@@ -27,6 +27,16 @@ async function resolveVariantTitles(workspaceId: string, variantIds: string[],) 
 async function enrichItemTitles(workspaceId: string, items: Record<string, unknown>[],) : Promise<Record<string, unknown>[]>
 ```
 
+Fills in `sku` / `image_url` rather than overwriting them — a caller that already mapped a sku off the Appstle payload keeps it, and a variant missing from `product_variants` keeps whatever it arrived with instead of being blanked.
+
+### `mergeContractLineItems` — function (pure)
+
+```ts
+function mergeContractLineItems(priorItems: Record<string, unknown>[], lines: Record<string, unknown>[]) : Record<string, unknown>[]
+```
+
+The lossless half of `syncContractItems`. See § Lossless item sync.
+
 ### `getAppstleConfig` — function
 
 ```ts
@@ -149,6 +159,8 @@ Pure predicate — does the live Appstle contract's `lines.nodes` snapshot satis
 
 **Self-swap = pure quantity change.** [[action-executor]] `change_quantity` calls `subSwapVariant(_, _, v, v, qty)` (old === new). The strict `swap` verdict — "new present AND old absent" — can NEVER hold on a self-swap (the old variant is the new variant), so the identity verdict would always false-fail. The false failure skips `syncItemsAfterMutation` AND the `capturedUnitCents` re-apply below it, silently resetting the grandfathered price to catalog. `identityExpectationForSwap(oldVariantId, newVariantId, quantity)` (pure helper) resolves this: when `old === new` it picks `{ kind: 'add', variantId, quantity }` (variant present at ≥ requested quantity — the only meaningful post-condition for a quantity change); otherwise it keeps the strict `swap` verdict so the 2026-07-30 partial-apply still fails loudly. Spec: [[../specs/change-quantity-self-swap-false-fails-identity-verdict]].
 
+**Already-landed short-circuit (self-heal retry).** `subSwapVariant` runs `verifyContractEndState` with `identityExpectationForSwap` BEFORE `captureOutgoingRealizedCents`. If identity is already satisfied — target variant present on the LIVE contract and the outgoing variant absent — the SDK syncs the DB mirror (idempotent) and returns `{ success: true }` without re-invoking Appstle. Without this, a self-heal retry against an already-landed swap would call `replace-variants-v3` against an outgoing line that no longer exists, and the price-capture guard below would refuse with `Cannot read outgoing line price ... swap refused to prevent a silent price reset` — a spurious refusal that surfaces as a scary customer message on a clean outcome (ticket 46a77d60, Christine 2026-08-05: crisis auto-swap-back to Mixed Berry on contract 33827422381 had already succeeded; the retry against the removed Peach Mango line triggered the false price-reset escalation). The short-circuit is scoped to genuine swaps (`old !== new`): a self-swap can't lose its outgoing line so it can't hit this class, and the strict `swap` verdict still fails loudly on the 2026-07-30 partial-apply shapes (new absent, or both new and old present) so the guard is not weakened. Spec: [[../specs/swap-variant-self-heal-must-not-refire-an-already-landed-swap]].
+
 A bounded settle window (`APPSTLE_MUTATION_VERIFY_ATTEMPTS`, default 3, and `APPSTLE_MUTATION_VERIFY_DELAY_MS`, default 400ms — worst-case ≈ 800ms wait) accommodates Appstle's asynchronous apply, but a TIMEOUT ends as FAILURE, never an assumed success. Unverifiable is NOT the same as done — the caller should retry or escalate rather than record a lie.
 
 **Why:** `callReplaceVariants` decides success purely from `res.ok`. Appstle answers 200 on requests it then declines to apply — reproduced on contracts `27946909869` and `27871477933` (2026-07-30) where a swap reported success and the flavour never moved. A false success is worse than a failure: a failure retries, a false success is recorded as done and the customer ships the wrong thing.
@@ -192,6 +204,22 @@ Internal-aware coupon remove. Internal subs: `internalSubRemoveDiscount` — fil
 - `src/lib/action-executor.ts` — `subscriptionApplyCoupon` (apply_coupon + apply_loyalty_coupon) / `subscriptionRemoveCoupon` (remove_coupon)
 - `src/lib/portal/handlers/remove-line-item.ts`
 - `src/lib/portal/handlers/replace-variants.ts`
+
+## Lossless item sync
+
+`syncContractItems` runs after EVERY verified Appstle line mutation and rewrites `subscriptions.items`. Anything it fails to carry forward is destroyed on the customer's live subscription, so it MERGES and never replaces.
+
+**Appstle owns** what the contract-external line node actually returns: which lines exist, `quantity`, `currentPrice`, `sku`, `sellingPlanName`, `variantImage.url`, `variantId`, `productId`, `id`. **We own** local-only enrichment Appstle has never heard of: `is_gift`, `price_override_cents`, `one_time_next_renewal`. Two of ours decide what the customer is charged.
+
+`mergeContractLineItems` keys prior items by **`line_id`, never `variant_id`** — a subscription can legitimately hold two lines of the same variant (7 active subs did during the 2026-08-11 ACV sweep), and a variant key collapses them, copying one line's gift flag or price override onto the other. Local keys merge UNDER the Appstle-owned block, so Appstle wins on what it owns and any local key survives by default — including keys added later.
+
+**Ground truth for why this matters.** Before 2026-08-11 the mapper simply never read `node.sku`, even though Appstle returns it. Every sub touched by any line mutation silently lost the skus on its remaining lines. A SKU-keyed sweep of ACV Gummies consequently found **8 subscriptions instead of 307** — the survivors were the ones that had never been mutated. The same omission overwrote our `product_id` UUID with Appstle's Shopify numeric, which is why UUID-keyed queries missed them too.
+
+**Two guards ride along:**
+- **Never blank a non-empty list.** A 200 carrying zero lines is indistinguishable from a contract Appstle has moved or dropped. Writing `[]` yields a subscription that renews billing shipping + protection with no product to ship — the SHOPCX171 empty-cart renewal (2026-08-07, refunded). The sync bails and leaves the last good snapshot, logging a warn.
+- **Workspace-scoped write.** The update carries `.eq("workspace_id", …)` alongside the contract id; `shopify_contract_id` alone is not a tenant-safe predicate in a multi-tenant table.
+
+`resolveVariantTitles` reads the first-class `product_variants` table (matching `shopify_variant_id` for the Appstle rail OR `id` for the internal rail) rather than the legacy `products.variants` jsonb blob, and returns `sku` + `image_url` so a brand-new line with no prior item to merge from still lands with a sku. Coverage is not total — a variant absent from `product_variants` resolves to nothing and keeps its payload values.
 
 ## Gotchas
 

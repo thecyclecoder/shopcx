@@ -33,30 +33,62 @@ export function couponApplicableToSubStatus(status: string | null | undefined): 
   return status === "active";
 }
 
-/** Look up product title + variant title from our catalog by variant ID */
+/**
+ * Look up product title + variant title + sku from our catalog by variant ID.
+ *
+ * Reads `product_variants` (the first-class variant table) rather than the
+ * legacy `products.variants` jsonb blob, and matches BOTH rails: Appstle rows
+ * carry the Shopify numeric variant id, internal rows carry our variant UUID.
+ * Returns `sku` so a line the caller could not otherwise identify by SKU still
+ * lands with one — see [[docs/brain/libraries/subscription-items]] § Lossless
+ * item sync.
+ */
 export async function resolveVariantTitles(
   workspaceId: string,
   variantIds: string[],
-): Promise<Map<string, { title: string; variant_title: string; product_id: string }>> {
+): Promise<Map<string, { title: string; variant_title: string; product_id: string; sku: string | null; image_url: string | null }>> {
+  const map = new Map<string, { title: string; variant_title: string; product_id: string; sku: string | null; image_url: string | null }>();
+  const ids = [...new Set(variantIds.map((v) => String(v || "")).filter(Boolean))];
+  if (!ids.length) return map;
+
   const admin = createAdminClient();
-  const { data: products } = await admin.from("products").select("id, shopify_product_id, title, variants").eq("workspace_id", workspaceId);
-  const map = new Map<string, { title: string; variant_title: string; product_id: string }>();
-  for (const p of products || []) {
-    for (const v of (p.variants as { id?: string | number; title?: string }[]) || []) {
-      const vid = String(v.id || "");
-      if (variantIds.includes(vid)) {
-        map.set(vid, {
-          title: p.title || "",
-          variant_title: v.title === "Default Title" ? "" : (v.title || ""),
-          product_id: String(p.id || ""),
-        });
-      }
-    }
+  // Match on the Shopify variant id (Appstle rail) or our own UUID (internal
+  // rail). UUID-shaped ids only go in the `id` predicate — feeding a non-UUID
+  // to a uuid column errors the whole query (22P02) instead of missing a row.
+  const uuidIds = ids.filter((v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v));
+  const query = admin
+    .from("product_variants")
+    .select("id, product_id, shopify_variant_id, sku, title, image_url, products(title)")
+    .eq("workspace_id", workspaceId);
+  const { data: variants } = uuidIds.length
+    ? await query.or(`shopify_variant_id.in.(${ids.join(",")}),id.in.(${uuidIds.join(",")})`)
+    : await query.in("shopify_variant_id", ids);
+
+  for (const v of variants || []) {
+    const productTitle = (v.products as { title?: string } | null)?.title || "";
+    const entry = {
+      title: productTitle,
+      variant_title: v.title === "Default Title" ? "" : (v.title || ""),
+      product_id: String(v.product_id || ""),
+      sku: v.sku ?? null,
+      image_url: v.image_url ?? null,
+    };
+    // Register under both keys so either rail's variant_id resolves.
+    if (v.shopify_variant_id) map.set(String(v.shopify_variant_id), entry);
+    if (v.id) map.set(String(v.id), entry);
   }
   return map;
 }
 
-/** Enrich subscription items array with titles from our product catalog */
+/**
+ * Enrich subscription items with titles + sku + our product UUID from the
+ * catalog. Catalog IDs are the source of truth over payload titles.
+ *
+ * `sku` is only FILLED IN, never overwritten — a caller that already mapped a
+ * sku off the Appstle payload keeps it, and an unresolvable variant (one
+ * missing from `product_variants`) keeps whatever it arrived with instead of
+ * being blanked.
+ */
 export async function enrichItemTitles(
   workspaceId: string,
   items: Record<string, unknown>[],
@@ -68,7 +100,14 @@ export async function enrichItemTitles(
     const vid = String(i.variant_id || "");
     const resolved = titleMap.get(vid);
     if (resolved) {
-      return { ...i, title: resolved.title, variant_title: resolved.variant_title, product_id: resolved.product_id };
+      return {
+        ...i,
+        title: resolved.title,
+        variant_title: resolved.variant_title,
+        product_id: resolved.product_id,
+        sku: i.sku ?? resolved.sku ?? null,
+        image_url: i.image_url ?? resolved.image_url ?? null,
+      };
     }
     return i;
   });
@@ -321,7 +360,73 @@ export async function appstleRemoveLineItem(
   }
 }
 
-/** Refresh local DB items from Appstle contract state */
+/**
+ * Merge a live Appstle `lines.nodes` snapshot over the stored items array.
+ *
+ * Appstle is authoritative for the fields it returns (which lines exist,
+ * quantity, price, sku, selling plan, image); our DB is authoritative for
+ * local-only enrichment it has never heard of (`is_gift`,
+ * `price_override_cents`, `one_time_next_renewal`). Prior items are keyed by
+ * `line_id`, never `variant_id` — a subscription can legitimately carry two
+ * lines of the SAME variant, and a variant key would collapse them and copy
+ * one line's local fields onto the other.
+ *
+ * Pure — unit-tested. See [[docs/brain/libraries/subscription-items]].
+ */
+export function mergeContractLineItems(
+  priorItems: Record<string, unknown>[],
+  lines: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  const priorByLineId = new Map<string, Record<string, unknown>>();
+  for (const p of priorItems || []) {
+    const lid = String(p?.line_id || "");
+    if (lid) priorByLineId.set(lid, p);
+  }
+  return (lines || []).map((node) => {
+    const lineId = String(node.id || "").split("/").pop() || "";
+    const appstleOwned = {
+      variant_id: String(node.variantId || "").split("/").pop() || "",
+      title: node.title || "",
+      quantity: node.quantity || 1,
+      price_cents: Math.round(parseFloat(String((node.currentPrice as Record<string, unknown>)?.amount || "0")) * 100),
+      variant_title: node.variantTitle || "",
+      product_id: String(node.productId || "").split("/").pop() || "",
+      line_id: lineId,
+      sku: (node.sku as string) || null,
+      selling_plan: (node.sellingPlanName as string) || null,
+      image_url: ((node.variantImage as Record<string, unknown> | null)?.url as string) || null,
+    };
+    // Local-only keys survive; Appstle-owned keys win.
+    return { ...(lineId ? priorByLineId.get(lineId) || {} : {}), ...appstleOwned };
+  });
+}
+
+/**
+ * Refresh local DB items from Appstle contract state — MERGE, never replace.
+ *
+ * This function runs after every Appstle line mutation, so anything it fails
+ * to carry forward is destroyed on the customer's subscription. Three rules:
+ *
+ * 1. **Map everything Appstle actually returns.** The contract-external line
+ *    node carries `sku`, `sellingPlanName` and `variantImage.url` alongside the
+ *    fields already mapped. Dropping `sku` here is what made a SKU-keyed sweep
+ *    of ACV Gummies find 8 subscriptions instead of 307 (2026-08-11) — every
+ *    sub touched by a prior mutation had silently lost its skus.
+ * 2. **Preserve local-only fields.** `is_gift`, `price_override_cents` and
+ *    `one_time_next_renewal` exist only in our DB; Appstle has never heard of
+ *    them. Two of those decide what the customer is charged. Prior items are
+ *    keyed by `line_id` (NOT variant_id — a sub can legitimately hold two
+ *    lines of the same variant) and merged UNDER the Appstle-owned fields, so
+ *    Appstle wins on what it owns and any local key survives by default.
+ * 3. **Never write an empty item list over a non-empty one.** A 200 carrying
+ *    zero lines is indistinguishable here from a contract Appstle has moved or
+ *    dropped, and blanking `items` produces a subscription that renews billing
+ *    shipping + protection with no product to ship (the SHOPCX171 empty-cart
+ *    renewal, 2026-08-07). Bail instead and leave the last good snapshot.
+ *
+ * Scoped to `workspace_id` on the write — `shopify_contract_id` alone is not a
+ * tenant-safe predicate in a multi-tenant table.
+ */
 async function syncContractItems(workspaceId: string, contractId: string, apiKey: string) {
   try {
     const res = await fetch(
@@ -329,20 +434,32 @@ async function syncContractItems(workspaceId: string, contractId: string, apiKey
     );
     if (!res.ok) return;
     const contract = await res.json();
-    const lines = contract.lines?.nodes || [];
-    const rawItems = lines.map((node: Record<string, unknown>) => ({
-      variant_id: String(node.variantId || "").split("/").pop() || "",
-      title: node.title || "",
-      quantity: node.quantity || 1,
-      price_cents: Math.round(parseFloat(String((node.currentPrice as Record<string, unknown>)?.amount || "0")) * 100),
-      variant_title: node.variantTitle || "",
-      product_id: String(node.productId || "").split("/").pop() || "",
-      line_id: String(node.id || "").split("/").pop() || "",
-    }));
-    const items = await enrichItemTitles(workspaceId, rawItems);
+    const lines = (contract.lines?.nodes || []) as Record<string, unknown>[];
     const admin = createAdminClient();
-    await admin.from("subscriptions")
+
+    const { data: existing } = await admin
+      .from("subscriptions")
+      .select("id, items")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    if (!existing) return;
+
+    const priorItems = (existing.items as Record<string, unknown>[] | null) || [];
+    if (!lines.length) {
+      if (priorItems.length) {
+        console.warn(
+          `[syncContractItems] contract ${contractId} returned 0 lines but local items has ${priorItems.length} — refusing to blank items`,
+        );
+      }
+      return;
+    }
+
+    const items = await enrichItemTitles(workspaceId, mergeContractLineItems(priorItems, lines));
+    await admin
+      .from("subscriptions")
       .update({ items, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId);
   } catch { /* non-fatal */ }
 }
@@ -755,16 +872,37 @@ async function syncItemsAfterMutation(
 ): Promise<void> {
   try {
     const admin = createAdminClient();
+    // ⭐ TENANT SCOPE (security). Both the read AND the write MUST filter on `workspace_id`.
+    // `shopify_contract_id` is NOT globally unique — it is an identifier minted by an external system,
+    // and two workspaces can legitimately hold rows carrying the same value (a shared/duplicated
+    // storefront, a re-imported contract, a test tenant seeded from prod data). Filtering on it alone
+    // meant this read could load ANOTHER tenant's items and the update could OVERWRITE another
+    // tenant's `items` array with them — a cross-tenant write, from a path an AI agent reaches on an
+    // ordinary swap/add/remove. `workspaceId` was already a parameter and used on the very next line
+    // (`enrichItemTitles`), so the scope was available and simply not applied.
+    //
+    // Found by the pre-merge security review of `swap-variant-self-heal-…` (2026-08-10) and then LOST:
+    // the finding was routed into a standalone fix spec (`scope-subscription-item-sync-by-workspace`)
+    // by the retired fix-spec model, and that spec was deferred as a model artifact — which discarded
+    // the finding with it. Re-verified present on main 2026-08-11 and fixed here.
     const { data: sub } = await admin.from("subscriptions")
       .select("items")
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId)
-      .single();
-    const currentItems = (sub?.items as Record<string, unknown>[] | null) || [];
+      .maybeSingle(); // maybeSingle: a miss is a normal no-op here, not an exception
+    if (!sub) {
+      console.warn(
+        `[subscription-items] syncItemsAfterMutation: no subscription for contract ${contractId} in workspace ${workspaceId} — skipping sync`,
+      );
+      return;
+    }
+    const currentItems = (sub.items as Record<string, unknown>[] | null) || [];
     const mutatedItems = mutate(currentItems);
     // Enrich with titles from our product catalog
     const updatedItems = await enrichItemTitles(workspaceId, mutatedItems);
     await admin.from("subscriptions")
       .update({ items: updatedItems, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId);
   } catch (err) {
     console.error("Failed to sync subscription items after mutation:", err);
@@ -891,7 +1029,7 @@ export async function subAddOneTimeGift(
   }
   const admin = createAdminClient();
   const { data: sub } = await admin
-    .from("subscriptions").select("id, customer_id").eq("shopify_contract_id", contractId).maybeSingle();
+    .from("subscriptions").select("id, customer_id").eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
   if (!sub?.customer_id) return { success: false, error: "Could not resolve the customer for this subscription", backend: "appstle" };
   const { data: cust } = await admin
     .from("customers").select("shopify_customer_id, first_name, last_name, default_address").eq("id", sub.customer_id).maybeSingle();
@@ -916,7 +1054,7 @@ export async function subAddOneTimeGift(
   if (!a?.address1) return { success: false, error: "No shipping address on file — can't create a gift order", backend: "appstle" };
 
   // Gift line title (product name) for the order + note.
-  const { data: pv } = await admin.from("product_variants").select("product_id").eq("shopify_variant_id", shopifyVariantId).maybeSingle();
+  const { data: pv } = await admin.from("product_variants").select("product_id").eq("workspace_id", workspaceId).eq("shopify_variant_id", shopifyVariantId).maybeSingle();
   let giftTitle = "Gift";
   if (pv?.product_id) {
     const { data: p } = await admin.from("products").select("title").eq("id", pv.product_id).maybeSingle();
@@ -1076,6 +1214,7 @@ export async function subUpdateLineItemPrice(
     const admin = createAdminClient();
     const { data: sub } = await admin.from("subscriptions")
       .select("items")
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId)
       .single();
     const items = (sub?.items as { variant_id?: string; line_id?: string }[]) || [];
@@ -1139,7 +1278,7 @@ export async function subUpdateLineItemPrice(
           : i
       ),
       updated_at: new Date().toISOString(),
-    }).eq("shopify_contract_id", contractId);
+    }).eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId);
 
     return { success: true };
   } catch (err) {
@@ -1273,7 +1412,7 @@ export async function subscriptionApplyCoupon(
   await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
-  const r = await applyDiscountWithReplace(config.apiKey, contractId, code);
+  const r = await applyDiscountWithReplace(workspaceId, config.apiKey, contractId, code);
   return { success: r.success, error: r.error };
 }
 
@@ -1303,7 +1442,7 @@ export async function subscriptionRemoveCoupon(
   await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
-  const r = await removeExistingDiscounts(config.apiKey, contractId);
+  const r = await removeExistingDiscounts(workspaceId, config.apiKey, contractId);
   return { success: !r.error, error: r.error };
 }
 
@@ -1344,6 +1483,42 @@ export async function subSwapVariant(
       return { success: false, error: `Old variant "${oldVariantId}" not found on contract. Available: ${r.available.join(", ") || "(none)"}` };
     }
     resolvedOld = r.numericId;
+  }
+
+  // Already-landed short-circuit (spec: [[swap-variant-self-heal-must-not-refire-an-already-landed-swap]]).
+  // The self-heal loop retries subSwapVariant when the first attempt didn't verify in the DB. If the
+  // first swap DID succeed (target variant present on the LIVE contract, old absent), re-invoking
+  // replace-variants would fire against an outgoing line that no longer exists —
+  // captureOutgoingRealizedCents below correctly refuses with "Cannot read outgoing line price",
+  // which reads to the customer as a scary price-reset danger even though the swap already landed.
+  // Ticket 46a77d60 (Christine, 2026-08-05): crisis auto-swap-back to Mixed Berry succeeded on
+  // contract 33827422381; the retry re-called subSwapVariant against the removed Peach Mango line
+  // and surfaced "I ran into a small issue" to a customer who'd threatened non-payment.
+  //
+  // Only genuine variant-to-variant swaps (old !== new) can hit this class — a self-swap
+  // (change_quantity) never loses its outgoing line because the line IS the target.
+  if (String(resolvedOld) !== String(newVariantId)) {
+    const preInvokeIdentity = await verifyContractEndState(
+      config.apiKey,
+      contractId,
+      identityExpectationForSwap(String(resolvedOld), String(newVariantId), quantity),
+      { attempts: 1, delayMs: 0 },
+    );
+    if (preInvokeIdentity.ok) {
+      // Sync the DB mirror in case the first pass didn't reach syncItemsAfterMutation. Idempotent
+      // — a no-op when the mirror already reflects the post-swap state. We deliberately do NOT
+      // re-apply capturedUnitCents here: the first invocation's price-preservation branch already
+      // ran on the live line, and re-invoking subUpdateLineItemPrice on a preserved line would
+      // reset it to the current post-swap realized rather than the grandfathered base.
+      await syncItemsAfterMutation(workspaceId, contractId, (items) =>
+        items.map((item) =>
+          String(item.variant_id) === String(resolvedOld)
+            ? { ...item, variant_id: String(newVariantId), quantity }
+            : item,
+        ),
+      );
+      return { success: true };
+    }
   }
 
   // Capture the outgoing line's realized per-unit price BEFORE the replace.
@@ -1430,6 +1605,7 @@ export async function subSwapVariant(
     const { data: newPv } = await admin
       .from("product_variants")
       .select("product_id, price_cents")
+      .eq("workspace_id", workspaceId)
       .eq("shopify_variant_id", String(newVariantId))
       .maybeSingle();
     const newProductId = (newPv?.product_id as string | undefined) || null;
@@ -1545,6 +1721,7 @@ async function readRulesExpectedForNewLineCents(
     const { data: sub } = await admin
       .from("subscriptions")
       .select("items, delivery_price_cents, pricing_offer_id")
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId)
       .maybeSingle();
     if (!sub) return 0;
@@ -1636,6 +1813,7 @@ async function captureOutgoingRealizedCents(
       const { data: oldPv } = await admin
         .from("product_variants")
         .select("product_id")
+        .eq("workspace_id", workspaceId)
         .eq("shopify_variant_id", String(resolvedOldVariantId))
         .maybeSingle();
       const oldProductId = (oldPv?.product_id as string | undefined) || null;

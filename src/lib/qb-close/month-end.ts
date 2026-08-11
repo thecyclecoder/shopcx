@@ -5,7 +5,7 @@
  * This is the piece the June 1:1 proof never had: that run read `fixtures/shoptics-golden/*.json`
  * dumped out of the Shoptics DB, so it validated the ENGINE but not that ShopCX holds the data.
  * Everything here reads `qb_*` tables in ShopCX (created by
- * `20261213120000_qb_close_source_tables.sql`).
+ * `20261213120001_qb_close_source_tables.sql`).
  *
  * POSTS NOTHING. It returns the five QBO artifacts as plain data; a caller decides whether to
  * post. See docs/brain/lifecycles/shoptics-migration.md.

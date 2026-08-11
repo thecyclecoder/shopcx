@@ -4,7 +4,7 @@ import { resolve } from "path";
 
 async function main() {
   const sql = readFileSync(
-    resolve(__dirname, "../supabase/migrations/20261213120000_qb_close_source_tables.sql"),
+    resolve(__dirname, "../supabase/migrations/20261213120001_qb_close_source_tables.sql"),
     "utf8",
   );
   const c = pgClient();

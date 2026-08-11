@@ -79,6 +79,15 @@ export interface ActionParams {
   crisis_action_id?: string;
   order_number?: string;
   free_label?: boolean;
+  // create_return — how the return resolves once the item is back. Passed
+  // through to createFullReturn.resolutionType (src/lib/shopify-returns.ts). Omit
+  // to keep today's behavior (createFullReturn defaults to 'refund_return' — a
+  // cash refund). Set 'store_credit_return' to have the return settle as store
+  // credit instead — the sanctioned retention-friendly outcome the returns
+  // engine already supports on both Shopify and internal (SHOPCX*) orders but
+  // that agents could not reach through the direct-action handler before this
+  // parameter existed. Reject any other value at the handler.
+  resolution_type?: "refund_return" | "store_credit_return";
   // add_one_time_gift — a one-time item on the sub's NEXT renewal that drops
   // off after it ships (never recurs). `free` defaults true (a $0 gift); set
   // false + base_price_cents for a paid one-time add-on (internal only).
@@ -1207,6 +1216,42 @@ async function deferCreateToAssistedPurchase(
   };
 }
 
+/**
+ * Validate + normalize the optional `resolution_type` field on a `create_return`
+ * ActionParams payload. The value that comes out is what the handler passes to
+ * `createFullReturn`'s `resolutionType` parameter (src/lib/shopify-returns.ts:833).
+ *
+ * `undefined` → `undefined` (createFullReturn's built-in `'refund_return'` default
+ * fires downstream — today's behavior on every call site that omits the field).
+ * `'refund_return'` or `'store_credit_return'` → passed through unchanged, so an
+ * agent that authored a sanctioned store-credit outcome (the cheaper, retention-
+ * friendly resolution the returns engine already supports on both Shopify and
+ * internal orders) actually gets it. Anything else → `{ ok: false, error }` so
+ * the handler surfaces the reason and NEVER calls createFullReturn — a bogus
+ * value must not silently downgrade to the refund default.
+ *
+ * Spec: create-return-direct-action-honors-store-credit-resolution Phase 1.
+ * The two valid strings mirror the union declared on `FullReturnParams`
+ * (`shopify-returns.ts`); the four-string enum on the returns row itself
+ * (`store_credit_no_return` / `refund_no_return`) is deliberately out of scope
+ * for the direct-action handler — a no-return refund would flow through
+ * `partial_refund` instead.
+ */
+export function resolveCreateReturnResolutionType(
+  value: unknown,
+):
+  | { ok: true; resolutionType: "refund_return" | "store_credit_return" | undefined }
+  | { ok: false; error: string } {
+  if (value === undefined) return { ok: true, resolutionType: undefined };
+  if (value === "refund_return" || value === "store_credit_return") {
+    return { ok: true, resolutionType: value };
+  }
+  return {
+    ok: false,
+    error: `Invalid resolution_type: ${JSON.stringify(value)}. Must be 'refund_return' or 'store_credit_return' (or omitted for the refund_return default).`,
+  };
+}
+
 // ── Direct Action Handler Registry ──
 
 export const directActionHandlers: Record<
@@ -2259,7 +2304,7 @@ export const directActionHandlers: Record<
       }
     }
 
-    const { data: sub } = await ctx.admin.from("subscriptions").select("items").eq("shopify_contract_id", p.contract_id).single();
+    const { data: sub } = await ctx.admin.from("subscriptions").select("items").eq("workspace_id", ctx.workspaceId).eq("shopify_contract_id", p.contract_id).single();
     const subItems = (sub?.items as { variant_id?: string; title?: string }[]) || [];
     const subRealItems = subItems.filter(i => !(i.title || "").toLowerCase().includes("shipping protection"));
     for (const it of subRealItems) pushUnique(it.variant_id);
@@ -2392,12 +2437,35 @@ export const directActionHandlers: Record<
       }
     }
 
-    // Look up order
+    // Look up order — scoped to BOTH the workspace AND the ticket's customer.
+    //
+    // ⭐ OWNERSHIP CHECK (security). The workspace filter alone is not sufficient: `order_number` is
+    // only unique WITHIN a workspace, and the value comes from the model's action payload — so a
+    // ticket for customer A could name customer B's order number and create a return against B's
+    // order (issuing a label + refund exposure on someone else's purchase). Requiring
+    // `customer_id === ctx.customerId` makes the lookup prove ownership before anything is created.
+    // `ctx.customerId` is the ticket's resolved customer, the same identity used for the customer
+    // lookup immediately below, so this adds no new input to trust.
+    //
+    // `maybeSingle` (not `single`): a miss is an expected outcome here — a wrong/foreign order number
+    // — so it must return null and fall into the generic error below, not throw a PostgREST exception
+    // out of the handler. The error text is deliberately generic (no "exists but isn't yours") so it
+    // does not confirm the existence of another customer's order.
+    //
+    // Found by the pre-merge security review of `create-return-direct-action-honors-store-credit-resolution`
+    // (2026-08-10) and then LOST: the finding was routed into a standalone fix spec
+    // (`scope-create-return-order-to-ticket-customer`) by the retired fix-spec model, and that spec was
+    // deferred as a model artifact — which discarded the finding with it. Re-verified present on main
+    // 2026-08-11 and fixed here.
+    if (!ctx.customerId) {
+      return { success: false, error: "Cannot create a return without a resolved customer on the ticket" };
+    }
     const { data: order } = await admin.from("orders")
       .select("id, order_number, shopify_order_id, shipping_address")
       .eq("workspace_id", ctx.workspaceId)
+      .eq("customer_id", ctx.customerId)
       .eq("order_number", p.order_number!)
-      .single();
+      .maybeSingle();
     if (!order) return { success: false, error: `Order ${p.order_number} not found` };
 
     // Look up customer
@@ -2408,6 +2476,16 @@ export const directActionHandlers: Record<
 
     const addr = order.shipping_address as Record<string, string> | null;
     if (!addr) return { success: false, error: "No shipping address on order" };
+
+    // Resolve the optional resolution_type via the pure helper below so a bad
+    // value is REJECTED at the handler rather than falling through and silently
+    // downgrading to createFullReturn's built-in refund_return default. Omitting
+    // the field keeps today's behavior exactly (`resolutionType: undefined` →
+    // createFullReturn writes 'refund_return'). Applies on both Shopify and
+    // internal (SHOPCX*) orders — the internal path already runs whenever
+    // shopify_order_id is null and nothing about that changes here.
+    const resolution = resolveCreateReturnResolutionType(p.resolution_type);
+    if (!resolution.ok) return { success: false, error: resolution.error };
 
     const r = await createFullReturn({
       workspaceId: ctx.workspaceId,
@@ -2430,6 +2508,7 @@ export const directActionHandlers: Record<
       },
       source: "ai",
       freeLabel: !!p.free_label,
+      resolutionType: resolution.resolutionType,
     });
 
     if (r.success && r.labelUrl) {
@@ -3231,7 +3310,7 @@ export const directActionHandlers: Record<
               city: a.city, province_code: province, zip, country_code: country,
             },
             updated_at: new Date().toISOString(),
-          }).eq("shopify_contract_id", p.contract_id);
+          }).eq("workspace_id", ctx.workspaceId).eq("shopify_contract_id", p.contract_id);
           anySuccess = true;
           summaries.push(`Subscription ${p.contract_id} address updated`);
         } else if (upd.error) {
@@ -3510,6 +3589,7 @@ export const directActionHandlers: Record<
       try {
         const { data: pv } = await ctx.admin.from("product_variants")
           .select("title, products(title)")
+          .eq("workspace_id", ctx.workspaceId)
           .eq("shopify_variant_id", variantId).maybeSingle();
         if (pv) {
           const productTitle = (pv.products as { title?: string } | null)?.title;

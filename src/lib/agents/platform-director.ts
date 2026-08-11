@@ -51,6 +51,7 @@ import {
   buildApprovalContent,
   approvalDeepLink,
   activeParkCardExistsForJob,
+  openBuildStuckCardExistsForSpec,
   type ApprovalJobRow,
 } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
@@ -379,8 +380,21 @@ export function directorInvestigationPrompt(brief: DirectorBrief): string {
     "You are Ada — the Platform/DevOps Director for ShopCX, running on Max (read-only prod DB + the brain, no API key).",
     "A platform tool you supervise raised an Approval Request that routed to YOU (Platform is live + autonomous).",
     "Your job: investigate the cause + the proposed action(s) READ-ONLY, then decide — AUTO-APPROVE only if it is",
-    "SOUND, LOW-RISK, and WITHIN THE LEASH; otherwise ESCALATE to the CEO. NEVER rubber-stamp: if you cannot",
-    "confirm it is sound and in-leash, escalate.",
+    "SOUND, LOW-RISK, and WITHIN THE LEASH; DECLINE it yourself if it simply should not run; ESCALATE to the CEO",
+    "only when the call is genuinely his. NEVER rubber-stamp: if you cannot confirm it is sound and in-leash,",
+    "do NOT approve.",
+    "",
+    "⭐ DECLINE IS YOURS TO MAKE — it is not an escalation. If the request is IN YOUR LEASH and you conclude it",
+    "should NOT run, choose `decline`. You may auto-approve these classes, so you may equally auto-decline them:",
+    "declining executes NOTHING, so it is strictly the safer direction of the same authority. Decline when the",
+    "proposal is REDUNDANT (the same fix already shipped — check whether prior specs on this signature already",
+    "landed), a NO-OP that will build nothing and park at needs_attention, based on a premise the code",
+    "contradicts, or simply the wrong lever for the diagnosed cause. Say WHY in `reasoning` — it becomes the",
+    "record of your call.",
+    "Do NOT escalate a request just to have the CEO click Decline on a conclusion you already reached. Writing",
+    "several hundred words explaining why something shouldn't be approved and then escalating it IS that",
+    "mistake — if you know the answer, act on it. Escalate only for a decision that is genuinely the CEO's:",
+    "high-stakes, irreversible, out of leash, a non-binary CHOICE, or something you cannot confirm either way.",
     "",
     "The leash — you MAY auto-approve ONLY these classes:",
     "- error_fix: a repair-agent fix for a real bug — the authored fix spec is sound + scoped.",
@@ -407,7 +421,8 @@ export function directorInvestigationPrompt(brief: DirectorBrief): string {
     brief.kind === "repair"
       ? '{"verdict":"bounce","reasoning":"<the bug is real but the authored fix is unsound — your concrete explanation of WHY, which is handed back to the Repair agent to re-author>"}'
       : "",
-    '{"verdict":"escalate","reasoning":"<why this needs the CEO — high-stakes / irreversible / unconfirmable / out of leash / a choice (NOT a repair fix-quality issue — bounce those)>"}',
+    '{"verdict":"decline","reasoning":"<why this in-leash request should NOT run — redundant / already shipped / a no-op that will park / wrong lever. YOUR call, not the CEO\'s.>"}',
+    '{"verdict":"escalate","reasoning":"<why this needs the CEO — high-stakes / irreversible / unconfirmable / out of leash / a choice (NOT a repair fix-quality issue — bounce those; NOT a decision you already reached — decline those)>"}',
   ]
     .filter(Boolean)
     .join("\n");
@@ -446,6 +461,59 @@ export async function applyDirectorApproval(
     routedToFunction: PLATFORM,
     decidedBy: "director",
     decision: "approved",
+    reasoning,
+    autonomous: true,
+  });
+  return { ok: true };
+}
+
+/**
+ * ⭐ a-director-who-can-approve-can-decline (2026-08-11) — the missing half of the leash.
+ *
+ * THE GAP. `directorInvestigationPrompt` gave Ada exactly three verdicts: `auto-approve`, `bounce`
+ * (repair only), and `escalate`. There was no way to say NO. So when she investigated an in-leash
+ * request and concluded it should NOT run — a duplicate of already-shipped work, a no-op that will
+ * build nothing and park — her only legal move was `escalate`, which dumps a fully-reasoned "don't do
+ * this" onto the CEO as a decision he still has to make. Observed live: the `db_health` slow-query
+ * signature `-1756037457588317045` produced FIVE CEO cards (four already dismissed), each carrying
+ * Ada's own several-hundred-word explanation of why the proposal was the 5th duplicate of four
+ * already-shipped fixes. The CEO's job was to click Decline on a call Ada had already made.
+ *
+ * THE PRINCIPLE. Declining is the SAFE direction of the same authority: approving EXECUTES something,
+ * declining executes nothing. A director trusted to auto-approve a leash class is, a fortiori, trusted
+ * to auto-decline it. Escalation is for decisions that are genuinely the CEO's — high-stakes,
+ * irreversible, a real choice — not for "no". ([[../operational-rules]] § North star: a supervisor
+ * owns the layer below it; hitting a rail means escalate, but reaching a CONCLUSION means act.)
+ *
+ * Mirrors `applyDirectorApproval` exactly, inverted: marks the listed actions `declined`, records a
+ * `declined` [[approval_decisions]] ledger row (so the grader scores the call like any other), and
+ * flips the target to `dismissed` once nothing stays pending — the terminal state a human Decline
+ * produces, so the downstream surfaces need no new case. The CEO card is never minted.
+ */
+export async function applyDirectorDecline(
+  admin: Admin,
+  target: DirectorTargetJob,
+  actionIds: string | string[],
+  reasoning: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const ids = new Set(Array.isArray(actionIds) ? actionIds : [actionIds]);
+  const actions = (target.pending_actions || []).map((a) => (a.id && ids.has(a.id) ? { ...a, status: "declined" } : a));
+  const stillPending = actions.some((a) => (a.status ?? "pending") === "pending");
+  const patch: Record<string, unknown> = { pending_actions: actions, updated_at: new Date().toISOString() };
+  // A declined request is DONE — nothing will execute. `dismissed` is the same terminal state the human
+  // Decline path produces, so the board / inbox / reconcilers need no new status to understand.
+  if (!stillPending) patch.status = "dismissed";
+  const { error } = await admin.from("agent_jobs").update(patch).eq("id", target.id);
+  if (error) return { ok: false, error: error.message };
+
+  await recordApprovalDecision(admin, {
+    workspaceId: target.workspace_id,
+    agentJobId: target.id,
+    pendingActionId: ids.size === 1 ? Array.from(ids)[0] : null,
+    raisedByFunction: resolveNodeOwner(target.kind) ?? CEO,
+    routedToFunction: PLATFORM,
+    decidedBy: "director",
+    decision: "declined",
     reasoning,
     autonomous: true,
   });
@@ -1642,6 +1710,15 @@ export async function escortSweep(admin: Admin): Promise<EscortSweepResult> {
           result.skipped++;
         }
       } else if (lane === "failed_repeat") {
+        // ONE OPEN CARD PER STUCK BUILD: the park watchdogs (needsattn / parkbackstop) and the
+        // init/groom loop guards reach the SAME conclusion about this spec from their own lanes.
+        // Whichever got there first already has the founder's attention; a second card adds no
+        // information, only noise. (Skipping the card does NOT skip the escort work below.)
+        if (await openBuildStuckCardExistsForSpec(admin, workspaceId, c.slug, `escort-failed-repeat:${c.slug}`)) {
+          console.log(`[platform-director] escortSweep failed-repeat for ${c.slug}: build-stuck card already open — no second card`);
+          result.skipped++;
+          continue;
+        }
         const r = await escalateDiagnosisToCeo(admin, {
           workspaceId,
           specSlug: c.slug,
@@ -1922,6 +1999,27 @@ function ceoEscalationNotification(args: {
   dedupeKey: string;
   deepLink: string;
   escalationKind: string;
+  /**
+   * ⭐ THE CALLER'S CONTEXT — chiefly `job_id`. Pre-2026-08-11 this parameter DID NOT EXIST here,
+   * while `escalateDiagnosisToCeo` accepted `metadata` and passed its whole `args` object in. Because
+   * `args` is a variable rather than an object literal, TypeScript's excess-property check never
+   * fired, so every caller's metadata was silently DROPPED from the card. The `director_activity`
+   * ledger got it; the card did not.
+   *
+   * That single omission broke two card-lifecycle mechanisms at once, and both were live bugs:
+   *
+   *  1. `activeParkCardExistsForJob` ([[./approval-inbox]]) looks a card up by
+   *     `metadata.agent_job_id` / `metadata.job_id`. No escalation card carried either, so the
+   *     one-card-per-park DEDUPE always answered "no card exists" and every emitter minted its own.
+   *     That is the duplicate-card fan-out.
+   *  2. `reconcileStaleParkCards` Family 1 (the job-backed auto-clear) partitions on `notifJobId`,
+   *     so escalation cards were never evaluated by it — including its pr-resolve branch, which
+   *     dismisses a park card once the PR is MERGED or CLOSED. Result: a park card for an
+   *     already-merged PR could not be cleared by anything, and Family 1b would not clear it either
+   *     because the parked job was still `needs_attention`. Structurally immortal. Observed
+   *     2026-08-11 on `pr-2438` + `pr-2450`, both of which had already merged.
+   */
+  metadata?: Record<string, unknown>;
 }) {
   const note = `🛠️ Ada (Platform/DevOps Director) escalated this to you:\n${args.diagnosis}`.slice(0, 4000);
   const nowIso = new Date().toISOString();
@@ -1932,6 +2030,9 @@ function ceoEscalationNotification(args: {
     body: note,
     link: args.deepLink,
     metadata: {
+      // Caller context FIRST so the canonical fields below always WIN — a caller can enrich the card
+      // (job_id, target_kind, revert_sha …) but can never spoof its routing, kind, or dedupe key.
+      ...(args.metadata ?? {}),
       routed_to_function: CEO,
       escalated_by_director: PLATFORM,
       escalation_kind: args.escalationKind,
@@ -2121,6 +2222,13 @@ export function decideEscalationMint(outcome: EscalationUpsertOutcome, nowMs: nu
   if (outcome.bumped) return { action: "bumped", seenCount: outcome.seenCount };
   return { action: "insert" };
 }
+
+/**
+ * Re-exported so the box worker's groom/init loop-guards (which load this module as `lib`) can run
+ * the SAME one-open-card-per-stuck-build gate as the escort sweep + the triage pass, without each
+ * lane hand-rolling its own dedupe read. Defined in [[./approval-inbox]] — see the doc there.
+ */
+export { openBuildStuckCardExistsForSpec };
 
 export async function escalateDiagnosisToCeo(
   admin: Admin,
@@ -2940,6 +3048,16 @@ const TRIAGE_SKIP_KINDS: ReadonlySet<string> = new Set(["build", "repair", "plat
 /** QC kinds whose handler re-investigates cleanly from `instructions`, so a recoverable park can be re-run. */
 const TRIAGE_RERUNNABLE_KINDS: ReadonlySet<string> = new Set(["security-review", "spec-test", "regression"]);
 
+/**
+ * security-dep-watch-authors-structured-and-never-ages-out Phase 3 — kinds whose parks carry an
+ * unresolved security signal. The age-out sweep must NEVER cancel one of these; a security finding
+ * that has sat unresolved past the window ESCALATES to the CEO instead of disappearing.
+ *
+ * Currently just `security-review` (covers diff / branch / dep-watch modes — every advisory the
+ * security agent surfaces rides this kind).
+ */
+const SECURITY_LANE_KINDS: ReadonlySet<string> = new Set(["security-review"]);
+
 /** A recoverable park: an inconclusive / unparseable QC verdict (a transient failure to produce a verdict). */
 const TRIAGE_RECOVERABLE_ERROR = /no parseable verdict|without a recognizable (verdict|status)|inconclusive/i;
 
@@ -3018,11 +3136,28 @@ export function computeAgeOutSkip(
   hasTriageLedgerRow: boolean,
   nowMs: number,
   windowMs: number = NEEDS_ATTENTION_STALE_PARK_MS,
-): { ageOut: true; reason: string } | { ageOut: false } {
+  opts?: { securityLane?: boolean },
+): { ageOut: true; reason: string } | { ageOut: false; exemptReason?: string } {
   if (hasTriageLedgerRow) return { ageOut: false };
   const ageMs = nowMs - new Date(createdAt).getTime();
   if (ageMs < windowMs) return { ageOut: false };
   const hours = Math.round(ageMs / (60 * 60 * 1000));
+  // security-dep-watch-authors-structured-and-never-ages-out Phase 3 — a SECURITY-lane park is EXEMPT
+  // from the age-out cancel. It falls through to the standard escalation path instead, so the CEO gets a
+  // card carrying `error` + `log_tail` (the advisory list). Ground truth: the 2026-07-21 dep-watch park sat
+  // 310h with 3 actionable advisories and was CANCELLED for aging out without ever reaching the founder;
+  // the advisory count then climbed to 10. Silently discarding a security finding because it got old is
+  // the failure mode most likely to hurt us.
+  if (opts?.securityLane) {
+    return {
+      ageOut: false,
+      exemptReason:
+        `security-lane park (${hours}h old) never ages out — a security signal must not be silently ` +
+        `discarded because it got old; escalate instead of cancel ` +
+        `(security-dep-watch-authors-structured-and-never-ages-out Phase 3, the 2026-07-21 310h dep-watch ` +
+        `park is the ground-truth case).`,
+    };
+  }
   return { ageOut: true, reason: `parked ${hours}h with no actionable path — aged out of needs_attention (never escalated, never re-runnable)` };
 }
 
@@ -3288,7 +3423,13 @@ export async function reconcileNeedsAttention(admin: Admin): Promise<NeedsAttent
     // every pass forever.
     const alreadyReranHere = reran.has(j.id);
     const alreadySurfacedHere = surfaced.has(j.id);
-    const ageOut = computeAgeOutSkip(j.created_at, alreadyReranHere || alreadySurfacedHere, nowMs);
+    // security-dep-watch-authors-structured-and-never-ages-out Phase 3 — a SECURITY-lane park
+    // (kind ∈ SECURITY_LANE_KINDS) is EXEMPT from the age-out cancel. `computeAgeOutSkip` returns
+    // `{ageOut:false, exemptReason}` for it, and the row falls through to the standard escalation path
+    // below — the CEO gets a card carrying `error` (the underlying author error) + `log_tail` (the
+    // advisory list). A security signal must never be silently discarded because it got old.
+    const securityLane = SECURITY_LANE_KINDS.has(String(j.kind));
+    const ageOut = computeAgeOutSkip(j.created_at, alreadyReranHere || alreadySurfacedHere, nowMs, undefined, { securityLane });
     if (ageOut.ageOut) {
       const cancelResult = await cancelTerminalPark(admin, j, ageOut.reason, {
         target_kind: j.kind,
@@ -3347,6 +3488,13 @@ export async function reconcileNeedsAttention(admin: Admin): Promise<NeedsAttent
     // A single parked job must surface AT MOST ONE CEO card. escalateDiagnosisToCeo also dedupes on its
     // own `needsattn:` key, but that wouldn't catch a sibling emitter's differently-keyed card.
     if (await activeParkCardExistsForJob(admin, workspaceId, j.id)) { confirmed++; continue; }
+    // ONE OPEN CARD PER STUCK BUILD (DEDUP, spec-scoped): the job-scoped check above cannot see a
+    // sibling watchdog that keyed on the SLUG (initguard / groom-loopguard / escort-failed-repeat),
+    // nor a card minted for a PREVIOUS job row of the same failing spec. Both are the same incident.
+    if (specSlug && (await openBuildStuckCardExistsForSpec(admin, workspaceId, specSlug, `needsattn:${j.id}`))) {
+      confirmed++;
+      continue;
+    }
     const why = alreadyReran
       ? "re-ran once after an inconclusive QC result and parked AGAIN — likely a real blocker, not a transient"
       : recoverable

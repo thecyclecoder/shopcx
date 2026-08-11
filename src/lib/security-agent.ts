@@ -43,6 +43,33 @@ export const SECURITY_DIRECTOR_FUNCTION = "platform";
 
 /** Stable spec_slug of the daily dependency-upgrade fix spec (find-or-update, never N of them). */
 export const SECURITY_DEP_UPGRADE_SLUG = "security-dep-upgrades";
+
+/**
+ * ⭐ THE DEP-UPGRADE LOOP DIES WHEN ITS CANONICAL SPEC FOLDS — this computes the escape hatch.
+ *
+ * The lane authors every advisory batch into the FIXED slug above. `authorSpecRowStructured` will
+ * not resurrect an archived spec (`reopenIfReauthoredAndChanged` returns early on
+ * `status === 'folded'` — deliberately, so a fold stays final). So the moment a dep-upgrade batch
+ * ships and folds, EVERY later batch is authored into an archived row that never re-enters the build
+ * pipeline. The loop is dead and nothing says so.
+ *
+ * Measured 2026-08-11: `security-dep-upgrades` folded on 2026-08-03; the dep-watch job that ran four
+ * minutes earlier parked with a bare "could not author dep-upgrade spec"; and **11 actionable
+ * advisories (8 high) with fixes available** were still outstanding 8 days later. The park card the
+ * founder saw carried none of that — it read "7 advisory(ies) but spec author failed".
+ *
+ * A fold means "that batch shipped", and a NEW batch of advisories is NEW work — so it gets its own
+ * cycle-scoped spec rather than fighting the archive invariant. Monthly granularity keeps the slug
+ * stable within a cycle (so a re-run in the same month refreshes one spec instead of proliferating)
+ * while guaranteeing the next cycle is never blocked by the last one folding.
+ *
+ * `now` is injected so the slug is deterministic in tests.
+ */
+export function depUpgradeCycleSlug(now: Date = new Date()): string {
+  const yyyy = now.getUTCFullYear();
+  const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${SECURITY_DEP_UPGRADE_SLUG}-${yyyy}-${mm}`;
+}
 /** The sentinel spec_slug carried by a dep-watch scan job (so it dedups distinctly from per-diff jobs). */
 export const SECURITY_DEP_WATCH_SLUG = "security-dep-watch";
 
@@ -328,6 +355,20 @@ export interface EnqueueSecurityReviewBranchInput {
   prNumber?: number | null;
   /** override the workspace; else resolved from the latest job / first workspace. */
   workspaceId?: string;
+  /**
+   * ⭐ security-real-vuln-deadlock-breaker Phase 2 — bypass the "unchanged branch" dedup (2) ONLY.
+   *
+   * Dedup (2) refuses to re-review a branch that already has a `completed` review unless a NEWER BUILD PUSH
+   * landed on that same branch. That is right for the loop it was written to stop (re-reviewing an identical
+   * clean diff every standing pass) but it also makes a `real-vuln` verdict PERMANENT: the fix for the
+   * finding lands on its OWN branch, so the origin branch never advances, so it is never re-reviewed, so
+   * `completedClean` stays false and the promote gate never opens. `force` has exactly one caller —
+   * [[agent-jobs]] `retestOriginBranchSecurityIfFixMerged`, fired when the linked fix spec's build MERGES,
+   * i.e. only when the vulnerability genuinely may be closed. Dedup (0) (merged branch gone) and dedup (1)
+   * (one OPEN review per branch) STILL APPLY under force, so this can neither stack concurrent reviews nor
+   * review a deleted ref.
+   */
+  force?: boolean;
 }
 
 export type EnqueueSecurityReviewInput = EnqueueSecurityReviewDiffInput | EnqueueSecurityReviewBranchInput;
@@ -603,7 +644,11 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
     .limit(1)
     .maybeSingle();
   const lastCleanAt = (lastClean as { created_at?: string } | null)?.created_at;
-  if (lastCleanAt) {
+  // ⭐ security-real-vuln-deadlock-breaker Phase 2 — a FORCED re-review skips this "branch unchanged" test.
+  // The caller (retestOriginBranchSecurityIfFixMerged) only forces when the linked fix spec's build MERGED,
+  // so the diff this branch is measured against (origin/main) HAS changed even though the branch tip did
+  // not — precisely the case this dedup cannot see. Guards (0) and (1) above still applied.
+  if (lastCleanAt && !input.force) {
     const lastBuildAt = (lastBuildJob as { status?: string; updated_at?: string } | null)?.status === "merged"
       ? null // a merged flip's bump is not a push (already returned above, but keep the comparison honest)
       : (lastBuildJob as { updated_at?: string } | null)?.updated_at;

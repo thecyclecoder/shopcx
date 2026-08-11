@@ -1413,6 +1413,123 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
 }
 
 /**
+ * ⭐ stalled-promote-eligibility-escalates Phase 1 — the "waiting on an input that will never arrive"
+ * detector.
+ *
+ * Every promote signal in this pipeline FAILS CLOSED (accumulation, spec-test-green, security-green) —
+ * correct individually, but the COMPOSITION had neither a timeout nor a voice: a PR whose gate could never
+ * open just sat, silently, indefinitely, behind a `console.warn` nobody reads. Measured 2026-08-11: PRs
+ * #2427 (24h) and #2438 (17h) were both green, mergeable, and permanently blocked on a stale `real-vuln`
+ * verdict — with zero cards and zero errors. The founder's experience was "I submit specs and they aren't
+ * built a day later"; the system's internal state was "everything is fine."
+ *
+ * Raises ONE CEO card per stuck spec naming the EXACT failing leg (the `reason` from
+ * `isSpecPromoteEligible`, e.g. "security not green on branch") plus a per-leg ✅/❌ breakdown, so a
+ * permanent stall is loud instead of invisible. DETECTOR ONLY — it never merges, never flips a gate, never
+ * marks anything green. Deduped per spec on an undismissed card, so a spec stuck for a week yields one card,
+ * not 168.
+ *
+ * NODE COMPLETENESS: adds no new node. It runs INSIDE the existing platform-director standing pass (same
+ * call site as `backstopPreMergeChecks`), inheriting that node's owner, kill-switch ancestry, and heartbeat
+ * — per [[../operational-rules]] § Node completeness.
+ */
+export const PROMOTE_STALL_ESCALATE_AFTER_MS = 6 * 60 * 60 * 1000; // 6h — well past a healthy ~30min spec
+
+export interface PromoteStallEscalation {
+  slug: string;
+  branch: string;
+  prNumber: number | null;
+  ageHours: number;
+  reason: string;
+}
+
+export async function escalateStalledPromoteEligibility(
+  adminClient?: Admin,
+): Promise<{ scanned: number; escalated: PromoteStallEscalation[] }> {
+  const admin = adminClient || createAdminClient();
+  const out: { scanned: number; escalated: PromoteStallEscalation[] } = { scanned: 0, escalated: [] };
+  try {
+    const cutoffIso = new Date(Date.now() - PROMOTE_STALL_ESCALATE_AFTER_MS).toISOString();
+    // Candidates: the latest branch-owning build per spec that OPENED A PR, is unmerged, and whose PR has
+    // been open past the stall window. `created_at` ordering + a seen-set mirrors the shape
+    // `backstopPreMergeChecks` uses, so the two agree on "the branch-bearing row for this spec".
+    const { data: jobs } = await admin
+      .from("agent_jobs")
+      .select("workspace_id, spec_slug, spec_branch, status, pr_number, created_at")
+      .eq("kind", "build")
+      .not("spec_branch", "is", null)
+      .not("pr_number", "is", null)
+      .lt("created_at", cutoffIso)
+      .order("created_at", { ascending: false })
+      .limit(300);
+    const seen = new Set<string>();
+    for (const j of (jobs ?? []) as Array<{
+      workspace_id: string;
+      spec_slug: string;
+      spec_branch: string;
+      status: string;
+      pr_number: number | null;
+      created_at: string;
+    }>) {
+      const slug = j.spec_slug;
+      const branch = j.spec_branch;
+      if (!slug || !branch?.startsWith("claude/build-")) continue;
+      const key = `${j.workspace_id}:${slug}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (j.status === "merged") continue; // landed — nothing stalled
+      const spec = await getSpecFromDb(j.workspace_id, slug).catch(() => null);
+      if (!spec) continue; // deleted spec — not a stall
+      if (spec.status === "shipped" || spec.status === "folded") continue;
+      out.scanned++;
+
+      const elig = await isSpecPromoteEligible(j.workspace_id, slug, branch).catch(() => null);
+      if (!elig || elig.eligible) continue; // eligible ⇒ the merge gate will take it; not a stall
+
+      const ageHours = Math.round((Date.now() - Date.parse(j.created_at)) / 3_600_000);
+      const dedupeKey = `promote-stall:${slug}`;
+      const { data: existingCard } = await admin
+        .from("dashboard_notifications")
+        .select("id")
+        .eq("workspace_id", j.workspace_id)
+        .eq("metadata->>dedupe_key", dedupeKey)
+        .eq("dismissed", false)
+        .maybeSingle();
+      if (existingCard) continue; // already surfaced and not yet dismissed — one card per stuck spec
+
+      await admin.from("dashboard_notifications").insert({
+        workspace_id: j.workspace_id,
+        type: "agent_approval_request",
+        title: `Build stuck ${ageHours}h — ${slug}`,
+        body:
+          `PR #${j.pr_number ?? "?"} has been open ${ageHours}h and cannot promote: ${elig.reason}. ` +
+          `(accumulation ${elig.accumulationComplete ? "✅" : "❌"} · spec-test ${elig.specTestGreen ? "✅" : "❌"} · security ${elig.securityGreen ? "✅" : "❌"})`,
+        link: "/dashboard/roadmap",
+        metadata: {
+          routed_to_function: "platform",
+          escalation_kind: "promote_stall",
+          dedupe_key: dedupeKey,
+          spec_slug: slug,
+          spec_branch: branch,
+          pr_number: j.pr_number,
+          age_hours: ageHours,
+          accumulation_complete: elig.accumulationComplete,
+          spec_test_green: elig.specTestGreen,
+          security_green: elig.securityGreen,
+          reason: elig.reason,
+          autonomous: true,
+        },
+      });
+      out.escalated.push({ slug, branch, prNumber: j.pr_number, ageHours, reason: elig.reason ?? "" });
+      console.warn(`[promote-stall] ${slug} stuck ${ageHours}h — ${elig.reason}`);
+    }
+  } catch (e) {
+    console.warn("[promote-stall] scan threw (continuing):", e instanceof Error ? e.message : e);
+  }
+  return out;
+}
+
+/**
  * spec-goal-branch-pm-flow M3 — the PROMOTE-ELIGIBILITY signal M4 consumes. A branch-flow spec is
  * promote-eligible (its `claude/build-{slug}` branch is ready to merge spec→goal) iff ALL THREE hold:
  *
@@ -1580,6 +1697,34 @@ export interface GoalBranchPromoteResult {
  * inline stamp idempotent: a re-run (or a phase the heal already stamped) is excluded, so we never
  * double-stamp or over-stamp. Pure — testable without DB or GitHub.
  */
+/**
+ * ⭐ chain-advance-skips-built-but-unstamped-phases (2026-08-11) — the pure selector behind
+ * [[queueNextChainedPhase]]: which phase should the chain build NEXT?
+ *
+ * Answer: the first phase that is `planned` AND carries **no `build_sha`**.
+ *
+ * WHY BOTH CONDITIONS. Selecting on `status === "planned"` alone wedges the chain PERMANENTLY the moment a
+ * phase is BUILT-BUT-UNSTAMPED (`build_sha` set, `status` still `planned`) — a routine drift in the branch
+ * flow, since `stampPhaseBuilt` and the status write are separate operations (it is the very class the
+ * `healed_built_unstamped` reconciler exists to repair). Such a phase is picked as "next" on every pass;
+ * `queueNextChainedPhase`'s dedup then finds the build job that ALREADY carries its scoped instructions and
+ * returns null — so the chain never advances and every LATER phase is unreachable.
+ *
+ * Observed live on `swap-variant-self-heal-…` (PR #2438): P1 `planned` with `build_sha=89ad4077`, P2 the
+ * security Fix phase appended by `spawnPreMergeFix`. The chain returned null on every pass, the fix never
+ * built, and the PR sat 19h — with `spawnPreMergeFix` reporting `buildQueued:false` and nothing acting on it.
+ * That made the restored fixes-as-phases path (which appends the phase correctly) still unable to finish.
+ *
+ * Skipping a `build_sha`'d phase is correct by construction: its code is already on the branch. This is the
+ * SAME predicate [[isSpecAccumulationComplete]] and [[phasesToStampBuiltOnGoalMerge]] key on, so all three
+ * agree on "done building". Pure — no DB, no GitHub; testable in isolation.
+ */
+export function nextPhaseToBuild<T extends { status: string; build_sha?: string | null }>(
+  phases: readonly T[],
+): T | undefined {
+  return phases.find((p) => p.status === "planned" && !p.build_sha);
+}
+
 export function phasesToStampBuiltOnGoalMerge(
   phases: { position: number; status: string; build_sha: string | null }[],
 ): number[] {
@@ -3588,8 +3733,24 @@ export async function queueNextChainedPhase(workspaceId: string, slug: string): 
   // resolve the WRONG workspace and find no/incorrect phases.
   const spec = await getSpec(slug, workspaceId);
   if (!spec) return null;
-  const next = spec.card.phases.find((p) => p.status === "planned");
-  if (!next) return null; // no ⏳ phase left → the chain is complete (all phases ✅/built)
+  // ⭐ chain-advance-skips-built-but-unstamped-phases (2026-08-11) — the next phase to BUILD is the first
+  // that is `planned` AND carries NO `build_sha`. Selecting on `status === "planned"` ALONE wedges the chain
+  // permanently whenever a phase is BUILT-BUT-UNSTAMPED (build_sha set, status still `planned` — the
+  // `healed_built_unstamped` drift class the reconciler exists to repair, and which the branch flow produces
+  // routinely because `stampPhaseBuilt` and the status write are separate).
+  //
+  // The wedge: that phase is picked as "next" forever; the dedup below then finds the build job that ALREADY
+  // carries its scoped instructions and returns null — so the chain never advances, and every LATER phase
+  // (notably an appended `kind='fix'` phase) is unreachable. Observed live on
+  // swap-variant-self-heal-…(PR #2438): P1 `planned` with build_sha=89ad4077, P2 the security Fix phase
+  // appended by spawnPreMergeFix — `queueNextChainedPhase` returned null on every pass, the fix never built,
+  // and the PR sat 19h. `spawnPreMergeFix` reported `buildQueued:false` and nothing acted on it.
+  //
+  // `build_sha` is the branch flow's authoritative "this phase is done building" signal — the SAME predicate
+  // `isSpecAccumulationComplete` and `phasesToStampBuiltOnGoalMerge` key on — so skipping a build_sha'd phase
+  // is correct by construction: its code is already on the branch. This makes the three agree.
+  const next = nextPhaseToBuild(spec.card.phases);
+  if (!next) return null; // no un-built ⏳ phase left → the chain is complete (all phases built/terminal)
   const scoped = phaseScopedInstructions(next.title);
 
   const admin = createAdminClient();
@@ -3748,6 +3909,95 @@ export async function retestOriginIfFixMerged(workspaceId: string, fixSlug: stri
   if (!origin || origin === fixSlug) return null; // no link / self-reference → no-op
   const res = await enqueueSpecTestIfDue(workspaceId, origin);
   return res.enqueued ? origin : null;
+}
+
+/**
+ * ⭐ security-real-vuln-deadlock-breaker Phase 3 — the SECURITY sibling of [[retestOriginIfFixMerged]],
+ * and the piece that makes a `real-vuln` finding survivable instead of terminal.
+ *
+ * THE DEADLOCK IT BREAKS. A pre-merge branch security review returning `real-vuln` writes that verdict onto
+ * the branch's `security-review` row. [[../libraries/security-agent]] `isRealVulnVerdict` makes that row NOT
+ * `completedClean` — deliberately, so the M4 promote gate can't merge a known-vulnerable branch while its fix
+ * is un-shipped. The finding then auto-authors a SCOPED FIX SPEC on its OWN `claude/build-{fix}` branch. But
+ * nothing ever re-reviewed the ORIGIN branch: `enqueueSecurityReviewBranch`'s dedup (2) only re-reviews when a
+ * newer build push lands on THAT branch, and the fix never touches it. So the origin's verdict was permanent —
+ * `securityGreen` false forever, PR open forever, no card, no error, no retry. Observed live on PRs #2427 and
+ * #2438 (both accumulation-complete AND spec-test green, blocked solely on this).
+ *
+ * WHAT THIS DOES. When a build MERGES, if its spec is a security fix linked to an origin (`regression_of_slug`,
+ * stamped by `authorSecurityFixSpec`), resolve the origin's still-UNMERGED `claude/build-*` branch and enqueue
+ * a FORCED fresh branch-mode security review of it. The fix is now on `main`, so the origin branch's diff vs
+ * `main` genuinely changed even though its tip did not — exactly the case dedup (2) is blind to. Vault re-reads
+ * the diff and writes a NEW authoritative verdict: clean ⇒ `completedClean` ⇒ the promote gate opens on the
+ * next pass; still `real-vuln` ⇒ correctly still blocked (this surfaces truth, it never papers over a finding).
+ *
+ * SAFETY. Re-review only — it never marks anything green; Vault's fresh verdict is the sole writer. Forcing
+ * skips ONLY the unchanged-branch dedup; the merged-branch guard (0) and one-open-review-per-branch guard (1)
+ * still apply, so it can neither review a deleted ref nor stack concurrent reviews. Best-effort: returns the
+ * origin slug iff a review was actually enqueued, null otherwise, and never throws (the standing pre-merge
+ * backstop remains the safety net). No `regression_of_slug`, a self-reference, an origin with no unmerged
+ * branch, or an already-merged origin all no-op.
+ */
+export async function retestOriginBranchSecurityIfFixMerged(
+  workspaceId: string,
+  fixSlug: string,
+  adminClient?: Admin,
+): Promise<string | null> {
+  const admin = adminClient || createAdminClient();
+  try {
+    const spec = await getSpecFromDb(workspaceId, fixSlug);
+    if (!spec) return null;
+    const origin = spec.regression_of_slug;
+    if (!origin || origin === fixSlug) return null; // no link / self-reference → no-op
+
+    // The origin's latest BRANCH-owning build row. `merged` ⇒ the origin already landed (branch deleted) ⇒ a
+    // pre-merge review is meaningless; the post-merge `diff` lane covers main.
+    const { data: originBuild } = await admin
+      .from("agent_jobs")
+      .select("spec_branch, status, preview_url, pr_number")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", origin)
+      .eq("kind", "build")
+      .not("spec_branch", "is", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const row = originBuild as {
+      spec_branch?: string | null;
+      status?: string | null;
+      preview_url?: string | null;
+      pr_number?: number | null;
+    } | null;
+    const branch = (row?.spec_branch ?? "").trim();
+    if (!branch || !branch.startsWith("claude/build-")) return null;
+    if (row?.status === "merged") return null; // origin already shipped — nothing to unblock
+
+    const { enqueueSecurityReviewJob } = await import("@/lib/security-agent");
+    const r = await enqueueSecurityReviewJob(admin, {
+      branch,
+      previewOrigin: (row?.preview_url ?? "") || "",
+      specSlug: origin,
+      prNumber: typeof row?.pr_number === "number" ? row.pr_number : null,
+      workspaceId,
+      force: true,
+    });
+    if (r.enqueued) {
+      console.log(
+        `[security-deadlock-breaker] fix ${fixSlug} merged → forced fresh security review of origin ${origin} (${branch})`,
+      );
+      return origin;
+    }
+    console.log(
+      `[security-deadlock-breaker] fix ${fixSlug} merged → origin ${origin} (${branch}) NOT re-reviewed: ${r.reason ?? "unknown"}`,
+    );
+    return null;
+  } catch (e) {
+    console.warn(
+      `[security-deadlock-breaker] re-review for fix ${fixSlug} threw (continuing):`,
+      e instanceof Error ? e.message : e,
+    );
+    return null;
+  }
 }
 
 /**
@@ -3980,6 +4230,15 @@ export async function applyMergedBuildEffects(
     await retestOriginIfFixMerged(workspaceId, slug);
   } catch {
     /* best-effort — the daily spec-test backlog cron re-tests shipped specs anyway */
+  }
+  // ⭐ security-real-vuln-deadlock-breaker Phase 3 — the SECURITY half of the same "fix shipped → re-check the
+  // origin" idea. retestOriginIfFixMerged above re-runs the origin's SPEC-TEST (post-ship lane); this re-runs
+  // the origin BRANCH's SECURITY review (pre-merge lane), the one leg that could otherwise never be
+  // superseded — a real-vuln verdict was permanent because the origin branch never advances. No link → no-op.
+  try {
+    await retestOriginBranchSecurityIfFixMerged(workspaceId, slug);
+  } catch {
+    /* best-effort — the standing pre-merge backstop still re-evaluates the branch every pass */
   }
   // director-initiation-throughput Phase 3: this merge freed a build lane — trigger an event-driven director
   // top-up so the pool re-saturates within seconds instead of waiting for the cron beat. Deduped + best-effort.

@@ -110,7 +110,7 @@ apologize for what the customer did. Sign off as a teammate, not "AI".
   Use the customer's **internal subscription UUID** for `contract_id` (the executor resolves it).
   Action types mirror the orchestrator: `remove_item` · `add_item` · `swap_variant` ·
   `change_frequency` · `change_next_date` · `pause_timed {pause_days:30|60}` · `skip_next_order` ·
-  `partial_refund {shopify_order_id, amount_cents, reason}` · `create_return {order_number, free_label}` ·
+  `partial_refund {shopify_order_id, amount_cents, reason}` · `create_return {order_number, free_label, resolution_type?: 'refund_return'|'store_credit_return'}` (omit `resolution_type` for a cash refund — the default; set `'store_credit_return'` when the sanctioned outcome is store credit) ·
   `update_line_item_price {contract_id, variant_id, base_price_cents}` (restore a grandfathered base —
   heals Appstle in place / sets internal price_override_cents; the overcharge-remediation fix) ·
   `apply_coupon {contract_id, code}`. **Account-repair (Improve-only) types** for the duplicate-account

@@ -260,6 +260,50 @@ test("computeMergedButUnapplied — off-format files (e.g. _PENDING_*.sql) are n
   assert.deepEqual(appliedNotOnMain, []);
 });
 
+test("computeMergedButUnapplied — reconcile-migration-drift-2026-08 recovery pins: BOTH the file-deletion path (20261124120000) AND the ledger-recorded path (20261206120000) clear the tile", () => {
+  // reconcile-migration-drift-2026-08-superseded-and-check-superset Phase 3 regression pin.
+  //
+  // Two recovery flavors for a merged-but-unapplied migration are authored in this spec — this
+  // test proves BOTH clear `mergedButUnapplied` for their respective versions on the next tick:
+  //
+  //   Flavor A — FILE DELETION. 20261124120000_creative_skeletons_wireframe.sql shipped a broken
+  //     CHECK (subquery inside a CHECK constraint — Postgres rejects it) that could never apply;
+  //     20261130120001_creative_skeletons_wireframe_shape_trigger.sql already delivers the intent
+  //     via a BEFORE INSERT/UPDATE trigger. Phase 1 DELETED the broken file from the tree AND
+  //     added `scripts/_ledger-reconcile-20261124120000.ts` (the belt-and-suspenders that records
+  //     the version in `supabase_migrations.schema_migrations` — the safety net for a stale
+  //     worktree that still carries the broken file). Post-recovery: the version is in the
+  //     applied set AND has no file on-main → `computeMergedButUnapplied` reports NEITHER
+  //     merged-but-unapplied NOR applied-not-on-main (a deleted-file version stays informational-
+  //     only under the reverse-alarm guard already covered above; the tile is silent).
+  //
+  //   Flavor B — LEDGER-RECORDED VIA APPLY-SCRIPT. 20261206120000_dashboard_notifications_
+  //     fulfillment_alert_type.sql is on-main (from PR #2250 amplifier-import-reliability-rail)
+  //     but the DB never got the CHECK-superset until Phase 2's `scripts/apply-20261206120000-*.ts`
+  //     runs (the primary drain is `applyMergedMigrations` on the reconciler tick; the apply-
+  //     script is the manual belt-and-suspenders). Post-apply: the version is in the applied set
+  //     AND its file is on-main → `computeMergedButUnapplied` returns [] for it.
+  //
+  // The setup below mirrors the on-main state after both recoveries have landed AND the ledger
+  // has caught up. The tile is GREEN for these two versions.
+  const files = [
+    // 20261124120000 has been DELETED from the tree (Phase 1). It is intentionally NOT listed here.
+    "20261130120001_creative_skeletons_wireframe_shape_trigger.sql", // Phase 1's on-main successor.
+    "20261206120000_dashboard_notifications_fulfillment_alert_type.sql", // Phase 2's on-main file.
+  ];
+  const applied = [
+    "20261124120000", // file-deletion path — recorded in the ledger by _ledger-reconcile-20261124120000.ts.
+    "20261130120001", // successor migration — auto-applied by applyMergedMigrations on a prior tick.
+    "20261206120000", // ledger-recorded path — recorded by apply-20261206120000-*.ts (or applyMergedMigrations).
+  ];
+  const { mergedButUnapplied, appliedNotOnMain } = computeMergedButUnapplied(files, applied);
+  // Neither version surfaces as merged-but-unapplied — both recoveries cleared the tile.
+  assert.deepEqual(mergedButUnapplied, []);
+  // 20261124120000 has no file on-main but IS in the applied set — the reverse alarm is
+  // intentionally silent for this class (`appliedNotOnMain` is informational, never a red).
+  assert.deepEqual(appliedNotOnMain, ["20261124120000"]);
+});
+
 test("runMigrationDriftCheck surfaces mergedButUnapplied on the drift result (both axes on one tile)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "migration-drift-test-"));
   try {

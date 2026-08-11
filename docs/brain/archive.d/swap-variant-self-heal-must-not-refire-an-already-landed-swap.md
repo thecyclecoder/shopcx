@@ -1,0 +1,1 @@
+- **Swap-variant self-heal must not re-fire an already-successful swap** · verified 2026-08-11 · → [[../lifecycles/commerce-sdk]]

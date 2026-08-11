@@ -20,6 +20,7 @@ The "Already done by June" line is the anti-Goodhart guard for the escalate path
 ## Exports
 
 - **`buildEscalateFounderCard(input: EscalateFounderCardInput): EscalateFounderCardRow`** — pure function that composes the dashboard_notifications row shape (title/body/link/metadata). Takes the ticket ID, June's reasoning, the cs-director-call job ID, optional black-swan classification, Phase 2's optional recommended remedy, and Phase 1 of `june-does-the-in-leash-part`'s optional `partialRemedyOutcome`. Returns the formatted card in dashboard_notifications shape.
+- **`escalateFounderDedupeKey(ticketId): string`** → `cs-director-founder:{ticketId}` — the ONE-OPEN-CARD-PER-TICKET key (the CEO-inbox signal-to-noise hot fix, 2026-08-11). Exported so the runner's insert site and `reconcileStaleParkCards`'s Family 1d agree on the key without re-deriving the string.
 - **`summarizeRecommendedRemedy(remedy?: Record<string, unknown>): string`** — helper that renders the remedy as a one-line summary for the card body, mirroring the internal-note rendering. When absent/incomplete, returns "(none — CEO to decide the action)" explicitly — never a bare "needs human review".
 - **`summarizePartialRemedyForCard(outcome: PartialRemedyCardInput): string`** — helper that renders the in-leash partial remedy's outcome as the "Already done by June" line. Distinguishes `landed` / `failed` / `loyalty_refused` / `threshold_gated` / `delivery_failed` / `malformed` so the founder never reads a failed partial as settled work.
 - **`EscalateFounderCardInput`** — interface for the input shape (ticketId, reasoning, jobId, optional triageRunId, optional blackSwanClass/blackSwanSource, optional Phase 2 recommendedRemedy, optional partialRemedyOutcome).
@@ -33,6 +34,7 @@ The "Already done by June" line is the anti-Goodhart guard for the escalate path
 The card metadata includes:
 - `routed_to_function: 'ceo'` — routes to the CEO inbox
 - `escalation_kind: 'cs_director_escalate_founder'` — identifies the card type
+- `dedupe_key: 'cs-director-founder:{ticketId}'` — **ONE OPEN CARD PER TICKET** (the CEO-inbox signal-to-noise hot fix, 2026-08-11). Keyed on the **ticket**, not the job: [[../inngest/founder-escalation-stale-recheck]] re-enqueues a fresh `cs-director-call` every `STALE_FOUNDER_ESCALATION_HOURS` (48h) for a founder-escalated ticket with no founder action, so pre-fix ONE unresolved ticket minted a NEW CEO card every 48h — on 2026-08-11 the same customer's already-settled refund question held two cards (16h + 18h old). With the key present the card falls under the `dashboard_notifications_dedupe_key_open_uniq` partial index, so the re-mint is a **benign 23505** the runner logs as "already open for ticket …" (explicitly NOT the "escalation reached no one" error path — the card IS up and waiting)
 - `escalation_reason` — June's reasoning (trimmed, verbatim)
 - `recommended_remedy` — Phase 2's structured suggestion (null when absent) so a downstream approver can pick it up without re-parsing the body
 - `agent_job_id` — cs-director-call job ID so the approvals-feed enrichment can join to the audit trail

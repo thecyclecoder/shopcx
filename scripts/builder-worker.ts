@@ -28,6 +28,8 @@ import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the dir
 // Sol's session dfa7d984 on ticket dfa77b28 died `writeDirection failed: [object Object]` at line
 // ~11538 of this file, so the real cause was unrecoverable. See src/lib/error-text.ts.
 import { errText } from "../src/lib/error-text";
+import { RERUNNABLE_JOB_KINDS } from "../src/lib/agents/park-retry"; // shared with the needs-attention re-drive rung — one list, no drift
+import { extractFailedPredeployGuards } from "../src/lib/predeploy-guard-extract"; // predeploy-gate-repairs-in-session — names the failing guard(s) so a park/repair carries real remediation (pure module: importing builder-worker.ts boots the worker, so this cannot live here)
 // pia-decomposition-emits-plain-slug-blocked-by Phase 1 — normalize Pia's blocked_by entries to the plain
 // member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
 import { normalizePlannerBlockedByList } from "../src/lib/agents/goal-proposals";
@@ -3868,7 +3870,10 @@ async function stampNeedsAttentionClass(jobId: string): Promise<void> {
 // just re-claim off the queue. The SAME set the poll loop calls INTERRUPTIBLE (those it won't block a
 // self-update on) and the reaper resets to `queued`. Every other kind is a work-PRODUCER (a PR, pushed
 // branch, published content, a user's mid-turn) a restart could leave half-done → the reaper fails it.
-const RERUNNABLE_KINDS = new Set<Job["kind"]>(["spec-test", "triage-escalations", "migration-fix", "dev-ask", "pr-resolve", "repair", "regression", "storefront-optimizer", "db_health", "coverage-register", "platform-director", "director-bounce-back", "growth-director", "proposed-goal", "deploy-review", "cs-director-call", "playbook-compile", "prompt-review", "mario"]);
+// SINGLE SOURCE OF TRUTH: the set lives in the pure `src/lib/agents/park-retry` module so the
+// needs-attention re-drive rung can consult the SAME list without importing this file (importing
+// builder-worker.ts boots the worker). Re-narrowed to Job["kind"] here for the local call sites.
+const RERUNNABLE_KINDS = RERUNNABLE_JOB_KINDS as ReadonlySet<Job["kind"]>;
 
 // Startup orphan-reaper (worker-orphan-reaper Phase 1): when the previous worker instance died mid-job
 // (self-update `git reset --hard` + exit, deploy, or crash) its in-flight rows sit in `building`/`claimed`/
@@ -6703,6 +6708,25 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing pre-merge backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // ⭐ stalled-promote-eligibility-escalates Phase 1 — the pre-merge backstop above re-fires the pre-merge
+    // SIGNALS; this makes their permanent ABSENCE loud. Every promote leg fails closed, so a spec whose gate
+    // can never open (the stale `real-vuln` deadlock, an accumulation that will never complete) sat silently
+    // forever. One CEO card per stuck spec, naming the exact failing leg. Detector only — never merges or
+    // flips a gate. No new node: it runs inside THIS standing pass, inheriting the platform-director node's
+    // owner + kill-switch + heartbeat.
+    const { escalateStalledPromoteEligibility } = await import("../src/lib/agent-jobs");
+    const stalls = await escalateStalledPromoteEligibility(db);
+    if (stalls.escalated.length) {
+      notes.push(
+        `promote-stall escalation → ${stalls.escalated.length} stuck spec(s) surfaced of ${stalls.scanned} scanned: ` +
+          stalls.escalated.map((s) => `${s.slug} (${s.ageHours}h — ${s.reason})`).join("; "),
+      );
+    }
+  } catch (e) {
+    notes.push(`promote-stall escalation failed: ${errText(e)}`);
+    console.error(`${tag} standing promote-stall escalation failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // POST-MERGE `diff` SECURITY backstop (fix-vault-post-merge-diff-backstop-7fbde0). Symmetric with
     // backstopPreMergeChecks above but for the OTHER leg: the reactive merge-hook enqueue in
     // `applyMergedBuildEffects` is fire-and-forget — a dropped send (Inngest sync reaped mid-flight,
@@ -7364,6 +7388,13 @@ async function groomBoard(job: Job, tag: string, backstopAdvanced: ReadonlySet<s
         // Loop-guard: a build that already failed ≥ the cap with nothing in-flight is a deeper issue —
         // stop, escalate to the CEO, never re-queue (the leash forbids an infinite resubmit loop).
         if (c.failedBuilds >= lib.PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
+          // ONE OPEN CARD PER STUCK BUILD: the park watchdogs and the escort/init lanes reach this
+          // same conclusion about this spec from their own sweeps. Stop resubmitting either way —
+          // just don't mint a SECOND founder card for an incident already on the founder's desk.
+          if (await lib.openBuildStuckCardExistsForSpec(db, job.workspace_id, c.slug, `groom-loopguard:${c.slug}`)) {
+            console.log(`${tag} groom ${c.slug} → continue but loop-guard; build-stuck card already open — no second card`);
+            continue;
+          }
           const diagnosis = `Grooming ${c.slug}: its next phase is needed now, but the build failed ${c.failedBuilds}× without landing — likely a deeper issue, not a flaky retry${c.lastError ? ` (latest: ${c.lastError.slice(0, 300)})` : ""}. I've stopped resubmitting; approve modifying the spec/approach.`;
           const r = await lib.escalateDiagnosisToCeo(db, {
             workspaceId: job.workspace_id,
@@ -7732,6 +7763,12 @@ async function initiatePlatformSpecs(job: Job, tag: string): Promise<string> {
         // Loop-guard: a build that already failed ≥ the cap with nothing in-flight is a deeper issue —
         // stop, escalate to the CEO, never re-queue (the leash forbids an infinite resubmit loop).
         if (c.failedBuilds >= lib.PLATFORM_DIRECTOR_LOOP_GUARD_MAX) {
+          // ONE OPEN CARD PER STUCK BUILD — see the groom lane's twin above. Same incident, same
+          // founder decision; whichever lane noticed first owns the card.
+          if (await lib.openBuildStuckCardExistsForSpec(db, job.workspace_id, c.slug, `initguard:${c.slug}`)) {
+            console.log(`${tag} init ${c.slug} → initiate but loop-guard; build-stuck card already open — no second card`);
+            return;
+          }
           const diagnosis = `Initiating ${c.slug}: I confirmed it's sound, but its build failed ${c.failedBuilds}× without landing — likely a deeper issue, not a flaky retry${c.lastError ? ` (latest: ${c.lastError.slice(0, 300)})` : ""}. I've stopped resubmitting; approve modifying the spec/approach.`;
           const r = await lib.escalateDiagnosisToCeo(db, {
             workspaceId: job.workspace_id,
@@ -8246,6 +8283,46 @@ async function runPlatformDirectorJob(job: Job) {
       await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "approved_approval", specSlug: t.spec_slug, reason: reasoning || `auto-approved within the leash (${bundleLabel})`, metadata: { job_id: t.id, target_kind: t.kind, leash_category: categories, action_count: leashActions.length, autonomous: true } });
       await update(job.id, { status: "completed", log_tail: `auto-approved ${t.kind} (${bundleLabel}) → target queued_resume.\n${reasoning}`.slice(-2000) });
       console.log(`${tag} auto-approved ${t.kind} (${bundleLabel})`);
+      return;
+    }
+
+    // ⭐ DECLINE (a-director-who-can-approve-can-decline) — Ada investigated an IN-LEASH request and concluded
+    // it should not run (redundant / already shipped / a no-op that would build nothing and park). That is HER
+    // call: she may auto-approve these classes, so she may auto-decline them, and declining executes nothing —
+    // strictly the safer direction of the same authority. The CEO card is never minted.
+    //
+    // Before this existed her only "no" was `escalate`, so a fully-reasoned "don't do this" landed in the CEO
+    // inbox as a decision he still had to make. Live case: db_health signature -1756037457588317045 produced
+    // FIVE CEO cards, each carrying Ada's own several-hundred-word explanation of why the proposal duplicated
+    // four already-shipped fixes. The founder's job was to click Decline on a call Ada had already made.
+    if (verdict === "decline") {
+      const res = await lib.applyDirectorDecline(db, t, leashActions.map((a) => a.actionId), reasoning || `declined (${bundleLabel}) — in-leash and should not run`);
+      if (!res.ok) {
+        await update(job.id, { status: "needs_attention", error: `director decline failed: ${res.error}`, log_tail: `decline FAILED: ${res.error}`.slice(-2000) });
+        console.warn(`${tag} decline FAILED: ${res.error}`);
+        return;
+      }
+      await recordDirectorActivity(db, {
+        workspaceId: t.workspace_id,
+        directorFunction: "platform",
+        actionKind: "declined_approval",
+        specSlug: t.spec_slug,
+        reason: reasoning || `declined within the leash (${bundleLabel})`,
+        metadata: { job_id: t.id, target_kind: t.kind, leash_category: categories, action_count: leashActions.length, autonomous: true },
+      });
+      try {
+        const { postDirectorMessage } = await import("../src/lib/agents/director-board");
+        await postDirectorMessage({
+          workspaceId: t.workspace_id,
+          author: "director",
+          authorFunction: "platform",
+          body: `🚫 Declined the ${t.kind} request for ${t.spec_slug ?? bundleLabel} — my call, not escalating:\n${reasoning.slice(0, 400)}`,
+          kind: "update",
+          metadata: { director_declined: true, target_kind: t.kind },
+        });
+      } catch { /* board best-effort */ }
+      await update(job.id, { status: "completed", log_tail: `declined ${t.kind} (${bundleLabel}) — target dismissed, NOT escalated.\n${reasoning}`.slice(-2000) });
+      console.log(`${tag} declined ${t.kind} (${bundleLabel}) — not escalated`);
       return;
     }
 
@@ -9637,29 +9714,45 @@ async function markNewSpecInReview(
     );
   }
   if (markdown && markdown.trim()) {
-    const { authorSpecRowFromMarkdown, AuthorWriteFailedError } = await import("../src/lib/author-spec");
-    // repair-author-write-surface-real-error-not-swallow — Phase 1 CAPTUREd the boolean here so a
-    // silent-false didn't sail on; Phase 2 finished the job by having `authorSpecRowFromMarkdown`
-    // (a) THROW the real caught error (MissingVerification / EmptyPhaseBody / MissingIntent /
-    // InvalidParent / raw DB / AuthorWriteFailedError for a "row not visible after write") rather
-    // than collapse to `return false`, and (b) do a `getSpec` read-after-write so a silent no-op
-    // upsert also throws with the concrete cause. Result: every failure carries a NON-NULL concrete
-    // message end-to-end (author-spec → here → `groupOrAuthorRepairSpec` catch → parked repair job's
-    // `error` column), never the generic "silent author-write fallout" fallback. The `!ok` throw
-    // below is dead today (the source can no longer return false), but stays as a defense-in-depth
-    // if a future author path adds a soft-halt shape (e.g. a circuit-breaker like the structured
-    // path's runaway-authoring guard — see author-spec.ts:965) — a soft halt still means the spec
-    // was NOT persisted, and the caller must surface that instead of silently continuing.
-    const ok = await authorSpecRowFromMarkdown(workspaceId, slug, markdown, intendedStatus, {
+    // ⭐ autonomous-markdown-authors-get-the-default-machine-check (2026-08-11).
+    //
+    // Route through `buildStructuredSpecInputFromMarkdown` + `authorSpecRowStructured` instead of the
+    // strict markdown path. Both enforce the every-phase-needs-a-machine-runnable-check chokepoint; the
+    // difference is that the STRUCTURED converter attaches the default `exec_kind:'tsc'` check per phase
+    // (its stated purpose: "so the … chokepoint gate passes on the first attempt"), while
+    // `authorSpecRowFromMarkdown` derives checks ONLY from the prose `## Verification` blob and throws
+    // `MissingMachineCheckError` when every bullet lands as `needs_human`.
+    //
+    // Why this matters here: `markNewSpecInReview` is the shared authoring seam for SEVEN autonomous
+    // lanes — db_health, the director groomed_split lanes, bounce-back split, spec-chat, migration-fix,
+    // and the developer message center. NONE of them emit typed checks; they hand over prose markdown.
+    // So every one of them was one prose-only Verification away from an unauthorable spec, and the lane
+    // that hit it retried forever with no new information.
+    //
+    // Live: the `db_health` slow-query signature 4608471940106465663 failed on this every ~10 minutes —
+    // "spec db-index-specs has a phase with no machine-runnable verification — phase 1 (Phase 1 — add
+    // index)" — while the underlying seq scan grew to 26,677 calls / 2,434s cumulative, unfixed, because
+    // the FIX SPEC could not be written down.
+    //
+    // The prose bullets are NOT lost: the converter carries them verbatim on the phase's `verification`
+    // column (human-facing); only `checks[]` drives deterministic execution. A bare `tsc` gate is the
+    // same floor repair-agent / mario / cs-director already default to for autonomous fix specs, and the
+    // spec-test agent still grades the prose bullets. This widens nothing about WHAT may be authored —
+    // it stops a writer being rejected for a check-shape it was never asked to produce.
+    const { buildStructuredSpecInputFromMarkdown, authorSpecRowStructured, AuthorWriteFailedError } =
+      await import("../src/lib/author-spec");
+    const structured = buildStructuredSpecInputFromMarkdown(slug, markdown);
+    const okStructured = await authorSpecRowStructured(workspaceId, slug, structured, intendedStatus, {
       intendedStatusSetBy: actor,
     });
-    if (!ok) {
+    if (!okStructured) {
       throw new AuthorWriteFailedError(
-        `authorSpecRowFromMarkdown ${slug} returned false — a soft-halt path (e.g. the runaway-` +
-          `authoring circuit-breaker) tripped without throwing. The spec was NOT persisted; do not ` +
-          `proceed to enqueue a build for this slug.`,
+        `authorSpecRowStructured ${slug} returned false — a soft-halt path (e.g. the runaway-authoring ` +
+          `circuit-breaker) tripped without throwing. The spec was NOT persisted; do not proceed to ` +
+          `enqueue a build for this slug.`,
       );
     }
+    return;
   }
 }
 
@@ -15693,7 +15786,14 @@ async function runCsDirectorCallJob(job: Job) {
           read: false,
           dismissed: false,
         });
-        if (notifErr) {
+        if (notifErr && notifErr.code === "23505") {
+          // ONE OPEN CARD PER TICKET — the DB's partial unique index on the dedupe_key rejected a
+          // second OPEN card for this same ticket. This is the 48h stale-recheck re-running June on
+          // a ticket the founder hasn't actioned yet: the decision is ALREADY on the founder's desk,
+          // so the correct STATE is one card, not two. Benign — NOT the "escalation reached no one"
+          // regression (that is a card reaching nobody; here the card is up and waiting).
+          console.log(`${tag} escalate_founder CEO card already open for ticket ${ticketId} — left as-is (one-open-card-per-ticket)`);
+        } else if (notifErr) {
           console.error(`${tag} CEO card insert failed — escalation reached no one: ${notifErr.message}`);
         } else {
           const suffix = cls.isBlackSwan ? ` · black_swan=${cls.class_key ?? "unspecified"}` : "";
@@ -24699,7 +24799,23 @@ async function authorSecurityFixSpec(raw: unknown, parentSlug: string, source: S
           ],
         },
         "planned",
-        { intendedStatusSetBy: "security-agent", parentKind: "mandate", parentRef: "platform#security" },
+        {
+          intendedStatusSetBy: "security-agent",
+          parentKind: "mandate",
+          parentRef: "platform#security",
+          // ⭐ security-real-vuln-deadlock-breaker Phase 1 — stamp the TYPED origin linkage. Without it a
+          // `real-vuln` on an UNMERGED branch was a permanent deadlock: the branch's security-review row
+          // carries `verdict='real-vuln'` forever (isRealVulnVerdict ⇒ completedClean=false ⇒ the M4
+          // promote gate never goes green), and NOTHING could ever re-review it —
+          // `enqueueSecurityReviewBranch`'s dedup (2) only re-reviews when a NEWER BUILD PUSH lands on that
+          // same branch, but the fix lives on its OWN branch and never touches the origin's. So the origin
+          // PR sat open indefinitely (observed live on #2427 / #2438 — 17–24h, both green on spec-test AND
+          // accumulation, blocked solely on this). `regression_of_slug` is the SAME typed provenance column
+          // `retestOriginIfFixMerged` already reads for spec-test regressions — reusing it lets the
+          // post-merge hook find the origin and force a fresh review. See [[../src/lib/agent-jobs]]
+          // `retestOriginBranchSecurityIfFixMerged`.
+          regressionOfSlug: parentSlug || null,
+        },
       );
       if (!ok) {
         const authorError = `AuthorWriteFailed: authorSpecRowStructured(${slug}) returned false — the row did not land in public.specs (soft-halt: runaway circuit-breaker or silent no-op)`;
@@ -24901,12 +25017,39 @@ async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, w
     DEP_UPGRADE_PARENT_KIND,
     DEP_UPGRADE_PARENT_REF,
     buildDepUpgradeSpecInput,
+    depUpgradeCycleSlug,
   } = await import("../src/lib/security-agent");
-  const slug = SECURITY_DEP_UPGRADE_SLUG;
+  let slug = SECURITY_DEP_UPGRADE_SLUG;
   try {
     // spec-pm-markdown-purge: the dep-upgrade spec lives ONLY in the DB. Find-or-update on the spec row.
     const { getSpec } = await import("../src/lib/brain-roadmap");
-    const existing = await getSpec(slug, workspaceId);
+    let existing = await getSpec(slug, workspaceId);
+
+    // ⭐ A FOLDED CANONICAL SPEC SILENTLY KILLS THIS LOOP — roll to a cycle-scoped slug instead.
+    //
+    // Two facts combine into a dead loop. (1) `authorSpecRowStructured` will not resurrect an
+    // archived spec: `reopenIfReauthoredAndChanged` returns early on `status === 'folded'`,
+    // deliberately, so a fold stays final. (2) The board-level `getSpec` used below returns NULL for
+    // a folded spec (it is not boardable), so the lane cannot even see that it is authoring into an
+    // archive — it takes the "brand new spec" path. Net effect: the advisory content is upserted
+    // into the folded row, the row stays `folded`, and it NEVER re-enters the build pipeline. No
+    // error, no card that says so.
+    //
+    // Measured 2026-08-11: `security-dep-upgrades` folded 2026-08-03 (its row's `updated_at` shows
+    // the content landing four minutes AFTER the job parked), and 11 actionable advisories — 8 high,
+    // every one with a fix available — sat unaddressed for 8 days behind a park card whose entire
+    // text was "7 advisory(ies) but spec author failed".
+    //
+    // A fold means THAT BATCH shipped; these advisories are NEW work, so they get their own spec.
+    // The RAW status has to come from the specs-table SDK — the board-level read hides folded rows,
+    // which is precisely how this stayed invisible.
+    const { getSpec: getSpecRowAnyStatus } = await import("../src/lib/specs-table");
+    const rawRow = await getSpecRowAnyStatus(workspaceId, slug);
+    if (rawRow?.status === "folded") {
+      slug = depUpgradeCycleSlug();
+      existing = await getSpec(slug, workspaceId);
+      console.log(`[security] canonical dep-upgrade spec is FOLDED — authoring this cycle as ${slug} (a fold must not kill the dep-upgrade loop)`);
+    }
     const structuredInput = buildDepUpgradeSpecInput(findings, signature);
     // Mirror `markNewSpecInReview`'s side effect on FIRST creation — flip the spec card to
     // `in_review` with the actor stamp before the DB write so surfaces that key off
@@ -24935,6 +25078,33 @@ async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, w
       // caller's park carries WHY rather than a bare "spec author failed".
       const authorError = `AuthorWriteFailed: authorSpecRowStructured(${slug}) returned false — the row did not land in public.specs (soft-halt: runaway circuit-breaker or silent no-op)`;
       console.warn(`[security] dep-upgrade spec author returned false for ${slug}`);
+      return { authorError, slug };
+    }
+
+    // ⭐ VERIFY THE OUTPUT IS ACTUALLY BUILDABLE — the step this lane was missing.
+    //
+    // Both times this watcher went blind, the shape was identical: it RAN, reported nothing wrong,
+    // and produced nothing buildable. A `true` from the author chokepoint only means the row was
+    // written; it does NOT mean the spec is on the board where the build pipeline can see it. The
+    // 2026-08-03 fold is exactly that gap — the write landed (the row's `updated_at` moved) while the
+    // status stayed `folded`, so 11 actionable advisories waited 8 days behind a park card that said
+    // only "spec author failed".
+    //
+    // The board-level `getSpec` returns null for any non-boardable status — which is precisely the
+    // asymmetry that HID the bug, so we use it as the DETECTOR. If the spec is not readable on the
+    // board after a successful write, this lane has failed regardless of what the write returned, and
+    // it must say so concretely instead of reporting success.
+    //
+    // Mirrors the coverage-register lane's `step: "verify"` check, which has had this since it
+    // shipped. Same class as CLAUDE.md's node-completeness rule: an autonomous writer that cannot
+    // confirm its own output is a silent proxy-optimizer.
+    const landed = await getSpec(slug, workspaceId);
+    if (!landed) {
+      const authorError =
+        `AuthorWriteFailed: authorSpecRowStructured(${slug}) returned true but the spec is NOT readable on the board ` +
+        `(getSpec returned null — a non-boardable status such as 'folded'). The advisory content was written into a row ` +
+        `the build pipeline cannot see, so nothing will upgrade these dependencies. Re-open or re-slug the spec.`;
+      console.error(`[security] dep-upgrade spec ${slug} wrote but is NOT boardable — the lane produced nothing buildable`);
       return { authorError, slug };
     }
     return { slug, alreadyExists: !!existing };
@@ -25159,6 +25329,78 @@ async function applySecurityVerdictToJob(
     await update(job.id, { status: "needs_attention", error: "needs-human", instructions: JSON.stringify({ ...instr, verdict }), log_tail: review.slice(-2000) });
     await emitVerdict();
     console.log(`${tag} needs-human → surfaced, no spec`);
+    return;
+  }
+  // ⭐ security-findings-as-fix-phases — RESTORED (regressed 2026-07-17 by `610790798` "graduate-vera
+  // follow-ups: remove dead Vera code", which deleted this block's only caller along with the genuinely-dead
+  // fused-session code; `buildSecurityFailingChecks` was left orphaned and uncalled ever since).
+  //
+  // A real-vuln on an IN-FLIGHT build branch appends a security Fix PHASE to the ORIGIN spec and resumes its
+  // build (mirroring the RED spec-test path, src/lib/pre-merge-fix.ts) — it does NOT author a standalone fix
+  // spec. WE DO NOT DO FIX SPECS for a live branch: that model was retired (see the pre-merge-fix module
+  // header — "the 2026-07-02 mess"), because a standalone fix spec on a fresh branch races the origin's own
+  // merge and produces superseded duplicate PRs (#1070/#1071), AND — the failure this regression caused —
+  // it can NEVER clear the origin: the fix lands on its own branch, the origin's branch never advances, so
+  // `enqueueSecurityReviewBranch`'s unchanged-branch dedup never re-reviews it and the `real-vuln` verdict
+  // is PERMANENT. That is the #2427/#2438 deadlock (17–24h, both otherwise-green PRs unpromotable).
+  //
+  // Appending the fix as a PHASE is what makes the loop close on its own: the phase builds ON the origin's
+  // `claude/build-{slug}` branch, which IS a new build push, which is exactly the signal dedup (2) waits for
+  // — so the fresh re-review happens naturally, with no forcing. spawnPreMergeFix carries the per-check-key
+  // dedup + PRE_MERGE_FIX_LOOP_GUARD_MAX (no endless Fix N; it escalates instead).
+  //
+  // POST-MERGE (`diff` mode) findings are UNCHANGED — they still author a follow-up spec below, correctly:
+  // the origin already shipped, so there is no live branch build to append a phase to.
+  if (verdict === "real-vuln" && source.kind === "branch" && source.branch) {
+    const branch = source.branch;
+    const review = String(parsed?.review || "");
+    const failing = buildSecurityFailingChecks(parsed);
+    let originTitle = parentSlug;
+    try {
+      const { getSpec } = await import("../src/lib/specs-table");
+      const s = await getSpec(job.workspace_id, parentSlug);
+      if (s?.title) originTitle = s.title;
+    } catch {
+      /* best-effort — degrade to the slug */
+    }
+    const { spawnPreMergeFix } = await import("../src/lib/pre-merge-fix");
+    const out = await spawnPreMergeFix(db, {
+      workspaceId: job.workspace_id,
+      originSlug: parentSlug,
+      originTitle,
+      branch,
+      failing,
+    });
+    const outcome = out.spawned
+      ? `security Fix phase appended to [[${parentSlug}]] + build resumed (attempt ${out.attempts + 1})`
+      : out.escalated
+        ? `loop-guard escalated (${out.attempts} prior fix phase(s)) — held for the owner`
+        : `no fix phase spawned (${out.reason})`;
+    await recordDirectorActivity(db, {
+      workspaceId: job.workspace_id,
+      directorFunction: SECURITY_DIRECTOR_FUNCTION,
+      actionKind: "authored_fix",
+      specSlug: parentSlug,
+      reason: `Pre-merge security review of ${specLabel}: real-vuln → ${outcome} (fixes-as-phases; no standalone fix spec).`.slice(0, 4000),
+      metadata: {
+        ...activityMetadata,
+        branch,
+        routed: "fixes-as-phases",
+        fix_check_keys: failing.map((f) => f.check_key),
+        spawn_escalated: out.escalated ?? false,
+      },
+    });
+    // Terminal but NOT security-green: the verdict stays 'real-vuln' so `isSecurityGreenForBranch` holds the
+    // PR until the fix phase ships on this branch and the resulting new push earns a fresh review that clears
+    // it. A loop-guard escalation likewise stays red — correctly held for the owner.
+    await update(job.id, {
+      status: "completed",
+      error: null,
+      instructions: JSON.stringify({ ...instr, verdict, routed: "fixes-as-phases" }),
+      log_tail: `real-vuln → ${outcome}\n\n${review}`.slice(-2000),
+    });
+    await emitVerdict();
+    console.log(`${tag} real-vuln on in-flight branch → ${outcome}`);
     return;
   }
   if (verdict === "real-vuln") {
@@ -26279,6 +26521,25 @@ async function preCommitSelfVerify(input: {
 // so the existing fix-phase path still backstops — no safety regression, just a faster path when
 // the miss is a positive-absence that Bo can fix in-session.
 const SELF_VERIFY_REPAIR_MAX = 2;
+
+/**
+ * ⭐ predeploy-gate-repairs-in-session — bounded in-session repair cap for the `predeploy:static` guard
+ * chain, mirroring SELF_VERIFY_REPAIR_MAX above.
+ *
+ * WHY. The predeploy gate was the ONLY gate in the build lane that parked with ZERO repair passes: the tsc
+ * gate fails hard into the fix-phase self-heal and the self-verify gate resumes Bo up to
+ * SELF_VERIFY_REPAIR_MAX times, but a `predeploy:static` violation went straight to `needs_attention` and
+ * waited for a human — while Bo's session was still alive with full context, and the violation is almost
+ * always a one-line mechanical fix (an RLS policy on a new table, a missing node-registry row, a lossy
+ * `String(e)`). Live effect on 2026-08-10: 6 of that day's builds parked here, including BOTH auto-authored
+ * security fix specs — which in turn deadlocked the two origin PRs waiting on them (see
+ * [[../src/lib/agent-jobs]] `retestOriginBranchSecurityIfFixMerged`). One un-repaired mechanical guard
+ * failure stalled the whole pipeline for half a day.
+ *
+ * Exhausting the cap preserves the ORIGINAL behavior exactly (park `needs_attention` with the guard output
+ * on `log_tail`) — this only adds attempts before that, never removes the human backstop.
+ */
+const PREDEPLOY_REPAIR_MAX = 2;
 
 async function dispatchJob(job: Job) {
   if (job.kind === "plan") return runPlanJob(job);
@@ -27915,21 +28176,82 @@ async function dispatchJob(job: Job) {
     // guards (`check:policy-contradictions` — imports `createAdminClient` via dynamic import
     // in the live-scan path). A DB blip in the build lane must not block a commit. Only the
     // hermetic, repo-reading guards belong here.
-    const staticCheck = await shAsync(
-      "npm",
-      ["run", "predeploy:static"],
-      { timeout: 5 * 60 * 1000, cwd: wt },
-    );
-    if (staticCheck.code !== 0) {
-      const out = `${staticCheck.out}\n${staticCheck.err}`;
-      const failed = /❌\s*(check-[^\s—]+)/.exec(out)?.[1] ?? "unknown check";
-      await update(job.id, {
-        status: "needs_attention",
-        error: `predeploy:static failed — ${failed} — see log_tail for the exact guard's remediation`,
-        log_tail: out.slice(-2000),
-      });
-      console.error(`${tag} build-lane predeploy:static FAIL (${failed}) — see log_tail`);
-      return;
+    // ⭐ predeploy-gate-repairs-in-session — the gate now REPAIRS before it parks. Same loop shape as the
+    // pre-commit self-verify gate directly below (resume Bo's live session with the concrete failure,
+    // re-run, re-gate on tsc, bounded by a cap). On cap exhaustion the behavior is IDENTICAL to before this
+    // change: park `needs_attention` with the guard output on `log_tail`.
+    {
+      let predeploySession: string | null = session ?? null;
+      let predeployRepairs = 0;
+      for (let repairPass = 0; repairPass <= PREDEPLOY_REPAIR_MAX; repairPass++) {
+        const staticCheck = await shAsync(
+          "npm",
+          ["run", "predeploy:static"],
+          { timeout: 5 * 60 * 1000, cwd: wt },
+        );
+        if (staticCheck.code === 0) {
+          if (predeployRepairs > 0) {
+            console.log(`${tag} build-lane predeploy:static PASS after ${predeployRepairs} in-session repair pass(es)`);
+            // Legible outcome for Ada — the gate fired and Bo cleared it with no human. Mirrors the
+            // self-verify gate's `build_self_verify_caught` row. Best-effort; never throws.
+            try {
+              const { recordDirectorActivity } = await import("../src/lib/director-activity");
+              await recordDirectorActivity(db, {
+                workspaceId: job.workspace_id,
+                directorFunction: "platform",
+                actionKind: "build_predeploy_guard_repaired",
+                specSlug: slug,
+                reason: `predeploy:static guard violation repaired in-session after ${predeployRepairs} pass(es)`,
+                metadata: { job_id: job.id, spec_slug: slug, repair_passes: predeployRepairs, autonomous: true },
+              });
+            } catch {
+              /* audit is best-effort — the pass already succeeded */
+            }
+          }
+          break;
+        }
+        const out = `${staticCheck.out}\n${staticCheck.err}`;
+        const guards = extractFailedPredeployGuards(out);
+        const failed = guards.length ? guards.join(", ") : "unattributable guard (see log_tail)";
+        if (repairPass === PREDEPLOY_REPAIR_MAX) {
+          // Cap exhausted → the ORIGINAL park, unchanged. A human (or Mario) takes it from here.
+          await update(job.id, {
+            status: "needs_attention",
+            error:
+              `predeploy:static failed — ${failed} — unresolved after ${predeployRepairs} in-session repair pass(es); see log_tail for the exact guard's remediation`,
+            log_tail: out.slice(-2000),
+          });
+          console.error(`${tag} build-lane predeploy:static FAIL (${failed}) after ${predeployRepairs} repair(s) — see log_tail`);
+          return;
+        }
+        // Budget remains → hand Bo the ACTUAL guard output. Every guard prints a human-readable
+        // remediation next to its ❌, so the tail is genuinely actionable.
+        const repairPrompt = [
+          `⛔ PREDEPLOY GUARD BLOCK (repair pass ${repairPass + 1} of ${PREDEPLOY_REPAIR_MAX}) — your change passed tsc and the table-refs rail, but the repo-wide \`npm run predeploy:static\` guard chain REJECTED it.`,
+          `Failing guard(s): ${failed}`,
+          `These are the project's hard invariants (RLS on new tables, node-registry ownership, PM-SDK compliance, no lossy error stringify, migration safety, …). Each guard prints its own remediation next to its ❌ line. Raw output:`,
+          "```\n" + out.slice(-4000) + "\n```",
+          `Fix the VIOLATION, not the guard: never edit, weaken, skip, or remove a \`scripts/_check-*.ts\` guard or its \`predeploy\` wiring to get past this — that is the one thing you must not do here. If a guard looks genuinely wrong, leave it failing and say so in your summary; the worker will park it for a human. Do NOT touch git — the worker still owns commit/push. When done, return the same {"status":"completed","summary":"…"} envelope; the worker re-runs the chain.`,
+        ].join("\n\n");
+        const repair = await runClaude(repairPrompt, predeploySession, wt, configDir, job.id);
+        await meterAgentJob(job, configDir, repair.usage, repair.model);
+        predeployRepairs++;
+        if (repair.session) {
+          predeploySession = repair.session;
+          await update(job.id, { claude_session_id: repair.session, claude_session_config_dir: configDir });
+        }
+        // A repair that broke tsc must not slip through — same shape as the self-verify loop's re-gate.
+        const tscAfter = await shAsync("npx", ["tsc", "--noEmit"], { timeout: 10 * 60 * 1000, cwd: wt });
+        if (tscAfter.code !== 0) {
+          await update(job.id, {
+            status: "failed",
+            error: "tsc failed after a predeploy-guard repair pass",
+            log_tail: (tscAfter.out + tscAfter.err).slice(-2000),
+          });
+          console.error(`${tag} predeploy-guard repair broke tsc — see log_tail`);
+          return;
+        }
+      }
     }
 
     // ⭐ PRE-COMMIT SELF-VERIFY GATE ([[../specs/build-lane-pre-commit-self-verify]] Phase 1) —

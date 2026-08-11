@@ -110,7 +110,7 @@ test("FIX: removeExistingDiscounts skips AUTOMATIC_DISCOUNT rows — Sandra's fr
     { id: "gid://loy-15",       title: "LOYALTY-15-XYZ",                type: "CODE_DISCOUNT",      value: 15,  valueType: "FIXED_AMOUNT" },
   ]);
 
-  const out = await removeExistingDiscounts("test-key", "34148253869");
+  const out = await removeExistingDiscounts("ws-test", "test-key", "34148253869");
 
   assert.equal(removeCalls.length, 1, "only ONE remove-discount PUT — for the CODE_DISCOUNT");
   assert.equal(removeCalls[0]!.discountId, "gid://loy-15", "the AUTOMATIC_DISCOUNT is never sent to Appstle");
@@ -126,7 +126,7 @@ test("FIX: the local applied_discounts write-back preserves the AUTOMATIC_DISCOU
     { id: "gid://loy-15",       title: "LOYALTY-15-XYZ",                type: "CODE_DISCOUNT",      value: 15,  valueType: "FIXED_AMOUNT" },
   ]);
 
-  await removeExistingDiscounts("test-key", "34148253869");
+  await removeExistingDiscounts("ws-test", "test-key", "34148253869");
 
   assert.equal(dbUpdates.length, 1, "one DB write happened (a CODE_DISCOUNT was removed)");
   const written = dbUpdates[0]!.appliedDiscounts ?? [];
@@ -140,7 +140,7 @@ test("FIX: MANUAL rows (cancel-flow retention discounts) are also preserved", as
     { id: "gid://loy-15",             title: "LOYALTY-15-XYZ",   type: "CODE_DISCOUNT", value: 15, valueType: "FIXED_AMOUNT" },
   ]);
 
-  const out = await removeExistingDiscounts("test-key", "c-1");
+  const out = await removeExistingDiscounts("ws-test", "test-key", "c-1");
 
   assert.equal(removeCalls.length, 1);
   assert.equal(removeCalls[0]!.discountId, "gid://loy-15");
@@ -155,7 +155,7 @@ test("FIX: unknown-or-missing type is treated as PRESERVE (never removable)", as
     { id: "gid://loy-5", title: "LOYALTY-5-A",   type: "CODE_DISCOUNT",           value: 5, valueType: "FIXED_AMOUNT" },
   ]);
 
-  const out = await removeExistingDiscounts("test-key", "c-2");
+  const out = await removeExistingDiscounts("ws-test", "test-key", "c-2");
 
   assert.equal(removeCalls.length, 1, "only the CODE_DISCOUNT is PUT — unknown types are never removable");
   assert.equal(out.preserved.length, 2);
@@ -167,7 +167,7 @@ test("FIX: an all-AUTOMATIC applied_discounts is a NO-OP — no PUT to Appstle, 
     { id: "gid://buy2",         title: "Buy 2 Discount",                 type: "AUTOMATIC_DISCOUNT", value: 5,   valueType: "PERCENTAGE" },
   ]);
 
-  const out = await removeExistingDiscounts("test-key", "c-3");
+  const out = await removeExistingDiscounts("ws-test", "test-key", "c-3");
 
   assert.equal(removeCalls.length, 0, "no code discounts → no Appstle mutation at all");
   assert.equal(dbUpdates.length, 0, "no code discounts → no local write — the previous bug wrote [] here");

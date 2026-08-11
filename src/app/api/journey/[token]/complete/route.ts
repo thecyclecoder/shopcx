@@ -644,7 +644,7 @@ export async function POST(
               if (wsCreds?.appstle_api_key_encrypted) {
                 const appstleKey = decrypt(wsCreds.appstle_api_key_encrypted);
                 const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-                const result = await applyDiscountWithReplace(appstleKey, sub.shopify_contract_id, couponCode);
+                const result = await applyDiscountWithReplace(wsId, appstleKey, sub.shopify_contract_id, couponCode);
                 if (result.removed.length > 0) actionLog.push(`Removed ${result.removed.length} existing coupon(s)`);
                 if (result.success) actionLog.push(`Coupon ${couponCode} applied`);
                 else actionLog.push(`Coupon ${couponCode} failed: ${result.error}`);
@@ -1102,7 +1102,7 @@ export async function POST(
                 const { decrypt } = await import("@/lib/crypto");
                 const apiKey = decrypt(wsData.appstle_api_key_encrypted);
                 const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-                const result = await applyDiscountWithReplace(apiKey, selectedSub.contractId, couponCode);
+                const result = await applyDiscountWithReplace(wsId, apiKey, selectedSub.contractId, couponCode);
                 if (result.success) {
                   actionLog.push(`Applied coupon ${couponCode} to subscription ${selectedSub.contractId}`);
                 } else {

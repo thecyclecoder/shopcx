@@ -45,6 +45,13 @@ export default async function OrderDetailPage({
       const session = JSON.parse(decrypt(legacySession));
       if (session && Date.now() <= session.exp) {
         const admin2 = createAdminClient();
+        // tenant-scope-exempt: this lookup RESOLVES the workspace — it cannot be scoped by one.
+        // A legacy portal session decrypts to a bare `shopify_customer_id` and carries no workspace, and
+        // the route's `[slug]` is only used for redirect URLs (it maps to no workspace column). The
+        // `workspaceId` used everywhere below is assigned FROM this query's result. The modern path (the
+        // `portal_workspace_id` magic cookie, handled above) is already workspace-scoped; this is only the
+        // legacy fallback. Residual risk: were the same `shopify_customer_id` present in two workspaces this
+        // would resolve one arbitrarily — accepted while the legacy branch exists; it goes away with it.
         const { data: cust } = await admin2.from("customers")
           .select("id, workspace_id")
           .eq("shopify_customer_id", session.shopify_customer_id)
