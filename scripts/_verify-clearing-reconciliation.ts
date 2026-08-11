@@ -92,9 +92,19 @@ async function main() {
 
   console.log(`\nCLEARING RECONCILIATION — ${MONTH}\n`);
   console.log(
-    `  ⚠ 'processor gross' is whatever is STORED. If a row was written by a mid-month snapshot it\n` +
-      `    understates the month and every delta below reads high. Check synced_at, and re-run\n` +
-      `    scripts/_verify-processor-sync.ts for the fresh figure.\n`,
+    `  ⭐ These are TWO DIFFERENT ACCOUNTING BASES and are not expected to be equal.\n` +
+      `     The books are ACCRUAL: the JE's clearing debit is ORDER-dated — revenue belongs to the\n` +
+      `     month the order was placed. A processor's gross is PAYOUT/SETTLEMENT-dated — cash. At a\n` +
+      `     month boundary the two differ by the tail: measured for 2026-07, July's Shopify payouts\n` +
+      `     carried $11,813.21 of JUNE charges while ~$11,214.74 of July charges paid out in August,\n` +
+      `     netting the $598.47 delta. That is CORRECT, not a defect.\n` +
+      `     Braintree ties exactly only because it settles same/next-day, so its window nearly\n` +
+      `     coincides with the order window — a narrower boundary, not a better reconciliation.\n` +
+      `     Investigate a delta that is LARGE relative to a boundary day's charges, or one that is\n` +
+      `     the size of a known refund/chargeback total. A few tenths of a percent is the tail.\n` +
+      `  ⚠ 'processor gross' is whatever is STORED. A row written by a mid-month snapshot understates\n` +
+      `     the month and makes every delta read high — check synced_at, and re-run\n` +
+      `     scripts/_verify-processor-sync.ts for the fresh figure.\n`,
   );
   console.log(`${"processor".padEnd(18)}${"JE clearing debit".padStart(20)}${"processor gross".padStart(18)}${"delta".padStart(14)}`);
   for (const p of procs ?? []) {

@@ -20,6 +20,25 @@ Proven by cutting a fresh Braintree pull at shoptics' capture instant: full July
 
 Scope note: ShopCX's token carries BOTH `read_shopify_payments_payouts` (granted 2026-08-11, app version `shopcx-100`) and `read_all_orders`. Shoptics has the former but NOT the latter — which is why the ~60-day order-window deadline binds Shoptics and not the ShopCX close.
 
+## ⭐ The books are ACCRUAL — clearing debits will never equal payout gross
+
+The JE's clearing DEBIT is **order-dated**: revenue belongs to the month the order was placed. A processor's gross is **payout / settlement-dated**: cash. Those are two different accounting bases, and at a month boundary they differ by the tail.
+
+Measured for 2026-07 (Shopify Payments):
+
+```
+July PAID payouts, charges by PROCESSED month:
+   2026-06   $11,813.21   <- June charges paid out in early July
+   2026-07  $145,645.12
+   total    $157,458.33
+```
+
+~$11,214.74 of July charges paid out in August instead, netting the **−$598.47** delta against the JE's $156,859.86. That is **correct**, not a defect — chasing exactness would mean making the accrual JE wrong.
+
+**Braintree ties exactly for a narrower reason**, not a better one: it settles same/next-day, so a `settledAt` month search nearly coincides with the order window. Don't read Braintree's $0.00 as the standard the others should meet.
+
+What DOES warrant investigation: a delta large relative to a boundary day's charges, or one that equals a known refund/chargeback total. July's refunds were $3,369.89 — nowhere near the $598.47 residual, which is how that hypothesis was ruled out.
+
 ## Exports
 
 `syncShopifyPaymentsSummary` · `syncPaypalSummary` · `syncBraintreeSummary` · `syncProcessorSummaries` (all three, isolated).
