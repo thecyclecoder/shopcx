@@ -127,6 +127,7 @@
     "test:cs-director-founder-ack": "tsx --test src/lib/cs-director.test.ts",
     "test:cs-director-author-spec-failure-card": "tsx --test src/lib/cs-director-author-spec-failure-card.test.ts",
     "test:build-stuck-dedupe": "tsx --test src/lib/agents/approval-inbox.build-stuck-dedupe.test.ts",
+    "test:escalation-universal-backstop": "tsx --test src/lib/agents/approval-inbox.universal-backstop.test.ts",
     "test:escalate-founder-dedupe": "tsx --test src/lib/cs-director-escalate-founder-card.dedupe.test.ts",
     "test:assisted-purchase-failure-card": "tsx --test src/lib/assisted-purchase-failure-card.test.ts",
     "test:founder-escalation-stale-recheck-selection": "tsx --test src/lib/inngest/founder-escalation-stale-recheck.selection.test.ts",
