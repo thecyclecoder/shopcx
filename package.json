@@ -130,6 +130,7 @@
     "test:cs-director-author-spec-failure-card": "tsx --test src/lib/cs-director-author-spec-failure-card.test.ts",
     "test:build-stuck-dedupe": "tsx --test src/lib/agents/approval-inbox.build-stuck-dedupe.test.ts",
     "test:escalation-universal-backstop": "tsx --test src/lib/agents/approval-inbox.universal-backstop.test.ts",
+    "test:approval-inbox-workspace-scope": "tsx --test src/lib/agents/approval-inbox.workspace-scope.test.ts",
     "test:platform-owner-rung": "tsx --test src/lib/agents/needs-attention-route.platform-owner-rung.test.ts",
     "test:escalate-founder-dedupe": "tsx --test src/lib/cs-director-escalate-founder-card.dedupe.test.ts",
     "test:assisted-purchase-failure-card": "tsx --test src/lib/assisted-purchase-failure-card.test.ts",
