@@ -2304,7 +2304,7 @@ export const directActionHandlers: Record<
       }
     }
 
-    const { data: sub } = await ctx.admin.from("subscriptions").select("items").eq("shopify_contract_id", p.contract_id).single();
+    const { data: sub } = await ctx.admin.from("subscriptions").select("items").eq("workspace_id", ctx.workspaceId).eq("shopify_contract_id", p.contract_id).single();
     const subItems = (sub?.items as { variant_id?: string; title?: string }[]) || [];
     const subRealItems = subItems.filter(i => !(i.title || "").toLowerCase().includes("shipping protection"));
     for (const it of subRealItems) pushUnique(it.variant_id);
@@ -3310,7 +3310,7 @@ export const directActionHandlers: Record<
               city: a.city, province_code: province, zip, country_code: country,
             },
             updated_at: new Date().toISOString(),
-          }).eq("shopify_contract_id", p.contract_id);
+          }).eq("workspace_id", ctx.workspaceId).eq("shopify_contract_id", p.contract_id);
           anySuccess = true;
           summaries.push(`Subscription ${p.contract_id} address updated`);
         } else if (upd.error) {
@@ -3589,6 +3589,7 @@ export const directActionHandlers: Record<
       try {
         const { data: pv } = await ctx.admin.from("product_variants")
           .select("title, products(title)")
+          .eq("workspace_id", ctx.workspaceId)
           .eq("shopify_variant_id", variantId).maybeSingle();
         if (pv) {
           const productTitle = (pv.products as { title?: string } | null)?.title;

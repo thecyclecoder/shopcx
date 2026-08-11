@@ -104,7 +104,7 @@ async function main() {
   const { getAppstleConfig } = await import("../src/lib/subscription-items");
   const config = await getAppstleConfig(WS);
   if (!config) { console.log("  Appstle not configured — ABORT."); return; }
-  const rem = await removeExistingDiscounts(config.apiKey, ASHWAVANA_CONTRACT_ID);
+  const rem = await removeExistingDiscounts(WS, config.apiKey, ASHWAVANA_CONTRACT_ID);
   console.log("  ->", JSON.stringify(rem));
 
   console.log("\nDONE.");

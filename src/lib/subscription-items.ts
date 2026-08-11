@@ -343,6 +343,7 @@ async function syncContractItems(workspaceId: string, contractId: string, apiKey
     const admin = createAdminClient();
     await admin.from("subscriptions")
       .update({ items, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId);
   } catch { /* non-fatal */ }
 }
@@ -912,7 +913,7 @@ export async function subAddOneTimeGift(
   }
   const admin = createAdminClient();
   const { data: sub } = await admin
-    .from("subscriptions").select("id, customer_id").eq("shopify_contract_id", contractId).maybeSingle();
+    .from("subscriptions").select("id, customer_id").eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
   if (!sub?.customer_id) return { success: false, error: "Could not resolve the customer for this subscription", backend: "appstle" };
   const { data: cust } = await admin
     .from("customers").select("shopify_customer_id, first_name, last_name, default_address").eq("id", sub.customer_id).maybeSingle();
@@ -937,7 +938,7 @@ export async function subAddOneTimeGift(
   if (!a?.address1) return { success: false, error: "No shipping address on file — can't create a gift order", backend: "appstle" };
 
   // Gift line title (product name) for the order + note.
-  const { data: pv } = await admin.from("product_variants").select("product_id").eq("shopify_variant_id", shopifyVariantId).maybeSingle();
+  const { data: pv } = await admin.from("product_variants").select("product_id").eq("workspace_id", workspaceId).eq("shopify_variant_id", shopifyVariantId).maybeSingle();
   let giftTitle = "Gift";
   if (pv?.product_id) {
     const { data: p } = await admin.from("products").select("title").eq("id", pv.product_id).maybeSingle();
@@ -1097,6 +1098,7 @@ export async function subUpdateLineItemPrice(
     const admin = createAdminClient();
     const { data: sub } = await admin.from("subscriptions")
       .select("items")
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId)
       .single();
     const items = (sub?.items as { variant_id?: string; line_id?: string }[]) || [];
@@ -1160,7 +1162,7 @@ export async function subUpdateLineItemPrice(
           : i
       ),
       updated_at: new Date().toISOString(),
-    }).eq("shopify_contract_id", contractId);
+    }).eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId);
 
     return { success: true };
   } catch (err) {
@@ -1294,7 +1296,7 @@ export async function subscriptionApplyCoupon(
   await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
-  const r = await applyDiscountWithReplace(config.apiKey, contractId, code);
+  const r = await applyDiscountWithReplace(workspaceId, config.apiKey, contractId, code);
   return { success: r.success, error: r.error };
 }
 
@@ -1324,7 +1326,7 @@ export async function subscriptionRemoveCoupon(
   await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
-  const r = await removeExistingDiscounts(config.apiKey, contractId);
+  const r = await removeExistingDiscounts(workspaceId, config.apiKey, contractId);
   return { success: !r.error, error: r.error };
 }
 
@@ -1487,6 +1489,7 @@ export async function subSwapVariant(
     const { data: newPv } = await admin
       .from("product_variants")
       .select("product_id, price_cents")
+      .eq("workspace_id", workspaceId)
       .eq("shopify_variant_id", String(newVariantId))
       .maybeSingle();
     const newProductId = (newPv?.product_id as string | undefined) || null;
@@ -1602,6 +1605,7 @@ async function readRulesExpectedForNewLineCents(
     const { data: sub } = await admin
       .from("subscriptions")
       .select("items, delivery_price_cents, pricing_offer_id")
+      .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId)
       .maybeSingle();
     if (!sub) return 0;
@@ -1693,6 +1697,7 @@ async function captureOutgoingRealizedCents(
       const { data: oldPv } = await admin
         .from("product_variants")
         .select("product_id")
+        .eq("workspace_id", workspaceId)
         .eq("shopify_variant_id", String(resolvedOldVariantId))
         .maybeSingle();
       const oldProductId = (oldPv?.product_id as string | undefined) || null;

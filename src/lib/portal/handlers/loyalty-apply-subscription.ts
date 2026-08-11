@@ -191,7 +191,7 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
     const apiKey = decrypt(ws.appstle_api_key_encrypted);
 
     const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-    let result = await applyDiscountWithReplace(apiKey, String(contractId), code);
+    let result = await applyDiscountWithReplace(auth.workspaceId, apiKey, String(contractId), code);
 
     // Self-healing: if Appstle rejects the code, regenerate it in Shopify and retry
     if (!result.success && result.status === 400) {
@@ -257,7 +257,7 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
 
           if (newNodeId) {
             // Retry apply with new code
-            result = await applyDiscountWithReplace(apiKey, String(contractId), newCode);
+            result = await applyDiscountWithReplace(auth.workspaceId, apiKey, String(contractId), newCode);
             if (result.success) {
               code = newCode;
               // Update redemption if it exists

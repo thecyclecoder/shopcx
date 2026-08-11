@@ -139,7 +139,7 @@ test("FIX: a 400 on apply triggers a rollback re-apply of the removed CODE_DISCO
     (attempt) => attempt === 0 ? 400 : 200,
   );
 
-  const result = await applyDiscountWithReplace("test-key", "34148253869", "PROMO-NEW");
+  const result = await applyDiscountWithReplace("ws-test", "test-key", "34148253869", "PROMO-NEW");
 
   const applies = fetchCalls.filter(c => c.endpoint === "apply-discount");
   assert.equal(applies.length, 2, "primary apply + one rollback re-apply");
@@ -157,7 +157,7 @@ test("FIX: on successful rollback, local applied_discounts is restored to the pr
   ];
   resetWorld(snapshot, (attempt) => attempt === 0 ? 400 : 200);
 
-  await applyDiscountWithReplace("test-key", "c-1", "PROMO-NEW");
+  await applyDiscountWithReplace("ws-test", "test-key", "c-1", "PROMO-NEW");
 
   // dbUpdates: [0] removeExistingDiscounts wrote preserved (1 row);
   //            [1] rollback restored the full snapshot (2 rows).
@@ -176,7 +176,7 @@ test("FIX: rollback that ITSELF fails returns the ORIGINAL apply error with roll
     (attempt) => attempt === 0 ? 400 : 500,
   );
 
-  const result = await applyDiscountWithReplace("test-key", "c-2", "PROMO-NEW");
+  const result = await applyDiscountWithReplace("ws-test", "test-key", "c-2", "PROMO-NEW");
 
   assert.equal(result.success, false);
   assert.equal(result.status, 400, "the ORIGINAL apply status is surfaced, not the rollback's 500");
@@ -196,7 +196,7 @@ test("FIX: rollback re-apply calls are logged through logAppstleCall (auditable 
     (attempt) => attempt === 0 ? 400 : 200,
   );
 
-  await applyDiscountWithReplace("test-key", "c-3", "PROMO-NEW");
+  await applyDiscountWithReplace("ws-test", "test-key", "c-3", "PROMO-NEW");
 
   const applyLogs = loggedAppstleCalls.filter(l => l.endpoint === "apply-discount");
   assert.equal(applyLogs.length, 2, "both the primary apply AND the rollback re-apply are logged");
@@ -211,7 +211,7 @@ test("BASELINE: a successful apply is unchanged — no rollback, rolledBack unde
     () => 200,
   );
 
-  const result = await applyDiscountWithReplace("test-key", "c-4", "PROMO-NEW");
+  const result = await applyDiscountWithReplace("ws-test", "test-key", "c-4", "PROMO-NEW");
 
   const applies = fetchCalls.filter(c => c.endpoint === "apply-discount");
   assert.equal(applies.length, 1, "only the primary apply — no rollback on success");
@@ -225,7 +225,7 @@ test("BASELINE: an apply failure with NO code discounts to restore returns rolle
     () => 400,
   );
 
-  const result = await applyDiscountWithReplace("test-key", "c-5", "PROMO-NEW");
+  const result = await applyDiscountWithReplace("ws-test", "test-key", "c-5", "PROMO-NEW");
 
   const applies = fetchCalls.filter(c => c.endpoint === "apply-discount");
   assert.equal(applies.length, 1, "no rollback re-apply — there was nothing to restore");

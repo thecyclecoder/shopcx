@@ -86,7 +86,7 @@ async function executeRemedyAction(
 
       // Remove existing discounts first, then apply (only 1 coupon per subscription)
       const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-      const result = await applyDiscountWithReplace(apiKey, contractId, mapping.code);
+      const result = await applyDiscountWithReplace(workspaceId, apiKey, contractId, mapping.code);
       if (!result.success) return { success: false, error: result.error };
 
       return { success: true, savedAction: `saved with coupon ${mapping.code}`, patch: {} };

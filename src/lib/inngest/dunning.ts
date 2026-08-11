@@ -509,6 +509,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
             const admin = createAdminClient();
             await admin.from("subscriptions")
               .update({ status: "active", updated_at: new Date().toISOString() })
+              .eq("workspace_id", workspace_id)
               .eq("shopify_contract_id", cancelled.contractId);
           }
 

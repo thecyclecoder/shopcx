@@ -150,6 +150,7 @@ async function appstleLinesToInternalItems(
     const { data: byShopId } = await admin
       .from("product_variants")
       .select("id, product_id, price_cents, title, sku")
+      .eq("workspace_id", workspaceId)
       .eq("shopify_variant_id", shopifyVid)
       .maybeSingle();
     v = byShopId;
