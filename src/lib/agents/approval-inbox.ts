@@ -1103,6 +1103,64 @@ export async function reconcileStaleParkCards(admin: Admin): Promise<number> {
     }
   }
 
+  // ── Family 1e: UNIVERSAL BACKSTOP — any escalation kind whose spec is folded/gone ──
+  // The families above each own a specific escalation_kind. That design has a standing failure mode:
+  // a kind nobody remembered to enroll belongs to NO family and its cards are IMMORTAL — only a
+  // founder click can clear them. Measured 2026-08-11, AFTER the first pass of this work shipped:
+  // four kinds were still orphaned, two of them holding open CEO cards whose specs were already
+  // `folded` (`init_dismiss_rework` and `drift_suspect`, both 204h old). Enumerating kinds one at a
+  // time loses to the rate at which new kinds are added.
+  //
+  // So: one kind-AGNOSTIC test that is true for every escalation card by construction. A card is
+  // ABOUT a spec; if that spec is `folded` (done or superseded) or its row is GONE, the thing the
+  // card wanted a decision on no longer exists — whatever the kind, whoever raised it. This is the
+  // same predicate Families 1/1b already apply, generalized.
+  //
+  // DELIBERATELY NARROW so it can never clear a live decision:
+  //   - `folded` / missing ONLY. A merely-`shipped`-by-rollup spec keeps its card (a genuine
+  //     spec-test park on a shipped spec must survive — the existing Family 1 rule).
+  //   - Cards with NO spec_slug are untouched (nothing to evaluate).
+  //   - Cards a specific family already owns are skipped — that family's own, better-informed test
+  //     wins; this only catches what nothing else claims.
+  //   - Routed Approval Requests (no escalation_kind, `needs_approval` job) are untouched — they
+  //     belong to the dismiss loop and represent a decision the founder actually still owes.
+  // `npm run check:escalation-coverage` is the rail that keeps this a BACKSTOP rather than the only
+  // thing standing between a new kind and an immortal card.
+  const ownedKinds = new Set<string>([
+    ...PARK_ESCALATION_KINDS,
+    ...BUILD_STUCK_ESCALATION_KINDS,
+    CS_FOUNDER_ESCALATION_KIND,
+    "deploy_unsure",
+  ]);
+  const orphanCards: Array<{ card: ParkCardRow; specSlug: string }> = [];
+  for (const n of notifs) {
+    const m = n.metadata ?? {};
+    const escKind = typeof m["escalation_kind"] === "string" ? (m["escalation_kind"] as string) : null;
+    if (escKind === null || ownedKinds.has(escKind)) continue;
+    const slug = typeof m["spec_slug"] === "string" && m["spec_slug"] ? (m["spec_slug"] as string) : null;
+    if (slug) orphanCards.push({ card: n, specSlug: slug });
+  }
+  if (orphanCards.length) {
+    const slugs = new Set(orphanCards.map((c) => c.specSlug));
+    const specStatus = await loadSpecStatuses(admin, slugs);
+    // SAFETY: `loadSpecStatuses` returning an EMPTY map for a non-empty slug set is indistinguishable
+    // from "every spec was deleted" — which would mass-dismiss on a transient read failure. A real
+    // all-deleted set is vanishingly rare; a read blip is not. Require at least one resolved spec
+    // before trusting an `undefined` as "this spec is gone".
+    const anyResolved = [...slugs].some((s) => specStatus.get(s) !== undefined);
+    for (const { card, specSlug } of orphanCards) {
+      const status = specStatus.get(specSlug);
+      if (status === undefined) {
+        if (!anyResolved) continue; // whole-map miss — treat as a read blip, keep every card
+        if (await dismissParkCard(admin, card.id, `spec ${specSlug} no longer exists — escalation superseded (universal backstop)`)) cleared++;
+        continue;
+      }
+      if (status === "folded") {
+        if (await dismissParkCard(admin, card.id, `spec ${specSlug} folded — escalation superseded (universal backstop)`)) cleared++;
+      }
+    }
+  }
+
   // ── Family 2: Reva "Ambiguous post-deploy signal" cards ──────────────────────
   if (revaCards.length) {
     const slugs = new Set<string>();
