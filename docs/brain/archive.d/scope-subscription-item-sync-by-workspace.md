@@ -1,0 +1,1 @@
+- **Cross-tenant write: subscription item sync was keyed on `shopify_contract_id` alone** · superseded 2026-08-11 · fix shipped in #2454, not by this spec · → [[../libraries/subscription-items]]

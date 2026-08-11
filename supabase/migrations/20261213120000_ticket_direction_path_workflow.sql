@@ -1,0 +1,23 @@
+-- Phase 1 of docs/brain/specs/ticket-direction-path-workflow-enum-drift.md
+--
+-- Extends the ticket_direction_path enum with the fifth value: 'workflow'. Sol's first-touch box
+-- session already knows about the workflow path — src/lib/ticket-directions.ts:14 lists 'workflow'
+-- on `TicketDirectionPath` and `validatePlanForPath` has a `chosen_path === 'workflow'` branch that
+-- gates `workflow_tag` against an enabled `public.workflows` row — but the Postgres enum backing
+-- `ticket_directions.chosen_path` never got the value, so the insert is rejected and the entire
+-- Sol session dies (three measured kills between 2026-07-28 and 2026-08-05; the Amy Schwartz
+-- ticket is the ground-truth case). This value closes the DB side of that drift.
+--
+-- Existing values: 'playbook' | 'journey' | 'stateless' | 'needs_info' — see
+-- supabase/migrations/20260925120002_ticket_directions.sql (initial three) and
+-- supabase/migrations/20261004120002_ticket_directions_journey_path.sql (added 'journey'). The
+-- new 'workflow' value pairs with plan.workflow_tag, and writeDirection at
+-- src/lib/ticket-directions.ts gates the tag against `public.workflows.trigger_tag`
+-- (enabled=true, workspace-scoped) before the row lands — the same "confirming predicate at the
+-- action point" pattern the playbook_slug + journey_slug gates apply.
+--
+-- Idempotent (ADD VALUE IF NOT EXISTS). ALTER TYPE ADD VALUE cannot run inside a wrapping
+-- transaction on older Postgres versions; the pooler runs migrations as top-level statements so
+-- this is safe as-is. Re-runs are a no-op once 'workflow' is present.
+
+ALTER TYPE public.ticket_direction_path ADD VALUE IF NOT EXISTS 'workflow';

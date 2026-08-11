@@ -2437,12 +2437,35 @@ export const directActionHandlers: Record<
       }
     }
 
-    // Look up order
+    // Look up order — scoped to BOTH the workspace AND the ticket's customer.
+    //
+    // ⭐ OWNERSHIP CHECK (security). The workspace filter alone is not sufficient: `order_number` is
+    // only unique WITHIN a workspace, and the value comes from the model's action payload — so a
+    // ticket for customer A could name customer B's order number and create a return against B's
+    // order (issuing a label + refund exposure on someone else's purchase). Requiring
+    // `customer_id === ctx.customerId` makes the lookup prove ownership before anything is created.
+    // `ctx.customerId` is the ticket's resolved customer, the same identity used for the customer
+    // lookup immediately below, so this adds no new input to trust.
+    //
+    // `maybeSingle` (not `single`): a miss is an expected outcome here — a wrong/foreign order number
+    // — so it must return null and fall into the generic error below, not throw a PostgREST exception
+    // out of the handler. The error text is deliberately generic (no "exists but isn't yours") so it
+    // does not confirm the existence of another customer's order.
+    //
+    // Found by the pre-merge security review of `create-return-direct-action-honors-store-credit-resolution`
+    // (2026-08-10) and then LOST: the finding was routed into a standalone fix spec
+    // (`scope-create-return-order-to-ticket-customer`) by the retired fix-spec model, and that spec was
+    // deferred as a model artifact — which discarded the finding with it. Re-verified present on main
+    // 2026-08-11 and fixed here.
+    if (!ctx.customerId) {
+      return { success: false, error: "Cannot create a return without a resolved customer on the ticket" };
+    }
     const { data: order } = await admin.from("orders")
       .select("id, order_number, shopify_order_id, shipping_address")
       .eq("workspace_id", ctx.workspaceId)
+      .eq("customer_id", ctx.customerId)
       .eq("order_number", p.order_number!)
-      .single();
+      .maybeSingle();
     if (!order) return { success: false, error: `Order ${p.order_number} not found` };
 
     // Look up customer
