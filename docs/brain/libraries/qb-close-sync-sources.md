@@ -23,9 +23,9 @@ That table is a **lossy logistics view** and using it would silently reintroduce
 
 The close needs `quantity_on_hand` (= available + committed) and `reserved`. So these syncs go to the APIs directly.
 
-## ⚠️ Amazon SALES is deliberately not synced
+## Amazon SALES lives in its own module
 
-ShopCX's `daily_amazon_product_snapshots` measures a **different quantity** from the close's `units_shipped`. For July 2026 it totals **803 units** where Shoptics' shipped-units report totals **597** — wiring it in would overstate Amazon burn by ~35%. The close needs the SP-API *shipped-units* report; until that exists `qb_amazon_sales_snapshots` is populated by `scripts/_backfill-qb-close-sources.ts`.
+`qb_amazon_sales_snapshots` is fed by [[qb-close-sync-amazon-sales]], not from here, because it needs its own SP-API report pull with the close's shipped-only rule. ShopCX's `daily_amazon_product_snapshots` counts Pending too (July: 803 ordered vs **597 shipped**, with 198 pending and 37 cancelled), so it can never substitute.
 
 ## ⭐ Store-local date bucketing
 

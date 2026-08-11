@@ -27,6 +27,7 @@ import {
   type SyncResult,
 } from "@/lib/qb-close/sync-sources";
 import { syncProcessorSummaries } from "@/lib/qb-close/sync-processors";
+import { syncAmazonSalesForClose } from "@/lib/qb-close/sync-amazon-sales";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 /** Re-sync this many trailing days of sales so late refunds/edits are picked up. */
@@ -83,6 +84,12 @@ export const syncQbCloseSources = inngest.createFunction(
       for (const [name, run] of [
         ["shopify-sales", () => syncShopifySalesForClose(admin, ws, start, end)],
         ["internal-sales", () => syncInternalSalesForClose(admin, ws, start, end)],
+        // Amazon SHIPPED units — its own SP-API report pull, not the analytics table, which
+        // counts Pending too (July: 803 ordered vs 597 shipped).
+        ["amazon-sales", async () => {
+          const r = await syncAmazonSalesForClose(admin, ws, start, end);
+          return { table: r.table, rows: r.rows, note: `${r.unitsShipped} shipped · ${r.unitsExcluded} pending/cancelled excluded` };
+        }],
         ["fba-inventory", () => syncFbaInventoryForClose(admin, ws, today)],
         ["tpl-inventory", () => syncTplInventoryForClose(admin, ws, today)],
         // Processor rollups for BOTH the current month and the previous one. Transactions keep
