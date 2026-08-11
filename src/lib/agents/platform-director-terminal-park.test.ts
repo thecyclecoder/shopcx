@@ -117,3 +117,34 @@ test("computeAgeOutSkip — a custom windowMs override honours the caller's choi
   // Custom 60 min window → aged out.
   assert.equal(computeAgeOutSkip(createdAt, false, NOW_MS, 60 * 60 * 1000).ageOut, true);
 });
+
+// ── security-dep-watch-authors-structured-and-never-ages-out Phase 3 ────────────────────────
+// The 2026-07-21 exact case: a dep-watch park sat 310h with 3 actionable advisories, never
+// escalated, and was CANCELLED for aging out. Silently discarding a security finding because
+// it got old is the failure mode most likely to hurt us — a security-lane park must NEVER
+// age-out; it escalates through the standard path instead.
+//
+// (Ported to main 2026-08-11: this Phase-3 work sat unmerged on the 3-day-stale, conflicting
+// PR #2416 while its spec row was already marked `folded` — a phantom fold. The protection was
+// NOT on main until this port.)
+
+test("computeAgeOutSkip — security-lane park past the stale window → NOT ageOut (the 2026-07-21 exact case: 310h dep-watch park)", () => {
+  const createdAt = new Date(NOW_MS - 310 * 60 * 60 * 1000).toISOString(); // 310h, the incident's exact age
+  const decision = computeAgeOutSkip(createdAt, false, NOW_MS, undefined, { securityLane: true });
+  assert.equal(decision.ageOut, false);
+  // The exemption carries a documented reason so the caller can surface WHY the sweep skipped
+  // (the dep-watch caller uses it to escalate on age rather than cancel).
+  if (!decision.ageOut) assert.match(decision.exemptReason ?? "", /security.*never ages? out/i);
+});
+
+test("computeAgeOutSkip — non-security lane past the stale window (unchanged): STILL ages out (regression pin — the exemption is scoped to security parks only)", () => {
+  const createdAt = new Date(NOW_MS - 310 * 60 * 60 * 1000).toISOString();
+  const decision = computeAgeOutSkip(createdAt, false, NOW_MS, undefined, { securityLane: false });
+  assert.equal(decision.ageOut, true);
+});
+
+test("computeAgeOutSkip — no opts arg (all existing callers stay green): STILL ages out past the window", () => {
+  const createdAt = new Date(NOW_MS - 310 * 60 * 60 * 1000).toISOString();
+  const decision = computeAgeOutSkip(createdAt, false, NOW_MS);
+  assert.equal(decision.ageOut, true);
+});
