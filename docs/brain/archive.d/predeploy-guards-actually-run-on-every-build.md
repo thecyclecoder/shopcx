@@ -1,0 +1,1 @@
+- **Make the predeploy guards actually run (enforce them in the build lane)** · verified 2026-08-11 · → [[../operational-rules#Predeploy static guards — enforced in the build lane, not by npm's `predeploy` hook]], [[../libraries/vercel-project]]
