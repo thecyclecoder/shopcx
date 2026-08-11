@@ -1900,6 +1900,30 @@ export async function countRenewalIntegrityOverdueSubs(
   return uncovered;
 }
 
+/**
+ * READ-ONLY: count `dunning_cycles` rows still in `retrying` past the grace, scoped to the
+ * SAME population the `dunning-payday-retry-cron` actually owns (see `src/lib/inngest/dunning.ts`
+ * `find-retryable-cycles`): Appstle contract ids only — internal-* rows are excluded because
+ * Braintree-billed subs are routed through `handleInternalDunningFailure` / the internal
+ * renewal cron, so an internal-* cycle stuck in `retrying` is NEVER work this hourly cron
+ * takes. Blaming the payday retry tile for it produced a noisy Control Tower false page
+ * (build-control-tower-stuck-dunning-scope-to-payday-cron Phase 1). The spec-test sandbox
+ * is also excluded so a seeded stuck-dunning fixture isn't a real anomaly.
+ *
+ * `next_retry_at < stuckBeforeIso` is null-safe on the pooler — rows with null
+ * `next_retry_at` are excluded, so a cycle awaiting scheduling isn't flagged.
+ */
+export async function countStuckDunningCycles(admin: Admin, stuckBeforeIso: string): Promise<number> {
+  const { count } = await admin
+    .from("dunning_cycles")
+    .select("id", { count: "exact", head: true })
+    .eq("status", "retrying")
+    .lt("next_retry_at", stuckBeforeIso)
+    .not("shopify_contract_id", "ilike", "internal-%")
+    .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID);
+  return count ?? 0;
+}
+
 /** READ-ONLY: fetch the extra state the Phase 2 output assertions evaluate against. */
 async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   const startOfToday = new Date();
@@ -1935,7 +1959,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   const latestRenewalCronBeatIso = (renewalCronBeatData as { ran_at: string } | null)?.ran_at ?? null;
   const latestSegmentsCronBeatIso = (segmentsCronBeatData as { ran_at: string } | null)?.ran_at ?? null;
 
-  const [escalated, oldestEscalated, triageJob, specTestJob, overdueInternalSubsUncovered, stuckDunning, smsTotal, smsFresh, smsStale] = await Promise.all([
+  const [escalated, oldestEscalated, triageJob, specTestJob, overdueInternalSubsUncovered, stuckDunningCount, smsTotal, smsFresh, smsStale] = await Promise.all([
     // Routine-owned escalated tickets still open — mirrors triage-escalations-cron's query.
     admin
       .from("tickets")
@@ -1975,15 +1999,12 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     // weren't eligible when the cron last ran, so a miss isn't yet provable
     // (control-tower-renewal-integrity-post-cron-activation-grace P1).
     countRenewalIntegrityOverdueSubs(admin, startOfToday.toISOString(), latestRenewalCronBeatIso),
-    // Stuck dunning: 'retrying' with next_retry_at older than the grace. (next_retry_at < x is
-    // null-safe — null next_retry_at rows are excluded, so a cycle awaiting scheduling isn't flagged.)
-    admin
-      .from("dunning_cycles")
-      .select("id", { count: "exact", head: true })
-      .eq("status", "retrying")
-      .lt("next_retry_at", stuckBeforeIso)
-      // Exclude the spec-test sandbox: a deliberately-stuck dunning fixture isn't a real anomaly.
-      .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID),
+    // Stuck dunning: 'retrying' with next_retry_at older than the grace, scoped to the SAME
+    // population dunning-payday-retry-cron owns — internal-* contracts are excluded (mirrors the
+    // cron's find-retryable-cycles filter in src/lib/inngest/dunning.ts). Otherwise an internal-*
+    // cycle stuck in retrying paged the payday retry tile red for work that cron never selects
+    // (build-control-tower-stuck-dunning-scope-to-payday-cron Phase 1).
+    countStuckDunningCycles(admin, stuckBeforeIso),
     // Segment refresh coverage inputs (fix-segment-refresh-coverage P2). Three global head-counts
     // over the SMS-subscribed set, excluding the spec-test sandbox tenant. Each is index-friendly
     // (sms_marketing_status + segments_refreshed_at) and head:true (no row payload), so this stays
@@ -2041,7 +2062,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     overdueInternalSubs: overdueInternalSubsUncovered,
     renewalCurrent,
     renewalBaseline,
-    stuckDunningCycles: stuckDunning.count ?? 0,
+    stuckDunningCycles: stuckDunningCount,
     smsSubscribedTotal: smsTotal.count ?? 0,
     smsSubscribedFresh26h: smsFresh.count ?? 0,
     smsSubscribedStale48h: smsStale.count ?? 0,
