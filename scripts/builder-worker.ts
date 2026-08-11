@@ -9714,29 +9714,45 @@ async function markNewSpecInReview(
     );
   }
   if (markdown && markdown.trim()) {
-    const { authorSpecRowFromMarkdown, AuthorWriteFailedError } = await import("../src/lib/author-spec");
-    // repair-author-write-surface-real-error-not-swallow — Phase 1 CAPTUREd the boolean here so a
-    // silent-false didn't sail on; Phase 2 finished the job by having `authorSpecRowFromMarkdown`
-    // (a) THROW the real caught error (MissingVerification / EmptyPhaseBody / MissingIntent /
-    // InvalidParent / raw DB / AuthorWriteFailedError for a "row not visible after write") rather
-    // than collapse to `return false`, and (b) do a `getSpec` read-after-write so a silent no-op
-    // upsert also throws with the concrete cause. Result: every failure carries a NON-NULL concrete
-    // message end-to-end (author-spec → here → `groupOrAuthorRepairSpec` catch → parked repair job's
-    // `error` column), never the generic "silent author-write fallout" fallback. The `!ok` throw
-    // below is dead today (the source can no longer return false), but stays as a defense-in-depth
-    // if a future author path adds a soft-halt shape (e.g. a circuit-breaker like the structured
-    // path's runaway-authoring guard — see author-spec.ts:965) — a soft halt still means the spec
-    // was NOT persisted, and the caller must surface that instead of silently continuing.
-    const ok = await authorSpecRowFromMarkdown(workspaceId, slug, markdown, intendedStatus, {
+    // ⭐ autonomous-markdown-authors-get-the-default-machine-check (2026-08-11).
+    //
+    // Route through `buildStructuredSpecInputFromMarkdown` + `authorSpecRowStructured` instead of the
+    // strict markdown path. Both enforce the every-phase-needs-a-machine-runnable-check chokepoint; the
+    // difference is that the STRUCTURED converter attaches the default `exec_kind:'tsc'` check per phase
+    // (its stated purpose: "so the … chokepoint gate passes on the first attempt"), while
+    // `authorSpecRowFromMarkdown` derives checks ONLY from the prose `## Verification` blob and throws
+    // `MissingMachineCheckError` when every bullet lands as `needs_human`.
+    //
+    // Why this matters here: `markNewSpecInReview` is the shared authoring seam for SEVEN autonomous
+    // lanes — db_health, the director groomed_split lanes, bounce-back split, spec-chat, migration-fix,
+    // and the developer message center. NONE of them emit typed checks; they hand over prose markdown.
+    // So every one of them was one prose-only Verification away from an unauthorable spec, and the lane
+    // that hit it retried forever with no new information.
+    //
+    // Live: the `db_health` slow-query signature 4608471940106465663 failed on this every ~10 minutes —
+    // "spec db-index-specs has a phase with no machine-runnable verification — phase 1 (Phase 1 — add
+    // index)" — while the underlying seq scan grew to 26,677 calls / 2,434s cumulative, unfixed, because
+    // the FIX SPEC could not be written down.
+    //
+    // The prose bullets are NOT lost: the converter carries them verbatim on the phase's `verification`
+    // column (human-facing); only `checks[]` drives deterministic execution. A bare `tsc` gate is the
+    // same floor repair-agent / mario / cs-director already default to for autonomous fix specs, and the
+    // spec-test agent still grades the prose bullets. This widens nothing about WHAT may be authored —
+    // it stops a writer being rejected for a check-shape it was never asked to produce.
+    const { buildStructuredSpecInputFromMarkdown, authorSpecRowStructured, AuthorWriteFailedError } =
+      await import("../src/lib/author-spec");
+    const structured = buildStructuredSpecInputFromMarkdown(slug, markdown);
+    const okStructured = await authorSpecRowStructured(workspaceId, slug, structured, intendedStatus, {
       intendedStatusSetBy: actor,
     });
-    if (!ok) {
+    if (!okStructured) {
       throw new AuthorWriteFailedError(
-        `authorSpecRowFromMarkdown ${slug} returned false — a soft-halt path (e.g. the runaway-` +
-          `authoring circuit-breaker) tripped without throwing. The spec was NOT persisted; do not ` +
-          `proceed to enqueue a build for this slug.`,
+        `authorSpecRowStructured ${slug} returned false — a soft-halt path (e.g. the runaway-authoring ` +
+          `circuit-breaker) tripped without throwing. The spec was NOT persisted; do not proceed to ` +
+          `enqueue a build for this slug.`,
       );
     }
+    return;
   }
 }
 

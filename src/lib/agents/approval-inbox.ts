@@ -293,23 +293,64 @@ function actionLabel(a: PendingActionLike): string {
 }
 
 /** Build the inbox title + the investigation/proposed-fix INLINE body from the job's pending actions. */
+/**
+ * ⭐ ASK FIRST, EVIDENCE AFTER (2026-08-11) — how many characters a CEO card may spend before it says
+ * what is being asked.
+ *
+ * The card body used to be the raising action's `preview` verbatim, up to 4000 chars. Agents write a full
+ * diagnostic paragraph there, so the founder got a wall of prose whose actual request — and often the
+ * agent's own recommendation — sat in the last two sentences. A decision surface that has to be READ
+ * before it can be UNDERSTOOD is a decision surface that doesn't get used.
+ *
+ * `summarizeForDecision` extracts the ASK: the action's `summary` (the one-line intent every action
+ * carries) plus the command it would run. The evidence still ships, below a `———` rule, so nothing is
+ * lost — it is just no longer the first thing on screen.
+ */
+export const APPROVAL_EVIDENCE_MAX = 2500;
+
+/**
+ * The decision line for one action: what would happen if the founder taps Approve. Prefers the action's
+ * own `summary`, falls back to its label, then its type. Never the `preview` — that is the evidence.
+ */
+export function decisionLineFor(a: PendingActionLike): string {
+  const summary = String(a.summary ?? "").trim();
+  if (summary) return summary.split("\n")[0].slice(0, 300);
+  const label = actionLabel(a);
+  if (label) return label.split("\n")[0].slice(0, 300);
+  return String(a.type ?? "action");
+}
+
 export function buildApprovalContent(job: ApprovalJobRow): { title: string; body: string } {
   const pending = pendingActions(job);
   const headline = actionLabel(pending[0] ?? {}) || job.spec_slug || job.kind;
   const title = `${job.kind}: ${headline}`.slice(0, 200);
 
-  const blocks: string[] = [];
+  // ── THE ASK — first, always, and short. What Approve would DO. ──
+  const asks: string[] = [];
   for (const a of pending) {
-    const seg: string[] = [];
-    const label = actionLabel(a);
-    if (label) seg.push(label);
-    if (a.preview) seg.push(a.preview);
-    if (a.cmd) seg.push(`$ ${a.cmd}`);
-    if (seg.length) blocks.push(seg.join("\n"));
+    const line = decisionLineFor(a);
+    const cmd = a.cmd ? `\n    $ ${a.cmd}` : "";
+    asks.push(pending.length > 1 ? `• ${line}${cmd}` : `${line}${cmd}`);
   }
-  let body = blocks.join("\n\n");
-  if (!body && job.log_tail) body = job.log_tail;
-  return { title, body: body.slice(0, 4000) };
+  const askBlock = asks.length
+    ? (pending.length > 1 ? `Approving runs ALL ${pending.length} of these:\n${asks.join("\n")}` : `Approving: ${asks[0]}`)
+    : "";
+
+  // ── THE EVIDENCE — why the agent is asking. Below the rule, and bounded. ──
+  const evidence: string[] = [];
+  for (const a of pending) {
+    const p = String(a.preview ?? "").trim();
+    if (p) evidence.push(pending.length > 1 ? `${decisionLineFor(a)}\n${p}` : p);
+  }
+  let evidenceBlock = evidence.join("\n\n");
+  if (!evidenceBlock && job.log_tail) evidenceBlock = String(job.log_tail).trim();
+  if (evidenceBlock.length > APPROVAL_EVIDENCE_MAX) {
+    evidenceBlock = `${evidenceBlock.slice(0, APPROVAL_EVIDENCE_MAX)}\n… (truncated — full detail on the job)`;
+  }
+
+  const body = [askBlock, evidenceBlock ? `———\nWhy:\n${evidenceBlock}` : ""].filter(Boolean).join("\n\n");
+  // Degrade to the old behavior rather than render an empty card.
+  return { title, body: (body || String(job.log_tail ?? "")).slice(0, 4000) };
 }
 
 /** The metadata blob carried on the routed Approval Request notification (drives the inbox API). */
