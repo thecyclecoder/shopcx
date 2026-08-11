@@ -389,6 +389,8 @@ The **security sibling** of `retestOriginIfFixMerged` above, and the piece that 
 
 **Safety.** Re-review only — it never marks anything green; Vault's fresh verdict is the sole writer. `force` skips ONLY the unchanged-branch dedup: the merged-branch guard (0) and one-open-review-per-branch guard (1) still apply, so it can neither review a deleted ref nor stack concurrent reviews. No link / self-reference / no unmerged origin branch / already-merged origin → no-op. Never throws. Called from `applyMergedBuildEffects` (step 6b), immediately after `retestOriginIfFixMerged`.
 
+> **⚠️ This is a BACKSTOP, not the primary path.** The correct handling of a pre-merge `real-vuln` is a **fix PHASE on the origin's own branch** ([[security-agent]] § A pre-merge real-vuln becomes a FIX PHASE) — which advances the branch and earns a fresh review with no forcing at all. This function exists only for the residual cases that still produce a standalone security fix spec: a **post-merge (`diff`) finding** whose origin somehow still has an unmerged branch, a legacy pre-restoration fix spec, and the CEO-approved `author_fix_spec` resume path. If you find yourself relying on it for ordinary pre-merge findings, the fixes-as-phases wiring has regressed — `npm run check:security-fix-phase-wiring` should have caught that.
+
 ### `escalateStalledPromoteEligibility` — function  *(stalled-promote-eligibility-escalates Phase 1)*
 
 ```ts
