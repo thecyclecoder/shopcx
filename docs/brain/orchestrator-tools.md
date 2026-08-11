@@ -55,7 +55,7 @@ Sonnet returns `{action_type, actions: [...]}` with the action type and params; 
 
 ### Order mutations
 - `partial_refund` — Shopify partial refund (or Braintree-direct fallback for the new internal-checkout path)
-- `create_return` — initiate a return via [[lifecycles/return-pipeline]] (EasyPost label + `returns` row)
+- `create_return` — initiate a return via [[lifecycles/return-pipeline]] (EasyPost label + `returns` row). Optional `resolution_type: 'refund_return' | 'store_credit_return'` — omit for a cash refund (the default), set `'store_credit_return'` when the sanctioned outcome is store credit instead. Passed through to `createFullReturn.resolutionType` on both Shopify and internal (SHOPCX*) orders. A bogus value is rejected at the handler (never silently downgrades to the refund default).
 - `create_replacement_order` — free draft order, $0 via 100% PERCENTAGE discount
 - `update_shipping_address` — update address on a pending order
 
