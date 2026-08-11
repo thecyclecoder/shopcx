@@ -43,6 +43,33 @@ export const SECURITY_DIRECTOR_FUNCTION = "platform";
 
 /** Stable spec_slug of the daily dependency-upgrade fix spec (find-or-update, never N of them). */
 export const SECURITY_DEP_UPGRADE_SLUG = "security-dep-upgrades";
+
+/**
+ * ⭐ THE DEP-UPGRADE LOOP DIES WHEN ITS CANONICAL SPEC FOLDS — this computes the escape hatch.
+ *
+ * The lane authors every advisory batch into the FIXED slug above. `authorSpecRowStructured` will
+ * not resurrect an archived spec (`reopenIfReauthoredAndChanged` returns early on
+ * `status === 'folded'` — deliberately, so a fold stays final). So the moment a dep-upgrade batch
+ * ships and folds, EVERY later batch is authored into an archived row that never re-enters the build
+ * pipeline. The loop is dead and nothing says so.
+ *
+ * Measured 2026-08-11: `security-dep-upgrades` folded on 2026-08-03; the dep-watch job that ran four
+ * minutes earlier parked with a bare "could not author dep-upgrade spec"; and **11 actionable
+ * advisories (8 high) with fixes available** were still outstanding 8 days later. The park card the
+ * founder saw carried none of that — it read "7 advisory(ies) but spec author failed".
+ *
+ * A fold means "that batch shipped", and a NEW batch of advisories is NEW work — so it gets its own
+ * cycle-scoped spec rather than fighting the archive invariant. Monthly granularity keeps the slug
+ * stable within a cycle (so a re-run in the same month refreshes one spec instead of proliferating)
+ * while guaranteeing the next cycle is never blocked by the last one folding.
+ *
+ * `now` is injected so the slug is deterministic in tests.
+ */
+export function depUpgradeCycleSlug(now: Date = new Date()): string {
+  const yyyy = now.getUTCFullYear();
+  const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
+  return `${SECURITY_DEP_UPGRADE_SLUG}-${yyyy}-${mm}`;
+}
 /** The sentinel spec_slug carried by a dep-watch scan job (so it dedups distinctly from per-diff jobs). */
 export const SECURITY_DEP_WATCH_SLUG = "security-dep-watch";
 

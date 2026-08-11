@@ -24961,12 +24961,39 @@ async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, w
     DEP_UPGRADE_PARENT_KIND,
     DEP_UPGRADE_PARENT_REF,
     buildDepUpgradeSpecInput,
+    depUpgradeCycleSlug,
   } = await import("../src/lib/security-agent");
-  const slug = SECURITY_DEP_UPGRADE_SLUG;
+  let slug = SECURITY_DEP_UPGRADE_SLUG;
   try {
     // spec-pm-markdown-purge: the dep-upgrade spec lives ONLY in the DB. Find-or-update on the spec row.
     const { getSpec } = await import("../src/lib/brain-roadmap");
-    const existing = await getSpec(slug, workspaceId);
+    let existing = await getSpec(slug, workspaceId);
+
+    // ⭐ A FOLDED CANONICAL SPEC SILENTLY KILLS THIS LOOP — roll to a cycle-scoped slug instead.
+    //
+    // Two facts combine into a dead loop. (1) `authorSpecRowStructured` will not resurrect an
+    // archived spec: `reopenIfReauthoredAndChanged` returns early on `status === 'folded'`,
+    // deliberately, so a fold stays final. (2) The board-level `getSpec` used below returns NULL for
+    // a folded spec (it is not boardable), so the lane cannot even see that it is authoring into an
+    // archive — it takes the "brand new spec" path. Net effect: the advisory content is upserted
+    // into the folded row, the row stays `folded`, and it NEVER re-enters the build pipeline. No
+    // error, no card that says so.
+    //
+    // Measured 2026-08-11: `security-dep-upgrades` folded 2026-08-03 (its row's `updated_at` shows
+    // the content landing four minutes AFTER the job parked), and 11 actionable advisories — 8 high,
+    // every one with a fix available — sat unaddressed for 8 days behind a park card whose entire
+    // text was "7 advisory(ies) but spec author failed".
+    //
+    // A fold means THAT BATCH shipped; these advisories are NEW work, so they get their own spec.
+    // The RAW status has to come from the specs-table SDK — the board-level read hides folded rows,
+    // which is precisely how this stayed invisible.
+    const { getSpec: getSpecRowAnyStatus } = await import("../src/lib/specs-table");
+    const rawRow = await getSpecRowAnyStatus(workspaceId, slug);
+    if (rawRow?.status === "folded") {
+      slug = depUpgradeCycleSlug();
+      existing = await getSpec(slug, workspaceId);
+      console.log(`[security] canonical dep-upgrade spec is FOLDED — authoring this cycle as ${slug} (a fold must not kill the dep-upgrade loop)`);
+    }
     const structuredInput = buildDepUpgradeSpecInput(findings, signature);
     // Mirror `markNewSpecInReview`'s side effect on FIRST creation — flip the spec card to
     // `in_review` with the actor stamp before the DB write so surfaces that key off
