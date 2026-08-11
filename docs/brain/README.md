@@ -6,7 +6,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 
 | Folder | Contents | Count |
 |---|---|---|
-| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 298 |
+| [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 299 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 118 |
 | [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 23 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 545 |
@@ -233,6 +233,7 @@ The source-data layer the month-end close consumes — see [[lifecycles/shoptics
 - [[tables/qb_book_inventory_snapshots]] — What QuickBooks itself held, pre/post close. The `month_end_post` row is the next month's opening book; missing it reads as zero, not an error.
 - [[tables/qb_payment_processor_summaries]] — Per-processor per-month fees / refunds / chargebacks / clearing. The window-immune half of the JE.
 - [[tables/qb_month_end_closings]] — The close ledger. `(workspace_id, closing_month)` UNIQUE = the run-once guard; receipts and adjustments are NOT idempotent.
+- [[tables/qb_close_dry_runs]] — Append-only dry-run verdicts. Posting refuses unless the latest row for the month `passed`; keeping every attempt makes "what did we know when we posted?" answerable.
 
 ### Ad tool
 
