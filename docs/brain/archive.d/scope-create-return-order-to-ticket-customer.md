@@ -1,0 +1,1 @@
+- **Cross-customer return: `create_return`'s order lookup never proved the order belonged to the ticket's customer** · superseded 2026-08-11 · fix shipped in #2454, not by this spec · → [[../operational-rules]]
