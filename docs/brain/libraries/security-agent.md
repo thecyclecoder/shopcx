@@ -88,3 +88,18 @@ North star: the build lane's fast + slow layers already compose (`runBoxSession`
 ## Related
 
 [[../specs/security-dependency-agent]] · [[../inngest/security-dep-watch]] · [[../dashboard/security-tests]] · [[repair-agent]] · [[regression-agent]] · [[approval-router]] · [[agent-jobs]] · [[director-activity]] · [[../tables/director_activity]] · [[control-tower]] · [[../integrations/github-webhook]] · [[agent-personas]] · [[../goals/grow-surface-platform-agent-team]]
+
+## ⚠️ A fold must never kill the dep-upgrade loop
+
+`SECURITY_DEP_UPGRADE_SLUG` is a **fixed** slug, and that combines with two other behaviours into a silent dead loop:
+
+1. `authorSpecRowStructured` will not resurrect an archived spec — `reopenIfReauthoredAndChanged` returns early on `status === 'folded'`, deliberately, so a fold stays final.
+2. The board-level [[brain-roadmap]] `getSpec` returns **null** for a folded spec (it is not boardable), so the dep-watch lane could not even see that it was authoring into an archive — it took the "brand new spec" path.
+
+Net effect: the advisory content is upserted into the folded row, the row **stays folded**, and it never re-enters the build pipeline. No error, no card that says so.
+
+**Measured 2026-08-11.** `security-dep-upgrades` folded on 2026-08-03 — its row's `updated_at` shows the content landing four minutes *after* the dep-watch job parked — and **11 actionable advisories (8 high, every one with a fix available)** sat unaddressed for 8 days. The only surface was a park card reading, in full: *"7 advisory(ies) but spec author failed"*.
+
+**The fix:** `depUpgradeCycleSlug(now)` → `security-dep-upgrades-YYYY-MM`. When the canonical spec is folded, the lane authors THIS cycle's batch under the cycle slug instead. A fold means *that batch shipped*; a new batch of advisories is new work. The slug is stable within a month (a re-run refreshes one spec rather than proliferating) and rolls at the boundary, so a folded cycle can never block the next one. The fold check reads the RAW status via the [[specs-table]] SDK — the board-level read hides folded rows, which is exactly how this stayed invisible.
+
+Pinned by `src/lib/security-agent.dep-upgrade-cycle.test.ts`.

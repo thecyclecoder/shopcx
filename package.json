@@ -124,6 +124,7 @@
     "test:derive-status-no-in-review": "tsx --test src/lib/brain-roadmap.derive-status-no-in-review.test.ts",
     "test:agent-grader-spec-review-retired": "tsx --test src/lib/agents/agent-grader.spec-review-retired.test.ts",
     "test:security-envelope": "tsx --test src/lib/security-envelope.test.ts",
+    "test:dep-upgrade-cycle": "tsx --test src/lib/security-agent.dep-upgrade-cycle.test.ts",
     "test:premerge-security-retirement": "tsx --test src/lib/premerge-security-retirement.test.ts",
     "test:pre-merge-fix": "tsx --test src/lib/pre-merge-fix.test.ts",
     "test:approval-router": "tsx --test src/lib/agents/approval-router.test.ts",
