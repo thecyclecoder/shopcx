@@ -47,6 +47,7 @@
     "test:all": "tsx scripts/_run-registered-tests.ts",
     "test:completed-effect-backing": "tsx --test src/lib/completed-effect-backing.test.ts",
     "test:predeploy-guard-extract": "tsx --test src/lib/predeploy-guard-extract.test.ts",
+    "test:chain-advance-selector": "tsx --test src/lib/agent-jobs.chain-advance-selector.test.ts",
     "test:platform-director-escalation-dedupe": "tsx --test src/lib/agents/platform-director-escalation-dedupe.test.ts",
     "test:platform-director-terminal-park": "tsx --test src/lib/agents/platform-director-terminal-park.test.ts",
     "test:june-remedy-approval-reask": "tsx --test src/lib/june-remedy-approval-reask.test.ts",
