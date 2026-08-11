@@ -43,6 +43,7 @@ import {
   computeAuditVariances,
   buildInventoryAdjustmentLines,
   type AdjustmentLine,
+  type VarianceRow,
   type AuditBomRow,
   type AuditInputs,
   type AuditMapping,
@@ -55,6 +56,8 @@ export interface MonthEndArtifacts {
   journalEntry: JournalEntryResult;
   receipts: { amazon: ReceiptLine[]; shopify: ReceiptLine[]; internal: ReceiptLine[] };
   inventoryAdjustment: AdjustmentLine[];
+  /** Every audited row incl. the MEASURED physical — what step 7 compares post-close QB against. */
+  auditRows: VarianceRow[];
   meta: {
     priorMonth: string;
     qbBasisRows: number;
@@ -232,16 +235,16 @@ export async function buildMonthEndArtifacts(opts: BuildMonthEndOptions): Promis
     .map((m) => ({ external_id: m.external_id, source: m.source, product_id: m.product_id, multiplier: m.unit_multiplier || 1 }));
   const auditBom: AuditBomRow[] = bom.map((b) => ({ parent_id: b.parent_id, component_id: b.component_id, quantity: Number(b.quantity) }));
 
-  const inventoryAdjustment = buildInventoryAdjustmentLines(
-    computeAuditVariances({
-      products: auditProducts, mappings: auditMappings, bom: auditBom,
-      qbInventory, fbaByAsin, tplBySku, manualByProduct,
-      amzSalesByAsin, shopSalesByVariant, internalSalesByProduct, receivedByProduct,
-    } as AuditInputs),
-  );
+  const audit = computeAuditVariances({
+    products: auditProducts, mappings: auditMappings, bom: auditBom,
+    qbInventory, fbaByAsin, tplBySku, manualByProduct,
+    amzSalesByAsin, shopSalesByVariant, internalSalesByProduct, receivedByProduct,
+  } as AuditInputs);
+  const inventoryAdjustment = buildInventoryAdjustmentLines(audit);
+  const auditRows = [...audit.bomComponents, ...audit.standalone];
 
   return {
-    month, journalEntry, receipts, inventoryAdjustment,
+    month, journalEntry, receipts, inventoryAdjustment, auditRows,
     meta: {
       priorMonth: prior, qbBasisRows: bookRows.length, fbaSnapshotDate: fbaDate, tplSnapshotDate: tplDate,
       shopifyOrderCount: orders.length, receivedItemCount: receivedByProduct.size,

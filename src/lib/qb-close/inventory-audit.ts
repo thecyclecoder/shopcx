@@ -28,7 +28,16 @@ export interface AuditInputs {
   receivedByProduct: Map<string, number>; // product_id → QB receipts (Bill/ItemReceipt/Purchase) in period
 }
 
-export interface VarianceRow { product_id: string; quickbooks_id: string; variance: number; }
+export interface VarianceRow {
+  product_id: string;
+  quickbooks_id: string;
+  variance: number;
+  /** The MEASURED physical total (FBA + transit + 3PL + manual, BOM-rolled, multiplier-applied).
+   *  Exposed so the post-close variance check can compare QuickBooks against physical without
+   *  re-deriving the rollup — re-running the full audit formula after posting would double-count
+   *  the adjustment and receipts QB has just absorbed. */
+  actual: number;
+}
 export interface AuditResult { bomComponents: VarianceRow[]; standalone: VarianceRow[]; }
 
 /** Reproduce the monthly-mode audit variances. Mirrors the route's getChannelInventory /
@@ -111,7 +120,8 @@ export function computeAuditVariances(inp: AuditInputs): AuditResult {
       seen.add(comp.id);
       const compQbStart = inp.qbInventory.get(comp.id) || 0;
       const compExpected = compQbStart - (componentTotalBurn.get(comp.id) || 0) + getReceived(comp.id);
-      bomComponents.push({ product_id: comp.id, quickbooks_id: comp.quickbooks_id, variance: compActualTotal(comp.id) - compExpected });
+      const compActual = compActualTotal(comp.id);
+      bomComponents.push({ product_id: comp.id, quickbooks_id: comp.quickbooks_id, variance: compActual - compExpected, actual: compActual });
     }
   }
 
@@ -124,7 +134,7 @@ export function computeAuditVariances(inp: AuditInputs): AuditResult {
     // standalone filter (route filters standalone_finished_goods): keep iff total>0 OR qb_starting>0.
     if (!(inv.total > 0 || qbStart > 0)) continue;
     const expected = qbStart - getSalesBurn(p.id).total_sold + getReceived(p.id);
-    standalone.push({ product_id: p.id, quickbooks_id: p.quickbooks_id, variance: Math.max(0, inv.total) - expected });
+    standalone.push({ product_id: p.id, quickbooks_id: p.quickbooks_id, variance: Math.max(0, inv.total) - expected, actual: Math.max(0, inv.total) });
   }
   return { bomComponents, standalone };
 }

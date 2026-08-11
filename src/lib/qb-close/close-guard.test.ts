@@ -33,6 +33,7 @@ function artifacts(over: Partial<MonthEndArtifacts["meta"]> = {}, jeOver: Partia
       internal: [{ itemRef: "3", qty: 122 }],
     } as MonthEndArtifacts["receipts"],
     inventoryAdjustment: [{ itemRef: "1", qtyDiff: 80 }],
+    auditRows: [{ product_id: "p1", quickbooks_id: "1", variance: 80, actual: 9678 }],
     meta: {
       priorMonth: "2026-06",
       qbBasisRows: 86,
