@@ -111,7 +111,7 @@ export async function executeShipTimeBackfillsForSpec(
         await recordFailure(admin, {
           id: row.id,
           workspaceId: row.workspace_id,
-          error: `rejected: script_path "${row.script_path}" is not a valid scripts/_backfill-*.ts path`,
+          error: `rejected: script_path "${row.script_path}" is not a valid scripts/_backfill-*.ts or scripts/_ledger-reconcile-*.ts path`,
         });
         continue;
       }
