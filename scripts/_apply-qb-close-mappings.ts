@@ -1,7 +1,7 @@
 import { pgClient } from "./_bootstrap";
 import { readFileSync } from "fs"; import { resolve } from "path";
 async function main(){
-  const sql = readFileSync(resolve(__dirname,"../supabase/migrations/20261011140000_qb_close_mappings.sql"),"utf8");
+  const sql = readFileSync(resolve(__dirname,"../supabase/migrations/20261011140001_qb_close_mappings.sql"),"utf8");
   const c = pgClient(); await c.connect();
   try{
     await c.query(sql);
