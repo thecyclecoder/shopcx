@@ -1,0 +1,13 @@
+{
+  "capturedFromRealm": "shoptics logistics DB",
+  "tables": {
+    "products": 59,
+    "product_bom": 37,
+    "sku_mappings": 117,
+    "external_skus": 351,
+    "manual_inventory": 20,
+    "kit_mappings": 2,
+    "month_end_closings": 4,
+    "payment_processor_summaries": 15
+  }
+}

@@ -1,0 +1,224 @@
+[
+  {
+    "id": "0c09d35d-940e-48c7-a1b4-24994c204378",
+    "parent_id": "9f118620-672b-43cd-9468-e023a8f7d8d3",
+    "component_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 1
+  },
+  {
+    "id": "11c12653-19b6-4e61-b848-5abc41649141",
+    "parent_id": "38b8d40c-3eab-452a-9e70-26ec43c2d1ac",
+    "component_id": "0f4a91f4-6c1d-4982-af26-275e84771639",
+    "quantity": 1
+  },
+  {
+    "id": "143f485b-72ba-40a8-97cb-7966ea5725b1",
+    "parent_id": "7aa6c492-f690-4edb-9ba9-88ad7952a753",
+    "component_id": "3389221d-671a-4ba9-a95d-79e28ef35f0e",
+    "quantity": 1
+  },
+  {
+    "id": "23c75a4b-71de-4ead-8765-cddf3b28c0ad",
+    "parent_id": "8de09515-1d83-4faf-b9da-fae9c7763ac3",
+    "component_id": "e1ff2fe6-94fa-4a81-8eac-2073b4f95142",
+    "quantity": 30
+  },
+  {
+    "id": "31ea86e9-ed0e-484d-9c14-3a422bef64ff",
+    "parent_id": "0dd22339-5c00-46c2-b18e-aa77aea56fda",
+    "component_id": "9bce86ca-a42c-44c5-8f0a-470efcdb6218",
+    "quantity": 1
+  },
+  {
+    "id": "35788c1c-9d24-4e00-b2b2-5018aa889989",
+    "parent_id": "38b8d40c-3eab-452a-9e70-26ec43c2d1ac",
+    "component_id": "148c9857-1099-405d-963d-cf77f822a296",
+    "quantity": 1
+  },
+  {
+    "id": "443c56c1-198e-4942-8db9-1af3b63e1615",
+    "parent_id": "502e14c4-0659-4713-8f46-26f6782859d3",
+    "component_id": "9d7a1f84-def1-4494-b32c-281ae9534bdb",
+    "quantity": 1
+  },
+  {
+    "id": "470bce55-1ba6-4698-a568-c12d43badb68",
+    "parent_id": "bbbb78b4-36fd-4fdc-9f34-bf8e2d6fa1ae",
+    "component_id": "fa481233-8aa9-47f6-adb1-29f61f5215fa",
+    "quantity": 1
+  },
+  {
+    "id": "4af68173-9396-407c-b98c-df0928247ef8",
+    "parent_id": "05bd8569-4d08-4a73-ac45-691e7eb5c97d",
+    "component_id": "066c8834-0fd3-4a64-9bb9-78ad2067dc6b",
+    "quantity": 1
+  },
+  {
+    "id": "4e1ef228-4867-414e-8de3-7af10ca46865",
+    "parent_id": "a8f2f9dd-b22d-4d2f-894a-29185ca5e9d5",
+    "component_id": "fb46ae65-e2e6-451f-9052-80f3c0bc0b26",
+    "quantity": 1
+  },
+  {
+    "id": "537a5fbd-c1bf-4a09-9318-c0fffef0c3da",
+    "parent_id": "7aa6c492-f690-4edb-9ba9-88ad7952a753",
+    "component_id": "e38d2aa9-94cb-4eeb-88d4-c1dee6a6bf7d",
+    "quantity": 1
+  },
+  {
+    "id": "55e1af33-05d0-498a-88b3-a1f34cca3c00",
+    "parent_id": "6b080ce4-3eb6-48fc-8f61-eda6804525b7",
+    "component_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 30
+  },
+  {
+    "id": "5dcad7a9-e14e-4d0e-ac3c-40b009fe6d0d",
+    "parent_id": "8de09515-1d83-4faf-b9da-fae9c7763ac3",
+    "component_id": "2466039f-245f-4e1f-b00b-057ee2ba7960",
+    "quantity": 1
+  },
+  {
+    "id": "6085fd51-2ee3-4f16-9cb8-8e52e47f5079",
+    "parent_id": "a8f2f9dd-b22d-4d2f-894a-29185ca5e9d5",
+    "component_id": "cd0d3085-644f-475a-9c44-04f73776f324",
+    "quantity": 1
+  },
+  {
+    "id": "7449a488-c36a-4cb7-bbfa-57c57c571f5f",
+    "parent_id": "2902cdeb-1895-42f1-9a4e-6597414c618e",
+    "component_id": "e6bb5f57-5f5c-4a55-9b47-29c6b0a887d9",
+    "quantity": 1
+  },
+  {
+    "id": "755f8a31-71c7-4e70-8753-373037c45151",
+    "parent_id": "2902cdeb-1895-42f1-9a4e-6597414c618e",
+    "component_id": "3a80559e-a74c-4ec6-9f1e-cd695be2018d",
+    "quantity": 1
+  },
+  {
+    "id": "79deef9f-a461-47e8-8446-ddd69be90455",
+    "parent_id": "0dd22339-5c00-46c2-b18e-aa77aea56fda",
+    "component_id": "f7e8cd70-b667-4919-8a1d-26b0a177a97c",
+    "quantity": 30
+  },
+  {
+    "id": "7eec3232-b2c1-4aaf-92b7-36675865e2ad",
+    "parent_id": "6b080ce4-3eb6-48fc-8f61-eda6804525b7",
+    "component_id": "87e12d98-361e-4bfe-859f-6e271ecd5ac9",
+    "quantity": 1
+  },
+  {
+    "id": "8327420c-c30c-4a1b-aace-f8053e3d19d6",
+    "parent_id": "0854a3de-7ef4-4747-9736-85e4d0337125",
+    "component_id": "252ca00e-fba0-45b7-a935-976c49db5476",
+    "quantity": 1
+  },
+  {
+    "id": "969cb995-7c61-405c-af22-aefe8ee4b08a",
+    "parent_id": "5dafe8e3-1e86-4b6b-ac19-a8ca39e17c41",
+    "component_id": "610fd97f-c088-4dcb-89ad-e528a547f656",
+    "quantity": 1
+  },
+  {
+    "id": "9db57224-6f78-4654-a7e8-585c6240f423",
+    "parent_id": "27ea190e-d03f-48a5-9614-fafb51faff9d",
+    "component_id": "7222a3b7-da2e-496b-9afb-012298ae66e8",
+    "quantity": 1
+  },
+  {
+    "id": "a551e1ca-6b6b-4ba5-abb0-0f990d8ae777",
+    "parent_id": "5dafe8e3-1e86-4b6b-ac19-a8ca39e17c41",
+    "component_id": "564d032a-b363-4bd1-aff1-7e82a83e91f4",
+    "quantity": 1
+  },
+  {
+    "id": "b1f722c8-c258-4852-a98f-aa0dc6f1b325",
+    "parent_id": "83b8996f-c974-4a99-8d4c-0bd54c0232f0",
+    "component_id": "2f6273f1-7b81-4e66-a117-577f1e943f38",
+    "quantity": 1
+  },
+  {
+    "id": "b3e68af1-b812-404e-a578-f56932551484",
+    "parent_id": "bbbb78b4-36fd-4fdc-9f34-bf8e2d6fa1ae",
+    "component_id": "277c6cd3-865d-4050-9d8d-a2a4bcf7f55d",
+    "quantity": 1
+  },
+  {
+    "id": "bad4c94d-0f3b-4e63-b8db-386584fbeb8e",
+    "parent_id": "27ea190e-d03f-48a5-9614-fafb51faff9d",
+    "component_id": "748e8437-6f61-4a4c-9049-0ae7255d84d3",
+    "quantity": 1
+  },
+  {
+    "id": "bec8e644-234f-477e-b404-ae5745b72826",
+    "parent_id": "0854a3de-7ef4-4747-9736-85e4d0337125",
+    "component_id": "5a490fec-c8fb-4951-b539-5db9248eec40",
+    "quantity": 0.2
+  },
+  {
+    "id": "c16c72a8-c41c-4c7f-a79b-8de000339952",
+    "parent_id": "83b8996f-c974-4a99-8d4c-0bd54c0232f0",
+    "component_id": "44c2deb1-8b42-43d2-b899-61dae2b44aa3",
+    "quantity": 1
+  },
+  {
+    "id": "c5ecc60e-0e77-4528-90ed-ebf77834c3d4",
+    "parent_id": "0dd22339-5c00-46c2-b18e-aa77aea56fda",
+    "component_id": "c035c9e3-2773-4842-bdde-31fd90eaed13",
+    "quantity": 1
+  },
+  {
+    "id": "ca36490d-e3c4-431d-a1e5-7b30af3597ed",
+    "parent_id": "05bd8569-4d08-4a73-ac45-691e7eb5c97d",
+    "component_id": "3fb6ac30-dd04-4dd8-abba-67cf912d7e68",
+    "quantity": 1
+  },
+  {
+    "id": "cad32b31-b0f4-4900-93fa-830c4badf092",
+    "parent_id": "d0db8e05-6596-4d36-882f-5393347348a0",
+    "component_id": "9c053baf-0d74-4be2-b583-12933e3487fe",
+    "quantity": 1
+  },
+  {
+    "id": "cd1d79ef-302f-4afd-aa06-2609b148234b",
+    "parent_id": "d0db8e05-6596-4d36-882f-5393347348a0",
+    "component_id": "d909b2b4-73a4-490f-b952-22a3b90c0c45",
+    "quantity": 1
+  },
+  {
+    "id": "d2a1b97f-0fd0-40d4-b9c7-91e86d63a2e8",
+    "parent_id": "502e14c4-0659-4713-8f46-26f6782859d3",
+    "component_id": "efd14081-64e6-4b77-bdaa-66de31fdbfb5",
+    "quantity": 1
+  },
+  {
+    "id": "d4422ca5-12c6-4f58-92d8-5b308ad6b19a",
+    "parent_id": "0854a3de-7ef4-4747-9736-85e4d0337125",
+    "component_id": "cc84b6bd-e236-49be-ad9d-71c1760cecba",
+    "quantity": 24
+  },
+  {
+    "id": "d4b4bddf-1900-42d0-aa68-a00d863c3470",
+    "parent_id": "27ea190e-d03f-48a5-9614-fafb51faff9d",
+    "component_id": "9698679d-5560-4ead-aee8-ec8dda32b38e",
+    "quantity": 30
+  },
+  {
+    "id": "eb65700d-9eb0-49be-a036-4effba1f3c62",
+    "parent_id": "d0db8e05-6596-4d36-882f-5393347348a0",
+    "component_id": "3db67683-d4cf-427f-89dd-eb1d5816f0cb",
+    "quantity": 10
+  },
+  {
+    "id": "f0005d65-f4dd-4621-ac66-860de147c994",
+    "parent_id": "8de09515-1d83-4faf-b9da-fae9c7763ac3",
+    "component_id": "a8f5921f-49cc-4efe-aa37-171bb80e0715",
+    "quantity": 1
+  },
+  {
+    "id": "fa0699a3-2054-4a34-b395-e50afa9908ac",
+    "parent_id": "6b080ce4-3eb6-48fc-8f61-eda6804525b7",
+    "component_id": "cb2d81de-ab99-472a-bfd8-afdb9d283da5",
+    "quantity": 1
+  }
+]
