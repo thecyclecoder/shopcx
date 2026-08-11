@@ -77,6 +77,20 @@ Worked instance: the [[goals/storefront-optimizer|Storefront Optimizer]] runs a 
 
 See also: [[README]] § Naming conventions for the table-level version of this rule.
 
+### Workspace scoping on external-id queries — CEO risk-accepted, do NOT re-escalate
+
+**Decision (CEO, 2026-08-11).** A query keyed on an external id (`shopify_contract_id`, `shopify_order_id`, …) **without** `.eq("workspace_id", …)` is a known, **accepted** risk. A static scan on 2026-08-11 found **48** such call sites — `action-executor.ts` (14), `subscription-items.ts` (8), `portal/handlers/replace-variants.ts` (8), `appstle-discount.ts` (7), `portal/handlers/coupon.ts` (4), others (7). They are **not** being fixed as a class.
+
+**Rationale:** there are exactly two workspaces — Superfoods (production) and a test workspace — and no multi-tenant roadmap. The failure mode (two tenants holding rows with the same external id) needs tenants that do not exist. Cost of a 48-site sweep exceeds the risk.
+
+**What this means for the security agent + reviewers:** a bare "missing `workspace_id` scope on an external-id lookup" finding is **NOT** a real-vuln. Do not auto-author a fix spec for it, do not escalate it to the CEO, and do not park a build on it. Classify it `false-positive` and move on. Re-raising it produces exactly the escalation noise the 2026-08-11 pipeline work removed.
+
+**What is still a REAL finding** (these are not covered by this acceptance):
+- **Cross-CUSTOMER** access inside one workspace — e.g. a lookup keyed on a model-supplied `order_number` that never proves the row belongs to `ctx.customerId`. That is live today with one workspace. Ground truth: `create_return` (fixed in #2454) could create a return — EasyPost label + refund exposure — against another customer's order.
+- Any authz/RLS gap, credential exposure, injection, or unsafe `createAdminClient()` reach. Unchanged.
+
+**Revisit if** a third workspace is ever provisioned, or the platform is sold/opened to another tenant. At that point the 48 sites become live exposure and the scan should be re-run (the scanner shape is in this decision's history; re-derive it as `.eq("<external_id>")` with no sibling `.eq("workspace_id")` in the same chain).
+
 ## Status enum case
 
 - **All status / enum-like text columns are lowercase.** `subscriptions.status='active'`, `dunning_cycles.status='retrying'`, etc. Writing `.eq("status", "ACTIVE")` returns zero rows silently.
