@@ -98,6 +98,49 @@ export function countGenuinePrResolveAttempts(
   }).length;
 }
 
+/**
+ * ⭐ pr-resolve-retries-key-on-the-INPUT-not-a-lifetime-budget (2026-08-11).
+ *
+ * A pr-resolve verdict is a pure function of TWO inputs: the PR's head commit and the commit on `main`
+ * it must merge into. Same pair ⇒ byte-identical verdict. So re-running the resolver against an
+ * unchanged pair is guaranteed waste, and a lifetime attempt budget spent on one unchanged pair
+ * permanently forecloses the retries that WOULD have been meaningful.
+ *
+ * Both halves were observed live on 2026-08-11:
+ *   - WASTE: PR #2450 got THREE pr-resolve box sessions inside two minutes (16:28:22 / 16:29:19 /
+ *     16:30:06), each recomputing the identical `advisory-supersede: 39 exported symbol(s) also appear
+ *     on main`. Each job finishes in ~50s, so the ACTIVE_JOB_STATUSES dedup never overlapped them, and
+ *     nothing else asked "did anything actually change?".
+ *   - FORECLOSURE: PR #2416 burned its 3 attempts the same way, was marked exhausted, and then sat
+ *     CONFLICTING for three days. `main` moved ~29 commits underneath it in that window — every one of
+ *     which changed the merge result — but the budget was already gone, so no later attempt could run.
+ *     A human (or an agent) had to resolve it by hand.
+ *
+ * The fingerprint is that (headSha, baseSha) pair, short-hashed. Attempts are counted PER FINGERPRINT:
+ *   - unchanged inputs ⇒ ZERO retries (stricter than the old 3 — the answer cannot differ), and
+ *   - genuinely new inputs (a fresh push, or `main` advancing) ⇒ a fresh budget, because the resolver
+ *     is now being asked a different question.
+ * Strictly narrower than the old rule where it matters and strictly more permissive only where the
+ * input actually changed. Pure — exported for tests.
+ */
+export function prResolveFingerprint(headSha: string | null | undefined, baseSha: string | null | undefined): string | null {
+  const h = String(headSha ?? "").trim().slice(0, 12);
+  const b = String(baseSha ?? "").trim().slice(0, 12);
+  if (!h || !b) return null; // unknown input ⇒ no fingerprint ⇒ fall back to the lifetime cap
+  return `${h}:${b}`;
+}
+
+/** Read the fingerprint a prior pr-resolve job was enqueued for (null on legacy/unparseable rows). */
+export function fingerprintOfPrResolveRow(row: { instructions?: string | null }): string | null {
+  try {
+    const parsed = JSON.parse(String(row.instructions ?? "{}")) as { resolve_fingerprint?: unknown };
+    const fp = String(parsed.resolve_fingerprint ?? "").trim();
+    return fp || null;
+  } catch {
+    return null;
+  }
+}
+
 /** Exported for unit tests. */
 export const PR_RESOLVE_MAX_ATTEMPTS_FOR_TESTS = MAX_PR_RESOLVE_ATTEMPTS;
 
@@ -383,7 +426,7 @@ export async function closeArchivedSpecPr(
  */
 export async function enqueuePrResolveJob(
   admin: Admin,
-  input: { workspaceId: string; prNumber: number; branch: string; reason?: string },
+  input: { workspaceId: string; prNumber: number; branch: string; reason?: string; headSha?: string | null; baseSha?: string | null },
 ): Promise<{ enqueued: boolean; reason?: string }> {
   const slug = prSpecSlug(input.prNumber);
   const { data: existing } = await admin
@@ -397,6 +440,33 @@ export async function enqueuePrResolveJob(
     .maybeSingle();
   if (existing) return { enqueued: false, reason: "active job exists" };
 
+  // ⭐ INPUT-KEYED DEDUP (pr-resolve-retries-key-on-the-INPUT-not-a-lifetime-budget). The resolver's
+  // verdict is a pure function of (PR head, main head); an unchanged pair cannot produce a different
+  // answer, so re-running is guaranteed waste. Computed here so both the dedup below and the per-
+  // fingerprint attempt count share one definition.
+  //
+  // Resolved INSIDE the enqueue rather than demanded from callers: the dirty-PR detector already has
+  // both SHAs on the PR object it fetched (and passes them), but the goal-member re-drive and the
+  // director's `reconcile_resolve` escort do not — and a caller that omits them would otherwise slip
+  // past the dedup and re-open the duplicate hole for everyone. One cheap GET closes it centrally.
+  // Best-effort: a failed lookup leaves the fingerprint null, which degrades to exactly the previous
+  // lifetime-cap behavior.
+  let headSha = input.headSha ?? null;
+  let baseSha = input.baseSha ?? null;
+  if (!headSha || !baseSha) {
+    try {
+      const pr = await gh("GET", `/repos/${GH_REPO}/pulls/${input.prNumber}`);
+      if (pr.ok && pr.json && !Array.isArray(pr.json)) {
+        const j = pr.json as { head?: { sha?: string }; base?: { sha?: string } };
+        headSha = headSha ?? (j.head?.sha ?? null);
+        baseSha = baseSha ?? (j.base?.sha ?? null);
+      }
+    } catch {
+      /* best-effort — null fingerprint falls back to the lifetime cap */
+    }
+  }
+  const fingerprint = prResolveFingerprint(headSha, baseSha);
+
   // Retry cap (dirty-pr-resolver-duplicate-detection Phase 1): stop looping after MAX_PR_RESOLVE_ATTEMPTS
   // GENUINE resolve attempts — surface to the owner once and do NOT enqueue again.
   //
@@ -408,16 +478,35 @@ export async function enqueuePrResolveJob(
   // Infra failures (worktree add failed, git push failed, ENOSPC) and the retry-cap sentinel do NOT.
   const { data: priorJobs } = await admin
     .from("agent_jobs")
-    .select("status, error")
+    .select("status, error, instructions")
     .eq("workspace_id", input.workspaceId)
     .eq("kind", "pr-resolve")
     .eq("spec_slug", slug);
-  const genuineAttempts = countGenuinePrResolveAttempts(
-    (priorJobs ?? []) as Array<{ status: string; error: string | null }>,
-  );
+  const prior = (priorJobs ?? []) as Array<{ status: string; error: string | null; instructions?: string | null }>;
+
+  // (a) SAME INPUT ⇒ never re-run. A prior job already reached a verdict for this exact (head, base)
+  // pair; the resolver is deterministic, so a re-run reproduces it byte-for-byte. This is what stopped
+  // PR #2450's three-sessions-in-two-minutes: each finished fast enough that the ACTIVE_JOB_STATUSES
+  // dedup never overlapped them, and nothing else asked whether anything had actually changed.
+  if (fingerprint) {
+    const sameInput = prior.some((r) => fingerprintOfPrResolveRow(r) === fingerprint);
+    if (sameInput) {
+      return { enqueued: false, reason: `already resolved for this exact PR head + main (${fingerprint}) — nothing changed` };
+    }
+  }
+
+  // (b) The cap now scopes to THIS input. A genuinely new state — a fresh push, or `main` advancing
+  // under the branch — is a different question and earns a fresh budget. Without this, PR #2416 spent
+  // its 3 lifetime attempts inside two minutes on one unchanged pair, was marked exhausted, and then
+  // sat CONFLICTING for three days while `main` moved ~29 commits underneath it: every one of those
+  // changed the merge result, and not one could be attempted. Legacy rows carry no fingerprint, so
+  // when we cannot fingerprint the CURRENT request we fall back to the old lifetime count (safe: that
+  // is the pre-existing, strictly-more-restrictive behavior).
+  const scoped = fingerprint ? prior.filter((r) => fingerprintOfPrResolveRow(r) === fingerprint) : prior;
+  const genuineAttempts = countGenuinePrResolveAttempts(scoped);
   if (genuineAttempts >= MAX_PR_RESOLVE_ATTEMPTS) {
     await surfaceExhaustedPrResolve(admin, input.workspaceId, input.prNumber, genuineAttempts);
-    return { enqueued: false, reason: `retry cap reached (${genuineAttempts} attempts) — surfaced to owner` };
+    return { enqueued: false, reason: `retry cap reached (${genuineAttempts} attempts for this PR state) — surfaced to owner` };
   }
 
   const { error } = await admin.from("agent_jobs").insert({
@@ -431,6 +520,9 @@ export async function enqueuePrResolveJob(
       pr_number: input.prNumber,
       branch: input.branch,
       reason: input.reason || "PR became CONFLICTING",
+      // The (head, base) pair this attempt was enqueued for — read back by `fingerprintOfPrResolveRow`
+      // so a later enqueue can tell "same question, already answered" from "the inputs moved".
+      resolve_fingerprint: fingerprint,
     }),
   });
   if (error) return { enqueued: false, reason: error.message };
@@ -697,9 +789,14 @@ export async function detectAndEnqueueDirtyPrs(admin?: Admin): Promise<DirtyPrRe
           }
         }
         if (!closedDup) {
-          const r = await enqueuePrResolveJob(db, { workspaceId, prNumber, branch });
+          // `base.sha` is main's commit as GitHub resolved it for this PR — together with `head.sha` it
+          // is the exact pair that determines the merge result, so it is the right dedup key. Both come
+          // free on the PR object already fetched above (no extra API call).
+          const baseSha = (p.base as { sha?: string } | undefined)?.sha ?? null;
+          const r = await enqueuePrResolveJob(db, { workspaceId, prNumber, branch, headSha: headSha || null, baseSha });
           enqueued = r.enqueued;
           if (enqueued) result.enqueued++;
+          else if (r.reason) console.log(`[dirty-pr] PR #${prNumber} not re-enqueued: ${r.reason}`);
         }
       } catch {
         /* best-effort — next event retries */
