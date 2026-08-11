@@ -1,0 +1,1 @@
+- **Security dependency upgrades** · verified 2026-08-11 · → [[../libraries/security-agent]] § A fold must never kill the dep-upgrade loop
