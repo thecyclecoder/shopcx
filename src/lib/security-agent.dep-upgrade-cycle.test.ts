@@ -53,3 +53,22 @@ test("the lane consults the fold status before authoring", async () => {
   assert.match(body, /status === "folded"/, "must branch on the canonical spec being folded");
   assert.match(body, /depUpgradeCycleSlug\(\)/, "must roll to the cycle slug");
 });
+
+// ── the lane must VERIFY its own output is buildable ─────────────────────────────────────────
+// Both times this watcher went blind it RAN, reported nothing wrong, and produced nothing
+// buildable. A `true` from the author chokepoint only means the row was WRITTEN — not that the
+// spec is on the board where the build pipeline can see it.
+
+test("authorDepUpgradeSpec verifies the spec is readable on the board before reporting success", async () => {
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(new URL("../../scripts/builder-worker.ts", import.meta.url), "utf8"),
+  );
+  const fn = src.slice(src.indexOf("async function authorDepUpgradeSpec"));
+  const body = fn.slice(0, 9000);
+  const verifyAt = body.indexOf("const landed = await getSpec(slug, workspaceId)");
+  const successAt = body.indexOf("return { slug, alreadyExists:");
+  assert.ok(verifyAt > 0, "must read the spec back after authoring");
+  assert.ok(successAt > verifyAt, "the read-back must happen BEFORE the success return");
+  assert.match(body.slice(verifyAt, successAt), /if \(!landed\)/, "a null read-back must be treated as failure");
+  assert.match(body.slice(verifyAt, successAt), /authorError/, "the failure must surface a concrete authorError, not a bare false");
+});

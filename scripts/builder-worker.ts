@@ -25024,6 +25024,33 @@ async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, w
       console.warn(`[security] dep-upgrade spec author returned false for ${slug}`);
       return { authorError, slug };
     }
+
+    // ⭐ VERIFY THE OUTPUT IS ACTUALLY BUILDABLE — the step this lane was missing.
+    //
+    // Both times this watcher went blind, the shape was identical: it RAN, reported nothing wrong,
+    // and produced nothing buildable. A `true` from the author chokepoint only means the row was
+    // written; it does NOT mean the spec is on the board where the build pipeline can see it. The
+    // 2026-08-03 fold is exactly that gap — the write landed (the row's `updated_at` moved) while the
+    // status stayed `folded`, so 11 actionable advisories waited 8 days behind a park card that said
+    // only "spec author failed".
+    //
+    // The board-level `getSpec` returns null for any non-boardable status — which is precisely the
+    // asymmetry that HID the bug, so we use it as the DETECTOR. If the spec is not readable on the
+    // board after a successful write, this lane has failed regardless of what the write returned, and
+    // it must say so concretely instead of reporting success.
+    //
+    // Mirrors the coverage-register lane's `step: "verify"` check, which has had this since it
+    // shipped. Same class as CLAUDE.md's node-completeness rule: an autonomous writer that cannot
+    // confirm its own output is a silent proxy-optimizer.
+    const landed = await getSpec(slug, workspaceId);
+    if (!landed) {
+      const authorError =
+        `AuthorWriteFailed: authorSpecRowStructured(${slug}) returned true but the spec is NOT readable on the board ` +
+        `(getSpec returned null — a non-boardable status such as 'folded'). The advisory content was written into a row ` +
+        `the build pipeline cannot see, so nothing will upgrade these dependencies. Re-open or re-slug the spec.`;
+      console.error(`[security] dep-upgrade spec ${slug} wrote but is NOT boardable — the lane produced nothing buildable`);
+      return { authorError, slug };
+    }
     return { slug, alreadyExists: !!existing };
   } catch (e) {
     // repair-verify-spec-persisted-before-build Phase 3 discipline (same as repair-agent) —

@@ -103,3 +103,11 @@ Net effect: the advisory content is upserted into the folded row, the row **stay
 **The fix:** `depUpgradeCycleSlug(now)` → `security-dep-upgrades-YYYY-MM`. When the canonical spec is folded, the lane authors THIS cycle's batch under the cycle slug instead. A fold means *that batch shipped*; a new batch of advisories is new work. The slug is stable within a month (a re-run refreshes one spec rather than proliferating) and rolls at the boundary, so a folded cycle can never block the next one. The fold check reads the RAW status via the [[specs-table]] SDK — the board-level read hides folded rows, which is exactly how this stayed invisible.
 
 Pinned by `src/lib/security-agent.dep-upgrade-cycle.test.ts`.
+
+### The lane verifies its own output is buildable
+
+Both times this watcher went blind the shape was identical: **it ran, reported nothing wrong, and produced nothing buildable.** A `true` from `authorSpecRowStructured` only means the row was WRITTEN — not that the spec is on the board where the build pipeline can see it. The 2026-08-03 fold is exactly that gap: the write landed (the row's `updated_at` moved) while the status stayed `folded`.
+
+So after a successful author, `authorDepUpgradeSpec` reads the spec back via the board-level [[brain-roadmap]] `getSpec` and fails with a concrete `authorError` if it returns null. That read hides non-boardable statuses — the very asymmetry that HID the bug — so it makes an exact detector for it.
+
+Mirrors the coverage-register lane's `step: "verify"` check, which has had this since it shipped. Same class as CLAUDE.md's node-completeness rule: **an autonomous writer that cannot confirm its own output is a silent proxy-optimizer.**
