@@ -20,6 +20,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   isReconcileEligibleSourceName,
+  isShopifyOriginOrder,
   packingSlipFirstName,
   RECONCILE_ELIGIBLE_SOURCE_NAMES,
 } from "./amplifier-import-reconcile";
@@ -48,6 +49,28 @@ test("Phase 2: the eligible set exposes exactly the two allowed source names (gu
     "internal_subscription_renewal",
     "storefront",
   ]);
+});
+
+test("head-of-line guard: a Shopify-origin (SC*) order is never this rail's business", () => {
+  assert.equal(isShopifyOriginOrder({ shopify_order_id: "5551234567890" }), true);
+});
+
+test("head-of-line guard: an internal (SHOPCX*) order IS this rail's business", () => {
+  assert.equal(isShopifyOriginOrder({ shopify_order_id: null }), false);
+});
+
+test("head-of-line guard: a missing shopify_order_id key is treated as internal, not Shopify", () => {
+  // A narrowed .select() that omits the column must not silently reclassify
+  // every internal order as Shopify and re-stall the rail.
+  assert.equal(isShopifyOriginOrder({}), false);
+  assert.equal(isShopifyOriginOrder({ shopify_order_id: undefined }), false);
+});
+
+test("head-of-line guard: any non-null id counts as Shopify-origin regardless of type", () => {
+  // shopify_order_id is text in the DB but historical rows / callers have
+  // passed numerics; both must classify as Shopify.
+  assert.equal(isShopifyOriginOrder({ shopify_order_id: 5551234567890 }), true);
+  assert.equal(isShopifyOriginOrder({ shopify_order_id: "" }), true);
 });
 
 test("Phase 2: packing-slip greeting reads first_name (snake_case — storefront legacy shape)", () => {
