@@ -637,6 +637,7 @@ export const BUILD_STUCK_ESCALATION_NAMESPACES: ReadonlySet<string> = new Set([
   "groom-loopguard",
   "escort-failed-repeat",
   "loopguard",
+  "premerge-fix-loopguard",
 ]);
 
 /** The namespace half of a `<ns>:<id>` dedupe key (the whole key when it carries no colon). */
@@ -720,6 +721,11 @@ const BUILD_STUCK_ESCALATION_KINDS: ReadonlySet<string> = new Set([
   "escort_failed_repeat",
   "escort_loop_guard",
   "loop_guard",
+  // The PLATFORM-OWNER RUNG's terminal failure mode ([[../pre-merge-fix]] loop-guard): Ada's
+  // fix-phase lane took an undiagnosed build park and its fixes stopped converging. Same incident
+  // shape as the rest of this family — "this spec's build is stuck" — so it shares both the
+  // one-open-card dedupe and Family 1c's reason-gone test (spec folded, or a build landed since).
+  "premerge_fix_loop_guard",
 ]);
 
 /** Build job statuses that mean a build LANDED — the recovery signal Family 1c clears on. */
