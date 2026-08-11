@@ -51,6 +51,7 @@ import {
   buildApprovalContent,
   approvalDeepLink,
   activeParkCardExistsForJob,
+  openBuildStuckCardExistsForSpec,
   type ApprovalJobRow,
 } from "@/lib/agents/approval-inbox";
 import { recordApprovalDecision } from "@/lib/agents/approval-decisions";
@@ -1642,6 +1643,15 @@ export async function escortSweep(admin: Admin): Promise<EscortSweepResult> {
           result.skipped++;
         }
       } else if (lane === "failed_repeat") {
+        // ONE OPEN CARD PER STUCK BUILD: the park watchdogs (needsattn / parkbackstop) and the
+        // init/groom loop guards reach the SAME conclusion about this spec from their own lanes.
+        // Whichever got there first already has the founder's attention; a second card adds no
+        // information, only noise. (Skipping the card does NOT skip the escort work below.)
+        if (await openBuildStuckCardExistsForSpec(admin, workspaceId, c.slug, `escort-failed-repeat:${c.slug}`)) {
+          console.log(`[platform-director] escortSweep failed-repeat for ${c.slug}: build-stuck card already open — no second card`);
+          result.skipped++;
+          continue;
+        }
         const r = await escalateDiagnosisToCeo(admin, {
           workspaceId,
           specSlug: c.slug,
@@ -2121,6 +2131,13 @@ export function decideEscalationMint(outcome: EscalationUpsertOutcome, nowMs: nu
   if (outcome.bumped) return { action: "bumped", seenCount: outcome.seenCount };
   return { action: "insert" };
 }
+
+/**
+ * Re-exported so the box worker's groom/init loop-guards (which load this module as `lib`) can run
+ * the SAME one-open-card-per-stuck-build gate as the escort sweep + the triage pass, without each
+ * lane hand-rolling its own dedupe read. Defined in [[./approval-inbox]] — see the doc there.
+ */
+export { openBuildStuckCardExistsForSpec };
 
 export async function escalateDiagnosisToCeo(
   admin: Admin,
@@ -3347,6 +3364,13 @@ export async function reconcileNeedsAttention(admin: Admin): Promise<NeedsAttent
     // A single parked job must surface AT MOST ONE CEO card. escalateDiagnosisToCeo also dedupes on its
     // own `needsattn:` key, but that wouldn't catch a sibling emitter's differently-keyed card.
     if (await activeParkCardExistsForJob(admin, workspaceId, j.id)) { confirmed++; continue; }
+    // ONE OPEN CARD PER STUCK BUILD (DEDUP, spec-scoped): the job-scoped check above cannot see a
+    // sibling watchdog that keyed on the SLUG (initguard / groom-loopguard / escort-failed-repeat),
+    // nor a card minted for a PREVIOUS job row of the same failing spec. Both are the same incident.
+    if (specSlug && (await openBuildStuckCardExistsForSpec(admin, workspaceId, specSlug, `needsattn:${j.id}`))) {
+      confirmed++;
+      continue;
+    }
     const why = alreadyReran
       ? "re-ran once after an inconclusive QC result and parked AGAIN — likely a real blocker, not a transient"
       : recoverable
