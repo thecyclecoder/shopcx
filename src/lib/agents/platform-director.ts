@@ -136,6 +136,9 @@ export interface DirectorActionLike {
   summary?: string;
   preview?: string;
   cmd?: string;
+  /** the-brief-must-carry-the-proposal — the pre-authored spec body some lanes (db_health) carry
+   *  INSTEAD of a `preview`. See `DirectorBriefAction.specBody`. */
+  spec_body?: string;
 }
 export interface DirectorTargetJob {
   id: string;
@@ -327,6 +330,25 @@ export interface DirectorBriefAction {
   summary: string;
   preview: string;
   cmd: string;
+  /**
+   * ⭐ the-brief-must-carry-the-proposal (2026-08-11) — the pre-authored spec body, when the raising
+   * action carries one instead of a `preview`.
+   *
+   * `db_health` (and any other lane that pre-authors a spec at detection) puts its ENTIRE proposal —
+   * the diagnosed cause, the pg_stat_statements evidence, the EXPLAIN plan, the phase plan, the
+   * verification — on `pending_actions[].spec_body`, and leaves `summary`/`preview`/`cmd` null. The
+   * brief read only those three, so Ada was handed a structurally EMPTY brief for a proposal that
+   * actually carried 2,464 characters of evidence, and correctly refused to approve what she could
+   * not see. Every db_health proposal therefore escalated to the CEO for "I cannot confirm this is
+   * sound" — not a judgment failure, a missing field.
+   *
+   * Live (2026-08-11, `dbhealth:slowq:4608471940106465663:specs`): the hidden body contained the
+   * EXPLAIN showing a Seq Scan on a 132-row table with a non-sargable `OR` + `CASE` filter — i.e.
+   * proof that the proposed index would NOT be used, which is exactly the "wrong column / redundant
+   * index" pattern Devi's coaching history warns about. Ada suspected it and could not demonstrate
+   * it. With the body in the brief she can read the plan and DECLINE it herself (#2464).
+   */
+  specBody: string;
 }
 
 /** The read-only brief the director investigates — the cause + the proposed action(s), inline. */
@@ -346,7 +368,13 @@ export interface DirectorBrief {
 export function buildDirectorBrief(job: DirectorTargetJob, candidates: LeashAction[]): DirectorBrief {
   const actions: DirectorBriefAction[] = candidates.map((c) => {
     const a = (job.pending_actions || []).find((p) => p.id === c.actionId) ?? {};
-    return { category: c.category, summary: a.summary || "", preview: a.preview || "", cmd: a.cmd || "" };
+    return {
+      category: c.category,
+      summary: a.summary || "",
+      preview: a.preview || "",
+      cmd: a.cmd || "",
+      specBody: a.spec_body || "",
+    };
   });
   return {
     jobId: job.id,
@@ -364,7 +392,16 @@ export function directorInvestigationPrompt(brief: DirectorBrief): string {
   const actionBlock = brief.actions
     .map((a, i) => {
       const head = brief.multi ? `Action ${i + 1} — category=${a.category}:` : `This request — category=${a.category}, kind=${brief.kind}, spec=${brief.specSlug ?? "—"}:`;
-      return [head, `  summary: ${a.summary}`, a.preview ? `  proposed fix / preview:\n${a.preview}` : "", a.cmd ? `  command that runs on approval: ${a.cmd}` : ""].filter(Boolean).join("\n");
+      return [
+        head,
+        `  summary: ${a.summary}`,
+        a.preview ? `  proposed fix / preview:\n${a.preview}` : "",
+        a.cmd ? `  command that runs on approval: ${a.cmd}` : "",
+        // the-brief-must-carry-the-proposal — a lane that pre-authors its spec (db_health) puts the whole
+        // proposal HERE and leaves summary/preview/cmd null. Without this the brief read as empty and the
+        // only honest verdict was "I cannot confirm this is sound" → a CEO escalation on every single one.
+        a.specBody ? `  PRE-AUTHORED SPEC BODY (the full proposal — diagnosed cause, evidence, EXPLAIN, phase plan):\n${a.specBody}` : "",
+      ].filter(Boolean).join("\n");
     })
     .join("\n\n");
 
@@ -413,6 +450,9 @@ export function directorInvestigationPrompt(brief: DirectorBrief): string {
     "",
     "Investigate read-only (the implicated spec / the migration SQL / the backfill script / the diagnosed code).",
     "Confirm every action is sound and within the leash before approving.",
+    brief.kind === "db_health"
+      ? "DB_HEALTH target: the PRE-AUTHORED SPEC BODY above carries the analyzer's evidence — the pg_stat_statements row and the EXPLAIN plan. READ THE PLAN before deciding; it is the whole basis for the call. An index proposal is UNSOUND — `decline` it — when the plan shows the planner would not use one: a small table where a Seq Scan is genuinely cheaper, a non-sargable predicate (an `OR`, a `CASE`, a function call over the column), or a column already covered by an existing index (check `pg_indexes` for the table). In those cases the real cost is CALL VOLUME or the query shape, and another index changes nothing — say so in your reasoning. Approve only when the plan shows a filter on an indexable column that no existing index covers."
+      : "",
     brief.kind === "repair"
       ? "REPAIR target: you SUPERVISE the Repair agent. If the bug is real but the AUTHORED FIX is UNSOUND (broken mechanism, mis-scoped to land, or the code contradicts its premise), choose `bounce` — that sends the fix BACK to the Repair agent with your reasoning to RE-DO its work; it never reaches the CEO. Reserve `escalate` for a call that genuinely needs the CEO (a real out-of-leash/irreversible decision), NOT a fix-quality problem you can hand back. `auto-approve` only a sound fix."
       : "",
