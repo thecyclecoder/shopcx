@@ -38,6 +38,7 @@ import { recordDirectorActivity } from "@/lib/director-activity";
 import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { getSpec } from "@/lib/brain-roadmap";
 import { classifyAndStamp, BUILD_STYLE_KINDS, type NeedsAttentionClass } from "@/lib/agents/needs-attention-classify";
+import { decideParkRetry, PARK_RETRY_MAX } from "@/lib/agents/park-retry";
 import {
   decideCsOwnerRoute,
   applyCsOwnerRoute,
@@ -155,6 +156,74 @@ async function loadLedger(admin: Admin): Promise<RoutedLedger> {
     if (a.action_kind === "routed_park_alarm") alarmed.add(jid);
   }
   return { routed, alarmed };
+}
+
+/**
+ * The `director_activity.action_kind` the re-drive ledger uses. Its OWN kind (not `routed_*`) so the
+ * retry count is countable with one filtered read and never confused with a routing disposition.
+ */
+export const PARK_RETRY_ACTION_KIND = "park_retry";
+
+/**
+ * A human label for a parked job. `spec_slug` is overloaded — for a `cs-director-call` it holds a
+ * TICKET UUID, so the card titled itself "Park needs eyes: 1eddd352-ad99-4173-95fa-89b9dff49712",
+ * which tells the founder nothing about what is stuck or why they should care. Resolve the real
+ * name: the spec's title, else the ticket's subject, else the bare kind. Best-effort — a lookup miss
+ * degrades to the slug rather than blocking the escalation.
+ */
+async function parkCardLabel(admin: Admin, row: ParkedRow): Promise<string> {
+  if (!row.spec_slug) return row.kind;
+  const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(row.spec_slug);
+  if (!isUuid) return row.spec_slug; // a real slug is already the best label
+  try {
+    const { data: ticket } = await admin.from("tickets").select("subject").eq("id", row.spec_slug).maybeSingle();
+    const subject = (ticket as { subject?: string | null } | null)?.subject?.trim();
+    if (subject) return `${row.kind} on ticket "${subject.slice(0, 60)}"`;
+  } catch {
+    /* best-effort — fall through to the slug */
+  }
+  return `${row.kind} ${row.spec_slug.slice(0, 8)}`;
+}
+
+/**
+ * The card body. Leads with WHAT HAPPENED and WHAT THE FOUNDER CAN DO, in plain language, before any
+ * machine detail — the pre-2026-08-11 body opened with "no_route_match" and then pasted 400 chars of
+ * raw JSON `log_tail`, which is unreadable and, worse, implies a decision the founder cannot make.
+ * The raw evidence stays one click away behind the card's deep link rather than inlined here.
+ */
+export function parkCardDiagnosis(row: { kind: string; error: string | null }): string {
+  const reason = (row.error ?? "").trim();
+  const firstSentence = reason.split(/(?<=\.)\s/)[0] ?? reason;
+  return [
+    `A ${row.kind} job has been stuck for over an hour and nothing automated could resolve it — including a bounded re-drive, so this is not a transient blip.`,
+    reason ? `Why it stopped: ${firstSentence.slice(0, 400)}` : `No error was recorded, which is itself the anomaly.`,
+    `You can't fix this from this card. What it needs is a decision: is the underlying work still wanted? If yes, it needs an engineer; if no, dismiss this and the job will be cleared.`,
+  ].join("\n\n");
+}
+
+/**
+ * How many times this park was already re-driven, and when last — read off the `director_activity`
+ * ledger so the count survives a worker restart (in-memory state would silently reset the cap).
+ * FAIL-CLOSED: a read error reports the cap as already reached, so a transient DB blip can never
+ * turn the bounded re-drive into an unbounded loop.
+ */
+async function loadParkRetryHistory(admin: Admin, jobId: string): Promise<{ count: number; lastAt: Date | null }> {
+  const { data, error } = await admin
+    .from("director_activity")
+    .select("created_at, metadata")
+    .eq("action_kind", PARK_RETRY_ACTION_KIND)
+    .order("created_at", { ascending: false })
+    .limit(200);
+  if (error) {
+    console.warn(`[needs-attention-route] park-retry history read failed for ${jobId.slice(0, 8)} — treating as capped: ${error.message}`);
+    return { count: PARK_RETRY_MAX, lastAt: null };
+  }
+  const mine = (data ?? []).filter((r) => {
+    const m = (r as { metadata: Record<string, unknown> | null }).metadata ?? {};
+    return m["job_id"] === jobId;
+  }) as Array<{ created_at: string }>;
+  const lastAt = mine.length ? new Date(mine[0].created_at) : null;
+  return { count: mine.length, lastAt: Number.isFinite(lastAt?.getTime()) ? lastAt : null };
 }
 
 /**
@@ -426,6 +495,56 @@ async function routeBackstop(admin: Admin, row: ParkedRow): Promise<{ backstoppe
       // cards for `scope-subscription-item-sync-by-workspace` sat in the CEO inbox on 2026-08-11. The
       // spec-scoped check also catches the slug-keyed sibling watchdogs (initguard / groom-loopguard /
       // escort-failed-repeat), which are all saying the same thing about the same spec.
+      // ⭐ RE-DRIVE BEFORE YOU ESCALATE (2026-08-11) — the cheapest rung of all, ahead of both the
+      // owner rung and the CEO fail-safe.
+      //
+      // A park caused by a CODE-SIDE VALIDATION REJECTION is fixed by a deploy, not by a human
+      // reading a card. Ground truth: June's `cs-director-call` was rejected by the author chokepoint
+      // at 14:25:39Z for a prose-only phase; that defect shipped fixed at 14:30:14Z — 4m35s later —
+      // and every subsequent run succeeded. Nothing re-drove the parked job, so the spec was NEVER
+      // authored (her product-gap finding was silently lost) and the founder got an unactionable card
+      // about a problem that no longer existed. The dropped finding is the serious half.
+      //
+      // So: re-drive first. Bounded by PARK_RETRY_MAX attempts spaced PARK_RETRY_MIN_INTERVAL_MS
+      // apart (the spacing is the point — it straddles a deploy), counted off the SAME
+      // `director_activity` ledger the router already reads, so the count survives a worker restart.
+      // Only re-runnable kinds and only known validation signatures qualify; everything else falls
+      // straight through to the behavior below, unchanged. On cap exhaustion the escalation finally
+      // says something useful: "re-driven N times across deploys, still failing."
+      if (fresh.klass === "unknown") {
+        const history = await loadParkRetryHistory(admin, row.id);
+        const decision = decideParkRetry({
+          kind: row.kind,
+          error: row.error,
+          priorRetries: history.count,
+          lastRetryAt: history.lastAt,
+          now: new Date(),
+        });
+        if (decision.retry) {
+          // Compare-and-set on `needs_attention` — never resurrect a row that moved on under us.
+          const { data: flipped, error: flipErr } = await admin
+            .from("agent_jobs")
+            .update({ status: "queued", updated_at: new Date().toISOString() })
+            .eq("id", row.id)
+            .eq("status", "needs_attention")
+            .select("id");
+          if (!flipErr && flipped?.length === 1) {
+            await recordDirectorActivity(admin, {
+              workspaceId: row.workspace_id,
+              directorFunction: PLATFORM,
+              actionKind: PARK_RETRY_ACTION_KIND,
+              specSlug: row.spec_slug,
+              reason: `Re-drove parked ${row.kind} ${row.id.slice(0, 8)} instead of escalating: ${decision.reason}. Park error: ${(row.error ?? "(none)").slice(0, 300)}`,
+              metadata: { job_id: row.id, action: "park_retry", target_kind: row.kind, attempt: history.count + 1, autonomous: true },
+            });
+            console.log(`[needs-attention-route] re-drove park ${row.id.slice(0, 8)} (${row.kind}) — ${decision.reason}`);
+            return { backstopped: false, alarmed: false };
+          }
+          if (flipErr) console.warn(`[needs-attention-route] park re-drive flip failed for ${row.id.slice(0, 8)}: ${flipErr.message}`);
+          // Flip lost the race or errored → fall through and surface it, never silently drop.
+        }
+      }
+
       // ⭐ PLATFORM-OWNER RUNG (2026-08-11) — the symmetric twin of the CS-owner rung in
       // `routeNeedsAttention` above: the owner function rules on its OWN park, and only what the
       // owner cannot resolve falls through to the CEO fail-safe.
@@ -476,8 +595,8 @@ async function routeBackstop(admin: Admin, row: ParkedRow): Promise<{ backstoppe
         await escalateDiagnosisToCeo(admin, {
           workspaceId: row.workspace_id,
           specSlug: row.spec_slug,
-          title: `Park needs eyes: ${row.spec_slug ?? row.kind}`,
-          diagnosis: `A ${row.kind} job parked >60 min ago and the classifier can't bucket it (no_route_match). Park reason: ${(row.error ?? "(none recorded)").slice(0, 300)}. Log tail: ${(row.log_tail ?? "(none)").slice(-400)}.`,
+          title: `Park needs eyes: ${await parkCardLabel(admin, row)}`,
+          diagnosis: parkCardDiagnosis(row),
           dedupeKey: `parkbackstop:${row.id}`,
           deepLink: row.spec_slug ? `/dashboard/roadmap/${row.spec_slug}` : "/dashboard/developer/control-tower",
           escalationKind: "park_backstop",
