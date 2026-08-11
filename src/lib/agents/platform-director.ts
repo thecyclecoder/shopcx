@@ -2957,6 +2957,16 @@ const TRIAGE_SKIP_KINDS: ReadonlySet<string> = new Set(["build", "repair", "plat
 /** QC kinds whose handler re-investigates cleanly from `instructions`, so a recoverable park can be re-run. */
 const TRIAGE_RERUNNABLE_KINDS: ReadonlySet<string> = new Set(["security-review", "spec-test", "regression"]);
 
+/**
+ * security-dep-watch-authors-structured-and-never-ages-out Phase 3 — kinds whose parks carry an
+ * unresolved security signal. The age-out sweep must NEVER cancel one of these; a security finding
+ * that has sat unresolved past the window ESCALATES to the CEO instead of disappearing.
+ *
+ * Currently just `security-review` (covers diff / branch / dep-watch modes — every advisory the
+ * security agent surfaces rides this kind).
+ */
+const SECURITY_LANE_KINDS: ReadonlySet<string> = new Set(["security-review"]);
+
 /** A recoverable park: an inconclusive / unparseable QC verdict (a transient failure to produce a verdict). */
 const TRIAGE_RECOVERABLE_ERROR = /no parseable verdict|without a recognizable (verdict|status)|inconclusive/i;
 
@@ -3035,11 +3045,28 @@ export function computeAgeOutSkip(
   hasTriageLedgerRow: boolean,
   nowMs: number,
   windowMs: number = NEEDS_ATTENTION_STALE_PARK_MS,
-): { ageOut: true; reason: string } | { ageOut: false } {
+  opts?: { securityLane?: boolean },
+): { ageOut: true; reason: string } | { ageOut: false; exemptReason?: string } {
   if (hasTriageLedgerRow) return { ageOut: false };
   const ageMs = nowMs - new Date(createdAt).getTime();
   if (ageMs < windowMs) return { ageOut: false };
   const hours = Math.round(ageMs / (60 * 60 * 1000));
+  // security-dep-watch-authors-structured-and-never-ages-out Phase 3 — a SECURITY-lane park is EXEMPT
+  // from the age-out cancel. It falls through to the standard escalation path instead, so the CEO gets a
+  // card carrying `error` + `log_tail` (the advisory list). Ground truth: the 2026-07-21 dep-watch park sat
+  // 310h with 3 actionable advisories and was CANCELLED for aging out without ever reaching the founder;
+  // the advisory count then climbed to 10. Silently discarding a security finding because it got old is
+  // the failure mode most likely to hurt us.
+  if (opts?.securityLane) {
+    return {
+      ageOut: false,
+      exemptReason:
+        `security-lane park (${hours}h old) never ages out — a security signal must not be silently ` +
+        `discarded because it got old; escalate instead of cancel ` +
+        `(security-dep-watch-authors-structured-and-never-ages-out Phase 3, the 2026-07-21 310h dep-watch ` +
+        `park is the ground-truth case).`,
+    };
+  }
   return { ageOut: true, reason: `parked ${hours}h with no actionable path — aged out of needs_attention (never escalated, never re-runnable)` };
 }
 
@@ -3305,7 +3332,13 @@ export async function reconcileNeedsAttention(admin: Admin): Promise<NeedsAttent
     // every pass forever.
     const alreadyReranHere = reran.has(j.id);
     const alreadySurfacedHere = surfaced.has(j.id);
-    const ageOut = computeAgeOutSkip(j.created_at, alreadyReranHere || alreadySurfacedHere, nowMs);
+    // security-dep-watch-authors-structured-and-never-ages-out Phase 3 — a SECURITY-lane park
+    // (kind ∈ SECURITY_LANE_KINDS) is EXEMPT from the age-out cancel. `computeAgeOutSkip` returns
+    // `{ageOut:false, exemptReason}` for it, and the row falls through to the standard escalation path
+    // below — the CEO gets a card carrying `error` (the underlying author error) + `log_tail` (the
+    // advisory list). A security signal must never be silently discarded because it got old.
+    const securityLane = SECURITY_LANE_KINDS.has(String(j.kind));
+    const ageOut = computeAgeOutSkip(j.created_at, alreadyReranHere || alreadySurfacedHere, nowMs, undefined, { securityLane });
     if (ageOut.ageOut) {
       const cancelResult = await cancelTerminalPark(admin, j, ageOut.reason, {
         target_kind: j.kind,
