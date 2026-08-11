@@ -52,10 +52,25 @@ const SHIP_TIME_BACKFILL_DEEP_LINK = "/dashboard/roadmap";
 /** The org function that OWNS the detector — matches the MONITORED_LOOPS entry + node-registry. */
 const PLATFORM_DIRECTOR_FUNCTION = "platform";
 
-/** Regex a script_path must match to be a ship-time backfill (`scripts/_backfill-<slug>.ts`). */
-const BACKFILL_PATH_RE = /^scripts\/_backfill-[a-z0-9][a-z0-9._-]*\.ts$/;
+/**
+ * Regex a script_path must match to be a tracked ship-time one-off:
+ *  - `scripts/_backfill-<slug>.ts` — the row-level data-fill genre (chunked, cursor-paginated).
+ *  - `scripts/_ledger-reconcile-<version>.ts` — a companion class added in
+ *    reconcile-migration-drift-2026-08-superseded-and-check-superset Phase 1. Idempotent
+ *    `insert into supabase_migrations.schema_migrations(version) values (...) on conflict do nothing`
+ *    safety-net script that records a retired migration's version so a stale worktree's drift
+ *    reconciler never re-attempts the deleted DDL. Same detector + executor pipeline as
+ *    `_backfill-*.ts` — same auto-ledger, same CEO escalation on un-run, same executor spawn.
+ * Both prefixes are bounded (only lowercase alphanumerics, `.`, `_`, `-`) so the executor's
+ * capability gate can trust the ledgered `script_path` before `spawn`.
+ */
+const BACKFILL_PATH_RE = /^scripts\/_(?:backfill|ledger-reconcile)-[a-z0-9][a-z0-9._-]*\.ts$/;
 
-/** True iff a repo-relative path is a ship-time backfill script (bounded convention). */
+/**
+ * True iff a repo-relative path is a tracked ship-time one-off script (bounded convention).
+ * Historically named for `_backfill-*.ts` alone; kept as-is to preserve every caller import
+ * after the regex was widened to also cover `_ledger-reconcile-*.ts` (see BACKFILL_PATH_RE).
+ */
 export function isBackfillScriptPath(path: string): boolean {
   return BACKFILL_PATH_RE.test(path);
 }
