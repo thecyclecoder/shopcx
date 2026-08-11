@@ -1932,6 +1932,27 @@ function ceoEscalationNotification(args: {
   dedupeKey: string;
   deepLink: string;
   escalationKind: string;
+  /**
+   * ⭐ THE CALLER'S CONTEXT — chiefly `job_id`. Pre-2026-08-11 this parameter DID NOT EXIST here,
+   * while `escalateDiagnosisToCeo` accepted `metadata` and passed its whole `args` object in. Because
+   * `args` is a variable rather than an object literal, TypeScript's excess-property check never
+   * fired, so every caller's metadata was silently DROPPED from the card. The `director_activity`
+   * ledger got it; the card did not.
+   *
+   * That single omission broke two card-lifecycle mechanisms at once, and both were live bugs:
+   *
+   *  1. `activeParkCardExistsForJob` ([[./approval-inbox]]) looks a card up by
+   *     `metadata.agent_job_id` / `metadata.job_id`. No escalation card carried either, so the
+   *     one-card-per-park DEDUPE always answered "no card exists" and every emitter minted its own.
+   *     That is the duplicate-card fan-out.
+   *  2. `reconcileStaleParkCards` Family 1 (the job-backed auto-clear) partitions on `notifJobId`,
+   *     so escalation cards were never evaluated by it — including its pr-resolve branch, which
+   *     dismisses a park card once the PR is MERGED or CLOSED. Result: a park card for an
+   *     already-merged PR could not be cleared by anything, and Family 1b would not clear it either
+   *     because the parked job was still `needs_attention`. Structurally immortal. Observed
+   *     2026-08-11 on `pr-2438` + `pr-2450`, both of which had already merged.
+   */
+  metadata?: Record<string, unknown>;
 }) {
   const note = `🛠️ Ada (Platform/DevOps Director) escalated this to you:\n${args.diagnosis}`.slice(0, 4000);
   const nowIso = new Date().toISOString();
@@ -1942,6 +1963,9 @@ function ceoEscalationNotification(args: {
     body: note,
     link: args.deepLink,
     metadata: {
+      // Caller context FIRST so the canonical fields below always WIN — a caller can enrich the card
+      // (job_id, target_kind, revert_sha …) but can never spoof its routing, kind, or dedupe key.
+      ...(args.metadata ?? {}),
       routed_to_function: CEO,
       escalated_by_director: PLATFORM,
       escalation_kind: args.escalationKind,
