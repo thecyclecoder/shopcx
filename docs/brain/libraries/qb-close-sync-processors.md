@@ -10,11 +10,15 @@ The month's per-processor money rollup into [[../tables/qb_payment_processor_sum
 |---|---|---|
 | `braintree` | ✅ reconciled | refunds **$576.78 exact** · chargebacks **$0.00 exact** · gross +$749.91, of which **$617.84 (82%) is settlement after the snapshot instant**; residual $132.07 (0.65%) |
 | `paypal` | ✅ same shape | gross +5.7%, fees +5.5% — same cause (fees are summed only on sales, so they track gross) |
-| `shopify_payments` | ⚠️ **403** | ShopCX's token lacks `read_shopify_payments_payouts` — a Shopify-admin scope grant + re-auth |
+| `shopify_payments` | ✅ **EXACT** | gross / fees / refunds / chargebacks all **$0.00 delta** — matches golden to the cent |
 
 Proven by cutting a fresh Braintree pull at shoptics' capture instant: full July gross $21,070.52 → $20,452.68 when restricted to `settledAt <= 2026-07-31T08:01:29Z`, against the stored $20,320.61.
 
 **Implication: a fresh pull is MORE complete than the stored snapshot, not wrong.** Late-settling transactions are real July revenue.
+
+**Shopify Payments corroborates this independently.** It reconciles to **$0.00 on all four figures** — because payouts are *settled* by definition and do not move after capture. PayPal and Braintree differ only in the direction and magnitude that late settlement predicts. Same code path, different settlement behaviour.
+
+Scope note: ShopCX's token carries BOTH `read_shopify_payments_payouts` (granted 2026-08-11, app version `shopcx-100`) and `read_all_orders`. Shoptics has the former but NOT the latter — which is why the ~60-day order-window deadline binds Shoptics and not the ShopCX close.
 
 ## Exports
 
