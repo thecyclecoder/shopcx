@@ -2251,7 +2251,16 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         const { data: wsForSandbox } = await admin.from("workspaces").select("sandbox_mode").eq("id", wsId).single();
         const isSandbox = wsForSandbox?.sandbox_mode === true || cfg.sandbox === true;
         const execResult = await executeSonnetDecision(
-          { admin, workspaceId: wsId, ticketId: tid, customerId: st.custId || "", channel: st.ch, sandbox: isSandbox, agentInvolved: agentAssigned },
+          {
+            admin, workspaceId: wsId, ticketId: tid, customerId: st.custId || "", channel: st.ch,
+            sandbox: isSandbox, agentInvolved: agentAssigned,
+            // ⭐ Feed the policy-bait guard the one fact it cannot infer: did we actually IDENTIFY
+            // this person? `hasShopifyCustomer` is false when the inbound address resolved to
+            // nothing (or only to the stub row the webhook minted from an unknown sender). The
+            // guard blocks any promised remedy in that state — eligibility cannot have been
+            // established for someone we cannot find (ticket 879dd36b, 2026-08-12).
+            _customerIdentified: st.hasShopifyCustomer,
+          },
           sonnetDecision,
           pers,
           async (m, sb) => sendWithDelay(admin, wsId, tid, st.ch, m, sb),

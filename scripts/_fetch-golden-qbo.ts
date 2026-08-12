@@ -3,6 +3,7 @@ import * as fs from "fs";
 import { createClient } from "@supabase/supabase-js";
 import { createAdminClient } from "../src/lib/supabase/admin";
 import { qboFetch } from "../src/lib/quickbooks";
+import { errText } from "../src/lib/error-text";
 const WS = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 const DIR = "fixtures/shoptics-golden";
 
@@ -38,7 +39,7 @@ async function main(){
         const r = await qboFetch(WS, `${entity}/${id}`, { admin });
         const key = `${entity}_${id}`;
         out[key] = r[entity[0].toUpperCase()+entity.slice(1)] ?? r;
-      } catch(e){ out[`${entity}_${id}_ERROR`] = e instanceof Error ? e.message : String(e); }
+      } catch(e){ out[`${entity}_${id}_ERROR`] = errText(e); }
     }
     fs.writeFileSync(`${DIR}/qbo-entries/${m}.json`, JSON.stringify(out,null,2));
     const posted = Object.keys(out).filter(k=>k!=="closing_month"&&!k.endsWith("_ERROR"));

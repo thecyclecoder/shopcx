@@ -142,6 +142,22 @@ function buildToolDefinitions() {
       input_schema: { type: "object" as const, properties: {}, required: [] as string[] },
     },
     {
+      name: "find_customer",
+      description:
+        "Find a customer account from identifiers the customer gives you IN THE CONVERSATION — their name, street address, phone, or a different email. USE THIS THE MOMENT the inbound email does not resolve to an account and the customer supplies ANY of those details. Do not escalate 'a human should search by name/address' — this IS that search. Returns graded candidates (high = shared address corroborating the surname, or a shared phone). An empty result is a FACT you may state ('I can't find an account on those details'); it is never a reason to imply we can see their orders.",
+      input_schema: {
+        type: "object" as const,
+        properties: {
+          name: { type: "string", description: "Full name or surname as the customer wrote it" },
+          address1: { type: "string", description: "Street line as written, e.g. '16815 328th Ave'" },
+          zip: { type: "string", description: "Postal code if given" },
+          phone: { type: "string", description: "Phone as written; any format" },
+          email: { type: "string", description: "An ALTERNATE email the customer names (not the inbound one, which already failed)" },
+        },
+        required: [] as string[],
+      },
+    },
+    {
       name: "get_customer_timeline",
       description: "Get a chronological 60-day timeline of orders, fulfillments, subscription changes (variant swaps, pauses, frequency changes), payments, and returns — PLUS pre-computed anomaly flags that surface contradictions between customer narrative and ground truth (e.g. 'subscription was changed after order entered fulfillment'). USE THIS FIRST whenever the customer says something that contradicts what they expect: 'I didn't order X', 'I changed it but...', 'why am I being charged', 'where's my order', 'I cancelled but...'. The anomalies section will save you from accepting a wrong customer framing.",
       input_schema: { type: "object" as const, properties: {}, required: [] as string[] },
@@ -754,6 +770,13 @@ ${buildPoliciesSection(policies || [])}
 ${buildPromptSections(dbPrompts || [])}
 
 ${compiledLibrarySection ? `${compiledLibrarySection}\n\n` : ""}DISCOUNT-CLAIM VERIFICATION (hard rule — never agree-and-refund a discount claim):
+UNIDENTIFIED CUSTOMER — IDENTIFY FIRST, PROMISE NOTHING (ticket 879dd36b, 2026-08-12).
+When the inbound email does not resolve to an account:
+1. ACKNOWLEDGE the request in one line, then ASK for or USE identifying details. Nothing else.
+2. Call 'find_customer' with whatever the customer supplied — name, street address, phone, an alternate email. If they gave you an address and you did not search it, you have not done your job. NEVER escalate with "a human should search by name/address"; that search is a tool you have.
+3. Do NOT name a remedy you have not verified they qualify for. Saying "cancelling your deliveries and processing your refund are both things we can absolutely take care of" to someone you cannot even identify is a promise you may have to break: a refund may be a renewal (CATEGORICALLY denied), outside the 30-day window, not their first order (MBG is first-order-only), or their lifetime return may already be used. Establish WHO they are, then WHAT they bought, and only then what is possible.
+4. State only what the tools returned. If 'find_customer' finds nothing, the honest line is "I can't find an account under those details" — NEVER "I can see from your address that you've been receiving shipments from us." That sentence was written to a customer we had no record of, in the same turn as an internal note saying no orders were visible. Do not invent a verification to sound helpful; an unverified reassurance is worse than an honest gap.
+
 When a customer claims they did NOT get a discount / promo / coupon, or that a discount "didn't apply," NEVER agree or compute a refund from their claim. Verify against the order data first:
 - The order's actual applied discount is in its "coupons" field (code + dollar amount) in RECENT ORDERS. If the order already shows a coupon and amount, the discount WAS applied — show the customer the code + the amount, do not refund it again.
 - Quantity-break discounts depend on the cart's total unit count (the storefront tiers are e.g. 0% / 8% / 12% for 1 / 2 / 3 units). A 1-unit order does NOT earn a multi-unit break — never invent a discount the cart never qualified for.
@@ -970,6 +993,17 @@ export async function executeToolCall(
     switch (name) {
       case "get_customer_account":
         return await getCustomerAccount(admin, workspaceId, customerId);
+      case "find_customer": {
+        const { findCustomerByIdentifiers, findCustomerToText } = await import("@/lib/customer-find");
+        const r = await findCustomerByIdentifiers(admin, workspaceId, {
+          name: (input?.name as string) ?? null,
+          address1: (input?.address1 as string) ?? null,
+          zip: (input?.zip as string) ?? null,
+          phone: (input?.phone as string) ?? null,
+          email: (input?.email as string) ?? null,
+        });
+        return findCustomerToText(r);
+      }
       case "get_customer_timeline": {
         const t = await buildCustomerTimeline(workspaceId, customerId);
         return timelineToText(t);

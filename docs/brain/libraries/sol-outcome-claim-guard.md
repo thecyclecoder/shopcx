@@ -21,8 +21,9 @@ Sibling to [[sol-policy-bait-guard]]: both are deterministic backstops on Sol's 
 ## Wire-in sites
 
 - **`scripts/builder-worker.ts` `runTicketHandleJob`** — right after `assessSolReplyBaitRisk` passes, BEFORE `deliverTicketMessage` fires. A block writes the reason + matched phrases to `job.log_tail`, leaves the Direction durable, and the customer never sees the baited turn. This is the Sol box-reply path — the primary Phase 3 wire-in.
+- **`src/lib/action-executor.ts` `executeSonnetDecision` — DONE (2026-08-12).** Wired at the single `stampedSend` chokepoint, which every customer-facing send in the executor flows through (clarification calls it directly, `trackedSend` wraps it, the workflow executor is handed it) — so one wire-in covers every branch. This is what kept it deferred: it looked like N sites, it is one. The gap was live: ticket 879dd36b ran `Orchestrator model: sonnet (default)` and shipped BOTH a baited remedy and an unbacked outcome claim, because Sol's replies were guarded here and the cheap inline path was not. A block withholds the reply and escalates; the guards fail OPEN on their own error (a throwing guard must never swallow a customer reply).
 - Future wire-ins (still deferred to their own follow-up work):
-  - `src/lib/action-executor.ts` `executeSonnetDecision` — every `stampedSend` branch (`direct_action`'s confirmation, `journey`/`playbook`'s in-flight sends, `workflow.sendReply`, `macro`/`kb_response`/`ai_response`, clarification). At those sites the caller has a `_resolutionEventId` and passes it, so the 'unbacked' stamp lands on the write-ahead ledger.
+  - `src/lib/action-executor.ts` legacy note — superseded by the line above (`direct_action`'s confirmation, `journey`/`playbook`'s in-flight sends, `workflow.sendReply`, `macro`/`kb_response`/`ai_response`, clarification). At those sites the caller has a `_resolutionEventId` and passes it, so the 'unbacked' stamp lands on the write-ahead ledger.
   - `src/app/api/tickets/[id]/improve/*` — Improve tab manual sends.
 
 ## Pattern design
