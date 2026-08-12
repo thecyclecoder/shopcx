@@ -73,6 +73,39 @@ export function filterCandidatesByDunningRetryWindow<T extends { id: string }>(
 //
 // Pure — no I/O. Tested via [[../inngest/internal-subscription-renewals]]
 // stale-attempt test.
+/**
+ * How long a `no_payment_method` alert suppresses the next one for the same subscription.
+ *
+ * The attempt repeats DAILY while a sub has no resolvable card, so an un-deduped alert would
+ * write an identical timeline row every day — as unreadable as no row at all. A week is short
+ * enough that a genuinely stuck sub keeps resurfacing and long enough that it never becomes noise.
+ */
+export const NO_PAYMENT_METHOD_ALERT_DEDUPE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Should this renewal skip raise a human-facing alert?
+ *
+ * ⭐ `no_payment_method` is the ONLY skip that can loop forever unseen: it does not advance
+ * `next_billing_date`, so the sub is re-picked daily, and it emits only a Control Tower beat that
+ * reads as a routine skip. The other two holds (no-recipient-name, overcharge guard) already
+ * write a `needs_attention` customer event. Audited 2026-08-12: three subs sat silently stuck for
+ * 20-24 days ($397.72 of renewals), each with a valid Braintree token merely missing `is_default`.
+ *
+ * Pure so the dedupe window is pinnable. `lastAlertAt` is the most recent alert for THIS
+ * subscription (null = never alerted).
+ */
+export function shouldAlertNoPaymentMethod(
+  reason: string,
+  lastAlertAt: string | Date | null,
+  now: Date = new Date(),
+): boolean {
+  if (reason !== "no_payment_method") return false;
+  if (!lastAlertAt) return true;
+  const last = lastAlertAt instanceof Date ? lastAlertAt : new Date(lastAlertAt);
+  if (Number.isNaN(last.getTime())) return true; // unparseable → alert rather than swallow
+  return now.getTime() - last.getTime() >= NO_PAYMENT_METHOD_ALERT_DEDUPE_MS;
+}
+
 export function isRenewalAttemptStale(
   expected: string | null | undefined,
   actual: string | null | undefined,
@@ -684,7 +717,9 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
           .maybeSingle();
         pm = data;
       }
-      if (!pm) return { skip: true, reason: "no_payment_method" } as const;
+      // Carry customer_id so the skip handler can surface this on the customer's timeline.
+      // Without it a no-card sub skips silently every day forever (see the handler).
+      if (!pm) return { skip: true, reason: "no_payment_method", customer_id: sub.customer_id } as const;
 
       const { data: customer } = await admin
         .from("customers")
@@ -744,6 +779,40 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
             source: "internal_subscription_renewal",
             summary:
               "Renewal blocked — the customer's stored shipping address has no recipient name and no first/last name is on their record. Add a name before re-running.",
+            properties: { subscription_id, needs_attention: true },
+          });
+        });
+      }
+      if (ctx.reason === "no_payment_method") {
+        // ⭐ This skip does NOT advance next_billing_date, so the sub is re-picked and re-skipped
+        // EVERY day, forever, with no human-facing signal — only a Control Tower beat that reads
+        // as a routine skip. Audited 2026-08-12: 3 subs silently stuck 20-24 days ($397.72 of
+        // renewals), every one with a valid Braintree token that simply wasn't flagged
+        // `is_default`. Surface it on the customer timeline like the other two holds do.
+        //
+        // Deduped to at most one alert per sub per week: the attempt repeats daily, and a
+        // timeline full of identical rows is as unreadable as no row at all.
+        await step.run("log-no-payment-method-event", async () => {
+          const { data: recent } = await admin
+            .from("customer_events")
+            .select("created_at")
+            .eq("workspace_id", workspace_id)
+            .eq("event_type", "subscription.renewal_blocked_no_payment_method")
+            .contains("properties", { subscription_id })
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle();
+          if (!shouldAlertNoPaymentMethod(ctx.reason, recent?.created_at ?? null)) return;
+
+          const { logCustomerEvent } = await import("@/lib/customer-events");
+          await logCustomerEvent({
+            workspaceId: workspace_id,
+            customerId: (ctx.customer_id as string | null) ?? null,
+            eventType: "subscription.renewal_blocked_no_payment_method",
+            source: "internal_subscription_renewal",
+            summary:
+              "Renewal blocked — no default payment method resolves for this subscription, so it is skipped every day without billing. " +
+              "Set a card as default (or set subscriptions.payment_method_id) and it will renew on the next daily run.",
             properties: { subscription_id, needs_attention: true },
           });
         });
