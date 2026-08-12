@@ -12,6 +12,13 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Scope stuck-dunning assertion to cycles the payday retry cron owns** · verified 2026-08-11 · → [[../inngest/control-tower-monitor]]
+- **Create return direct action must honor a store-credit resolution, not force a cash refund** · verified 2026-08-11 · → [[../lifecycles/return-pipeline]]
+- **Make the predeploy guards actually run (enforce them in the build lane)** · verified 2026-08-11 · → [[../operational-rules#Predeploy static guards — enforced in the build lane, not by npm's `predeploy` hook]], [[../libraries/vercel-project]]
+- **Reconcile migration-drift 2026-08 — retire the syntactically-broken superseded migration + apply the strict-superset dashboard_notifications CHECK** · verified 2026-08-11 · → [[../libraries/control-tower]]
+- **Security dependency upgrades** · verified 2026-08-11 · → [[../libraries/security-agent]] § A fold must never kill the dep-upgrade loop
+- **Swap-variant self-heal must not re-fire an already-successful swap** · verified 2026-08-11 · → [[../lifecycles/commerce-sdk]]
+- **Sol's workflow Direction can't persist — ticket_direction_path enum missing value guard** · verified 2026-08-11 · → [[../libraries/ticket-directions]]
 - **change_quantity self-swap false-fails the identity verdict — spurious escalation + silently reset grandfathered price** · verified 2026-08-10 · → [[../libraries/subscription-items]], [[../libraries/action-executor]]
 - **Claim-guard backs a truthful restatement of an already-completed cancellation** · verified 2026-08-10 · → [[../lifecycles/ticket-lifecycle]]
 - **create_subscription can never create an in-house subscription — the fallback that would save it runs after the insert that fails** · verified 2026-08-10 · → [[lifecycles/subscription-billing]]
@@ -950,6 +957,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **[TEST] Goal-path v2 — clean hands-off validation** · folded 2026-06-29 · → [[recipes/pipeline-validation-tests]]
 - **Sol: set the ticket's direction once (box session), then run it cheap (API) — re-session on drift** · folded 2026-07-08 · → [[lifecycles/ticket-lifecycle]]
 - **v3 Ad Creative Engine** · folded 2026-07-22 · → [[lifecycles/quant-desk-reweight-loop]]
+- **Cross-customer return: `create_return`'s order lookup never proved the order belonged to the ticket's customer** · superseded 2026-08-11 · fix shipped in #2454, not by this spec · → [[../operational-rules]]
+- **Cross-tenant write: subscription item sync was keyed on `shopify_contract_id` alone** · superseded 2026-08-11 · fix shipped in #2454, not by this spec · → [[../libraries/subscription-items]]
 
 ## Related
 
