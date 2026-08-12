@@ -11,7 +11,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import { retrieveContext } from "@/lib/rag";
-import { getShopifyOnHandByVariant } from "@/lib/inventory/read";
+import { getShopifyOnHandByVariant, getAmplifierOnHandBySku } from "@/lib/inventory/read";
 import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { renderDirectionSystemPrompt, prefixDirectionContextReasoning } from "@/lib/ai-context";
@@ -1745,7 +1745,7 @@ async function getProductKnowledge(admin: Admin, wsId: string, query: string): P
  * ([[inngest/sync-inventory]]).
  */
 async function checkInventory(admin: Admin, wsId: string, query: string): Promise<string> {
-  const [{ data: products }, { data: variants }, { data: crises }, { data: ws }, canonicalOnHand] = await Promise.all([
+  const [{ data: products }, { data: variants }, { data: crises }, { data: ws }, canonicalOnHand, amplifierOnHand] = await Promise.all([
     admin.from("products").select("id, title, inventory_updated_at").eq("workspace_id", wsId).eq("status", "active"),
     admin.from("product_variants")
       .select("product_id, title, option1, sku, available, position, shopify_variant_id")
@@ -1754,12 +1754,22 @@ async function checkInventory(admin: Admin, wsId: string, query: string): Promis
       .select("affected_product_title, affected_variant_id, affected_sku, expected_restock_date")
       .eq("workspace_id", wsId).eq("status", "active"),
     admin.from("workspaces").select("shipping_protection_title").eq("id", wsId).maybeSingle(),
-    // Canonical, live on-hand (single source of truth), keyed by Shopify variant id.
+    // Storefront on-hand (the BUY GATE), keyed by Shopify variant id.
     getShopifyOnHandByVariant(admin, wsId),
+    // ⭐ SHIP TRUTH — Amplifier 3PL on-hand, keyed by SKU. The founder is explicit that Amplifier is
+    // the authority for our inventory: Shopify says what a customer may BUY, Amplifier says what we
+    // can actually SHIP. They normally track, so the gap is invisible until it is the OOS incident.
+    getAmplifierOnHandBySku(admin, wsId),
   ]);
   // On-hand from canonical inventory_levels, never the stale product_variants scalar.
-  const qtyOf = (v: { shopify_variant_id?: string | null }) =>
+  // AMPLIFIER WINS when we have a row for the SKU — it is what determines fulfilment. Shopify is the
+  // fallback for anything the 3PL doesn't carry (digital/virtual, or a SKU not yet mapped).
+  const shipQtyOf = (v: { sku?: string | null }) =>
+    v.sku ? amplifierOnHand.get(String(v.sku).trim()) ?? null : null;
+  const storefrontQtyOf = (v: { shopify_variant_id?: string | null }) =>
     v.shopify_variant_id != null ? canonicalOnHand.get(String(v.shopify_variant_id)) ?? null : null;
+  const qtyOf = (v: { sku?: string | null; shopify_variant_id?: string | null }) =>
+    shipQtyOf(v) ?? storefrontQtyOf(v);
 
   // Exclude virtual / non-shippable products (shipping protection) — they
   // carry junk negative inventory and are never a "missing item".
@@ -1789,6 +1799,15 @@ async function checkInventory(admin: Admin, wsId: string, query: string): Promis
     const label = variantName && variantName !== "Default Title" ? `${productTitle} — ${variantName}` : productTitle;
     const q = qtyOf(v);
     const qty = q == null ? "untracked" : `${q}`;
+    // ⭐ Surface a storefront/3PL SPLIT. When Shopify would let a customer buy more than the 3PL can
+    // ship, that gap IS the out-of-stock incident in the making — say it plainly rather than quoting a
+    // single number that hides it. Only flagged when it actually matters (3PL at/near zero while the
+    // storefront still shows stock), so ordinary small drifts don't add noise.
+    const ship = shipQtyOf(v);
+    const store = storefrontQtyOf(v);
+    const split = ship != null && store != null && ship <= 0 && store > 0
+      ? ` — ⚠️ storefront shows ${store} but the 3PL has ${ship}: sellable, NOT shippable. Do not promise delivery.`
+      : "";
     const inStock = isInStock(productTitle, v);
     const crisis = inStock ? undefined : crisisFor(productTitle, v);
     const status = inStock ? "in stock" : "OUT OF STOCK";
@@ -1799,7 +1818,7 @@ async function checkInventory(admin: Admin, wsId: string, query: string): Promis
       : crisis
         ? ` — active OOS crisis (inventory count is not authoritative)${crisis.expected_restock_date ? ` (expected restock: ${crisis.expected_restock_date})` : ""}`
         : "";
-    return `- ${label}: ${status} (qty ${qty})${note}`;
+    return `- ${label}: ${status} (qty ${qty})${note}${split}`;
   };
 
   // Tokenized match: any token (≥3 chars) hits the product OR variant name/sku.

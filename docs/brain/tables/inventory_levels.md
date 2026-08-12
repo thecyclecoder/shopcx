@@ -4,6 +4,21 @@
 
 Migration: `supabase/migrations/20261011160000_inventory_canonical.sql`. Owner: [[../functions/logistics]].
 
+## ⚠️ Which `location` is the truth — Amplifier, not Shopify (CEO, 2026-08-12)
+
+`location='shopify'` is the **BUY GATE** — what the storefront will let a customer purchase. **`location='amplifier_3pl'` is the SHIP TRUTH** — what the 3PL physically holds, and therefore what can actually be fulfilled. **Amplifier is the authority for our inventory.**
+
+The two normally track, so the distinction is invisible until it isn't — and the moment they diverge *is* the out-of-stock incident: Shopify says available → the customer buys → nothing ships. A reader that quotes only the storefront figure cannot see that coming.
+
+| Reader | Location | Keyed by | Use for |
+|---|---|---|---|
+| [[../libraries/inventory-read]] `getAmplifierOnHandBySku` | `amplifier_3pl` | **SKU** (`sku`/`external_ref`; `variant_id` is null on these rows) | "can we ship it?" — the authority |
+| `getShopifyOnHandByVariant` | `shopify` | Shopify variant id | "will the storefront sell it?" — the gate |
+
+`check_inventory` (the orchestrator tool) prefers **Amplifier by SKU**, falls back to Shopify-by-variant for anything the 3PL doesn't carry, and emits an explicit *"sellable, NOT shippable"* warning when the 3PL is at zero while the storefront still shows stock.
+
+**Never read `product_variants.inventory_quantity`.** It is a frozen backfill snapshot. Measured 2026-08-12 it read **3,746** for Mixed Berry (real: 7,779) and **3,748** for Strawberry Lemonade (real: **3**) — wrong for both, in opposite directions, and the 3,746 is the same frozen figure behind incident 9a7f9481.
+
 ## `inventory_levels` — current levels (fast read path + single source of truth)
 
 | Column | Type | Notes |
