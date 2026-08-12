@@ -361,13 +361,17 @@ export type SolAssistedPurchaseFastDefaultAssessment =
 /**
  * Patterns that recreate the Latrina aa0b6697 dead-end — telling a checkout-
  * stuck customer to "try another card / PayPal / Shop Pay" instead of
- * concierging the purchase on our Braintree minisite. Intentionally narrow
- * (first-person suggestion or imperative — matches "try another card",
- * "you could try PayPal", "try using Shop Pay", "have you tried a different
- * card") — a REFERENCE to what the customer already tried ("you mentioned
- * Shop Pay") does NOT match. That would defeat the guard's purpose (which is
- * to prevent Sol from PROPOSING the failing rails, not from acknowledging
- * them).
+ * concierging the purchase on our Braintree minisite — AND the ticket 3dd271be
+ * companion dead-ends: looping on "clear your cache" / "try incognito" / "try
+ * a different browser" / "hard refresh" instead of pivoting to assisted
+ * purchase. Both patterns tell a stuck customer to keep fighting the failing
+ * storefront rather than routing them to the add-payment-method journey.
+ * Intentionally narrow (first-person suggestion or imperative — matches "try
+ * another card", "you could try PayPal", "clear your cache", "try in
+ * incognito") — a REFERENCE to what the customer already tried ("you mentioned
+ * you tried incognito") does NOT match. That would defeat the guard's purpose
+ * (which is to prevent Sol from PROPOSING the failing rails, not from
+ * acknowledging them).
  */
 const DEAD_END_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
   {
@@ -394,6 +398,31 @@ const DEAD_END_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
     pattern: /\buse\s+(?:a\s+)?different\s+(?:card|payment\s+method|browser)\s+to\s+(?:check\s*out|complete|finish)\b/i,
     label: "use a different card / payment to check out",
   },
+  // Ticket 3dd271be dead-ends — the storefront-block cache-clear loop. Prefix
+  // is REQUIRED (not optional) on the clear-cache and hard-refresh patterns so
+  // a reference to what the customer already tried ("you tried clearing your
+  // cache") does NOT match — only a Sol-side SUGGESTION ("please clear your
+  // cache", "could you clear your cache", "Clear your cache and reload") does.
+  {
+    pattern: /(?:^|[.!?]\s+|please\s+|could\s+you\s+|can\s+you\s+|would\s+you\s+|you\s+(?:could|can|might|should|need\s+to)\s+|try(?:\s+to)?\s+)clear(?:ing)?\s+(?:your|the)\s+(?:browser\s+)?(?:cache|cookies)\b/i,
+    label: "clear your (browser) cache / cookies",
+  },
+  {
+    pattern: /(?:^|[.!?]\s+|please\s+|could\s+you\s+|can\s+you\s+|would\s+you\s+|you\s+(?:could|can|might|should)\s+)?try(?:\s+(?:using|in|with))?\s+(?:an?\s+)?(?:incognito|private)(?:\s+(?:mode|browsing|window|tab))?\b/i,
+    label: "try (in) incognito / private",
+  },
+  {
+    pattern: /(?:^|[.!?]\s+|please\s+|could\s+you\s+|can\s+you\s+|would\s+you\s+|you\s+(?:could|can|might|should)\s+)?try(?:\s+(?:using|in|with))?\s+(?:an?\s+)?(?:different|another)\s+browser\b/i,
+    label: "try a different browser",
+  },
+  {
+    pattern: /(?:^|[.!?]\s+|please\s+|could\s+you\s+|can\s+you\s+|would\s+you\s+|you\s+(?:could|can|might|should)\s+)?try(?:\s+using)?\s+(?:chrome|safari|firefox|edge)\b(?:\s+(?:instead|browser|to))?/i,
+    label: "try Chrome / Safari / Firefox / Edge",
+  },
+  {
+    pattern: /(?:^|[.!?]\s+|please\s+|could\s+you\s+|can\s+you\s+|would\s+you\s+|you\s+(?:could|can|might|should|need\s+to)\s+|try(?:\s+to|\s+a)?\s+|do\s+a\s+|perform\s+a\s+)hard(?:\s+|-)refresh(?:ing)?(?:\s+(?:the|your)?\s*(?:page|browser)?)?\b/i,
+    label: "hard refresh the page",
+  },
 ];
 
 /**
@@ -401,8 +430,11 @@ const DEAD_END_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
  * [[../../docs/brain/specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]].
  * The founder directive (2026-07-10): ANY checkout issue must default, as fast
  * as possible, to us CONCIERGING the purchase — never a stateless "try another
- * card / try PayPal / try Shop Pay" dead-end. The Latrina aa0b6697 incident is
- * the recorded failure mode this guard blocks.
+ * card / try PayPal / try Shop Pay" dead-end, and never a "clear your cache /
+ * try incognito / try a different browser / hard refresh" loop on a
+ * pre-purchase storefront block. The Latrina aa0b6697 incident + the ticket
+ * 3dd271be Mixed Berry 60-day case are the recorded failure modes this guard
+ * blocks.
  *
  * The box worker calls this after `assertSolAssistedPurchaseReplyNeverClaimsPlaced`
  * on a checkout-stuck ticket. A reply that suggests the customer keep fighting

@@ -361,3 +361,93 @@ test("Phase 5: empty reply on checkout-stuck → PASS (nothing to block)", () =>
   const r = assertSolFastDefaultToConcierge({ isCheckoutStuck: true, firstReply: "" });
   assert.equal(r.ok, true);
 });
+
+// ── Ticket 3dd271be dead-ends — the cache-clear / incognito loop ─────────
+
+test("3dd271be: 'clear your cache' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "Could you try to clear your cache and reload the product page?",
+  });
+  assert.equal(r.ok, false);
+  if (r.ok === false) {
+    assert.equal(r.kind, "checkout_stuck_dead_end_reply");
+    assert.match(r.matched_phrase, /clear/i);
+  }
+});
+
+test("3dd271be: 'clear the browser cache' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "Please clear the browser cache and try again.",
+  });
+  assert.equal(r.ok, false);
+});
+
+test("3dd271be: 'clear your cookies' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "You could clear your cookies for our site and see if that helps.",
+  });
+  assert.equal(r.ok, false);
+});
+
+test("3dd271be: 'try incognito' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "Could you try in incognito mode? Sometimes that resolves it.",
+  });
+  assert.equal(r.ok, false);
+  if (r.ok === false) assert.match(r.matched_phrase, /incognito/i);
+});
+
+test("3dd271be: 'try a private window' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "Please try a private window and see if the option appears.",
+  });
+  assert.equal(r.ok, false);
+});
+
+test("3dd271be: 'try a different browser' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "Could you try a different browser? Sometimes Safari has issues.",
+  });
+  assert.equal(r.ok, false);
+});
+
+test("3dd271be: 'try Chrome instead' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "Please try Chrome instead and let me know if that works.",
+  });
+  assert.equal(r.ok, false);
+});
+
+test("3dd271be: 'do a hard refresh' on checkout-stuck → BLOCK", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: "Could you do a hard refresh on the product page?",
+  });
+  assert.equal(r.ok, false);
+});
+
+test("3dd271be: cache-clear advice on a NON checkout-stuck ticket → PASS (guard is a no-op)", () => {
+  // Dunning / order-status tickets can legitimately mention cache-clear or
+  // browser fixes; the guard only fires on the checkout-stuck lane.
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: false,
+    firstReply: "If the portal is stuck, please clear your cache and reload.",
+  });
+  assert.equal(r.ok, true);
+});
+
+test("3dd271be: acknowledging what the customer already tried (incognito) → PASS (reference, not suggestion)", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply:
+      "I saw you already tried incognito and clearing your cache — none of that fixed it. I can just place this for you on my side.",
+  });
+  assert.equal(r.ok, true, "a reference (not a suggestion) must pass");
+});

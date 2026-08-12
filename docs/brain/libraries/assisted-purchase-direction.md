@@ -149,9 +149,14 @@ export function assertSolFastDefaultToConcierge(ctx: {
 }): { ok: true } | { ok: false; kind: "checkout_stuck_dead_end_reply"; reason: string; matched_phrase: string };
 ```
 
-Pure predicate the worker's pre-send chain runs AFTER `assertSolAssistedPurchaseReplyNeverClaimsPlaced`. On a checkout-stuck ticket, a reply that suggests the customer keep fighting the failing rails (`try another card`, `try PayPal`, `try Shop Pay`, `try a different payment method`, `have you tried a different card`, `use a different card to check out`) is BLOCKED — Direction stays durable, reply is NOT delivered, ticket escalates to June. On a non-checkout-stuck ticket the guard is a no-op (a dunning reply legitimately says "try another card").
+Pure predicate the worker's pre-send chain runs AFTER `assertSolAssistedPurchaseReplyNeverClaimsPlaced`. On a checkout-stuck ticket, a reply that suggests the customer keep fighting the failing rails is BLOCKED — Direction stays durable, reply is NOT delivered, ticket escalates to June. On a non-checkout-stuck ticket the guard is a no-op (a dunning reply legitimately says "try another card").
 
-Distinction between PROPOSE and REFERENCE: "I saw you mentioned Shop Pay — I can just place this for you" PASSES (a reference to what the customer already tried), while "You could try Shop Pay" BLOCKS (a suggestion to keep fighting).
+Two families of dead-end patterns block:
+
+- **Payment-rail dead-ends (Latrina aa0b6697):** `try another card`, `try PayPal`, `try Shop Pay`, `try a different payment method`, `have you tried a different card`, `use a different card to check out`.
+- **Storefront-block cache-loop dead-ends (ticket 3dd271be — Mixed Berry 60-day sub):** `clear your (browser) cache / cookies`, `try (in) incognito / private (mode / window)`, `try a different browser`, `try Chrome / Safari / Firefox / Edge`, `(do a) hard refresh`. These are the loop the orchestrator ran 3× before inventing a "30/60/90 Day Supply card" UI that didn't exist — the guard treats a fresh cache-clear / incognito / different-browser SUGGESTION on a checkout-stuck ticket the same as a "try another card" dead-end.
+
+Distinction between PROPOSE and REFERENCE: "I saw you mentioned Shop Pay — I can just place this for you" PASSES (a reference to what the customer already tried); "I saw you already tried incognito and clearing your cache — I can just place this for you" PASSES. "You could try Shop Pay" BLOCKS. "Please clear your cache and reload" BLOCKS. The cache-clear / hard-refresh patterns REQUIRE a prescriptive prefix (`please`, `could you`, `you should`, sentence-start imperative) so an acknowledgment of what the customer already tried never trips.
 
 ### Analytics — the concierge-flow funnel
 
