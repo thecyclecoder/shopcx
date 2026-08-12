@@ -77,3 +77,51 @@ test("both signals present (out-of-policy + two returns) → BLOCKED by structur
   assert.equal(res.ok, false);
   if (res.ok === false) assert.equal(res.kind, "multiple_remedies_offered");
 });
+
+// ── unverified_remedy_promise (ticket 879dd36b, 2026-08-12) ─────────────────────────────────
+// The two original signals both assume we KNOW something: one needs a declared out-of-policy
+// verdict, the other a stacked-remedy shape. Neither fires on a promise made under total
+// IGNORANCE — which is the more dangerous case, because eligibility is unknown rather than
+// known-bad. Mark McCartney's email matched no account; the reply promised a refund anyway.
+
+test("unverified_remedy_promise — the EXACT 879dd36b sentence is blocked when the customer is unidentified", () => {
+  const v = assessSolReplyBaitRisk({
+    contextSummary: "Customer wants to cancel and get a refund. No account found under their email.",
+    firstReply:
+      "Hi Mark, thank you for providing your address. I want to make sure we get this sorted out for you — cancelling your deliveries and processing your refund are both things we can absolutely take care of.",
+    customerIdentified: false,
+  });
+  assert.equal(v.ok, false);
+  if (!v.ok) {
+    assert.equal(v.kind, "unverified_remedy_promise");
+    assert.match(v.reason, /NOT identified/);
+    assert.match(v.reason, /categorically denied|MBG|lifetime return/);
+  }
+});
+
+test("the SAME sentence passes once the customer IS identified (the guard is about ignorance, not the words)", () => {
+  const v = assessSolReplyBaitRisk({
+    contextSummary: "In-policy: first order, within the 30-day window, no prior return.",
+    firstReply: "cancelling your deliveries and processing your refund are both things we can absolutely take care of",
+    customerIdentified: true,
+  });
+  assert.equal(v.ok, true);
+});
+
+test("acknowledging + asking to identify is NEVER blocked — only the promise is", () => {
+  const v = assessSolReplyBaitRisk({
+    contextSummary: "No account found under their email.",
+    firstReply:
+      "Thanks Mark — I can't find an account under that email. Was the order placed under a different email, or possibly a spouse's name or card?",
+    customerIdentified: false,
+  });
+  assert.equal(v.ok, true, "the identify-first reply must always be sendable");
+});
+
+test("omitting customerIdentified preserves existing behaviour (defaults to identified)", () => {
+  const v = assessSolReplyBaitRisk({
+    contextSummary: "In-policy.",
+    firstReply: "I'll issue a refund today.",
+  });
+  assert.equal(v.ok, true, "existing callers must not start blocking");
+});

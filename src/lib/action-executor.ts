@@ -184,6 +184,17 @@ export interface ActionContext {
   // this row so every branch shares one write-ahead ledger row per turn.
   // See docs/brain/tables/ticket_resolution_events.md.
   _resolutionEventId?: string;
+  /**
+   * ⭐ Whether the customer on this ticket is genuinely IDENTIFIED — resolved to a real account,
+   * not merely a stub row the inbound webhook minted from an unknown sender. Read by the
+   * policy-bait guard on the send path: when false, ANY promised remedy is blocked, because
+   * eligibility cannot have been established for someone we cannot find.
+   *
+   * Set by the caller that knows (the unified handler's resolve step). Absent/undefined is treated
+   * as identified, so every existing call site keeps today's behaviour — this only ever ADDS a
+   * block for a caller that explicitly reports "I could not identify this person".
+   */
+  _customerIdentified?: boolean;
   // Internal: set by a direct action whose REAL outcome is async and
   // can't be known at the executor's return time (bill_now on Appstle
   // is the archetype — the vendor accepts the trigger then can decline
@@ -3794,7 +3805,59 @@ export async function executeSonnetDecision(
   // above this bound + matching ticket_id yields THIS turn's cost delta.
   // Spec: docs/brain/specs/sol-cost-csat-measurement-vs-pre-sol-baseline.md § Phase 1
   const turnStartedAt = new Date().toISOString();
+  // ⭐ THE DEFERRED WIRE-IN (sol-outcome-claim-guard "Future wire-ins" / 2026-08-12).
+  //
+  // Both deterministic send-guards existed but ran ONLY on Sol's box path
+  // (`builder-worker.runTicketHandleJob`). The brain listed `executeSonnetDecision` as a deferred
+  // wire-in — and that is precisely the surface that shipped the 2026-08-12 failure on ticket
+  // 879dd36b, which ran `Orchestrator model: sonnet (default)`:
+  //   - "cancelling your deliveries and processing your refund are both things we can absolutely
+  //      take care of"  → a remedy promised to a customer we could not even identify
+  //   - "I can see from your address that you've been receiving shipments from us"
+  //      → an outcome claim with no backing row, contradicting this run's own internal note
+  //        ("There are no orders or subscriptions visible") written 30 seconds earlier.
+  // Sol's replies were guarded against exactly these; the cheap inline path was not.
+  //
+  // `stampedSend` is the SINGLE chokepoint for every customer-facing send in this executor —
+  // clarification calls it directly, `trackedSend` wraps it, and the workflow executor is handed it
+  // — so guarding here covers every branch at once rather than per-branch (which is how the wire-in
+  // stayed deferred: it looked like N sites, it is one).
+  //
+  // A blocked reply is NOT sent and the ticket escalates, mirroring Sol's path (block → June
+  // re-drafts). Fails OPEN on a guard error: a guard that throws must never swallow a customer
+  // reply — the failure mode we are fixing is silence-and-fabrication, not over-blocking.
   const stampedSend: SendFn = async (m, sb) => {
+    if (m && m.trim() && !sb) {
+      try {
+        const { assessSolReplyBaitRisk } = await import("@/lib/sol-policy-bait-guard");
+        const bait = assessSolReplyBaitRisk({
+          contextSummary: String(decision.reasoning ?? ""),
+          plan: null,
+          firstReply: m,
+          customerIdentified: ctx._customerIdentified !== false,
+        });
+        if (!bait.ok) {
+          console.warn(`[executor] policy-bait guard BLOCKED the reply (${bait.kind}): ${bait.reason}`);
+          await escalateTicket(ctx, `Reply blocked by the policy-bait guard (${bait.kind}): ${bait.reason} — matched "${bait.matched_phrase}". Draft withheld; needs a human re-draft.`);
+          return;
+        }
+        const { assertClaimsBackedByOutcomes } = await import("@/lib/sol-outcome-claim-guard");
+        const claims = await assertClaimsBackedByOutcomes({
+          admin: ctx.admin,
+          workspace_id: ctx.workspaceId,
+          ticket_id: ctx.ticketId,
+          message: m,
+          resolution_event_id: ctx._resolutionEventId,
+        });
+        if (!claims.ok) {
+          console.warn(`[executor] outcome-claim guard BLOCKED the reply: ${claims.reason}`);
+          await escalateTicket(ctx, `Reply blocked by the outcome-claim guard: ${claims.reason}. Draft withheld; needs a human re-draft.`);
+          return;
+        }
+      } catch (e) {
+        console.warn("[executor] send guards errored — failing OPEN:", errText(e));
+      }
+    }
     await send(m, sb);
     await stampResolutionShipped(ctx);
   };

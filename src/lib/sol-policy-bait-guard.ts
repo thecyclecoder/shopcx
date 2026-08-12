@@ -31,13 +31,28 @@ export interface SolReplyBaitContext {
   plan?: Record<string, unknown> | null;
   /** The DRAFT reply Sol wants to send to the customer. */
   firstReply: string;
+  /**
+   * ⭐ Whether the customer has actually been IDENTIFIED — resolved to a real account with order
+   * history. Pass `false` when the inbound address matched nothing (or matched only a stub row the
+   * ticket itself minted). Defaults to `true` so every existing caller keeps its behaviour.
+   *
+   * WHY THIS EXISTS. The two original signals both assume we KNOW something: one needs a declared
+   * out-of-policy verdict, the other needs a stacked-remedy shape. Neither fires on a promise made
+   * under total IGNORANCE — and that is the more dangerous case, because eligibility is unknown
+   * rather than known-bad. Ticket 879dd36b (2026-08-12): "cancelling your deliveries and processing
+   * your refund are both things we can absolutely take care of", written to someone we could not
+   * find. A refund there might have been a renewal (categorically denied), outside the 30-day MBG
+   * window, not their first order (MBG is first-order-only), or their one lifetime return already
+   * spent. We had no idea — which is exactly why it must not be promised.
+   */
+  customerIdentified?: boolean;
 }
 
 export type SolReplyBaitAssessment =
   | { ok: true }
   | {
       ok: false;
-      kind: "out_of_policy_promise" | "multiple_remedies_offered";
+      kind: "out_of_policy_promise" | "multiple_remedies_offered" | "unverified_remedy_promise";
       reason: string;
       matched_phrase: string;
     };
@@ -94,6 +109,30 @@ const PROMISE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
       /\bwe['’]?(?:ll|\s?will) (?:issue|initiate|process|set up|start|generate|create|send|arrange|refund|comp|waive|expedite) (?:you )?(?:a|the|your|two|both)? ?(?:refunds?|returns?|prepaid labels?|store credits?|exchanges?|replacements?|expedited (?:shipping|delivery)?)/i,
     label: "we-will promised remedy",
   },
+  // ⭐ CAPABILITY ASSERTION (ticket 879dd36b, 2026-08-12). The four patterns above all catch a
+  // COMMITMENT ("I'll issue…", "you'll receive…", "here is your…"). The live failure used a
+  // capability claim instead — "cancelling your deliveries and processing your refund are both
+  // things we can absolutely take care of" — which promises just as hard to a customer while
+  // matching none of them. Reassurance about what we CAN do is a promise; the customer reads no
+  // difference. Requires a remedy noun nearby so ordinary helpfulness ("we can take a look at
+  // that", "that's something we can check") is untouched.
+  {
+    pattern:
+      /\b(?:we|that|this|those|these|it)(?:['’]s| is| are)?\s+(?:both\s+)?(?:things?\s+)?(?:we\s+)?can\s+(?:absolutely\s+|definitely\s+|certainly\s+|easily\s+)?(?:take care of|handle|do|sort out|arrange|process)\b[^.!?]{0,80}?(?:refunds?|returns?|prepaid labels?|store credits?|exchanges?|replacements?)/i,
+    label: "capability-assertion remedy promise",
+  },
+  {
+    // The same shape with the remedy stated FIRST — "cancelling your deliveries and processing
+    // your refund are both things we can absolutely take care of".
+    pattern:
+      /(?:refunds?|returns?|cancell?ing|prepaid labels?|store credits?|exchanges?|replacements?)[^.!?]{0,100}?\b(?:are|is)\s+(?:both\s+)?(?:things?|something)\s+we\s+can\s+(?:absolutely\s+|definitely\s+|certainly\s+|easily\s+)?(?:take care of|handle|do|sort out|arrange|process)\b/i,
+    label: "capability-assertion remedy promise (remedy-first)",
+  },
+  {
+    pattern:
+      /\b(?:happy|glad|able)\s+to\s+(?:issue|process|arrange|send|set up)\s+(?:you\s+)?(?:a|the|your)?\s?(?:refunds?|returns?|prepaid labels?|store credits?|replacements?)/i,
+    label: "happy-to remedy promise",
+  },
   {
     pattern:
       /\b(?:let|allow) me (?:to )?(?:issue|process|initiate|set up|start|generate|arrange) (?:a|the|your)? ?(?:refund|return|prepaid label|store credit|exchange|replacement)/i,
@@ -134,6 +173,24 @@ export function assessSolReplyBaitRisk(ctx: SolReplyBaitContext): SolReplyBaitAs
           "reply stacks multiple remedies in one turn (the returns policy caps at one MBG return per customer for life — any offer of two returns/refunds/labels is a bait)",
         matched_phrase: m[0],
       };
+    }
+  }
+
+  // ⭐ PROMISE UNDER IGNORANCE. Fires regardless of verdict, like the structural check above: if we
+  // have not identified the customer we cannot have established eligibility for ANY remedy, so
+  // naming one is a promise we may have to break. Acknowledging and asking to identify them is
+  // always available and is never blocked — only the promise is.
+  if (ctx.customerIdentified === false) {
+    for (const { pattern, label } of PROMISE_PATTERNS) {
+      const m = reply.match(pattern);
+      if (m) {
+        return {
+          ok: false,
+          kind: "unverified_remedy_promise",
+          reason: `the customer is NOT identified (no account resolved), so eligibility for a remedy cannot have been established — yet the reply promises one (${label}). Acknowledge and identify them first; a refund may be a renewal (categorically denied), outside the MBG window, not their first order, or their one lifetime return already used`,
+          matched_phrase: m[0],
+        };
+      }
     }
   }
 
