@@ -22,6 +22,7 @@ import { assertPostable } from "@/lib/qb-close/close-guard";
 import type { ShopifyOrder } from "@/lib/qb-close/journal-entry";
 import { annotateGatewayAmounts } from "@/lib/qb-close/gateway-amounts";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
+import { errText } from "@/lib/error-text";
 
 // No `export const dynamic` — this repo runs Next 16 with `cacheComponents: true`
 // (next.config.ts), which REJECTS the route-segment `dynamic` config at build time. It is
@@ -328,6 +329,6 @@ export async function POST(request: NextRequest) {
       { status: result.refused ? 409 : 200 },
     );
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+    return NextResponse.json({ error: errText(err) }, { status: 500 });
   }
 }
