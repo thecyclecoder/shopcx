@@ -15,7 +15,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyDirectorDecline, directorInvestigationPrompt } from "./platform-director";
+import { applyDirectorDecline, directorInvestigationPrompt, buildDirectorBrief } from "./platform-director";
 
 type Row = Record<string, unknown>;
 
@@ -95,7 +95,7 @@ test("the decision is recorded as `declined` on the ledger, so the grader scores
 test("the prompt OFFERS decline, and tells Ada it is hers rather than an escalation", () => {
   const prompt = directorInvestigationPrompt({
     jobId: "j", kind: "db_health", specSlug: "s", categories: ["db_health"],
-    actions: [{ category: "db_health", summary: "s", preview: "p", cmd: "" }],
+    actions: [{ category: "db_health", summary: "s", preview: "p", cmd: "", specBody: "" }],
     multi: false, logTail: "",
   });
   assert.match(prompt, /"verdict":"decline"/, "decline must be an offered verdict");
@@ -107,9 +107,72 @@ test("the prompt OFFERS decline, and tells Ada it is hers rather than an escalat
 test("the prompt still refuses rubber-stamping (the safety half is unchanged)", () => {
   const prompt = directorInvestigationPrompt({
     jobId: "j", kind: "db_health", specSlug: "s", categories: ["db_health"],
-    actions: [{ category: "db_health", summary: "s", preview: "p", cmd: "" }],
+    actions: [{ category: "db_health", summary: "s", preview: "p", cmd: "", specBody: "" }],
     multi: false, logTail: "",
   });
   assert.match(prompt, /NEVER rubber-stamp/i);
   assert.match(prompt, /ALWAYS ESCALATE \(never auto-approve\)/i);
+});
+
+// ── the-brief-must-carry-the-proposal (2026-08-11) ──────────────────────────────────────────
+// db_health puts its ENTIRE proposal — diagnosed cause, pg_stat_statements row, EXPLAIN plan,
+// phase plan — on `pending_actions[].spec_body`, leaving summary/preview/cmd null. The brief read
+// only those three, so Ada got a structurally EMPTY brief for a 2,464-char proposal and correctly
+// refused to approve what she could not see. Every db_health proposal escalated to the CEO for
+// "I cannot confirm this is sound" — a missing field, not a judgment failure.
+// Live: dbhealth:slowq:4608471940106465663:specs, card 2026-08-11T17:33Z.
+
+test("buildDirectorBrief carries `spec_body` — a db_health action is no longer an empty brief", () => {
+  const job = {
+    id: "j1",
+    workspace_id: "ws",
+    kind: "db_health",
+    spec_slug: "dbhealth:slowq:4608471940106465663:specs",
+    log_tail: "seq scan on specs · 91ms mean × 26677 calls",
+    pending_actions: [
+      { id: "a1", type: "db_health_build", status: "pending", spec_body: "# Add an index\n\nEXPLAIN:\nSeq Scan on specs" },
+    ],
+  } as unknown as Parameters<typeof buildDirectorBrief>[0];
+  const brief = buildDirectorBrief(job, [{ actionId: "a1", category: "db_health" }] as never);
+  assert.equal(brief.actions[0].specBody, "# Add an index\n\nEXPLAIN:\nSeq Scan on specs");
+  assert.equal(brief.actions[0].summary, "", "summary really is empty — the body is the content");
+});
+
+test("the prompt RENDERS the pre-authored body, so the EXPLAIN is readable", () => {
+  const prompt = directorInvestigationPrompt({
+    jobId: "j", kind: "db_health", specSlug: "s", categories: ["db_health"],
+    actions: [{ category: "db_health", summary: "", preview: "", cmd: "", specBody: "EXPLAIN:\nSeq Scan on specs (rows=132)" }],
+    multi: false, logTail: "",
+  });
+  assert.match(prompt, /PRE-AUTHORED SPEC BODY/);
+  assert.match(prompt, /Seq Scan on specs \(rows=132\)/, "the evidence must reach the prompt verbatim");
+});
+
+test("a db_health brief tells Ada how to judge an index proposal from the plan", () => {
+  const prompt = directorInvestigationPrompt({
+    jobId: "j", kind: "db_health", specSlug: "s", categories: ["db_health"],
+    actions: [{ category: "db_health", summary: "", preview: "", cmd: "", specBody: "EXPLAIN: Seq Scan" }],
+    multi: false, logTail: "",
+  });
+  assert.match(prompt, /READ THE PLAN before deciding/i);
+  assert.match(prompt, /non-sargable/i, "the OR/CASE case must be named — it is why the live proposal was unsound");
+  assert.match(prompt, /already covered by an existing index/i);
+});
+
+test("a non-db_health brief does NOT get the index guidance (no prompt bloat)", () => {
+  const prompt = directorInvestigationPrompt({
+    jobId: "j", kind: "repair", specSlug: "s", categories: ["error_fix"],
+    actions: [{ category: "error_fix", summary: "fix", preview: "p", cmd: "", specBody: "" }],
+    multi: false, logTail: "",
+  });
+  assert.ok(!/READ THE PLAN before deciding/i.test(prompt));
+});
+
+test("an action with no spec_body renders no empty section", () => {
+  const prompt = directorInvestigationPrompt({
+    jobId: "j", kind: "repair", specSlug: "s", categories: ["error_fix"],
+    actions: [{ category: "error_fix", summary: "fix", preview: "p", cmd: "", specBody: "" }],
+    multi: false, logTail: "",
+  });
+  assert.ok(!/PRE-AUTHORED SPEC BODY/.test(prompt));
 });
