@@ -1,6 +1,6 @@
 # libraries/checkout-stuck-intent
 
-Pure predicate that recognizes a CHECKOUT-STUCK customer message as a first-class intent — distinct from the coarse `account` / `general` / `outreach` buckets the [[unified-ticket-handler]] classify-bucket step returns. Part of the [[../recipes/checkout-stuck-concierge-flow]]. A customer who "can't check out", whose OTP / verification code isn't arriving, who is "stuck at the payment or authentication screen", or who asks "how do I finish my order" is a candidate for the assisted-purchase concierge flow — not a stateless "try another card" dead-end reply from the cheap orchestrator.
+Pure predicate that recognizes a CHECKOUT-STUCK customer message as a first-class intent — distinct from the coarse `account` / `general` / `outreach` buckets the [[unified-ticket-handler]] classify-bucket step returns. Part of the [[../recipes/checkout-stuck-concierge-flow]]. A customer who "can't check out", whose OTP / verification code isn't arriving, who is "stuck at the payment or authentication screen", asks "how do I finish my order", OR who is BLOCKED PRE-PURCHASE on the storefront itself (can't select a variant / can't choose a subscription tier / no option to subscribe / can't add to cart) is a candidate for the assisted-purchase concierge flow — not a stateless "try another card" dead-end reply from the cheap orchestrator, and not a "clear your cache" loop that invents UI to click through.
 
 **File:** `src/lib/checkout-stuck-intent.ts` · **Tests:** `src/lib/checkout-stuck-intent.test.ts`
 
@@ -32,12 +32,15 @@ First match wins the evidence label. Every entry is a phrase a customer with a p
 | `cant_check_out` | "I can't check out", "I cannot complete my order", "I can't finish my purchase" | Can't check out |
 | `checkout_not_working` | "checkout isn't working", "Shop Pay won't go through" | Can't check out |
 | `how_do_i_finish` | "how do I finish my order?", "how can I complete my purchase?" | How do I finish my order |
+| `no_subscribe_option` | "there is no option to subscribe", "no Subscribe & Save option", "no 60 day option" — ticket 3dd271be | Storefront pre-purchase block |
+| `cant_select_variant` | "I can't select the 60-day", "won't let me choose the subscription plan / variant / flavor" — ticket 3dd271be | Storefront pre-purchase block |
+| `cant_add_to_cart` | "I can't add it to my cart", "the add-to-cart button doesn't do anything" | Storefront pre-purchase block |
 
 Normalization mirrors [[../inngest/unified-ticket-handler]] `classifyIntent` + [[inflection-detector]]: strip HTML tags, decode entities enough for regex, collapse whitespace, trim. Every cue is `/i` (case-insensitive).
 
 ## Why a separate bucket
 
-The coarse [[../inngest/unified-ticket-handler]] classify-bucket step returns `"account" | "general" | "outreach"`. A checkout-stuck message today falls into `account` — but the account lane's default handling is stateless (refund / cancel / order status / address change) and dead-ends a checkout-stuck customer with "try another card / PayPal / Shop Pay". Ticket aa0b6697 (Latrina C.) is the recorded failure: mis-classed `account`, replied to on Opus (recent-merges tripped [[model-picker]]), and Sol was never re-sessioned to author an assisted-purchase Direction.
+The coarse [[../inngest/unified-ticket-handler]] classify-bucket step returns `"account" | "general" | "outreach"`. A checkout-stuck message today falls into `account` — but the account lane's default handling is stateless (refund / cancel / order status / address change) and dead-ends a checkout-stuck customer with "try another card / PayPal / Shop Pay". Ticket aa0b6697 (Latrina C.) is the recorded Shop-Pay-OTP failure: mis-classed `account`, replied to on Opus (recent-merges tripped [[model-picker]]), and Sol was never re-sessioned to author an assisted-purchase Direction. Ticket 3dd271be (mdengberg2, Mixed Berry 60-day sub) is the storefront-pre-purchase-block companion: item was in stock (7,761 on hand, live PDP available), but the orchestrator looped 3× on "clear your cache" and once invented a "30/60/90 Day Supply card" UI that doesn't exist on the PDP; ticket false-resolved 9/10 while the customer remained blocked. The new `no_subscribe_option` / `cant_select_variant` / `cant_add_to_cart` cues route those blocked buyers into the same Sol-re-session lane, and the [[assisted-purchase-direction]] `assertSolFastDefaultToConcierge` guard now blocks the "clear your cache / try incognito / try a different browser / hard refresh" loop on Sol's reply.
 
 The `classifyCheckoutStuck` predicate recognizes the intent as its own thing so downstream routing and Sol can special-case it:
 - **Routing** — [[model-picker]] keeps checkout-stuck on Sonnet even when `recentMergesCount > 0`, and the drift/re-session router flags Sol back in.

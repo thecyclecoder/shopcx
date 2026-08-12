@@ -5,22 +5,30 @@
  * Pure classifier that recognizes a CHECKOUT-STUCK customer message as a first-class
  * intent, distinct from the coarse `account` bucket the [[unified-ticket-handler]]
  * classify-bucket step returns. A customer who "can't check out", whose OTP /
- * verification code isn't arriving, who is "stuck at the payment screen", or who
- * asks "how do I finish my order" is a candidate for the assisted-purchase concierge
- * flow — not a stateless "try another card" dead-end reply.
+ * verification code isn't arriving, who is "stuck at the payment screen", asks
+ * "how do I finish my order", OR who is BLOCKED PRE-PURCHASE on the storefront
+ * itself (can't select a variant / can't choose a subscription tier / no option
+ * to subscribe / can't add to cart) is a candidate for the assisted-purchase
+ * concierge flow — not a stateless "try another card" dead-end reply and not a
+ * cache-clear loop that invents UI to click through.
  *
  * Founder directive (2026-07-10): ANY checkout issue must default — as fast as
  * possible — to us CONCIERGING the purchase. Ticket aa0b6697 (Latrina C.) was
  * mis-classed `account`; her Shop Pay OTP never arrived and the orchestrator
  * told her to "try another card / PayPal / Shop Pay" instead of routing the
- * ticket back to Sol for an assisted-purchase Direction. This predicate is the
- * *recognition* half of the fix; Phases 2-5 handle routing / Direction /
+ * ticket back to Sol for an assisted-purchase Direction. Ticket 3dd271be
+ * (mdengberg2, never subscribed, Mixed Berry 60-day sub) is the storefront-
+ * block companion: the item was in stock (7,761 on hand; live PDP available)
+ * but the orchestrator looped 3× on "clear your cache" and once invented a
+ * "30/60/90 Day Supply card" UI that doesn't exist on the PDP; the customer
+ * remained unable to buy while the ticket false-resolved 9/10. This predicate
+ * is the *recognition* half of the fix; Phases 2-5 handle routing / Direction /
  * playbook / analytics.
  *
  * Shape mirrors [[inflection-detector]] — a rule catalog of specificity-ordered
  * regex cues, first match wins the evidence label. Pure function, no I/O; tests
- * pin every listed cue plus the aa0b6697-shaped fixture and a negative case for
- * plain order-status / account questions.
+ * pin every listed cue plus the aa0b6697 + 3dd271be fixtures and a negative
+ * case for plain order-status / account questions.
  */
 
 export interface CheckoutStuckClassification {
@@ -75,6 +83,24 @@ const CUES: Array<{ id: string; re: RegExp }> = [
   {
     id: "how_do_i_finish",
     re: /\bhow\s+(?:do|can|would|should)\s+i\s+(?:finish|complete|place|submit|pay\s+for)\s+(?:my\s+)?(?:order|purchase|checkout)\b/i,
+  },
+  // (e) Storefront pre-purchase block — customer cannot get an in-stock item
+  //     INTO a purchase on the PDP itself (variant not selectable, no
+  //     subscription tier option, add-to-cart not working). Ticket 3dd271be
+  //     (Mixed Berry 60-day sub) — the failure this catches. Pivot to
+  //     assisted purchase instead of a cache-clear loop or an invented UI
+  //     description.
+  {
+    id: "no_subscribe_option",
+    re: /\b(?:no|don'?t\s+(?:see|have)|there'?s\s+no|there\s+is\s+no|missing)\s+(?:an?\s+)?(?:option\s+(?:to|for)\s+)?(?:subscri(?:be|ption)|subscribe\s*(?:&|and)\s*save|s\s*&\s*s|(?:30|60|90)\s*(?:-|\s)?day)\b/i,
+  },
+  {
+    id: "cant_select_variant",
+    re: /\b(?:can(?:'?t|not)|un(?:able|able\s+to)|won'?t\s+let\s+me|will\s+not\s+let\s+me)\s+(?:select|choose|pick|click(?:\s+on)?)\s+(?:the\s+|a\s+|any\s+)?(?:(?:30|60|90)\s*(?:-|\s)?day|subscri(?:be|ption)|(?:flavou?r|variant|option|plan|tier|size))\b/i,
+  },
+  {
+    id: "cant_add_to_cart",
+    re: /\b(?:can(?:'?t|not)|un(?:able|able\s+to)|won'?t\s+let\s+me|will\s+not\s+let\s+me)\s+add\s+(?:it\s+|this\s+|them\s+|the\s+\w+\s+)?to\s+(?:my\s+|the\s+)?cart\b/i,
   },
 ];
 

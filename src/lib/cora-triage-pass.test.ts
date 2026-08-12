@@ -11,7 +11,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildTriagePrompt, parseTriageResult, renderTranscript, TRIAGE_SIGNALS } from "./cora-triage-pass";
+import { buildTriagePrompt, parseTriageResult, renderTranscript, TRIAGE_SIGNALS, detectPrePurchaseStillBlocked } from "./cora-triage-pass";
 
 // subject-blind-grader: email customers routinely put the whole ask in the SUBJECT ("PLEASE Cancel
 // my Subscription!!!") and leave a footer-only body. The grader must see the subject or a correct
@@ -127,4 +127,104 @@ test("every declared TRIAGE_SIGNAL is a terminal-state failure mode (documentati
   assert.ok(!TRIAGE_SIGNALS.includes("mid_turn_error" as never));
   assert.ok(TRIAGE_SIGNALS.includes("customer_unresolved"));
   assert.ok(TRIAGE_SIGNALS.includes("false_outcome_claim"));
+});
+
+// ── Pre-purchase-still-blocked override (ticket 3dd271be) ──────────────────
+
+const clean = (body: string) => ({ visibility: "external", body, body_clean: body });
+
+test("override HITS on 3dd271be pattern: last customer 'still can't buy' + agent 'clear your cache'", () => {
+  const r = detectPrePurchaseStillBlocked({
+    msgs: [
+      { direction: "inbound", author_type: "customer", ...clean("I can't select the 60-day Mixed Berry subscription.") },
+      { direction: "outbound", author_type: "ai", ...clean("Sorry about that — could you please clear your cache and reload the page?") },
+      { direction: "inbound", author_type: "customer", ...clean("I did that. I still can't buy the 60-day.") },
+    ],
+  });
+  assert.equal(r.hit, true);
+  assert.match(r.reason || "", /pre-purchase/i);
+});
+
+test("override HITS when agent suggested 'try incognito' and customer's last message says 'it still doesn't work'", () => {
+  const r = detectPrePurchaseStillBlocked({
+    msgs: [
+      { direction: "inbound", author_type: "customer", ...clean("I can't add Mixed Berry to my cart.") },
+      { direction: "outbound", author_type: "ai", ...clean("Please try in incognito mode.") },
+      { direction: "inbound", author_type: "customer", ...clean("Tried it. It still doesn't work.") },
+    ],
+  });
+  assert.equal(r.hit, true);
+});
+
+test("override HITS when agent said 'try a different browser'", () => {
+  const r = detectPrePurchaseStillBlocked({
+    msgs: [
+      { direction: "inbound", author_type: "customer", ...clean("The subscribe option isn't there.") },
+      { direction: "outbound", author_type: "ai", ...clean("Could you try a different browser?") },
+      { direction: "inbound", author_type: "customer", ...clean("Nothing's working — I still cannot subscribe.") },
+    ],
+  });
+  assert.equal(r.hit, true);
+});
+
+test("override DOES NOT HIT when the customer's last message is a thank-you (ticket ended fine)", () => {
+  const r = detectPrePurchaseStillBlocked({
+    msgs: [
+      { direction: "inbound", author_type: "customer", ...clean("I can't select the 60-day.") },
+      { direction: "outbound", author_type: "ai", ...clean("Please clear your cache and try again.") },
+      { direction: "inbound", author_type: "customer", ...clean("That fixed it. Thanks!") },
+    ],
+  });
+  assert.equal(r.hit, false);
+});
+
+test("override DOES NOT HIT when no agent reply looped on cache-clear (a clean resolved-by-action ticket)", () => {
+  const r = detectPrePurchaseStillBlocked({
+    msgs: [
+      { direction: "inbound", author_type: "customer", ...clean("I can't select the 60-day.") },
+      { direction: "outbound", author_type: "ai", ...clean("I've placed the order for you on our side.") },
+      { direction: "inbound", author_type: "customer", ...clean("I still can't buy from your site though.") },
+    ],
+  });
+  // Customer's last message DOES match "still can't buy", but no agent looped on cache
+  // — this is a real second problem, not the 3dd271be loop pattern. Not overridden here;
+  // the cheap classifier can grade it on its own.
+  assert.equal(r.hit, false);
+});
+
+test("override IGNORES an agent's REFERENCE to what the customer already tried ('you tried clearing your cache')", () => {
+  const r = detectPrePurchaseStillBlocked({
+    msgs: [
+      { direction: "inbound", author_type: "customer", ...clean("I've tried clearing my cache — it doesn't help.") },
+      { direction: "outbound", author_type: "ai", ...clean("I saw you tried clearing your cache — I can just place this for you on my side.") },
+      { direction: "inbound", author_type: "customer", ...clean("I still can't buy on your site.") },
+    ],
+  });
+  // The agent's reply REFERENCES the customer's prior attempt; it doesn't SUGGEST a
+  // fresh cache-clear. The guard must not flag this as the 3dd271be loop.
+  assert.equal(r.hit, false);
+});
+
+test("override HITS on multiple agent loops (3× cache-clear like the real 3dd271be)", () => {
+  const r = detectPrePurchaseStillBlocked({
+    msgs: [
+      { direction: "inbound", author_type: "customer", ...clean("Can't select the Mixed Berry 60-day plan.") },
+      { direction: "outbound", author_type: "ai", ...clean("Please clear your cache.") },
+      { direction: "inbound", author_type: "customer", ...clean("Did that — still nothing.") },
+      { direction: "outbound", author_type: "ai", ...clean("Could you clear your cookies and try again?") },
+      { direction: "inbound", author_type: "customer", ...clean("Tried. Nothing changed.") },
+      { direction: "outbound", author_type: "ai", ...clean("Please try in incognito mode.") },
+      { direction: "inbound", author_type: "customer", ...clean("I still cannot buy this — it just does not let me select the 60-day option.") },
+    ],
+  });
+  assert.equal(r.hit, true);
+});
+
+test("override does NOT trip on empty / customer-only conversation", () => {
+  const r = detectPrePurchaseStillBlocked({
+    msgs: [
+      { direction: "inbound", author_type: "customer", ...clean("I still can't buy the 60-day.") },
+    ],
+  });
+  assert.equal(r.hit, false);
 });

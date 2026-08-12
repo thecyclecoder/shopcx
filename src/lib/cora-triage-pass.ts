@@ -174,6 +174,87 @@ export function parseTriageResult(text: string): TriageResult {
 }
 
 /**
+ * PRE-PURCHASE STILL-BLOCKED override — deterministic terminal-state check the cheap classifier
+ * cannot be trusted to run on its own. Ticket 3dd271be (mdengberg2, Mixed Berry 60-day sub) was
+ * the recorded failure: the customer's LAST message still said she couldn't buy, the AGENT had
+ * looped 3× on cache-clear + invented a "30/60/90 Day Supply card" UI that doesn't exist, and
+ * Haiku still returned `needs_review=false, score=9`. This scanner runs on the SAME transcript
+ * the classifier sees and forces `needsReview=true` + a `customer_unresolved` signal when both
+ * halves hit:
+ *   (1) the LAST customer message says they still can't buy / order / check out / select / add,
+ *       and
+ *   (2) some AGENT message told them to clear cache / try incognito / try a different browser
+ *       / hard refresh (the storefront-block loop) — the specific pattern the fast-default
+ *       [[assisted-purchase-direction]] `assertSolFastDefaultToConcierge` guard also blocks.
+ * On a cheap-pass override, the returned signal is `customer_unresolved` (a known TRIAGE_SIGNALS
+ * entry) so the recall-biased gate in `runCheapTriagePass` routes the ticket to the deep session
+ * exactly the way any terminal-state trip does.
+ *
+ * Pure — no DB, no network, safe to unit-test with the same transcript strings the tests build.
+ */
+export interface PrePurchaseStillBlockedContext {
+  msgs: Array<{ direction: string; author_type: string; visibility: string; body: string | null; body_clean: string | null }>;
+}
+
+const STILL_BLOCKED_LAST_CUSTOMER_PATTERNS: RegExp[] = [
+  /\bstill\s+(?:can(?:'?t|not)|un(?:able|able\s+to))\s+(?:buy|order|check\s*out|complete|select|choose|subscribe|add|pay)\b/i,
+  /\bit\s+(?:still\s+)?(?:doesn'?t|does\s+not|won'?t|will\s+not)\s+(?:work|let\s+me|allow\s+me)\b/i,
+  /\bnothing(?:'?s|\s+is)?\s+(?:working|changed|helped)\b/i,
+  /\b(?:tried|did)\s+that\s+(?:and\s+it|,?\s+it)?\s+(?:still\s+)?(?:didn'?t|does\s+not|doesn'?t|won'?t)\s+(?:work|help|let\s+me)\b/i,
+  /\bi\s+(?:still\s+)?can(?:'?t|not)\s+(?:get|figure\s+out\s+how\s+to)\s+(?:it|this|the\s+\w+)\s+(?:into|to|in)\s+(?:my\s+)?cart\b/i,
+];
+
+const AGENT_CACHE_LOOP_PATTERNS: RegExp[] = [
+  // Cache/cookies clear — required prefix (imperative / suggestion / sentence-start).
+  /(?:^|[.!?]\s+|please\s+|could\s+you\s+|can\s+you\s+|would\s+you\s+|you\s+(?:could|can|might|should|need\s+to)\s+|try(?:\s+to)?\s+)clear(?:ing)?\s+(?:your|the)\s+(?:browser\s+)?(?:cache|cookies)\b/i,
+  // Try incognito / private — `try` alone is enough (won't match "tried").
+  /\btry(?:\s+(?:using|in|with))?\s+(?:an?\s+)?(?:incognito|private)(?:\s+(?:mode|browsing|window|tab))?\b/i,
+  // Try a different browser.
+  /\btry(?:\s+(?:using|in|with))?\s+(?:an?\s+)?(?:different|another)\s+browser\b/i,
+  // Hard refresh — required prefix.
+  /(?:^|[.!?]\s+|please\s+|could\s+you\s+|can\s+you\s+|you\s+(?:could|can|might|should|need\s+to)\s+|try(?:\s+to|\s+a)?\s+|do\s+a\s+|perform\s+a\s+)hard(?:\s+|-)refresh\b/i,
+];
+
+export interface PrePurchaseStillBlockedVerdict {
+  /** True when the override fires (both halves matched). */
+  hit: boolean;
+  /** The verbatim reason string safe to stamp into a triage signal / analysis row. */
+  reason?: string;
+}
+
+export function detectPrePurchaseStillBlocked(
+  ctx: PrePurchaseStillBlockedContext,
+): PrePurchaseStillBlockedVerdict {
+  const msgs = ctx.msgs || [];
+  if (!msgs.length) return { hit: false };
+
+  const clean = (s: string | null | undefined) =>
+    (s || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+
+  // (1) the LAST inbound customer message must still describe being blocked.
+  const customerMsgs = msgs
+    .filter((m) => m.visibility !== "internal" && m.direction === "inbound")
+    .map((m) => clean(m.body_clean || m.body));
+  const lastCustomer = customerMsgs[customerMsgs.length - 1];
+  if (!lastCustomer) return { hit: false };
+  const stillBlocked = STILL_BLOCKED_LAST_CUSTOMER_PATTERNS.some((p) => p.test(lastCustomer));
+  if (!stillBlocked) return { hit: false };
+
+  // (2) some agent (AI or human) reply must have looped on the storefront-block dead-ends.
+  const agentMsgs = msgs
+    .filter((m) => m.visibility !== "internal" && (m.author_type === "ai" || m.author_type === "agent"))
+    .map((m) => clean(m.body_clean || m.body));
+  const looped = agentMsgs.some((body) => AGENT_CACHE_LOOP_PATTERNS.some((p) => p.test(body)));
+  if (!looped) return { hit: false };
+
+  return {
+    hit: true,
+    reason:
+      "pre-purchase still-blocked override: last customer message still describes being blocked from buying AND an agent reply told them to clear cache / try incognito / different browser / hard refresh (the ticket 3dd271be loop)",
+  };
+}
+
+/**
  * Render the customer/AI conversation into a compact transcript for the classifier. Internal system
  * notes are dropped (they're not the customer-facing exchange); bodies are cleaned of quoted history
  * + signatures. Capped to the most recent MAX_TRANSCRIPT_MESSAGES to keep the call cheap.
@@ -255,7 +336,25 @@ export async function runCheapTriagePass(admin: Admin, ticketId: string): Promis
     usage?: { input_tokens?: number; output_tokens?: number };
   };
   const text = (data.content || []).map((c) => c.text || "").join("");
-  const triage = parseTriageResult(text);
+  const parsed = parseTriageResult(text);
+
+  // Deterministic pre-purchase-still-blocked override — even if Haiku returned a clean
+  // needs_review=false, force a deep review + a customer_unresolved signal when the ticket
+  // 3dd271be pattern is present (last customer message still describes being blocked from
+  // buying AND some agent reply looped on cache-clear / incognito / different browser /
+  // hard refresh). Prepended to signals so the deep session sees the deterministic trip
+  // first.
+  const override = detectPrePurchaseStillBlocked({ msgs });
+  const triage: TriageResult = override.hit
+    ? {
+        ...parsed,
+        needsReview: true,
+        signals: parsed.signals.includes("customer_unresolved")
+          ? parsed.signals
+          : ["customer_unresolved", ...parsed.signals],
+        summary: `[pre-purchase-still-blocked] ${parsed.summary}`,
+      }
+    : parsed;
 
   const windowStart = (ticket.sol_handled_at as string | null) || (ticket.created_at as string);
   const windowEnd = (ticket.closed_at as string | null) || (msgs[msgs.length - 1]?.created_at as string) || windowStart;

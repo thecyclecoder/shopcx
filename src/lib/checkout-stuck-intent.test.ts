@@ -79,6 +79,62 @@ test("cue: checkout isn't working", () => {
   assert.equal(r.cue, "checkout_not_working");
 });
 
+// ── Pre-purchase storefront-block cues (ticket 3dd271be) ─────────────────
+
+test("cue: can't select the 60-day subscription", () => {
+  const r = classifyCheckoutStuck("I want the Mixed Berry Superfood Tabs but I can't select the 60-day option.");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "cant_select_variant");
+});
+
+test("cue: won't let me choose the subscription plan", () => {
+  const r = classifyCheckoutStuck("Your site won't let me choose the subscription plan for Mixed Berry.");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "cant_select_variant");
+});
+
+test("cue: no option to subscribe", () => {
+  const r = classifyCheckoutStuck("There is no option to subscribe on the tabs page — only one-time.");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "no_subscribe_option");
+});
+
+test("cue: don't see a Subscribe & Save option", () => {
+  const r = classifyCheckoutStuck("I don't see a Subscribe & Save option anywhere on the page.");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "no_subscribe_option");
+});
+
+test("cue: no 60 day option", () => {
+  const r = classifyCheckoutStuck("There's no 60 day option showing on Mixed Berry — only 30-day.");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "no_subscribe_option");
+});
+
+test("cue: can't add to cart", () => {
+  const r = classifyCheckoutStuck("The add-to-cart button doesn't do anything — I can't add it to my cart.");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "cant_add_to_cart");
+});
+
+// ── The 3dd271be fixture ──────────────────────────────────────────────────
+
+test("3dd271be fixture — Mixed Berry pre-purchase block — classifies checkout-stuck, NOT account", () => {
+  // Derived from the ticket description: mdengberg2 wanted a Mixed Berry 60-day
+  // subscription but couldn't select it across devices/incognito. The
+  // orchestrator false-resolved this in the coarse `account` bucket. The fix:
+  // this predicate must catch the pre-purchase block so the ticket routes to
+  // the assisted-purchase Direction lane instead of a cache-clear loop.
+  const msg =
+    "I tried on my phone and my laptop in incognito — I still can't select the 60-day subscription for Mixed Berry Superfood Tabs. Can you help me order it?";
+  const r = classifyCheckoutStuck(msg);
+  assert.equal(r.matched, true, "3dd271be fixture must classify as checkout-stuck");
+  assert.ok(
+    r.cue === "cant_select_variant" || r.cue === "no_subscribe_option",
+    `unexpected cue on 3dd271be fixture: ${r.cue}`,
+  );
+});
+
 // ── The aa0b6697 fixture ──────────────────────────────────────────────────
 
 test("aa0b6697 fixture — Shop Pay OTP never arrived — classifies checkout-stuck, NOT account", () => {
