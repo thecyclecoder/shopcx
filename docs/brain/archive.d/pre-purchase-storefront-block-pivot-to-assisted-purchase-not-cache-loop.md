@@ -1,0 +1,1 @@
+- **Blocked pre-purchase buyer → pivot to assisted purchase; never loop on cache-clear, invent store UI, or false-resolve** · verified 2026-08-12 · → [[../recipes/checkout-stuck-concierge-flow]], [[../libraries/checkout-stuck-intent]], [[../libraries/assisted-purchase-direction]], [[../libraries/cora-triage-pass]]
