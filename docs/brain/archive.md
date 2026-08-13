@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Blocked pre-purchase buyer → pivot to assisted purchase; never loop on cache-clear, invent store UI, or false-resolve** · verified 2026-08-12 · → [[../recipes/checkout-stuck-concierge-flow]], [[../libraries/checkout-stuck-intent]], [[../libraries/assisted-purchase-direction]], [[../libraries/cora-triage-pass]]
 - **Scope stuck-dunning assertion to cycles the payday retry cron owns** · verified 2026-08-11 · → [[../inngest/control-tower-monitor]]
 - **Create return direct action must honor a store-credit resolution, not force a cash refund** · verified 2026-08-11 · → [[../lifecycles/return-pipeline]]
 - **Make the predeploy guards actually run (enforce them in the build lane)** · verified 2026-08-11 · → [[../operational-rules#Predeploy static guards — enforced in the build lane, not by npm's `predeploy` hook]], [[../libraries/vercel-project]]
