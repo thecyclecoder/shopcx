@@ -131,6 +131,20 @@ const TICKET_ANALYSIS_FEEDER_GRACE_MS = 40 * 60_000;
 const TICKET_ANALYSIS_CORA_SETTLE_MS = 30 * 60_000;
 
 /**
+ * Cron-aligned June-decision lookback for the `tickets-awaiting-qc` work probe
+ * (ticket-analyzer-workprobe-june-decision-lookback-align). Mirrors the cron's own candidate
+ * horizon in src/lib/inngest/ticket-analysis-cron.ts (`cutoff = now - 7 * 24 * 60 * 60 * 1000`)
+ * used to bound the `director_activity` `cs_director_call` scan. The probe previously scoped this
+ * lookup with the loop's liveness window (`sinceIso`, 2h for loop:ai:ticket-analyzer), which
+ * silently dropped a same-cycle June decision that landed 3h ago even though the cron still sees
+ * it and correctly skips the ticket. The result was a monitor-false-positive: healthy analyzer
+ * (cron skipping a June-decided ticket) with a red `idle_while_work` tile. We now use this
+ * dedicated cron-aligned cutoff for the director_activity `.gte("created_at", …)` in the probe
+ * so the probe and the cron read the same June-decision universe. The sibling regression test
+ * pins this constant to the cron's 7-day horizon so a change in one moves the other. */
+const TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS = 7 * 24 * 60 * 60_000;
+
+/**
  * Settle window for the `tickets-awaiting-handler-dispatch` work probe
  * (control-tower-unified-handler-dispatch-workprobe). Mirrors INTENT_SETTLE_MS in
  * src/lib/inngest/unanswered-inbound-backstop-cron.ts — every ingest chokepoint stamps
@@ -1059,6 +1073,15 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // whose June decision is at-or-after its handling anchor. A June decision from a
             // PRIOR cycle (decided_at < handledAt) is inert — Sol re-handled past it, so this
             // is a new, undecided cycle and the ticket still counts as awaited work.
+            //
+            // Cron-aligned June-decision lookback (ticket-analyzer-workprobe-june-decision-lookback-align) —
+            // the director_activity `.gte("created_at", …)` MUST use the same 7-day horizon the cron
+            // uses (ticket-analysis-cron.ts:143 `now - 7d`), NOT the loop's 2h liveness window
+            // (`sinceIso`). The 2h window silently drops a same-cycle June decision landed 3h ago:
+            // the cron still sees it and skips the ticket, but the probe's map has no entry and
+            // counts the ticket as awaited work → false idle_while_work on a healthy analyzer.
+            // TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS is defined above so the sibling drift pin
+            // catches a change in the cron's horizon that isn't mirrored here.
             const nowMs = Date.now();
             const { data: candidates } = await admin
               .from("tickets")
@@ -1100,12 +1123,15 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // (small set — the base filter caps volume), keyed on `metadata.ticket_id`. Keep the
             // MAX(created_at) per ticket so the compare below sees the freshest decision.
             const uniqueWorkspaces = Array.from(new Set(candidateRows.map((c) => c.workspace_id)));
+            const juneDecisionCutoffIso = new Date(
+              nowMs - TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS,
+            ).toISOString();
             const { data: verdictRows } = await admin
               .from("director_activity")
               .select("metadata, created_at")
               .eq("action_kind", "cs_director_call")
               .in("workspace_id", uniqueWorkspaces)
-              .gte("created_at", sinceIso);
+              .gte("created_at", juneDecisionCutoffIso);
             const latestJuneDecidedAtByTicket = new Map<string, number>();
             for (const v of ((verdictRows ?? []) as Array<{ metadata: Record<string, unknown> | null; created_at: string }>)) {
               const ticketId =

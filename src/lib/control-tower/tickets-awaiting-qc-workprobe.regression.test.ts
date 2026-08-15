@@ -348,3 +348,135 @@ test("ticket-analysis cron continues to gate on the June-decided lookup at the s
     "ticket-analysis-cron find-tickets must keep the metadata.ticket_id key on the June-decided map — if this moves, the probe's key is stale.",
   );
 });
+
+// ── ticket-analyzer-workprobe-june-decision-lookback-align ──────────────────────────────────
+// The cron's `director_activity` scan uses a 7-day cutoff (ticket-analysis-cron.ts:143), not the
+// loop's 2h liveness window. The probe previously scoped the same lookup with `sinceIso` (the 2h
+// loop window), so a same-cycle June decision that landed 3h ago was silently dropped from the
+// probe's map — the cron correctly skipped the ticket while the probe counted it as awaited work,
+// firing a false idle_while_work on a healthy loop:ai:ticket-analyzer. These pins guard the
+// cron-aligned lookback: the named constant, its value, that the probe uses it (NOT `sinceIso`)
+// for the director_activity `.gte("created_at", …)`, and the boundary the fix is meant to close.
+
+test("monitor.ts defines TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS = 7 days (cron-aligned)", () => {
+  // Named-constant + value pin. The cron's candidate horizon is `7 * 24 * 60 * 60 * 1000` at
+  // ticket-analysis-cron.ts:143; the probe's June-decision lookback MUST match or the probe
+  // silently reads a smaller universe than the cron and false-flags a June-decided ticket.
+  const monitor = read(MONITOR);
+  const monitorMatch = monitor.match(/TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS\s*=\s*([^;]+);/);
+  assert.ok(
+    monitorMatch,
+    "monitor.ts must define TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS = <expr>; — the dedicated cron-aligned June-decision lookback for the tickets-awaiting-qc probe. Without this the director_activity lookup silently reuses the loop's liveness window and drops a same-cycle June decision older than 2h.",
+  );
+  const monitorMs = Function(`"use strict"; return (${monitorMatch[1]});`)() as number;
+  assert.equal(
+    monitorMs,
+    7 * 24 * 60 * 60_000,
+    "TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS must equal 7 days (7 * 24 * 60 * 60_000) — mirrors the cron's `cutoff = now - 7 * 24 * 60 * 60 * 1000` at ticket-analysis-cron.ts:143. A shorter value re-opens the false-alert window this spec closes.",
+  );
+});
+
+test("monitor's TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS matches the ticket-analysis cron's candidate horizon", () => {
+  // Drift pin: the cron computes its 7-day cutoff inline as an arithmetic literal. Extract that
+  // arithmetic literal from the cron source and assert the monitor's named constant evaluates to
+  // the same number. If the cron ever moves its horizon the two must move together or the probe
+  // diverges silently.
+  const monitor = read(MONITOR);
+  const cron = read(CRON);
+  const monitorMatch = monitor.match(/TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS\s*=\s*([^;]+);/);
+  assert.ok(monitorMatch, "monitor.ts must define TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS = <expr>;");
+  const cronMatch = cron.match(
+    /new\s+Date\(\s*Date\.now\(\)\s*-\s*(\d[\d\s*_]*(?:\*\s*\d[\d_]*)+)\s*\)\.toISOString\(\)/,
+  );
+  assert.ok(
+    cronMatch,
+    "ticket-analysis-cron.ts must keep its inline `new Date(Date.now() - <arith>).toISOString()` cutoff expression for the candidate horizon — the drift pin extracts <arith> to compare against the monitor's named constant. If this expression is refactored, hoist it into a named export and update this pin.",
+  );
+  const monitorMs = Function(`"use strict"; return (${monitorMatch[1]});`)() as number;
+  const cronMs = Function(`"use strict"; return (${cronMatch[1]});`)() as number;
+  assert.equal(
+    monitorMs,
+    cronMs,
+    "TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS in monitor.ts must equal the cron's `now - <arith>` cutoff at ticket-analysis-cron.ts:143 — the probe and the cron must scan the same director_activity universe or a same-cycle June decision older than the loop's 2h window is silently dropped.",
+  );
+});
+
+test("tickets-awaiting-qc probe uses the cron-aligned June-decision cutoff (NOT the 2h loop window) for director_activity", () => {
+  // The tightened assertion this spec ships. The block-level match ensures the probe's
+  // director_activity `.gte("created_at", …)` argument is a cutoff derived from the dedicated
+  // 7-day constant, NOT the shared `sinceIso` variable (which mirrors loop.livenessWindowMs = 2h
+  // for loop:ai:ticket-analyzer). A regression to `sinceIso` here re-opens the boundary: a same-
+  // cycle June decision landed 3h ago is invisible to the probe but visible to the cron, and the
+  // probe false-counts the ticket as awaited work.
+  const block = ticketsAwaitingQcBlock(read(MONITOR));
+  // Find the director_activity chain and pull the .gte("created_at", <var>) argument off it.
+  const chainMatch = block.match(
+    /\.from\(\s*"director_activity"\s*\)[\s\S]*?\.gte\(\s*"created_at"\s*,\s*([A-Za-z_$][\w$]*)\s*\)/,
+  );
+  assert.ok(
+    chainMatch,
+    "`tickets-awaiting-qc` probe must call `.gte(\"created_at\", <var>)` on the director_activity chain — the June-decision cutoff argument is what this spec's alignment fix keys on.",
+  );
+  const cutoffVar = chainMatch[1];
+  assert.notEqual(
+    cutoffVar,
+    "sinceIso",
+    "`tickets-awaiting-qc` probe must NOT scope director_activity with `sinceIso` — that's the loop's 2h liveness window and it silently drops a same-cycle June decision older than 2h, re-opening the exact false-alert window this spec closes. Use a dedicated cron-aligned cutoff (e.g. `juneDecisionCutoffIso`) derived from TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS.",
+  );
+  // Assert the cutoff variable is derived from the dedicated lookback constant — otherwise a
+  // stealth reuse of any other short window (e.g. a locally-named `windowMs`) would sneak past
+  // the `!== "sinceIso"` guard.
+  const derivationRegex = new RegExp(
+    `${cutoffVar}\\s*=\\s*[^;]*TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS`,
+  );
+  assert.match(
+    block,
+    derivationRegex,
+    `\`${cutoffVar}\` must be derived from TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS in the probe block — otherwise the cutoff is a stealth reuse of another short window and the probe silently diverges from the cron's 7-day candidate horizon.`,
+  );
+});
+
+test("boundary: a same-cycle June decision older than the loop's 2h liveness window still lies inside the probe's cron-aligned lookback", () => {
+  // The failing boundary this spec repairs, encoded as a pure predicate:
+  //   - candidate updated inside the 2-hour loop liveness window (nowMs - updatedMs < 2h);
+  //   - Sol handled the ticket 1h ago (handledMs = nowMs - 1h);
+  //   - June decided 30 min ago (juneMs = nowMs - 30min) — later than handledMs (same cycle);
+  //   - the June decision is older than the loop's 2h window (nowMs - juneMs > 2h) is FALSE
+  //     here (30 min < 2h), but the ORIGINAL false-alert case is `juneMs 3h old` — see below.
+  // The critical case: `juneMs = nowMs - 3h` — older than 2h (loop window) but well inside 7d
+  // (cron horizon). The 2h window would drop it, the 7d window keeps it, so the probe's map
+  // still contains this June decision → the compare `juneMs >= handledMs` fires → skip.
+  const monitor = read(MONITOR);
+  const monitorMatch = monitor.match(/TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS\s*=\s*([^;]+);/);
+  assert.ok(monitorMatch, "monitor.ts must define TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS = <expr>;");
+  const lookbackMs = Function(`"use strict"; return (${monitorMatch[1]});`)() as number;
+  const nowMs = 1_723_690_000_000;
+  const twoHours = 2 * 60 * 60_000;
+  const handledMs = nowMs - 1 * 60 * 60_000; // Sol handled 1h ago (inside the 2h loop window)
+  const juneMs = nowMs - 3 * 60 * 60_000; // June decided 3h ago (older than the loop window)
+  // The failing state we are pinning: june is older than the loop's 2h window …
+  assert.ok(nowMs - juneMs > twoHours, "juneMs must be older than 2h to exercise the failing boundary");
+  // … AND the June decision landed BEFORE Sol's handling of this cycle in wall-clock terms — but
+  // the FAILING case has June AFTER handled (same cycle). Adjust: put juneMs after handledMs.
+  const juneMsSameCycle = handledMs + 30 * 60_000; // June ruled 30 min after Sol handled
+  assert.ok(juneMsSameCycle >= handledMs, "same-cycle June decision must be at-or-after handling anchor");
+  // For the 2h window (`sinceIso` path), a decision that lands at handledMs+30min still lies
+  // 30min ago in this construction — so use the truly-adversarial case: June 30min after handled,
+  // then a longer wait bumps everything back. Anchor the ticket further back and re-derive.
+  const handledOld = nowMs - 4 * 60 * 60_000;
+  const juneOld = handledOld + 30 * 60_000; // June ruled 30 min after handled, now 3.5h ago
+  assert.ok(nowMs - juneOld > twoHours, "adversarial juneOld is older than the 2h loop window");
+  assert.ok(juneOld >= handledOld, "adversarial juneOld is same-cycle (at-or-after handledOld)");
+  // The cron-aligned lookback MUST include this decision so the probe's map contains it and the
+  // `juneMs >= handledMs` skip fires. Equivalent: cutoff ≤ juneOld ⇔ (nowMs - lookbackMs) ≤ juneOld.
+  assert.ok(
+    nowMs - lookbackMs <= juneOld,
+    `TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS (${lookbackMs}ms) must be large enough that a same-cycle June decision landed 3.5h ago (older than the loop's 2h window) is still inside the cutoff. If this fails the probe would silently drop that decision and re-open the false idle_while_work on loop:ai:ticket-analyzer.`,
+  );
+  // Contrast: the OLD 2h-window path (`sinceIso`) would have failed here, proving the boundary.
+  const oldLoopWindowMs = 2 * 60 * 60_000;
+  assert.ok(
+    !(nowMs - oldLoopWindowMs <= juneOld),
+    "sanity: the old 2h loop window WOULD have dropped this June decision — that's the false-positive boundary this spec closes.",
+  );
+});
