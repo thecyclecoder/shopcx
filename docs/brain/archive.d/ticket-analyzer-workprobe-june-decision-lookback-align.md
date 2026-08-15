@@ -1,0 +1,1 @@
+- **Align ticket analyzer work probe June-decision lookup with the cron** · verified 2026-08-15 · → [[lifecycles/control-tower]]
