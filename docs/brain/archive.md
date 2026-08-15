@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Align ticket analyzer work probe June-decision lookup with the cron** · verified 2026-08-15 · → [[lifecycles/control-tower]]
 - **Blocked pre-purchase buyer → pivot to assisted purchase; never loop on cache-clear, invent store UI, or false-resolve** · verified 2026-08-12 · → [[../recipes/checkout-stuck-concierge-flow]], [[../libraries/checkout-stuck-intent]], [[../libraries/assisted-purchase-direction]], [[../libraries/cora-triage-pass]]
 - **Scope stuck-dunning assertion to cycles the payday retry cron owns** · verified 2026-08-11 · → [[../inngest/control-tower-monitor]]
 - **Create return direct action must honor a store-credit resolution, not force a cash refund** · verified 2026-08-11 · → [[../lifecycles/return-pipeline]]
