@@ -1,0 +1,1 @@
+- **Stop segment-coverage stale-tail alerts for customers updated after the refresh cron** · verified 2026-08-15 · → [[../libraries/control-tower]]
