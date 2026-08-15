@@ -15,7 +15,9 @@ import { resolve } from "node:path";
 import {
   classifyShaDirectionLocal,
   countRenewalIntegrityOverdueSubs,
+  countSegmentStaleTail,
   countStuckDunningCycles,
+  SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE,
   evalAgentKind,
   evalCron,
   evalInlineAgent,
@@ -1620,6 +1622,169 @@ test("countStuckDunningCycles: spec-test sandbox stuck-dunning fixture is always
   ]);
   const n = await countStuckDunningCycles(admin, STUCK_BEFORE_ISO);
   assert.equal(n, 0);
+});
+
+// ── countSegmentStaleTail — post-cron opt-in grace (segment-coverage-ignore-post-cron-opt-ins P1) ──
+// The stale-tail head-count blames the refresh-customer-segments cron for subscribed rows with
+// segments_refreshed_at >48h or NULL. An EXISTING customer whose row updates AFTER the last
+// refresh beat (e.g. an SMS opt-in flipped `sms_marketing_status` to 'subscribed' after the daily
+// cron completed) is graced from the count until the next scheduled cycle — the cron never had a
+// chance to see them in their new state. Pre-existing stale subscribers still count.
+interface FakeCustomerRow {
+  sms_marketing_status: string;
+  workspace_id: string;
+  created_at: string;
+  updated_at: string;
+  segments_refreshed_at: string | null;
+}
+
+/**
+ * Tiny fake admin modelling the shape `countSegmentStaleTail` uses on the `customers` table:
+ *   .from("customers").select("id",{count:"exact",head:true})
+ *     .eq("sms_marketing_status","subscribed").neq("workspace_id", sandbox)
+ *     [.lte("created_at", beat).lte("updated_at", beat)]
+ *     .or("segments_refreshed_at.is.null,segments_refreshed_at.lt.<iso>") → { count }
+ */
+function fakeSegmentCustomersAdmin(rows: FakeCustomerRow[]): ReturnType<typeof createAdminClient> {
+  const build = () => {
+    let filtered: FakeCustomerRow[] = rows.map((r) => ({ ...r }));
+    const chain = {
+      select: (_cols?: string, _opts?: { count?: string; head?: boolean }) => chain,
+      eq: (col: keyof FakeCustomerRow, val: unknown) => {
+        filtered = filtered.filter((r) => r[col] === val);
+        return chain;
+      },
+      neq: (col: keyof FakeCustomerRow, val: unknown) => {
+        filtered = filtered.filter((r) => r[col] !== val);
+        return chain;
+      },
+      lte: (col: keyof FakeCustomerRow, val: string) => {
+        filtered = filtered.filter((r) => {
+          const cell = r[col] as string | null;
+          if (cell == null) return false;
+          return cell <= val;
+        });
+        return chain;
+      },
+      or: (expr: string) => {
+        // Model exactly the two-clause OR the helper builds:
+        //   `segments_refreshed_at.is.null,segments_refreshed_at.lt.<iso>`
+        const match = /^segments_refreshed_at\.is\.null,segments_refreshed_at\.lt\.(.+)$/.exec(expr);
+        if (!match) throw new Error(`fake only models the segment stale-tail .or clause, got: ${expr}`);
+        const cutoff = match[1];
+        filtered = filtered.filter((r) => r.segments_refreshed_at == null || r.segments_refreshed_at < cutoff);
+        return chain;
+      },
+      then: (onFulfilled: (v: { count: number; data: null; error: null }) => unknown) =>
+        Promise.resolve(onFulfilled({ count: filtered.length, data: null, error: null })),
+    } as unknown as Record<string, unknown>;
+    return chain;
+  };
+  return { from: (_t: string) => build() } as unknown as ReturnType<typeof createAdminClient>;
+}
+
+const SEG_BEAT_ISO = "2026-08-14T07:00:00.000Z"; // "latest daily refresh cron beat"
+const SEG_STALE_CUTOFF_ISO = "2026-08-12T07:00:00.000Z"; // 48h before the beat
+const SEG_WS = "22222222-2222-4222-8222-222222222222";
+
+test("countSegmentStaleTail: pre-existing SMS-subscribed customer >48h stale still counts (regression guard for existing stale-tail behavior)", async () => {
+  const admin = fakeSegmentCustomersAdmin([
+    {
+      sms_marketing_status: "subscribed",
+      workspace_id: SEG_WS,
+      created_at: "2026-08-01T00:00:00.000Z", // before the beat
+      updated_at: "2026-08-01T00:00:00.000Z", // before the beat
+      segments_refreshed_at: "2026-08-10T00:00:00.000Z", // >48h stale vs beat
+    },
+  ]);
+  const n = await countSegmentStaleTail(admin, {
+    staleCutoffIso: SEG_STALE_CUTOFF_ISO,
+    latestSegmentsCronBeatIso: SEG_BEAT_ISO,
+  });
+  assert.equal(n, 1);
+});
+
+test("countSegmentStaleTail: existing customer created BEFORE beat but UPDATED AFTER beat with NULL segments_refreshed_at is graced (post-cron opt-in scenario)", async () => {
+  const admin = fakeSegmentCustomersAdmin([
+    {
+      sms_marketing_status: "subscribed",
+      workspace_id: SEG_WS,
+      created_at: "2026-08-01T00:00:00.000Z", // pre-existing customer
+      updated_at: "2026-08-14T10:00:00.000Z", // opted in AFTER the 07:00 refresh beat
+      segments_refreshed_at: null, // cron didn't see them as subscribed at run time
+    },
+  ]);
+  const n = await countSegmentStaleTail(admin, {
+    staleCutoffIso: SEG_STALE_CUTOFF_ISO,
+    latestSegmentsCronBeatIso: SEG_BEAT_ISO,
+  });
+  // The post-cron update grace excludes them — the cron never had a chance to refresh their new
+  // sms_marketing_status='subscribed' state until the next scheduled cycle.
+  assert.equal(n, 0);
+});
+
+test("countSegmentStaleTail: brand-new subscriber created AFTER beat is graced (segment-coverage-ignore-post-cron-new-subscribers Phase 1 regression guard)", async () => {
+  const admin = fakeSegmentCustomersAdmin([
+    {
+      sms_marketing_status: "subscribed",
+      workspace_id: SEG_WS,
+      created_at: "2026-08-14T12:00:00.000Z", // AFTER the 07:00 beat
+      updated_at: "2026-08-14T12:00:00.000Z",
+      segments_refreshed_at: null,
+    },
+  ]);
+  const n = await countSegmentStaleTail(admin, {
+    staleCutoffIso: SEG_STALE_CUTOFF_ISO,
+    latestSegmentsCronBeatIso: SEG_BEAT_ISO,
+  });
+  assert.equal(n, 0);
+});
+
+test("countSegmentStaleTail: fallback path (no beat ever recorded) keeps the unfiltered count so a never-firing cron still trips", async () => {
+  const admin = fakeSegmentCustomersAdmin([
+    {
+      sms_marketing_status: "subscribed",
+      workspace_id: SEG_WS,
+      // Everything post-hypothetical-beat — but without a beat we can't know that, so the
+      // unfiltered NULL/>48h shape must still count so a truly-registered-but-never-firing
+      // cron doesn't hide behind the grace.
+      created_at: "2026-08-14T12:00:00.000Z",
+      updated_at: "2026-08-14T12:00:00.000Z",
+      segments_refreshed_at: null,
+    },
+  ]);
+  const n = await countSegmentStaleTail(admin, {
+    staleCutoffIso: SEG_STALE_CUTOFF_ISO,
+    latestSegmentsCronBeatIso: null,
+  });
+  assert.equal(n, 1);
+});
+
+test("countSegmentStaleTail: spec-test sandbox subscriber is always excluded", async () => {
+  const admin = fakeSegmentCustomersAdmin([
+    {
+      sms_marketing_status: "subscribed",
+      workspace_id: SANDBOX_WS, // sandbox
+      created_at: "2026-08-01T00:00:00.000Z",
+      updated_at: "2026-08-01T00:00:00.000Z",
+      segments_refreshed_at: null,
+    },
+  ]);
+  const n = await countSegmentStaleTail(admin, {
+    staleCutoffIso: SEG_STALE_CUTOFF_ISO,
+    latestSegmentsCronBeatIso: SEG_BEAT_ISO,
+  });
+  assert.equal(n, 0);
+});
+
+test("SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE fingerprint is present in monitor.ts (grep-able marker for the post-cron opt-in grace)", () => {
+  const monitorSrc = readFileSync(resolve(__dirname, "./monitor.ts"), "utf8");
+  assert.ok(
+    monitorSrc.includes("SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE"),
+    "monitor.ts must carry the SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE fingerprint " +
+      "so a grep locates the post-cron opt-in grace behavior",
+  );
+  assert.equal(SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE, "segment-coverage-ignore-post-cron-opt-ins");
 });
 
 // Fingerprint guard: the monitor query MUST carry the same internal-* exclusion the payday
