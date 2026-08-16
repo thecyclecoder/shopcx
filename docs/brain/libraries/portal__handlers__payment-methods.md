@@ -40,7 +40,7 @@ _No internal callers found via static scan._
 
 ## Gotchas
 
-_None documented._
+- Read-only endpoint. Adding a card lives in [[portal__handlers__payment-method-update]]; **removing** a saved card lives in [[portal__handlers__remove-payment-method]] (Braintree-vaulted only, customer-only PCI stance). SHOPIFY PAYMENT METHODS entries cannot be removed via the portal — the customer must remove them from her Shopify account page.
 
 ---
 
