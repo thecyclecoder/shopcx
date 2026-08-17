@@ -66,10 +66,22 @@ export interface SpawnPreMergeFixInput {
   branch: string;
   /** Evidence-backed failing checks from the failing pre-merge spec_test_runs row. */
   failing: PreMergeFailingCheck[];
+  /**
+   * ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 4 — the id of
+   * the `security-review` job that spawned this fix, when the RED trigger was a `real-vuln` security
+   * verdict (`buildSecurityFailingChecks` in `scripts/builder-worker.ts` — the branch-mode arm of
+   * `applySecurityVerdictToJob`). Stamped onto each APPENDED fix phase's `metadata.security_review_job_id`
+   * so the landing side ([[../agent-jobs]] `retestBranchSecurityIfFixPhaseLanded`, fired from
+   * `finalizeBuiltPhase` after `git push` succeeds) can find its way back and DIRECTLY enqueue a fresh
+   * branch-mode security review — no dependence on the Phase-2 SHA freshness heuristic to infer that
+   * the branch moved. Omitted for non-security callers (regression fixes / spec-test fails); the
+   * landing hook then no-ops for those phases.
+   */
+  securityReviewJobId?: string | null;
 }
 
 export type SpawnPreMergeFixResult =
-  | { spawned: true; escalated: false; fixSlug: string; alreadyAuthored: boolean; buildQueued: boolean; attempts: number }
+  | { spawned: true; escalated: false; fixSlug: string; alreadyAuthored: boolean; buildQueued: boolean; attempts: number; appendedPositions?: number[] }
   | { spawned: false; escalated: true; attempts: number; reason: string; depth?: number }
   | { spawned: false; escalated: false; reason: string };
 
@@ -286,6 +298,7 @@ export async function spawnPreMergeFix(admin: Admin, input: SpawnPreMergeFixInpu
     const checkKeys = cleanFailing.map((f) => f.check_key);
     const fixNum = existingFixPhases.length + 1;
 
+    let appendedPositions: number[] = [];
     if (!pending) {
       const phaseBody = [
         `The pre-merge spec-test for [[${originSlug}]] on branch \`${branch}\` FAILED — ${cleanFailing.length} verification check${cleanFailing.length === 1 ? "" : "s"} returned \`fail\` against the per-build preview deploy. Fix them on THIS branch (resumed session); the origin re-spec-tests itself when this Fix phase ships.`,
@@ -312,6 +325,31 @@ export async function spawnPreMergeFix(admin: Admin, input: SpawnPreMergeFixInpu
       ]);
       if (appended.appended === 0) {
         return { spawned: false, escalated: false, reason: `appendFixPhases wrote 0 rows for ${originSlug}` };
+      }
+      appendedPositions = appended.positions;
+      // ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 4 — stamp the
+      // two-way link: the fix phase knows which security-review job it answers. The reverse leg (review
+      // → fix positions) is stamped by the caller onto `instructions.waiting_on_fix_positions` at the same
+      // terminal write that persists `verdict='real-vuln'` (builder-worker.ts applySecurityVerdictToJob).
+      // Together they let `retestBranchSecurityIfFixPhaseLanded` (agent-jobs.ts) fire from
+      // `finalizeBuiltPhase` after `git push` succeeds and DIRECTLY enqueue a fresh branch-mode security
+      // review — no dependence on the Phase-2 SHA freshness heuristic to infer the branch moved.
+      // Best-effort: a metadata write failure never fails the fix append (the phase is real work; the
+      // reverse Phase-2 freshness gate is still the safety net if this link doesn't get written).
+      if (input.securityReviewJobId) {
+        try {
+          const { setPhaseMetadata } = await import("@/lib/specs-table");
+          for (const pos of appendedPositions) {
+            await setPhaseMetadata(workspaceId, originSlug, pos, {
+              security_review_job_id: input.securityReviewJobId,
+              spawned_from_kind: "security",
+            });
+          }
+        } catch (e) {
+          console.warn(
+            `[pre-merge-fix] setPhaseMetadata(security link) failed for ${originSlug} phase(s) ${appendedPositions.join(",")} (non-fatal — Phase-2 SHA freshness remains as backstop): ${e instanceof Error ? e.message : e}`,
+          );
+        }
       }
     }
 
@@ -345,7 +383,7 @@ export async function spawnPreMergeFix(admin: Admin, input: SpawnPreMergeFixInpu
         loop_guard_max: PRE_MERGE_FIX_LOOP_GUARD_MAX,
       },
     });
-    return { spawned: true, escalated: false, fixSlug: originSlug, alreadyAuthored: !!pending, buildQueued, attempts: existingFixPhases.length };
+    return { spawned: true, escalated: false, fixSlug: originSlug, alreadyAuthored: !!pending, buildQueued, attempts: existingFixPhases.length, appendedPositions };
   } catch (e) {
     console.warn(`[pre-merge-fix] spawnPreMergeFix threw for ${input.originSlug}: ${e instanceof Error ? e.message : e}`);
     return { spawned: false, escalated: false, reason: `spawn threw: ${e instanceof Error ? e.message : e}` };

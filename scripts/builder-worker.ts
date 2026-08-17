@@ -25613,7 +25613,20 @@ async function applySecurityVerdictToJob(
       originTitle,
       branch,
       failing,
+      // ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 4 — the fix
+      // phase(s) spawnPreMergeFix appends get stamped with this security-review-job-id on their metadata.
+      // When the origin's build later lands that fix phase, [[../src/lib/agent-jobs]]
+      // `retestBranchSecurityIfFixPhaseLanded` (fired from finalizeBuiltPhase) reads that link and
+      // DIRECTLY enqueues a fresh branch-mode security review — no dependence on the Phase-2 SHA
+      // freshness heuristic to infer the branch moved.
+      securityReviewJobId: job.id,
     });
+    // ⭐ Phase 4 — record the REVERSE leg of the link: which fix phase positions this security review is
+    // waiting on. Written to `instr` so the terminal update below persists it into `instructions`
+    // alongside `verdict='real-vuln'`. The fix-landed hook reads the forward link (phase → job); the
+    // reverse leg is for observability + debugging ("what fix is this review waiting on?"). No safety
+    // dependence on this — the forward link alone drives the enqueue.
+    const waitingOnFixPositions = out.spawned ? (out.appendedPositions ?? []) : [];
     const outcome = out.spawned
       ? `security Fix phase appended to [[${parentSlug}]] + build resumed (attempt ${out.attempts + 1})`
       : out.escalated
@@ -25631,6 +25644,7 @@ async function applySecurityVerdictToJob(
         routed: "fixes-as-phases",
         fix_check_keys: failing.map((f) => f.check_key),
         spawn_escalated: out.escalated ?? false,
+        waiting_on_fix_positions: waitingOnFixPositions,
       },
     });
     // Terminal but NOT security-green: the verdict stays 'real-vuln' so `isSecurityGreenForBranch` holds the
@@ -25639,11 +25653,11 @@ async function applySecurityVerdictToJob(
     await update(job.id, {
       status: "completed",
       error: null,
-      instructions: JSON.stringify({ ...instr, verdict, routed: "fixes-as-phases" }),
+      instructions: JSON.stringify({ ...instr, verdict, routed: "fixes-as-phases", waiting_on_fix_positions: waitingOnFixPositions }),
       log_tail: `real-vuln → ${outcome}\n\n${review}`.slice(-2000),
     });
     await emitVerdict();
-    console.log(`${tag} real-vuln on in-flight branch → ${outcome}`);
+    console.log(`${tag} real-vuln on in-flight branch → ${outcome}${waitingOnFixPositions.length ? ` (waiting on fix positions ${waitingOnFixPositions.join(",")})` : ""}`);
     return;
   }
   if (verdict === "real-vuln") {
@@ -27736,6 +27750,34 @@ async function dispatchJob(job: Job) {
           }
         } catch (e) {
           console.error(`${tag} stampPhaseBuilt import failed (non-fatal):`, e instanceof Error ? e.message : e);
+        }
+      }
+      // ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 4 — a landed
+      // fix for a security finding explicitly asks to be re-checked. If any position we just stamped
+      // BUILT is a `kind='fix'` phase whose `metadata.security_review_job_id` was stamped by
+      // spawnPreMergeFix (branch-mode real-vuln arm of applySecurityVerdictToJob), enqueue a fresh
+      // branch-mode security review DIRECTLY — no dependence on the Phase-2 SHA freshness heuristic to
+      // infer the branch moved. Guard (1) (one OPEN review per branch) inside the enqueue chokepoint is
+      // the sole dedupe (the spec's point 3: "prefer enqueuing over skipping when the two are
+      // ambiguous"). Non-security fix phases (regression fixes / spec-test fails) carry no link and
+      // no-op through this helper. Best-effort + never throws.
+      if (branch && positionsToStamp.size) {
+        try {
+          const { retestBranchSecurityIfFixPhaseLanded } = await import("../src/lib/agent-jobs");
+          const r = await retestBranchSecurityIfFixPhaseLanded(
+            job.workspace_id,
+            slug,
+            Array.from(positionsToStamp),
+            branch,
+            opts.headSha,
+          );
+          if (r.enqueued) {
+            console.log(`${tag} fix-landed: enqueued fresh security review of ${branch} (${r.matchingFixPhaseCount} matching phase(s))`);
+          } else if (r.matchingFixPhaseCount > 0) {
+            console.log(`${tag} fix-landed: ${r.matchingFixPhaseCount} security-linked fix phase(s) but re-review not enqueued — ${r.reason}`);
+          }
+        } catch (e) {
+          console.error(`${tag} fix-landed re-review dispatch threw (non-fatal):`, e instanceof Error ? e.message : e);
         }
       }
       // ACCUMULATION — the stamp above is now persisted, so this read reflects the just-built phase. Fails OPEN.
