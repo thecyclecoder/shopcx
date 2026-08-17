@@ -7,7 +7,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
-import { getSpec as getSpecFromDb, listSpecs, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete, verifyPhaseAccumulatedOnBranch, type VerifyPhaseDeps, type SpecStatus } from "@/lib/specs-table";
+import { getSpec as getSpecFromDb, listSpecs, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete, verifyPhaseAccumulatedOnBranch, mergeContainsPhaseBuild, type VerifyPhaseDeps, type SpecStatus } from "@/lib/specs-table";
 
 export type JobStatus =
   | "queued"
@@ -4240,15 +4240,39 @@ export async function enqueueDirectorTopUp(workspaceId: string, adminClient?: Ad
   }
 }
 
-/** Phase indices (0-based) a build's instructions name — "Phase 2 — …" → [1]; a single PR may name several. */
-function parsePhaseIndices(instructions: string | null | undefined, count: number): number[] {
-  if (!instructions) return [];
-  const idxs = new Set<number>();
-  for (const m of instructions.matchAll(/\bPhase\s+(\d+)\b/gi)) {
-    const i = parseInt(m[1], 10) - 1;
-    if (i >= 0 && i < count) idxs.add(i);
+/**
+ * [[../specs/a-merge-stamps-only-the-phases-whose-code-it-actually-contains]] Phase 1 — the PURE partition
+ * a merge's stamp uses to decide which phase positions to flip shipped. Given a spec's phases and a
+ * "does this merge contain this build SHA?" predicate, return the positions to stamp.
+ *
+ * Rules (mirroring the spec's Phase-1 What):
+ *   - Never stamp a terminal phase (shipped/rejected) — the stamp is inert but the caller shouldn't ask.
+ *   - Never stamp a phase whose `build_sha` is null — a phase with no evidence of having been built has no
+ *     merge that can be evidence of it having shipped. This is the exact shape the spec pins
+ *     (`phase-accumulation-verifies-the-pushed-branch-not-the-boxs-local-copy` P2: `build=(none)`).
+ *   - Otherwise, stamp iff the containment predicate returns true for the phase's `build_sha`.
+ *
+ * Pure, sortable, testable without spawning git. The container-check itself
+ * ([[../libraries/specs-table]] `mergeContainsPhaseBuild`) runs in the async wrapper below.
+ */
+export interface PhaseForStampSelection {
+  position: number;
+  status: string;
+  build_sha: string | null;
+}
+
+export function selectPhasesShippedByMerge<P extends PhaseForStampSelection>(
+  phases: P[],
+  containsBuild: (buildSha: string) => boolean,
+): number[] {
+  const out: number[] = [];
+  for (const p of phases) {
+    if (p.status === "shipped" || p.status === "rejected") continue;
+    if (!p.build_sha) continue;
+    if (!containsBuild(p.build_sha)) continue;
+    out.push(p.position);
   }
-  return [...idxs];
+  return out.sort((a, b) => a - b);
 }
 
 export async function applyMergedBuildEffects(
@@ -4266,52 +4290,49 @@ export async function applyMergedBuildEffects(
     const spec = await getSpecFromDb(workspaceId, slug);
     if (!spec) return; // no DB spec row → nothing to advance (the daily backlog cron backstops)
     const phases = spec.phases; // 1-indexed by `position`, ordered ASC
-    // TRUST THE MERGE + TAG ITS PROVENANCE (phase-pr-provenance). Which phase(s) did THIS merge ship?
+    // ⭐ [[../specs/a-merge-stamps-only-the-phases-whose-code-it-actually-contains]] Phase 1 —
+    // A merge stamps ONLY the phases whose code the merge actually carries.
     //
-    // ⭐ ship-all-phases-on-squash-merge (post-merge-ships-only-one-phase fix): under M1's branch-accumulation
-    // model ALL of a spec's phases accumulate onto ONE `claude/build-{slug}` branch, and the auto-merge
-    // ACCUMULATION GATE only squash-merges that branch once EVERY phase is built (no phase still `planned`).
-    // A squash-merge collapses the whole branch into ONE commit on main — so it ships the WHOLE spec
-    // ATOMICALLY, regardless of how many phases its diff spans or which phase the merged build job's
-    // `instructions` happen to NAME. The old code keyed on the named-phase shortcut FIRST: a director-initiated /
-    // chain build whose `instructions` said "Phase 2" stamped ONLY P2 and left P1 `in_progress` forever
-    // (noop-pipeline-test-4 / #837 — P1 in_progress, merge_sha=NULL while P2 shipped). So: when the spec is
-    // FULLY ACCUMULATED, stamp EVERY non-terminal phase shipped with this merge SHA — the named-phase parse is
-    // a fallback for the (now-rare) case a single PR merged a partial branch. This makes the post-merge advance
-    // idempotent + re-runnable: a re-run over an already-merged spec whose P1 stayed `in_progress` RECONCILES
-    // it (stampPhaseShipped on a shipped phase is inert; the in_progress phase flips shipped + carries the SHA).
+    // Prior behaviour keyed on `isSpecAccumulationComplete` as a "the merge shipped the whole spec"
+    // signal and blanket-stamped every non-terminal phase against ONE merge SHA. But the accumulation
+    // gate rides on the branch state, not the merge — so when a phase without its own build lived on the
+    // branch anyway (P2 with `build_sha=NULL`, e.g. `phase-accumulation-verifies-the-pushed-branch-not-
+    // the-boxs-local-copy` 2026-08-17), the blanket stamp gave it a merge SHA it never earned. The fold
+    // then read the spec as complete and archived it while the real P2 code was still on an unmerged PR.
     //
-    //   (1) accumulation-complete (the normal squash-merge) → stamp ALL non-terminal phases (whole-spec atomic);
-    //   (2) else the phase(s) the build's instructions NAME ("Phase N") — mapped to positions (partial merge);
-    //   (3) else the FIRST not-yet-shipped phase (lowest position whose status isn't shipped/rejected).
+    // New rule: for every non-terminal phase with a `build_sha`, check `git merge-base --is-ancestor
+    // buildSha mergeSha` — stamp iff the merge actually contains that build. A phase with a NULL
+    // build_sha is NEVER stamped (rule 2 — no build evidence, no merge can stamp it). When the merge
+    // covers only SOME of a spec's phases, that is a normal state — accumulation keeps the spec on the
+    // board and the pipeline drives the remainder (rule 3, do not escalate; do not fail the merge).
+    // Containment is resolved via [[../libraries/specs-table]] `mergeContainsPhaseBuild`, which routes
+    // through `resolveBranchRefForVerification` (origin-first) so we're checking against the pushed
+    // commit, never a stale local ref — the sibling defect this spec was stranded by (rule 4).
     const shippedPositions = new Set<number>();
-    let accumulationComplete = false;
-    if (phases.length > 1) {
-      try {
-        const acc = await isSpecAccumulationComplete(workspaceId, slug);
-        accumulationComplete = acc.complete;
-      } catch {
-        // Accumulation read failed → fall through to the named/next heuristics (don't blanket-ship on an unknown).
-        accumulationComplete = false;
-      }
-    }
-    const named = parsePhaseIndices(opts.instructions, phases.length); // 0-based indices
-    if (accumulationComplete) {
-      // ⭐ A squash-merge of a fully-accumulated branch ships the WHOLE spec — stamp every non-terminal phase.
+    if (opts.mergeSha) {
+      // Compute containment per unique build_sha (a spec's phases very often share the same build SHA
+      // under branch-accumulation — one git call per distinct SHA is enough). Fail-closed: on git error
+      // we don't stamp — the daily backlog / a later merge reconciles rather than minting a phantom ship.
+      const containment = new Map<string, boolean>();
+      const uniqueBuildShas = new Set<string>();
       for (const p of phases) {
-        if (p.status !== "shipped" && p.status !== "rejected") shippedPositions.add(p.position);
+        if (p.status === "shipped" || p.status === "rejected") continue;
+        if (p.build_sha) uniqueBuildShas.add(p.build_sha);
       }
-    } else if (named.length) {
-      // map named 0-based indices → phase positions (1-indexed `position`, ordered ASC)
-      for (const i of named) {
-        const p = phases[i];
-        if (p) shippedPositions.add(p.position);
+      for (const bsha of uniqueBuildShas) {
+        const res = await mergeContainsPhaseBuild(opts.mergeSha, bsha);
+        containment.set(bsha, res.ok && res.contained);
       }
-    } else {
-      // Single-phase spec, or a build with no named phase — advance the first not-yet-shipped phase.
-      const next = phases.find((p) => p.status !== "shipped" && p.status !== "rejected");
-      if (next) shippedPositions.add(next.position);
+      for (const pos of selectPhasesShippedByMerge(
+        phases.map((p) => ({ position: p.position, status: p.status, build_sha: p.build_sha })),
+        (bsha) => containment.get(bsha) === true,
+      )) {
+        shippedPositions.add(pos);
+      }
     }
+    // A merge with NO mergeSha (rare manual-reconcile path) carries no verifiable containment claim, so
+    // stamps nothing here — the standing reconcile / audit path recovers those. The post-ship hooks below
+    // still fire on the derived rollup, so a spec that reached shipped by prior stamps still folds.
     // Stamp each shipped phase's status + PR/SHA provenance through the SDK — the only status-write path.
     // This leaf write is what advances the now-DERIVED spec status (the DB rollup trigger is gone — status
     // derives from `spec_phases` at read time). No raw PM SQL (pm-db-agent-toolkit invariant).

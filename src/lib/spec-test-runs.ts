@@ -787,8 +787,24 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
   // fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 2 — hoisted so the
   // spec-phases-checks read only fires for the Rail-2 fall-through (a spec whose latest run failed
   // isCleanMachinePassRun's 0-check floor).
-  const { listSpecs } = await import("@/lib/specs-table");
+  const { listSpecs, verifyPhasesContainedByMerges, mergeContainsPhaseBuild: _mergeContainsPhaseBuildRef } = await import("@/lib/specs-table");
   const { listSpecPhaseChecks } = await import("@/lib/spec-phase-checks-table");
+  // ⭐ [[../specs/a-merge-stamps-only-the-phases-whose-code-it-actually-contains]] Phase 2 Rail 4 —
+  // pre-fold hard-refuse guard. The fold is a one-way door: it rewrites the brain and takes the spec
+  // off the board. Before folding, we assert (a) every phase's `merge_sha` actually contains the
+  // phase's `build_sha` via `mergeContainsPhaseBuild` (one origin-first mechanism, not two), and (b)
+  // no OPEN pull request still carries the spec's `claude/build-{slug}` branch — either alone is
+  // sufficient evidence the spec is not finished. The failing state the spec pins:
+  // `phase-accumulation-verifies-the-pushed-branch-not-the-boxs-local-copy` folded on 2026-08-17 with
+  // P2 `build=(none) merge=9ea6351de` while PR #2508 was open + mergeable and carried the real P2 code.
+  // Reference `mergeContainsPhaseBuild` explicitly so any future refactor keeps the containment predicate
+  // wired into this fold path (the Phase-2 verification grep pins this file).
+  void _mergeContainsPhaseBuildRef;
+  const { listOpenClaudeBuildBranches } = await import("@/lib/github-pr-resolve");
+  const openBuildBranches = await listOpenClaudeBuildBranches();
+  // `null` from listOpenClaudeBuildBranches means the GitHub lookup failed (no token / list error / bad
+  // payload). FAIL-CLOSED: if we can't prove the absence of an open PR, don't fold — the daily cron sweeps
+  // this the moment the read recovers. An empty set is a genuine "no open build PRs, proceed".
   const [{ specs }, archived, runs, resolutions, liveRows, securityBySlug] = await Promise.all([
     // Grade the SAME workspace whose spec-test runs we read below — `getRoadmap()` with no arg resolves a
     // non-deterministic DEFAULT workspace (latest agent_job), so the gate would otherwise grade the wrong
@@ -932,6 +948,45 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
         goalStatusCache.set(goalSlug, goalStatus);
       }
       if (!isFoldSafeGivenGoalStatus(goalStatus)) continue;
+    }
+
+    // ⭐ Rail 4 (a-merge-stamps-only-the-phases-whose-code-it-actually-contains Phase 2). Two hard
+    // refusals — either alone leaves the spec on the board with a specific reason logged.
+    //
+    // Rail 4a — every phase's `merge_sha` must actually contain the phase's `build_sha`
+    // (via the Phase-1 containment helper). A `build_sha=NULL` phase that got shipped-stamped by
+    // another phase's merge is the exact wedge shape this spec was named after. Fail-CLOSED on a git
+    // error — the fold rewrites the brain and archives the spec; better to defer than to fold on an
+    // unverifiable claim.
+    const containment = await verifyPhasesContainedByMerges(
+      s.phases.map((p, idx) => ({
+        position: idx + 1, // SpecCard.phases is position-ordered (1-indexed) but SpecPhase omits `position`
+        status: p.status,
+        build_sha: p.build_sha ?? null,
+        merge_sha: p.merge_sha ?? null,
+      })),
+    );
+    if (!containment.ok) {
+      console.warn(
+        `[auto-fold] refusing to fold ${s.slug} — phase merge_sha does NOT contain phase build_sha for: ${containment.failures.map((f) => `pos ${f.position} (${f.reason})`).join("; ")}`,
+      );
+      continue;
+    }
+    // Rail 4b — an open pull request on the spec's build branch is sufficient evidence the spec is
+    // NOT finished (the failing state pins this exactly: PR #2508 was open, clean and mergeable at
+    // the moment the spec folded, and it was never consulted). If we couldn't list open PRs
+    // (`openBuildBranches === null`), fail-CLOSED — the read recovers on the next sweep.
+    if (openBuildBranches === null) {
+      console.warn(
+        `[auto-fold] refusing to fold ${s.slug} — GitHub open-PR list unavailable (cannot prove no build PR is still open for claude/build-${s.slug})`,
+      );
+      continue;
+    }
+    if (openBuildBranches.has(`claude/build-${s.slug}`)) {
+      console.warn(
+        `[auto-fold] refusing to fold ${s.slug} — an OPEN PR still carries branch claude/build-${s.slug} (the spec is not finished)`,
+      );
+      continue;
     }
 
     eligible.push(s.slug);
@@ -1212,4 +1267,43 @@ export async function reactiveFoldOnGateComplete(
     console.error(`[reactive-fold] gate trigger for ${slug} failed (non-fatal):`, e instanceof Error ? e.message : e);
     return null;
   }
+}
+
+/**
+ * [[../specs/a-merge-stamps-only-the-phases-whose-code-it-actually-contains]] Phase 2 rule 4 —
+ * backstop for specs ALREADY in the failing state. A spec that is `folded` but whose phases fail the
+ * merge-contains-build assertion is a LIVE INCIDENT, not history: the brain has been rewritten around
+ * a claim the repository doesn't have. Surface those; do NOT auto-repair (un-folding rewrites the
+ * brain again — that's a judgment call the owner must make).
+ *
+ * Returns the list of folded specs with their per-phase failure reasons, keyed by slug. Pure over
+ * `verifyPhasesContainedByMerges`; the caller (a standing cron / a Control Tower assertion / an
+ * ad-hoc audit) decides how to escalate — a dashboard_notifications card, a director inbox item, or
+ * a log line. Empty result = every folded spec's phase provenance still holds (the healthy state).
+ */
+export interface FoldedPhantomContainmentReport {
+  slug: string;
+  failures: Array<{ position: number; reason: string }>;
+}
+
+export async function findFoldedSpecsFailingPhaseContainment(
+  workspaceId: string,
+): Promise<FoldedPhantomContainmentReport[]> {
+  const { getAllSpecs, verifyPhasesContainedByMerges } = await import("@/lib/specs-table");
+  const specs = await getAllSpecs(workspaceId);
+  const out: FoldedPhantomContainmentReport[] = [];
+  for (const s of specs) {
+    if (s.status !== "folded") continue;
+    if (!s.phases || s.phases.length === 0) continue; // one-shot: carries provenance at the card, not per phase
+    const report = await verifyPhasesContainedByMerges(
+      s.phases.map((p) => ({
+        position: p.position,
+        status: p.status,
+        build_sha: p.build_sha,
+        merge_sha: p.merge_sha,
+      })),
+    );
+    if (!report.ok) out.push({ slug: s.slug, failures: report.failures });
+  }
+  return out;
 }

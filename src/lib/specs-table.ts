@@ -1651,6 +1651,143 @@ export async function resolveBranchRefForVerification(
   return { ok: true, ref };
 }
 
+/**
+ * `mergeContainsPhaseBuild` — does the merge commit `mergeSha` actually contain the phase's build commit
+ * `buildSha`? This is the containment predicate that gates phase-shipped stamping in
+ * [[../libraries/agent-jobs]] `applyMergedBuildEffects` per the
+ * [[../specs/a-merge-stamps-only-the-phases-whose-code-it-actually-contains]] Phase-1 rule:
+ * a phase is stamped shipped by a merge ONLY when the merge actually carries the phase's build. The
+ * failing state the spec pins: `phase-accumulation-verifies-the-pushed-branch-not-the-boxs-local-copy`
+ * folded on 2026-08-17 with P2 `build=(none) merge=9ea6351de` while PR #2508 (the real P2 code) was still
+ * open — the old blanket-stamp treated one merge as delivery of the whole spec.
+ *
+ * Contract:
+ *   1. Reject anything that isn't a bare hex SHA (7–40 chars) as untrusted capability boundary BEFORE
+ *      spawning git — same rejection shape `resolveBranchRefForVerification` applies to branch strings.
+ *   2. Refresh `origin/main` via `resolveBranchRefForVerification("main")` first so the merge commit is
+ *      guaranteed reachable in the local object DB — mirrors the sibling defect's fix
+ *      ([[../specs/phase-accumulation-verifies-the-pushed-branch-not-the-boxs-local-copy]]): resolve
+ *      containment against the pushed commit, not whatever local ref the box happens to carry. One
+ *      origin-first mechanism, not two that can drift.
+ *   3. Run `git merge-base --is-ancestor <buildSha> <mergeSha>` — exit 0 = contained, exit 1 = not
+ *      contained, any other exit / spawn error = { ok:false, error } (FAIL-CLOSED: the caller must NOT
+ *      stamp on an inconclusive answer — the daily backlog / a later merge reconciles).
+ *
+ * Injectable `runGitCmd` so unit tests can pin the flow without spawning git.
+ */
+export type MergeContainsPhaseBuildResult =
+  | { ok: true; contained: boolean }
+  | { ok: false; error: string };
+
+const HEX_SHA_RE = /^[0-9a-f]{7,40}$/i;
+
+export async function mergeContainsPhaseBuild(
+  mergeSha: string | null | undefined,
+  buildSha: string | null | undefined,
+  deps: ResolveBranchRefDeps = { runGitCmd },
+): Promise<MergeContainsPhaseBuildResult> {
+  const m = (mergeSha ?? "").trim();
+  const b = (buildSha ?? "").trim();
+  if (!m || !HEX_SHA_RE.test(m)) {
+    return { ok: false, error: `refused unsafe merge sha '${mergeSha ?? ""}'` };
+  }
+  if (!b || !HEX_SHA_RE.test(b)) {
+    return { ok: false, error: `refused unsafe build sha '${buildSha ?? ""}'` };
+  }
+  // Route the refresh through the SAME origin-first resolver the accumulation gate uses, so we're checking
+  // containment against the pushed main commit rather than a stale local ref (the sibling defect's fix).
+  const mainRef = await resolveBranchRefForVerification("main", deps);
+  if (!mainRef.ok) {
+    return { ok: false, error: `origin/main refresh failed: ${mainRef.error}` };
+  }
+  const anc = await deps.runGitCmd(["merge-base", "--is-ancestor", b, m]);
+  if (anc.error) {
+    return { ok: false, error: `git merge-base failed to spawn: ${anc.error}` };
+  }
+  if (anc.code === 0) return { ok: true, contained: true };
+  if (anc.code === 1) return { ok: true, contained: false };
+  return {
+    ok: false,
+    error: `git merge-base --is-ancestor ${b} ${m}: ${(anc.stderr || anc.stdout || `exit ${anc.code}`).slice(0, 4000).trim()}`,
+  };
+}
+
+/**
+ * [[../specs/a-merge-stamps-only-the-phases-whose-code-it-actually-contains]] Phase 2 — the pre-fold
+ * assertion. For every non-terminal (`shipped`/`in_progress`/`planned`) phase, verify the recorded
+ * `merge_sha` actually contains the phase's `build_sha` via the Phase-1 containment helper
+ * `mergeContainsPhaseBuild` — one definition of "this merge carried this phase", not two.
+ *
+ * Failure shapes (every one blocks the fold — fold is a one-way door, so fail-CLOSED):
+ *   - a non-rejected phase with `build_sha` NULL (rule 2 pin — no evidence it was built);
+ *   - a shipped phase with `merge_sha` set but the containment check returns false (the exact P2 shape:
+ *     `build=a0e1172c merge=9ea6351d` where 9ea6351d contains a0e1172c → PASS, but P2 `build=null` →
+ *     already failed above; the check also catches a real build_sha whose merge does not carry it);
+ *   - a containment check that returns `ok:false` (a git error / unresolvable SHA) — fail-closed rather
+ *     than fold on an unverifiable claim.
+ *
+ * A `rejected` phase is skipped — the spec never expected it to ship. A non-shipped phase without a
+ * `merge_sha` is skipped in the containment step (it isn't claiming to be on main); the caller's own
+ * derived-shipped rail already excludes such specs from the fold set.
+ *
+ * Returns `{ ok: true }` iff every checked phase passes; otherwise `{ ok: false, failures }` with the
+ * failing positions + a human-readable reason apiece — the caller (fold worker / backstop) surfaces
+ * these verbatim.
+ */
+export interface PhaseContainmentInput {
+  position: number;
+  status: string;
+  build_sha: string | null;
+  merge_sha: string | null;
+}
+
+export type PhaseContainmentReport =
+  | { ok: true }
+  | { ok: false; failures: Array<{ position: number; reason: string }> };
+
+export async function verifyPhasesContainedByMerges(
+  phases: PhaseContainmentInput[],
+  deps: ResolveBranchRefDeps = { runGitCmd },
+): Promise<PhaseContainmentReport> {
+  const failures: Array<{ position: number; reason: string }> = [];
+  for (const p of phases) {
+    if (p.status === "rejected") continue;
+    if (!p.build_sha) {
+      failures.push({
+        position: p.position,
+        reason: `phase ${p.position} has no build_sha — no evidence it was ever built (the exact shape that stranded PR #2508: P2 build=(none))`,
+      });
+      continue;
+    }
+    if (!p.merge_sha) {
+      // A non-terminal phase without a merge stamp is not yet delivered — the derived-shipped rail
+      // filters these out upstream, but keep the guard so callers reusing this predicate for an
+      // already-folded backstop still flag the wedge shape.
+      failures.push({
+        position: p.position,
+        reason: `phase ${p.position} has build_sha=${p.build_sha.slice(0, 8)} but no merge_sha — not yet on main`,
+      });
+      continue;
+    }
+    const res = await mergeContainsPhaseBuild(p.merge_sha, p.build_sha, deps);
+    if (!res.ok) {
+      failures.push({
+        position: p.position,
+        reason: `phase ${p.position} containment check inconclusive (fail-closed): ${res.error}`,
+      });
+      continue;
+    }
+    if (!res.contained) {
+      failures.push({
+        position: p.position,
+        reason: `phase ${p.position} merge ${p.merge_sha.slice(0, 8)} does NOT contain its build ${p.build_sha.slice(0, 8)} — a stamp exceeded its evidence`,
+      });
+    }
+  }
+  if (failures.length) return { ok: false, failures };
+  return { ok: true };
+}
+
 async function defaultRunGitGrepOnBranch(
   branchRef: string,
   params: GrepCheckParams,
