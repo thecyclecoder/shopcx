@@ -344,18 +344,26 @@ test("buildGrepArgv places `--` before the user-controlled path (rg option-injec
   // Regression pin for harden-deterministic-grep-check-paths: even a validator-passed path must
   // be argv-separated from the pattern by `--` so ripgrep cannot re-parse it as a flag or a
   // `--pre=`-style preprocessor. Pattern goes via `-e`; path goes after `--`; both are covered.
+  // Uppercase-only patterns keep smart-case OFF, so the argv shape is unchanged from the
+  // pre-smart-case pin (see spec-check-runner.smart-case.test.ts for the smart-case ON shape).
   const withPath = buildGrepArgv({ pattern: "PRESENT", path: "src/lib", expect: "present" });
   assert.deepEqual(withPath, ["-e", "PRESENT", "--", "src/lib"]);
 
   const noPath = buildGrepArgv({ pattern: "PRESENT", expect: "present" });
   assert.deepEqual(noPath, ["-e", "PRESENT", "--", "."]);
 
-  // A pattern that itself starts with `-` still lands under `-e`, so rg treats it as data.
+  // A pattern that itself starts with `-` still lands under `-e`, so rg treats it as data. This
+  // pattern is all-lowercase → smart-case ON → `-i` is prepended. The security invariant we're
+  // pinning is that the pattern still lands under `-e` and the path still sits after `--`; the
+  // exact argv INDEX is not the invariant.
   const dashPattern = buildGrepArgv({ pattern: "-not-a-flag", path: "src/lib", expect: "present" });
-  assert.equal(dashPattern[0], "-e");
-  assert.equal(dashPattern[1], "-not-a-flag");
-  assert.equal(dashPattern[2], "--");
-  assert.equal(dashPattern[3], "src/lib");
+  const eIdx = dashPattern.indexOf("-e");
+  const ddIdx = dashPattern.indexOf("--");
+  assert.notEqual(eIdx, -1, "`-e` must be present");
+  assert.notEqual(ddIdx, -1, "`--` argv separator must be present");
+  assert.equal(dashPattern[eIdx + 1], "-not-a-flag", "pattern must land immediately after `-e`");
+  assert.equal(dashPattern[ddIdx + 1], "src/lib", "path must land immediately after `--`");
+  assert.ok(eIdx < ddIdx, "`-e` must come before `--`");
 });
 
 test("ensureRealTopLevelNodeModulesForBuild — no-op when node_modules is already a real directory", async () => {

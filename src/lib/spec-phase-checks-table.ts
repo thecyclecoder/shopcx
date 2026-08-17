@@ -54,6 +54,31 @@ export interface GrepCheckParams {
   path?: string;
   expect: "present" | "absent";
 }
+
+/**
+ * smart-case predicate — the single shared answer to "should this grep pattern match
+ * case-insensitively?" consumed by BOTH grep lanes (the deterministic runner's ripgrep path in
+ * [[spec-check-runner]] `buildGrepArgv`, and the merge-gate git grep path in [[specs-table]]
+ * `defaultRunGitGrepOnBranch`).
+ *
+ * Rule (ripgrep's `--smart-case` semantic): a pattern containing NO uppercase ASCII letter is an
+ * author writing a prose phrase and cannot know the source's capitalization, so match
+ * case-insensitively. A pattern with any uppercase is an author naming an identifier where casing
+ * is load-bearing (`VERCEL_LOG_DRAIN`, `ErrorSource`, `onRequestError`) and must stay exact.
+ *
+ * Why one exported predicate + both lanes routed through it: if each lane grew its own answer they
+ * would drift, and a check could pass the runner and fail the merge gate — worse than today's
+ * consistent behavior. `git grep` has no `--smart-case` flag, so it must be emulated in userland;
+ * ripgrep DOES have `-S`, but the runner deliberately does NOT use it — the predicate is the sole
+ * source of truth for both lanes.
+ *
+ * Ground-truth incident: the spec `replace-log-drain-with-in-process-onrequesterror` built all
+ * three phases correctly and then parked for three days because the check pattern
+ * `cannot filter by log level` did not match `CANNOT filter by log level` in the page it checked.
+ */
+export function shouldGrepCaseInsensitively(pattern: string): boolean {
+  return !/[A-Z]/.test(pattern);
+}
 export interface HttpGetCheckParams {
   url: string;
   expect_status: number;
