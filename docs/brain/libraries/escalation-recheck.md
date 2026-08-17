@@ -53,6 +53,10 @@ The Phase-2 standing sweep lives in **[[escalation-retirement-sweep]]** (`src/li
 6. Writes ONE [[../tables/director_activity]] row with `action_kind='retired_escalation'` under the RAISING director's function (read from `metadata.escalated_by_director`, defaulting to `platform`).
 7. Bounded by `RETIREMENT_SWEEP_CAP_PER_PASS` (50); the standing-pass note names the retired cards (`retirement sweep → dismissed N healed card(s): …`) so a burst is visible.
 
+### Guard: a card carrying pending actions is by definition not healed
+
+Spec Phase 2 §4 — "A retirement never DECIDES the underlying action. If a card carries pending actions that are still actionable, it is by definition not healed — leave it." The sweep enforces this with a defense-in-depth check BEFORE the descriptor gate: `if (card.actions.length > 0) continue;` — any card whose approvals-feed enrichment reads ≥1 inline action (Approve/Decline/multi-choice) is skipped unconditionally, regardless of its descriptor's shape. Two layers keep the invariant: (1) a raiser with a still-actionable pending action must not set `retire_when` in the first place; (2) if a raiser bug ever does, the sweep still refuses to touch the card. Belt-and-suspenders — dismissing a card with pending actions would silently discard the founder's decision.
+
 The `decideRetirement` helper is pure and unit-tested in `escalation-retirement-sweep.test.ts` (7 tests exercising each shape + the fail-closed contract).
 
 ## Related

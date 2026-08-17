@@ -27,8 +27,10 @@
  *   founder can audit "what did it retire, and was it right?" from the ledger alone.
  *
  * - **Never DECIDES the underlying action.** Dismiss clears the card; it does not approve or
- *   decline anything. If a card carries pending actions that are still actionable, it is by
- *   definition not healed — leave it (guarded by the retirable-descriptor gate at raise time).
+ *   decline anything. Enforced twice: (1) the retirable-descriptor gate at raise time (a raiser
+ *   with a still-actionable pending action must not set `retire_when`), and (2) a defense-in-depth
+ *   guard IN this sweep that skips any card whose enriched approvals feed reports `actions.length
+ *   > 0` — belt-and-suspenders so a raiser bug can never let the sweep silently discard a decision.
  *
  * - **Rate-limited per pass.** Bounded by `RETIREMENT_SWEEP_CAP_PER_PASS` so a sudden 20-card
  *   retirement is visible in the standing-pass note rather than discovered later; the count of
@@ -274,6 +276,12 @@ export async function retireHealedEscalations(
     if (result.retired.length >= RETIREMENT_SWEEP_CAP_PER_PASS) break;
     const row = notifById.get(card.id);
     if (!row) continue; // dismissed between feed build + re-read; leave it
+    // Spec Phase 2 §4 — "A retirement never DECIDES the underlying action. If a card carries
+    // pending actions that are still actionable, it is by definition not healed — leave it." This
+    // is a guard-before-mutation (coaching #11/#12): a card whose approvals-feed enrichment reads
+    // ≥1 inline action is a "please decide" surface; dismissing it would silently discard the
+    // decision. Skip unconditionally, regardless of the descriptor's shape.
+    if (card.actions.length > 0) continue;
     const descriptor = readEscalationRecheckDescriptor(row.metadata);
     if (!isRetirable(descriptor)) continue; // absent / non_retirable / malformed → leave (fail-closed)
     if (!descriptor) continue; // exhaustive — isRetirable(null)=false above; TS narrowing
