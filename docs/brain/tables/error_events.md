@@ -2,7 +2,7 @@
 
 The Control Tower's **error feed** store ([[../specs/error-feed-monitoring]] Phase 1 + Phase 2). One **grouped** incident per distinct error from the "hidden surfaces" the dashboard never showed: **Vercel** runtime errors / 500s, **Inngest** runs that failed after exhausting retries, **app-layer Supabase** errors our own code reported, and (Phase 2) **DB-level Supabase logs** (Postgres/auth/API) pulled from the [[../integrations/supabase-management-logs]] API. A burst of the same error folds into **one row** (`count` bumped, `last_seen_at` refreshed) — not N rows / N pages.
 
-**Global infra, not workspace-scoped** (same as [[loop_heartbeats]] / [[loop_alerts]] / [[worker_heartbeats]]). RLS: any authenticated user reads; service role writes (Inngest + the `/api/webhooks/vercel-logs` endpoint + `reportDbError` from app code).
+**Global infra, not workspace-scoped** (same as [[loop_heartbeats]] / [[loop_alerts]] / [[worker_heartbeats]]). RLS: any authenticated user reads; service role writes (Inngest + `src/instrumentation.ts` `onRequestError` in-process hook + `reportDbError` from app code).
 
 **Primary key:** `id`
 
@@ -44,7 +44,7 @@ The Control Tower's **error feed** store ([[../specs/error-feed-monitoring]] Pha
 ## Gotchas
 
 - **Signature normalization strips volatile bits** (uuids, long hex, numbers, quoted strings) before hashing — so "row 4821 not found" and "row 9173 not found" collapse to one incident. Group on the STABLE parts (function id / route / error class), never on run-specific ids.
-- **Vercel batches are grouped client-side too** — `/api/webhooks/vercel-logs` folds a delivered batch by `(path, status, message)` and calls `recordError` once per group with an `occurrences` count, so a 500-row burst in one POST is one count bump, not 500 reads.
+- **Vercel errors are grouped by handler** — `src/instrumentation.ts` `onRequestError` groups errors by `(path, err.name)` and calls `recordError` once per group with an `occurrences` count, so a burst of the same error is one count bump, not N reads.
 - **The inngest capture skips its own failures** (`function_id === 'inngest-failure-capture'`) — no self-loop.
 
 ## Migration
