@@ -173,6 +173,31 @@ export interface RenderedPlacement {
   format: PlacementFormat;
   buffer: Buffer;
   mimeType: string;
+  /** dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 4 — the exact
+   *  prompt Nano Banana was handed for THIS placement. Siblings differ from the canonical by
+   *  aspect ratio (and today by nothing else), but the per-placement store means a divergence
+   *  is a single row-read. Optional so bench/test fixtures + the CEO revise-format path
+   *  (`regenerate-existing-format`) that pre-dates the wire-in stay green; when absent, the
+   *  persisted `meta.render.prompt` is empty and `meta.render.prompt_truncated` is false. */
+  prompt?: string;
+}
+
+/** dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 4 — the pack-wide
+ *  provenance every placement shares. Shape mirrors the spec exactly:
+ *    • `pinned_skeleton_id` — the `creative_skeletons.id` the owner pinned, or null when the
+ *      angle came off the auto-ranked shelf.
+ *    • `composition_transfer` — did the render reuse a design reference's composition?
+ *    • `treatment` — the archetype the PROMPT was steered toward, or null on an imitation path
+ *      (Phase 2's gate: an imitation carries no TREATMENT_STEER, the source ad IS the treatment).
+ *    • `had_source_wireframe` — did `brief.sourceWireframe` land in the prompt (Phase 3)?
+ *    • `author_notes_present` — did the owner's free-text directions ride into the prompt?
+ *  Persisted per placement in `ad_videos.meta.render` alongside the placement's own prompt. */
+export interface RenderProvenance {
+  pinned_skeleton_id: string | null;
+  composition_transfer: boolean;
+  treatment: string | null;
+  had_source_wireframe: boolean;
+  author_notes_present: boolean;
 }
 
 /** Input to `planCreativePackInserts` — the caller has already rendered the 3 placement statics
@@ -185,17 +210,26 @@ export interface CreativePackInsertsInput {
   copyPack: MetaCopyPack;
   archetype: string;                       // 'before_after' | 'testimonial' | ...
   generatedBy: string;                     // 'ad-creative-agent'
+  /** dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 4 — the pack-wide
+   *  provenance every placement's `meta.render` inherits. Optional so pre-Phase-4 callers stay
+   *  byte-identical (`meta.render_provenance` absent → `insertOnePlacementRender` writes no
+   *  render envelope, matching today's `{archetype, generated_by, storage_path}` shape). */
+  renderProvenance?: RenderProvenance;
 }
 
 /** One row's worth of the `ad_videos` insert body — `campaign_id` links to the pack's campaign;
- *  siblings carry `format_variant_of_id` (populated after the canonical insert lands its id). */
+ *  siblings carry `format_variant_of_id` (populated after the canonical insert lands its id).
+ *  Phase 4 (dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it): `render_provenance`
+ *  rides on `meta` here; `insertOnePlacementRender` extracts it and writes the final
+ *  `meta.render = { prompt, prompt_truncated, ...render_provenance }` envelope alongside the
+ *  existing `archetype / generated_by / storage_path` keys (unchanged). */
 export interface AdVideoInsertBody {
   workspace_id: string;
   campaign_id: string;
   format: PlacementFormat;
   media_kind: "static";
   status: "pending";
-  meta: { archetype: string; generated_by: string };
+  meta: { archetype: string; generated_by: string; render_provenance?: RenderProvenance };
 }
 
 /** Pack of DB writes. `siblings[].format_variant_of_id` starts unset — the caller stamps it with
@@ -246,7 +280,9 @@ export function planCreativePackInserts(input: CreativePackInsertsInput): Creati
     format,
     media_kind: "static",
     status: "pending",
-    meta: { archetype: input.archetype, generated_by: input.generatedBy },
+    meta: input.renderProvenance
+      ? { archetype: input.archetype, generated_by: input.generatedBy, render_provenance: input.renderProvenance }
+      : { archetype: input.archetype, generated_by: input.generatedBy },
   });
 
   return {

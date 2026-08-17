@@ -62,6 +62,7 @@ import {
   type MetaCopyPack,
   type PlacementFormat,
   type RenderedPlacement,
+  type RenderProvenance,
 } from "@/lib/ads/creative-pack";
 import { COPY_QC_CREATIVE_FORMATS } from "@/lib/ads/creative-qa";
 
@@ -2880,6 +2881,23 @@ async function insertReadyCreative(
       headline_pattern_id: string | null;
       creative_combination_id: string | null;
     };
+    /** dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 4 — the
+     *  pack-wide render provenance (pinned skeleton id, composition_transfer, treatment,
+     *  had_source_wireframe, author_notes_present) rides onto every placement's
+     *  `ad_videos.meta.render` envelope alongside the per-placement `prompt`. Absent →
+     *  today's byte-for-byte behavior (no `render_provenance` in meta, no `render` envelope
+     *  written by `insertOnePlacementRender`). The hardcoded `archetype: "before_after"` is
+     *  ALSO derived from this: composition_transfer ⇒ `'imitation'`, otherwise the actually-
+     *  applied `treatment` (from the outer loop's assigned Treatment) — the audit-trail
+     *  archetype must describe what was rendered, not a constant that describes every ad
+     *  identically. */
+    renderProvenance?: RenderProvenance;
+    /** dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 4 — the
+     *  archetype to stamp on `ad_videos.meta.archetype` when `renderProvenance` is not
+     *  supplied (or when a caller wants to override the derivation). The current `archetype`
+     *  key is unchanged for backward-compat readers; this replaces the hardcoded
+     *  `'before_after'` at the `planCreativePackInserts` call site. */
+    renderArchetype?: string;
   },
 ): Promise<InsertReadyCreativeResult> {
   // Phase-2 cold-offer gate — fires BEFORE any DB write so the refusal is atomic and cheap. The
@@ -3003,14 +3021,31 @@ async function insertReadyCreative(
   // Pure planner emits the exact write bodies for the pack's 3 ad_videos rows (canonical +
   // siblings). Throws when the pack shape is malformed — Phase 3's `isCreativePackComplete`
   // re-checks persisted rows; this catches an authoring-time regression BEFORE we write.
+  // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 4 — the archetype
+  // stamped on `ad_videos.meta.archetype` describes what was ACTUALLY rendered, not a constant.
+  // Precedence: an explicit `opts.renderArchetype` (the caller's derivation) wins; otherwise
+  // derive from the pack-wide render provenance: an imitation branch (composition_transfer +
+  // design ref) is `'imitation'` (Phase 2 strips TREATMENT_STEER from the prompt, so the ad
+  // takes its archetype from the source ad itself, not one of ours), else the treatment the
+  // prompt was steered toward, else the previous default `'before_after'` for callers that
+  // supply neither. A constant that describes every ad as `'before_after'` was a lie in the
+  // audit trail; this restores it as truth.
+  const derivedArchetype =
+    opts?.renderArchetype
+    ?? (opts?.renderProvenance?.composition_transfer ? "imitation" : opts?.renderProvenance?.treatment)
+    ?? "before_after";
   const plan = planCreativePackInserts({
     workspaceId,
     campaignId,
     canonicalRender: renders.canonical,
     siblingRenders: renders.siblings,
     copyPack,
-    archetype: "before_after",
+    archetype: derivedArchetype,
     generatedBy: "ad-creative-agent",
+    // Phase 4 — pack-wide provenance rides onto every placement's `meta.render` envelope.
+    // Absent → today's byte-for-byte behavior (no `render_provenance` in meta, no `render`
+    // envelope written by `insertOnePlacementRender`).
+    renderProvenance: opts?.renderProvenance,
   });
 
   // Canonical (feed_4x5) — insert row, upload buffer, sign URL, flip to ready.
@@ -3041,14 +3076,36 @@ async function insertReadyCreative(
   return { kind: "ok", campaignId };
 }
 
+/** dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 4 — cap the persisted
+ *  render prompt so a runaway prompt (a threading regression, a caller looping the whole brief in)
+ *  can't bloat the `ad_videos` row. Chosen empirically: today's Nano Banana prompts run 2-4k chars,
+ *  4× headroom absorbs the SOURCE STRUCTURE + CEO EDIT + owner-notes clauses this spec adds without
+ *  landing near the limit. A truncation is flagged loudly on the row (`prompt_truncated:true`) rather
+ *  than silently cut, so diagnosing a truncated capture reads its bounds from the same envelope. */
+export const RENDER_PROMPT_STORE_CAP = 16_000;
+
+/** PURE — cap a persisted render prompt for `ad_videos.meta.render`. Same-file constant + helper so
+ *  the cap can't drift from the flag readers ([[../creative-generate]] tests can `import` it too). */
+export function capRenderPromptForPersist(prompt: string | undefined | null): { prompt: string; prompt_truncated: boolean } {
+  const s = typeof prompt === "string" ? prompt : "";
+  if (s.length <= RENDER_PROMPT_STORE_CAP) return { prompt: s, prompt_truncated: false };
+  return { prompt: s.slice(0, RENDER_PROMPT_STORE_CAP), prompt_truncated: true };
+}
+
 /** Insert one placement render (canonical OR a sibling): open a pending ad_videos row, upload the
  *  buffer under `finals/{ws}/{video_id}.{ext}`, sign the URL, flip to `ready` with the storage
  *  path in `meta`. When `variantOfId` is set, the row is a sibling and its `format_variant_of_id`
- *  points at the canonical row's id (same-psychology invariant). Returns the row id. */
+ *  points at the canonical row's id (same-psychology invariant). Returns the row id.
+ *
+ *  Phase 4: the ready-flip's `meta` write now composes the PER-PLACEMENT `render` envelope
+ *  ({prompt, prompt_truncated, ...render_provenance}) alongside the existing archetype /
+ *  generated_by / storage_path keys — the publish path + ad detail page still read those, and
+ *  `render` is additive (never overwrites). Absent `render_provenance` (pre-Phase-4 caller) →
+ *  byte-identical meta. */
 async function insertOnePlacementRender(
   admin: Admin,
   workspaceId: string,
-  insertBody: { workspace_id: string; campaign_id: string; format: string; media_kind: string; status: string; meta: { archetype: string; generated_by: string } },
+  insertBody: { workspace_id: string; campaign_id: string; format: string; media_kind: string; status: string; meta: { archetype: string; generated_by: string; render_provenance?: RenderProvenance } },
   render: RenderedPlacement,
   variantOfId: string | null,
 ): Promise<string | null> {
@@ -3062,10 +3119,25 @@ async function insertOnePlacementRender(
   const storagePath = `finals/${workspaceId}/${videoId}.${ext}`;
   await uploadBuffer(storagePath, render.buffer, render.mimeType);
   const url = await signedUrl(storagePath);
+  // Phase 4 — compose the per-placement render envelope. The pack-wide provenance rides on
+  // `insertBody.meta.render_provenance`; the placement's own prompt comes off the RenderedPlacement.
+  // Both are optional so a pre-Phase-4 caller writes byte-identical meta.
+  const provenance = insertBody.meta.render_provenance;
+  const renderEnvelope = provenance
+    ? {
+        render: {
+          ...capRenderPromptForPersist(render.prompt),
+          ...provenance,
+        },
+      }
+    : {};
+  // Strip `render_provenance` from the base meta before merging — it's now nested inside `render`
+  // and would otherwise duplicate as a top-level meta key.
+  const baseMeta: Record<string, unknown> = { archetype: insertBody.meta.archetype, generated_by: insertBody.meta.generated_by };
   await admin.from("ad_videos").update({
     static_jpg_url: url,
     status: "ready",
-    meta: { ...insertBody.meta, storage_path: storagePath },
+    meta: { ...baseMeta, storage_path: storagePath, ...renderEnvelope },
   }).eq("id", videoId);
   return videoId;
 }
@@ -3253,6 +3325,12 @@ async function stockProduct(
         conceptTags: c.conceptTags,
         winnerTier: c.winnerTier,
         winnerScore: c.winnerScore,
+        // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — carry the
+        // pinned/shelf ad's stored wireframe (elements/product_presentation/punchiness) through
+        // `angle.raw` so `buildCreativeBrief` can surface it on `brief.sourceWireframe` and the
+        // generation call site can hand it to `generateCreative`. Null when the source skeleton
+        // predates the extractor — the render then falls through to today's behaviour.
+        wireframe: c.wireframe,
       } as Record<string, unknown>,
     }));
   // cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 2 —
@@ -3391,12 +3469,45 @@ async function stockProduct(
         // this creative rather than persist a half-pack.
         // (dahlia-produces-3-placement-multi-copy-creative-pack Phase 2.)
         const packPlan = placementPackPlan();
+        // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 2 — when the
+        // render is a competitor IMITATION (composition transfer + a real design reference), the
+        // source ad's own structure IS the treatment; do NOT overlay our own TREATMENT_STEER
+        // archetype (a picked "before_after" / "testimonial" / "big_claim" line in the prompt)
+        // on top of it. `treatment` is still preserved in the LEDGER (`recordCombinationGenerated`
+        // below) and in the concept-tag mapping (`mapTreatmentToConceptTag`) — we're only
+        // removing it from the PROMPT so the reference ad supplies the archetype instead. The
+        // gate mirrors `buildPrompt`'s own `isImitation` condition (`compositionTransfer &&
+        // hasDesignRef`) so the two stay in lockstep. Own-brand renders (no imitation) keep
+        // today's behaviour exactly.
+        const isImitationRender = plan.useCompositionTransfer && !!plan.designReferenceUrl;
+        const treatmentForPrompt = isImitationRender ? undefined : treatment;
+        // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 4 — the
+        // pack-wide render provenance every placement's `meta.render` inherits. Composed ONCE
+        // per attempt from the same inputs the render already consumed, so both the postable
+        // and the held-bin insert paths land IDENTICAL provenance on their siblings without a
+        // second derivation. `treatment` here is the ARCHETYPE the PROMPT was steered toward
+        // (null on the imitation path — Phase 2's gate strips TREATMENT_STEER when the source
+        // ad supplies the archetype); the ledger's `treatment` (recordCombinationGenerated)
+        // keeps the assigned one — different concerns.
+        const renderProvenance = {
+          pinned_skeleton_id: pinnedCompetitorSkeletonId ?? null,
+          composition_transfer: isImitationRender,
+          treatment: treatmentForPrompt ?? null,
+          had_source_wireframe: !!brief.sourceWireframe,
+          author_notes_present: !!(brief.authorNotes && brief.authorNotes.trim().length > 0),
+        };
         progress(`Generating the ad image (${treatment}${attempt > 0 ? `, retry ${attempt + 1}` : ""})…`);
         const gen = await generateCreative(workspaceId, brief, {
-          treatment,
+          treatment: treatmentForPrompt,
           designReferenceUrl: plan.designReferenceUrl,
           compositionTransfer: plan.useCompositionTransfer,
           aspectRatio: packPlan.canonical.aspectRatio,
+          // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — hand
+          // the source ad's stored wireframe (populated by buildCreativeBrief from
+          // angle.raw.wireframe) to the renderer so buildPrompt emits the binding SOURCE
+          // STRUCTURE clause. Absent (own-brand angle / pre-extractor skeleton) → the prompt
+          // is byte-identical to today.
+          sourceWireframe: brief.sourceWireframe,
         });
         // Phase 2 of ad-creative-requires-real-packshot-never-invent-packaging — thread the real
         // packshot URL to the QA vision compare so packagingFaithful can reject a fabricated pack
@@ -3414,7 +3525,11 @@ async function stockProduct(
         const realOffer = brief.offer
           ? { headline: brief.offer.headline, strikethrough: brief.offer.strikethrough, perServing: brief.offer.perServing }
           : null;
-        const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation, packshotUrl, realOffer };
+        // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 1 — the QA gate
+        // expects a before/after IMAGE only when the render actually emits one (gated on
+        // `renderBeforeAfter`). A transformation object attached only for text-proof purposes
+        // (flag=false) must not make QA falsely expect a two-photo layout.
+        const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation?.renderBeforeAfter, packshotUrl, realOffer };
         progress("Checking the image quality…");
         const verdict = qcDispatcher
           ? await qaCreativeViaBoxSession(qaInput, qcDispatcher)
@@ -3431,15 +3546,28 @@ async function stockProduct(
         // whatever the final passing set was.
         let currentCanonicalBuffer: Buffer = gen.buffer;
         let currentCanonicalMime: string = gen.mimeType;
+        // Phase 4 — the exact prompt the CURRENT canonical was rendered from. Tracks alongside
+        // buffer/mime so Max's creative-QC regen (a per-format re-render) updates the persisted
+        // prompt in lockstep with the pixels, and the insertReadyCreative call reads the LAST
+        // passing prompt — the one that actually lands.
+        let currentCanonicalPrompt: string = gen.prompt;
         const siblingRenders: RenderedPlacement[] = [];
         for (const sib of packPlan.siblings) {
           const sibGen = await generateCreative(workspaceId, brief, {
-            treatment,
+            // Phase 2 — sibling placements share the canonical's imitation gate: no TREATMENT_STEER
+            // in the prompt when the source ad supplies the archetype.
+            treatment: treatmentForPrompt,
             designReferenceUrl: plan.designReferenceUrl,
             compositionTransfer: plan.useCompositionTransfer,
             aspectRatio: sib.aspectRatio,
+            // Phase 3 — siblings render from the SAME brief + same source wireframe as canonical.
+            sourceWireframe: brief.sourceWireframe,
           });
-          siblingRenders.push({ format: sib.format, buffer: sibGen.buffer, mimeType: sibGen.mimeType });
+          // Phase 4 — carry the sibling's OWN prompt onto its RenderedPlacement so
+          // `insertOnePlacementRender` can persist `meta.render.prompt` per placement (aspect-ratio
+          // differences already produce distinct prompt strings; a future divergence would be
+          // legible from a single row read instead of a code re-derive).
+          siblingRenders.push({ format: sib.format, buffer: sibGen.buffer, mimeType: sibGen.mimeType, prompt: sibGen.prompt });
         }
         // dahlia-copy-author-box-session Phase 3 — author-mode branch. When DAHLIA_COPY_MODE=author
         // AND a dispatcher was injected by the caller, hand the QC-passed canonical image + the
@@ -3453,6 +3581,7 @@ async function stockProduct(
         let insertOpts: {
           audienceTemperature?: "cold" | "warm" | "hot" | null;
           authorModeCopy?: AuthorModeCopy;
+          renderProvenance?: RenderProvenance;
           /** cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad
            *  Phase 1 — deterministic whole-pack lane threads its Treatment-derived Andromeda
            *  concept_tag here (see `mapTreatmentToConceptTag`). Undefined in author-mode inserts
@@ -3903,10 +4032,17 @@ async function stockProduct(
                   // slot intent from the planner. Threaded through so the provenance badge on
                   // the always-binned ineligible row tells the same truth as the postable path.
                   intent,
+                  // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 4 —
+                  // the held-bin path lands the same pack-wide provenance the postable path
+                  // does, so a HELD row is just as inspectable as an eligible one (the CEO's
+                  // rule: a HELD draft is a complete, inspectable creative — not an empty shell).
+                  renderProvenance,
                 };
                 const binResult = await insertReadyCreative(
                   admin, workspaceId, productId, product.handle, productTitle, angle, ineligibleCopyPack,
-                  { canonical: { format: "feed_4x5", buffer: gen.buffer, mimeType: gen.mimeType }, siblings: siblingRenders },
+                  // Phase 4 — carry the canonical's OWN prompt so the persisted `meta.render.prompt`
+                  // reflects the exact string Nano Banana was handed for this held creative.
+                  { canonical: { format: "feed_4x5", buffer: gen.buffer, mimeType: gen.mimeType, prompt: gen.prompt }, siblings: siblingRenders },
                   ineligibleInsertOpts,
                 );
                 const binCampaignId = binResult.kind === "ok" ? binResult.campaignId : null;
@@ -4019,21 +4155,32 @@ async function stockProduct(
               for (const fmt of failedFormats) {
                 try {
                   const regen = await generateCreative(workspaceId, brief, {
-                    treatment,
+                    // Phase 2 — Max's creative-QC regen shares the same imitation gate as the
+                    // canonical + sibling renders: on an imitation branch the source ad's own
+                    // structure IS the treatment, so TREATMENT_STEER stays out of the prompt.
+                    treatment: treatmentForPrompt,
                     designReferenceUrl: plan.designReferenceUrl,
                     compositionTransfer: plan.useCompositionTransfer,
                     aspectRatio: PLACEMENT_ASPECT[fmt],
+                    // Phase 3 — regen renders from the SAME brief + same source wireframe.
+                    sourceWireframe: brief.sourceWireframe,
                   });
                   if (fmt === "feed_4x5") {
                     currentCanonicalBuffer = regen.buffer;
                     currentCanonicalMime = regen.mimeType;
+                    // Phase 4 — replace the persisted prompt in lockstep with the pixels the
+                    // insert reads. Otherwise Max's regen would ship the ORIGINAL prompt on a
+                    // NEW render, and the next divergence audit would read the wrong string.
+                    currentCanonicalPrompt = regen.prompt;
                   } else {
                     // Update the matching sibling in-place; a format Max flagged that isn't in the
                     // sibling set (e.g. reels_9x16 — the SKILL lists 4 formats but the runtime only
                     // renders 3 placements today) is skipped rather than pushed as a spurious extra.
                     const idx = siblingRenders.findIndex((s) => s.format === fmt);
                     if (idx >= 0) {
-                      siblingRenders[idx] = { format: fmt, buffer: regen.buffer, mimeType: regen.mimeType };
+                      // Phase 4 — mirror the canonical treatment: the sibling's persisted prompt
+                      // must match the pixels it was regenerated from.
+                      siblingRenders[idx] = { format: fmt, buffer: regen.buffer, mimeType: regen.mimeType, prompt: regen.prompt };
                     }
                   }
                 } catch (err) {
@@ -4159,6 +4306,13 @@ async function stockProduct(
             // slot intent from the planner (`wantExploit` capped at `exploitPool.length` where
             // exploitPool = eligible with prior win). Threaded so provenance.mode is honest.
             intent,
+            // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 4 — the
+            // pack-wide render provenance (pinned skeleton id, composition_transfer, treatment,
+            // had_source_wireframe, author_notes_present) rides onto every placement's
+            // `ad_videos.meta.render` envelope alongside the per-placement prompt. Composed once
+            // per attempt above so BOTH the postable path and the held-bin path stamp identical
+            // provenance on siblings without a second derivation.
+            renderProvenance,
           };
         } else {
           // ad-creative-box-session-only-retire-deterministic-path-and-honest-explore-exploit
@@ -4211,7 +4365,11 @@ async function stockProduct(
           // buffers: the canonical + siblingRenders were mutated in-place by the creative-regen
           // loop when a per-format creative-gate check flipped false. On the initial-pass /
           // deterministic path, these are byte-identical to gen.buffer + the original siblings.
-          canonical: { format: "feed_4x5", buffer: currentCanonicalBuffer, mimeType: currentCanonicalMime },
+          //
+          // Phase 4 — carry the tracked canonical prompt (updated in lockstep with the pixels
+          // by Max's creative-QC regen) so the persisted `meta.render.prompt` reflects the
+          // exact string Nano Banana was handed for the render that actually lands.
+          canonical: { format: "feed_4x5", buffer: currentCanonicalBuffer, mimeType: currentCanonicalMime, prompt: currentCanonicalPrompt },
           siblings: siblingRenders,
         }, insertOpts);
         if (result.kind === "skip") {

@@ -114,9 +114,23 @@ export async function loadCreativeLearning(admin: Admin, workspaceId: string, pr
   for (const tr of byTreatment.values()) { const n = tr.won + tr.lost; tr.winRate = n > 0 ? tr.won / n : null; }
 
   const bestTreatments = [...byTreatment.values()]
-    .sort((x, y) => (y.winRate ?? -1) - (x.winRate ?? -1) || y.won - x.won)
+    .sort((x, y) => treatmentRank(y) - treatmentRank(x) || y.won - x.won)
     .map((t) => t.treatment);
   return { byAngle, byTreatment, bestTreatments };
+}
+
+/** dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 2 — three-tier rank
+ *  for the treatment picker. Real winners (winRate > 0) beat every untried treatment; untried
+ *  (winRate === null — no resolved outcomes) beats every pure loser (winRate === 0 with tests
+ *  on the board); losers rank last. The old `(y.winRate ?? -1) - (x.winRate ?? -1)` coerced
+ *  untried to `-1` so a 0-for-5 loser (winRate === 0) sorted ABOVE it — which is why Amazing
+ *  Coffee kept queueing `before_after` (0/5) on 14 pending creatives while every other treatment
+ *  had never even been tried. Numbers just have to preserve the tier order + let higher winRate
+ *  sort inside the winner tier — `won` still tiebreaks. Pure — same input, same output. */
+function treatmentRank(t: TreatmentStat): number {
+  if (t.winRate === null) return 0;      // untried tier
+  if (t.winRate === 0) return -1;        // pure-loser tier (has tests on the board, none won)
+  return 1 + t.winRate;                  // winner tier — higher winRate ranks higher
 }
 
 /**

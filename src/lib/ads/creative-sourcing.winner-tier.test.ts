@@ -210,6 +210,7 @@ test("rankByWinnerSignalAndIntent: proven > building > new > retired regardless 
     winnerTier: null,
     winnerScore: null,
     conceptTags: null,
+    wireframe: null,
     ...over,
   });
   const angles: CompetitorAngle[] = [
@@ -242,6 +243,7 @@ test("rankByWinnerSignalAndIntent: same-tier ties break by winner_score, then da
     winnerTier: "proven",
     winnerScore: null,
     conceptTags: null,
+    wireframe: null,
     ...over,
   });
   const angles: CompetitorAngle[] = [
@@ -275,6 +277,7 @@ test("rankByWinnerSignalAndIntent: cold intent surfaces unaware/problem_aware wi
     winnerTier: tier,
     winnerScore: score,
     conceptTags: conceptTags({ awareness_stage: stage }),
+    wireframe: null,
   });
   const angles: CompetitorAngle[] = [
     // Highest tier + score is hot (most_aware) — WITHOUT intent it would lead.
@@ -317,6 +320,7 @@ test("rankByWinnerSignalAndIntent: null awareness_stage is treated as off-temper
     winnerTier: tier,
     winnerScore: score,
     conceptTags: tags,
+    wireframe: null,
   });
   const angles: CompetitorAngle[] = [
     mk("cold on-temp", conceptTags({ awareness_stage: "unaware" }), "proven", 30),
@@ -445,7 +449,7 @@ function fitAngle(over: Partial<CompetitorAngle>): CompetitorAngle {
   return {
     advertiser: null, hook: null, framework: null, mechanismClaim: null, proof: null,
     offer: null, daysRunning: 40, heat: null, destinationDomain: null, imageUrl: null,
-    resumeAdvertising: null, winnerTier: "proven", winnerScore: 50, conceptTags: null, ...over,
+    resumeAdvertising: null, winnerTier: "proven", winnerScore: 50, conceptTags: null, wireframe: null, ...over,
   };
 }
 

@@ -25,6 +25,7 @@ import { chooseGroundedSubstitute, isCompetitorOffer, stripCompetitorOffer } fro
 import { competitorFocalIsWarmHot, type CreativeIntent } from "@/lib/ads/creative-sourcing";
 import type { ConceptTags } from "@/lib/creative-skeleton";
 import { selectConfirmedBenefits, type ConfirmedBenefit } from "@/lib/ads/creative-imitation";
+import type { SkeletonElement } from "@/lib/ads/decision-engine";
 
 type Row = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -284,8 +285,12 @@ export interface CreativeBrief {
   authorNotes?: string | null;
   /** The proof behind the LEAD claim — a real review quote or an ingredient-research citation. */
   leadProof: { kind: "review" | "ingredient" | "cluster"; text: string; attribution?: string } | null;
-  /** A real customer transformation to anchor the creative (weight-loss angles), with its photo if any. */
-  transformation: { reviewer: string; quote: string; beforeAfterImage: string | null } | null;
+  /** A real customer transformation to anchor the creative (weight-loss angles), with its photo if any.
+   *  `renderBeforeAfter` gates whether the RENDER emits a two-photo body-transformation image; when
+   *  false, the quote + reviewer still surface as ordinary review-proof text (see
+   *  `shouldRenderBeforeAfter`). Attaching this object no longer implies a before/after IMAGE — that
+   *  is a deliberate creative choice, not something a weight-loss keyword should force. */
+  transformation: { reviewer: string; quote: string; beforeAfterImage: string | null; renderBeforeAfter: boolean } | null;
   /** Supporting retention truths (energy-no-crash, taste) — body copy, never the headline. */
   supportingBenefits: string[];
   /** Verified proof stack — certs, award, store selling points. */
@@ -366,6 +371,23 @@ export interface CreativeBrief {
    */
   confirmedBenefits?: ConfirmedBenefit[];
   /**
+   * dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — the source
+   * (pinned/imitated competitor) ad's stored WIREFRAME: its element/zone/prominence map, how the
+   * product is presented (packshot / held-in-hand / lifestyle / before_after), and the copy
+   * rhythm from its `punchiness` tags. Threaded here from `angle.raw.wireframe` (stockProduct
+   * mirrors [[./creative-sourcing]] `CompetitorAngle.wireframe` onto every competitor-source
+   * angle) so `generateCreative` can emit a binding SOURCE STRUCTURE clause without a second DB
+   * read. Null when the source skeleton predates the extractor OR the angle isn't a competitor
+   * imitation — the render then falls through to today's behaviour (a `sourceWireframe`-absent
+   * prompt is byte-identical). `elements` reuses [[./decision-engine]] `SkeletonElement` so the
+   * shape stays in lockstep with the substitution engine's own contract.
+   */
+  sourceWireframe?: {
+    elements: SkeletonElement[];
+    productPresentation: string[];
+    punchiness: string[];
+  } | null;
+  /**
    * swap-competitor-offer-slot-for-our-grounded-proof-benefit-or-feature-in-debrand Phase 1 —
    * derived product features (ingredient count, format) surfaced as the LAST-RESORT substitute
    * pool for `chooseGroundedSubstitute` when the competitor's offer slot needs swapping and the
@@ -393,6 +415,44 @@ export interface BuildCreativeBriefOpts {
    *  `brief.authorNotes` so both the image prompt (`buildPrompt`) and the copy-author prompt
    *  (`buildCopyAuthorPrompt`) apply it first-pass — skipping rounds of manual editing. */
   authorNotes?: string;
+  /** The caller's explicit treatment selection (own-brand path). `before_after` is the (a) EXPLICIT
+   *  request in `shouldRenderBeforeAfter` — the only own-brand signal that a two-photo body
+   *  transformation is deliberately desired. Any other value (or absent) leaves the flag false. */
+  treatment?: string | null;
+  /** Phase-3 hookup — the source (pinned) competitor ad's `creative_skeletons.product_presentation`
+   *  array (e.g. `['packshot']` / `['before_after']` / `['lifestyle']`). When it carries a
+   *  `before_after` entry, that is the (c) SOURCE-STRUCTURE signal in `shouldRenderBeforeAfter`
+   *  — the pinned ad's own wireframe consents to a before/after. Absent today for the fresh-pack
+   *  path; Phase 3 threads it through from `getCompetitorAngleBySkeletonId`. */
+  sourceProductPresentation?: readonly string[] | null;
+}
+
+/** dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 1 — pure predicate:
+ *  should the render emit a two-photo body-transformation before/after IMAGE? Returns true ONLY on
+ *  an EXPLICIT signal — never on inferred vocabulary in a competitor's own hook:
+ *    (a) the caller passed an EXPLICIT request — the own-brand path's selected treatment is
+ *        `before_after` (a deliberate archetype pick);
+ *    (b) the OWNER'S `authorNotes` ask for a before/after (owner text is text we control, unlike
+ *        a competitor hook whose "slimming" is not consent);
+ *    (c) the source ad's own wireframe carries a `before_after` entry in `product_presentation`
+ *        (Phase 3 supplies this — the pinned ad's structure IS the signal).
+ *  Default FALSE. A weight-loss keyword in a competitor's hook is NOT a signal. */
+export function shouldRenderBeforeAfter(input: {
+  treatment?: string | null;
+  authorNotes?: string | null;
+  sourceProductPresentation?: readonly string[] | null;
+}): boolean {
+  if (input.treatment === "before_after") return true;
+  const notes = typeof input.authorNotes === "string" ? input.authorNotes : "";
+  // Match "before/after", "before and after", "before + after", "before after". We deliberately do
+  // NOT match "before" alone (too loose) or the weight-loss vocabulary (that is exactly the trigger
+  // this predicate replaces).
+  if (notes && /\bbefore\s*(?:[/&+\-]|and)\s*after\b/i.test(notes)) return true;
+  const pres = input.sourceProductPresentation ?? [];
+  for (const p of pres) {
+    if (typeof p === "string" && p.trim().toLowerCase() === "before_after") return true;
+  }
+  return false;
 }
 
 function money(cents: number | null | undefined): string | null {
@@ -448,14 +508,56 @@ export async function buildCreativeBrief(
   // the SAME person. When the angle IS a transformation, use its own reviewer (angle.raw). Only show a
   // before/after if THAT reviewer submitted one — never borrow another customer's photo under this number
   // (the 2026-07-10 "84 lbs headline / 63 lbs caption / third person's photo" inconsistency).
+  //
+  // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — thread the
+  // pinned/imitated source ad's wireframe onto the brief. stockProduct threads it via
+  // `angle.raw.wireframe` (from [[./creative-sourcing]] `CompetitorAngle.wireframe`); we surface
+  // a typed field here so the generation call site + Phase-1's before/after predicate can both
+  // read it. Own-brand angles (`raw` absent OR `raw.wireframe` absent/null) leave the field null
+  // and the render falls through to today's behaviour.
+  const rawWireframe = angle.raw && typeof angle.raw === "object" && "wireframe" in angle.raw
+    ? (angle.raw as { wireframe?: unknown }).wireframe
+    : null;
+  let sourceWireframe: CreativeBrief["sourceWireframe"] = null;
+  if (rawWireframe && typeof rawWireframe === "object" && !Array.isArray(rawWireframe)) {
+    const wf = rawWireframe as { elements?: unknown; productPresentation?: unknown; punchiness?: unknown };
+    sourceWireframe = {
+      elements: Array.isArray(wf.elements) ? (wf.elements as SkeletonElement[]) : [],
+      productPresentation: Array.isArray(wf.productPresentation)
+        ? (wf.productPresentation as unknown[]).filter((s): s is string => typeof s === "string")
+        : [],
+      punchiness: Array.isArray(wf.punchiness)
+        ? (wf.punchiness as unknown[]).filter((s): s is string => typeof s === "string")
+        : [],
+    };
+  }
+
+  // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 1 — the attach is no longer
+  // gated on a keyword match against the ANGLE'S text (a competitor's own "slimming" hook is not consent
+  // to render a body transformation). It attaches when we have a transformation-source angle whose own
+  // reviewer to anchor on, OR when an EXPLICIT before/after signal is present via
+  // `shouldRenderBeforeAfter` (owner directions / explicit treatment / source-ad wireframe). The
+  // `renderBeforeAfter` flag on the object gates whether the RENDER emits a two-photo IMAGE — a false
+  // flag still surfaces the reviewer + quote as ordinary `leadProof` text (evidence stays; the image
+  // directive is what a keyword should not decide).
+  //
+  // Phase 3 wire-in: when the caller doesn't supply `opts.sourceProductPresentation`, fall back to
+  // the source wireframe's productPresentation here — so a pinned ad whose stored wireframe carries
+  // `before_after` self-consents to a before/after render even when no owner-side signal was passed.
+  const renderBeforeAfter = shouldRenderBeforeAfter({
+    treatment: opts.treatment,
+    authorNotes: opts.authorNotes,
+    sourceProductPresentation: opts.sourceProductPresentation ?? sourceWireframe?.productPresentation ?? null,
+  });
   let transformation: CreativeBrief["transformation"] = null;
-  if (/weight|transformation|lbs|pound|shed|slim/i.test(`${angle.hook} ${angle.leadBenefit}`) && transformationStories.length) {
+  if (transformationStories.length && (renderBeforeAfter || angle.source === "transformation")) {
     const angleReviewer = angle.source === "transformation" ? (angle.raw as unknown as PIReview | undefined) : undefined;
     const t = angleReviewer ?? transformationStories.find((r) => r.images.length) ?? transformationStories[0];
     transformation = {
       reviewer: t.reviewer_name ?? "verified customer",
       quote: (t.smart_quote || t.body || "").slice(0, 160),
       beforeAfterImage: (t.images ?? [])[0] ?? null, // this reviewer's OWN photo only — no borrowing
+      renderBeforeAfter,
     };
   }
 
@@ -510,7 +612,13 @@ export async function buildCreativeBrief(
   const imageRefs: CreativeBrief["imageRefs"] = [];
   const hero = pi.media.byCategory.hero?.[0] as Row | undefined;
   if (hero) imageRefs.push({ role: "hero", url: str(hero.url) });
-  if (transformation?.beforeAfterImage) imageRefs.push({ role: "before_after", url: transformation.beforeAfterImage });
+  // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 1 — the reviewer's own
+  // before/after PHOTO is an IMAGE directive: only pass it to the renderer when we're actually
+  // emitting a two-photo layout. Otherwise the reviewer stays available as leadProof TEXT (evidence
+  // preserved) but the model isn't seeded with a photo it isn't supposed to place.
+  if (transformation?.renderBeforeAfter && transformation.beforeAfterImage) {
+    imageRefs.push({ role: "before_after", url: transformation.beforeAfterImage });
+  }
   if (pi.media.isolatedPackshots[0]) imageRefs.push({ role: "packshot", url: pi.media.isolatedPackshots[0] });
 
   const guardrails = [
@@ -659,7 +767,7 @@ export async function buildCreativeBrief(
     );
   }
 
-  return { productTitle, angle, authorNotes: opts.authorNotes?.trim() || null, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags, leadBenefitWeave, confirmedBenefits, productFeatures };
+  return { productTitle, angle, authorNotes: opts.authorNotes?.trim() || null, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags, leadBenefitWeave, confirmedBenefits, productFeatures, sourceWireframe };
 }
 
 /**

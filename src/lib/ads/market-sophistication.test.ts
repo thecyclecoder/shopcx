@@ -41,6 +41,7 @@ function makeAngle(over: Partial<CompetitorAngle> = {}): CompetitorAngle {
     winnerTier: null,
     winnerScore: null,
     conceptTags: null,
+    wireframe: null,
     ...over,
   };
 }

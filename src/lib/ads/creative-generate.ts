@@ -11,6 +11,7 @@ import { errText } from "@/lib/error-text";
 import { generateNanoBananaProCombine, type NanoBananaAspect } from "@/lib/gemini";
 import { compositeCopyOverlay, type OverlayCopy } from "@/lib/ads/creative-overlay";
 import { buildSideBySide } from "@/lib/ads/creative-side-by-side";
+import type { SkeletonElement } from "@/lib/ads/decision-engine";
 
 // ── Render-side no-competitor-leak guard ────────────────────────────────────
 // The copy-side no-competitor-leak gate only inspects TEXT; a leak that lives in the pixels
@@ -137,6 +138,22 @@ export interface GenerateCreativeOpts {
    *  drifting back to a generic fresh render. Absent (normal fresh-pack path) → no clause emitted,
    *  the prompt is byte-identical to today. */
   ceoReviseReason?: string;
+  /** dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — the source
+   *  (pinned/imitated competitor) ad's stored WIREFRAME: its element/zone/prominence map, how
+   *  the product is presented (packshot / held-in-hand / lifestyle / before_after), and the copy
+   *  rhythm from its `punchiness` tags. When present, `buildPrompt` emits a binding `SOURCE
+   *  STRUCTURE (reproduce this layout):` clause IMMEDIATELY after the composition-transfer
+   *  refClause (Nano Banana weighs earliest instructions heaviest), enumerating the elements in
+   *  reading order (zone → role → prominence), stating the product presentation verbatim, stating
+   *  the copy rhythm from punchiness tags, and forbidding invention of any element type not in
+   *  the map. Absent (own-brand angle / pre-extractor skeleton) → the prompt is byte-identical
+   *  to today. Reuses `SkeletonElement` from [[./decision-engine]] so the shape stays in lockstep
+   *  with the substitution engine's own contract. */
+  sourceWireframe?: {
+    elements: SkeletonElement[];
+    productPresentation: string[];
+    punchiness: string[];
+  } | null;
 }
 
 /** ceo-feedback-render-edits-the-existing-ad-format-in-place-not-a-new-whole-pack-ad Phase 1 —
@@ -173,7 +190,55 @@ export interface GeneratedCreative {
   sideBySide?: { buffer: Buffer; mimeType: string };
 }
 
-export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: GenerateCreativeOpts["treatment"], compositionTransfer?: boolean, ceoReviseReason?: string): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
+/** dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — sentinel header
+ *  the render prompt emits when a source wireframe is supplied. A unit test can grep this
+ *  literal to prove the binding layout clause landed IMMEDIATELY after `refClause` (earliest
+ *  instructions weigh heaviest in Nano Banana). Same-file constant so buildPrompt + any future
+ *  test never drift. */
+export const SOURCE_STRUCTURE_HEADER = "SOURCE STRUCTURE (reproduce this layout";
+
+/** Reading-order for the wireframe listing — mirrors the layout zones a viewer scans in on a
+ *  4:5 / 9:16 static ad. Zones absent from an element list simply don't render. */
+const WIREFRAME_ZONE_ORDER: readonly SkeletonElement["zone"][] = ["header", "hero", "body", "footer", "cta"] as const;
+/** The full role vocabulary from [[./decision-engine]] `SkeletonElement.role`. When emitting
+ *  the "do NOT invent" clause we name the roles the source ad OMITS so the model doesn't
+ *  free-associate a proof bar, price sticker, or risk-reversal badge the source didn't carry. */
+const WIREFRAME_ALL_ROLES: readonly SkeletonElement["role"][] = [
+  "hook", "mechanism", "proof", "offer", "risk_reversal", "social_proof", "price",
+] as const;
+
+/** PURE — turn the source ad's stored wireframe into the render prompt's SOURCE STRUCTURE
+ *  clause. Empty wireframe (no elements + no presentation + no punchiness) → empty string, so
+ *  a `sourceWireframe`-absent OR fully-empty prompt is byte-identical to today. */
+function formatSourceStructureClause(
+  wf: { elements: SkeletonElement[]; productPresentation: string[]; punchiness: string[] } | null | undefined,
+): string {
+  if (!wf) return "";
+  const sortedElements = [...wf.elements].sort((a, b) => {
+    const dz = WIREFRAME_ZONE_ORDER.indexOf(a.zone) - WIREFRAME_ZONE_ORDER.indexOf(b.zone);
+    if (dz !== 0) return dz;
+    return b.prominence - a.prominence;
+  });
+  if (sortedElements.length === 0 && wf.productPresentation.length === 0 && wf.punchiness.length === 0) return "";
+  const elementLines = sortedElements
+    .map((e) => `- ${e.zone} · ${e.role} (prominence ${e.prominence})`)
+    .join("\n");
+  const presentationLine = wf.productPresentation.length
+    ? `PRODUCT PRESENTATION (render the product exactly this way, verbatim from the source ad): ${wf.productPresentation.join(", ")}.`
+    : "";
+  const punchinessLine = wf.punchiness.length
+    ? `COPY RHYTHM (match this cadence exactly): ${wf.punchiness.join(", ")}.`
+    : "";
+  const rolesPresent = new Set(sortedElements.map((e) => e.role));
+  const rolesOmitted = WIREFRAME_ALL_ROLES.filter((r) => !rolesPresent.has(r));
+  const noInvent = elementLines
+    ? `Do NOT invent any element type not in this list${rolesOmitted.length ? ` — specifically, do NOT add a ${rolesOmitted.join(" / ")} panel, bar, badge, sticker, or caption the source ad does not have` : ""}. No extra panels, no extra proof bars, no photo splits, and no CTA buttons the source ad does not carry.`
+    : "";
+  const bodyLines = [elementLines, presentationLine, punchinessLine, noInvent].filter(Boolean).join("\n");
+  return `\n\n${SOURCE_STRUCTURE_HEADER} — this is BINDING; the source ad's own map is the treatment. Reproduce THIS structure, filled with OUR content):\n${bodyLines}`;
+}
+
+export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: GenerateCreativeOpts["treatment"], compositionTransfer?: boolean, ceoReviseReason?: string, sourceWireframe?: GenerateCreativeOpts["sourceWireframe"]): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
   // For a COMPOSITION-TRANSFER (competitor imitation), the angle.hook is the COMPETITOR's proven hook —
   // it may carry THEIR brand/product name (e.g. "MUD\WTR Mushroom Tea Blend - Up to 43% Off"). Rendering
   // it verbatim over OUR packshot is a brand mismatch the QC gate correctly rejects (2026-07-13). So for
@@ -202,8 +267,21 @@ export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatme
     ? "Match the FIRST image's design language (layout energy, typography weight, color system) — the product images follow it."
     : "Clean, premium direct-response e-commerce static; high contrast; mobile-thumb-legible.";
 
+  // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — the source ad's
+  // stored WIREFRAME lands here, IMMEDIATELY after `refClause` (earliest instructions weigh
+  // heaviest in Nano Banana), so the binding layout the extractor already knows travels with
+  // the reference image instead of being drowned by the ~150 words of downstream instructions.
+  // Absent (own-brand angle / pre-extractor skeleton) → empty string, prompt byte-identical.
+  const sourceStructureClause = formatSourceStructureClause(sourceWireframe);
+
   const bodyBits: string[] = [];
-  if (brief.transformation) {
+  // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 1 — the two-photo
+  // before/after paragraph fires ONLY when `renderBeforeAfter === true` (an EXPLICIT signal
+  // via `shouldRenderBeforeAfter`), not merely because a transformation object was attached.
+  // When the object exists but the flag is false, fall through to the ordinary review-proof
+  // line so the real reviewer quote + name still render as text (the leadProof was set to the
+  // transformation's quote in `buildCreativeBrief` for that exact reason).
+  if (brief.transformation?.renderBeforeAfter) {
     const img = brief.transformation.beforeAfterImage
       ? "Anchor it on the REAL before/after image PROVIDED (don't alter the person)"
       : "Anchor it on a before/after WEIGHT-LOSS transformation shown as TWO SEPARATE side-by-side FULL-BODY photographs of the SAME woman, standing, head-to-knee or head-to-toe, in fitted clothing (leggings + fitted top) so the PHYSIQUE change is clearly visible: a clear BEFORE (visibly heavier) on the left and an AFTER (noticeably slimmer, toned, happy) on the right. In the AFTER photo she is holding a tall glass of the prepared product beverage (the same iced drink shown with the product) — it ties the transformation to the product. This is a BODY transformation — NOT a face close-up, NOT skincare-style, NOT a single face split down the middle, NOT a morph, NOT the same photo twice. PHOTOREALISTIC (natural skin, real lighting), never an illustration, cartoon, drawing, 3D render, or CGI. Small 'Before' and 'After' corner labels are OK; put NO other text on the photos — no 'candid photo', no claim it is a real/verified/documentary image";
@@ -226,10 +304,12 @@ export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatme
     ? `HEADLINE: the proven competitor angle to ECHO is "${headline}". Echo only its STRUCTURE and ENERGY, never its words. Write OUR headline that names ONLY ${brief.productTitle} and references ONLY our product — REMOVE any competitor brand name, product name, or trademark (never render another brand's name anywhere). CRITICAL — three things to strip, not just the brand: (1) DROP any product ATTRIBUTE or ingredient descriptor that is NOT true of ${brief.productTitle} (e.g. competitor says "protein coffee" / "keto" / "collagen" and we are not that; when the competitor's product noun differs from ours, SWAP IN OURS — the real product noun shown on the pack, never their attribute). (2) DROP any BENEFIT, RESULT, or PROMISE that is not what ${brief.productTitle} actually delivers — if the competitor's hook promises "deeper sleep" / "younger skin" / "weight loss" and OUR product is for a DIFFERENT benefit, do NOT carry their benefit over; lead with OUR real benefit. The headline must promise ONLY what our product does. (3) NEVER carry over a SPECIFIC, UNVERIFIED CLAIM from the competitor's hook — no efficacy TIMEFRAME ("10 weeks", "30 days", "overnight"), no QUANTITY / numeric RESULT ("lose 40 lbs", "3x"), no PERCENTAGE — unless it is a verified fact about ${brief.productTitle}. Echoing the competitor's number/timeframe as ours (e.g. their "10 Weeks to Younger Skin" → "10 Weeks to Steady Energy") is a FABRICATION, not an imitation. Big, bold, correctly spelled, 1–2 key phrases highlighted in a color block.`
     : `HEADLINE (render EXACTLY, correct spelling, no dropped/repeated words): "${headline}" — big, bold, with 1–2 key phrases highlighted in a color block.`;
 
-  // When the brief has NO transformation, the model must NOT free-associate a weight-loss before/after —
-  // it did exactly that on 2 of 4 competitor imitations (2026-07-13), a fabricated result the QC gate then
-  // (correctly) rejected. Forbid it explicitly so the render doesn't waste a generation on an auto-reject.
-  const noTransformationRule = brief.transformation
+  // When the render is not emitting a before/after image, the model must NOT free-associate a
+  // weight-loss before/after — it did exactly that on 2 of 4 competitor imitations (2026-07-13),
+  // a fabricated result the QC gate then (correctly) rejected. Forbid it explicitly so the render
+  // doesn't waste a generation on an auto-reject. Keyed on `renderBeforeAfter` — a transformation
+  // object attached only for text-proof purposes (flag=false) must still trigger this hard clause.
+  const noTransformationRule = brief.transformation?.renderBeforeAfter
     ? ""
     : ` This ad has NO transformation: do NOT render any before/after, weight-loss, body-comparison, results-timeline, or "BEFORE"/"AFTER" imagery, panel, or caption of ANY kind — no implied physical-result story.`;
 
@@ -252,7 +332,7 @@ export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatme
     ? `\n\n${AUTHOR_NOTES_HEADER} the owner asked for this ad and left specific directions. Apply them EXACTLY when designing this ad (they override the generic composition below on any conflict). THE DIRECTIONS: "${briefNote.replace(/"/g, "'")}".`
     : "";
 
-  const prompt = `Design a 4:5 static ad for ${brief.productTitle}. ${refClause}${treatmentClause}${ceoEditClause}${authorNotesClause}
+  const prompt = `Design a 4:5 static ad for ${brief.productTitle}. ${refClause}${sourceStructureClause}${treatmentClause}${ceoEditClause}${authorNotesClause}
 
 ${headlineClause}
 
@@ -410,7 +490,7 @@ export async function generateCreative(workspaceId: string, brief: CreativeBrief
     return { buffer, mimeType, prompt: textFreePrompt, expectedCopy, sideBySide };
   }
 
-  const { prompt, expectedCopy } = buildPrompt(brief, hasRef, opts.treatment, opts.compositionTransfer, opts.ceoReviseReason);
+  const { prompt, expectedCopy } = buildPrompt(brief, hasRef, opts.treatment, opts.compositionTransfer, opts.ceoReviseReason, opts.sourceWireframe);
   // Render-side no-competitor-leak deterministic guard (Phase 1) — after the strip
   // helper scrubbed the imitation headline AND the NO COMPETITOR OFFER hard rule was
   // negative-prompted into the composed prompt, a lingering freebie artifact token in
