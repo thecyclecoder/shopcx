@@ -1,0 +1,1 @@
+- **Retire the fused Vera+Vault session everywhere it still claims to exist** · verified 2026-08-17 · → [[../libraries/spec-check-runner]]
