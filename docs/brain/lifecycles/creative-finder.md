@@ -53,7 +53,7 @@ Cron + manual sweep:
 - **Manual event** `ads/creative-finder.sweep` — fires from the dashboard button; same sweep logic scoped to a workspace if supplied
 
 API endpoints:
-- `GET /api/ads/creative-finder` — list skeletons
+- `GET /api/ads/creative-finder` — list skeletons. LIST branch hides `do_not_use=true` rows by default (the CEO/Max-flagged bad imitation bases, see [[../functions/growth]] "Imitation-quality review" mandate) and reports the suppressed count on the `X-Hidden-Count` response header; `?includeHidden=1` brings them back for the Research › Ads Show-hidden toggle. The `?skeletonId=` detail branch is unaffected — a flagged ad still resolves so its detail page's Use-again toggle and Max's review-card links keep working.
 - `POST /api/ads/creative-finder` — manual sweep
 - `GET /api/ads/creative-finder/patterns` — pattern matrix
 - `PATCH /api/ads/creative-finder/[id]` — shortlist (status toggle)

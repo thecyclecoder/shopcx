@@ -31,6 +31,7 @@
  */
 import { VERCEL_PROJECT_IDS } from "@/lib/vercel-project";
 import { errText } from "@/lib/error-text";
+import { redactedEndpoint } from "@/lib/vercel-drain-redact";
 
 const { PROJECT_ID, TEAM_ID } = VERCEL_PROJECT_IDS;
 
@@ -121,7 +122,15 @@ function hostOf(endpoint: string): string | null {
 export type Violation = {
   drainId: string;
   drainName: string;
-  endpoint: string;
+  /**
+   * Redacted display of the drain's delivery endpoint — protocol + host, with a
+   * fixed `/<path-redacted>` marker when the URL had a non-root pathname. Never
+   * carries userinfo, search params, the fragment, or the pathname text itself
+   * (all four are places a shared secret / API key / signed token can live in
+   * a delivery URL). Host classification below runs against the RAW parsed URL,
+   * not this display — see `hostOf`.
+   */
+  endpointDisplay: string;
   host: string;
   reason: string;
 };
@@ -172,6 +181,8 @@ async function main(): Promise<void> {
   for (const drain of drains) {
     const endpoint = endpointOf(drain);
     if (!endpoint) continue;
+    // Host classification MUST use the parsed host — never the redacted display —
+    // so a URL with credentials in userinfo can't dodge the guard.
     const host = hostOf(endpoint);
     if (!host) continue;
     const verdict = classifyHost(host, aliases);
@@ -179,7 +190,7 @@ async function main(): Promise<void> {
     violations.push({
       drainId: drain.id ?? "(unknown)",
       drainName: drain.name ?? "(unnamed)",
-      endpoint,
+      endpointDisplay: redactedEndpoint(endpoint),
       host,
       reason: verdict.reason,
     });
@@ -197,7 +208,7 @@ async function main(): Promise<void> {
   );
   for (const v of violations) {
     console.error(`   drain ${v.drainId} "${v.drainName}"`);
-    console.error(`      endpoint: ${v.endpoint}`);
+    console.error(`      endpoint: ${v.endpointDisplay}`);
     console.error(`      host:     ${v.host}  (${v.reason})`);
   }
   console.error(

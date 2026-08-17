@@ -1,7 +1,12 @@
 /**
  * Winning Static-Creative Finder — skeletons list + manual sweep trigger.
  *
- *   GET  ?workspaceId=&status=&kind=        → analyzed creative_skeletons (browse/shortlist)
+ *   GET  ?workspaceId=&status=&kind=&includeHidden=  → analyzed creative_skeletons (browse/shortlist).
+ *        LIST branch hides `do_not_use=true` rows by default (the CEO/Max-flagged bad
+ *        imitation bases) and reports the suppressed count on an `X-Hidden-Count` response
+ *        header; pass `includeHidden=1` to bring them back for the Show-hidden toggle.
+ *        The `skeletonId=` detail branch is unaffected — a flagged ad still resolves so its
+ *        detail page's Use-again toggle and Max's review-card links keep working.
  *   POST { workspaceId, productId?, force? } → fire the deliberate per-product scout
  *                                             (ads/creative-scout.sweep — all products, or one when
  *                                             productId is given), or mode:"video" → drain video_pending
@@ -43,6 +48,12 @@ export async function GET(req: Request) {
   const productId = url.searchParams.get("productId"); // filter to one advertised product's ads
   const mediaType = url.searchParams.get("mediaType"); // 'static' | 'video' — the Research › Ads toggle
   const skeletonId = url.searchParams.get("skeletonId"); // single-ad fetch for the Research › Ads detail page
+  // Show-hidden opt-in: the LIST branch hides do_not_use=true rows by default so the CEO's own
+  // rejections (+ Max's auto-flags) do not clutter the imitation-base picker; `?includeHidden=1`
+  // brings them back for the grid's Show-hidden toggle.
+  const includeHidden =
+    url.searchParams.get("includeHidden") === "1" ||
+    url.searchParams.get("includeHidden") === "true";
 
   const SELECT =
     "id, advertiser, title, image_url, thumb_path, media_type, format, framework, hook, mechanism_claim, proof, offer, days_running, heat, first_seen, last_seen, seed_keyword, seed_kind, status, product_id, competitor_id, created_at, do_not_use, do_not_use_reason, do_not_use_by, do_not_use_at";
@@ -64,25 +75,52 @@ export async function GET(req: Request) {
     });
   }
 
+  // Shared narrowing predicates for the LIST query and the hidden-count query. Factored so the
+  // "N hidden" number cannot drift from the rows the list actually returns — a mismatched
+  // predicate would report a fictitious count. Only the `do_not_use` filter differs between the
+  // two callers, so it is applied by the caller, not here.
+  // A video toggle wants VIDEO ads regardless of their processing stage (video_pending OR later
+  // flipped to analyzed), so when a mediaType is requested we widen the default status set to
+  // include video_pending; otherwise keep the processed-only default (analyzed/shortlisted).
+  type Narrowable<Q> = {
+    eq: (col: string, val: unknown) => Q;
+    in: (col: string, val: readonly string[]) => Q;
+  };
+  const applyNarrowing = <Q extends Narrowable<Q>>(q: Q): Q => {
+    let out = q.eq("workspace_id", workspaceId as string);
+    if (statusFilter) out = out.eq("status", statusFilter);
+    else if (mediaType === "video") out = out.in("status", ["analyzed", "shortlisted", "video_pending"]);
+    else out = out.in("status", ["analyzed", "shortlisted"]);
+    if (kind) out = out.eq("seed_kind", kind);
+    if (productId) out = out.eq("product_id", productId);
+    if (mediaType === "static" || mediaType === "video") out = out.eq("media_type", mediaType);
+    return out;
+  };
+
   let q = auth.admin
     .from("creative_skeletons")
     .select(SELECT)
-    .eq("workspace_id", workspaceId as string)
     .order("days_running", { ascending: false, nullsFirst: false })
     .limit(500);
-
-  if (statusFilter) q = q.eq("status", statusFilter);
-  // A video toggle wants VIDEO ads regardless of their processing stage (video_pending OR later
-  // flipped to analyzed), so when a mediaType is requested we widen the default status set to include
-  // video_pending; otherwise keep the processed-only default (analyzed/shortlisted).
-  else if (mediaType === "video") q = q.in("status", ["analyzed", "shortlisted", "video_pending"]);
-  else q = q.in("status", ["analyzed", "shortlisted"]);
-  if (kind) q = q.eq("seed_kind", kind);
-  if (productId) q = q.eq("product_id", productId);
-  if (mediaType === "static" || mediaType === "video") q = q.eq("media_type", mediaType);
+  q = applyNarrowing(q);
+  if (!includeHidden) q = q.eq("do_not_use", false);
 
   const { data, error } = await q;
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // How many rows the default filter suppressed — same narrowing predicates, `do_not_use=true`
+  // instead. Skip the count entirely when the caller opted in (nothing hidden in that mode).
+  let hiddenCount = 0;
+  if (!includeHidden) {
+    let cq = auth.admin
+      .from("creative_skeletons")
+      .select("id", { count: "exact", head: true });
+    cq = applyNarrowing(cq);
+    cq = cq.eq("do_not_use", true);
+    const { count } = await cq;
+    hiddenCount = count ?? 0;
+  }
+
   // Attach a signed URL to OUR stored downscaled copy so the dashboard serves it directly from storage
   // (no live AdLibrary proxy). Legacy rows without thumb_path get null → the client falls back to the proxy.
   const rows = data || [];
@@ -92,7 +130,9 @@ export async function GET(req: Request) {
       thumb_url: r.thumb_path ? await signCreativeShot(r.thumb_path as string) : null,
     })),
   );
-  return NextResponse.json(withThumbs);
+  return NextResponse.json(withThumbs, {
+    headers: { "X-Hidden-Count": String(hiddenCount) },
+  });
 }
 
 export async function POST(req: Request) {
