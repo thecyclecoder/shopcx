@@ -623,8 +623,16 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
   // once the branch's PR has MERGED — the `claude/build-*` branch is DELETED, so the box would "review an
   // unmerged branch" that no longer exists, burning a Max session every standing pass (noop-pipeline-test-4 /
   // #837). The build job's post-merge state-advance flips it to `merged` and BUMPS its `updated_at`, which the
-  // step-(2) "branch changed since clean review" test below mistook for a new push → re-enqueued forever. So
-  // before any dedup: if the latest build job for this branch is `merged`, the branch is gone — never enqueue.
+  // OLD step-(2) "branch changed since clean review" timestamp test mistook for a new push → re-enqueued
+  // forever. So before any dedup: if the latest build job for this branch is `merged`, the branch is gone —
+  // never enqueue.
+  //
+  // ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 2 note: this guard is
+  // NO LONGER load-bearing for loop prevention. The step-(2) check below now keys on the head SHA, and a
+  // status flip (completed→merged) does not change the head SHA — so an unchanged head skips by construction
+  // regardless of `updated_at` bumps. Guard (0) is kept because its OTHER purpose is still correct: a merged
+  // branch is deleted, and a review of a deleted ref is a wasted Max session (fetches nothing / errors out).
+  // Do not remove.
   const { data: lastBuildJob } = await admin
     .from("agent_jobs")
     .select("status, updated_at")
@@ -651,34 +659,78 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
     return { enqueued: false, reason: "security-review already open for this branch" };
   }
 
-  // (2) Dedup by branch state (one CLEAN review per UNCHANGED branch — the loop fix). If the branch already
-  // has a `completed` review, only re-review when the branch advanced SINCE that review with a NEW CODE PUSH —
-  // NOT a status-only `updated_at` bump (a completed→merged flip is not a push; the (0) guard above already
-  // dropped merged branches, but we also exclude `merged`/`completed` non-push bumps here so the comparison
-  // keys on a genuine build push). Compare the latest completed review's `created_at` against the latest
-  // NON-terminal build job's `updated_at`. Review newer-or-equal ⇒ same diff already cleared ⇒ skip (this is
-  // what stopped the per-pass loop). A genuinely newer build push ⇒ re-review.
-  const { data: lastClean } = await admin
-    .from("agent_jobs")
-    .select("created_at")
-    .eq("kind", "security-review")
-    .eq("spec_branch", branch)
-    .eq("status", "completed")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  const lastCleanAt = (lastClean as { created_at?: string } | null)?.created_at;
-  // ⭐ security-real-vuln-deadlock-breaker Phase 2 — a FORCED re-review skips this "branch unchanged" test.
-  // The caller (retestOriginBranchSecurityIfFixMerged) only forces when the linked fix spec's build MERGED,
-  // so the diff this branch is measured against (origin/main) HAS changed even though the branch tip did
-  // not — precisely the case this dedup cannot see. Guards (0) and (1) above still applied.
-  if (lastCleanAt && !input.force) {
-    const lastBuildAt = (lastBuildJob as { status?: string; updated_at?: string } | null)?.status === "merged"
-      ? null // a merged flip's bump is not a push (already returned above, but keep the comparison honest)
-      : (lastBuildJob as { updated_at?: string } | null)?.updated_at;
-    // No newer build push than the clean review ⇒ the reviewed diff is current ⇒ don't re-review.
-    if (!lastBuildAt || Date.parse(lastBuildAt) <= Date.parse(lastCleanAt)) {
-      return { enqueued: false, reason: "branch already has a clean security-review and has not changed since" };
+  // ⭐ (2) Dedup by branch state — a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed
+  // Phase 2. The question is not "did the build lane push?" but "is the code on this branch the code we
+  // reviewed?" — and only the head SHA answers that. Two changes replace the old timestamp comparison:
+  //
+  //   Fix #1 (freshness keys on head SHA). Read the newest suppressing review's recorded head_sha (Phase 1
+  //   records it — the AUTHORITATIVE value the worker stamps at run time, not the enqueue-time one) and
+  //   compare it to the branch's CURRENT head (`input.headSha`, resolved by the caller from
+  //   `origin/<branch>`). Equal ⇒ skip (the reviewed diff is current). Different, or either side absent
+  //   (legacy pre-Phase-1 row with no recorded SHA / server-side caller that could not resolve
+  //   `input.headSha`) ⇒ enqueue — conservative default for a security gate: re-review whenever we cannot
+  //   prove currency. This closes the 2026-08-17 defect: PR 2486's review at 13:22 → conflict-resolution
+  //   merge commit d8727bf0 pushed at 14:05 landing a slice of main → no re-review, because the old
+  //   `updated_at` check only saw pushes the BUILD LANE made. A merge commit from Pax's conflict-
+  //   resolution flow (or any human push) never touches the build job's `updated_at`, so it was
+  //   invisible. The head SHA moves regardless of who pushed.
+  //
+  //   Fix #2 (real-vuln is not a clean review). A completed review whose recorded `verdict` was
+  //   `real-vuln` (or any non-clean verdict the runner writes back — filtered via [[isRealVulnVerdict]],
+  //   the shared predicate the three rollup helpers use so "clean" means the same thing everywhere) MUST
+  //   NOT suppress the next pass. Both `clean` and `false-positive` complete cleanly and DO suppress
+  //   (they mean "no vulnerability was found"); `real-vuln` completed rows come from the fixes-as-phases
+  //   spawn path (branch mode → `spawnPreMergeFix` appends a Fix phase to the origin, keeps
+  //   `status='completed'` + `instructions.verdict='real-vuln'` so `isSecurityGreenForBranch` still
+  //   blocks the promote gate). Under the old timestamp code that row could ALSO satisfy the "already
+  //   has a clean review" skip if no new push happened between review and re-enqueue — which is exactly
+  //   backwards. `needs-human` / `needs_approval` / declined-real-vuln rows are already excluded by the
+  //   `.eq("status","completed")` filter.
+  //
+  //   Guards (0) and (1) above are UNCHANGED — this fix is purely the currency check.
+  //
+  // ⭐ Loop-safety proof (replaces the noop-pipeline-test-4 / #837 concern that the old timestamp
+  // comparison existed to stop). That loop was a `completed → merged` status flip bumping `updated_at`
+  // and re-enqueueing forever. A SHA comparison cannot loop: a status flip does not change the head SHA,
+  // so an unchanged head skips by construction. Guard (0) still handles the merged-branch case (branch
+  // deleted). The FORCE bypass (`security-real-vuln-deadlock-breaker` Phase 2) also cannot loop —
+  // guard (1) still refuses a duplicate open review, and force is only set by
+  // [[../src/lib/agent-jobs]] `retestOriginBranchSecurityIfFixMerged`, which fires ONCE per fix merge
+  // (not on a standing pass).
+  //
+  // ⭐ security-real-vuln-deadlock-breaker Phase 2 (retained) — a FORCED re-review still skips this
+  // "same head" test: the caller only forces when the linked fix spec's build MERGED, so the diff this
+  // branch is measured against (origin/main) HAS changed even though the branch tip did not — precisely
+  // the case a same-SHA check cannot see. Guards (0) and (1) above still applied.
+  if (!input.force) {
+    const { data: newestCompleted } = await admin
+      .from("agent_jobs")
+      .select("instructions")
+      .eq("kind", "security-review")
+      .eq("spec_branch", branch)
+      .eq("status", "completed")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const rawInstructions = (newestCompleted as { instructions?: string } | null)?.instructions ?? null;
+    if (rawInstructions) {
+      let parsed: { head_sha?: string | null; verdict?: string } | null = null;
+      try {
+        parsed = JSON.parse(String(rawInstructions)) as { head_sha?: string | null; verdict?: string };
+      } catch {
+        /* not JSON — treat as no suppressing review */
+      }
+      // Fix #2: a real-vuln (or any non-clean) verdict never suppresses.
+      if (parsed && !isRealVulnVerdict(parsed.verdict)) {
+        // Fix #1: same SHA on BOTH sides ⇒ reviewed diff is current ⇒ skip. Any absent side ⇒ can't
+        // prove currency ⇒ enqueue (conservative — re-review). `input.headSha` is caller-supplied
+        // (Phase 1 resolveOriginBranchSha); `parsed.head_sha` is the run-time stamp the worker wrote.
+        const currentHead = typeof input.headSha === "string" && input.headSha ? input.headSha : null;
+        const reviewedHead = typeof parsed.head_sha === "string" && parsed.head_sha ? parsed.head_sha : null;
+        if (currentHead && reviewedHead && currentHead === reviewedHead) {
+          return { enqueued: false, reason: "branch already has a clean security-review for the current head SHA" };
+        }
+      }
     }
   }
 

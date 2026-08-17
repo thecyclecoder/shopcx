@@ -134,6 +134,7 @@
     "test:dep-upgrade-cycle": "tsx --test src/lib/security-agent.dep-upgrade-cycle.test.ts",
     "test:premerge-security-retirement": "tsx --test src/lib/premerge-security-retirement.test.ts",
     "test:security-agent-branch-head-sha": "tsx --test src/lib/security-agent.branch-head-sha.test.ts",
+    "test:security-agent-branch-freshness": "tsx --test src/lib/security-agent.branch-freshness.test.ts",
     "test:pre-merge-fix": "tsx --test src/lib/pre-merge-fix.test.ts",
     "test:approval-router": "tsx --test src/lib/agents/approval-router.test.ts",
     "test:growth-director": "tsx --test src/lib/agents/growth-director.test.ts",
