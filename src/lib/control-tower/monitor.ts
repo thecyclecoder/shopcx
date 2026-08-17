@@ -131,6 +131,20 @@ const TICKET_ANALYSIS_FEEDER_GRACE_MS = 40 * 60_000;
 const TICKET_ANALYSIS_CORA_SETTLE_MS = 30 * 60_000;
 
 /**
+ * Cron-aligned June-decision lookback for the `tickets-awaiting-qc` work probe
+ * (ticket-analyzer-workprobe-june-decision-lookback-align). Mirrors the cron's own candidate
+ * horizon in src/lib/inngest/ticket-analysis-cron.ts (`cutoff = now - 7 * 24 * 60 * 60 * 1000`)
+ * used to bound the `director_activity` `cs_director_call` scan. The probe previously scoped this
+ * lookup with the loop's liveness window (`sinceIso`, 2h for loop:ai:ticket-analyzer), which
+ * silently dropped a same-cycle June decision that landed 3h ago even though the cron still sees
+ * it and correctly skips the ticket. The result was a monitor-false-positive: healthy analyzer
+ * (cron skipping a June-decided ticket) with a red `idle_while_work` tile. We now use this
+ * dedicated cron-aligned cutoff for the director_activity `.gte("created_at", …)` in the probe
+ * so the probe and the cron read the same June-decision universe. The sibling regression test
+ * pins this constant to the cron's 7-day horizon so a change in one moves the other. */
+const TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS = 7 * 24 * 60 * 60_000;
+
+/**
  * Settle window for the `tickets-awaiting-handler-dispatch` work probe
  * (control-tower-unified-handler-dispatch-workprobe). Mirrors INTENT_SETTLE_MS in
  * src/lib/inngest/unanswered-inbound-backstop-cron.ts — every ingest chokepoint stamps
@@ -1059,6 +1073,15 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // whose June decision is at-or-after its handling anchor. A June decision from a
             // PRIOR cycle (decided_at < handledAt) is inert — Sol re-handled past it, so this
             // is a new, undecided cycle and the ticket still counts as awaited work.
+            //
+            // Cron-aligned June-decision lookback (ticket-analyzer-workprobe-june-decision-lookback-align) —
+            // the director_activity `.gte("created_at", …)` MUST use the same 7-day horizon the cron
+            // uses (ticket-analysis-cron.ts:143 `now - 7d`), NOT the loop's 2h liveness window
+            // (`sinceIso`). The 2h window silently drops a same-cycle June decision landed 3h ago:
+            // the cron still sees it and skips the ticket, but the probe's map has no entry and
+            // counts the ticket as awaited work → false idle_while_work on a healthy analyzer.
+            // TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS is defined above so the sibling drift pin
+            // catches a change in the cron's horizon that isn't mirrored here.
             const nowMs = Date.now();
             const { data: candidates } = await admin
               .from("tickets")
@@ -1100,12 +1123,15 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // (small set — the base filter caps volume), keyed on `metadata.ticket_id`. Keep the
             // MAX(created_at) per ticket so the compare below sees the freshest decision.
             const uniqueWorkspaces = Array.from(new Set(candidateRows.map((c) => c.workspace_id)));
+            const juneDecisionCutoffIso = new Date(
+              nowMs - TICKET_ANALYSIS_JUNE_DECISION_LOOKBACK_MS,
+            ).toISOString();
             const { data: verdictRows } = await admin
               .from("director_activity")
               .select("metadata, created_at")
               .eq("action_kind", "cs_director_call")
               .in("workspace_id", uniqueWorkspaces)
-              .gte("created_at", sinceIso);
+              .gte("created_at", juneDecisionCutoffIso);
             const latestJuneDecidedAtByTicket = new Map<string, number>();
             for (const v of ((verdictRows ?? []) as Array<{ metadata: Record<string, unknown> | null; created_at: string }>)) {
               const ticketId =
@@ -1512,6 +1538,16 @@ const SEGMENT_COVERAGE_MAX_AGE_MS = 48 * 60 * 60_000;
 const SEGMENT_COVERAGE_MIN_SAMPLE = 100;
 /** Run-in-progress grace: skip the fresh-cohort ratio check while the daily refresh-customer-segments cron is still fanning out (comfortably longer than the observed worst-case fanout). The stale48h check stays active. */
 const SEGMENT_COVERAGE_RUN_GRACE_MS = 6 * 60 * 60_000;
+/**
+ * Fingerprint: segment-coverage-ignore-post-cron-opt-ins.
+ * The stale-tail head-count only counts subscribed rows that were BOTH present
+ * (`created_at` <= latest refresh beat) AND unchanged (`updated_at` <= latest refresh beat)
+ * at the last refresh-customer-segments cron beat. An existing customer that opted in / had
+ * their sms_marketing_status flipped AFTER the cron completed hasn't had its shot yet, so a
+ * NULL/>48h segments_refreshed_at on them cannot prove the cron missed the book until the
+ * next scheduled cycle. Pre-existing stale subscribers still count.
+ */
+export const SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE = "segment-coverage-ignore-post-cron-opt-ins" as const;
 
 /** Sum the anomalous ("bad") outcomes in a renewal breakdown. */
 function badOutcomeCount(c: RenewalOutcomeCounts): number {
@@ -1913,6 +1949,46 @@ export async function countRenewalIntegrityOverdueSubs(
  * `next_retry_at < stuckBeforeIso` is null-safe on the pooler — rows with null
  * `next_retry_at` are excluded, so a cycle awaiting scheduling isn't flagged.
  */
+/**
+ * Segment-coverage stale-tail head-count over SMS-subscribed customers, excluding the
+ * spec-test sandbox workspace. Applied gates:
+ *  - `segments_refreshed_at is null OR segments_refreshed_at < staleCutoffIso` (>48h stale or never-refreshed).
+ *  - When `latestSegmentsCronBeatIso` is known (the daily cron has fired at least once):
+ *      • `created_at <= beat` — a subscriber that arrived after the last refresh isn't
+ *         yet a proven miss (segment-coverage-ignore-post-cron-new-subscribers Phase 1).
+ *      • `updated_at <= beat` — an existing customer whose row changed after the last
+ *         refresh (e.g. an SMS opt-in) hasn't had its chance to be refreshed yet
+ *         ({@link SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE} — this file's fingerprint).
+ *  - Fallback (no beat ever recorded — cron never fired or heartbeats pruned): keep the
+ *    unfiltered count so the stale-tail still catches a truly-registered-but-never-firing cron.
+ */
+export async function countSegmentStaleTail(
+  admin: Admin,
+  opts: { staleCutoffIso: string; latestSegmentsCronBeatIso: string | null },
+): Promise<number> {
+  const orExpr = `segments_refreshed_at.is.null,segments_refreshed_at.lt.${opts.staleCutoffIso}`;
+  if (opts.latestSegmentsCronBeatIso) {
+    const { count } = await admin
+      .from("customers")
+      .select("id", { count: "exact", head: true })
+      .eq("sms_marketing_status", "subscribed")
+      .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID)
+      .lte("created_at", opts.latestSegmentsCronBeatIso)
+      // SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE — existing subscriber whose row changed after
+      // the beat is graced; a NULL/>48h shape on them can't yet prove the cron missed the book.
+      .lte("updated_at", opts.latestSegmentsCronBeatIso)
+      .or(orExpr);
+    return count ?? 0;
+  }
+  const { count } = await admin
+    .from("customers")
+    .select("id", { count: "exact", head: true })
+    .eq("sms_marketing_status", "subscribed")
+    .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID)
+    .or(orExpr);
+  return count ?? 0;
+}
+
 export async function countStuckDunningCycles(admin: Admin, stuckBeforeIso: string): Promise<number> {
   const { count } = await admin
     .from("dunning_cycles")
@@ -2020,29 +2096,11 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
       .eq("sms_marketing_status", "subscribed")
       .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID)
       .gte("segments_refreshed_at", segFreshCutoffIso),
-    // Stale tail: segments_refreshed_at older than 48h OR NULL. `.or` gives us both branches in
-    // one count (NULL-safe: `is.null` matches never-refreshed rows the `lt` branch would skip).
-    // Post-cron new-subscriber gate (segment-coverage-ignore-post-cron-new-subscribers Phase 1):
-    // when we know the latest refresh-customer-segments cron beat, exclude rows whose created_at
-    // is strictly after that ran_at — a subscriber that arrived after the last daily refresh
-    // completed hasn't had its chance to be refreshed yet, so a NULL / >48h shape on them cannot
-    // prove the cron missed the book. Pre-existing stale subscribers still count. Fallback (no
-    // beat ever recorded — never-fired or pruned): keep the unfiltered count so the stale-tail
-    // still catches a truly-registered-but-never-firing cron.
-    (latestSegmentsCronBeatIso
-      ? admin
-          .from("customers")
-          .select("id", { count: "exact", head: true })
-          .eq("sms_marketing_status", "subscribed")
-          .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID)
-          .lte("created_at", latestSegmentsCronBeatIso)
-          .or(`segments_refreshed_at.is.null,segments_refreshed_at.lt.${segStaleCutoffIso}`)
-      : admin
-          .from("customers")
-          .select("id", { count: "exact", head: true })
-          .eq("sms_marketing_status", "subscribed")
-          .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID)
-          .or(`segments_refreshed_at.is.null,segments_refreshed_at.lt.${segStaleCutoffIso}`)),
+    // Stale tail: segments_refreshed_at older than 48h OR NULL, with post-cron new-subscriber
+    // gate (segment-coverage-ignore-post-cron-new-subscribers Phase 1) AND post-cron opt-in
+    // gate (segment-coverage-ignore-post-cron-opt-ins Phase 1 —
+    // SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE) both applied inside the helper.
+    countSegmentStaleTail(admin, { staleCutoffIso: segStaleCutoffIso, latestSegmentsCronBeatIso }).then((count) => ({ count })),
   ]);
 
   // Renewal outcome distribution: current cycle (since the last cron beat, or a 26h fallback) vs a
