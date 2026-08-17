@@ -1,0 +1,1 @@
+- **Replace the self-feeding Vercel log drain with in-process onRequestError** · verified 2026-08-17 · → [[../integrations/vercel-log-drain]]
