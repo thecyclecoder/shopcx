@@ -963,6 +963,17 @@ export type CopyAuthorSessionOutcome =
        *  firewall / validator / self-score / Max exhaustion alike — never discard a produced creative.
        *  The `reason` field names what failed (the red flag). Absent only if no attempt ever parsed. */
       heldCaption?: AuthorModeCopy | null;
+      /** max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 4 — TRUE when the
+       *  exhaustion is a Max copy-QC OUR-SIDE failure (parse_error after the QA runner's one-shot
+       *  re-ask, OR dispatch_error, OR the runner threw). Distinguishes this "we didn't hear Max's
+       *  answer" class from `maxCopyQcMissed` ("Max said no, below floor / hard-gate fail"). The
+       *  short-circuit path returns kind='exhausted' with attempts=1 (no Dahlia revise consumed)
+       *  and `heldCaption` populated so stockProduct's bin-held path lands the row FAIL-CLOSED at
+       *  `max_qc_eligible=false` — the CEO-visible held state, hidden from Bianca's postable list —
+       *  instead of the pre-Phase-4 pass-through where kind='ok'+maxCopyQcVerdict=null stamped
+       *  max_qc_eligible=null (which Bianca reads as postable). Absent on every other exhaustion
+       *  class. */
+      maxCopyQcOurSideFailure?: boolean;
     };
 
 /** Discriminated result of `parseAuthorVerdict` — either a validated AuthorModeCopy or a concrete
@@ -1963,19 +1974,35 @@ export async function runCopyAuthorSession(
       const maxCheck = await inputs.verifyMaxCopyQc(verdict);
       if (!maxCheck.ok) {
         if (maxCheck.ourSideFailure) {
-          // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — an OUR-SIDE
-          // failure (parse_error after the QA runner's one-shot re-ask, OR dispatch_error) must
-          // NOT consume one of Dahlia's revise attempts, because Max never actually authored a
-          // verdict for Dahlia to answer to. The caller closure already emitted the
-          // `max_copy_qc_verdict_unparseable` director_activity audit; here we simply accept
-          // the copy she wrote and return ok (with a null Max verdict — the ad_campaigns row
-          // gets stamped max_qc_eligible=null, treated as pass-through by Bianca's filter,
-          // identical to the "no dispatcher injected" branch below).
-          note("Max's verdict couldn't be parsed after a re-ask — audited and accepting the copy without consuming a revise attempt.");
+          // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 4 (Fix 1) — an
+          // OUR-SIDE failure (parse_error after the QA runner's one-shot re-ask, OR dispatch_error,
+          // OR the runner threw) must NOT consume one of Dahlia's revise attempts (the caller
+          // closure already emitted the `max_copy_qc_verdict_unparseable` director_activity audit)
+          // AND must NOT bypass Max's independent gate downstream. The pre-Phase-4 return of
+          // kind='ok' + maxCopyQcVerdict=null stamped `ad_campaigns.max_qc_eligible=null`, which
+          // Bianca's `.not("max_qc_eligible","is",false)` filter reads as POSTABLE — the security
+          // regression called out in the Fix phase: any untrusted creative/session content that
+          // makes Max emit unparseable JSON twice would bypass no_fabrication / no_competitor_leak
+          // / no_cold_offer / render_ok instead of holding the creative. Fail CLOSED: short-circuit
+          // to a distinct exhaustion class carrying `heldCaption=verdict` (Dahlia's copy cleared
+          // every earlier gate — parse / self-score / cold-offer / validator / firewall — so it's
+          // safe to bin) + `maxCopyQcOurSideFailure=true`. stockProduct's bin-held path lands the
+          // row with `max_qc_eligible=false` + a distinct `max_copy_qc_our_side_failed` hold_flag
+          // gate so the creative EXISTS for CEO review (Max's raw first ~500 chars are already on
+          // the growth ledger) but Bianca cannot pick it up until Max returns a valid passing
+          // verdict or a human override is explicit. `attempts=attempt+1` reflects Dahlia dispatch
+          // count; no revise triggered.
+          note("Max's verdict couldn't be parsed after a re-ask — held out of the bin without consuming a revise attempt.");
           lastMaxCopyQcMissed = false;
           lastMaxCopyQcVerdict = null;
           lastAuthorVerdict = null;
-          return { kind: "ok", verdict, attempts: attempt + 1, maxCopyQcVerdict: null };
+          return {
+            kind: "exhausted",
+            reason: maxCheck.reason || "max_qc_our_side_failure",
+            attempts: attempt + 1,
+            heldCaption: verdict,
+            maxCopyQcOurSideFailure: true,
+          };
         }
         lastReason = maxCheck.reason;
         lastValidatorMisses = undefined;
@@ -3739,34 +3766,52 @@ async function stockProduct(
             // `dahlia_copy_firewall_exhausted` (fabrication) vs `dahlia_copy_author_exhausted`
             // (self-score / parse / cold-offer / validator).
             const isFirewallExhaustion = !!outcome.firewallMisses;
+            // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 4 (Fix 1) — a
+            // DISTINCT exhaustion class when the Max copy-QC session came back OUR-SIDE
+            // unparseable (parse_error after re-ask / dispatch_error / thrown). Separated from
+            // `max_qc_below_floor` (where Max returned a real critique) because the operator
+            // action + brain lineage differ: our-side means the wire dropped Max's verdict, not
+            // that Max failed the ad. Ranks BELOW firewall (a fabrication miss is a stronger
+            // north-star signal than a missing supervisor call) but ABOVE below-floor + author
+            // so `maxCopyQcMissed=false` on this class doesn't collapse it back to `author`.
+            const isOurSideMaxFailure = !isFirewallExhaustion && !!outcome.maxCopyQcOurSideFailure;
             // max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 3 — a DISTINCT
             // exhaustion class when the LAST failed attempt tripped Max's copy-QC gate (either
             // a sub-7 verdict, a hard-gate fail, or a Max session dispatch/parse miss on the
             // final try). The firewall wins over Max on the exhaustion-class tie-break: a
             // fabrication miss is a stronger north-star signal than a below-floor persuasion
             // score, and the firewall's `misses` metadata already carries the concrete evidence.
-            const isMaxQcExhaustion = !isFirewallExhaustion && !!outcome.maxCopyQcMissed;
+            const isMaxQcExhaustion =
+              !isFirewallExhaustion && !isOurSideMaxFailure && !!outcome.maxCopyQcMissed;
             const exhaustionKind = isFirewallExhaustion
               ? "firewall"
-              : isMaxQcExhaustion
-                ? "max_qc_below_floor"
-                : "author";
+              : isOurSideMaxFailure
+                ? "max_qc_our_side"
+                : isMaxQcExhaustion
+                  ? "max_qc_below_floor"
+                  : "author";
             const lastMaxVerdict = outcome.lastMaxCopyQcVerdict ?? null;
             const actionKind = isFirewallExhaustion
               ? "dahlia_copy_firewall_exhausted"
-              : isMaxQcExhaustion
-                ? "max_qc_below_floor_exhausted"
-                : "dahlia_copy_author_exhausted";
+              : isOurSideMaxFailure
+                ? "max_copy_qc_our_side_failed_held"
+                : isMaxQcExhaustion
+                  ? "max_qc_below_floor_exhausted"
+                  : "dahlia_copy_author_exhausted";
             const specSlug = isFirewallExhaustion
               ? "dahlia-never-fabricate-copy-firewall"
-              : isMaxQcExhaustion
-                ? "max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia"
-                : "dahlia-copy-author-box-session";
+              : isOurSideMaxFailure
+                ? "max-critique-reaches-dahlia-and-the-box-card-shows-one-face"
+                : isMaxQcExhaustion
+                  ? "max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia"
+                  : "dahlia-copy-author-box-session";
             const reasonLine = isFirewallExhaustion
               ? `dahlia never-fabricate firewall exhausted for ${productTitle} (${angle.source} angle) after ${outcome.attempts} attempts — ${outcome.firewallMisses!.length} untraceable claim(s); last reason: ${outcome.reason}`
-              : isMaxQcExhaustion
-                ? `max copy-QC bounce-back exhausted for ${productTitle} (${angle.source} angle) after ${outcome.attempts} attempts — held out of the bin (last score=${lastMaxVerdict?.persuasion_score ?? "null"} / floor=${MAX_QC_ELIGIBILITY_FLOOR}); last reason: ${outcome.reason}`
-                : `dahlia copy-author exhausted for ${productTitle} (${angle.source} angle) after ${outcome.attempts} attempts — last reason: ${outcome.reason}`;
+              : isOurSideMaxFailure
+                ? `max copy-QC OUR-SIDE failure for ${productTitle} (${angle.source} angle) — held out of the bin without consuming a Dahlia revise attempt (max_qc_eligible=false); last reason: ${outcome.reason}`
+                : isMaxQcExhaustion
+                  ? `max copy-QC bounce-back exhausted for ${productTitle} (${angle.source} angle) after ${outcome.attempts} attempts — held out of the bin (last score=${lastMaxVerdict?.persuasion_score ?? "null"} / floor=${MAX_QC_ELIGIBILITY_FLOOR}); last reason: ${outcome.reason}`
+                  : `dahlia copy-author exhausted for ${productTitle} (${angle.source} angle) after ${outcome.attempts} attempts — last reason: ${outcome.reason}`;
             await recordDirectorActivity(admin, {
               workspaceId,
               directorFunction: "growth",
@@ -3808,9 +3853,11 @@ async function stockProduct(
               const failKey =
                 exhaustionKind === "firewall"
                   ? "dahlia_copy_firewall_exhausted_activity_failed"
-                  : exhaustionKind === "max_qc_below_floor"
-                    ? "max_qc_below_floor_exhausted_activity_failed"
-                    : "dahlia_copy_author_exhausted_activity_failed";
+                  : exhaustionKind === "max_qc_our_side"
+                    ? "max_copy_qc_our_side_failed_held_activity_failed"
+                    : exhaustionKind === "max_qc_below_floor"
+                      ? "max_qc_below_floor_exhausted_activity_failed"
+                      : "dahlia_copy_author_exhausted_activity_failed";
               console.warn(failKey, { workspaceId, productId, err: errText(e) });
             });
             // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 — Max-QC

@@ -2215,12 +2215,20 @@ test("runCopyAuthorSession: ad-name invalid (competitor brand token) → revise 
   }
 });
 
-// ── max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 ────────────────────
+// ── max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 + Phase 4 (Fix 1) ──
 // A copy-QC OUR-SIDE failure (parse_error after re-ask OR dispatch_error) must NOT decrement
-// Dahlia's revise budget. Only a verdict Max actually returned (below floor / hard-gate fail)
-// is a real bounce that costs an attempt. This pair asserts both halves of that split.
+// Dahlia's revise budget (Phase 1 half) AND must NOT bypass Max's independent gate downstream
+// (Phase 4 fix-closed half). The pre-Phase-4 return of kind='ok'+maxCopyQcVerdict=null stamped
+// `ad_campaigns.max_qc_eligible=null` — treated as postable by Bianca's `.not("max_qc_eligible",
+// "is",false)` filter — which the security review flagged as a prompt-injection / gate-bypass
+// vector (untrusted content that makes Max emit unparseable JSON twice would bypass
+// no_fabrication / no_competitor_leak / no_cold_offer / render_ok). The Fix short-circuits to a
+// distinct exhausted class carrying `heldCaption=verdict` + `maxCopyQcOurSideFailure=true` so
+// stockProduct's bin-held path lands the row FAIL-CLOSED at `max_qc_eligible=false` (visible for
+// CEO review, hidden from Bianca) — and the revise budget is preserved because attempts=1 with
+// no revise round ever triggered.
 
-test("Phase 1: verifyMaxCopyQc returning ourSideFailure → loop accepts the copy on the first attempt WITHOUT bouncing (no revise budget consumed)", async () => {
+test("Phase 4 Fix 1: verifyMaxCopyQc ourSideFailure → outcome fails CLOSED with maxCopyQcOurSideFailure + heldCaption, NO revise consumed, and NEVER kind='ok' (was the pre-Fix pass-through gate-bypass)", async () => {
   const { dispatch, calls } = scriptedDispatcher([{ resultText: envelope() }]);
   let closureCalls = 0;
   const ourSideClosure: NonNullable<CopyAuthorSessionInputs["verifyMaxCopyQc"]> = async () => {
@@ -2233,12 +2241,17 @@ test("Phase 1: verifyMaxCopyQc returning ourSideFailure → loop accepts the cop
     };
   };
   const outcome = await runCopyAuthorSession(sessionInputs({ verifyMaxCopyQc: ourSideClosure }), dispatch);
-  assert.equal(outcome.kind, "ok", "an OUR-SIDE Max failure must NOT bounce Dahlia — the copy she authored is accepted");
-  if (outcome.kind === "ok") {
-    assert.equal(outcome.attempts, 1, "no revise attempt consumed on an our-side failure — only Max verdicts (below-floor / hard-gate) cost an attempt");
-    assert.equal(outcome.maxCopyQcVerdict, null, "no verdict body when Max never authored one; row lands max_qc_eligible=null (Bianca reads null as pass-through)");
+  assert.notEqual(outcome.kind, "ok", "an OUR-SIDE Max failure must NEVER return kind='ok' — that stamped max_qc_eligible=null which Bianca reads as postable (Phase 4 Fix 1: fail closed)");
+  assert.equal(outcome.kind, "exhausted", "the fix returns a distinct exhausted-class carrying the held caption so stockProduct bins it at max_qc_eligible=false");
+  if (outcome.kind === "exhausted") {
+    assert.equal(outcome.maxCopyQcOurSideFailure, true, "the discriminant fires the max_qc_our_side exhaustion class in stockProduct (distinct from below-floor / firewall / author)");
+    assert.equal(outcome.heldCaption?.headline, "Clean energy, no crash", "Dahlia's authored copy is preserved on the exhausted outcome so the bin-held path persists it (never discard a produced creative)");
+    assert.notEqual(outcome.heldCaption, null, "heldCaption populated ⇒ stockProduct's insertReadyCreative path fires with maxQcEligible=false + a hold_flag");
+    assert.equal(outcome.attempts, 1, "no revise attempt consumed on an our-side failure — only Max verdicts (below-floor / hard-gate) cost an attempt (Phase 1 half preserved)");
+    assert.equal(outcome.maxCopyQcMissed, undefined, "distinct from the below-floor class — Max never authored a verdict; the operator distinction is on maxCopyQcOurSideFailure, not maxCopyQcMissed");
+    assert.match(outcome.reason, /copy_qc_parse_error|max_qc_our_side_failure/, "the reason carries the parse-error detail so operators can slice");
   }
-  assert.equal(calls.length, 1, "Dahlia was invoked exactly once — she was not asked to revise");
+  assert.equal(calls.length, 1, "Dahlia was invoked exactly once — she was not asked to revise (the revise-budget half of Phase 1 is preserved)");
   assert.equal(closureCalls, 1, "the Max closure fired once (on the first attempt); an our-side failure does not re-invoke it");
 });
 
