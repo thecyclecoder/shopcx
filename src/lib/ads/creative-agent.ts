@@ -1416,7 +1416,15 @@ export function buildCopyAuthorPrompt(
     // Owner's up-front "Generate ad like this" directions — a TRUSTED worker input (the owner asked
     // for this ad). Apply exactly; overrides the brief on any conflict. Absent → not emitted.
     ...(ownerDirections
-      ? ["", `OWNER_DIRECTIONS (apply these EXACTLY — the owner asked for this ad and left specific directions; they override the brief on any conflict): ${ownerDirections}`]
+      ? [
+          "",
+          // ⭐ CEO 2026-08-17 (#4) — "the brief" was too vague: the competitor's hook reaches you
+          // as `BRIEF.angle.hook` / `COMPETITOR_DNA.hook`, and on job 58138929 the angle hook was
+          // "Meet Nature's Ozempic" (a Novo Nordisk trademark) while the owner note pinned a
+          // different headline verbatim AND banned the word. Name the angle explicitly so there is
+          // no reading in which the competitor's hook outranks the owner.
+          `OWNER_DIRECTIONS (apply these EXACTLY — the owner asked for this ad and left specific directions; they override the brief on any conflict, INCLUDING the angle hook and the competitor DNA. If they name or quote a headline, use it verbatim. If they ban a word or phrase, it must not appear in your headline, primary text, description, or ANY variation — not even carried over from the competitor's proven line): ${ownerDirections}`,
+        ]
       : []),
     "",
     COPY_AUTHOR_INJECTION_GUARDRAIL,
@@ -4393,14 +4401,56 @@ async function stockProduct(
           siblings: siblingRenders,
         }, insertOpts);
         if (result.kind === "skip") {
-          // cold_offer_leak — deterministic Phase-2 refusal (not a QA/gen failure). Treat like the
-          // packshot skip: no retry (the copy needs a revise, not another regen), distinct reason.
-          // In author mode this is defence-in-depth — runCopyAuthorSession's local gate should have
-          // caught it first. If we still get here (a gate-vs-model disagreement), record it distinctly.
+          // cold_offer_leak / firewall_claim_miss — deterministic post-gate refusal (not a QA/gen
+          // failure). No retry: the copy needs a revise, not another regen.
+          //
+          // ⭐ ALWAYS-SAVE (CEO 2026-08-17). This branch used to `break` here, discarding the copy
+          // AND every rendered placement — a full author+render cycle vanished leaving only the
+          // string `author_cold_offer_leak_post_gate` in the job's log_tail. Job 58138929 died
+          // exactly this way and the caption was unrecoverable, so nobody could see what Dahlia
+          // actually wrote or tell her what to change. The CEO's rule: "it should always save even
+          // if it doesn't pass QC.. otherwise it's just a failure and no visibility."
+          //
+          // So bin it HELD, reusing the SAME mechanism the exhaustion classes already use
+          // (`max_qc_eligible=false` + a `hold_flag`): the row is fully inspectable on the detail
+          // page, and Bianca's `.not("max_qc_eligible","is",false)` filter — plus the second
+          // in-loop guard in [[../ads/ready-to-test]] — keeps it strictly non-postable until the
+          // CEO stamps `override_postable`. Passing `maxQcEligible:false` also short-circuits
+          // `shouldRefuseColdOfferInsert`, so the held insert cannot re-trip the gate that
+          // rejected it.
+          const skipFlag = {
+            gate: result.reason === "firewall_claim_miss" ? "firewall" : "cold_offer",
+            reason: result.reason,
+            human: humanizeReviseReason(result.reason),
+            attempts: MAX_QA_ATTEMPTS,
+          };
+          let heldCampaignId: string | null = null;
+          try {
+            const heldResult = await insertReadyCreative(
+              admin, workspaceId, productId, product.handle, productTitle, angle, copyPack,
+              {
+                canonical: { format: "feed_4x5", buffer: currentCanonicalBuffer, mimeType: currentCanonicalMime, prompt: currentCanonicalPrompt },
+                siblings: siblingRenders,
+              },
+              { ...insertOpts, maxQcEligible: false, holdReason: skipFlag },
+            );
+            if (heldResult.kind === "ok") heldCampaignId = heldResult.campaignId;
+            else {
+              // A held insert that ITSELF fails is the one case with nothing to show. Say so
+              // loudly rather than letting it read as a plain gate refusal.
+              console.warn("post_gate_held_bin_failed", {
+                workspaceId, productId, reason: result.reason, heldKind: heldResult.kind,
+              });
+            }
+          } catch (e) {
+            console.warn("post_gate_held_bin_threw", { workspaceId, productId, err: errText(e) });
+          }
           out.push({
             productId,
             angleHook: angle.hook,
-            campaignId: null,
+            // The creative EXISTS now (held, non-postable). Surfacing its id is what makes the
+            // failure inspectable from the job row instead of a dead-end string.
+            campaignId: heldCampaignId,
             ok: false,
             reason: authorVerdict ? "author_cold_offer_leak_post_gate" : "cold_offer_leak",
           });
