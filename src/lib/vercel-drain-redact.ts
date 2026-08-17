@@ -27,10 +27,19 @@ export function endpointOf(drain: DrainLike): string | null {
 }
 
 /**
- * Safe display for a drain endpoint: `protocol//host[:port]/pathname` only.
- * Strips userinfo (username:password@), search params, and hash — the three
- * places a shared secret / API key is most likely to live in a delivery URL.
- * Returns `<unparseable-endpoint>` when the input can't be parsed as a URL.
+ * Safe display for a drain endpoint: `protocol//host[:port]` plus a fixed
+ * `/<path-redacted>` marker when the URL carries a non-root pathname. The
+ * pathname itself is NEVER emitted — a drain endpoint can carry a shared
+ * secret / signed token / customer id in a path segment
+ * (e.g. `https://logs.example.com/ingest/sk_live_ABC123`), and the ops
+ * scripts must not print that segment to CI or worker logs. Userinfo
+ * (username:password@), search params, and hash are stripped for the same
+ * reason. Returns `<unparseable-endpoint>` when the input can't be parsed
+ * as a URL.
+ *
+ * Host classification (e.g. self-pointing-drain guard in
+ * `scripts/_check-no-self-pointing-log-drain.ts`) MUST still run against
+ * the raw parsed URL — this helper is a DISPLAY, not a classifier.
  */
 export function redactedEndpoint(endpoint: string | null | undefined): string {
   if (!endpoint) return "<no-endpoint>";
@@ -41,8 +50,10 @@ export function redactedEndpoint(endpoint: string | null | undefined): string {
     return "<unparseable-endpoint>";
   }
   const host = parsed.host.toLowerCase();
-  const path = parsed.pathname || "/";
-  return `${parsed.protocol}//${host}${path}`;
+  const rawPath = parsed.pathname || "";
+  const hasPath = rawPath.length > 0 && rawPath !== "/";
+  const pathMarker = hasPath ? "/<path-redacted>" : "";
+  return `${parsed.protocol}//${host}${pathMarker}`;
 }
 
 /**
@@ -51,7 +62,9 @@ export function redactedEndpoint(endpoint: string | null | undefined): string {
  *   - id
  *   - name
  *   - status (or a disabled=true|false fallback)
- *   - the redacted endpoint (protocol + host + pathname)
+ *   - the redacted endpoint (protocol + host, with `/<path-redacted>` marker
+ *     when the URL had a non-root pathname — the pathname text itself is never
+ *     emitted, because a drain path segment can carry a secret / token / id)
  */
 export function summarizeDrain(drain: DrainLike): string {
   const id = drain.id ?? "<no-id>";
