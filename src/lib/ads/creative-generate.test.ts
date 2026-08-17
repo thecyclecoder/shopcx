@@ -54,10 +54,16 @@ test("buildPrompt: an imitation carries a CLAIM FIDELITY rule forbidding false p
   assert.ok(/must be TRUE of Amazing Coffee/.test(prompt), "the rule anchors to OUR product's real attributes");
 });
 
-test("buildPrompt: the imitation HEADLINE clause tells the model to DROP a non-true competitor attribute", () => {
+// NOTE (2026-08-17): the three assertions below were rewritten to match the TRUTH-TEST headline
+// clause that replaced the old blanket "DROP any …" wording. The rule inverted deliberately —
+// CEO: "we can echo words if the words apply to our product cleanly" — so the contract is now
+// KEEP-unless-untrue, not drop-on-sight. The tests kept asserting the retired strings and had been
+// red on main since that rewrite; they now pin the behaviour that actually ships.
+test("buildPrompt: the imitation HEADLINE clause swaps a competitor attribute that is NOT true of our product", () => {
   const { prompt } = buildPrompt(brief("New daily protein coffee."), true, undefined, true);
-  assert.ok(/DROP any product ATTRIBUTE or ingredient descriptor/.test(prompt));
-  assert.ok(/SWAP IN OURS/.test(prompt), "when the competitor's product noun differs, swap in ours");
+  assert.ok(/ATTRIBUTE \/ ingredient descriptor/.test(prompt), "the truth test covers product attributes");
+  assert.ok(/swap in our real equivalent only when it is not/.test(prompt), "swap ONLY when the attribute is untrue of us");
+  assert.ok(/protein coffee/.test(prompt), "names the concrete 2026-07-17 failure mode");
 });
 
 test("buildPrompt: an own-brand angle renders its headline exactly and needs no attribute swap", () => {
@@ -68,17 +74,20 @@ test("buildPrompt: an own-brand angle renders its headline exactly and needs no 
 
 // ── debrand hardening 2026-07-19 — drop mismatched benefits + unverified claims + no third-party brands
 
-test("buildPrompt: the imitation HEADLINE clause tells the model to DROP a mismatched BENEFIT (not just a product attribute)", () => {
+test("buildPrompt: the imitation HEADLINE clause keeps a BENEFIT we deliver and drops one we don't", () => {
   const { prompt } = buildPrompt(brief("Deeper Sleep, Clear Mornings"), true, undefined, true);
-  assert.ok(/DROP any BENEFIT, RESULT, or PROMISE that is not what/.test(prompt), "must forbid carrying a benefit our product doesn't deliver");
-  assert.ok(/deeper sleep/i.test(prompt), "the rule names the concrete failure mode (a sleep hook on a non-sleep product)");
-  assert.ok(/lead with OUR real benefit/.test(prompt));
+  assert.ok(/BENEFIT \/ RESULT \/ PROMISE/.test(prompt), "the truth test covers benefits, not just attributes");
+  assert.ok(/drop it only when we do not deliver it/.test(prompt), "a benefit is dropped ONLY when untrue of us");
+  assert.ok(
+    /Do not discard a benefit merely because a competitor used the phrase/.test(prompt),
+    "echoing a competitor's wording is explicitly allowed when the benefit is real (CEO 2026-08-17)",
+  );
 });
 
 test("buildPrompt: the imitation HEADLINE clause forbids carrying a competitor's specific unverified claim / timeframe (fabrication)", () => {
   const { prompt } = buildPrompt(brief("10 Weeks to Younger-Looking Skin"), true, undefined, true);
-  assert.ok(/NEVER carry over a SPECIFIC, UNVERIFIED CLAIM/.test(prompt));
-  assert.ok(/efficacy TIMEFRAME/.test(prompt) && /10 weeks/i.test(prompt), "names timeframe fabrication as the failure mode");
+  assert.ok(/SPECIFIC NUMBER, TIMEFRAME OR PERCENTAGE/.test(prompt), "numbers get their own truth-test rung");
+  assert.ok(/keep ONLY when it is a verified fact/.test(prompt), "a number survives only if verified about OUR product");
   assert.ok(/is a FABRICATION, not an imitation/.test(prompt));
 });
 
@@ -141,4 +150,38 @@ test("buildPrompt: sourceWireframe with a `before_after` product presentation st
     { elements: [{ zone: "hero", role: "proof", prominence: 9 }], productPresentation: ["before_after"], punchiness: [] },
   );
   assert.ok(prompt.includes(SOURCE_STRUCTURE_HEADER), "wireframe clause fires whenever wireframe is supplied");
+});
+
+// ── CEO 2026-08-17 (#4) — OWNER PRECEDENCE over the angle hook ────────────────────────────────
+// Job 58138929 authored under `angleHook: "Meet Nature's Ozempic"` (a Novo Nordisk trademark)
+// although the owner's note pinned "Nature's Way To Curb Cravings" verbatim AND banned the word.
+// The two clauses simply coexisted — `authorNotesClause` renders EARLIER than `headlineClause`, so
+// the last instruction the model read was "ECHO <competitor hook>". Precedence is now STATED.
+function briefWithOwnerNote(hook: string, note: string | null): CreativeBrief {
+  const b = brief(hook) as unknown as { authorNotes: string | null };
+  b.authorNotes = note;
+  return b as unknown as CreativeBrief;
+}
+
+test("buildPrompt: an owner note outranks the competitor hook on the IMITATION path", () => {
+  const { prompt } = buildPrompt(
+    briefWithOwnerNote("Meet Nature's Ozempic", 'Use this EXACT headline: "Nature\'s Way To Curb Cravings". Do NOT use the word Ozempic.'),
+    true,
+    undefined,
+    true,
+  );
+  assert.ok(/OWNER OVERRIDE, ABOVE EVEN RAIL 0/.test(prompt), "the headline clause must state owner precedence");
+  assert.ok(/THAT is the headline/.test(prompt), "an owner-named headline wins outright");
+  assert.ok(/must not appear anywhere in the image/.test(prompt), "an owner-banned word is banned even inside an echoed line");
+});
+
+test("buildPrompt: an owner note outranks the hook on the OWN-BRAND path too", () => {
+  const { prompt } = buildPrompt(briefWithOwnerNote("Clean daily energy", "Lead with the sleep benefit instead."), false, undefined, false);
+  assert.ok(/OWNER OVERRIDE/.test(prompt), "own-brand renders carry the same precedence clause");
+});
+
+test("buildPrompt: NO owner note ⇒ no precedence clause (the competitor hook stands unqualified)", () => {
+  const { prompt } = buildPrompt(briefWithOwnerNote("Meet Nature's Ozempic", null), true, undefined, true);
+  assert.ok(!/OWNER OVERRIDE/.test(prompt), "the clause must not appear when the owner left no directions");
+  assert.ok(/RAIL 0/.test(prompt), "…but the standing trademark rail still applies");
 });

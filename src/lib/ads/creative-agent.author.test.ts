@@ -2278,3 +2278,27 @@ test("Phase 1: real Max bounce still consumes a revise attempt (below-floor verd
   assert.equal(calls.length, 2);
 });
 
+
+// ── ALWAYS-SAVE on a POST-GATE refusal (CEO 2026-08-17) ───────────────────────────────────────
+// The exhaustion classes already binned their last caption HELD; the POST-GATE skip did not — it
+// discarded the copy AND every rendered placement, leaving only `author_cold_offer_leak_post_gate`
+// in the job's log_tail (job 58138929). stockProduct now routes that branch through the same
+// held-bin path, with gate='cold_offer'. CEO: "it should always save even if it doesn't pass QC..
+// otherwise it's just a failure and no visibility."
+test("buildAdCampaignInsertBody: a POST-GATE cold-offer refusal bins HELD + non-postable (always-save)", () => {
+  const body = buildAdCampaignInsertBody({
+    workspaceId: "ws-1",
+    productId: "prod-1",
+    name: "n",
+    angleId: "angle-1",
+    status: "ready",
+    audienceTemperature: "cold",
+    maxQcEligible: false,
+    holdReason: { gate: "cold_offer", reason: "cold_offer_leak", human: "offer leaked into cold copy", attempts: 3 },
+  });
+  // Strictly non-postable — Bianca's `.not("max_qc_eligible","is",false)` filter plus the second
+  // in-loop guard in ready-to-test keep it out of the bin until the CEO stamps override_postable.
+  assert.equal(body.max_qc_eligible, false);
+  assert.equal(body.hold_flag?.gate, "cold_offer");
+  assert.equal(body.hold_flag?.human, "offer leaked into cold copy");
+});
