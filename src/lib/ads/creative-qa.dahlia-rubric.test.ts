@@ -269,11 +269,34 @@ test("(P2-5) renderMaxDahliaRubricTrustedContext: own-brand angle (benchmark nul
 
 // ── 6. Session runner ──────────────────────────────────────────────────
 
+// max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — the QA runner now
+// parses inline so the dispatcher must return a full parseable envelope, not the "ok" stub
+// used before this phase (an unparseable string would land in the parse_error re-ask branch).
+const stubParseableVerdictJsonP2 = JSON.stringify({
+  hard_gate_pass: true,
+  hard_gates: {
+    no_fabrication: true,
+    no_cold_offer: true,
+    no_competitor_leak: true,
+    render_ok: true,
+  },
+  persuasion_score: 8,
+  persuasion_rubric: {
+    lf8: 2,
+    schwartz: 1,
+    cialdini: 2,
+    hopkins: 1,
+    sugarman: 2,
+    evidence: [],
+  },
+  verdict_reason: "stub verdict for P2-6 prompt-pinning test",
+});
+
 test("(P2-6) runQaCreativeCopyViaBoxSession: dispatcher receives the intent-aware block when declaredIntent is threaded", async () => {
   let dispatchedPrompt = "";
   const dispatcher = async (prompt: string, _img: string) => {
     dispatchedPrompt = prompt;
-    return { resultText: "ok", isError: false };
+    return { resultText: stubParseableVerdictJsonP2, isError: false };
   };
   const brief = {
     productTitle: "Superfood Coffee",
@@ -335,7 +358,7 @@ test("(P2-6) runQaCreativeCopyViaBoxSession: no declaredIntent → no intent blo
   let dispatchedPrompt = "";
   const dispatcher = async (prompt: string, _img: string) => {
     dispatchedPrompt = prompt;
-    return { resultText: "ok", isError: false };
+    return { resultText: stubParseableVerdictJsonP2, isError: false };
   };
   const brief = { imageRefs: [] } as unknown as CreativeBrief;
   const input: QaCreativeCopyBoxSessionInput = {

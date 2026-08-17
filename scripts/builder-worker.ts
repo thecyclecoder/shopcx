@@ -22549,6 +22549,31 @@ async function runMediaBuyerJob(job: Job) {
  * job per thin-bin product with its deficit. With no product_id, tops up every intelligence-backed
  * product to the bin floor.
  */
+/**
+ * max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — best-effort stamp of the
+ * ACTIVE actor onto `agent_jobs.metadata.active_persona` at each ad-creative dispatch boundary.
+ * The Build Box card reads this to render exactly ONE face (Dahlia while she authors, Max while
+ * he grades) driven by what the worker actually dispatched — instead of pattern-matching a
+ * checklist note that often didn't say what was running. Preserves other metadata keys via a
+ * read-merge-write; a failed stamp NEVER breaks the run (mirrors the `session_note` streaming
+ * guarantee). The metadata key is a persona slug that resolves through KIND_PERSONA_ALIAS
+ * ('ad-creative' → Dahlia, 'ad-creative-copy-qc' → Max); passing `null` clears the stamp.
+ */
+async function stampActivePersona(jobId: string, persona: "ad-creative" | "ad-creative-copy-qc" | null): Promise<void> {
+  try {
+    const { data } = await db
+      .from("agent_jobs")
+      .select("metadata")
+      .eq("id", jobId)
+      .maybeSingle();
+    const currentMeta = ((data as { metadata?: unknown } | null)?.metadata ?? {}) as Record<string, unknown>;
+    const nextMeta = { ...currentMeta, active_persona: persona };
+    await db.from("agent_jobs").update({ metadata: nextMeta }).eq("id", jobId);
+  } catch {
+    /* best-effort — a failed stamp never breaks the run (same guarantee as session_note streaming) */
+  }
+}
+
 async function runAdCreativeJob(job: Job) {
   const tag = `[ad-creative:${job.id.slice(0, 8)}]`;
   const a = await admin();
@@ -22655,6 +22680,11 @@ async function runAdCreativeJob(job: Job) {
   const qcDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
     qcCounter++;
     const qcTag = `${tag}[qc#${qcCounter}]`;
+    // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — the image-QC turn
+    // runs INSIDE Dahlia's creative loop on her own render; `getPersona('ad-creative-qc')`
+    // resolves to a generic default persona today, so the box card must not render it directly.
+    // Stamp 'ad-creative' so the card keeps showing Dahlia while her image is being checked.
+    void stampActivePersona(job.id, "ad-creative");
     try {
       const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
         configDir: cfg,
@@ -22704,6 +22734,10 @@ async function runAdCreativeJob(job: Job) {
   const copyAuthorDispatcher: CopyAuthorSessionDispatcher = async (prompt, allowedImagePath, resume) => {
     copyAuthorCounter++;
     const authorTag = `${tag}[copy-author#${copyAuthorCounter}]${resume ? "[resume]" : ""}`;
+    // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — Dahlia is now
+    // the active actor (author or revise turn). The box card reads `metadata.active_persona`
+    // and swaps to her single photo.
+    void stampActivePersona(job.id, "ad-creative");
     try {
       const run = await runBoxLane(
         (cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
@@ -22767,30 +22801,58 @@ async function runAdCreativeJob(job: Job) {
   // rollback lever (the ad-creative kill switch in Phase 3 is the ONLY rollback), so a frozen
   // switch produces nothing rather than a Max-less creative.
   let copyQcCounter = 0;
-  const copyQcDispatcher: CopyQcSessionDispatcher = async (prompt, allowedImagePath) => {
+  // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — the QC dispatcher now
+  // mirrors the copy-author dispatcher's resume shape. `runQaCreativeCopyViaBoxSession` uses
+  // this to RESUME Max's SAME session for the one-shot re-ask on a parse_error (his prior verdict
+  // context stays cache-warm, so the re-ask is a short "re-emit in the correct envelope" turn
+  // instead of paying the full prompt again). Same missing-session / account-hop failsafes as
+  // the copy-author dispatcher — either signals "settle as parse_error" upstream.
+  const copyQcDispatcher: CopyQcSessionDispatcher = async (prompt, allowedImagePath, resume) => {
     copyQcCounter++;
-    const qcTag = `${tag}[copy-qc#${copyQcCounter}]`;
+    const qcTag = `${tag}[copy-qc#${copyQcCounter}]${resume ? "[resume]" : ""}`;
+    // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — Max is now the
+    // active actor (grade or re-ask turn). The box card reads `metadata.active_persona` and
+    // swaps to his single photo.
+    void stampActivePersona(job.id, "ad-creative-copy-qc");
     try {
-      const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
-        configDir: cfg,
-        kind: "ad-creative-copy-qc",
-        // Least-privilege — same profile as `sandbox: "qc"` / the copy-author lane; the QC child
-        // only Reads ONE tmp jpeg + emits ONE JSON envelope, so we strip every SUPABASE_/GITHUB_/
-        // META_/ANTHROPIC_/OPENAI_ credential.
-        sandbox: "qc",
-        timeout: AD_CREATIVE_QC_TIMEOUT_MS,
-        idleTimeout: AD_CREATIVE_QC_IDLE_MS,
-        // Reuse the QC PreToolUse gate — the shared predicate allows Read on any path in the
-        // comma-separated AD_CREATIVE_QC_ALLOWED_IMAGE env + TodoWrite, denies everything else.
-        // Same env-var name keeps the gate script single-source-of-truth across QC / author / copy-qc.
-        permissionGate: { hookCommand: qcPermissionHookCommand },
-        extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
-      }));
+      const run = await runBoxLane(
+        (cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+          configDir: cfg,
+          kind: "ad-creative-copy-qc",
+          // Least-privilege — same profile as `sandbox: "qc"` / the copy-author lane; the QC child
+          // only Reads ONE tmp jpeg + emits ONE JSON envelope, so we strip every SUPABASE_/GITHUB_/
+          // META_/ANTHROPIC_/OPENAI_ credential.
+          sandbox: "qc",
+          timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+          idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+          // Reuse the QC PreToolUse gate — the shared predicate allows Read on any path in the
+          // comma-separated AD_CREATIVE_QC_ALLOWED_IMAGE env + TodoWrite, denies everything else.
+          // Same env-var name keeps the gate script single-source-of-truth across QC / author / copy-qc.
+          permissionGate: { hookCommand: qcPermissionHookCommand },
+          extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+        }),
+        resume ? { sessionConfigDir: resume.sessionConfigDir, sessionId: resume.sessionId } : undefined,
+      );
+      // FAILSAFE 1 — RESUME whose session the box no longer has. Signal the caller to settle as
+      // parse_error rather than trying to rebuild context (the re-ask is a short-turn prompt that
+      // assumes Max's prior context, so a fresh session couldn't answer it usefully).
+      if (resume && isMissingSessionError(run.raw || "")) {
+        console.warn(`${qcTag} resume session ${resume.sessionId} missing on box — signaling parse_error settle`);
+        return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: true };
+      }
+      // FAILSAFE 2 — RESUME whose pinned account was capped mid-loop: runBoxLane hops to a healthy
+      // account and re-runs the SHORT re-ask on a FRESH session there — which has NO cached context,
+      // so its output is unusable. Detect the hop + signal missingSession so the caller settles as
+      // parse_error rather than trusting a context-less re-ask.
+      if (resume && run.configDir && resume.sessionConfigDir && run.configDir !== resume.sessionConfigDir) {
+        console.warn(`${qcTag} resume account-hopped ${resume.sessionConfigDir}→${run.configDir} (cap) — short prompt ran context-less; signaling parse_error settle`);
+        return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: true };
+      }
       if (run.isError) console.warn(`${qcTag} copy-QC session errored — fail-closed to dispatch_error`);
-      return { resultText: run.resultText || "", isError: run.isError };
+      return { resultText: run.resultText || "", isError: run.isError, sessionId: run.session, sessionConfigDir: run.configDir, missingSession: false };
     } catch (err) {
       console.error(`${qcTag} copy-QC dispatch threw: ${errText(err)}`);
-      return { resultText: "", isError: true };
+      return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: false };
     }
   };
   console.log(`${tag} per-creative max-copy-qc box session engaged (box-session-only invariant — DAHLIA_QC_COPY_MODE gate retired)`);
@@ -22870,6 +22932,10 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
     const qcDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
       qcCounter++;
       const qcTag = `${tag}[qc#${qcCounter}]`;
+      // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — see the
+      // production runAdCreativeJob's dispatcher for the rationale. Image-QC turn stamps
+      // Dahlia (the vision check runs inside her loop on her own render).
+      void stampActivePersona(job.id, "ad-creative");
       try {
         const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
           configDir: cfg,
@@ -22893,6 +22959,9 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
     const copyAuthorDispatcher: CopyAuthorSessionDispatcher = async (prompt, allowedImagePath, resume) => {
       counter++;
       const authorTag = `${tag}[copy-author#${counter}]${resume ? "[resume]" : ""}`;
+      // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — Dahlia is the
+      // active actor for the author/revise turn.
+      void stampActivePersona(job.id, "ad-creative");
       try {
         const run = await runBoxLane(
           (cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
@@ -22927,24 +22996,42 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
     // sandbox / gate / env pattern as the copy-author dispatcher above (single tmp jpeg, minimal
     // env, TodoWrite + Read on the allowed image only).
     let copyQcCounter = 0;
-    const copyQcDispatcher: CopyQcSessionDispatcher = async (prompt, allowedImagePath) => {
+    // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — mirror the
+    // production lane's resume-capable QC dispatcher so runQaCreativeCopyViaBoxSession can
+    // re-ask Max's SAME session on a parse_error here too. Same missing-session / account-hop
+    // failsafes as the copy-author dispatcher.
+    const copyQcDispatcher: CopyQcSessionDispatcher = async (prompt, allowedImagePath, resume) => {
       copyQcCounter++;
-      const qcTag = `${tag}[copy-qc#${copyQcCounter}]`;
+      const qcTag = `${tag}[copy-qc#${copyQcCounter}]${resume ? "[resume]" : ""}`;
+      // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — Max is the
+      // active actor for the grade / one-shot parse re-ask turn.
+      void stampActivePersona(job.id, "ad-creative-copy-qc");
       try {
-        const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
-          configDir: cfg,
-          kind: "ad-creative-copy-qc",
-          sandbox: "qc",
-          timeout: AD_CREATIVE_QC_TIMEOUT_MS,
-          idleTimeout: AD_CREATIVE_QC_IDLE_MS,
-          permissionGate: { hookCommand: qcPermissionHookCommand },
-          extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
-        }));
+        const run = await runBoxLane(
+          (cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+            configDir: cfg,
+            kind: "ad-creative-copy-qc",
+            sandbox: "qc",
+            timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+            idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+            permissionGate: { hookCommand: qcPermissionHookCommand },
+            extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+          }),
+          resume ? { sessionConfigDir: resume.sessionConfigDir, sessionId: resume.sessionId } : undefined,
+        );
+        if (resume && isMissingSessionError(run.raw || "")) {
+          console.warn(`${qcTag} resume session ${resume.sessionId} missing on box — signaling parse_error settle`);
+          return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: true };
+        }
+        if (resume && run.configDir && resume.sessionConfigDir && run.configDir !== resume.sessionConfigDir) {
+          console.warn(`${qcTag} resume account-hopped ${resume.sessionConfigDir}→${run.configDir} (cap) — short prompt ran context-less; signaling parse_error settle`);
+          return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: true };
+        }
         if (run.isError) console.warn(`${qcTag} copy-QC session errored — fail-closed to dispatch_error`);
-        return { resultText: run.resultText || "", isError: run.isError };
+        return { resultText: run.resultText || "", isError: run.isError, sessionId: run.session, sessionConfigDir: run.configDir, missingSession: false };
       } catch (err) {
         console.error(`${qcTag} copy-QC dispatch threw: ${errText(err)}`);
-        return { resultText: "", isError: true };
+        return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: false };
       }
     };
     const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");
