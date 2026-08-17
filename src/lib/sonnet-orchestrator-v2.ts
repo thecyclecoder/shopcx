@@ -221,7 +221,7 @@ function buildToolDefinitions() {
     },
     {
       name: "get_payment_methods",
-      description: "Get the cards/payment methods the customer has on file (both our local Braintree-vaulted cards from storefront checkout AND Shopify Payments cards). Use when the customer asks about which cards we have, wants to change/default/delete a card, or mentions a specific card by last4. Returns brand, last4, expiry, default flag, and revocation status for each.",
+      description: "Get the cards/payment methods the customer has on file (both our local Braintree-vaulted cards from storefront checkout AND Shopify Payments cards). Use when the customer asks about which cards we have, wants to change/default/delete a card, or mentions a specific card by last4. Returns brand, last4, expiry, default flag, and revocation status for each — plus per-provider guidance on where the customer can remove/add/set-default (portal for STOREFRONT-VAULTED, Shopify account page for SHOPIFY PAYMENT METHODS, never claim the portal can remove a Shopify Payments card).",
       input_schema: { type: "object" as const, properties: {}, required: [] as string[] },
     },
     {
@@ -2223,9 +2223,23 @@ async function getPaymentMethods(admin: Admin, wsId: string, custId: string): Pr
   if (parts.length === 0) {
     return "No payment methods on file for this customer.";
   }
+  // Ticket 9bc2e674 fix: previously this said "customer can add/remove/set-default
+  // there" as one blanket line, which the AI paraphrased into a false "scroll to
+  // Payment Methods and remove the duplicates" instruction for a portal flow that
+  // did not exist (the portal was list + add only, no remove). The portal now
+  // supports removal on Braintree-vaulted (STOREFRONT-VAULTED) cards via the
+  // remove_payment_method route (customer-only, PCI stance — support cannot
+  // revoke a card on the customer's behalf), so the guidance below distinguishes
+  // the two provider paths accurately. It also states the billing-safe truth
+  // about duplicate cards (dunning dedupes by last4 + expiry) so the AI can
+  // reassure a customer who is worried about duplicate charges without inventing
+  // a self-serve step to make them go away.
   parts.push(
-    "\nManage payment methods URL: https://account.superfoodscompany.com/profile (customer can add/remove/set-default there). " +
-    "Shopify Payments does NOT expose a way to programmatically set the default; the customer must do it from their account portal.",
+    "\nManage payment methods URL: https://account.superfoodscompany.com/profile" +
+    "\n- STOREFRONT-VAULTED cards: the customer CAN add a new card and CAN remove a saved card from the portal Payment Methods section. The AI must NOT offer to remove a card on the customer's behalf — the removal path is customer-only (deliberate PCI stance) and there is no agent-side revoke action. Guide the customer to Manage Payment Methods → Remove and answer any follow-up from there." +
+    "\n- SHOPIFY PAYMENT METHODS: OUR portal cannot remove or set-default these — they live in Shopify's vault. The customer must remove/change them from their Shopify account page (Manage account → Payment methods on the storefront). Do NOT tell the customer to remove them from our portal — that will not work." +
+    "\n- Duplicate saved cards (same brand/last4/expiry) are billing-safe: the dunning + renewal pipeline dedupes charges by last4 + expiry, so a duplicate never causes a double charge. Say that plainly if the customer is worried about being charged twice; still respect a genuine wish to tidy up her wallet by pointing to the removal path above." +
+    "\nShopify Payments does NOT expose a way to programmatically set the default; the customer must do it from her Shopify account page.",
   );
   return parts.join("\n");
 }
