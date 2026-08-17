@@ -14,8 +14,9 @@ Ticket `9bc2e674` (G esposito) surfaced a product gap: the customer asked 4+ tim
 - **Customer-only** — same auth+ban gate as every other portal handler. There is NO agent-side removal action; support cannot revoke a card on the customer's behalf, per the deliberate customer-only / PCI stance called out in the ticket. If a signed-out customer asks, the answer is "sign in and remove it there," not "we'll do it for you."
 - **Braintree-vaulted cards only.** Shopify-Payments cards live in Shopify's vault; a local flip would be re-mirrored back by the `customer_payment_methods/update` webhook. Refuse with `not_removable_here` so the AI can direct the customer to her Shopify account page.
 - **Blocked on active-subscription pin.** A card currently pinned to an active/paused *internal* subscription cannot be removed — losing it mid-cycle breaks the next renewal. Response is `409 pinned_to_active_subscription` with the offending `subscription_ids` so the caller can prompt the customer to switch that sub's card first (via [[portal__handlers__set-subscription-payment-method]]) or add a replacement.
+- **Blocked when this is the LAST card funding an active subscription.** The renewal charge path in [[../inngest/internal-subscription-renewals]] (see `src/lib/inngest/internal-subscription-renewals.ts:694-722`) reads `sub.payment_method_id` first and, when null, falls back to the link group's `is_default` active card; if neither resolves the renewal returns `{ skip: true, reason: "no_payment_method" }` and silently does not charge. The pinned guard above therefore only covers subscriptions that explicitly pin this card — removing the ONLY active Braintree card in the link group would still silently break every sub that relies on the default-card fallback. So the handler ALSO refuses removal with `409 last_card_for_active_subscription` (with the blocking `subscription_ids`) when no replacement card exists AND at least one internal subscription in the link group is still active/paused. The decision is factored out as the pure exported predicate `shouldBlockLastCardRemoval({ replacementCardId, activeInternalSubCount })` (returns true iff `replacementCardId === null && activeInternalSubCount > 0`) so a test can pin the rule without mocking Supabase — the same shape [[action-executor]] uses for `pickChargeableVaultedPm` in `src/lib/action-executor.vaulted-pm-guard.test.ts`. Cover in `src/lib/portal/handlers/remove-payment-method.guard.test.ts` (registered as `test:remove-payment-method-guard` in `package.json`).
 - **Default promotion.** When the removed card was `is_default`, the most-recently-created active Braintree card belonging to anyone in the customer's link group is promoted to default in the same request.
-- **Best-effort Braintree vault delete.** `gateway.paymentMethod.delete` is called; a missing/invalid token or gateway hiccup is logged but never blocks the local `status='removed'` flip — the local flag is what renewal + dunning read, and re-attempting a delete on a stale token would loop.
+- **Write order is local-first, error-checked, then best-effort vault.** The previous order (Braintree delete → local flip → default promotion, none of them error-checked) could destroy the vault entry while leaving the local row still reading `status='active'` + `is_default=true`, and the next renewal would pick it and charge a token that no longer exists. The corrected order is: (1) flip the local row to `status='removed'` + `is_default=false` and CHECK the error (500 on failure — the vault is NOT touched); (2) promote the replacement default and CHECK the error (500 on failure); (3) best-effort Braintree `paymentMethod.delete`. A vault failure after a successful local flip is now an orphaned vault entry (harmless), never a live local row pointing at a dead token.
 
 ## Request / response
 
@@ -33,6 +34,9 @@ Body: { paymentMethodId: string }
 // 403 payment_method_not_in_group
 // 404 customer_not_found | payment_method_not_found
 // 409 pinned_to_active_subscription  (with pinned_subscription_ids: string[])
+// 409 last_card_for_active_subscription  (with subscription_ids: string[])
+// 500 local_flip_failed  (row-update error — vault NOT touched)
+// 500 default_promotion_failed  (row-update error on the new-default row)
 ```
 
 ## Exports
@@ -42,6 +46,17 @@ Body: { paymentMethodId: string }
 ```ts
 const removePaymentMethod: RouteHandler
 ```
+
+### `shouldBlockLastCardRemoval` — function
+
+```ts
+function shouldBlockLastCardRemoval(args: {
+  replacementCardId: string | null;
+  activeInternalSubCount: number;
+}): boolean
+```
+
+Returns `true` iff there is no replacement card AND at least one active/paused internal subscription in the link group. Pure — extracted so `remove-payment-method.guard.test.ts` can pin the rule without mocking Supabase.
 
 ## Callers
 
