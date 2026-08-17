@@ -49,14 +49,27 @@ test("cold + '20% off' trips the gate (bare-percent regex)", () => {
 });
 
 test("COLD_OFFER_TOKENS colocates the LF8 offer/urgency cluster (SSOT — no drift)", () => {
-  // The LF8 offer/urgency cluster (lf8.ts): save · off · deal · today. The gate MUST reuse these — a
-  // divergent list would let a hallucinated cold caption ship with an LF8-flagged token the
-  // supervisor gate would still see. `free shipping` was removed from BOTH (CEO 2026-07-21 — it's a
-  // cold-allowed trust/risk-reversal element, not a deal-chase discount), so the mirror stays intact.
+  // The LF8 offer/urgency cluster (lf8.ts): save · off · deal · today. The list is kept in lockstep
+  // so the hint handed to the reasoning layer matches the vocabulary the supervisor's LF8 gate sees.
+  // NOTE (CEO 2026-08-17): this list is ADVISORY — it no longer gates anything. See the retirement
+  // test below.
   for (const t of ["save", "off", "deal", "today"]) {
     assert.ok(COLD_OFFER_TOKENS.includes(t), `expected COLD_OFFER_TOKENS to include LF8 offer/urgency token "${t}"`);
   }
   assert.ok(!COLD_OFFER_TOKENS.includes("free shipping"), "free shipping is no longer a cold-offer token");
+});
+
+test("COLD_OFFER_TOKENS is ADVISORY — no token, on its own, blocks the gate (CEO 2026-08-17)", () => {
+  // The whole-word ban was retired: judging whether a sentence PITCHES an offer is semantic work
+  // and belongs to Max's `no_cold_offer` hard gate, not a literal token match. Pin every token so a
+  // future edit can't quietly reinstate the ban by re-wiring the list into the predicate.
+  for (const t of COLD_OFFER_TOKENS) {
+    assert.equal(
+      gateBlocks("cold", emptyRest(`a caption that merely contains the word ${t} in passing`)),
+      false,
+      `token "${t}" must not block on its own — that judgement is Max's`,
+    );
+  }
 });
 
 test("hasColdOfferLeak scans all three copy fields (headline / primaryText / description)", () => {
@@ -66,9 +79,12 @@ test("hasColdOfferLeak scans all three copy fields (headline / primaryText / des
   assert.equal(hasColdOfferLeak({ headline: "clean headline", primaryText: "", description: "$19 today" }), true);
 });
 
-test("hasColdOfferLeak lowercases before matching (mixed-case leaks still trip)", () => {
-  assert.equal(hasColdOfferLeak(emptyRest("SAVE big TODAY")), true);
-  assert.equal(hasColdOfferLeak(emptyRest("Free Shipping over $50")), true);
+test("hasColdOfferLeak is case-insensitive (mixed-case leaks still trip)", () => {
+  assert.equal(hasColdOfferLeak(emptyRest("Free Shipping over $50")), true); // bare price
+  assert.equal(hasColdOfferLeak(emptyRest("SAVE 25% NOW")), true); // discount percent
+  // "SAVE big TODAY" no longer trips the RAIL — no price, no percent. It is deal-chase copy and
+  // SHOULD be refused, but by Max's `no_cold_offer` judgement (CEO 2026-08-17).
+  assert.equal(hasColdOfferLeak(emptyRest("SAVE big TODAY")), false);
 });
 
 // ── debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-offer-for-offer

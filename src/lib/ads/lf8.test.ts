@@ -8,7 +8,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { hasAnyLf8, LF8_KEYWORDS, hasColdOfferLeak } from "./lf8";
+import { hasAnyLf8, LF8_KEYWORDS, hasColdOfferLeak, coldOfferLeakMatch } from "./lf8";
 
 // ── hasColdOfferLeak — word-boundary, not substring (2026-07-17 "coffee" regression) ─────────────
 const c = (headline: string, primaryText = "", description = "") => ({ headline, primaryText, description });
@@ -37,12 +37,44 @@ test("hasColdOfferLeak: a benefit / social-proof STAT is allowed (not a discount
   assert.equal(hasColdOfferLeak(c("95% of drinkers report steadier energy")), false);
 });
 
-test("hasColdOfferLeak: a real DISCOUNT / offer is caught", () => {
-  assert.equal(hasColdOfferLeak(c("50% off today only")), true); // off + today
-  assert.equal(hasColdOfferLeak(c("Save $10 on your first bag")), true); // save
+test("hasColdOfferLeak: a real DISCOUNT / PRICE is caught by the mechanical rails", () => {
+  assert.equal(hasColdOfferLeak(c("50% off today only")), true); // % adjacent to an offer word
+  assert.equal(hasColdOfferLeak(c("Save $10 on your first bag")), true); // bare price
   assert.equal(hasColdOfferLeak(c("Get 20% discount")), true); // % discount
   assert.equal(hasColdOfferLeak(c("Just $29 a bag")), true); // bare currency (a price shown to cold)
-  assert.equal(hasColdOfferLeak(c("Grab this deal")), true);
+});
+
+// ── CEO 2026-08-17 — the whole-word token ban is RETIRED; Max judges offer language in context ───
+// The deterministic rails keep only what is unambiguous in every context (a printed price, a
+// discount percentage). Deal-chase VOCABULARY in an ordinary sentence is no longer a hard fail —
+// it is Max's `no_cold_offer` hard gate's call. Rationale: the ban failed plain English across six
+// long-form captions per emit and returned a reason that never named the offending word, so the
+// one sanctioned revise was a guess. See lf8.ts COLD_OFFER_TOKENS § history.
+test("hasColdOfferLeak: ordinary English reusing a deal word is NOT a mechanical leak", () => {
+  assert.equal(hasColdOfferLeak(c("Takes the edge off around 3pm")), false); // "off"
+  assert.equal(hasColdOfferLeak(c("Deal with the afternoon crash")), false); // "deal"
+  assert.equal(hasColdOfferLeak(c("You won't feel it today, you'll feel it in week two")), false); // "today"
+  assert.equal(hasColdOfferLeak(c("Save your energy for what matters")), false); // "save"
+});
+
+test("hasColdOfferLeak: deal-chase phrasing with no price/percent passes the RAIL and defers to Max", () => {
+  // Both of these SHOULD ship-block — but as Max's `no_cold_offer` judgement, not as a token match.
+  // Pinned so a future reader doesn't mistake the rail's silence for approval of the copy.
+  assert.equal(hasColdOfferLeak(c("Grab this deal")), false);
+  assert.equal(hasColdOfferLeak(c("BOGO ends Sunday")), false);
+});
+
+test("coldOfferLeakMatch: names the offending pattern + quotes the literal text (revise feedback)", () => {
+  // The bare `cold_offer_leak` reason is what made the author guess; the excerpt is the fix.
+  assert.deepEqual(coldOfferLeakMatch(c("Just $29.99 a bag")), {
+    pattern: "bare_price",
+    excerpt: "$29.99",
+  });
+  assert.deepEqual(coldOfferLeakMatch(c("Get 20% off this week")), {
+    pattern: "discount_percent",
+    excerpt: "20% off",
+  });
+  assert.equal(coldOfferLeakMatch(c("Takes the edge off around 3pm")), null);
 });
 
 test("hasAnyLf8: previously false-flagged live creatives now register a hit", () => {
