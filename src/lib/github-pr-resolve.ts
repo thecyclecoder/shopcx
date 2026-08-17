@@ -147,6 +147,9 @@ export function countGenuinePrResolveAttempts(
     ) {
       return false; // the surfaced sentinel — a marker, not an attempt
     }
+    if (isPaxFollowUpExhaustedSentinel(row)) {
+      return false; // the pax-followup exhausted sentinel — also a marker, not an attempt
+    }
     if (row.status === "failed" && PR_RESOLVE_INFRA_FAILURE_RE.test(row.error ?? "")) {
       return false; // box/infra, not a resolve verdict
     }
@@ -202,6 +205,67 @@ export function fingerprintOfPrResolveRow(row: { instructions?: string | null })
 
 /** Exported for unit tests. */
 export const PR_RESOLVE_MAX_ATTEMPTS_FOR_TESTS = MAX_PR_RESOLVE_ATTEMPTS;
+
+/**
+ * pax-never-reports-nothing-to-resolve-on-a-pr-state-it-could-not-read (Phase 2) — a Pax pass that
+ * ends with the PR still open + conflicting self-requeues one follow-up pr-resolve job, up to
+ * `PR_RESOLVE_MAX_FOLLOWUP_ATTEMPTS`. On exhaustion the sentinel row below is inserted; its error
+ * prefix trips the [[./agents/needs-attention-classify.ts]] real_blocker heuristic ("needs a human
+ * merge") so the router surfaces a genuine stuck PR instead of a silent one.
+ *
+ * Why the marker is a separate needs_attention row rather than a status flip on the current job:
+ * mirrors `surfaceExhaustedPrResolve` (the general cap), and preserves the current job's own
+ * outcome verbatim (a job that finished as "surfaced to owner" still reads as such — the cap-park
+ * is a distinct, single, idempotent artifact).
+ */
+export const PR_RESOLVE_FOLLOWUP_EXHAUSTED_PREFIX = "pax-followup-exhausted";
+export const PR_RESOLVE_MAX_FOLLOWUP_ATTEMPTS = 3;
+export const PR_RESOLVE_MAX_FOLLOWUP_ATTEMPTS_FOR_TESTS = PR_RESOLVE_MAX_FOLLOWUP_ATTEMPTS;
+
+/**
+ * Read the follow-up attempt counter from a pr-resolve row's instructions (0 for the initial
+ * webhook-fired job / legacy rows / unparseable rows). Pure — exported for tests.
+ */
+export function attemptCountOfPrResolveRow(row: { instructions?: string | null }): number {
+  try {
+    const parsed = JSON.parse(String(row.instructions ?? "{}")) as { attempt?: unknown };
+    const n = Number(parsed.attempt);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * The highest follow-up attempt number carried across all prior pr-resolve rows for this PR (0 when
+ * none carried an attempt counter). Pure — the next follow-up's attempt number is `this + 1`, and
+ * the cap trips when `this + 1 > PR_RESOLVE_MAX_FOLLOWUP_ATTEMPTS`.
+ */
+export function highestPriorPaxFollowUpAttempt(
+  rows: ReadonlyArray<{ instructions?: string | null }>,
+): number {
+  let max = 0;
+  for (const r of rows) {
+    const n = attemptCountOfPrResolveRow(r);
+    if (n > max) max = n;
+  }
+  return max;
+}
+
+/**
+ * Pure predicate: does a prior pr-resolve row represent an exhausted-followup sentinel? Used by the
+ * general `countGenuinePrResolveAttempts` counter to exclude the marker (like the general
+ * exhausted-cap sentinel) and by `enqueuePaxFollowUp`'s idempotency check.
+ */
+export function isPaxFollowUpExhaustedSentinel(row: {
+  status: string;
+  error: string | null;
+}): boolean {
+  return (
+    row.status === "needs_attention" &&
+    (row.error ?? "").startsWith(PR_RESOLVE_FOLLOWUP_EXHAUSTED_PREFIX)
+  );
+}
 
 /**
  * Verify the `X-Hub-Signature-256` header GitHub sends on a webhook delivery. GitHub signs the raw
@@ -637,6 +701,177 @@ async function surfaceExhaustedPrResolve(
     }
   } catch (e) {
     console.error(`[pr-resolve] surfaceExhausted PR #${prNumber} failed:`, e instanceof Error ? e.message : e);
+  }
+}
+
+/**
+ * pax-never-reports-nothing-to-resolve-on-a-pr-state-it-could-not-read Phase 2 — self-requeue a
+ * pr-resolve pass whose previous run ended with the PR still open + conflicting. Bounded: on the
+ * `PR_RESOLVE_MAX_FOLLOWUP_ATTEMPTS + 1`th call for the same PR, DOES NOT enqueue; instead surfaces
+ * a real_blocker-classifiable needs_attention sentinel row so the founder sees a stuck PR instead
+ * of a silent one.
+ *
+ * Differences from `enqueuePrResolveJob`:
+ *   • BYPASSES the (a) SAME INPUT fingerprint refusal — a same-fingerprint follow-up is the WHOLE
+ *     POINT (the initial pass ended with the PR still open+conflicting; a second pass on the same
+ *     inputs is retried in case the initial run wedged on a transient — worker crash, worktree
+ *     add failure, a mid-pass GitHub blip).
+ *   • BYPASSES the general resolve-attempts cap — that cap counts resolver VERDICTS; the follow-up
+ *     counter is a separate bounded budget for end-of-pass self-requeues.
+ *   • STILL respects the ACTIVE_JOB_STATUSES dedup so a concurrent enqueue (self-requeue racing
+ *     with the standing dirty-PR backstop) doesn't fan out two live jobs on the same PR.
+ *
+ * The attempt counter rides on the job's `instructions.attempt` field alongside `resolve_fingerprint`
+ * — read back by `attemptCountOfPrResolveRow` on the next enqueue, incremented by 1.
+ */
+export async function enqueuePaxFollowUp(
+  admin: Admin,
+  input: {
+    workspaceId: string;
+    prNumber: number;
+    branch: string;
+    reason?: string;
+    headSha?: string | null;
+    baseSha?: string | null;
+  },
+): Promise<
+  | { enqueued: true; attempt: number }
+  | { enqueued: false; capped: true; attempt: number; reason: string }
+  | { enqueued: false; capped?: false; reason: string }
+> {
+  const slug = prSpecSlug(input.prNumber);
+  // Fan-out guard — never two live pr-resolve jobs on the same PR (mirrors enqueuePrResolveJob).
+  const { data: existing } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", input.workspaceId)
+    .eq("kind", "pr-resolve")
+    .eq("spec_slug", slug)
+    .in("status", ACTIVE_JOB_STATUSES)
+    .limit(1)
+    .maybeSingle();
+  if (existing) return { enqueued: false, reason: "active pr-resolve job already exists (dedup)" };
+
+  // Read prior rows for THIS PR to compute the next attempt counter + the cap check. Includes ALL
+  // prior rows regardless of status (the counter tracks lifetime end-of-pass self-requeues, not
+  // resolve verdicts). The exhausted sentinel is deliberately included so it never re-fires (the
+  // idempotency check below).
+  const { data: priorJobs } = await admin
+    .from("agent_jobs")
+    .select("status, error, instructions")
+    .eq("workspace_id", input.workspaceId)
+    .eq("kind", "pr-resolve")
+    .eq("spec_slug", slug);
+  const prior = (priorJobs ?? []) as Array<{ status: string; error: string | null; instructions?: string | null }>;
+
+  // Idempotent cap-park — once we've surfaced the real_blocker sentinel, do NOT keep re-surfacing.
+  if (prior.some((r) => isPaxFollowUpExhaustedSentinel(r))) {
+    return { enqueued: false, reason: "pax-followup already exhausted (sentinel present)" };
+  }
+
+  const nextAttempt = highestPriorPaxFollowUpAttempt(prior) + 1;
+  if (nextAttempt > PR_RESOLVE_MAX_FOLLOWUP_ATTEMPTS) {
+    await surfacePaxFollowUpExhausted(admin, input.workspaceId, input.prNumber, nextAttempt - 1, input.reason);
+    return {
+      enqueued: false,
+      capped: true,
+      attempt: nextAttempt - 1,
+      reason: `pax-followup cap reached (${nextAttempt - 1} attempts) — surfaced real_blocker`,
+    };
+  }
+
+  // Resolve fingerprint (best-effort — reused for traceability + so a later NON-followup enqueue's
+  // dedup can still identify same-input siblings).
+  let headSha = input.headSha ?? null;
+  let baseSha = input.baseSha ?? null;
+  if (!headSha || !baseSha) {
+    try {
+      const pr = await gh("GET", `/repos/${GH_REPO}/pulls/${input.prNumber}`);
+      if (pr.ok && pr.json && !Array.isArray(pr.json)) {
+        const j = pr.json as { head?: { sha?: string }; base?: { sha?: string } };
+        headSha = headSha ?? (j.head?.sha ?? null);
+        baseSha = baseSha ?? (j.base?.sha ?? null);
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+  const fingerprint = prResolveFingerprint(headSha, baseSha);
+
+  const { error } = await admin.from("agent_jobs").insert({
+    workspace_id: input.workspaceId,
+    spec_slug: slug,
+    spec_branch: input.branch,
+    kind: "pr-resolve",
+    status: "queued",
+    pr_number: input.prNumber,
+    instructions: JSON.stringify({
+      pr_number: input.prNumber,
+      branch: input.branch,
+      reason: input.reason || "pax follow-up: prior pass ended with PR still open + conflicting",
+      resolve_fingerprint: fingerprint,
+      // Counter carried on the row so the NEXT follow-up can read + increment it.
+      attempt: nextAttempt,
+    }),
+  });
+  if (error) return { enqueued: false, reason: error.message };
+  return { enqueued: true, attempt: nextAttempt };
+}
+
+/**
+ * Insert the pax-followup exhausted sentinel — one idempotent needs_attention row per PR carrying
+ * an error string the `stampNeedsAttentionClass` real_blocker heuristic ("needs a human merge")
+ * matches. Best-effort throughout; a failure here never blocks the caller's flow.
+ */
+async function surfacePaxFollowUpExhausted(
+  admin: Admin,
+  workspaceId: string,
+  prNumber: number,
+  attempts: number,
+  originReason: string | undefined,
+): Promise<void> {
+  const slug = prSpecSlug(prNumber);
+  try {
+    // Idempotent — one sentinel row per PR (the exhaustion signal, not a per-call notification).
+    const { data: alreadySurfaced } = await admin
+      .from("agent_jobs")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("kind", "pr-resolve")
+      .eq("spec_slug", slug)
+      .eq("status", "needs_attention")
+      .like("error", `${PR_RESOLVE_FOLLOWUP_EXHAUSTED_PREFIX}%`)
+      .limit(1)
+      .maybeSingle();
+    if (alreadySurfaced) return;
+
+    const prUrl = `https://github.com/${GH_REPO}/pull/${prNumber}`;
+    // The phrase "needs a human merge" is load-bearing — it trips the real_blocker classifier
+    // heuristic in needs-attention-classify.ts (REAL_BLOCKER_PATTERNS: /needs a human merge/i).
+    await admin.from("agent_jobs").insert({
+      workspace_id: workspaceId,
+      spec_slug: slug,
+      kind: "pr-resolve",
+      status: "needs_attention",
+      pr_number: prNumber,
+      error: `${PR_RESOLVE_FOLLOWUP_EXHAUSTED_PREFIX}: PR #${prNumber} needs a human merge after ${attempts} pax follow-up attempts`,
+      log_tail: `PR #${prNumber} was still open + CONFLICTING after ${attempts} pax follow-up attempts. Stopped the self-requeue loop and surfaced real_blocker — a human needs to resolve or close this PR.\nOriginal escalate reason: ${originReason || "(none)"}\n${prUrl}`,
+    });
+    try {
+      const { notifyOpsAlert } = await import("@/lib/notify-ops-alert");
+      await notifyOpsAlert(workspaceId, {
+        title: `Dirty-PR resolver: pax follow-up exhausted for PR #${prNumber}`,
+        severity: "warning",
+        lines: [
+          `The pr-resolve self-requeue loop hit its ${attempts}-attempt cap. PR still open + CONFLICTING; a human needs to look.`,
+          prUrl,
+        ],
+      });
+    } catch {
+      /* slack best-effort */
+    }
+  } catch (e) {
+    console.error(`[pr-resolve] surfacePaxFollowUpExhausted PR #${prNumber} failed:`, e instanceof Error ? e.message : e);
   }
 }
 

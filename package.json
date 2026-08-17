@@ -93,6 +93,7 @@
     "test:reap-needs-attention-archived": "tsx --test src/lib/agent-jobs.reap-needs-attention-archived.test.ts",
     "test:pr-resolve-retry-cap-counts-parked": "tsx --test src/lib/github-pr-resolve.retry-cap-counts-parked.test.ts",
     "test:pr-resolve-unreadable-state-retry": "tsx --test src/lib/github-pr-resolve.unreadable-state-retry.test.ts",
+    "test:pr-resolve-pax-followup-attempt-counter": "tsx --test src/lib/github-pr-resolve.pax-followup-attempt-counter.test.ts",
     "test:fold-closes-orphan-pr": "tsx --test src/lib/agent-jobs.fold-closes-orphan-pr.test.ts",
     "test:stuck-build-terminal-spec": "tsx --test src/lib/agents/platform-director.stuck-build-terminal-spec.test.ts",
     "test:mario-terminal-spec-guard": "tsx --test src/lib/mario.terminal-spec-enqueue-guard.test.ts",

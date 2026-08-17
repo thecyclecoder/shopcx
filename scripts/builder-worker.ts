@@ -19716,6 +19716,23 @@ async function runPrResolveJob(job: Job) {
     return;
   }
 
+  // pax-never-reports-nothing-to-resolve-on-a-pr-state-it-could-not-read (Phase 2) — end-of-pass
+  // self-requeue hook. Pax is enqueued by the webhook on the transition INTO conflicting; once that
+  // event has fired, no further event brings it back. If a pass ends without landing a resolution
+  // and the PR is still open + conflicting, THIS PASS re-queues itself under a bounded attempt
+  // counter (via enqueuePaxFollowUp). Cap → real_blocker sentinel row → founder sees a stuck PR
+  // instead of a silent one.
+  //
+  // The flag is set at:
+  //   • worktree-add failed (infra failure that never even reached the resolver)
+  //   • escalate() → surface-to-owner (no spec identified for this branch — the current job parks
+  //     needs_attention, but without a rebuild-on-main to close the PR, it stays conflicting).
+  // Deliberate human-needed parks (provenance failure, origin mismatch, advisory-supersede, the
+  // Phase 1 unreadable-cap path) do NOT set this flag — those are already the resolver's "human,
+  // decide" verdicts, so a self-requeue would just re-park.
+  let paxFollowUpNeeded = false;
+  let paxFollowUpReason = "";
+  try {
   // Re-check PR state (idempotent / de-duped): only act on an OPEN, not-already-MERGEABLE PR. mergeable
   // can be null (GitHub still computing) → re-check briefly; if still unknown, attempt anyway (the
   // webhook flagged it CONFLICTING). already mergeable / merged / closed → no-op completed.
@@ -19876,6 +19893,12 @@ async function runPrResolveJob(job: Job) {
   const add = sh("git", ["worktree", "add", "-B", branch, wt, `origin/${branch}`]);
   if (add.code !== 0) {
     await update(job.id, { status: "failed", error: "worktree add failed", log_tail: add.err.slice(-2000) });
+    // Phase 2: infra failure — the resolver never ran, PR is still conflicting. Self-requeue so
+    // the next pass gets a clean worktree slot (the general retry cap excludes worktree-add
+    // failures via PR_RESOLVE_INFRA_FAILURE_RE, but the standing dirty-PR backstop would still
+    // fingerprint-refuse a same-input re-enqueue → the follow-up bypasses that dedup).
+    paxFollowUpNeeded = true;
+    paxFollowUpReason = `worktree add failed: ${add.err.slice(-200)}`;
     return;
   }
   sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
@@ -20026,6 +20049,11 @@ async function runPrResolveJob(job: Job) {
         await surfacePrToOwner(wsId, prNumber, prUrl, why);
         await update(job.id, { status: "needs_attention", pr_url: prUrl, pr_number: prNumber, error: `needs a human merge: ${why}`, log_tail: `${why}\n\n${raw.slice(-1500)}` });
         console.log(`${tag} surfaced PR #${prNumber} to owner: ${why}`);
+        // Phase 2: PR is still open + conflicting and nothing rebuilt the build (no spec identified).
+        // Enqueue ONE bounded follow-up so the next pass gets another crack rather than ending the
+        // story on one failed pass. Cap → real_blocker sentinel (see enqueuePaxFollowUp).
+        paxFollowUpNeeded = true;
+        paxFollowUpReason = `escalate-surface (no build spec identified for ${branch}): ${why}`;
       }
     };
 
@@ -20071,6 +20099,35 @@ async function runPrResolveJob(job: Job) {
     console.log(`${tag} ✓ resolved PR #${prNumber}, pushed ${branch} → green`);
   } finally {
     sh("git", ["worktree", "remove", "--force", wt]);
+  }
+  } finally {
+    // pax-never-reports-nothing-to-resolve-on-a-pr-state-it-could-not-read (Phase 2) — outer
+    // finally: if this pass ended with the PR still open + conflicting (worktree add fell over
+    // BEFORE the resolver ran, or escalate() surfaced with no rebuild-on-main to close the PR),
+    // enqueue ONE follow-up pr-resolve job carrying an attempt counter. Bounded — on the
+    // MAX_FOLLOWUP+1th call, the helper does NOT enqueue and instead surfaces a real_blocker
+    // sentinel row so a human sees "pax-followup exhausted: needs a human merge". Best-effort:
+    // a throw here never derails the outer job's already-written outcome.
+    if (paxFollowUpNeeded) {
+      try {
+        const { enqueuePaxFollowUp } = await import("../src/lib/github-pr-resolve");
+        const followUp = await enqueuePaxFollowUp(db, {
+          workspaceId: wsId,
+          prNumber,
+          branch,
+          reason: paxFollowUpReason,
+        });
+        if (followUp.enqueued) {
+          console.log(`${tag} pax follow-up attempt ${followUp.attempt} enqueued for PR #${prNumber}`);
+        } else if (followUp.capped) {
+          console.log(`${tag} pax follow-up exhausted (${followUp.attempt} attempts) for PR #${prNumber} — surfaced real_blocker`);
+        } else if (followUp.reason) {
+          console.log(`${tag} pax follow-up NOT enqueued for PR #${prNumber}: ${followUp.reason}`);
+        }
+      } catch (e) {
+        console.error(`${tag} pax follow-up hook failed for PR #${prNumber}:`, e instanceof Error ? e.message : e);
+      }
+    }
   }
 }
 
