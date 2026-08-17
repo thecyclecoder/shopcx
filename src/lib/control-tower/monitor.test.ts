@@ -299,6 +299,82 @@ test("evalAgentKind keeps building/claimed stuck reds even when the worker is un
   }
 });
 
+test("evalAgentKind renders amber/off for a switched-off queued lane before stuck_jobs aging (blocked_off precedes stuck)", () => {
+  // control-tower-agent-kind-switch-off-precedes-stuck-jobs Phase 1 — the originating false-page:
+  // the ad-creative kill switch is on, the worker refuses to claim, writeSuppressedClaimHeartbeats
+  // has stamped `{blocked_off:true, offBy:'ad-creative', scope:'agent'}` as the latest beat, and a
+  // queued ad-creative job sits in the queue past the 60-min threshold. Before this fix `stuck_jobs`
+  // was evaluated first, so the CEO's explicit switch-off read as a red incident. The fix reorders
+  // so the authoritative control-plane state is honored: amber/off, no violation.
+  const adCreativeLoop: MonitoredLoop = {
+    id: "agent:ad-creative",
+    kind: "agent-kind",
+    owner: "growth",
+    label: "Ad-creative agent",
+    description: "ad-creative agent kind",
+    expectedCadence: "on demand",
+    agentKind: "ad-creative",
+    stuckThresholdMs: 60 * 60_000,
+  };
+  const enqueuedAt = "2026-08-16T09:00:00Z"; // 3h before now — well past the 60-min threshold.
+  const queued: ActiveJob[] = [
+    { id: "eeeeeeee-0000-0000-0000-000000000000", kind: "ad-creative", status: "queued", created_at: enqueuedAt, claimed_at: null, updated_at: enqueuedAt },
+  ];
+  const blockedOffBeat: LoopHistoryRow = {
+    ran_at: "2026-08-16T11:59:00Z",
+    ok: true,
+    produced: { blocked_off: true, offBy: "ad-creative", scope: "agent" },
+    detail: null,
+    duration_ms: null,
+  };
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-08-16T12:00:00Z");
+  try {
+    // Healthy worker so the worker-outage guard is off — the ONLY thing keeping this lane out of
+    // red is the reordered blocked_off precedence. workerStartedAt older than enqueuedAt so the
+    // stuck clamp wouldn't lift the floor either.
+    const result = evalAgentKind(adCreativeLoop, blockedOffBeat, queued, "2026-08-16T08:00:00Z", false);
+    assert.equal(result.color, "amber");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /off by ad-creative \(agent\)/);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalAgentKind still flags a genuinely-stuck queued lane once the switch is lifted (no free pass)", () => {
+  // The mirror-image regression guard: if the latest beat is NOT a blocked_off beat (e.g. the
+  // switch was removed and a normal completion beat overwrote it), the queued row past the
+  // threshold must STILL trip stuck_jobs on the very next tick. The reorder must not become a
+  // silent free-pass for lanes that were once switched off.
+  const adCreativeLoop: MonitoredLoop = {
+    id: "agent:ad-creative",
+    kind: "agent-kind",
+    owner: "growth",
+    label: "Ad-creative agent",
+    description: "ad-creative agent kind",
+    expectedCadence: "on demand",
+    agentKind: "ad-creative",
+    stuckThresholdMs: 60 * 60_000,
+  };
+  const enqueuedAt = "2026-08-16T09:00:00Z";
+  const queued: ActiveJob[] = [
+    { id: "ffffffff-0000-0000-0000-000000000000", kind: "ad-creative", status: "queued", created_at: enqueuedAt, claimed_at: null, updated_at: enqueuedAt },
+  ];
+  // Latest beat is a normal completion (no blocked_off), so the switched-off precedence does NOT
+  // apply and the stuck-job path must run.
+  const normalBeat: LoopHistoryRow = { ran_at: "2026-08-16T11:59:00Z", ok: true, produced: { ok: true }, detail: null, duration_ms: null };
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-08-16T12:00:00Z");
+  try {
+    const result = evalAgentKind(adCreativeLoop, normalBeat, queued, "2026-08-16T08:00:00Z", false);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "stuck_jobs");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test("evalAgentKind still flags queued stuck jobs when the worker is healthy (regression guard)", () => {
   // The existing behavior — the guard must ONLY suppress when the worker really is unavailable.
   // A healthy worker + a queued row past its threshold is a genuinely-wedged lane and must still
