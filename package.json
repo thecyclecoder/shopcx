@@ -49,6 +49,7 @@
     "predeploy": "npm run predeploy:static && npm run check:policy-contradictions",
     "test:all": "tsx scripts/_run-registered-tests.ts",
     "test:built-not-stamped": "tsx --test src/lib/pipeline-doctor.built-not-stamped.test.ts",
+    "test:chain-advance-skip": "tsx --test src/lib/agent-jobs.chain-advance-skip.test.ts",
     "test:vercel-drain-redact": "tsx --test src/lib/vercel-drain-redact.test.ts",
     "test:completed-effect-backing": "tsx --test src/lib/completed-effect-backing.test.ts",
     "test:subscription-items-merge": "tsx --test src/lib/subscription-items.merge.test.ts",
