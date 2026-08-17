@@ -1,0 +1,1 @@
+- **Max's critique reaches Dahlia, and the box card shows one face at a time** · verified 2026-08-17 · → [[lifecycles/ad-creative]]
