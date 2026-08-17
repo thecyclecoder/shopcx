@@ -1546,18 +1546,100 @@ async function runGitCmd(
   });
 }
 
+/**
+ * `resolveBranchRefForVerification` — resolve a bare branch name to the SAME commit the pull request is
+ * actually made of. The accumulation gate greps a branch to prove a phase's code landed; before this
+ * helper it greped whatever local ref shared the branch name, which on the box (worktrees, sequential
+ * builds) could be a stale-by-dozens-of-commits or fully-diverged copy of the pushed branch — greenlighting
+ * work the PR does not carry, or blocking work that is fine.
+ *
+ * Contract:
+ *   1. Reject a spec-authored branch string as an untrusted capability boundary — leading `-`, whitespace,
+ *      NUL, or empty are refused up front (same guard applied by [[spec-check-runner]] `buildGrepArgv`).
+ *   2. Targeted refresh of ONE ref via `git fetch --no-tags origin +refs/heads/<b>:refs/remotes/origin/<b>`
+ *      — do NOT fetch the world (accumulation runs per phase, per pass). The `+` allows a rewound remote
+ *      to update the local remote-tracking ref.
+ *   3. Verify `origin/<branch>` resolves via `git rev-parse --verify --quiet` before returning it — a
+ *      "successful" fetch that produced no ref still fails resolution rather than feeding a phantom ref
+ *      into git grep.
+ *   4. Apply the unsafe-ref rejection to the resolved ref too (defence in depth — a branch that squeaks
+ *      past input validation cannot smuggle an option through the `origin/` prefix either).
+ *
+ * `runGitCmd` is injectable for tests so the resolver can be exercised without spawning git; the default
+ * uses the module-level `runGitCmd` (which spawns `git`).
+ */
+export interface ResolveBranchRefDeps {
+  runGitCmd: (
+    args: string[],
+  ) => Promise<{ code: number | null; stdout: string; stderr: string; error?: string }>;
+}
+
+export type ResolvedBranchRef =
+  | { ok: true; ref: string }
+  | { ok: false; error: string };
+
+export async function resolveBranchRefForVerification(
+  branch: string,
+  deps: ResolveBranchRefDeps = { runGitCmd },
+): Promise<ResolvedBranchRef> {
+  const inTrim = branch.trim();
+  if (!inTrim || inTrim.startsWith("-") || inTrim.includes("\0") || /\s/.test(inTrim)) {
+    return { ok: false, error: `refused unsafe branch '${branch}'` };
+  }
+  const fetchRes = await deps.runGitCmd([
+    "fetch",
+    "--no-tags",
+    "--quiet",
+    "origin",
+    `+refs/heads/${inTrim}:refs/remotes/origin/${inTrim}`,
+  ]);
+  if (fetchRes.error) {
+    return { ok: false, error: `git fetch origin ${inTrim} failed to spawn: ${fetchRes.error}` };
+  }
+  if (fetchRes.code !== 0) {
+    return {
+      ok: false,
+      error: `git fetch origin ${inTrim}: ${(fetchRes.stderr || fetchRes.stdout || `exit ${fetchRes.code}`).slice(0, 4000).trim()}`,
+    };
+  }
+  const ref = `origin/${inTrim}`;
+  if (ref.startsWith("-") || ref.includes("\0") || /\s/.test(ref)) {
+    return { ok: false, error: `refused unsafe resolved ref '${ref}'` };
+  }
+  const rev = await deps.runGitCmd(["rev-parse", "--verify", "--quiet", ref]);
+  if (rev.error) {
+    return { ok: false, error: `git rev-parse ${ref} failed to spawn: ${rev.error}` };
+  }
+  if (rev.code !== 0) {
+    return {
+      ok: false,
+      error: `git rev-parse ${ref}: ${(rev.stderr || rev.stdout || `exit ${rev.code}`).slice(0, 4000).trim()}`,
+    };
+  }
+  return { ok: true, ref };
+}
+
 async function defaultRunGitGrepOnBranch(
   branchRef: string,
   params: GrepCheckParams,
 ): Promise<{ ok: boolean; evidence: string }> {
+  // Resolve to the remote-tracking ref (`origin/<branch>`) FIRST so the gate greps the commit the pull
+  // request is actually made of — not a stale/diverged local copy the box happens to carry. A bare local
+  // branch is NEVER a silent fallback (Phase 1, rule #3): if resolution fails we return ok:false naming
+  // the ref as `unresolvable` and carrying the git error verbatim, rather than grep the local ref.
+  // Phase 2 elevates the `unresolvable` case to its own distinct outcome kind on the result so callers
+  // can render an infrastructure fault distinctly from a phantom code gap; here in Phase 1 the wording
+  // already names the class so an operator reading the reason sees the class, not a missing pattern.
+  const resolved = await resolveBranchRefForVerification(branchRef);
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      evidence: `unresolvable remote-tracking ref for '${branchRef}': ${resolved.error}`,
+    };
+  }
+  const ref = resolved.ref;
   // git grep against a tree-ish, path passed after `--` — matches the [[spec-check-runner]] grep hardening
   // (pattern via `-e` so a `-`-leading pattern isn't reparsed as an option; path after `--`).
-  // Reject an obviously-unsafe branch ref up front — a spec-authored branchRef is treated as an untrusted
-  // capability boundary just like grep.path.
-  const refTrim = branchRef.trim();
-  if (!refTrim || refTrim.startsWith("-") || refTrim.includes("\0") || /\s/.test(refTrim)) {
-    return { ok: false, evidence: `refused unsafe branchRef '${branchRef}'` };
-  }
   // smart-case: `git grep` has no `--smart-case` flag, so emulate it by adding `-i` when the shared
   // [[spec-phase-checks-table]] `shouldGrepCaseInsensitively` predicate says so. The predicate is
   // the sole source of truth — both this lane and the deterministic runner's ripgrep lane
@@ -1566,7 +1648,7 @@ async function defaultRunGitGrepOnBranch(
   const smart = shouldGrepCaseInsensitively(params.pattern);
   const args: string[] = ["grep", "-l", "-E"];
   if (smart) args.push("-i");
-  args.push("-e", params.pattern, refTrim);
+  args.push("-e", params.pattern, ref);
   if (params.path) {
     args.push("--", params.path);
   }
@@ -1584,7 +1666,7 @@ async function defaultRunGitGrepOnBranch(
   const smartCase = smart ? " [smart-case: -i]" : "";
   return {
     ok,
-    evidence: `git grep '${params.pattern}' on ${refTrim}${params.path ? " -- " + params.path : ""}${smartCase} — ${found ? "match(es) found" : "no match"} (expect=${params.expect})`,
+    evidence: `git grep '${params.pattern}' on ${ref}${params.path ? " -- " + params.path : ""}${smartCase} — ${found ? "match(es) found" : "no match"} (expect=${params.expect})`,
   };
 }
 
