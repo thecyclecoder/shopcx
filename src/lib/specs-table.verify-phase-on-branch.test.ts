@@ -110,3 +110,77 @@ test("verifier rejects context with missing workspace/slug/branchRef (fail close
   const c = await verifyPhaseAccumulatedOnBranch(WS, SLUG, 1, "", deps);
   assert.equal(c.accumulated, false);
 });
+
+// ── Phase 2: an unresolvable ref is its own outcome, not a failed check ──────────────────────────
+//
+// Pins the correct state per the spec's Phase-2 Verification bullet:
+//   "an unresolvable branch ref is reported as its own outcome"
+//
+// The gate must FAIL CLOSED (never green-light without reading the artifact), and the reason
+// surfaced by the verifier must clearly name the class as an infrastructure fault — never as a
+// phantom "code missing" — so an operator sees the right thing to fix.
+
+test("unresolvable ref is reported distinctly from a no-match — reason names 'unresolvable', carries the git error verbatim, fails closed", async () => {
+  const phase: PhaseFlagsForVerify = { id: "phase-1", status: "in_progress", build_sha: null };
+  const grep: GrepCheckParams = { pattern: "someSymbol", expect: "present" };
+  const deps = makeDeps({
+    loadPhaseFlags: async () => phase,
+    loadPhaseGrepChecks: async () => [{ description: "someSymbol exists", params: grep }],
+    // Simulate the resolver failing — the fetch (or rev-parse) of `origin/<branch>` came back
+    // with a git error. The runGitGrepOnBranch shim tags the result with the distinct outcome.
+    runGitGrepOnBranch: async () => ({
+      ok: false,
+      outcome: "unresolvable",
+      evidence: "unresolvable remote-tracking ref for 'claude/build-some-spec': git fetch origin claude/build-some-spec: fatal: couldn't find remote ref",
+      gitError: "fatal: couldn't find remote ref refs/heads/claude/build-some-spec",
+    }),
+  });
+  const verdict = await verifyPhaseAccumulatedOnBranch(WS, SLUG, 1, BRANCH, deps);
+  assert.equal(verdict.accumulated, false, "unresolvable ref MUST fail closed — never green-light a check we could not read");
+  // The reason must clearly frame this as infrastructure, not a phantom code gap.
+  assert.match(verdict.reason, /unresolvable/i);
+  // The git error itself is carried through so an operator can act on it.
+  assert.match(verdict.reason, /couldn't find remote ref/);
+  // And crucially — it must NOT read as "the code is missing" like a no-match would.
+  assert.doesNotMatch(verdict.reason, /no match/i);
+});
+
+test("grep-error (git command failed, not a no-match) is reported distinctly from a no-match — infrastructure, not a code gap", async () => {
+  const phase: PhaseFlagsForVerify = { id: "phase-1", status: "in_progress", build_sha: null };
+  const grep: GrepCheckParams = { pattern: "someSymbol", expect: "present" };
+  const deps = makeDeps({
+    loadPhaseFlags: async () => phase,
+    loadPhaseGrepChecks: async () => [{ description: "someSymbol exists", params: grep }],
+    // Simulate git grep itself failing (exit != 0/1 — bad regex, corrupt index, etc.).
+    runGitGrepOnBranch: async () => ({
+      ok: false,
+      outcome: "grep-error",
+      ref: "origin/claude/build-some-spec",
+      evidence: "git grep failed on origin/claude/build-some-spec: fatal: bad revision",
+      gitError: "fatal: bad revision",
+    }),
+  });
+  const verdict = await verifyPhaseAccumulatedOnBranch(WS, SLUG, 1, BRANCH, deps);
+  assert.equal(verdict.accumulated, false);
+  // Reason must frame this as an infrastructure fault, not "code missing".
+  assert.match(verdict.reason, /git error/i);
+  assert.match(verdict.reason, /bad revision/);
+  assert.doesNotMatch(verdict.reason, /no match/i);
+});
+
+test("a legacy shim (no `outcome` field on the result) still lands as a plain failed check — backwards compatible", async () => {
+  const phase: PhaseFlagsForVerify = { id: "phase-1", status: "in_progress", build_sha: null };
+  const grep: GrepCheckParams = { pattern: "someSymbol", expect: "present" };
+  const deps = makeDeps({
+    loadPhaseFlags: async () => phase,
+    loadPhaseGrepChecks: async () => [{ description: "someSymbol exists", params: grep }],
+    // A shim that only speaks the old `{ ok, evidence }` shape — the verifier must still fail closed
+    // and surface the evidence, without pretending it was unresolvable.
+    runGitGrepOnBranch: async () => ({ ok: false, evidence: "git grep 'someSymbol' — no match (expect=present)" }),
+  });
+  const verdict = await verifyPhaseAccumulatedOnBranch(WS, SLUG, 1, BRANCH, deps);
+  assert.equal(verdict.accumulated, false);
+  assert.match(verdict.reason, /no match/);
+  assert.doesNotMatch(verdict.reason, /unresolvable/i);
+  assert.doesNotMatch(verdict.reason, /git error/i);
+});

@@ -1469,6 +1469,38 @@ export interface PhaseFlagsForVerify {
   build_sha: string | null;
 }
 
+/**
+ * Result of a single grep-on-branch check.
+ *
+ * `outcome` is the Phase-2 discriminator that distinguishes a genuine no-match (the code the check
+ * asserts really is missing on the branch) from an infrastructure fault (the ref could not be read,
+ * or git itself failed) — the class the pre-Phase-2 gate collapsed into a single `ok:false` and then
+ * rendered as 'phase N check "..." failed on <branch>: fatal: unable to resolve revision: <branch>',
+ * which reads as verified-and-missing when in truth we could not read the artifact at all.
+ *
+ *   - 'match'        — pattern found (or absent, when expect='absent') → `ok:true`
+ *   - 'no-match'     — the pattern's expected state did NOT hold on the branch → `ok:false`, plain code gap
+ *   - 'grep-error'   — git ran but exited with a non-0/1 code, OR spawning git failed → `ok:false`, infra fault
+ *   - 'unresolvable' — the remote-tracking ref could not be resolved (fetch or rev-parse failed, or the
+ *                      branch string was unsafe) → `ok:false`, infra fault. Distinct from grep-error so
+ *                      operators can tell "we could not read the branch" apart from "git itself blew up".
+ *
+ * `ref` is the resolved ref that was actually grepped (the remote-tracking form `origin/<branch>`) when
+ * resolution succeeded; unset when it did not. `gitError` carries the git error verbatim for the infra
+ * outcomes (unresolvable / grep-error) so downstream reasons can quote it. All three fields are OPTIONAL
+ * so existing injected test doubles that return the pre-Phase-2 `{ ok, evidence }` shape still typecheck
+ * — the verifier treats an omitted `outcome` as a plain failed check (the pre-Phase-2 behaviour).
+ */
+export type GrepOnBranchOutcome = "match" | "no-match" | "grep-error" | "unresolvable";
+
+export interface GrepOnBranchResult {
+  ok: boolean;
+  evidence: string;
+  outcome?: GrepOnBranchOutcome;
+  ref?: string;
+  gitError?: string;
+}
+
 export interface VerifyPhaseDeps {
   loadPhaseFlags: (
     workspaceId: string,
@@ -1481,7 +1513,7 @@ export interface VerifyPhaseDeps {
   runGitGrepOnBranch: (
     branchRef: string,
     params: GrepCheckParams,
-  ) => Promise<{ ok: boolean; evidence: string }>;
+  ) => Promise<GrepOnBranchResult>;
 }
 
 async function defaultLoadPhaseFlags(
@@ -1622,19 +1654,22 @@ export async function resolveBranchRefForVerification(
 async function defaultRunGitGrepOnBranch(
   branchRef: string,
   params: GrepCheckParams,
-): Promise<{ ok: boolean; evidence: string }> {
+): Promise<GrepOnBranchResult> {
   // Resolve to the remote-tracking ref (`origin/<branch>`) FIRST so the gate greps the commit the pull
   // request is actually made of — not a stale/diverged local copy the box happens to carry. A bare local
-  // branch is NEVER a silent fallback (Phase 1, rule #3): if resolution fails we return ok:false naming
-  // the ref as `unresolvable` and carrying the git error verbatim, rather than grep the local ref.
-  // Phase 2 elevates the `unresolvable` case to its own distinct outcome kind on the result so callers
-  // can render an infrastructure fault distinctly from a phantom code gap; here in Phase 1 the wording
-  // already names the class so an operator reading the reason sees the class, not a missing pattern.
+  // branch is NEVER a silent fallback (Phase 1, rule #3): if resolution fails we return outcome
+  // 'unresolvable' carrying the git error verbatim, rather than grep the local ref. Phase 2 tags the
+  // 'unresolvable' case with its own outcome kind on the result so the verifier can render an
+  // infrastructure fault distinctly from a phantom code gap (the pre-Phase-2 gate rendered both as
+  // 'phase N check "..." failed on <branch>: fatal: unable to resolve revision', which reads as
+  // verified-and-missing when in truth the artifact could not be read at all).
   const resolved = await resolveBranchRefForVerification(branchRef);
   if (!resolved.ok) {
     return {
       ok: false,
+      outcome: "unresolvable",
       evidence: `unresolvable remote-tracking ref for '${branchRef}': ${resolved.error}`,
+      gitError: resolved.error,
     };
   }
   const ref = resolved.ref;
@@ -1653,12 +1688,20 @@ async function defaultRunGitGrepOnBranch(
     args.push("--", params.path);
   }
   const r = await runGitCmd(args);
-  if (r.error) return { ok: false, evidence: `spawn git: ${r.error}` };
+  if (r.error) {
+    // Spawning git itself failed — infrastructure fault, NOT a code gap. Tag as grep-error so the
+    // verifier renders it as such.
+    return { ok: false, outcome: "grep-error", ref, evidence: `spawn git: ${r.error}`, gitError: r.error };
+  }
   // git grep exits 0 on match, 1 on no match. Anything else = git error (unknown ref, bad regex, etc.).
   if (r.code !== 0 && r.code !== 1) {
+    const stderr = (r.stderr || r.stdout || `git grep exit ${r.code}`).slice(0, 4000).trim();
     return {
       ok: false,
-      evidence: (r.stderr || r.stdout || `git grep exit ${r.code}`).slice(0, 4000),
+      outcome: "grep-error",
+      ref,
+      evidence: `git grep failed on ${ref}: ${stderr}`,
+      gitError: stderr,
     };
   }
   const found = r.code === 0;
@@ -1666,6 +1709,8 @@ async function defaultRunGitGrepOnBranch(
   const smartCase = smart ? " [smart-case: -i]" : "";
   return {
     ok,
+    outcome: ok ? "match" : "no-match",
+    ref,
     evidence: `git grep '${params.pattern}' on ${ref}${params.path ? " -- " + params.path : ""}${smartCase} — ${found ? "match(es) found" : "no match"} (expect=${params.expect})`,
   };
 }
@@ -1708,9 +1753,30 @@ export async function verifyPhaseAccumulatedOnBranch(
     for (const check of checks) {
       const r = await deps.runGitGrepOnBranch(branchRef, check.params);
       if (!r.ok) {
+        // Phase 2: propagate the outcome-class distinction into the reason so 'not verified because
+        // the branch could not be read' never reads as 'not verified because the work is missing'.
+        // The gate FAILS CLOSED in every case (accumulated:false) — an unread artifact must never
+        // green-light; but the reason names the class so the operator sees an infrastructure fault
+        // rather than chasing a phantom code gap. `r.ref` (the resolved ref) is preferred over the
+        // bare `branchRef` when available so the reason names the commit actually grepped.
+        const wherRef = r.ref ?? branchRef;
+        if (r.outcome === "unresolvable") {
+          return {
+            accumulated: false,
+            reason: `phase ${phasePosition} check "${check.description}" — BRANCH UNRESOLVABLE for '${branchRef}' (infrastructure fault, NOT a code gap): ${r.gitError ?? r.evidence}`,
+          };
+        }
+        if (r.outcome === "grep-error") {
+          return {
+            accumulated: false,
+            reason: `phase ${phasePosition} check "${check.description}" — GIT ERROR on ${wherRef} (infrastructure fault, NOT a code gap): ${r.gitError ?? r.evidence}`,
+          };
+        }
+        // 'no-match' (the pre-Phase-2 default, and the shape a legacy shim that omits `outcome`
+        // still lands in) — a genuine code gap.
         return {
           accumulated: false,
-          reason: `phase ${phasePosition} check "${check.description}" failed on ${branchRef}: ${r.evidence}`,
+          reason: `phase ${phasePosition} check "${check.description}" failed on ${wherRef}: ${r.evidence}`,
         };
       }
     }
