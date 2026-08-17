@@ -1,0 +1,1 @@
+- **Phase accumulation verifies the pushed branch, not the box's local copy** · verified 2026-08-17 · → [[../libraries/specs-table]]
