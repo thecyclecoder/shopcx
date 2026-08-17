@@ -14,20 +14,19 @@ The agent **never** marks a spec verified/archived and **never** runs a mutating
 `agent_verdict` (a bounded "the automatable checks pass" proxy, the supervisable-autonomy north star in
 [[../operational-rules]]) that the owner then confirms.
 
-## Deterministic pre-pass — [[spec-check-runner]] runs first
+## Deterministic pre-pass — [[spec-check-runner]] IS the spec-test verdict
 
-[[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] Phase 3 wired a deterministic Node runner ahead of Vera on the post-ship path. `runSpecTestJob` (`scripts/builder-worker.ts`) now:
+[[../specs/machine-declared-verification-and-deterministic-spec-test-runner]] Phase 3 wired a deterministic Node runner ahead of Vera, and **graduate-vera (2026-07-17) retired Vera entirely** (see [[spec-check-runner]] § graduate-vera). `runSpecTestJob` (`scripts/builder-worker.ts`) now:
 
 1. Calls [[spec-check-runner]] `runSpecChecks(workspaceId, slug)` in-process — the runner executes every machine-declared `spec_phase_checks` row per its [[spec-phase-checks-executable]] `exec_kind` (tsc · grep · ci_status · http_get · db_probe_readonly · unit_test · build). Non-destructive by construction.
 2. Calls `classifyDeterministicRun(results)` — a pure classifier that returns `{ allResolved, residualCount, residualTexts, checks, summary, agentVerdict }`.
-3. If `allResolved === true` AND this is NOT a fused pre-merge job, writes `spec_test_runs` straight from the runner's verdicts (no `claude_session_id`), runs the same timecard / green-writeback / auto-fold / regression detector downstream, and RETURNS — no Max session. A spec whose verification is fully machine-declared verifies with ZERO Max cost.
-4. If any needs_human residual remains, spawns the Max session as today with a residual-scope hint in the prompt, then `mergeDeterministicWithLlmChecks(runner, llm)` fuses the two — the runner's pass/fail is AUTHORITATIVE (byte-identical + evidence-backed), the LLM only fills the residual.
+3. Writes `spec_test_runs` straight from the runner's verdicts (`claude_session_id` is always null — there is no Vera Max session to attach one), runs the same timecard / green-writeback / auto-fold / regression detector downstream. A `needs_human` residual the runner can't execute stays surfaced (never AI-judged). Post-ship AND pre-merge follow this same path.
 
-The FUSED PRE-MERGE path (isPreMerge && branch) stays unchanged — Vault's security envelope is judgment, not mechanical, and the same Max session emits both verdicts today. The runner still runs (its heartbeat still beats — see [[../operational-rules]] § Control Tower), but Max is spawned regardless.
+Security is Vault's own solo session now — `runSpecTestJob` enqueues a standalone branch-mode `security-review` on completion (see [[security-agent]] § branch); the fused spec-test+security session is gone.
 
 ## Monitored, not graded — the runner is Control Tower infra
 
-A `spec-test` row whose `claude_session_id IS NULL` (the deterministic-only path) is filtered out of the [[agent-grader]] pool ([[agent-grader]] `ungradedConcludedJobs`) — there is no LLM output to score against Vera's rubric. Liveness of the runner is asserted through the Control Tower loop `deterministic-spec-check-runner` (`DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID`), which beats once per spec-test job that invokes it (ok:true when the runner returned verdicts, ok:false when it threw and Vera's LLM lane had to take over). This is the "monitored, not graded" carve-out the spec § Phase 3 mandates.
+A `spec-test` row's `claude_session_id` is always NULL (deterministic-only — Vera is retired) and is filtered out of the [[agent-grader]] pool ([[agent-grader]] `ungradedConcludedJobs`) — there is no LLM output to score. Liveness of the runner is asserted through the Control Tower loop `deterministic-spec-check-runner` (`DETERMINISTIC_SPEC_CHECK_RUNNER_LOOP_ID`), which beats once per spec-test job that invokes it (ok:true when the runner returned verdicts, ok:false when it threw — a threw run is re-tried, no LLM fallback exists). This is the "monitored, not graded" carve-out the spec § Phase 3 mandates.
 
 ## Types
 
@@ -119,17 +118,13 @@ The spec-test agent runs in TWO modes off the SAME runner + JSON contract:
   The runner's contract is otherwise unchanged: one JSON verdict, no mutating checks. Dedupe key is per-branch (workspace, slug,
   branch) so a pre-merge run on branch A doesn't block one on branch B; the post-ship `(workspace, slug)` chokepoint is strictly
   broader so the two lanes never collide.
-  **Fused pre-merge security review ([[../specs/consolidate-premerge-checks-one-session]] Phase 1).** The pre-merge session ALSO
-  emits a SECURITY REVIEW off the same branch diff it already loaded — a two-verdict JSON envelope
-  (`{...spec_test, security: {...}}`). The worker writes the spec-test verdict to `spec_test_runs` FIRST (partial-safety — a session
-  that dies after the spec-test half still records it), then INSERTS a synthetic `security-review` `agent_jobs` row for the branch
-  (mode='branch', status='claimed' so the standalone poll never picks it) and applies the security verdict via the shared
-  `applySecurityVerdictToJob` sink — SAME appliers the standalone lane uses (`director_activity` + [[security-agent]] fix-spec author
-  + [[approval-router]] fix-routing). The standalone `security-review` branch-mode enqueue ([[agent-jobs]]
-  `maybeEnqueuePreMergeSecurityOnAccumulation`) is now inert (its work moved into this fused session); the standalone lane still
-  runs for post-merge `diff` mode + on-demand use, and it's the safety-net fallback the fused session invokes when its own security
-  envelope is missing/malformed. The M4 promote gate's dual green signal (`isSpecTestGreenForBranch` ∧ `isSecurityGreenForBranch`)
-  reads the same rows — the synthetic security-review row satisfies the security signal.
+  **Pre-merge security review — a standalone solo Vault session (post-graduate-vera).** The fused pre-merge spec-test+security session
+  (once described here as `[[../specs/consolidate-premerge-checks-one-session]] Phase 1`) was retired 2026-07-17 — see
+  [[spec-check-runner]] § graduate-vera. Spec-testing is deterministic now (no Max session), so it can't carry a fused security
+  envelope. Instead, on completion of the deterministic pre-merge `runSpecTestJob`, the worker enqueues a STANDALONE branch-mode
+  `security-review` via [[security-agent]] `enqueueSecurityReviewJob({branch, previewOrigin, specSlug, prNumber})`; Vault runs his own
+  solo Max session and writes the branch verdict the M4 gate reads. The M4 promote gate's dual green signal
+  (`isSpecTestGreenForBranch` ∧ `isSecurityGreenForBranch`) reads the standalone security-review row.
 
 ### Pre-merge green-signal (Phase 3) — readable by the M4 promote gate
 - `getLatestSpecTestRunForBranch(workspaceId, slug, branch)` → `SpecTestRun | null` — the latest pre-merge row for the branch
@@ -264,13 +259,15 @@ the CODE was broken, so Bo could not build the phase and the whole accumulation 
 `npm error Missing script`, `command not found`, `: not found`, `No such file or directory` / `ENOENT`,
 `Cannot find module` / `Cannot find package`, `Missing script:`, `Unknown command:`. Case-insensitive.
 
-**Two-layer defence.** Both layers use the SAME predicate so they can never disagree:
+**Two-layer defence** (post-graduate-vera — the Vera Max session is retired; both layers now sit in the
+deterministic path and share the SAME predicate so they can never disagree):
 
-1. **Vera-side classify + resolve** — the `spec-test` skill (`.claude/skills/spec-test/SKILL.md` §
-   *Harness/command failure*) + the `runSpecTestJob` prompt teach Vera to grep `package.json`
-   `"scripts"` for a matching `test:<name>` and re-run the resolved script when possible; a resolved
-   assertion pass is `pass`, a resolved assertion fail is a real `fail`; if no runnable script maps,
-   the check is `needs_human` (a verification-authoring wart), NEVER `fail`.
+1. **Runner-side classify** — [[spec-check-runner]]'s `unit_test` / `build` / `grep` executors route any
+   spawn-level command failure (ENOENT · `Missing script` · command-not-found · fetch spawn error)
+   through [[spec-test-harness-classifier]] `isHarnessCommandFailure`, downgrading it to `needs_human`
+   with `harness error (bullet broken, not code): …` prefixed onto the evidence — never a false `fail`.
+   See [[spec-check-runner]] § "Harness error ≠ fail" — this is structural now, not a Max-session
+   heuristic.
 2. **Worker-side reclassifier** — `normalizeSpecTest` in `scripts/builder-worker.ts` runs
    `reclassifyHarnessFails` on the checks array BEFORE deriving `summary` / `agent_verdict`, so a
    slipped harness `fail` is downgraded to `needs_human` (with the original stderr preserved as
@@ -296,9 +293,11 @@ as a fix-phase that wedges the pipeline. Tests live at
 [[../../../src/lib/spec-test-harness-classifier.test.ts]] pinning the exact motivating stderr as the
 downgraded state, and confirming a real assertion `fail` still flows through as `fail`.
 
-## Durable mandate (agent-mandate-hardening-spec-test)
+## Durable mandate (agent-mandate-hardening-spec-test) — historical, applied to the retired Vera Max session
 
-Two permanent rules that override any tendency to bail or auto-pass, baked into `runSpecTestJob` (scripts/builder-worker.ts):
+Post-**graduate-vera (2026-07-17)** `runSpecTestJob` no longer spawns a Max session (see [[spec-check-runner]] § graduate-vera), so the two mandates below no longer have a live session to bind — they describe the RETIRED session shape. Kept for the incident record; the deterministic runner enforces its own contract structurally (needs_human residuals stay surfaced, harness errors downgrade, byte-identical reruns).
+
+Two permanent rules that overrode any tendency to bail or auto-pass, baked into `runSpecTestJob` (scripts/builder-worker.ts) while Vera was live:
 
 - **Fresh sessions are the normal starting state.** A spec-test session is ALWAYS stateless — "no prior verification context / no security review context available in this session" is the EXPECTED entry condition, NEVER a reason to bail with a prose response and no verdicts. When you encounter this, re-derive the spec's `## Verification` bullets from the materialized spec file (`.box/spec-<slug>.md`) yourself, classify each bullet, and **run the non-destructive checks in-session**: `npx tsc --noEmit`, `gh` CI status, read-only DB probes, GET endpoints, the browser check, the sandbox toolkit, AND the spec's own read-only harness (e.g., `npx tsx scripts/commerce-diff-sample.ts` when the spec ships one — the harness's own header declares "READ-ONLY BY CONSTRUCTION"). Emit the per-check `agent_verdict` JSON. Refusing to fabricate a false-✅ is correct; the fix is to actually run the checks.
 
