@@ -22,7 +22,7 @@ import sharp from "sharp";
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { getProductIntelligence, type PIReview } from "@/lib/product-intelligence";
 import { selectAngles, selectAnglesForTemperature, buildCreativeBrief, type ScoredAngle, type CreativeBrief } from "@/lib/ads/creative-brief";
-import { hasColdOfferLeak } from "@/lib/ads/lf8";
+import { coldOfferLeakMatch, hasColdOfferLeak } from "@/lib/ads/lf8";
 import { validateGeneratedCopy, type ValidatorCheck } from "@/lib/ads/copy-validator";
 import { verifyClaimTrace, resolveReviewsForClaimTrace } from "@/lib/ads/never-fabricate";
 import { loadCreativeLearning, nextTreatmentFor, recordCombinationGenerated, angleKey, type Treatment } from "@/lib/ads/creative-learning";
@@ -1818,22 +1818,31 @@ export async function runCopyAuthorSession(
       lastAuthorVerdict = null;
       continue;
     }
-    if (
-      verdict.audience_temperature === "cold" &&
-      hasColdOfferLeak(
-        {
-          headline: verdict.headline,
-          primaryText: verdict.primaryText,
-          description: verdict.description,
-        },
-        // debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-offer-
-        // for-offer Phase 1 — OUR real brief.offer (free shipping with Subscribe & Save) is
-        // an ALLOWED offer for the cold gate, so an offer-for-offer swap that renders it
-        // verbatim is not flagged. A different discount ("50% off today") still trips.
-        inputs.brief.offer,
-      )
-    ) {
-      lastReason = "cold_offer_leak";
+    // The cold rails are MECHANICAL only (a printed price / a discount percentage) as of CEO
+    // 2026-08-17 — the semantic "is this pitching an offer?" judgement moved to Max's copy QC.
+    // `coldOfferLeakMatch` returns the literal offending excerpt so the ONE sanctioned revise
+    // names the exact text to fix; the old bare `cold_offer_leak` made the author guess which of
+    // six long-form captions was at fault. See [[../ads/lf8]] COLD_OFFER_TOKENS § history.
+    const coldLeak =
+      verdict.audience_temperature === "cold"
+        ? coldOfferLeakMatch(
+            {
+              headline: verdict.headline,
+              primaryText: verdict.primaryText,
+              description: verdict.description,
+            },
+            // debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-offer-
+            // for-offer Phase 1 — OUR real brief.offer (free shipping with Subscribe & Save) is
+            // an ALLOWED offer for the cold gate, so an offer-for-offer swap that renders it
+            // verbatim is not flagged. A different discount ("50% off") still trips.
+            inputs.brief.offer,
+          )
+        : null;
+    if (coldLeak) {
+      lastReason =
+        coldLeak.pattern === "bare_price"
+          ? `cold_offer_leak: the price "${coldLeak.excerpt}" appears in your copy — a cold viewer has never heard of us, so remove the price entirely (do not reword it)`
+          : `cold_offer_leak: the discount "${coldLeak.excerpt}" appears in your copy — swap it for a trust / risk-reversal element (money-back guarantee, third-party tested, free shipping)`;
       lastValidatorMisses = undefined;
       lastFirewallMisses = undefined;
       lastMaxCopyQcMissed = false;

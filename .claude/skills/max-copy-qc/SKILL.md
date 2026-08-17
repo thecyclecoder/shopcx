@@ -123,11 +123,33 @@ or in-copy phrase in `evidence` — no unattributed hard-gate fails.**
    money-back) as fabrication, is the failure mode this spec closes. Numbers still ground against
    the brief — a fabricated inflation like
    `"8,000,000+ customers"` (when proofStack says 700K) IS fabrication and should fail.
-2. **`no_cold_offer`** — for a `cold` `AUDIENCE_TEMPERATURE`, the caption does NOT lead with a
-   discount / percent-off / dollar-off / free-shipping / "limited time" bump; a cold buyer
-   doesn't know the price they're saving off. A `warm` / `hot` audience is exempt (offer-first
-   is appropriate at those temperatures) — return `true` unless the caption is temperature-
-   mismatched. Cite the offer phrase for a cold fail.
+2. **`no_cold_offer`** — for a `cold` `AUDIENCE_TEMPERATURE`, the caption does NOT pitch a
+   discount / percent-off / dollar-off / "limited time" bump; a cold buyer doesn't know the
+   price they're saving off. A `warm` / `hot` audience is exempt (offer-first is appropriate at
+   those temperatures) — return `true` unless the caption is temperature-mismatched. Cite the
+   offer phrase for a cold fail.
+
+   **You are the ONLY judge of this. Judge the SENTENCE, not the words in it.** (CEO 2026-08-17.)
+   This used to be pre-filtered by a deterministic whole-word ban on `save · off · deal · today ·
+   sale · discount · coupon · promo · clearance · bogo`, which failed ordinary English — "takes
+   the edge off", "deal with the 3pm crash", "not something you feel today", "save your energy
+   for the afternoon" — and burned Dahlia's revises on captions that were never pitching
+   anything. That ban is GONE. Those words are now only a hint list: seeing one is a reason to
+   look, never a reason to fail.
+
+   Ask the question a scrolling stranger answers: **is this sentence asking me to buy on price?**
+   - "Save $10 on your first bag" / "20% off this week" / "BOGO ends Sunday" → FAIL. Deal-chase.
+   - "takes the edge off around 3pm" / "deal with the afternoon crash" / "save your energy for
+     the things that matter" / "you won't feel it today, you'll feel it in week two" → PASS.
+     These are benefit language that merely reuse a deal word.
+   - Trust / risk-reversal is explicitly ALLOWED on cold and is the sanctioned SWAP for a
+     competitor's offer slot: free shipping, 30-day money-back, risk-free trial, third-party
+     tested (CEO 2026-07-21). Never fail one of these as an offer.
+
+   Two rails still run mechanically BEFORE you, and you will never see a caption that trips
+   them: a literal printed price (`$29`) and a discount percentage (`50% off`, `save 40%`).
+   Those are unambiguous in every context, so they don't need judgement. Everything else is
+   yours — if you pass a caption, it ships.
 3. **`no_competitor_leak`** — the caption does NOT mention a real competitor brand name or a
    verbatim slogan the brief traced to a competitor's ad (an "imitation" creative rewrites the
    competitor angle for OUR brand; the competitor name never survives). Cite the competitor

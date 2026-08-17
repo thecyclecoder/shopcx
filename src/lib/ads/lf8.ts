@@ -50,41 +50,39 @@ export function hasAnyLf8(copyLower: string): boolean {
 }
 
 /**
- * COLD_OFFER_TOKENS — the offer / urgency cluster that must NEVER appear in a cold-audience
- * creative's caption (docs/brain/specs/dahlia-audience-temperature-marking-and-cold-offer-gate.md
- * Phase 2). Deliberately the SAME cluster already SSOT'd in LF8_KEYWORDS (offer/urgency, lines
- * 41-42) — a divergent list would let a hallucinated cold caption ship with an LF8-flagged token
- * the ads-supervisor gate would still see, defeating the whole point.
+ * COLD_OFFER_TOKENS — deal-chase vocabulary that OFTEN signals offer language in a cold caption.
+ *
+ * ⚠️ ADVISORY ONLY as of CEO 2026-08-17. This list is NOT a gate and MUST NOT be used as one.
+ * It is handed to the reasoning layer (Dahlia's author session + Max's copy QC) as a hint of what
+ * to look at, and each hit is judged IN CONTEXT.
+ *
+ * History — why it stopped being a gate. It used to hard-fail any cold caption containing one of
+ * these as a whole word, which meant ordinary English tripped it: "takes the edge off", "deal with
+ * the 3pm crash", "not something you feel today", "save your energy for the afternoon". The author
+ * prompt simultaneously REQUIRES six long-form three-paragraph captions per emit (canonical + five
+ * framework variations), so the odds of a clean pass were poor and Dahlia burned her revises on a
+ * reason string that never named the offending word. Same class as the 2026-07-17 `"coffee"
+ * .includes("off")` bug: word boundaries fixed false SUBSTRINGS but not false MEANINGS. The
+ * judgement is semantic, so it belongs to the AI session that exists to make it — not to a literal
+ * token match. See `coldOfferLeakMatch` for the two mechanical rails that remain.
  *
  * Under Advantage+ the creative IS the audience selector, so a cold-audience creative that leaks
- * offer/price language is the #1 DTC creative error: it retargets warm-shopper language at a
- * cold viewer who's never heard of the brand.
+ * offer/price language is still the #1 DTC creative error — that reasoning is unchanged. What
+ * changed is WHO decides whether a given sentence commits it.
  */
-// NB: `free shipping` was REMOVED from this list (CEO 2026-07-21). When Dahlia imitates an offer-led
-// competitor ad at a COLD temperature, the offer slot must be SWAPPED for a trust / risk-reversal
-// element (money-back guarantee, risk-free trial, free shipping, third-party tested) rather than
-// killing the ad — free shipping / risk-reversal reduce purchase risk and are cold-appropriate; only
-// a DEAL-CHASE discount (% off / $ off / save / sale / coupon / BOGO) retargets warm-shopper vocab at a
-// cold viewer. Kept in lockstep with the LF8 offer/urgency cluster above.
 export const COLD_OFFER_TOKENS: readonly string[] = [
   "save", "off", "deal", "today", "sale", "discount", "coupon", "promo", "clearance", "bogo",
 ];
 
-/** Each cold-offer token, WORD-BOUNDARY anchored + case-insensitive. Substring matching was a real
- *  defect: `"coffee".includes("off")` is TRUE, so EVERY cold coffee creative tripped the gate on the
- *  word "coffee" — a coffee product literally could not author cold copy (2026-07-17 Amazing Coffee
- *  test). `\b` fixes it: `\boff\b` matches "50% off" but not the "off" inside "coffee" (nor "deal" in
- *  "ideal", "save" in "unsaved", "today" in "todays"). */
-const COLD_OFFER_TOKEN_RES: readonly RegExp[] = COLD_OFFER_TOKENS.map(
-  (t) => new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i"),
-);
 /** A DISCOUNT percent — a percentage adjacent to an offer word ("50% off", "save 40%", "20% discount").
  *  A BARE percentage (`40% more focus`, `95% of drinkers`) is a benefit/social-proof STAT, NOT an
  *  offer — cold copy may cite it (a cold curiosity/problem ad often leads with a stat). The old bare
  *  `\b\d{1,3}%` flagged every stat, which — on top of the "coffee" bug — starved cold copy. */
 const DISCOUNT_PERCENT_RE = /(\bsave\b[^.\n]{0,12}\d{1,3}\s*%)|(\d{1,3}\s*%\s*(off|discount|savings?)\b)/i;
-/** Bare-currency leak (e.g. "$29", "$5") — a price shown to a cold stranger is a warm/hot move. */
-const BARE_CURRENCY_RE = /\$\d/;
+/** Bare-currency leak (e.g. "$29", "$5") — a price shown to a cold stranger is a warm/hot move.
+ *  Captures the WHOLE price ("$29.99", "$1,200") so the revise reason can quote the literal
+ *  offending text rather than a single digit. */
+const BARE_CURRENCY_RE_G = /\$\d[\d,.]*/;
 
 /** debrand-offer-swap-prefers-our-real-offer-free-shipping-subscribe-and-save-offer-for-offer
  *  Phase 1 — OUR real store offer allowlist. When a caller passes `brief.offer`, the exact
@@ -117,30 +115,55 @@ function stripAllowedOfferPhrases(joined: string, allowed: AllowedOffer | null |
   return out;
 }
 
+/** What a cold-offer leak matched, so the caller can tell the author WHICH words to fix rather
+ *  than handing back a bare category. `excerpt` is the literal matched text from the caption. */
+export interface ColdOfferLeakMatch {
+  /** `discount_percent` — a percentage adjacent to an offer word ("50% off", "save 40%").
+   *  `bare_price` — a literal price shown to a cold stranger ("$29"). */
+  pattern: "discount_percent" | "bare_price";
+  excerpt: string;
+}
+
 /**
- * hasColdOfferLeak — DETERMINISTIC gate the persister chokepoint (insertReadyCreative) runs
- * before writing a status='ready' row. Given the three Meta copy fields, return true iff:
- *   (a) any COLD_OFFER_TOKENS hits as a WHOLE WORD (case-insensitive), OR
- *   (b) a DISCOUNT-percent pattern hits (a % adjacent to an offer word — NOT a bare benefit stat), OR
- *   (c) a bare-currency pattern hits (a price shown to a cold viewer).
+ * coldOfferLeakMatch — the two MECHANICAL cold-audience rails, and nothing else.
  *
- * When `allowedOffer` is provided (OUR real brief.offer), its exact headline / disclaimer
- * strings are stripped from the joined scan text BEFORE the predicate runs — so an offer-for-
- * offer swap that renders our real offer verbatim isn't flagged (see [[../ads/debrand]]
- * `chooseGroundedSubstitute`). A DIFFERENT discount ("50% off today") still trips the gate.
+ * These two survive as deterministic checks because they are unambiguous: a printed price or a
+ * printed discount percentage is deal-chase language in every context, so no reasoning is needed
+ * and none should be spent. Everything semantic — whether a sentence is *pitching an offer* — is
+ * Max's call in copy QC, informed by COLD_OFFER_TOKENS as a hint list rather than a ban list
+ * (CEO 2026-08-17: "this is why there is an AI session, to use reasoning").
  *
- * The temperature check itself lives at the CALLER — this predicate just classifies the copy.
- * The caller fires it only when the row's audience_temperature is 'cold'; warm/hot/null rows
- * pass through untouched. See [[../ads/creative-agent]] insertReadyCreative.
+ * Returns the FIRST match with the literal offending excerpt, or null when clean. The excerpt is
+ * what makes the one sanctioned revise actionable — the pre-2026-08-17 gate returned a bare
+ * `cold_offer_leak`, so the author had to guess which of six long captions was at fault.
+ *
+ * When `allowedOffer` is provided (OUR real brief.offer), its exact headline / disclaimer strings
+ * are stripped from the joined scan text BEFORE the rails run — so an offer-for-offer swap that
+ * renders our real offer verbatim isn't flagged (see [[../ads/debrand]] `chooseGroundedSubstitute`).
+ * A DIFFERENT discount ("50% off") still trips.
+ *
+ * The temperature check itself lives at the CALLER — this predicate just classifies the copy. The
+ * caller fires it only when the row's audience_temperature is 'cold'; warm/hot/null rows pass
+ * through untouched. See [[../ads/creative-agent]] insertReadyCreative.
  */
+export function coldOfferLeakMatch(
+  copy: { headline: string; primaryText: string; description: string },
+  allowedOffer?: AllowedOffer | null,
+): ColdOfferLeakMatch | null {
+  const joinedRaw = `${copy.headline} ${copy.primaryText} ${copy.description}`;
+  const joined = stripAllowedOfferPhrases(joinedRaw, allowedOffer);
+  const pct = joined.match(DISCOUNT_PERCENT_RE);
+  if (pct) return { pattern: "discount_percent", excerpt: pct[0].trim() };
+  const price = joined.match(BARE_CURRENCY_RE_G);
+  if (price) return { pattern: "bare_price", excerpt: price[0].trim() };
+  return null;
+}
+
+/** Boolean form of `coldOfferLeakMatch`, kept for the callers that only branch on it. Prefer
+ *  `coldOfferLeakMatch` anywhere the reason is surfaced to an author or an operator. */
 export function hasColdOfferLeak(
   copy: { headline: string; primaryText: string; description: string },
   allowedOffer?: AllowedOffer | null,
 ): boolean {
-  const joinedRaw = `${copy.headline} ${copy.primaryText} ${copy.description}`;
-  const joined = stripAllowedOfferPhrases(joinedRaw, allowedOffer);
-  for (const re of COLD_OFFER_TOKEN_RES) if (re.test(joined)) return true;
-  if (DISCOUNT_PERCENT_RE.test(joined)) return true;
-  if (BARE_CURRENCY_RE.test(joined)) return true;
-  return false;
+  return coldOfferLeakMatch(copy, allowedOffer) !== null;
 }

@@ -342,14 +342,28 @@ role='lead' benefit at all), the RIFF rail is silent — obey IMITATE-DEBRANDED 
    element** drawn from the brief: a **risk-reversal** (`30-day money-back guarantee`, `risk-free`,
    `try it risk-free`), **free shipping**, or a **proof point** (`third-party tested`, `700K+
    customers`, `Non-GMO`, `clinically studied`). These reduce purchase risk without training a
-   cold viewer to chase deals. **BANNED on cold** (these trip the gate): `20% OFF`, `Save $X`,
-   `Sale`, `Discount`, `Coupon`, `BOGO`, a bare `\d+%` adjacent to an offer word, or a bare `$\d`.
-   Lead the copy with the pain / mechanism / transformation; the offer slot is the swapped-in
-   trust element, not the headline. **The cold-offer-gate in `insertReadyCreative` is the
-   enforcer** — a cold caption that trips `hasColdOfferLeak` in [[../../../src/lib/ads/lf8.ts]]
-   returns `{ kind:'skip', reason:'cold_offer_leak' }` and triggers ONE copy-only rewrite. So swap
-   the discount for a guarantee / free shipping / proof — don't get skipped, and don't kill a good
-   imitation just because the source ad led with a discount.
+   cold viewer to chase deals. Lead the copy with the pain / mechanism / transformation; the offer
+   slot is the swapped-in trust element, not the headline.
+
+   **What is actually enforced, and by whom** (CEO 2026-08-17 — read this before you self-censor):
+
+   - **Two mechanical rails, no judgement, no exceptions.** A literal printed price (`$29`) and a
+     discount percentage (`50% off`, `save 40%`) trip `coldOfferLeakMatch` in
+     [[../../../src/lib/ads/lf8.ts]] and bounce you with the exact offending text quoted back.
+     Never put either in a cold caption.
+   - **Everything else is Max's judgement** via his `no_cold_offer` hard gate. He asks one
+     question: *is this sentence asking the reader to buy on price?*
+
+   **There is NO banned word list any more.** A deterministic whole-word ban on `save · off ·
+   deal · today · sale · discount · coupon · promo · clearance · bogo` used to fail cold captions
+   outright, which meant ordinary English kept getting rejected — "takes the edge **off**",
+   "**deal** with the 3pm crash", "you won't feel it **today**", "**save** your energy for the
+   afternoon". It's gone. Write naturally. Do NOT contort a sentence to avoid one of those words;
+   contorted copy reads AI-written and loses the click, which costs more than the gate ever saved.
+   What matters is whether the sentence PITCHES a deal, not whether it contains a deal word.
+
+   So swap the discount for a guarantee / free shipping / proof — and don't kill a good imitation
+   just because the source ad led with a discount.
 5. **Warm / hot** may lead with the real offer from the brief (never invent one), respecting
    rails 1-3.
 
