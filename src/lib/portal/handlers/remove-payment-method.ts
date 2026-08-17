@@ -48,6 +48,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer, logPortalAction, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
@@ -190,6 +191,7 @@ export const removePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
   const flip = await admin
     .from("customer_payment_methods")
     .update({ status: "removed", is_default: false, updated_at: nowIso })
+    .eq("workspace_id", auth.workspaceId)
     .eq("id", pm.id);
   if (flip.error) {
     return jsonErr({ error: "local_flip_failed" }, 500);
@@ -199,6 +201,7 @@ export const removePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
     const promote = await admin
       .from("customer_payment_methods")
       .update({ is_default: true, updated_at: nowIso })
+      .eq("workspace_id", auth.workspaceId)
       .eq("id", newDefaultId);
     if (promote.error) {
       return jsonErr({ error: "default_promotion_failed" }, 500);
@@ -216,9 +219,14 @@ export const removePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
       await gateway.paymentMethod.delete(pm.braintree_payment_method_token as string);
     }
   } catch (e) {
+    // Credential-free by rule (checked by scripts/_check-no-braintree-token-in-log.ts):
+    // the vaulted Braintree payment-method token is a charge/delete credential and
+    // MUST NOT be interpolated into log output, not even a prefix — a prefix is still
+    // credential material. Log only non-secret identifiers (the local row id + workspace)
+    // and a lossless sanitized error rendering via errText.
     console.warn(
-      `[portal/remove-payment-method] Braintree delete failed for token ${String(pm.braintree_payment_method_token).slice(0, 8)}… — local row already flipped to removed:`,
-      e instanceof Error ? e.message : e,
+      `[portal/remove-payment-method] Braintree delete failed for payment_method_id=${pm.id} workspace_id=${auth.workspaceId} — local row already flipped to removed:`,
+      errText(e),
     );
   }
 
