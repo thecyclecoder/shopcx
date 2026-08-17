@@ -3291,7 +3291,11 @@ async function stockProduct(
         const realOffer = brief.offer
           ? { headline: brief.offer.headline, strikethrough: brief.offer.strikethrough, perServing: brief.offer.perServing }
           : null;
-        const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation, packshotUrl, realOffer };
+        // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 1 — the QA gate
+        // expects a before/after IMAGE only when the render actually emits one (gated on
+        // `renderBeforeAfter`). A transformation object attached only for text-proof purposes
+        // (flag=false) must not make QA falsely expect a two-photo layout.
+        const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation?.renderBeforeAfter, packshotUrl, realOffer };
         progress("Checking the image quality…");
         const verdict = qcDispatcher
           ? await qaCreativeViaBoxSession(qaInput, qcDispatcher)

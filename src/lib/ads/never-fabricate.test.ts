@@ -18,7 +18,7 @@ import type { ProductIntelligence, PIReview } from "@/lib/product-intelligence";
 function brief(overrides: Partial<CreativeBrief> = {}): Pick<CreativeBrief, "leadProof" | "transformation" | "supportingBenefits"> {
   return {
     leadProof: { kind: "review", text: "changed my life", attribution: "Sarah H." },
-    transformation: { reviewer: "Kaitlyn", quote: "I lost 40 lbs in 12 weeks", beforeAfterImage: null },
+    transformation: { reviewer: "Kaitlyn", quote: "I lost 40 lbs in 12 weeks", beforeAfterImage: null, renderBeforeAfter: false },
     supportingBenefits: ["steady focus", "no jitters", "no crash"],
     ...overrides,
   };
