@@ -3223,6 +3223,9 @@ async function stockProduct(
   const authorModeEngaged = !!copyAuthorDispatcher;
   const rubricText = authorModeEngaged ? renderRubricForPrompt() : "";
   const pi = await getProductIntelligence(admin, workspaceId, productId);
+  // ⭐ CEO 2026-08-17 (#3) — real pack proportions for every render in this pass. Null when no
+  // variant carries measured packaging, in which case the render prompt is unchanged.
+  const packageDimensions = pi.packageDimensions ?? undefined;
   const product = pi.product as { title?: string; handle?: string } | null;
   if (!product?.handle) return [{ productId, angleHook: "", campaignId: null, ok: false, reason: "product_missing_handle" }];
   const productTitle = product.title ?? "Product";
@@ -3499,6 +3502,7 @@ async function stockProduct(
         progress(`Generating the ad image (${treatment}${attempt > 0 ? `, retry ${attempt + 1}` : ""})…`);
         const gen = await generateCreative(workspaceId, brief, {
           treatment: treatmentForPrompt,
+          packageDimensions,
           designReferenceUrl: plan.designReferenceUrl,
           compositionTransfer: plan.useCompositionTransfer,
           aspectRatio: packPlan.canonical.aspectRatio,
@@ -3552,11 +3556,18 @@ async function stockProduct(
         // passing prompt — the one that actually lands.
         let currentCanonicalPrompt: string = gen.prompt;
         const siblingRenders: RenderedPlacement[] = [];
+        // ⭐ CEO 2026-08-17 (#1 — "one ad, three ratios, not three different ads"). Hand each sibling
+        // the CANONICAL's finished pixels as its first reference image so the render is a RE-LAYOUT of
+        // the approved ad, not a second interpretation of the brief. Observed failure (ad dcd6d536):
+        // the 4:5 was a packshot ad and the 9:16 an entirely different before/after transformation ad.
+        const canonicalRenderDataUrl = `data:${currentCanonicalMime};base64,${currentCanonicalBuffer.toString("base64")}`;
         for (const sib of packPlan.siblings) {
           const sibGen = await generateCreative(workspaceId, brief, {
             // Phase 2 — sibling placements share the canonical's imitation gate: no TREATMENT_STEER
             // in the prompt when the source ad supplies the archetype.
             treatment: treatmentForPrompt,
+            canonicalRenderDataUrl,
+            packageDimensions,
             designReferenceUrl: plan.designReferenceUrl,
             compositionTransfer: plan.useCompositionTransfer,
             aspectRatio: sib.aspectRatio,
