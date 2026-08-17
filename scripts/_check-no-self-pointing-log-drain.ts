@@ -123,9 +123,12 @@ export type Violation = {
   drainId: string;
   drainName: string;
   /**
-   * Redacted display of the drain's delivery endpoint — protocol + host + pathname only.
-   * Never carries userinfo, search params, or fragments (the three places a shared secret
-   * / API key most commonly lives in a delivery URL).
+   * Redacted display of the drain's delivery endpoint — protocol + host, with a
+   * fixed `/<path-redacted>` marker when the URL had a non-root pathname. Never
+   * carries userinfo, search params, the fragment, or the pathname text itself
+   * (all four are places a shared secret / API key / signed token can live in
+   * a delivery URL). Host classification below runs against the RAW parsed URL,
+   * not this display — see `hostOf`.
    */
   endpointDisplay: string;
   host: string;
