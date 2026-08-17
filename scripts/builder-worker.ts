@@ -22420,6 +22420,31 @@ async function runMediaBuyerJob(job: Job) {
  * job per thin-bin product with its deficit. With no product_id, tops up every intelligence-backed
  * product to the bin floor.
  */
+/**
+ * max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — best-effort stamp of the
+ * ACTIVE actor onto `agent_jobs.metadata.active_persona` at each ad-creative dispatch boundary.
+ * The Build Box card reads this to render exactly ONE face (Dahlia while she authors, Max while
+ * he grades) driven by what the worker actually dispatched — instead of pattern-matching a
+ * checklist note that often didn't say what was running. Preserves other metadata keys via a
+ * read-merge-write; a failed stamp NEVER breaks the run (mirrors the `session_note` streaming
+ * guarantee). The metadata key is a persona slug that resolves through KIND_PERSONA_ALIAS
+ * ('ad-creative' → Dahlia, 'ad-creative-copy-qc' → Max); passing `null` clears the stamp.
+ */
+async function stampActivePersona(jobId: string, persona: "ad-creative" | "ad-creative-copy-qc" | null): Promise<void> {
+  try {
+    const { data } = await db
+      .from("agent_jobs")
+      .select("metadata")
+      .eq("id", jobId)
+      .maybeSingle();
+    const currentMeta = ((data as { metadata?: unknown } | null)?.metadata ?? {}) as Record<string, unknown>;
+    const nextMeta = { ...currentMeta, active_persona: persona };
+    await db.from("agent_jobs").update({ metadata: nextMeta }).eq("id", jobId);
+  } catch {
+    /* best-effort — a failed stamp never breaks the run (same guarantee as session_note streaming) */
+  }
+}
+
 async function runAdCreativeJob(job: Job) {
   const tag = `[ad-creative:${job.id.slice(0, 8)}]`;
   const a = await admin();
@@ -22526,6 +22551,11 @@ async function runAdCreativeJob(job: Job) {
   const qcDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
     qcCounter++;
     const qcTag = `${tag}[qc#${qcCounter}]`;
+    // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — the image-QC turn
+    // runs INSIDE Dahlia's creative loop on her own render; `getPersona('ad-creative-qc')`
+    // resolves to a generic default persona today, so the box card must not render it directly.
+    // Stamp 'ad-creative' so the card keeps showing Dahlia while her image is being checked.
+    void stampActivePersona(job.id, "ad-creative");
     try {
       const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
         configDir: cfg,
@@ -22575,6 +22605,10 @@ async function runAdCreativeJob(job: Job) {
   const copyAuthorDispatcher: CopyAuthorSessionDispatcher = async (prompt, allowedImagePath, resume) => {
     copyAuthorCounter++;
     const authorTag = `${tag}[copy-author#${copyAuthorCounter}]${resume ? "[resume]" : ""}`;
+    // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — Dahlia is now
+    // the active actor (author or revise turn). The box card reads `metadata.active_persona`
+    // and swaps to her single photo.
+    void stampActivePersona(job.id, "ad-creative");
     try {
       const run = await runBoxLane(
         (cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
@@ -22647,6 +22681,10 @@ async function runAdCreativeJob(job: Job) {
   const copyQcDispatcher: CopyQcSessionDispatcher = async (prompt, allowedImagePath, resume) => {
     copyQcCounter++;
     const qcTag = `${tag}[copy-qc#${copyQcCounter}]${resume ? "[resume]" : ""}`;
+    // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — Max is now the
+    // active actor (grade or re-ask turn). The box card reads `metadata.active_persona` and
+    // swaps to his single photo.
+    void stampActivePersona(job.id, "ad-creative-copy-qc");
     try {
       const run = await runBoxLane(
         (cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
@@ -22765,6 +22803,10 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
     const qcDispatcher = async (prompt: string, allowedImagePath: string): Promise<{ resultText: string; isError: boolean }> => {
       qcCounter++;
       const qcTag = `${tag}[qc#${qcCounter}]`;
+      // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — see the
+      // production runAdCreativeJob's dispatcher for the rationale. Image-QC turn stamps
+      // Dahlia (the vision check runs inside her loop on her own render).
+      void stampActivePersona(job.id, "ad-creative");
       try {
         const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
           configDir: cfg,
@@ -22788,6 +22830,9 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
     const copyAuthorDispatcher: CopyAuthorSessionDispatcher = async (prompt, allowedImagePath, resume) => {
       counter++;
       const authorTag = `${tag}[copy-author#${counter}]${resume ? "[resume]" : ""}`;
+      // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — Dahlia is the
+      // active actor for the author/revise turn.
+      void stampActivePersona(job.id, "ad-creative");
       try {
         const run = await runBoxLane(
           (cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
@@ -22829,6 +22874,9 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
     const copyQcDispatcher: CopyQcSessionDispatcher = async (prompt, allowedImagePath, resume) => {
       copyQcCounter++;
       const qcTag = `${tag}[copy-qc#${copyQcCounter}]${resume ? "[resume]" : ""}`;
+      // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — Max is the
+      // active actor for the grade / one-shot parse re-ask turn.
+      void stampActivePersona(job.id, "ad-creative-copy-qc");
       try {
         const run = await runBoxLane(
           (cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
