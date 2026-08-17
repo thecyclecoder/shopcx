@@ -70,6 +70,59 @@ export const PR_RESOLVE_INFRA_FAILURE_RE =
   /worktree add failed|git (?:push|fetch|checkout|merge|worktree) failed|ENOSPC|could not lock|no space left/i;
 
 /**
+ * pax-never-reports-nothing-to-resolve-on-a-pr-state-it-could-not-read (Phase 1) — a Pax pass that
+ * could not READ the PR's current GitHub state (transport failure, or a 200 with a missing/unrecognized
+ * `state`) writes a `failed` row with THIS error prefix, then the standing dirty-PR backstop re-picks
+ * it up. Ground truth: job 5720fb3a completed 27s after enqueue with 'PR #2486 no longer open
+ * (state=undefined merged=undefined)' while the PR was OPEN + CONFLICTING — one GitHub blip stranded
+ * it because the ledger said the resolver had already looked. That fake-terminal path is now this
+ * explicitly-retryable failed path.
+ *
+ * The cap-parked marker (`needs_attention` from `runPrResolveJob` after this same PR has hit the
+ * consecutive-unreadable-state cap) uses the SAME prefix so a downstream reader can identify both the
+ * transient failure and the escalation without a separate signal. Neither should burn the general
+ * pr-resolve retry-cap budget (those attempts never ran the resolver to a verdict — GitHub was
+ * unreachable), so `countGenuinePrResolveAttempts` excludes both.
+ */
+export const PR_RESOLVE_UNREADABLE_STATE_ERROR_PREFIX = "unreadable-pr-state";
+
+/**
+ * Bound on how many CONSECUTIVE unreadable-state pr-resolve attempts we tolerate on the same PR before
+ * escalating the current job to `needs_attention` instead of a retryable `failed`. Small on purpose:
+ * a persistently unreachable PR probably needs a human eye, not a longer retry loop. Neighbors the
+ * general `MAX_PR_RESOLVE_ATTEMPTS = 3` cap.
+ */
+const MAX_PR_RESOLVE_UNREADABLE_STATE_ATTEMPTS = 3;
+export const PR_RESOLVE_MAX_UNREADABLE_STATE_ATTEMPTS_FOR_TESTS =
+  MAX_PR_RESOLVE_UNREADABLE_STATE_ATTEMPTS;
+
+/**
+ * Pure predicate for a prior pr-resolve row whose outcome was "we could not read GitHub's state for
+ * this PR". Matches BOTH the retryable `failed` shape written by `runPrResolveJob` and the escalated
+ * `needs_attention` cap-park shape (same prefix by design — see PR_RESOLVE_UNREADABLE_STATE_ERROR_PREFIX).
+ * Exported for the pure counter's tests.
+ */
+export function isUnreadablePrStateAttempt(row: {
+  status: string;
+  error: string | null;
+}): boolean {
+  if (row.status !== "failed" && row.status !== "needs_attention") return false;
+  return (row.error ?? "").startsWith(PR_RESOLVE_UNREADABLE_STATE_ERROR_PREFIX);
+}
+
+/**
+ * Pure counter: how many prior pr-resolve rows for THIS PR were "unreadable state" outcomes. Used by
+ * `runPrResolveJob` to decide, on a fresh unreadable read, whether to fail retryably or escalate to
+ * `needs_attention` with the real reason ('could not read PR state'). Counts BOTH retryable-failed and
+ * cap-parked-needs_attention rows so a bounce-off-the-cap-and-retry pattern cannot re-open the loop.
+ */
+export function countPriorUnreadablePrStateAttempts(
+  rows: ReadonlyArray<{ status: string; error: string | null }>,
+): number {
+  return rows.filter(isUnreadablePrStateAttempt).length;
+}
+
+/**
  * Pure decision helper for the pr-resolve retry cap. Counts prior pr-resolve rows that represent a
  * GENUINE resolver attempt against a hard conflict — i.e. rows that ran the resolver to a verdict.
  * Excluded:
@@ -77,6 +130,9 @@ export const PR_RESOLVE_INFRA_FAILURE_RE =
  *     marker, not an attempt (pr-resolve-retry-cap-counts-parked-attempts Phase 1).
  *   - `failed` rows whose error matches `PR_RESOLVE_INFRA_FAILURE_RE` (worktree add / git push
  *     failed / ENOSPC …) — a box bug, not a resolve verdict; must not burn the cap.
+ *   - unreadable-pr-state rows (either `failed` retryable or `needs_attention` cap-parked, see
+ *     `isUnreadablePrStateAttempt`) — GitHub was unreachable, the resolver never ran to a verdict;
+ *     these get their own bounded budget in `runPrResolveJob`, not this one.
  * Included (the fix): `needs_attention` rows parked from advisory-supersede in builder-worker.ts.
  * Those DID run the resolver's static pre-flight to a verdict of "needs human"; counting them makes
  * the cap trip and stops the standing-pass dirty-PR backstop from re-enqueuing forever (#1893).
@@ -93,6 +149,9 @@ export function countGenuinePrResolveAttempts(
     }
     if (row.status === "failed" && PR_RESOLVE_INFRA_FAILURE_RE.test(row.error ?? "")) {
       return false; // box/infra, not a resolve verdict
+    }
+    if (isUnreadablePrStateAttempt(row)) {
+      return false; // GitHub was unreachable — no verdict was ever computed
     }
     return true;
   }).length;

@@ -19720,9 +19720,66 @@ async function runPrResolveJob(job: Job) {
   // can be null (GitHub still computing) → re-check briefly; if still unknown, attempt anyway (the
   // webhook flagged it CONFLICTING). already mergeable / merged / closed → no-op completed.
   const prResp = await gh("GET", `/repos/${REPO}/pulls/${prNumber}`);
-  const pr = prResp.json as { state?: string; merged?: boolean; mergeable?: boolean | null; html_url?: string; head?: { ref?: string }; base?: { ref?: string } };
+  const pr = prResp.json as { state?: string; merged?: boolean; mergeable?: boolean | null; html_url?: string; message?: string; head?: { ref?: string }; base?: { ref?: string } };
   const prUrl = pr.html_url || `https://github.com/${REPO}/pull/${prNumber}`;
-  if (!prResp.ok || pr.state !== "open" || pr.merged) {
+
+  // pax-never-reports-nothing-to-resolve-on-a-pr-state-it-could-not-read (Phase 1) — SPLIT the guard.
+  // Old code collapsed transport failure, closed, and merged into one 'no longer open — nothing to
+  // resolve' completed no-op — a failed fetch was recorded as a successful decision that the PR was
+  // terminal. Job 5720fb3a completed in 27s with 'state=undefined merged=undefined' while PR #2486
+  // was OPEN + CONFLICTING; the ledger said the resolver had already looked, so nothing re-picked it
+  // up and the branch stranded. Now:
+  //   • !prResp.ok OR a 200 with a missing/unrecognized `state` → the PR state is UNKNOWN. Retryable
+  //     failure with an error prefix that keeps this attempt out of the general resolve-attempts cap
+  //     (the resolver never ran) but IS counted against its own unreadable-state cap. On cap → the
+  //     current job flips to `needs_attention` with a real reason ("could not read PR state") rather
+  //     than looping.
+  //   • pr.state === 'closed' or pr.merged === true → genuinely terminal, keep the clean `completed`
+  //     path unchanged.
+  const stateReadable = prResp.ok && (pr.state === "open" || pr.state === "closed");
+  const stateIsTerminal = stateReadable && (pr.state === "closed" || pr.merged === true);
+  if (!stateReadable) {
+    const {
+      PR_RESOLVE_UNREADABLE_STATE_ERROR_PREFIX,
+      PR_RESOLVE_MAX_UNREADABLE_STATE_ATTEMPTS_FOR_TESTS: MAX_UNREADABLE,
+      countPriorUnreadablePrStateAttempts,
+      prSpecSlug,
+    } = await import("../src/lib/github-pr-resolve");
+    const httpDetail = !prResp.ok
+      ? `HTTP ${prResp.status}${typeof pr.message === "string" && pr.message ? `: ${pr.message.slice(0, 200)}` : ""}`
+      : `200 with state=${JSON.stringify((pr as { state?: unknown }).state)}`;
+    const errorLine = `${PR_RESOLVE_UNREADABLE_STATE_ERROR_PREFIX}: could not read PR #${prNumber} state (${httpDetail})`;
+    const { data: priorRows } = await db
+      .from("agent_jobs")
+      .select("id, status, error")
+      .eq("workspace_id", wsId)
+      .eq("kind", "pr-resolve")
+      .eq("spec_slug", prSpecSlug(prNumber))
+      .neq("id", job.id);
+    const prior = (priorRows ?? []) as Array<{ status: string; error: string | null }>;
+    const priorUnreadable = countPriorUnreadablePrStateAttempts(prior);
+    if (priorUnreadable + 1 >= MAX_UNREADABLE) {
+      await update(job.id, {
+        status: "needs_attention",
+        pr_url: prUrl,
+        pr_number: prNumber,
+        error: errorLine,
+        log_tail: `${errorLine}\ncap reached — ${priorUnreadable + 1} consecutive unreadable-state attempts on PR #${prNumber}; escalating instead of retrying. A human should check the PR's actual state (the resolver never ran — this is not a 'no longer open' verdict).`,
+      });
+      console.log(`${tag} PR #${prNumber} unreadable-state cap (${priorUnreadable + 1}/${MAX_UNREADABLE}) → needs_attention`);
+      return;
+    }
+    await update(job.id, {
+      status: "failed",
+      pr_url: prUrl,
+      pr_number: prNumber,
+      error: errorLine,
+      log_tail: `${errorLine}\nleaving retryable — the PR's state was not readable, so the resolver did not run (attempt ${priorUnreadable + 1}/${MAX_UNREADABLE}). The next dirty-PR pass will re-enqueue.`,
+    });
+    console.log(`${tag} PR #${prNumber} unreadable state → failed retry ${priorUnreadable + 1}/${MAX_UNREADABLE}: ${errorLine}`);
+    return;
+  }
+  if (stateIsTerminal) {
     await update(job.id, { status: "completed", pr_url: prUrl, pr_number: prNumber, log_tail: `PR #${prNumber} no longer open (state=${pr.state} merged=${pr.merged}) — nothing to resolve` });
     console.log(`${tag} PR #${prNumber} not open (state=${pr.state}) — no-op`);
     return;
