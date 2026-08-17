@@ -8,16 +8,18 @@ Complements the per-slug [[spec-audit]] (origin/main-only, `spec_status_history`
 
 For every ACTIVE (non-folded) spec, for every phase with `status='shipped'`, the detector resolves the target branch and runs the phase's grep checks against that branch HEAD via [[specs-table]] `verifyPhaseAccumulatedOnBranch`. A phase whose verifier reports `accumulated:false` is a PHANTOM — reported.
 
-**Target branch per spec:**
-- Goal-bound spec (has `milestone_id`) → `origin/goal/{goal-slug}` (M4 merges the spec's build branch onto its goal branch and stays there until M5's atomic goal→main promotion).
-- One-off spec → `origin/main` (ships direct to main).
+**Target branch per spec (BARE — no `origin/` prefix):**
+- Goal-bound spec (has `milestone_id`) → `goal/{goal-slug}` (M4 merges the spec's build branch onto its goal branch and stays there until M5's atomic goal→main promotion).
+- One-off spec → `main` (ships direct to main).
 
 Resolver: `branchForGoal(goalSlug: string | null)` (pure) + `resolvePhantomShipTargetBranch(workspaceId, slug)` (DB-backed — calls [[agent-jobs]] `resolveGoalSlugForSpec`).
 
+⭐ [[../specs/a-merge-stamps-only-the-phases-whose-code-it-actually-contains]] Phase 4 (Fix 2) — the resolver returns the BARE branch name, not the `origin/{name}` remote-tracking ref. `verifyPhaseAccumulatedOnBranch`'s underlying [[specs-table]] `resolveBranchRefForVerification` prepends `origin/` itself as part of its origin-first refresh contract; a pre-prefixed input would double-prefix to `origin/origin/main` and blow up as `git fetch origin origin/main: fatal: couldn't find remote ref refs/heads/origin/main`, which is exactly what turned every shipped phase on every one-off spec into a phantom under an infrastructure fault. The phantom REPORT still displays the `origin/{name}` form so a human reads "on origin/main" — the ref actually grepped.
+
 ## Exports
 
-- **`branchForGoal(goalSlug: string | null)`** → `"origin/goal/{slug}"` when goal-bound, `"origin/main"` otherwise. Pure — no I/O. The unit-testable seam under the DB-backed resolver.
-- **`resolvePhantomShipTargetBranch(workspaceId, slug)`** → the DB-backed resolver (delegates the goal-slug lookup to [[agent-jobs]] `resolveGoalSlugForSpec` and returns `branchForGoal` of it).
+- **`branchForGoal(goalSlug: string | null)`** → `"goal/{slug}"` when goal-bound, `"main"` otherwise (BARE — never `origin/`-prefixed; Phase 4 fix). Pure — no I/O. The unit-testable seam under the DB-backed resolver.
+- **`resolvePhantomShipTargetBranch(workspaceId, slug)`** → the DB-backed resolver (delegates the goal-slug lookup to [[agent-jobs]] `resolveGoalSlugForSpec` and returns `branchForGoal` of it — also bare).
 - **`detectPhantomShippedPhases(deps?)`** → `PhantomShipReport` with `{ scanned, specsScanned, workspacesScanned, phantoms: [{ workspaceId, slug, position, branch, reason }] }`. Enumerates every workspace in `public.specs`, lists its ACTIVE specs via [[specs-table]] `listSpecs({ scope: 'active' })` (folded specs are excluded — they're archived, not gate-eligible), and per shipped phase calls `verifyPhaseAccumulatedOnBranch(workspaceId, slug, position, targetBranch)`. `deps` (a `DetectorDeps` DI point) lets tests plug in fixture workspaces / specs / branch resolvers / a mock verifier without touching git or Supabase.
 - **`defaultDetectorDeps`** — the production dep set (real Supabase enumeration + `verifyPhaseAccumulatedOnBranch`'s default git-grep executor).
 

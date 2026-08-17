@@ -3432,24 +3432,38 @@ async function gh(method: string, path: string, body?: unknown) {
   return { ok: res.ok, status: res.status, json: text ? JSON.parse(text) : {} };
 }
 
-async function ensurePr(branch: string, title: string, draft: boolean, body?: string, base = "main"): Promise<{ url: string; number: number } | null> {
+type EnsurePrResult =
+  | { url: string; number: number; error: null }
+  | { url: null; number: null; error: string };
+
+async function ensurePr(branch: string, title: string, draft: boolean, body?: string, base = "main"): Promise<EnsurePrResult> {
   const owner = REPO.split("/")[0];
   const prBody = body ?? `Automated build of spec \`${title}\` by the box worker (the spec lives in public.specs + public.spec_phases — the DB is the spec). ${draft ? "**Draft — has open questions.**" : ""}`;
   // Retry `gh pr create` a few times with backoff — most failures are transient (GitHub 5xx / secondary
   // rate-limit), so the manual Create-PR recovery (build-recover-pr-create) is the rare fallback, not the
   // norm. Before each retry adopt an already-open PR for the branch (idempotent: a prior attempt may have
-  // actually created one despite a flaky response). Only after the retries are exhausted do we return
-  // null → the caller flags `needs_attention` "branch pushed but PR creation failed" (recoverable).
+  // actually created one despite a flaky response). Only after the retries are exhausted do we return an
+  // `error`-shaped result → the caller flags `needs_attention` "branch pushed but PR creation failed"
+  // (recoverable) AND stashes the per-attempt HTTP status + response body via
+  // [[../src/lib/pr-create-diagnostic]] `formatPrCreateFailureDiagnostic` into the parked job's
+  // `log_tail` — Fix 1 of [[../.box/spec-a-merge-stamps-only-the-phases-whose-code-it-actually-contains]]
+  // (the pre-Fix log_tail carried unrelated Claude usage metadata, so a triaging human had nothing to
+  // act on; the tooling-failure classifier still routes on `error`, but a human debugging the park now
+  // sees the ACTUAL GitHub errors).
   // `base` defaults to main (one-off specs + fold flows); a GOAL-BOUND spec passes `goal/{goalSlug}` so its PR
   // accumulates onto the goal branch (Gate B), NEVER main (spec-goal-branch-pm-flow M4 — see the build path).
   // ⭐ CEO 2026-08-17 — was [1000, 3000, 8000]: ~12s total, which cannot survive a real GitHub
   // incident. The 2026-08-17 outage returned HTTP 503 from the PR-create endpoint for ~10 minutes
   // and parked a build whose branch had pushed cleanly. Widened to ~62s so a brief blip never
   // reaches the park at all; the MISSING-PR standing backstop below covers anything longer.
+  // Complementary to Fix 1's diagnostic capture below: the backoff decides how long we TRY, the
+  // diagnostic decides what a human SEES when trying stops being enough.
   const backoffs = [1000, 3000, 8000, 20000, 30000];
+  const { formatPrCreateFailureDiagnostic } = await import("../src/lib/pr-create-diagnostic");
+  const attempts: { attempt: number; status: number | null; body: string }[] = [];
   for (let attempt = 0; attempt <= backoffs.length; attempt++) {
     const created = await gh("POST", `/repos/${REPO}/pulls`, { title, head: branch, base, body: prBody, draft });
-    if (created.ok) return { url: created.json.html_url as string, number: created.json.number as number };
+    if (created.ok) return { url: created.json.html_url as string, number: created.json.number as number, error: null };
     const existing = await gh("GET", `/repos/${REPO}/pulls?head=${owner}:${branch}&state=open`);
     if (existing.ok && Array.isArray(existing.json) && existing.json.length) {
       const open = existing.json[0] as { html_url: string; number: number; base?: { ref?: string } };
@@ -3462,8 +3476,17 @@ async function ensurePr(branch: string, title: string, draft: boolean, body?: st
           `[ensurePr] adopted existing PR #${open.number} (${branch}) had base ${open.base.ref}; retargeted → ${base} (${patched.ok ? "ok" : `failed ${patched.status}`})`,
         );
       }
-      return { url: open.html_url, number: open.number };
+      return { url: open.html_url, number: open.number, error: null };
     }
+    // Capture this attempt's failure detail so the final diagnostic can name the EXACT reason.
+    attempts.push({
+      attempt: attempt + 1,
+      status: typeof created.status === "number" ? created.status : null,
+      body: (() => {
+        try { return typeof created.json === "string" ? created.json : JSON.stringify(created.json); }
+        catch { return "(unserializable response body)"; }
+      })(),
+    });
     if (attempt < backoffs.length) {
       console.error(
         `[ensurePr] create PR for ${branch} failed (${created.status}: ${JSON.stringify(created.json).slice(0, 160)}) — retry ${attempt + 1}/${backoffs.length} in ${backoffs[attempt]}ms`,
@@ -3471,7 +3494,9 @@ async function ensurePr(branch: string, title: string, draft: boolean, body?: st
       await new Promise((r) => setTimeout(r, backoffs[attempt]));
     }
   }
-  return null;
+  const diagnostic = formatPrCreateFailureDiagnostic(attempts);
+  console.error(`[ensurePr] create PR for ${branch} EXHAUSTED all retries — ${diagnostic}`);
+  return { url: null, number: null, error: diagnostic };
 }
 
 /**
@@ -11276,7 +11301,7 @@ async function runFoldJob(job: Job) {
         sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
       }
       const pr = await ensurePr(branch!, "fold-batch", true, prBody);
-      await update(job.id, { status: "needs_input", questions: parsed.questions ?? [], log_tail: logTail, pr_url: pr?.url ?? null, pr_number: pr?.number ?? null });
+      await update(job.id, { status: "needs_input", questions: parsed.questions ?? [], log_tail: logTail, pr_url: pr.url ?? null, pr_number: pr.number ?? null });
       return; // specs stay 'folding' bound to this job → re-read on resume
     }
 
@@ -11319,11 +11344,11 @@ async function runFoldJob(job: Job) {
       }
       // A fold can pause on needs_input → draft PR; un-draft it on a no-new-change resume (same gap as runJob).
       const pr = await ensurePr(branch!, slugs[0] || "fold", false);
-      if (pr) {
+      if (pr.url) {
         await markReady(pr.number);
         await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: "no new changes; un-drafted existing PR" });
       } else {
-        await update(job.id, { status: "completed", log_tail: "no file changes; specs already folded" });
+        await update(job.id, { status: "completed", log_tail: `no file changes; specs already folded${pr.error ? ` (ensurePr no-op: ${pr.error.slice(0, 400)})` : ""}` });
       }
       // Snapshot-race sweep: rows enqueued after this job's snapshot are still `pending` here too.
       await reEnqueueFoldIfPending(job.workspace_id, tag);
@@ -11343,8 +11368,11 @@ async function runFoldJob(job: Job) {
       return;
     }
     const pr = await ensurePr(branch!, "fold-batch", false, prBody);
-    if (!pr) {
-      await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });
+    if (!pr.url) {
+      // Fix 1 (a-merge-stamps-only-the-phases-whose-code-it-actually-contains): thread the ACTUAL
+      // per-attempt GH HTTP status + body into the parked job's log_tail so a triaging human sees the
+      // real failure — not the surrounding Claude usage metadata a bare `logTail` slice carried.
+      await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: `${pr.error}\n\n---\n${logTail}` });
       return;
     }
     await markReady(pr.number);
@@ -11527,7 +11555,7 @@ async function runGoalFoldJob(job: Job) {
         sh("git", ["push", "-u", "origin", branch!], { cwd: wt });
       }
       const pr = await ensurePr(branch!, `goal-fold-${slug}`, true, prBody);
-      await update(job.id, { status: "needs_input", questions: parsed.questions ?? [], log_tail: logTail, pr_url: pr?.url ?? null, pr_number: pr?.number ?? null });
+      await update(job.id, { status: "needs_input", questions: parsed.questions ?? [], log_tail: logTail, pr_url: pr.url ?? null, pr_number: pr.number ?? null });
       return;
     }
 
@@ -11557,11 +11585,11 @@ async function runGoalFoldJob(job: Job) {
       // Nothing changed — brain already folded. Flip the row anyway so it leaves the active board.
       await flipFolded();
       const pr = await ensurePr(branch!, `goal-fold-${slug}`, false);
-      if (pr) {
+      if (pr.url) {
         await markReady(pr.number);
         await update(job.id, { status: "completed", pr_url: pr.url, pr_number: pr.number, log_tail: "no new changes; un-drafted existing PR; goal flipped to folded" });
       } else {
-        await update(job.id, { status: "completed", log_tail: "no file changes; goal flipped to folded" });
+        await update(job.id, { status: "completed", log_tail: `no file changes; goal flipped to folded${pr.error ? ` (ensurePr no-op: ${pr.error.slice(0, 400)})` : ""}` });
       }
       return;
     }
@@ -11577,8 +11605,10 @@ async function runGoalFoldJob(job: Job) {
       return;
     }
     const pr = await ensurePr(branch!, `goal-fold-${slug}`, false, prBody);
-    if (!pr) {
-      await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: logTail });
+    if (!pr.url) {
+      // Fix 1 (a-merge-stamps-only-the-phases-whose-code-it-actually-contains): stash the ACTUAL
+      // per-attempt GH HTTP status + body in log_tail so a human triaging the park can act.
+      await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: `${pr.error}\n\n---\n${logTail}` });
       return;
     }
     await markReady(pr.number);
@@ -28080,8 +28110,12 @@ async function dispatchJob(job: Job) {
       }
       console.log(`${tag} accumulation complete (${acc.reason}) → opening PR (base ${prBase})`);
       const pr = await ensurePr(branch!, slug, false, undefined, prBase);
-      if (!pr) {
-        await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: opts.finalLogTail });
+      if (!pr.url) {
+        // Fix 1 (a-merge-stamps-only-the-phases-whose-code-it-actually-contains): the ACTUAL per-attempt
+        // GH HTTP status + body is what a triaging human needs — the pre-Fix park stashed only the
+        // opts.finalLogTail slice, which typically carries unrelated Claude usage metadata (parked build
+        // job c5c168bc). Keep opts.finalLogTail as context, prepend the diagnostic.
+        await update(job.id, { status: "needs_attention", error: "branch pushed but PR creation failed", log_tail: `${pr.error}\n\n---\n${opts.finalLogTail}` });
         return;
       }
       const ready = await markReady(pr.number);
