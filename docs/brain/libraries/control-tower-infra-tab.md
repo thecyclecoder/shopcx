@@ -20,7 +20,7 @@ Candidates checked, in order:
    - `/api/portal/*`, `/api/webhooks/{shopify,appstle,braintree,stripe}` → `retention`
    - `/api/orchestrator/*`, `/api/tickets`, `/api/ticket-*` → `cs`
    - `/api/webhooks/{meta,klaviyo}` → `growth`
-   - `/api/developer/*`, `/api/webhooks/vercel-logs`, `/api/client-errors` → `platform`
+   - `/api/developer/*`, `/api/client-errors` → `platform`
 
 A `supabase-logs` row (Postgres/auth log incidents polled by [[../inngest/supabase-log-poll]] `pollSupabaseLogs`) has neither a `function_id` nor a `path` — DB-level rows always fall through to `platform`.
 
