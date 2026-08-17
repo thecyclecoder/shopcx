@@ -1554,10 +1554,14 @@ const SOURCES: ErrorSource[] = ["vercel", "inngest", "supabase", "supabase-logs"
 
 /**
  * Which sources need a "received a delivery" proof before they can go green.
- *   - vercel / supabase-logs — wired feeds with an observable clean delivery (a drain
- *     POST / a successful poll) — need a `feed:<source>` beat.
- *   - inngest — failure-only (no clean delivery to observe); liveness is proxied by the
- *     freshness of Inngest itself (any recent cron beat) — needs that proxy beat.
+ *   - vercel / inngest — failure-only (no clean delivery to observe); liveness is
+ *     proxied by the freshness of the app itself (any recent cron beat proves both
+ *     the app is being served AND Inngest is delivering). vercel used to have a
+ *     receipt-proof (the drain POST) but that transport was replaced by in-process
+ *     `onRequestError` in `instrumentation.ts` (see the replace-log-drain-with-in-process-onrequesterror
+ *     spec: the drain was self-feeding and cost $1,850/mo; the in-process hook has
+ *     no observable clean delivery to beat on).
+ *   - supabase-logs — wired feed with an observable clean poll — needs a `feed:supabase-logs` beat.
  *   - supabase (app-layer) — reportDbError is wired unconditionally into live code paths
  *     (no setup, no separate delivery to observe); it's connected whenever it's clean.
  */
@@ -1574,7 +1578,7 @@ const REQUIRES_RECEIPT: Record<ErrorSource, boolean> = {
 
 /** One-line "how to wire" hint shown when a source isn't configured. */
 const NOT_CONFIGURED_HINT: Record<ErrorSource, string> = {
-  vercel: "Set VERCEL_LOG_DRAIN_SECRET and create the Vercel log drain pointed at /api/webhooks/vercel-logs.",
+  vercel: "In-process capture is wired via src/instrumentation.ts (Next.js onRequestError → recordError) — no drain, no secret. Do NOT create a Vercel log drain pointed at this app; that's the $1,850/mo self-feeding loop the spec killed.",
   inngest: "Deploy the inngest-failure-capture function so failed runs are captured.",
   supabase: "reportDbError is wired in code — no setup needed.",
   "supabase-logs": "Paste a Supabase Management access token in the Control Tower (owner-only) to poll DB logs.",
@@ -1625,15 +1629,19 @@ export async function buildErrorFeedSnapshot(adminClient?: Admin): Promise<Error
       .gte("last_seen_at", since)
       .order("last_seen_at", { ascending: false })
       .limit(300),
-    // Latest "received a delivery" beats for the feeds that emit them.
+    // Latest "received a delivery" beats for the feeds that emit them. `vercel` is no
+    // longer in this list: the drain sink that beat feed:vercel is gone (replaced by
+    // in-process onRequestError in instrumentation.ts), so vercel liveness is now
+    // proxied via any recent cron beat below — same shape as inngest.
     admin
       .from("loop_heartbeats")
       .select("loop_id, ran_at")
-      .in("loop_id", [feedLoopId("vercel"), feedLoopId("supabase-logs"), feedLoopId("client")])
+      .in("loop_id", [feedLoopId("supabase-logs"), feedLoopId("client")])
       .order("ran_at", { ascending: false })
       .limit(50),
-    // Inngest liveness proxy: any recent cron beat proves Inngest is delivering (and the
-    // failure-capture fn, registered alongside, would catch a failure).
+    // Inngest / Vercel liveness proxy: any recent cron beat proves Inngest is delivering
+    // AND the app is being served (so the in-process onRequestError hook is loaded and
+    // would catch a request-scoped error).
     admin
       .from("loop_heartbeats")
       .select("ran_at")
@@ -1654,14 +1662,14 @@ export async function buildErrorFeedSnapshot(adminClient?: Admin): Promise<Error
   const latestCronAt = (cronRes.data as { ran_at: string } | null)?.ran_at ?? null;
 
   const configuredBy: Record<ErrorSource, boolean> = {
-    vercel: Boolean(process.env.VERCEL_LOG_DRAIN_SECRET),
+    vercel: true, // src/instrumentation.ts is registered in code with the deploy (Next.js onRequestError).
     inngest: true, // the capture fn is registered in code with the deploy.
     supabase: true, // reportDbError needs no setup — always wired.
     "supabase-logs": supabaseLogsConfigured,
     client: true, // the storefront/portal reporters are wired in code — always configured.
   };
   const receivedAtBy: Record<ErrorSource, string | null> = {
-    vercel: feedLatest.get(feedLoopId("vercel")) ?? null,
+    vercel: latestCronAt, // failure-only feed; proxied via cron freshness (same shape as inngest).
     inngest: latestCronAt,
     supabase: null,
     "supabase-logs": feedLatest.get(feedLoopId("supabase-logs")) ?? null,
