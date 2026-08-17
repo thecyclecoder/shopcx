@@ -1,0 +1,1 @@
+- **Redact Vercel drain endpoint path segments from diagnostics** · verified 2026-08-17 · → [[../libraries/vercel-drain-redact]]
