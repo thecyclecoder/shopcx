@@ -290,6 +290,10 @@ export async function applyCsOwnerRoute(
           loop_guard_max: CS_DIRECTOR_LOOP_GUARD_MAX,
           window_ms: CS_DIRECTOR_LOOP_GUARD_WINDOW_MS,
         },
+        // an-escalation-retires-itself Phase 1 — the loop-guard escalation retires when the ticket
+        // closes resolved. If the customer's underlying situation is fixed (by a later CS call, a
+        // billing reconcile, or human action), this card no longer describes a live problem.
+        retireWhen: { kind: "ticket_terminal", ticket_id: ticketId },
       });
     } catch (e) {
       console.warn(
