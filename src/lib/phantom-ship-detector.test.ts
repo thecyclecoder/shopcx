@@ -27,17 +27,29 @@ import type { GrepCheckParams } from "./spec-phase-checks-table";
 
 // -- branchForGoal (pure resolver) ---------------------------------------------------------------
 
-test("branchForGoal: one-off spec (null goalSlug) → origin/main", () => {
-  assert.equal(branchForGoal(null), "origin/main");
+test("branchForGoal: one-off spec (null goalSlug) → bare 'main'", () => {
+  assert.equal(branchForGoal(null), "main");
 });
 
-test("branchForGoal: goal-bound spec → origin/goal/{goal-slug}", () => {
-  assert.equal(branchForGoal("my-goal"), "origin/goal/my-goal");
+test("branchForGoal: goal-bound spec → bare 'goal/{goal-slug}'", () => {
+  assert.equal(branchForGoal("my-goal"), "goal/my-goal");
 });
 
-test("branchForGoal: empty/whitespace goalSlug → origin/main (a slug of only whitespace is not goal-bound)", () => {
-  assert.equal(branchForGoal(""), "origin/main");
-  assert.equal(branchForGoal("   "), "origin/main");
+test("branchForGoal: empty/whitespace goalSlug → 'main' (a slug of only whitespace is not goal-bound)", () => {
+  assert.equal(branchForGoal(""), "main");
+  assert.equal(branchForGoal("   "), "main");
+});
+
+// ⭐ Phase 4 (Fix 2) named-failing-state pin. The bug: `resolveBranchRefForVerification` prepends
+// `origin/` on the branch it fetches; when `branchForGoal` also prepended `origin/`, the wire
+// composed to `git fetch origin origin/main` → `fatal: couldn't find remote ref refs/heads/origin/main`
+// and the phantom-shipped-phases guard reported every shipped phase on every one-off spec as a
+// phantom under that infrastructure fault. The correct state: `branchForGoal` returns the BARE
+// branch name (no `origin/` prefix), leaving the origin-first refresh entirely to the resolver.
+test("branchForGoal: return value MUST NOT start with 'origin/' (Phase 4 — no double-prefix through resolveBranchRefForVerification)", () => {
+  assert.equal(branchForGoal(null).startsWith("origin/"), false);
+  assert.equal(branchForGoal("my-goal").startsWith("origin/"), false);
+  assert.equal(branchForGoal("").startsWith("origin/"), false);
 });
 
 // -- detectPhantomShippedPhases (the detector) --------------------------------------------------
@@ -78,7 +90,7 @@ test("phantom detected: a status=shipped phase whose grep check FAILS on the bra
         ],
       },
     ],
-    resolveTargetBranch: async () => "origin/main",
+    resolveTargetBranch: async () => "main",
     verifyDeps: makeVerifyDeps({
       "symbolFor_phase-1": true, // present on branch
       // "symbolFor_phase-2" ABSENT — phantom
@@ -91,7 +103,11 @@ test("phantom detected: a status=shipped phase whose grep check FAILS on the bra
   assert.equal(r.phantoms.length, 1);
   assert.equal(r.phantoms[0].slug, "my-spec");
   assert.equal(r.phantoms[0].position, 2);
-  assert.equal(r.phantoms[0].branch, "origin/main");
+  assert.equal(
+    r.phantoms[0].branch,
+    "origin/main",
+    "phantom REPORT display keeps the origin-prefixed ref so a human reads 'on origin/main' — the ref actually grepped (the bare 'main' is only for the resolver's origin-first refresh contract)",
+  );
   assert.match(r.phantoms[0].reason, /no match/);
 });
 
@@ -107,7 +123,7 @@ test("clean case: every shipped phase's code is present on the branch → 0 phan
         ],
       },
     ],
-    resolveTargetBranch: async () => "origin/main",
+    resolveTargetBranch: async () => "main",
     verifyDeps: makeVerifyDeps({ "symbolFor_phase-1": true, "symbolFor_phase-2": true }),
   };
   const r = await detectPhantomShippedPhases(deps);
@@ -115,7 +131,7 @@ test("clean case: every shipped phase's code is present on the branch → 0 phan
   assert.equal(r.phantoms.length, 0);
 });
 
-test("goal-bound spec verifies against origin/goal/{goal-slug} — one-off against origin/main", async () => {
+test("goal-bound spec verifies against goal/{goal-slug} (bare) — one-off against main (bare); the phantom report displays the origin-prefixed ref", async () => {
   const branchesUsed: string[] = [];
   const deps: DetectorDeps = {
     listWorkspaces: async () => ["ws-1"],
@@ -128,11 +144,17 @@ test("goal-bound spec verifies against origin/goal/{goal-slug} — one-off again
       branchesUsed.push(`${slug}:${branch}`);
       return branch;
     },
-    verifyDeps: makeVerifyDeps({ "symbolFor_phase-1": true }),
+    // Force both to be phantoms so we can see the report's display shape.
+    verifyDeps: makeVerifyDeps({}),
   };
   const r = await detectPhantomShippedPhases(deps);
-  assert.equal(r.phantoms.length, 0);
-  assert.deepEqual(branchesUsed.sort(), ["spec-a:origin/goal/goal-x", "spec-b:origin/main"]);
+  // The BARE branch is what flows to the verifier (which resolves origin-first internally).
+  assert.deepEqual(branchesUsed.sort(), ["spec-a:goal/goal-x", "spec-b:main"]);
+  // The REPORT keeps the `origin/{name}` display form — that's the ref that was actually grepped.
+  assert.equal(r.phantoms.length, 2);
+  const byId = Object.fromEntries(r.phantoms.map((p) => [p.slug, p.branch]));
+  assert.equal(byId["spec-a"], "origin/goal/goal-x");
+  assert.equal(byId["spec-b"], "origin/main");
 });
 
 test("spec with no shipped phases is skipped (no target-branch resolve, no verify — cheap fast path)", async () => {
@@ -145,7 +167,7 @@ test("spec with no shipped phases is skipped (no target-branch resolve, no verif
     ],
     resolveTargetBranch: async () => {
       resolves++;
-      return "origin/main";
+      return "main";
     },
     verifyDeps: makeVerifyDeps({}),
   };
@@ -163,7 +185,7 @@ test("multi-workspace: the detector fans out over every workspace and aggregates
   const deps: DetectorDeps = {
     listWorkspaces: async () => ["ws-1", "ws-2"],
     listActiveSpecsFor: async (ws) => specsByWs[ws] ?? [],
-    resolveTargetBranch: async () => "origin/main",
+    resolveTargetBranch: async () => "main",
     verifyDeps: makeVerifyDeps({ "symbolFor_phase-1": false }), // both are phantoms
   };
   const r = await detectPhantomShippedPhases(deps);
@@ -175,4 +197,7 @@ test("multi-workspace: the detector fans out over every workspace and aggregates
     "ws-1/spec-a",
     "ws-2/spec-b",
   ]);
+  for (const p of r.phantoms) {
+    assert.equal(p.branch, "origin/main", "report display uses the origin-prefixed ref");
+  }
 });
