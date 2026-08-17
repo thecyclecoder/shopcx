@@ -67,7 +67,7 @@ Two individually-correct pieces of code compose into a silent, indefinite stall.
 **The trace, step by step.**
 
 1. A phase's build session runs to completion on its branch (the commit lands).
-2. `stampPhaseBuilt` and the status flip are separate operations. The stamp *does not* land — a rare-but-real DB drift, the same class the `healed_built_unstamped` reconciler exists to repair.
+2. `stampPhaseBuilt` and the status flip are separate operations. The stamp *does not* land (a missed stamp) — a rare-but-real DB drift, the same class the `healed_built_unstamped` reconciler exists to repair.
 3. That phase keeps deriving `planned` because [[../libraries/specs-table]] `derivePhaseStatus` returns `in_progress` only when `build_sha` is non-null; the whole spec derives `planned` too (rollup).
 4. `queueNextChainedPhase` runs on the next reconcile pass. Historically it did a single `find(status === "planned")`, computed `phaseScopedInstructions(title)`, and then a per-phase dedup query returned null because that phase's own scoped build job existed. The chain never advanced — and every LATER phase (notably an appended `kind='fix'` phase from a security or spec-test gate) was permanently unreachable.
 5. The board detector `detectBuiltNotStamped` ([[../libraries/pipeline-doctor]]) exists for exactly this case. Its `reason` string names "the build ran yet `stampPhaseBuilt` never advanced any phase" — but its old status guard admitted only `derivedStatus === "in_progress"`, and (from step 3) a missed-stamp spec derives `planned`. **The one alarm for the failure was unreachable in precisely the case it names.**
