@@ -10,7 +10,8 @@ Owner-facing browse of the **competitor ads** we found in the ad library for our
 ## UI — list (`/dashboard/research/ads`)
 - **Static | Video** segmented toggle (default **Static** — we research static creative). `media_type` is the clean discriminator (survives the video→analyzed status transition).
 - **Product** `<select>` (All products + the ~6 hero products).
-- A **clean, clickable card grid** (image/keyframe + advertiser + days-running + hook). **No action buttons on the list** — the founder's "don't cram the list view" (CEO 2026-07-20): each card is a `next/link` to the detail page, where the actions live. A `do_not_use` ad renders **dimmed + grayscale** with a red **"don't use"** badge. Video cards carry a `▶ video` badge.
+- **Show hidden (N) toggle** — hidden ads (flagged `do_not_use=true` by the CEO or Max) are hidden by default to unclutter the founder's picking surface. A conditional "Show hidden (N)" checkbox appears in the filter row when `N > 0` hidden ads exist or the toggle is already ON. Toggling ON fetches with `includeHidden=1` and reveals the suppressed cards; revealed do-not-use ads keep their **dimmed + grayscale** styling + red **"don't use"** badge so they visibly read as rejected (re-enablement path intact: click into the detail page and toggle "Use again" to un-flag).
+- A **clean, clickable card grid** (image/keyframe + advertiser + days-running + hook). **No action buttons on the list** — the founder's "don't cram the list view" (CEO 2026-07-20): each card is a `next/link` to the detail page, where the actions live. Video cards carry a `▶ video` badge.
 
 ## UI — detail (`/dashboard/research/ads/[id]`)
 The per-ad detail page: the full creative (large) + hook / mechanism / proof / offer / seed + the **two actions**:
