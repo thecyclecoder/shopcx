@@ -11,7 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { loadCreativeLearningWithRollup } from "./creative-learning";
+import { loadCreativeLearning, loadCreativeLearningWithRollup } from "./creative-learning";
 
 /** Same fake-admin shape the sibling selection-engine.test.ts uses — reads terminate
  *  on `then` with `{data, error}`; `maybeSingle()` is stubbed for the policies read. */
@@ -151,4 +151,55 @@ test("loadCreativeLearningWithRollup: cold-start product returns an empty rollup
 
   assert.deepEqual(learning.byCombinationRollup, []);
   assert.equal(learning.byAngle.size, 0);
+});
+
+// ── dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 2 ────────────────
+// Regression: an UNTRIED treatment (winRate === null) must rank ABOVE a treatment with a
+// LOSING record (winRate === 0, some tests on the board), and BELOW a treatment with a real
+// win rate. Live evidence: Amazing Coffee's `before_after` was 0-for-5 while every other
+// treatment was untried, and the old sort put `before_after` FIRST — so 14 pending creatives
+// re-ran on the exact losing archetype.
+test("bestTreatments — an untried treatment ranks ABOVE a pure loser (0 wins / N losses)", async () => {
+  const admin = makeFakeAdmin({
+    creative_test_outcomes: [
+      { angle_key: "slimming", treatment: "before_after", outcome: "lost" },
+      { angle_key: "slimming", treatment: "before_after", outcome: "lost" },
+      { angle_key: "slimming", treatment: "before_after", outcome: "lost" },
+      { angle_key: "slimming", treatment: "before_after", outcome: "lost" },
+      { angle_key: "slimming", treatment: "before_after", outcome: "lost" },
+    ],
+  });
+  const learning = await loadCreativeLearning(admin as never, "ws-1", "prod-1");
+  const idxBA = learning.bestTreatments.indexOf("before_after");
+  // Every other treatment is untried and must rank ABOVE the 0-for-5 before_after.
+  assert.equal(idxBA, learning.bestTreatments.length - 1, "the 0-for-5 loser ranks LAST");
+  for (const t of ["testimonial", "big_claim", "authority", "advertorial"] as const) {
+    const idxT = learning.bestTreatments.indexOf(t);
+    assert.ok(idxT >= 0 && idxT < idxBA, `untried '${t}' ranks above the loser`);
+  }
+});
+
+test("bestTreatments — a real winner ranks ABOVE untried, and untried above a loser", async () => {
+  const admin = makeFakeAdmin({
+    creative_test_outcomes: [
+      // testimonial: 2 wins / 1 loss  (winRate ~0.67 — real winner)
+      { angle_key: "focus", treatment: "testimonial", outcome: "won" },
+      { angle_key: "focus", treatment: "testimonial", outcome: "won" },
+      { angle_key: "focus", treatment: "testimonial", outcome: "lost" },
+      // before_after: 0 wins / 3 losses (winRate 0 — pure loser)
+      { angle_key: "focus", treatment: "before_after", outcome: "lost" },
+      { angle_key: "focus", treatment: "before_after", outcome: "lost" },
+      { angle_key: "focus", treatment: "before_after", outcome: "lost" },
+      // big_claim, authority, advertorial: untried (no rows)
+    ],
+  });
+  const learning = await loadCreativeLearning(admin as never, "ws-1", "prod-1");
+  const idxWinner = learning.bestTreatments.indexOf("testimonial");
+  const idxLoser = learning.bestTreatments.indexOf("before_after");
+  assert.equal(idxWinner, 0, "the real winner ranks first");
+  assert.equal(idxLoser, learning.bestTreatments.length - 1, "the pure loser ranks last");
+  for (const t of ["big_claim", "authority", "advertorial"] as const) {
+    const idxT = learning.bestTreatments.indexOf(t);
+    assert.ok(idxT > idxWinner && idxT < idxLoser, `untried '${t}' sits between winner and loser`);
+  }
 });

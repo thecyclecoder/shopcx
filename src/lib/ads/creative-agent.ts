@@ -3268,9 +3268,21 @@ async function stockProduct(
         // this creative rather than persist a half-pack.
         // (dahlia-produces-3-placement-multi-copy-creative-pack Phase 2.)
         const packPlan = placementPackPlan();
+        // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 2 — when the
+        // render is a competitor IMITATION (composition transfer + a real design reference), the
+        // source ad's own structure IS the treatment; do NOT overlay our own TREATMENT_STEER
+        // archetype (a picked "before_after" / "testimonial" / "big_claim" line in the prompt)
+        // on top of it. `treatment` is still preserved in the LEDGER (`recordCombinationGenerated`
+        // below) and in the concept-tag mapping (`mapTreatmentToConceptTag`) — we're only
+        // removing it from the PROMPT so the reference ad supplies the archetype instead. The
+        // gate mirrors `buildPrompt`'s own `isImitation` condition (`compositionTransfer &&
+        // hasDesignRef`) so the two stay in lockstep. Own-brand renders (no imitation) keep
+        // today's behaviour exactly.
+        const isImitationRender = plan.useCompositionTransfer && !!plan.designReferenceUrl;
+        const treatmentForPrompt = isImitationRender ? undefined : treatment;
         progress(`Generating the ad image (${treatment}${attempt > 0 ? `, retry ${attempt + 1}` : ""})…`);
         const gen = await generateCreative(workspaceId, brief, {
-          treatment,
+          treatment: treatmentForPrompt,
           designReferenceUrl: plan.designReferenceUrl,
           compositionTransfer: plan.useCompositionTransfer,
           aspectRatio: packPlan.canonical.aspectRatio,
@@ -3315,7 +3327,9 @@ async function stockProduct(
         const siblingRenders: RenderedPlacement[] = [];
         for (const sib of packPlan.siblings) {
           const sibGen = await generateCreative(workspaceId, brief, {
-            treatment,
+            // Phase 2 — sibling placements share the canonical's imitation gate: no TREATMENT_STEER
+            // in the prompt when the source ad supplies the archetype.
+            treatment: treatmentForPrompt,
             designReferenceUrl: plan.designReferenceUrl,
             compositionTransfer: plan.useCompositionTransfer,
             aspectRatio: sib.aspectRatio,
@@ -3825,7 +3839,10 @@ async function stockProduct(
               for (const fmt of failedFormats) {
                 try {
                   const regen = await generateCreative(workspaceId, brief, {
-                    treatment,
+                    // Phase 2 — Max's creative-QC regen shares the same imitation gate as the
+                    // canonical + sibling renders: on an imitation branch the source ad's own
+                    // structure IS the treatment, so TREATMENT_STEER stays out of the prompt.
+                    treatment: treatmentForPrompt,
                     designReferenceUrl: plan.designReferenceUrl,
                     compositionTransfer: plan.useCompositionTransfer,
                     aspectRatio: PLACEMENT_ASPECT[fmt],
