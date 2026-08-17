@@ -102,6 +102,15 @@ interface LaneRow {
   // expand: the full checklist). Phase 1's runner writes both onto the row; Phase 2 surfaces them here.
   session_note?: string | null;
   session_checklist?: SessionChecklistItem[] | null;
+  // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — the ACTIVE actor at each
+  // dispatch boundary of an ad-creative-copy-author ping-pong. The two dispatcher-wrappers in
+  // scripts/builder-worker.ts stamp `agent_jobs.metadata.active_persona = 'ad-creative'` before
+  // dispatching Dahlia's author/revise (or the image-QC turn Dahlia owns), and 'ad-creative-copy-qc'
+  // before dispatching Max's copy-QC. The box card reads this so it can render EXACTLY ONE face
+  // (the current actor) instead of pattern-matching a checklist note that often says nothing useful.
+  // Null on a queued/idle row or a legacy job whose runner never stamped — the card then falls back
+  // to the owning persona (Dahlia for ad-creative-copy-author per KIND_PERSONA_ALIAS).
+  active_persona?: string | null;
   // chained-phase-session-resume Phase 2 — true when this lane's job carried a `claude_session_id` at
   // claim (a chained-phase resume from the prior phase's session, OR a needs_input/needs_approval →
   // queued_resume flip). Written by the box worker's heartbeat; passed through as-is so the lane card
@@ -288,19 +297,37 @@ export async function GET() {
   if (worker?.lanes?.length) {
     const ids = worker.lanes.map((l) => l.job_id).filter(Boolean);
     if (ids.length) {
+      // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — piggy-back on the
+      // existing per-lane enrichment: fetch `metadata` too and pluck `active_persona` off it so
+      // the box card can render the current actor's single face instead of the pre-Phase-3 dual
+      // avatar. Only the ad-creative ping-pong writes this key today; every other kind reads null
+      // and the card falls back to its owning persona (unchanged).
       const { data: cl } = await admin
         .from("agent_jobs")
-        .select("id, session_checklist, session_note")
+        .select("id, session_checklist, session_note, metadata")
         .in("id", ids);
       const checklistById = new Map<string, SessionChecklistItem[] | null>();
       const noteById = new Map<string, string | null>();
-      for (const j of (cl || []) as Array<{ id: string; session_checklist: SessionChecklistItem[] | null; session_note: string | null }>) {
+      const activePersonaById = new Map<string, string | null>();
+      for (const j of (cl || []) as Array<{
+        id: string;
+        session_checklist: SessionChecklistItem[] | null;
+        session_note: string | null;
+        metadata: Record<string, unknown> | null;
+      }>) {
         checklistById.set(j.id, j.session_checklist ?? null);
         noteById.set(j.id, j.session_note ?? null);
+        const rawActive = j.metadata && typeof j.metadata === "object" ? (j.metadata as Record<string, unknown>).active_persona : null;
+        activePersonaById.set(j.id, typeof rawActive === "string" && rawActive.length > 0 ? rawActive : null);
       }
       worker.lanes = worker.lanes.map((l) =>
-        checklistById.has(l.job_id) || noteById.has(l.job_id)
-          ? { ...l, session_checklist: checklistById.get(l.job_id) ?? null, session_note: noteById.get(l.job_id) ?? null }
+        checklistById.has(l.job_id) || noteById.has(l.job_id) || activePersonaById.has(l.job_id)
+          ? {
+              ...l,
+              session_checklist: checklistById.get(l.job_id) ?? null,
+              session_note: noteById.get(l.job_id) ?? null,
+              active_persona: activePersonaById.get(l.job_id) ?? null,
+            }
           : l,
       );
     }

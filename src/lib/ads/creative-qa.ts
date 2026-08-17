@@ -496,14 +496,49 @@ export function computeCopyQcPreCheck(input: CopyQcPreCheckInput): CopyQcPreChec
  *  the child runs as `sandbox: "qc"` on Max via runBoxLane (no ANTHROPIC_API_KEY, minimal env,
  *  PreToolUse gate allows only Read on the exact tmp jpeg path). Any spawn error / cap / timeout
  *  / gate deny surfaces as `isError:true` so runQaCreativeCopyViaBoxSession converts it to a
- *  fail-closed bounce. */
-export type CopyQcSessionDispatcher = (prompt: string, allowedImagePath: string) => Promise<{ resultText: string; isError: boolean }>;
+ *  fail-closed bounce.
+ *
+ *  max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — the dispatcher now
+ *  mirrors the `CopyAuthorSessionDispatcher` resume shape: an optional `resume` pin lets the
+ *  QA runner RESUME the same box session for the one-shot re-ask on a parse_error (cache-warm,
+ *  so Max sees the exact env he built the verdict against without re-paying the full context).
+ *  The returned `sessionId`/`sessionConfigDir` let the QA runner pin the re-ask to the same
+ *  account, and `missingSession` tells it the box lost the session (rare edge — we just settle
+ *  as parse_error rather than trying to rebuild). All three fields are OPTIONAL so a legacy
+ *  dispatcher / a scripted test dispatcher that returns only `{ resultText, isError }` still
+ *  type-checks (missing session info ⇒ no re-ask can be attempted). */
+export type CopyQcSessionDispatcher = (
+  prompt: string,
+  allowedImagePath: string,
+  resume?: { sessionId: string; sessionConfigDir: string | null },
+) => Promise<{
+  resultText: string;
+  isError: boolean;
+  sessionId?: string | null;
+  sessionConfigDir?: string | null;
+  missingSession?: boolean;
+}>;
 
-/** Discriminated outcome the Node lane materializes from Max's session. `ok` carries whatever
- *  Max returned; `dispatch_error` and `pre_check_bounce` (never used today — the pre-check is
- *  advisory here) let a future dispatcher short-circuit without spawning. */
+/** Discriminated outcome the Node lane materializes from Max's session. `ok` carries the parsed
+ *  verdict (the QA runner runs `parseCopyQaVerdict` inline so a re-ask on parse failure lives at
+ *  the SAME boundary, per max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1).
+ *  `parse_error` — the caller emits an audit + treats it as an OUR-SIDE failure so it does not
+ *  consume Dahlia's revise budget. `dispatch_error` — session error / dispatcher throw, same
+ *  OUR-SIDE class. */
 export type CopyQcSessionOutcome =
-  | { kind: "ok"; validator: ValidatorResult; resultText: string }
+  | { kind: "ok"; validator: ValidatorResult; resultText: string; verdict: CopyQaVerdict }
+  | {
+      kind: "parse_error";
+      validator: ValidatorResult;
+      reason: string;
+      /** The FIRST dispatch's raw text (first ~500 chars) so an audit downstream can quote what
+       *  Max actually returned instead of just the reason code. */
+      firstRawHead: string;
+      /** The RE-ASK's raw text (first ~500 chars) when the re-ask ran and also failed to parse.
+       *  Absent when we could not even ATTEMPT a re-ask (no sessionId returned from the first
+       *  dispatch, or a dispatcher error on the re-ask). */
+      secondRawHead?: string;
+    }
   | { kind: "dispatch_error"; validator: ValidatorResult; reason: string };
 
 /** Full input to runQaCreativeCopyViaBoxSession — the pre-check inputs + the tmp jpeg path Max
@@ -566,7 +601,7 @@ export async function runQaCreativeCopyViaBoxSession(
   ]
     .filter((s) => s.length > 0)
     .join("\n\n");
-  let dispatchResult: { resultText: string; isError: boolean };
+  let dispatchResult: Awaited<ReturnType<CopyQcSessionDispatcher>>;
   try {
     dispatchResult = await dispatch(prompt, input.imagePath);
   } catch (err) {
@@ -579,7 +614,111 @@ export async function runQaCreativeCopyViaBoxSession(
   if (dispatchResult.isError) {
     return { kind: "dispatch_error", validator: preCheck.validator, reason: "qa_copy_session_error" };
   }
-  return { kind: "ok", validator: preCheck.validator, resultText: dispatchResult.resultText };
+  const firstText = dispatchResult.resultText ?? "";
+  const firstParsed = parseCopyQaVerdict(firstText, {
+    runTargetTemperature: input.context.audience_temperature,
+  });
+  if (firstParsed.kind === "ok") {
+    return { kind: "ok", validator: preCheck.validator, resultText: firstText, verdict: firstParsed.verdict };
+  }
+  // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — the FIRST dispatch's
+  // verdict didn't parse (the 2026-08-12 Amazing Coffee case: Max returned the image-QC hard_gates
+  // shape). Re-ask his SAME session ONCE, quoting the parse error and restating the required
+  // envelope (top-level `hard_gate_pass` + `hard_gates:{no_fabrication,no_cold_offer,no_competitor_leak,render_ok}`
+  // + `persuasion_score` + `persuasion_rubric` + `verdict_reason`). This is a FORMATTING correction,
+  // not a re-review — the re-ask instructs Max to keep his judgement identical and re-emit ONLY
+  // the envelope. A second failure is a genuine miss; the caller audits it and does not consume
+  // one of Dahlia's revise attempts.
+  const firstRawHead = firstText.slice(0, 500);
+  // We can only RESUME when the first dispatch returned a sessionId. If not (a legacy / scripted
+  // dispatcher that doesn't report session info), settle as parse_error — the audit still fires
+  // downstream, we just cannot cache-warm ask again.
+  const resumeSessionId = dispatchResult.sessionId ?? null;
+  if (!resumeSessionId) {
+    return {
+      kind: "parse_error",
+      validator: preCheck.validator,
+      reason: `copy_qc_parse_error: ${firstParsed.reason} (no session_id to re-ask)`,
+      firstRawHead,
+    };
+  }
+  const resumeConfigDir: string | null = dispatchResult.sessionConfigDir ?? null;
+  const rePrompt = buildCopyQcParseErrorReAskPrompt(firstParsed.reason);
+  let secondDispatch: Awaited<ReturnType<CopyQcSessionDispatcher>>;
+  try {
+    secondDispatch = await dispatch(rePrompt, input.imagePath, {
+      sessionId: resumeSessionId,
+      sessionConfigDir: resumeConfigDir,
+    });
+  } catch (err) {
+    return {
+      kind: "parse_error",
+      validator: preCheck.validator,
+      reason: `copy_qc_parse_error: ${firstParsed.reason}; re_ask_dispatch_threw: ${errText(err)}`,
+      firstRawHead,
+    };
+  }
+  if (secondDispatch.missingSession) {
+    return {
+      kind: "parse_error",
+      validator: preCheck.validator,
+      reason: `copy_qc_parse_error: ${firstParsed.reason}; re_ask_session_lost`,
+      firstRawHead,
+    };
+  }
+  if (secondDispatch.isError) {
+    return {
+      kind: "parse_error",
+      validator: preCheck.validator,
+      reason: `copy_qc_parse_error: ${firstParsed.reason}; re_ask_session_error`,
+      firstRawHead,
+    };
+  }
+  const secondText = secondDispatch.resultText ?? "";
+  const secondParsed = parseCopyQaVerdict(secondText, {
+    runTargetTemperature: input.context.audience_temperature,
+  });
+  if (secondParsed.kind === "ok") {
+    return { kind: "ok", validator: preCheck.validator, resultText: secondText, verdict: secondParsed.verdict };
+  }
+  return {
+    kind: "parse_error",
+    validator: preCheck.validator,
+    reason: `copy_qc_parse_error: ${firstParsed.reason}; re_ask_parse_error: ${secondParsed.reason}`,
+    firstRawHead,
+    secondRawHead: secondText.slice(0, 500),
+  };
+}
+
+/** max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — the short re-ask body
+ *  the QA runner hands Max on a parse_error. Pure + exported so a unit test can pin the exact
+ *  bytes; the message names the parse error verbatim and restates the required envelope. Kept
+ *  short (RESUME turns are cache-warm; the whole context Max already saw is on the session). */
+export function buildCopyQcParseErrorReAskPrompt(parseReason: string): string {
+  return [
+    "The previous JSON envelope you emitted could not be parsed:",
+    `  parse_error_reason: ${parseReason}`,
+    "",
+    "Do NOT re-review the creative. Keep your judgement identical and re-emit ONLY the envelope in the correct shape:",
+    "",
+    "REQUIRED shape (all keys lowercase snake_case; hard_gates carries these four boolean keys):",
+    "  {",
+    '    "hard_gate_pass": <boolean>,',
+    '    "hard_gates": {',
+    '      "no_fabrication": <boolean>,',
+    '      "no_cold_offer": <boolean>,',
+    '      "no_competitor_leak": <boolean>,',
+    '      "render_ok": <boolean>',
+    "    },",
+    '    "persuasion_score": <number 0..10, or null on a hard-gate fail>,',
+    '    "persuasion_rubric": { "lf8": <number>, "schwartz": <number>, "cialdini": <number>, "hopkins": <number>, "sugarman": <number>, "evidence": [<string>, ...] },',
+    '    "verdict_reason": "<one-line human sentence naming what you saw>"',
+    "  }",
+    "",
+    "REJECT the alternate image-QC hard_gates spelling (`pass` / `noFabricatedPhotoCaption` / `transformationPhotorealistic` / `headlineExact` / `textLegible` / `noBarePrice`) — those keys belong to the IMAGE-QC contract, not the COPY-QC contract, and will not parse here.",
+    "",
+    "Emit ONLY the JSON object, no prose before or after.",
+  ].join("\n");
 }
 
 // ── Max copy-QC verdict — TS type + strict-JSON parser + SDK persistence ───────────────────────

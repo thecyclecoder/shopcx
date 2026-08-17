@@ -1,0 +1,1 @@
+- **Pax never reports "nothing to resolve" on a PR state it could not read** · verified 2026-08-17 · → [[../libraries/github-pr-resolve]]

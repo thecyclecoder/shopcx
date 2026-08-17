@@ -1725,6 +1725,38 @@ export function nextPhaseToBuild<T extends { status: string; build_sha?: string 
   return phases.find((p) => p.status === "planned" && !p.build_sha);
 }
 
+/**
+ * ⭐ unstamped-phase-cannot-silently-strand-a-build Phase 2 — the pure ORDERED SCAN behind
+ * `queueNextChainedPhase`. Walks the caller's ordered planned-phase titles and returns the FIRST
+ * whose `phaseScopedInstructions(title)` is NOT already present in `existingInstructions` (the
+ * set of `instructions` strings on this spec's build jobs). Returns null when every planned phase
+ * already has a matching build job — the chain is complete for the reachable set.
+ *
+ * WHY THIS EXISTS. Even after `nextPhaseToBuild` skips a phase whose `build_sha` is set, one wedge
+ * remains: a phase whose build ran to completion but `stampPhaseBuilt` never landed reads
+ * `planned` + `build_sha=null`, and its scoped build job exists in `agent_jobs`. The OLD
+ * `queueNextChainedPhase` did a single `find(status === 'planned')`, saw the matching build job,
+ * bailed on the DEDUP, and returned null — every LATER phase (notably an appended fix phase from
+ * a security or spec-test gate) became permanently unreachable. Verified live on the
+ * card-removal spec: its 2026-08-16 20:38 build job carried `phaseScopedInstructions('P1 —
+ * implement the fix')` byte-for-byte while P1's `build_sha` was null; the appended fix phase at
+ * position 2 was never considered, and the PR sat 17h with a real credential leak. This helper
+ * turns the single-find into an ordered scan so a missed stamp costs a SKIPPED phase, not the
+ * whole spec.
+ *
+ * Pure — no DB, no I/O; testable in isolation (same shape `pickChargeableVaultedPm` uses in
+ * `action-executor.vaulted-pm-guard.test.ts`).
+ */
+export function selectNextUnbuiltPlannedPhase(
+  orderedPlannedTitles: readonly string[],
+  existingInstructions: ReadonlySet<string>,
+): string | null {
+  for (const title of orderedPlannedTitles) {
+    if (!existingInstructions.has(phaseScopedInstructions(title))) return title;
+  }
+  return null;
+}
+
 export function phasesToStampBuiltOnGoalMerge(
   phases: { position: number; status: string; build_sha: string | null }[],
 ): number[] {
@@ -3749,24 +3781,50 @@ export async function queueNextChainedPhase(workspaceId: string, slug: string): 
   // `build_sha` is the branch flow's authoritative "this phase is done building" signal — the SAME predicate
   // `isSpecAccumulationComplete` and `phasesToStampBuiltOnGoalMerge` key on — so skipping a build_sha'd phase
   // is correct by construction: its code is already on the branch. This makes the three agree.
-  const next = nextPhaseToBuild(spec.card.phases);
-  if (!next) return null; // no un-built ⏳ phase left → the chain is complete (all phases built/terminal)
-  const scoped = phaseScopedInstructions(next.title);
-
+  // ⭐ unstamped-phase-cannot-silently-strand-a-build Phase 2 — turn the OLD single-find + dup=bail into an
+  // ORDERED SCAN so a missed stamp costs a skipped phase, not the whole spec. `nextPhaseToBuild` above
+  // already handles the stamped-built-on-branch case (build_sha set, status still planned). The remaining
+  // wedge is a phase whose stamp NEVER landed — its build job exists but `build_sha` is null; the old code
+  // picked it, matched its own scoped build job in the dedup below, and bailed — every LATER phase
+  // (notably an appended security/spec-test fix phase) was permanently unreachable. See the card-removal
+  // incident in `selectNextUnbuiltPlannedPhase` above.
+  const plannedCandidates = spec.card.phases.filter((p) => p.status === "planned" && !p.build_sha);
+  if (!plannedCandidates.length) return null; // no un-built ⏳ phase left → the chain is complete
   const admin = createAdminClient();
-  // Idempotency: never (re-)queue a phase that already has a build job (any status). Covers a re-run on a
-  // later board load, an in-flight build of this phase, AND the narrow race where a few-seconds-stale `main`
-  // read still shows the just-merged phase as ⏳ — the just-merged job carries this exact scoped instruction,
-  // so it matches here and we skip rather than rebuilding the phase we just shipped.
-  const { data: dup } = await admin
+  // Read this spec's build-job instructions ONCE (in place of the per-phase dup query below). The set
+  // subsumes the old idempotency check: a phase whose scoped instruction is already in the set is either
+  // the just-merged phase (race between the stale `main` read and this call), an in-flight build, or the
+  // missed-stamp wedge — all three should be skipped in favor of the next un-instructed phase.
+  const { data: buildJobs } = await admin
     .from("agent_jobs")
-    .select("id")
+    .select("instructions")
     .eq("workspace_id", workspaceId)
     .eq("spec_slug", slug)
-    .eq("kind", "build")
-    .eq("instructions", scoped)
-    .limit(1);
-  if (dup && dup.length) return null;
+    .eq("kind", "build");
+  const existingInstructions = new Set<string>(
+    (buildJobs ?? [])
+      .map((j) => (j as { instructions: string | null }).instructions ?? "")
+      .filter((s) => s.length > 0),
+  );
+  const orderedTitles = plannedCandidates.map((p) => p.title);
+  const nextTitle = selectNextUnbuiltPlannedPhase(orderedTitles, existingInstructions);
+  if (!nextTitle) return null; // every planned candidate already carries a build job → complete for reachable set
+  // Log every phase the scan skips before landing on `nextTitle` — the log-level surface for the SAME
+  // condition the built-not-stamped board detector (Phase 1) alarms on, so the miss is never silent even
+  // when the operator isn't watching the board.
+  for (const p of spec.card.phases) {
+    const title = p.title;
+    if (title === nextTitle) break;
+    if (p.status !== "planned" || p.build_sha) continue;
+    if (existingInstructions.has(phaseScopedInstructions(title))) {
+      const position = spec.card.phases.indexOf(p) + 1;
+      console.warn(
+        `[chain-advance] ${slug}: skipping planned phase #${position} "${title}" — it reads planned but already has a matching build job, which is a missed stamp. Advancing to "${nextTitle}".`,
+      );
+    }
+  }
+  const next = plannedCandidates.find((p) => p.title === nextTitle)!;
+  const scoped = phaseScopedInstructions(next.title);
   // Don't stack on any other in-flight build for this spec (e.g. a manual build running concurrently).
   const { data: active } = await admin
     .from("agent_jobs")

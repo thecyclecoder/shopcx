@@ -36,6 +36,14 @@ interface LaneRow {
   // /api/roadmap/box. Null on a session that hasn't yet emitted a TodoWrite (or a pre-Phase-1 row).
   session_note?: string | null;
   session_checklist?: SessionChecklistItem[] | null;
+  // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — the ACTIVE actor at
+  // each dispatch boundary of an ad-creative-copy-author ping-pong. Written by the two
+  // dispatcher-wrappers in scripts/builder-worker.ts as `agent_jobs.metadata.active_persona`
+  // ('ad-creative' for Dahlia's author/revise + image-QC; 'ad-creative-copy-qc' for Max's
+  // copy-QC turn). The card renders EXACTLY ONE face driven off this stamp instead of
+  // pattern-matching a checklist note. Null on a queued / idle / legacy row — the card falls
+  // back to the OWNING persona (Dahlia per KIND_PERSONA_ALIAS['ad-creative-copy-author']).
+  active_persona?: string | null;
   // chained-phase-session-resume Phase 2 — true when this lane's job started as a RESUME of a prior
   // claude -p session (chained-phase carry-forward, or a mid-run queued_resume flip = cache-warm), false
   // when it started FRESH (cache-cold). The card renders a small `resumed`/`fresh` chip on build lanes
@@ -254,45 +262,50 @@ function personaForKind(kind: string, directorFunction?: string | null) {
   return kind === "platform-director" ? getPersona("platform") : getPersona(kind);
 }
 
-// box-page-both-avatars-ping-pong Phase 1 — an ad-creative-copy-author session is a PING-PONG: Dahlia
-// (ad-creative) authors a creative, then Max (ad-creative-copy-qc / growth grader) independently grades
-// it, bouncing back and forth across the revise loop under ONE parent job. The card renders BOTH avatars
-// so the collaboration is visible at a glance — otherwise it reads as one long single-agent Dahlia
-// session. Every other kind falls back to the single-avatar path via the caller's `dual ?? single`
-// compose.
-function pingPongInfo(
-  kind: string,
-): { personas: [AgentPersona, AgentPersona]; title: string; label: string } | null {
+// max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — the ad-creative-copy-author
+// lane now renders exactly ONE face (an ACTOR-DRIVEN single-face resolver + a text-only label chip)
+// instead of the earlier dual-avatar render. Rationale from the spec's Why:
+//
+//   'The CEO's read of the Build Box card is "one session with two people in it". The truth is a job
+//    that hands control back and forth between two separate sessions, one at a time. Showing both
+//    faces at once hides which one is actually working — and it hid the fact that Max's half of the
+//    8/12 run produced nothing usable. The card should name the actor, always.'
+//
+// The earlier `activePingPongPersona` regex-matched the session checklist and returned null whenever
+// it couldn't tell — which was most of the time, because notes like 'Generating the ad image…' and
+// 'Checking the image quality…' matched neither branch. That null produced the permanent both-faces
+// render. Now the resolver reads the worker-stamped `metadata.active_persona` (written by the two
+// dispatcher-wrappers in scripts/builder-worker.ts at every dispatch boundary), which is
+// authoritative because it names exactly which sub-session the deterministic Node code just handed
+// control to. On a queued / idle / legacy row (no stamp) we fall back to the OWNING persona (Dahlia
+// per KIND_PERSONA_ALIAS['ad-creative-copy-author']) — the card ALWAYS shows one face for this kind,
+// never two. The retired fused-pre-merge Vera + Vault path is deliberately not represented here:
+// spec-test shows Vera alone and Vault runs as a separate security-review lane.
+
+/** Short label describing the ping-pong pairing for the label chip. `null` for any kind that is
+ *  not an ad-creative ping-pong; the caller elides the chip. Keeps the ping-pong composition
+ *  legible in text while the avatar shows only the current actor (per the spec's Phase 3 §7). */
+function pingPongLabel(kind: string): string | null {
   if (kind !== "ad-creative-copy-author") return null;
-  return {
-    personas: [getPersona("ad-creative"), getPersona("ad-creative-copy-qc")],
-    title: "Dahlia → Max · ad-creative ping-pong",
-    label: "author · copy-QC",
-  };
+  return "ad-creative ping-pong";
 }
 
-// box-page-both-avatars-ping-pong Phase 2 — while the parent ad-creative-copy-author job is a ping-pong,
-// only ONE sub-session is running at a time (Dahlia authoring OR Max grading). Phase 1 streams a
-// checklist from those sessions; whichever item is `in_progress` names the currently-active actor
-// (author/authoring/revise/revising → Dahlia; grade/grading/copy-qc/score → Max). Return that persona so
-// the card can render the single ACTIVE photo instead of the dual-avatar fallback — the ping-pong is
-// then legible at a glance both in composition (via the dual title/label chip from `dual`) AND in the
-// current actor. Return null when there's no unambiguous signal (idle, no checklist yet, or a step whose
-// text doesn't map to either persona) so the caller falls back to the dual (both-avatar) render.
+/** Resolve the ACTIVE face for an ad-creative-copy-author lane / queued job. Returns the persona
+ *  named by the worker-stamped `metadata.active_persona` (`'ad-creative'` → Dahlia, `'ad-creative-copy-qc'`
+ *  → Max). Falls back to the OWNING persona (Dahlia) when unstamped — a queued row, an idle spot
+ *  between dispatches, or a legacy row whose runner never wrote the key. NEVER returns two faces:
+ *  the pre-Phase-3 both-avatar render for this kind is retired. Returns `null` for any other kind
+ *  so its normal single-persona path stays byte-identical. */
 function activePingPongPersona(
   kind: string,
-  checklist: SessionChecklistItem[] | null | undefined,
+  activePersona: string | null | undefined,
 ): AgentPersona | null {
   if (kind !== "ad-creative-copy-author") return null;
-  if (!checklist || checklist.length === 0) return null;
-  const inProgress = checklist.find((c) => c.status === "in_progress");
-  if (!inProgress) return null;
-  const text = `${inProgress.step} ${inProgress.note}`.toLowerCase();
-  // Match Max markers first — the copy-QC grader — so a "Max grade" step doesn't accidentally hit the
-  // Dahlia branch on the word "copy" (author/authoring/revise/revising = Dahlia is the fallback branch).
-  if (/\b(max|grade|grading|copy-?qc|qc|score)\b/.test(text)) return getPersona("ad-creative-copy-qc");
-  if (/\b(dahlia|author|authoring|revise|revising)\b/.test(text)) return getPersona("ad-creative");
-  return null;
+  if (activePersona === "ad-creative-copy-qc") return getPersona("ad-creative-copy-qc");
+  if (activePersona === "ad-creative") return getPersona("ad-creative");
+  // Unstamped / older row / idle: render the OWNING persona (Dahlia via KIND_PERSONA_ALIAS)
+  // so a single face still shows. This is the "the card should name the actor, always" rail.
+  return getPersona(kind);
 }
 
 function LaneCell({ lane }: { lane: LaneRow | null }) {
@@ -309,41 +322,27 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
   const isCoach = lane.kind === "director-coach";
   const persona = personaForKind(lane.kind, lane.director_function);
   const gc = gradeCoachInfo(lane.kind, lane.director_function); // grade/coach kinds → "Ada Grading" etc.
-  // A card renders BOTH personas' avatars when the session has two collaborators: an
-  // ad-creative-copy-author ping-pong (Dahlia authors + Max independently grades under ONE parent job
-  // across the revise loop) renders dual-avatar + a dual title + a static sub-task label chip; every
-  // other kind falls back to the single-avatar / single-persona path. The spec-test lane is Vera's
-  // deterministic run alone; Vault's security review is its own separate lane with his own face.
-  const dual = pingPongInfo(lane.kind);
-  // box-page-both-avatars-ping-pong Phase 2 — when Phase 1's checklist names an in-progress step whose
-  // text unambiguously maps to Dahlia (authoring/revising) or Max (grading), swap the ping-pong card's
-  // avatar to that persona's single photo so the currently-active actor is visible at a glance. Null
-  // (idle, no checklist, ambiguous step) means the card keeps the dual (both-avatar) fallback below.
-  const active = activePingPongPersona(lane.kind, lane.session_checklist);
-  const title = dual
-    ? dual.title
-    : isCoach
-      ? (lane.intent === "coach" ? `Coaching ${persona.name}` : `Asking ${persona.name}`)
-      : gc
-        ? `${persona.name} ${gc.verb}`
-        : persona.name;
+  // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — the ad-creative ping-pong is
+  // two sub-sessions handing control back and forth, never both at once. Render one active face from the
+  // worker-stamped `metadata.active_persona`, falling back to the owning persona (Dahlia) when unstamped.
+  // The retired fused-pre-merge Vera + Vault path is intentionally gone; spec-test shows Vera alone.
+  const active = activePingPongPersona(lane.kind, lane.active_persona);
+  const pingPongChip = pingPongLabel(lane.kind);
+  const title = active
+      ? active.name
+      : isCoach
+        ? (lane.intent === "coach" ? `Coaching ${persona.name}` : `Asking ${persona.name}`)
+        : gc
+          ? `${persona.name} ${gc.verb}`
+          : persona.name;
   const action = isCoach ? "with the CEO" : KIND_ACTION[lane.kind] ?? "working on";
   return (
     <div className="flex min-h-[88px] flex-col gap-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-      {/* Row 1: avatar + name (full width — no longer truncated by the chips) + elapsed time. A dual-
-          persona lane (ad-creative ping-pong) shows BOTH avatars side-by-side, unless the ping-pong is
-          currently mid-flight AND Phase 1's checklist unambiguously names the active actor — then a
-          single ACTIVE avatar swaps in (title/label chip below still reflect the dual composition so
-          the ping-pong context stays visible in text). Every other lane keeps its single avatar. */}
+      {/* Row 1: avatar + name (full width — no longer truncated by the chips) + elapsed time. */}
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5">
           {active ? (
             <PersonaAvatar persona={active} size={20} />
-          ) : dual ? (
-            <span className="flex shrink-0 items-center -space-x-2">
-              <PersonaAvatar persona={dual.personas[0]} size={20} />
-              <PersonaAvatar persona={dual.personas[1]} size={20} />
-            </span>
           ) : (
             <PersonaAvatar persona={persona} size={20} />
           )}
@@ -351,14 +350,15 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
         </span>
         <span className="shrink-0 text-[11px] tabular-nums text-zinc-400">{elapsed(lane.since)}</span>
       </div>
-      {/* Row 2: the kind chip + the Round Robin account, indented under the name (off the cramped header).
-          A dual-persona lane appends a static sub-task label so the card reads correctly with NO
-          session_checklist (Codex has no TodoWrite; the copy-QC bounce is fast). */}
+      {/* Row 2: the kind chip + the Round Robin account, indented under the name (off the cramped header). */}
       <div className="mt-1 flex flex-wrap items-center gap-1.5 pl-[26px]">
         <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[lane.kind] || KIND_CHIP.build}`}>{lane.kind}</span>
-        {dual && (
+        {/* max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — the ping-pong
+            is legible in the LABEL rather than the avatar: the chip names the pairing (e.g.
+            'ad-creative ping-pong') while the photo above shows only the current actor. */}
+        {pingPongChip && (
           <span className="shrink-0 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
-            {dual.label}
+            {pingPongChip}
           </span>
         )}
         {lane.account && (
@@ -609,28 +609,24 @@ function QueuedJobsLog({ jobs }: { jobs: Job[] }) {
           {jobs.map((j) => {
             const persona = personaForKind(j.kind, j.director_function);
             const gc = gradeCoachInfo(j.kind, j.director_function); // grade/coach kinds → "Ada Grading" etc.
-            // A queued dual-persona job (ad-creative-copy-author ping-pong) renders both personas + a
-            // dual title, same as the in-flight lane treatment.
-            const dual = pingPongInfo(j.kind);
+            // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — queued
+            // ad-creative-copy-author jobs no longer render a dual avatar. A queued job hasn't
+            // started, so no `metadata.active_persona` is stamped yet; the card shows the OWNING
+            // persona (Dahlia, per KIND_PERSONA_ALIAS['ad-creative-copy-author']) plus a label chip
+            // that names the pairing. The retired fused-pre-merge dual-avatar path is not rendered.
+            const pingPongChip = pingPongLabel(j.kind);
             // A queued job's slug is only a real spec page for the spec-slug kinds (and not if it was folded).
             const slugIsLink = SPEC_SLUG_KINDS.has(j.kind) && !j.spec_missing;
             return (
               <li key={j.id} className="flex items-center gap-2.5 px-3 py-2">
-                {dual ? (
-                  <span className="flex shrink-0 items-center -space-x-2">
-                    <PersonaAvatar persona={dual.personas[0]} size={20} />
-                    <PersonaAvatar persona={dual.personas[1]} size={20} />
-                  </span>
-                ) : (
-                  <PersonaAvatar persona={persona} size={20} />
-                )}
-                <span className="shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{dual ? dual.title : gc ? `${persona.name} ${gc.verb}` : persona.name}</span>
+                <PersonaAvatar persona={persona} size={20} />
+                <span className="shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{gc ? `${persona.name} ${gc.verb}` : persona.name}</span>
                 <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[j.kind] || KIND_CHIP.build}`}>
                   {j.kind}
                 </span>
-                {dual && (
+                {pingPongChip && (
                   <span className="shrink-0 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
-                    {dual.label}
+                    {pingPongChip}
                   </span>
                 )}
                 {slugIsLink ? (
