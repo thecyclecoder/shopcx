@@ -286,26 +286,25 @@ function fusedPreMergeInfo(
   };
 }
 
-// max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — REPLACED the pre-Phase-3
-// dual-avatar `pingPongInfo` (which rendered BOTH Dahlia + Max avatars whenever the parent job kind
-// was `ad-creative-copy-author`) with an ACTOR-DRIVEN single-face resolver + a text-only label
-// chip. Rationale from the spec's Why:
+// max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — the ad-creative-copy-author
+// lane now renders exactly ONE face (an ACTOR-DRIVEN single-face resolver + a text-only label chip)
+// instead of the earlier dual-avatar render. Rationale from the spec's Why:
 //
 //   'The CEO's read of the Build Box card is "one session with two people in it". The truth is a job
 //    that hands control back and forth between two separate sessions, one at a time. Showing both
 //    faces at once hides which one is actually working — and it hid the fact that Max's half of the
 //    8/12 run produced nothing usable. The card should name the actor, always.'
 //
-// The pre-Phase-3 `activePingPongPersona` regex-matched the session checklist and returned null
-// whenever it couldn't tell — which was most of the time, because notes like 'Generating the ad
-// image…' and 'Checking the image quality…' matched neither branch. That null produced the
-// permanent both-faces render. Now the resolver reads the worker-stamped `metadata.active_persona`
-// (written by the two dispatcher-wrappers in scripts/builder-worker.ts at every dispatch boundary),
-// which is authoritative because it names exactly which sub-session the deterministic Node code
-// just handed control to. On a queued / idle / legacy row (no stamp) we fall back to the OWNING
-// persona (Dahlia per KIND_PERSONA_ALIAS['ad-creative-copy-author']) — the card ALWAYS shows one
-// face for this kind, never two. The fused-pre-merge lane (Vera + Vault) is a genuinely
-// simultaneous two-agent session and KEEPS its dual render via `fusedPreMergeInfo`.
+// The earlier `activePingPongPersona` regex-matched the session checklist and returned null whenever
+// it couldn't tell — which was most of the time, because notes like 'Generating the ad image…' and
+// 'Checking the image quality…' matched neither branch. That null produced the permanent both-faces
+// render. Now the resolver reads the worker-stamped `metadata.active_persona` (written by the two
+// dispatcher-wrappers in scripts/builder-worker.ts at every dispatch boundary), which is
+// authoritative because it names exactly which sub-session the deterministic Node code just handed
+// control to. On a queued / idle / legacy row (no stamp) we fall back to the OWNING persona (Dahlia
+// per KIND_PERSONA_ALIAS['ad-creative-copy-author']) — the card ALWAYS shows one face for this
+// kind, never two. The fused-pre-merge lane (Vera + Vault) is a genuinely simultaneous two-agent
+// session and KEEPS its dual render via `fusedPreMergeInfo`.
 
 /** Short label describing the ping-pong pairing for the label chip. `null` for any kind that is
  *  not an ad-creative ping-pong; the caller elides the chip. Keeps the ping-pong composition
