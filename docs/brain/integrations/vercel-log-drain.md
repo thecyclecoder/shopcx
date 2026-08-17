@@ -2,7 +2,7 @@
 
 **Retired 2026-08-12** — replaced by an in-process Next.js hook. Prod runtime errors reach the Control Tower "Vercel errors" panel via `instrumentation.ts` → `onRequestError` → `recordError` (`source='vercel'`), NOT a Vercel log drain.
 
-**Capture:** `src/instrumentation.ts` (`onRequestError`) · records via [[../libraries/control-tower]] (`error-feed.ts` → `recordError`, `source='vercel'`) · panel: [[../dashboard/control-tower]] · rail: `scripts/_check-no-self-pointing-log-drain.ts` (wired into `predeploy:static`) · parent spec: [[../specs/replace-log-drain-with-in-process-onrequesterror]].
+**Capture:** `src/instrumentation.ts` (`onRequestError`) · records via [[../libraries/control-tower]] (`error-feed.ts` → `recordError`, `source='vercel'`) · panel: [[../dashboard/control-tower]] · rail: `scripts/_check-no-self-pointing-log-drain.ts` (wired into `predeploy:static`, uses [[../libraries/vercel-drain-redact]] for safe diagnostic printing) · parent spec: [[../specs/replace-log-drain-with-in-process-onrequesterror]].
 
 ## The limitation (stated first, plainly)
 
@@ -47,8 +47,8 @@ The drain endpoint was `https://shopcx.ai/api/webhooks/vercel-logs` — the same
 - Degrades to skip (exit 0) on a Vercel-API read failure — a transient upstream is not a self-pointing drain.
 - Prints the cost arithmetic on failure so whoever trips it sees the stakes immediately.
 
-A **disabled** drain is still a configured drain someone can flip back on — the rail treats disabled and enabled the same. The `_delete-self-pointing-vercel-drain.ts` one-off in `scripts/` removes the retired `drn_kQkATjjmtVrTnRrj` ("SHOPCX Control Tower") drain via the Vercel API.
+A **disabled** drain is still a configured drain someone can flip back on — the rail treats disabled and enabled the same. The `_delete-self-pointing-vercel-drain.ts` one-off in `scripts/` removes the retired `drn_kQkATjjmtVrTnRrj` ("SHOPCX Control Tower") drain via the Vercel API, using [[../libraries/vercel-drain-redact]] (`summarizeDrain`) to safely print the operation to CI logs.
 
 ## Related
 
-[[../specs/replace-log-drain-with-in-process-onrequesterror]] · [[../libraries/control-tower]] · [[../tables/error_events]] · [[../inngest/inngest-failure-capture]] · [[../dashboard/control-tower]] · [[../libraries/notify-ops-alert]]
+[[../specs/replace-log-drain-with-in-process-onrequesterror]] · [[../libraries/control-tower]] · [[../libraries/vercel-drain-redact]] · [[../tables/error_events]] · [[../inngest/inngest-failure-capture]] · [[../dashboard/control-tower]] · [[../libraries/notify-ops-alert]]
