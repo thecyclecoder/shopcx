@@ -31,6 +31,7 @@ import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import {
   AUTO_TESTABLE_EXEC_KINDS,
+  shouldGrepCaseInsensitively,
   validateExecutableCheck,
   type SpecPhaseCheckExecKind,
   type SpecPhaseCheckParams,
@@ -331,9 +332,17 @@ async function runCmd(
  * starting with `-` cannot be re-parsed as an option, and the user-controlled path is placed after
  * an argv separator `--` so even a validated path cannot be interpreted by ripgrep as a flag or a
  * `--pre=`-style preprocessor. `validateExecutableCheck` is the primary gate; this is the belt.
+ *
+ * smart-case: prepend `-i` when [[spec-phase-checks-table]] `shouldGrepCaseInsensitively` returns
+ * true (an all-lowercase pattern is a prose phrase whose source-casing the author cannot know). We
+ * deliberately do NOT use ripgrep's `-S`/`--smart-case` flag — the predicate is the single source
+ * of truth so the merge-gate `git grep` lane (which has no `--smart-case` available) cannot drift.
  */
 export function buildGrepArgv(params: GrepCheckParams): string[] {
-  return ["-e", params.pattern, "--", params.path ?? "."];
+  const args: string[] = [];
+  if (shouldGrepCaseInsensitively(params.pattern)) args.push("-i");
+  args.push("-e", params.pattern, "--", params.path ?? ".");
+  return args;
 }
 
 /**
@@ -428,9 +437,10 @@ export const defaultExecutors: CheckExecutors = {
     }
     const found = r.code === 0;
     const ok = params.expect === "present" ? found : !found;
+    const smartCase = shouldGrepCaseInsensitively(params.pattern) ? " [smart-case: -i]" : "";
     return {
       ok,
-      evidence: `ripgrep '${params.pattern}' ${params.path ?? "."} — ${found ? "match(es) found" : "no match"} (expect=${params.expect})`,
+      evidence: `ripgrep '${params.pattern}' ${params.path ?? "."}${smartCase} — ${found ? "match(es) found" : "no match"} (expect=${params.expect})`,
     };
   },
   ci_status: async ({ repoRoot }) => {

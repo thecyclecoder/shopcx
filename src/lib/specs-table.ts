@@ -37,7 +37,7 @@ import { spawn } from "node:child_process";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import type { Phase } from "@/lib/brain-roadmap";
-import type { GrepCheckParams } from "@/lib/spec-phase-checks-table";
+import { shouldGrepCaseInsensitively, type GrepCheckParams } from "@/lib/spec-phase-checks-table";
 
 export type { Phase } from "@/lib/brain-roadmap";
 
@@ -1558,7 +1558,15 @@ async function defaultRunGitGrepOnBranch(
   if (!refTrim || refTrim.startsWith("-") || refTrim.includes("\0") || /\s/.test(refTrim)) {
     return { ok: false, evidence: `refused unsafe branchRef '${branchRef}'` };
   }
-  const args: string[] = ["grep", "-l", "-E", "-e", params.pattern, refTrim];
+  // smart-case: `git grep` has no `--smart-case` flag, so emulate it by adding `-i` when the shared
+  // [[spec-phase-checks-table]] `shouldGrepCaseInsensitively` predicate says so. The predicate is
+  // the sole source of truth — both this lane and the deterministic runner's ripgrep lane
+  // ([[spec-check-runner]] `buildGrepArgv`) route through it, so a check cannot pass one lane and
+  // fail the other over a casing difference.
+  const smart = shouldGrepCaseInsensitively(params.pattern);
+  const args: string[] = ["grep", "-l", "-E"];
+  if (smart) args.push("-i");
+  args.push("-e", params.pattern, refTrim);
   if (params.path) {
     args.push("--", params.path);
   }
@@ -1573,9 +1581,10 @@ async function defaultRunGitGrepOnBranch(
   }
   const found = r.code === 0;
   const ok = params.expect === "present" ? found : !found;
+  const smartCase = smart ? " [smart-case: -i]" : "";
   return {
     ok,
-    evidence: `git grep '${params.pattern}' on ${refTrim}${params.path ? " -- " + params.path : ""} — ${found ? "match(es) found" : "no match"} (expect=${params.expect})`,
+    evidence: `git grep '${params.pattern}' on ${refTrim}${params.path ? " -- " + params.path : ""}${smartCase} — ${found ? "match(es) found" : "no match"} (expect=${params.expect})`,
   };
 }
 
