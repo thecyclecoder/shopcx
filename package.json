@@ -79,6 +79,7 @@
     "test:meta-insights-inline-link-clicks": "tsx --test src/lib/meta/performance.inline-link-clicks.test.ts",
     "test:insights-per-copy-mode": "tsx --test src/lib/media-buyer/insights.per-copy-mode.test.ts",
     "test:ads-lf8": "tsx --test src/lib/ads/lf8.test.ts",
+    "test:amazon-pack-dimensions": "tsx --test src/lib/amazon/pack-dimensions.test.ts",
     "test:copy-rubric": "tsx --test src/lib/ads/copy-rubric.test.ts",
     "test:sophistication": "tsx --test src/lib/ads/sophistication.test.ts",
     "test:market-sophistication": "tsx --test src/lib/ads/market-sophistication.test.ts",
