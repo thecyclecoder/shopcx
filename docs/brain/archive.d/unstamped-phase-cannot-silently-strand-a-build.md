@@ -1,0 +1,1 @@
+- **A phase that builds but loses its stamp must not silently strand the spec forever** · verified 2026-08-17 · → [[lifecycles/spec-build-pipeline]]
