@@ -2189,13 +2189,38 @@ export function buildCopyQcPromptPreamble(input: {
  *  pure so a unit test can pin the exact bytes; feeds `buildCopyAuthorRevisePrompt` which
  *  runs it through `sanitizeReviseReason` at the choke-point (identical guard as the firewall /
  *  validator reasons — no interpolation of untrusted strings the model could weaponize as
- *  instructions). Format is one-line, ≤ ~500 chars: `max_qc_below_floor: <verdict_reason>
- *  (score=N, floor=M)[; hard_gates_failed=<names>][; persuasion_gaps=<axis:reason,…>]` — floor
- *  is `MAX_QC_ELIGIBILITY_FLOOR` (currently 9 after bianca-posts-only-at-9of10 Phase 1). The
- *  hard-gate list and persuasion-gap list are elided when empty so Dahlia sees only the
- *  critiques that actually apply. A NULL verdict (Max session dispatch/parse miss) yields the
- *  distinct `max_qc_verdict_missed` prefix so operators can slice miss rates apart from a
- *  legitimate below-floor bounce. */
+ *  instructions). Format is one line:
+ *    `max_qc_below_floor: <verdict_reason> (score=N, floor=M)[; hard_gates_failed=<names>]`
+ *    `[; render_critiques=<format>: <finding>[ | <finding>...][ · <format>: ...]]`
+ *    `[; persuasion_gaps=<axis:reason>,…]`
+ *  Floor is `MAX_QC_ELIGIBILITY_FLOOR` (currently 9 after bianca-posts-only-at-9of10 Phase 1).
+ *  The hard-gate list, render-critique list, and persuasion-gap list are all elided when empty
+ *  so Dahlia sees only the critiques that actually apply. A NULL verdict (Max session dispatch
+ *  / parse miss) yields the distinct `max_qc_verdict_missed` prefix so operators can slice miss
+ *  rates apart from a legitimate below-floor bounce.
+ *
+ *  max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 2 —
+ *   (1) Max's per-format `creative[].findings` from the max-copy-qc SKILL are now inlined as
+ *       `render_critiques=<format>: <finding> | <finding> · <format>: ...`. On the 8/12
+ *       Amazing Coffee ad these were the most actionable output Max produced (a per-format
+ *       sentence naming the exact defect + the exact evidence in the brief that contradicted
+ *       it — e.g. `hasRealPhoto: false, transformation.beforeAfterImage: null, yet the
+ *       renderer invented AI before/after model photos and captioned them "I lost 40+
+ *       pounds!" — Barbara H.`) and were dropped entirely from the revise reason before
+ *       this phase. Formats with no findings are skipped; legacy `creative:null` verdicts
+ *       skip the block entirely (byte-identical to pre-Phase-2).
+ *   (2) The truncation cap is raised (500 → 2000 chars). The pre-Phase-2 500-char clip
+ *       chopped the score line + gate list + persuasion evidence + (after change 1) the
+ *       render critiques into ONE budget, so Max's own prose got chopped before Dahlia ever
+ *       saw it. Max's `verdict_reason` is placed FIRST so it survives the tail-trim if a
+ *       future consumer clips further — the score is already restated in that segment and
+ *       Dahlia cannot act on it alone (per the spec's "prefer Max's prose over the numeric
+ *       restatement when the budget is tight" guidance). 2000 chars comfortably fits
+ *       verdict_reason (~500) + four per-format critiques (~250 each) + hard_gates_failed +
+ *       persuasion_gaps, while still keeping the revise prompt small for a fast cache-warm
+ *       RESUME.
+ *   (3) The `max_qc_below_floor:` prefix is preserved so the operator slicing that already
+ *       exists (director_activity rows keyed on `max_qc_below_floor_exhausted`) still works. */
 export function buildMaxQcReviseReason(
   verdict: CopyQaVerdict | null,
   floor: number = MAX_QC_ELIGIBILITY_FLOOR,
@@ -2204,6 +2229,10 @@ export function buildMaxQcReviseReason(
   const parts: string[] = [];
   const score = verdict.persuasion_score ?? null;
   const base = verdict.verdict_reason?.trim() ? verdict.verdict_reason.trim() : "(no verdict_reason)";
+  // Max's prose FIRST — the sentence Dahlia can act on. The score+floor parenthetical is a
+  // context suffix; it lives on the same segment (not as a separate one) so a future clipper
+  // shortening the tail trims off the persuasion_gaps / render_critiques / hard_gates_failed
+  // pieces first, but this first segment's prose survives.
   parts.push(`${base} (score=${score ?? "null"}, floor=${floor})`);
   const failedGates = Object.entries(verdict.hard_gates)
     .filter(([, ok]) => ok === false)
@@ -2211,14 +2240,29 @@ export function buildMaxQcReviseReason(
   if (failedGates.length > 0) {
     parts.push(`hard_gates_failed=${failedGates.join(",")}`);
   }
+  // Phase 2 (1) — per-format render critiques. Only formats with at least one finding
+  // contribute; formats with an empty `findings` are omitted (Dahlia doesn't need to see
+  // "feed_4x5: (nothing wrong)"). When every format is clean OR `verdict.creative` is null
+  // (legacy single-image verdict / creative-gate not run), the whole `render_critiques=`
+  // segment is elided — byte-identical to pre-Phase-2 for those verdicts.
+  if (verdict.creative && verdict.creative.length > 0) {
+    const renderCritiques = verdict.creative
+      .filter((c) => c.findings.length > 0)
+      .map((c) => `${c.format}: ${c.findings.join(" | ")}`);
+    if (renderCritiques.length > 0) {
+      parts.push(`render_critiques=${renderCritiques.join(" · ")}`);
+    }
+  }
   if (verdict.persuasion_rubric?.evidence?.length) {
-    // Only include the first ~3 lines so the revise reason stays short. Each entry is a
-    // human string of the form "axis: reason"; the SKILL doesn't guarantee the axis-prefix
+    // Only include the first ~3 lines so the revise reason stays reasonable. Each entry is
+    // a human string of the form "axis: reason"; the SKILL doesn't guarantee the axis-prefix
     // shape, so we treat them as opaque strings.
     const evidence = verdict.persuasion_rubric.evidence.slice(0, 3).join(" | ");
     parts.push(`persuasion_gaps=${evidence}`);
   }
-  return `max_qc_below_floor: ${parts.join("; ")}`.slice(0, 500);
+  // Phase 2 (2) — cap raised 500 → 2000 chars so Max's own prose + the four per-format
+  // critiques all survive. See doc block above.
+  return `max_qc_below_floor: ${parts.join("; ")}`.slice(0, 2000);
 }
 
 async function runCopyQcForCreative(

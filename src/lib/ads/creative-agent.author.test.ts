@@ -1501,6 +1501,147 @@ test("Phase 3 loop: buildMaxQcReviseReason: hard-gate fail lists the failing gat
   assert.match(reason, /no_fabrication|no_cold_offer|no_competitor_leak|render_ok/);
 });
 
+// ── max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 2 ────────────────────
+// Max's actual critique reaches Dahlia in his words:
+//   (P2-a) verdict_reason is carried verbatim — the pre-Phase-2 500-char clip chopped Max's
+//          own sentence naming the exact defect. A verdict_reason ~1200 chars now survives
+//          intact (the cap was raised to 2000).
+//   (P2-b) per-format `creative[].findings` are inlined as a `render_critiques=` segment —
+//          the 8/12 Amazing Coffee case's most actionable output (a per-format sentence
+//          citing what the renderer invented) was dropped entirely before this phase.
+//   (P2-c) legacy (`creative:null`) verdicts stay byte-identical: no `render_critiques=`
+//          segment at all.
+//   (P2-d) the `max_qc_below_floor:` prefix is preserved (operator slicing on that literal
+//          exists downstream — director_activity + agent_jobs.log_tail regexes).
+
+test("(P2-a) buildMaxQcReviseReason: verdict_reason ~1200 chars survives intact (500→2000 cap raised so Max's prose isn't chopped mid-sentence)", () => {
+  const longProse =
+    "the rendered creative fabricates a customer transformation the brief explicitly says does not exist. " +
+    "hasRealPhoto:false, transformation.beforeAfterImage:null, transformation.testimonialName:null, transformation.claimedResult:null; " +
+    "yet the renderer invented AI before/after model photos and captioned them 'I lost 40+ pounds!' — Barbara H., a name the brief carries no evidence for. " +
+    "the LF8 targeting of 'freedom from fear/pain/danger' is real (weight-loss anxiety is a genuine LF8 axis), but the execution is a hallucinated case study — " +
+    "either drop the transformation entirely and lead with the ingredient-honest hook the brief supports, or source a real before/after with a signed release and route it through the fabrication firewall first.";
+  assert.ok(longProse.length > 500 && longProse.length < 2000, "fixture prose must fit inside the new 2000-char envelope but be too big for the old 500-char one");
+  const verdict = { ...copyQcVerdictP3(4), verdict_reason: longProse } as CopyQaVerdict;
+  const reason = buildMaxQcReviseReason(verdict);
+  assert.match(reason, /^max_qc_below_floor: /, "the `max_qc_below_floor:` prefix must be preserved for downstream operator slicing");
+  assert.ok(reason.length > 500, `the full reason must exceed the pre-Phase-2 500-char clip — got length=${reason.length}`);
+  // The exact prose must appear verbatim (no truncation, no ellipsis) so Dahlia sees what
+  // Max actually said, not a chopped fragment.
+  assert.ok(reason.includes(longProse), "Max's verdict_reason must be carried verbatim, not clipped");
+  // The score/floor parenthetical still rides on the same first segment for context.
+  assert.match(reason, /score=4, floor=9/);
+});
+
+test("(P2-b) buildMaxQcReviseReason: per-format creative critiques are inlined verbatim (the 8/12 Amazing Coffee 'FREE TOTE' + fabricated-transformation case)", () => {
+  const withPerFormat = {
+    ...copyQcVerdictP3(5),
+    creative: [
+      {
+        format: "feed_4x5" as const,
+        product_scale_ok: true,
+        no_hallucinated_offer_or_badge: false,
+        no_in_pixel_competitor_leak: true,
+        on_image_text_legible: true,
+        findings: ["no_hallucinated_offer_or_badge: FREE TOTE badge invented from competitor hook — the brief carries no tote offer"],
+      },
+      {
+        format: "stories_9x16" as const,
+        product_scale_ok: false,
+        no_hallucinated_offer_or_badge: true,
+        no_in_pixel_competitor_leak: true,
+        on_image_text_legible: true,
+        findings: ["product_scale_ok: 12oz pack rendered at ~40% of frame — looks like a giant SKU, not the true jar size"],
+      },
+      // A clean placement contributes nothing — 'right_column_1x1: (nothing wrong)' would be noise.
+      {
+        format: "right_column_1x1" as const,
+        product_scale_ok: true,
+        no_hallucinated_offer_or_badge: true,
+        no_in_pixel_competitor_leak: true,
+        on_image_text_legible: true,
+        findings: [],
+      },
+    ],
+    creative_gate_pass: false,
+  } as CopyQaVerdict;
+  const reason = buildMaxQcReviseReason(withPerFormat);
+  // Both failing formats + their exact findings must appear verbatim so Dahlia knows WHICH
+  // render + WHICH check to fix.
+  assert.match(reason, /render_critiques=/);
+  assert.match(reason, /feed_4x5: no_hallucinated_offer_or_badge: FREE TOTE badge invented/);
+  assert.match(reason, /stories_9x16: product_scale_ok: 12oz pack rendered/);
+  // The clean placement must be omitted — no `right_column_1x1: ` line.
+  assert.doesNotMatch(reason, /right_column_1x1/);
+  // Prefix + verdict_reason still ride at the head of the string (Max's prose first).
+  assert.match(reason, /^max_qc_below_floor: /);
+  assert.match(reason, /generic supplement pitch/);
+});
+
+test("(P2-b) buildMaxQcReviseReason: multiple findings on ONE format render as `finding1 | finding2` inside that format's segment", () => {
+  const twoFindings = {
+    ...copyQcVerdictP3(6),
+    creative: [
+      {
+        format: "feed_4x5" as const,
+        product_scale_ok: false,
+        no_hallucinated_offer_or_badge: false,
+        no_in_pixel_competitor_leak: true,
+        on_image_text_legible: true,
+        findings: [
+          "product_scale_ok: pack looks 3x its real size",
+          "no_hallucinated_offer_or_badge: 'AS SEEN ON TV' sticker never in brief",
+        ],
+      },
+    ],
+    creative_gate_pass: false,
+  } as CopyQaVerdict;
+  const reason = buildMaxQcReviseReason(twoFindings);
+  assert.match(
+    reason,
+    /feed_4x5: product_scale_ok: pack looks 3x its real size \| no_hallucinated_offer_or_badge: 'AS SEEN ON TV' sticker never in brief/,
+  );
+});
+
+test("(P2-c) buildMaxQcReviseReason: legacy verdict with creative:null → no `render_critiques=` segment (byte-identical to pre-Phase-2 for that verdict)", () => {
+  const legacy = copyQcVerdictP3(5); // helper leaves creative:null
+  const reason = buildMaxQcReviseReason(legacy);
+  assert.doesNotMatch(reason, /render_critiques=/);
+});
+
+test("(P2-c) buildMaxQcReviseReason: creative present but every format's findings is empty → no `render_critiques=` segment (clean render on a below-floor persuasion verdict — nothing to say about the pixels)", () => {
+  const allClean = {
+    ...copyQcVerdictP3(6),
+    creative: [
+      { format: "feed_4x5" as const, product_scale_ok: true, no_hallucinated_offer_or_badge: true, no_in_pixel_competitor_leak: true, on_image_text_legible: true, findings: [] },
+      { format: "stories_9x16" as const, product_scale_ok: true, no_hallucinated_offer_or_badge: true, no_in_pixel_competitor_leak: true, on_image_text_legible: true, findings: [] },
+    ],
+    creative_gate_pass: true,
+  } as CopyQaVerdict;
+  const reason = buildMaxQcReviseReason(allClean);
+  assert.doesNotMatch(reason, /render_critiques=/);
+});
+
+test("(P2-d) buildMaxQcReviseReason: the `max_qc_below_floor:` prefix is preserved even with per-format critiques + long verdict_reason (operator slicing rail unbroken)", () => {
+  const rich = {
+    ...copyQcVerdictP3(4),
+    creative: [
+      {
+        format: "feed_4x5" as const,
+        product_scale_ok: false,
+        no_hallucinated_offer_or_badge: false,
+        no_in_pixel_competitor_leak: false,
+        on_image_text_legible: false,
+        findings: ["product_scale_ok: fail", "no_hallucinated_offer_or_badge: fail"],
+      },
+    ],
+    creative_gate_pass: false,
+    verdict_reason: "compound failures across multiple checks",
+  } as CopyQaVerdict;
+  const reason = buildMaxQcReviseReason(rich);
+  assert.match(reason, /^max_qc_below_floor: /);
+});
+
 test("Phase 3 loop: Max grades 9/10 on the FIRST attempt → ok with maxCopyQcVerdict on the outcome (no bounce needed; 9 is the new floor)", async () => {
   const { dispatch } = scriptedDispatcher([{ resultText: envelope() }]);
   const { closure, seen } = scriptedMaxQc([copyQcVerdictP3(9)]);
