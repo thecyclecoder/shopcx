@@ -178,6 +178,60 @@ test("planCreativePackInserts — rejects a copy pack with fewer than 4 headline
   );
 });
 
+// ── dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 4 ───────────────────
+
+test("planCreativePackInserts — Phase 4: renderProvenance absent → meta is byte-identical to pre-Phase-4 shape", () => {
+  const pack = buildMetaCopyPack(makeBrief());
+  const plan = planCreativePackInserts({
+    workspaceId: "ws-1", campaignId: "cmp-1",
+    canonicalRender: renderFor("feed_4x5"),
+    siblingRenders: [renderFor("stories_9x16"), renderFor("right_column_1x1")],
+    copyPack: pack, archetype: "before_after", generatedBy: "ad-creative-agent",
+  });
+  for (const r of [plan.canonical, ...plan.siblings]) {
+    assert.deepEqual(Object.keys(r.meta).sort(), ["archetype", "generated_by"]);
+    assert.equal((r.meta as { render_provenance?: unknown }).render_provenance, undefined);
+  }
+});
+
+test("planCreativePackInserts — Phase 4: renderProvenance rides onto every placement's meta", () => {
+  const pack = buildMetaCopyPack(makeBrief());
+  const renderProvenance = {
+    pinned_skeleton_id: "f28ac0bc-4b1d-4184-98b1-dabf92ba1ca4",
+    composition_transfer: true,
+    treatment: null,
+    had_source_wireframe: true,
+    author_notes_present: false,
+  };
+  const plan = planCreativePackInserts({
+    workspaceId: "ws-1", campaignId: "cmp-1",
+    canonicalRender: renderFor("feed_4x5"),
+    siblingRenders: [renderFor("stories_9x16"), renderFor("right_column_1x1")],
+    copyPack: pack, archetype: "imitation", generatedBy: "ad-creative-agent",
+    renderProvenance,
+  });
+  for (const r of [plan.canonical, ...plan.siblings]) {
+    assert.equal(r.meta.archetype, "imitation", "the audit-trail archetype is the render's actual archetype");
+    assert.deepEqual(r.meta.render_provenance, renderProvenance, "provenance rides on every placement");
+  }
+});
+
+test("capRenderPromptForPersist — Phase 4: within-cap prompt passes through untouched, over-cap is truncated + flagged", async () => {
+  const { capRenderPromptForPersist, RENDER_PROMPT_STORE_CAP } = await import("./creative-agent");
+  // A small prompt — no truncation.
+  const short = capRenderPromptForPersist("Design a 4:5 static ad for Amazing Coffee. …");
+  assert.equal(short.prompt_truncated, false);
+  assert.equal(short.prompt.length, 44);
+  // A prompt over the cap — truncated at the boundary + flagged loudly.
+  const huge = "x".repeat(RENDER_PROMPT_STORE_CAP + 500);
+  const capped = capRenderPromptForPersist(huge);
+  assert.equal(capped.prompt_truncated, true);
+  assert.equal(capped.prompt.length, RENDER_PROMPT_STORE_CAP);
+  // Absent/nullish prompt caps to an empty string (not a truncated flag).
+  assert.deepEqual(capRenderPromptForPersist(undefined), { prompt: "", prompt_truncated: false });
+  assert.deepEqual(capRenderPromptForPersist(null), { prompt: "", prompt_truncated: false });
+});
+
 // ── Phase 3 — `isCreativePackComplete` (the deterministic gate Bianca's publish consults) ────────
 
 const CANONICAL_ID = "canonical-video-id";
