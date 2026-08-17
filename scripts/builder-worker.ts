@@ -3442,7 +3442,11 @@ async function ensurePr(branch: string, title: string, draft: boolean, body?: st
   // null → the caller flags `needs_attention` "branch pushed but PR creation failed" (recoverable).
   // `base` defaults to main (one-off specs + fold flows); a GOAL-BOUND spec passes `goal/{goalSlug}` so its PR
   // accumulates onto the goal branch (Gate B), NEVER main (spec-goal-branch-pm-flow M4 — see the build path).
-  const backoffs = [1000, 3000, 8000];
+  // ⭐ CEO 2026-08-17 — was [1000, 3000, 8000]: ~12s total, which cannot survive a real GitHub
+  // incident. The 2026-08-17 outage returned HTTP 503 from the PR-create endpoint for ~10 minutes
+  // and parked a build whose branch had pushed cleanly. Widened to ~62s so a brief blip never
+  // reaches the park at all; the MISSING-PR standing backstop below covers anything longer.
+  const backoffs = [1000, 3000, 8000, 20000, 30000];
   for (let attempt = 0; attempt <= backoffs.length; attempt++) {
     const created = await gh("POST", `/repos/${REPO}/pulls`, { title, head: branch, base, body: prBody, draft });
     if (created.ok) return { url: created.json.html_url as string, number: created.json.number as number };
@@ -3468,6 +3472,63 @@ async function ensurePr(branch: string, title: string, draft: boolean, body?: st
     }
   }
   return null;
+}
+
+/**
+ * ⭐ MISSING-PR recovery (CEO 2026-08-17) — finish a build that pushed its branch but never opened a PR.
+ *
+ * The failure it repairs: `ensurePr` exhausts its retries during a GitHub outage, the caller parks the
+ * build `needs_attention` with "branch pushed but PR creation failed", and nothing ever tries again.
+ * The branch is COMPLETE and pushed; the only missing artifact is the PR. Observed 2026-08-17 on
+ * `a-merge-stamps-only-the-phases-whose-code-it-actually-contains`, whose three phases were all built and
+ * stamped at the branch head while the spec sat parked for a human.
+ *
+ * Safe by construction:
+ *  - Only touches build jobs parked with EXACTLY that error, so no other park class is disturbed.
+ *  - `ensurePr` adopts an already-open PR for the branch before creating one, so this can never
+ *    open a duplicate.
+ *  - Confirms the branch still exists on origin first; a branch deleted since (merged by hand,
+ *    abandoned) is left alone rather than resurrected.
+ *  - On success it clears the park and stamps `pr_number`, so `getBranchBuildSuccess` stops reading a
+ *    parked row as the branch's owning job and the pre-merge gates can evaluate it.
+ *  - On continued failure it leaves the park exactly as it was — the next pass tries again.
+ */
+async function recoverBranchesPushedWithoutPr(): Promise<{ checked: number; opened: number; stillFailing: number }> {
+  const out = { checked: 0, opened: 0, stillFailing: 0 };
+  const { data: parked } = await db
+    .from("agent_jobs")
+    .select("id, spec_slug, spec_branch, workspace_id")
+    .eq("kind", "build")
+    .eq("status", "needs_attention")
+    .eq("error", "branch pushed but PR creation failed")
+    .limit(20);
+  for (const row of (parked ?? []) as Array<{ id: string; spec_slug: string | null; spec_branch: string | null }>) {
+    const branch = row.spec_branch;
+    if (!branch || !branch.startsWith("claude/")) continue;
+    out.checked++;
+    // The branch must still be on origin — never resurrect one that has since been deleted.
+    const ref = await gh("GET", `/repos/${REPO}/git/ref/heads/${branch}`);
+    if (!ref.ok) {
+      console.error(`[missing-pr] ${branch} no longer on origin (${ref.status}) — leaving parked`);
+      continue;
+    }
+    const pr = await ensurePr(branch, row.spec_slug || branch, false);
+    if (!pr) {
+      out.stillFailing++;
+      console.error(`[missing-pr] ${branch} — PR creation still failing; leaving parked for the next pass`);
+      continue;
+    }
+    out.opened++;
+    await update(row.id, {
+      status: "completed",
+      needs_attention_class: null,
+      error: null,
+      pr_url: pr.url,
+      pr_number: pr.number,
+    });
+    console.log(`[missing-pr] ${branch} → opened PR #${pr.number} and cleared the park`);
+  }
+  return out;
 }
 
 // Un-draft a PR (used by the fold flow, which opens a draft PR; and as a belt-and-suspenders on the
@@ -6584,6 +6645,24 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
   } catch (e) {
     notes.push(`dirty-pr backstop failed: ${errText(e)}`);
     console.error(`${tag} standing dirty-pr backstop failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
+    // ⭐ MISSING-PR backstop (CEO 2026-08-17). A build can push its branch cleanly and then fail to OPEN
+    // the PR — GitHub's PR-create endpoint returned 503 for ~10 minutes on 2026-08-17, parking
+    // `a-merge-stamps-only-the-phases-whose-code-it-actually-contains` with "branch pushed but PR creation
+    // failed" while its branch sat complete and stamped at its head. WHY a standing backstop is REQUIRED,
+    // not just nice-to-have: `ensurePr`'s in-call retries span ~62s (widened above), which covers a blip
+    // but not an incident; once the build job exits there is NO other trigger, so the branch waits for a
+    // human forever. The work is finished and pushed — the only missing artifact is a PR, and this pass can
+    // create it the moment GitHub recovers. Idempotent: `ensurePr` adopts an already-open PR for the branch
+    // before creating, so a duplicate can never be opened.
+    const recovered = await recoverBranchesPushedWithoutPr();
+    if (recovered.opened || recovered.stillFailing) {
+      notes.push(`missing-pr backstop → ${recovered.opened} PR(s) opened, ${recovered.stillFailing} still failing (of ${recovered.checked} parked)`);
+    }
+  } catch (e) {
+    notes.push(`missing-pr backstop failed: ${errText(e)}`);
+    console.error(`${tag} standing missing-pr backstop failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
     // GOAL-MEMBER DIRTY re-drive (serialize-goal-member-spec-builds Phase 2). The MIRROR of the
