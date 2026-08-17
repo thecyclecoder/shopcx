@@ -31,6 +31,34 @@ import { errText } from "../src/lib/error-text";
 const { TEAM_ID } = VERCEL_PROJECT_IDS;
 const DRAIN_ID = "drn_kQkATjjmtVrTnRrj";
 
+/**
+ * Vercel-drain response bodies can carry delivery configuration (custom headers,
+ * signing/auth material, URL userinfo/query with tokens). NEVER print the raw
+ * object. Extract an allowlisted, safe-to-log distillation and a redacted
+ * endpoint (host + pathname only — no userinfo, no search params, no hash).
+ * Returns a compact single-line string suitable for `console.log`.
+ */
+function redactedEndpoint(raw: unknown): string {
+  if (typeof raw !== "string" || !raw) return "<none>";
+  try {
+    const u = new URL(raw);
+    return `${u.protocol}//${u.host}${u.pathname}`;
+  } catch {
+    return "<unparseable>";
+  }
+}
+
+function summarizeDrainSafe(obj: unknown): string {
+  if (!obj || typeof obj !== "object") return "<empty>";
+  const o = obj as Record<string, unknown>;
+  const parts: string[] = [];
+  if (typeof o.id === "string") parts.push(`id=${o.id}`);
+  if (typeof o.name === "string") parts.push(`name=${o.name}`);
+  if (typeof o.status === "string") parts.push(`status=${o.status}`);
+  parts.push(`endpoint=${redactedEndpoint(o.endpoint)}`);
+  return parts.join(" ");
+}
+
 function vercelToken(): string {
   const t = process.env.VERCEL_API_TOKEN || process.env.VERCEL_TOKEN;
   if (!t) {
@@ -67,13 +95,14 @@ async function main(): Promise<void> {
     return;
   }
   if (!probe.ok) {
-    const body = await probe.text().catch(() => "");
-    throw new Error(
-      `probe GET failed: ${probe.status} ${body.slice(0, 500)}`,
-    );
+    // Do NOT echo the raw response body — a Vercel error payload can carry request-echo
+    // metadata (auth headers, tokens in the queried URL). Status alone is diagnostic enough.
+    throw new Error(`probe GET failed: ${probe.status}`);
   }
   const before = await probe.json().catch(() => ({}));
-  console.log(`delete-self-pointing-vercel-drain — found drain: ${JSON.stringify(before).slice(0, 400)}`);
+  console.log(
+    `delete-self-pointing-vercel-drain — found drain: ${summarizeDrainSafe(before)}`,
+  );
 
   // Step 2 — DELETE.
   const del = await fetch(drainUrl(DRAIN_ID), {
@@ -81,19 +110,16 @@ async function main(): Promise<void> {
     headers: authHeaders(token),
   });
   if (!del.ok) {
-    const body = await del.text().catch(() => "");
-    throw new Error(
-      `DELETE failed: ${del.status} ${body.slice(0, 500)}`,
-    );
+    // Same rule: no raw response body in the thrown message.
+    throw new Error(`DELETE failed: ${del.status}`);
   }
   console.log(`delete-self-pointing-vercel-drain — DELETE returned ${del.status}.`);
 
   // Step 3 — confirm the drain is truly gone.
   const confirm = await fetch(drainUrl(DRAIN_ID), { headers: authHeaders(token) });
   if (confirm.status !== 404) {
-    const body = await confirm.text().catch(() => "");
     throw new Error(
-      `confirm GET after DELETE expected 404, got ${confirm.status}: ${body.slice(0, 500)}`,
+      `confirm GET after DELETE expected 404, got ${confirm.status}`,
     );
   }
   console.log(
