@@ -6,6 +6,12 @@
 // each card links to the per-ad detail page (`/dashboard/research/ads/[id]`) where the actions live
 // ("Generate ad" + "Don't use"), so the list view stays uncluttered. Owner-gated (API 403 + client
 // short-circuit).
+//
+// Hidden-by-default: `do_not_use=true` rows (the CEO/Max-flagged bad imitation bases) are excluded
+// server-side and the suppressed count comes back on the `X-Hidden-Count` response header. A
+// `Show hidden (N)` toggle in the filter row re-requests with `includeHidden=1`, bringing them
+// back with the existing dim + "don't use" badge so a wrong flag is still reversible from the
+// detail page.
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useWorkspace } from "@/lib/workspace-context";
@@ -46,6 +52,11 @@ export default function ResearchAdsPage() {
   const [ads, setAds] = useState<Ad[]>([]);
   const [loading, setLoading] = useState(true);
   const [forbidden, setForbidden] = useState(false);
+  // Show-hidden toggle for the CEO/Max-flagged `do_not_use=true` rows. OFF by default so the
+  // imitation-base picker is clean; ON re-requests with `includeHidden=1` so a wrong flag is
+  // still one click away from being reversed on the detail page.
+  const [showHidden, setShowHidden] = useState(false);
+  const [hiddenCount, setHiddenCount] = useState(0);
 
   const proxy = useCallback(
     (u: string | null): string | null =>
@@ -70,15 +81,21 @@ export default function ResearchAdsPage() {
     setLoading(true);
     const qs = new URLSearchParams({ workspaceId: workspace.id, mediaType });
     if (productId) qs.set("productId", productId);
+    if (showHidden) qs.set("includeHidden", "1");
     const res = await fetch(`/api/ads/creative-finder?${qs.toString()}`);
     if (res.status === 403) {
       setForbidden(true);
       setLoading(false);
       return;
     }
-    if (res.ok) setAds((await res.json()) as Ad[]);
+    if (res.ok) {
+      setAds((await res.json()) as Ad[]);
+      // Header names are case-insensitive via Headers.get. Only meaningful when the toggle is
+      // OFF — the server skips the count when includeHidden is passed and emits "0".
+      setHiddenCount(Number(res.headers.get("x-hidden-count") ?? 0));
+    }
     setLoading(false);
-  }, [workspace.id, mediaType, productId]);
+  }, [workspace.id, mediaType, productId, showHidden]);
 
   useEffect(() => {
     if (workspace.role !== "owner") return;
@@ -134,6 +151,21 @@ export default function ResearchAdsPage() {
             </option>
           ))}
         </select>
+
+        {/* Show-hidden toggle — only render when there is something to reveal (or it's already
+            on, so the user can turn it back off). Keeps the filter row clean on a library with
+            no flagged ads. */}
+        {hiddenCount > 0 || showHidden ? (
+          <label className="inline-flex cursor-pointer items-center gap-1.5 rounded border border-zinc-200 bg-white px-2 py-1 text-xs text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
+            <input
+              type="checkbox"
+              className="h-3.5 w-3.5"
+              checked={showHidden}
+              onChange={(e) => setShowHidden(e.target.checked)}
+            />
+            Show hidden ({hiddenCount})
+          </label>
+        ) : null}
 
         <span className="text-xs text-zinc-400">
           {loading ? "Loading…" : `${ads.length} ${mediaType} ad${ads.length === 1 ? "" : "s"}`}
