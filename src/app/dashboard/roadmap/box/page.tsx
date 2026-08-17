@@ -44,11 +44,6 @@ interface LaneRow {
   // pattern-matching a checklist note. Null on a queued / idle / legacy row — the card falls
   // back to the OWNING persona (Dahlia per KIND_PERSONA_ALIAS['ad-creative-copy-author']).
   active_persona?: string | null;
-  // consolidate-premerge-checks-one-session Phase 2 — true for a `spec-test` lane whose underlying job's
-  // `spec_branch` is a `claude/*` PR branch (fused pre-merge session emits BOTH the spec-test verdict AND
-  // the security verdict in one JSON). The card renders TWO avatars (Vera + Vault) + a 'spec-test ·
-  // security' label; a post-ship spec-test lane (no branch) still renders single-persona.
-  fused_pre_merge?: boolean;
   // chained-phase-session-resume Phase 2 — true when this lane's job started as a RESUME of a prior
   // claude -p session (chained-phase carry-forward, or a mid-run queued_resume flip = cache-warm), false
   // when it started FRESH (cache-cold). The card renders a small `resumed`/`fresh` chip on build lanes
@@ -115,7 +110,6 @@ interface Job {
   phase?: string | null; // queued-jobs-log: "Phase N" (from instructions, or the spec's next-unshipped phase)
   spec_missing?: boolean; // fold-guard-live-build: the spec page would 404 (folded/archived/deleted)
   director_function?: string | null; // box-grading-session-and-account-count-fixes Phase 3 (grade/coach kinds)
-  fused_pre_merge?: boolean; // consolidate-premerge-checks-one-session Phase 2 (queued fused pre-merge spec-test)
 }
 interface FailedJob {
   id: string;
@@ -268,24 +262,6 @@ function personaForKind(kind: string, directorFunction?: string | null) {
   return kind === "platform-director" ? getPersona("platform") : getPersona(kind);
 }
 
-// consolidate-premerge-checks-one-session Phase 2 — for a fused pre-merge spec-test lane the SAME session
-// emits BOTH verdicts (spec-test + security) off the same loaded branch diff, so the card renders both
-// personas + a static dual label. The label is static because the fused session is Codex-primary and Codex
-// has no TodoWrite, so we can't lean on the live session_checklist to pick the active sub-task; the card
-// must render correctly with an empty checklist. A non-fused spec-test lane (post-ship / no branch) resolves
-// to null and the caller falls back to the single-persona path.
-function fusedPreMergeInfo(
-  kind: string,
-  fusedPreMerge?: boolean,
-): { personas: [AgentPersona, AgentPersona]; title: string; label: string } | null {
-  if (kind !== "spec-test" || !fusedPreMerge) return null;
-  return {
-    personas: [getPersona("spec-test"), getPersona("security-review")],
-    title: "Vera → Vault · pre-merge check",
-    label: "spec-test · security",
-  };
-}
-
 // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — the ad-creative-copy-author
 // lane now renders exactly ONE face (an ACTOR-DRIVEN single-face resolver + a text-only label chip)
 // instead of the earlier dual-avatar render. Rationale from the spec's Why:
@@ -302,9 +278,9 @@ function fusedPreMergeInfo(
 // dispatcher-wrappers in scripts/builder-worker.ts at every dispatch boundary), which is
 // authoritative because it names exactly which sub-session the deterministic Node code just handed
 // control to. On a queued / idle / legacy row (no stamp) we fall back to the OWNING persona (Dahlia
-// per KIND_PERSONA_ALIAS['ad-creative-copy-author']) — the card ALWAYS shows one face for this
-// kind, never two. The fused-pre-merge lane (Vera + Vault) is a genuinely simultaneous two-agent
-// session and KEEPS its dual render via `fusedPreMergeInfo`.
+// per KIND_PERSONA_ALIAS['ad-creative-copy-author']) — the card ALWAYS shows one face for this kind,
+// never two. The retired fused-pre-merge Vera + Vault path is deliberately not represented here:
+// spec-test shows Vera alone and Vault runs as a separate security-review lane.
 
 /** Short label describing the ping-pong pairing for the label chip. `null` for any kind that is
  *  not an ad-creative ping-pong; the caller elides the chip. Keeps the ping-pong composition
@@ -346,20 +322,13 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
   const isCoach = lane.kind === "director-coach";
   const persona = personaForKind(lane.kind, lane.director_function);
   const gc = gradeCoachInfo(lane.kind, lane.director_function); // grade/coach kinds → "Ada Grading" etc.
-  // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — a card renders BOTH
-  // avatars ONLY for the fused pre-merge lane (Vera + Vault genuinely run one session emitting
-  // both verdicts off the same loaded diff). The pre-Phase-3 ad-creative-copy-author dual render
-  // is retired: an ad-creative ping-pong is TWO sub-sessions handing control back and forth,
-  // never both at once — showing both faces hid which one was actually working. `active` now
-  // resolves to a single face driven by the worker-stamped `metadata.active_persona` (Dahlia
-  // while she authors / does image-QC, Max while he grades), falling back to the OWNING persona
-  // (Dahlia) when unstamped so the card ALWAYS names the actor.
-  const dual = fusedPreMergeInfo(lane.kind, lane.fused_pre_merge);
+  // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — the ad-creative ping-pong is
+  // two sub-sessions handing control back and forth, never both at once. Render one active face from the
+  // worker-stamped `metadata.active_persona`, falling back to the owning persona (Dahlia) when unstamped.
+  // The retired fused-pre-merge Vera + Vault path is intentionally gone; spec-test shows Vera alone.
   const active = activePingPongPersona(lane.kind, lane.active_persona);
   const pingPongChip = pingPongLabel(lane.kind);
-  const title = dual
-    ? dual.title
-    : active
+  const title = active
       ? active.name
       : isCoach
         ? (lane.intent === "coach" ? `Coaching ${persona.name}` : `Asking ${persona.name}`)
@@ -369,21 +338,11 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
   const action = isCoach ? "with the CEO" : KIND_ACTION[lane.kind] ?? "working on";
   return (
     <div className="flex min-h-[88px] flex-col gap-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
-      {/* Row 1: avatar + name (full width — no longer truncated by the chips) + elapsed time. A dual-
-          persona lane (fused pre-merge OR ad-creative ping-pong) shows BOTH avatars side-by-side, unless
-          the ping-pong is currently mid-flight AND Phase 1's checklist unambiguously names the active
-          actor — then a single ACTIVE avatar swaps in (title/label chip below still reflect the dual
-          composition so the ping-pong context stays visible in text). Every other lane keeps its single
-          avatar. */}
+      {/* Row 1: avatar + name (full width — no longer truncated by the chips) + elapsed time. */}
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5">
           {active ? (
             <PersonaAvatar persona={active} size={20} />
-          ) : dual ? (
-            <span className="flex shrink-0 items-center -space-x-2">
-              <PersonaAvatar persona={dual.personas[0]} size={20} />
-              <PersonaAvatar persona={dual.personas[1]} size={20} />
-            </span>
           ) : (
             <PersonaAvatar persona={persona} size={20} />
           )}
@@ -391,21 +350,13 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
         </span>
         <span className="shrink-0 text-[11px] tabular-nums text-zinc-400">{elapsed(lane.since)}</span>
       </div>
-      {/* Row 2: the kind chip + the Round Robin account, indented under the name (off the cramped header).
-          A dual-persona lane appends a static sub-task label so the card reads correctly with NO
-          session_checklist (Codex has no TodoWrite; the copy-QC bounce is fast). */}
+      {/* Row 2: the kind chip + the Round Robin account, indented under the name (off the cramped header). */}
       <div className="mt-1 flex flex-wrap items-center gap-1.5 pl-[26px]">
         <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[lane.kind] || KIND_CHIP.build}`}>{lane.kind}</span>
-        {dual && (
-          <span className="shrink-0 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
-            {dual.label}
-          </span>
-        )}
         {/* max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — the ping-pong
             is legible in the LABEL rather than the avatar: the chip names the pairing (e.g.
-            'ad-creative ping-pong') while the photo above shows only the current actor. Elided
-            on the fused-pre-merge lane (whose own dual.label already says 'spec-test · security'). */}
-        {!dual && pingPongChip && (
+            'ad-creative ping-pong') while the photo above shows only the current actor. */}
+        {pingPongChip && (
           <span className="shrink-0 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
             {pingPongChip}
           </span>
@@ -661,34 +612,19 @@ function QueuedJobsLog({ jobs }: { jobs: Job[] }) {
             // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 3 — queued
             // ad-creative-copy-author jobs no longer render a dual avatar. A queued job hasn't
             // started, so no `metadata.active_persona` is stamped yet; the card shows the OWNING
-            // persona (Dahlia, per KIND_PERSONA_ALIAS['ad-creative-copy-author']) via the normal
-            // `personaForKind` path + a `pingPongLabel` chip that names the pairing. The
-            // fused-pre-merge lane (Vera + Vault) keeps its dual render since that IS a genuinely
-            // simultaneous two-agent session.
-            const dual = fusedPreMergeInfo(j.kind, j.fused_pre_merge);
+            // persona (Dahlia, per KIND_PERSONA_ALIAS['ad-creative-copy-author']) plus a label chip
+            // that names the pairing. The retired fused-pre-merge dual-avatar path is not rendered.
             const pingPongChip = pingPongLabel(j.kind);
             // A queued job's slug is only a real spec page for the spec-slug kinds (and not if it was folded).
             const slugIsLink = SPEC_SLUG_KINDS.has(j.kind) && !j.spec_missing;
             return (
               <li key={j.id} className="flex items-center gap-2.5 px-3 py-2">
-                {dual ? (
-                  <span className="flex shrink-0 items-center -space-x-2">
-                    <PersonaAvatar persona={dual.personas[0]} size={20} />
-                    <PersonaAvatar persona={dual.personas[1]} size={20} />
-                  </span>
-                ) : (
-                  <PersonaAvatar persona={persona} size={20} />
-                )}
-                <span className="shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{dual ? dual.title : gc ? `${persona.name} ${gc.verb}` : persona.name}</span>
+                <PersonaAvatar persona={persona} size={20} />
+                <span className="shrink-0 text-[13px] font-semibold text-zinc-800 dark:text-zinc-100">{gc ? `${persona.name} ${gc.verb}` : persona.name}</span>
                 <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${KIND_CHIP[j.kind] || KIND_CHIP.build}`}>
                   {j.kind}
                 </span>
-                {dual && (
-                  <span className="shrink-0 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
-                    {dual.label}
-                  </span>
-                )}
-                {!dual && pingPongChip && (
+                {pingPongChip && (
                   <span className="shrink-0 rounded-full bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300">
                     {pingPongChip}
                   </span>
