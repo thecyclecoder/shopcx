@@ -460,8 +460,10 @@ async function enqueueSecurityReviewDiff(admin: Admin, input: EnqueueSecurityRev
  *   1. ONE OPEN review per branch — skip if any security-review job with `spec_branch === branch` is in a
  *      live/surfaced status (queued / claimed / building / needs_input / needs_approval / queued_resume /
  *      needs_attention).
- *   2. ONE CLEAN review per UNCHANGED branch — skip if the branch already has a `completed` review that is
- *      NEWER than the latest build-job push on the branch. A clean review proves the branch's current diff
+ *   2. ONE CLEAN review per UNCHANGED branch — skip if the branch already has a `completed`, genuinely
+ *      CLEAN (non-`real-vuln`) review that is NEWER than the latest build-job push on the branch. A
+ *      review that FOUND something never suppresses the next pass — otherwise the finding's fix can
+ *      never be re-checked and the pre-merge tests gate blocks that PR forever (2026-08-17 hotfix). A clean review proves the branch's current diff
  *      is clean; re-reviewing the exact same diff every standing pass is the Vault loop. We only re-review
  *      once a genuinely newer build commit lands (the build job's `updated_at` advances past the review) —
  *      THAT new diff might re-introduce something the prior pass cleared, which is the only case the
@@ -634,16 +636,34 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
   // keys on a genuine build push). Compare the latest completed review's `created_at` against the latest
   // NON-terminal build job's `updated_at`. Review newer-or-equal ⇒ same diff already cleared ⇒ skip (this is
   // what stopped the per-pass loop). A genuinely newer build push ⇒ re-review.
-  const { data: lastClean } = await admin
+  // ⭐ HOTFIX (2026-08-17) — a `real-vuln` review is NOT a clean review, so it must never suppress the
+  // next pass. The prior query took the newest `completed` row REGARDLESS of verdict, so a branch whose
+  // review FOUND something was treated as "already cleared" and could never be re-reviewed — the finding
+  // routes fixes-as-phases, the fix builds, and then nothing re-checks it, so `isSecurityGreenForBranch`
+  // (which correctly requires a completed NON-real-vuln review) stays false forever and the pre-merge
+  // tests gate blocks the PR permanently. Observed live on three branches at once: 2483 (18h stuck),
+  // 2486, and max-critique — all `verdict: real-vuln`, all refused re-review with the misleading
+  // "branch already has a clean security-review" reason. Only a genuinely CLEAN completed review may
+  // suppress; `isRealVulnVerdict` is the same predicate `getSecurityStateForBranch` gates on, so the
+  // enqueue and the gate can never disagree about what "clean" means.
+  const { data: completedReviews } = await admin
     .from("agent_jobs")
-    .select("created_at")
+    .select("created_at, instructions")
     .eq("kind", "security-review")
     .eq("spec_branch", branch)
     .eq("status", "completed")
     .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  const lastCleanAt = (lastClean as { created_at?: string } | null)?.created_at;
+    .limit(50);
+  const lastCleanAt = ((completedReviews ?? []) as Array<{ created_at?: string; instructions?: string }>)
+    .find((row) => {
+      let verdict = "";
+      try {
+        verdict = String((JSON.parse(String(row.instructions || "{}")) as { verdict?: string }).verdict || "");
+      } catch {
+        /* not JSON — unknown verdict, treated as clean (matches getSecurityStateForBranch) */
+      }
+      return !isRealVulnVerdict(verdict);
+    })?.created_at;
   // ⭐ security-real-vuln-deadlock-breaker Phase 2 — a FORCED re-review skips this "branch unchanged" test.
   // The caller (retestOriginBranchSecurityIfFixMerged) only forces when the linked fix spec's build MERGED,
   // so the diff this branch is measured against (origin/main) HAS changed even though the branch tip did
