@@ -61,13 +61,19 @@ Hard rail: refuses to run for `main` / `master` / empty `branch` — this helper
 
 Each row is normalized to `{ uid, url, state, target, meta, createdAt }` so the caller doesn't have to handle Vercel's `state` vs `readyState` schema drift.
 
-### `getLatestReadyDeploymentForBranch(branch, commitSha?)` → `{ latest, ready }`
+### `getLatestReadyDeploymentForBranch(branch, commitSha?)` → `{ latest, ready, readyForRequestedSha, latestReadyOnBranch }`
 
 The capture-path lookup used by M1 Phase 2.
 
 - Lists the branch's recent deployments (above), drops any `target: "production"` row.
 - `latest`: newest of any state — lets the caller surface "still BUILDING" without re-querying.
-- `ready`: newest `state === "READY"`. When `commitSha` is supplied, prefer a READY whose `meta.githubCommitSha` matches — keeps an earlier preview from being mis-attributed to a later commit on the same branch. Falls back to the newest READY on the branch when no exact-SHA match is present.
+- `ready`: the READY deployment for the caller's request.
+  - When `commitSha` is supplied → ONLY a READY whose `meta.githubCommitSha` matches; **null on a miss (no cross-SHA substitution)**. This is the [[../specs/a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed]] Phase 3 tightening.
+  - When `commitSha` is omitted → the newest READY on the branch, exactly as before.
+- `readyForRequestedSha`: `true` iff `ready` satisfies the caller's request. `false` on a SHA-supplied miss (the caller can tell "no preview for THIS sha yet" apart from "no preview at all" using the fields below).
+- `latestReadyOnBranch`: the newest READY on the branch **regardless of commit SHA** — always populated for observability. On a SHA-supplied miss, this is the non-matching newest READY, exposed so the caller can distinguish "no preview at all" (`null`) from "preview exists but for a different commit" (non-null with `ready === null`). **Never used as a substitute** for `ready`.
+
+**⭐ Phase 3 tightening — no cross-SHA substitution.** Before Phase 3 (2026-08-17), a SHA-scoped miss silently fell back to the newest READY on the branch, so a pre-merge check pointed at "the branch's ready preview" could target a build from a different commit. Observed live: PR 2486's branch on 2026-08-17 — merge commit `d8727bf05` (14:05) produced no deployment; between 14:05 and 14:27 the lookup returned `7bf057e97`'s pre-merge build for "the branch's ready preview". Phase 3 refuses that substitution — the miss returns `ready: null` + `readyForRequestedSha: false` + the non-matching newest under `latestReadyOnBranch`. Pinned by `src/lib/vercel-project.branch-preview-sha-scope.test.ts`.
 
 ### `previewHttpsUrl(deployment)` → `string | null`
 

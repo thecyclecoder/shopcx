@@ -2,7 +2,7 @@
  * a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 2 pins:
  *
  *   Fix #1 (freshness keys on head SHA). `enqueueSecurityReviewBranch`'s dedup (2) compares the newest
- *   suppressing review's recorded `instructions.head_sha` against the branch's CURRENT head
+ *   suppressing review's recorded `instructions.reviewed_head_sha` against the branch's CURRENT head
  *   (`input.headSha`). Equal ⇒ skip. Different / either side absent ⇒ enqueue (conservative — cannot
  *   prove currency, so re-review). The old `updated_at`-based timestamp comparison is retired: a merge
  *   commit that Pax's conflict-resolution flow (or any human) pushes never touches the build job's
@@ -31,7 +31,7 @@ type InsertedRow = { kind: string; spec_slug: string; spec_branch?: string | nul
 
 /** Row shape the tests seed for the "newest completed review" query. */
 interface CompletedReviewRow {
-  instructions: string; // JSON — SecurityBranchInstructions with head_sha + optional verdict
+  instructions: string; // JSON — SecurityBranchInstructions with reviewed_head_sha + optional verdict
 }
 /** Row shape the tests seed for guard (0). */
 interface LastBuildJobRow {
@@ -119,14 +119,14 @@ const SHA_A = "0".repeat(39) + "a";
 const SHA_B = "0".repeat(39) + "b";
 const BRANCH = "claude/build-example";
 
-/** Compact factory: a completed review row whose recorded head_sha + verdict come from args. */
+/** Compact factory: a completed review row whose recorded reviewed_head_sha + verdict come from args. */
 function completedReview(headSha: string | null, verdict?: string): CompletedReviewRow {
   const instr: SecurityBranchInstructions = {
     mode: "branch",
     branch: BRANCH,
     preview_origin: "",
     spec_slug: "example",
-    head_sha: headSha,
+    reviewed_head_sha: headSha,
     ...(verdict ? { verdict } : {}),
   };
   return { instructions: JSON.stringify(instr) };
@@ -177,7 +177,7 @@ test("dedup (2): the 2026-08-17 defect — a merge commit changes the head SHA (
   assert.equal(r.enqueued, true, "the merge-commit push must re-review — this is the whole point of Phase 2");
 });
 
-test("dedup (2): recorded head_sha is null (legacy pre-Phase-1 row / worker crashed pre-stamp) → ENQUEUE (conservative)", async () => {
+test("dedup (2): recorded reviewed_head_sha is null (legacy pre-Phase-1 row / worker crashed pre-stamp) → ENQUEUE (conservative)", async () => {
   const { admin } = makeAdmin({ newestCompletedReview: completedReview(null) });
   const r = await enqueueSecurityReviewJob(admin as never, enqueueInput(SHA_A));
   assert.equal(r.enqueued, true, "an absent recorded SHA cannot prove currency — re-review");
@@ -293,5 +293,5 @@ test("2026-08-17 PR 2486 ground truth: real-vuln at 13:22 + merge commit d8727bf
   assert.equal(r.enqueued, true);
   assert.equal(inserts.length, 1);
   const instr = JSON.parse(inserts[0].instructions) as SecurityBranchInstructions;
-  assert.equal(instr.head_sha, afterMerge, "Phase 1: the new review records the SHA it will cover");
+  assert.equal(instr.reviewed_head_sha, afterMerge, "Phase 1: the new review records the SHA it will cover");
 });

@@ -25550,7 +25550,7 @@ async function runSecurityReviewJob(job: Job) {
     actor: "vault",
     metadata: { job_id: job.id, kind: "security-review" },
   });
-  let instr: { mode?: string; merge_sha?: string; branch?: string; preview_origin?: string; spec_slug?: string; pr_number?: number | null; verdict?: string; authored_slug?: string; finding_signature?: string; head_sha?: string | null } = {};
+  let instr: { mode?: string; merge_sha?: string; branch?: string; preview_origin?: string; spec_slug?: string; pr_number?: number | null; verdict?: string; authored_slug?: string; finding_signature?: string; reviewed_head_sha?: string | null } = {};
   try {
     instr = job.instructions ? JSON.parse(job.instructions) : {};
   } catch {
@@ -25739,7 +25739,7 @@ async function runSecurityReviewJob(job: Job) {
       // Best-effort: a resolve failure (branch just deleted / transient) leaves whatever the enqueue
       // recorded, and a null on completion is Phase-2's not-fresh signal (conservative — re-review).
       const reviewedHeadSha = resolveOriginBranchSha(branch);
-      if (reviewedHeadSha) instr.head_sha = reviewedHeadSha;
+      if (reviewedHeadSha) instr.reviewed_head_sha = reviewedHeadSha;
       console.log(`${tag} reviewing unmerged branch ${branch} (spec ${parentSlug}${previewOrigin ? `, preview ${previewOrigin}` : ""}${reviewedHeadSha ? `, head ${reviewedHeadSha.slice(0, 12)}` : ""})`);
       basePrompt = securityBranchPrompt(branch, previewOrigin, parentSlug, instr.pr_number ?? null);
       source = { kind: "branch", branch, previewOrigin };
@@ -25747,7 +25747,7 @@ async function runSecurityReviewJob(job: Job) {
       specLabel = `unmerged ${parentSlug} (${branch})`;
       activityReason = (verdict, review) =>
         `Security review of unmerged ${parentSlug} (branch ${branch}): ${verdict} — ${review}`.slice(0, 4000);
-      activityMetadata = { branch, preview_origin: previewOrigin, head_sha: reviewedHeadSha, job_id: job.id };
+      activityMetadata = { branch, preview_origin: previewOrigin, reviewed_head_sha: reviewedHeadSha, job_id: job.id };
     } else {
       // ── Phase 1: per-merged-diff security pass. ──
       const mergeSha = instr.merge_sha || "";

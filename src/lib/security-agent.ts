@@ -166,7 +166,7 @@ export interface SecurityBranchInstructions {
    * before Phase 1 shipped, or a run whose worker crashed before stamping. Phase 2 treats those rows as
    * NOT-fresh (conservative default for a security gate: re-review whenever we can't prove currency).
    */
-  head_sha?: string | null;
+  reviewed_head_sha?: string | null;
   /** set on a TERMINAL job by the box: the verdict it reached. */
   verdict?: string;
   /** set when the box authored a fix: the slug it wrote. */
@@ -376,7 +376,7 @@ export interface EnqueueSecurityReviewBranchInput {
    * current head SHA at enqueue time, if the caller can resolve it. Server-side callers (Inngest / route
    * handlers) may not have local git access and pass `null`/omit — the RUN-TIME worker still stamps the
    * authoritative reviewed-SHA on completion, so an unknown enqueue-time value is fine. Recorded onto
-   * `instructions.head_sha` on insert so the row carries the intended-to-cover SHA even before the run.
+   * `instructions.reviewed_head_sha` on insert so the row carries the intended-to-cover SHA even before the run.
    */
   headSha?: string | null;
   /**
@@ -663,7 +663,7 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
   // Phase 2. The question is not "did the build lane push?" but "is the code on this branch the code we
   // reviewed?" — and only the head SHA answers that. Two changes replace the old timestamp comparison:
   //
-  //   Fix #1 (freshness keys on head SHA). Read the newest suppressing review's recorded head_sha (Phase 1
+  //   Fix #1 (freshness keys on head SHA). Read the newest suppressing review's recorded reviewed_head_sha (Phase 1
   //   records it — the AUTHORITATIVE value the worker stamps at run time, not the enqueue-time one) and
   //   compare it to the branch's CURRENT head (`input.headSha`, resolved by the caller from
   //   `origin/<branch>`). Equal ⇒ skip (the reviewed diff is current). Different, or either side absent
@@ -714,9 +714,9 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
       .maybeSingle();
     const rawInstructions = (newestCompleted as { instructions?: string } | null)?.instructions ?? null;
     if (rawInstructions) {
-      let parsed: { head_sha?: string | null; verdict?: string } | null = null;
+      let parsed: { reviewed_head_sha?: string | null; verdict?: string } | null = null;
       try {
-        parsed = JSON.parse(String(rawInstructions)) as { head_sha?: string | null; verdict?: string };
+        parsed = JSON.parse(String(rawInstructions)) as { reviewed_head_sha?: string | null; verdict?: string };
       } catch {
         /* not JSON — treat as no suppressing review */
       }
@@ -724,9 +724,9 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
       if (parsed && !isRealVulnVerdict(parsed.verdict)) {
         // Fix #1: same SHA on BOTH sides ⇒ reviewed diff is current ⇒ skip. Any absent side ⇒ can't
         // prove currency ⇒ enqueue (conservative — re-review). `input.headSha` is caller-supplied
-        // (Phase 1 resolveOriginBranchSha); `parsed.head_sha` is the run-time stamp the worker wrote.
+        // (Phase 1 resolveOriginBranchSha); `parsed.reviewed_head_sha` is the run-time stamp the worker wrote.
         const currentHead = typeof input.headSha === "string" && input.headSha ? input.headSha : null;
-        const reviewedHead = typeof parsed.head_sha === "string" && parsed.head_sha ? parsed.head_sha : null;
+        const reviewedHead = typeof parsed.reviewed_head_sha === "string" && parsed.reviewed_head_sha ? parsed.reviewed_head_sha : null;
         if (currentHead && reviewedHead && currentHead === reviewedHead) {
           return { enqueued: false, reason: "branch already has a clean security-review for the current head SHA" };
         }
@@ -747,7 +747,7 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
     // caller-supplied enqueue-time head (null when the caller has no git access to resolve it). The worker
     // lane overrides with the AUTHORITATIVE run-time reviewed SHA on completion, so an unknown enqueue-time
     // value is fine.
-    head_sha: input.headSha ?? null,
+    reviewed_head_sha: input.headSha ?? null,
   };
   const { error } = await admin.from("agent_jobs").insert({
     workspace_id: workspaceId,
