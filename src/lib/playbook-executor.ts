@@ -1377,9 +1377,163 @@ async function handleCheckVaultedPm(
 // one effector. Reuse is the point.
 //
 // Params come from the orchestrator's populated
-// `ctx.assisted_purchase_params` (Phase 3 wiring populates this from
-// the customer's intent + product picks); the step's `config` supplies
-// defaults (e.g. vendor='internal').
+// `ctx.assisted_purchase_params` — written at the routing boundary by
+// [[buildAssistedPurchaseParams]] / [[resolveAssistedPurchaseIntentToParams]]
+// (an-assisted-purchase-carries-the-item-the-customer-actually-picked Phase 2).
+// The step's `config` supplies defaults (e.g. vendor='internal').
+
+/**
+ * Phase 2 of an-assisted-purchase-carries-the-item-the-customer-actually-picked —
+ * the WRITER for `ctx.assisted_purchase_params`. Pure, no DB, no network. Turns a
+ * routed purchase intent (a variant the customer confirmed at Sol's `confirm_items`
+ * turn, a quantity, and — for a Subscribe & Save — the billing interval + next
+ * date) into the shape [[handleAssistedCreate]] merges into the terminal create
+ * action's payload.
+ *
+ * Reader/writer contract:
+ *   - `create_order`        → `{ vendor, line_items: [{ variant_id, title?, quantity, unit_cents? }] }`
+ *     mirroring `directActionHandlers.create_order` in `action-executor.ts` (which
+ *     requires `p.line_items?.length` — the Phase-1 empty-order guard is a sibling
+ *     of that same requirement).
+ *   - `create_subscription` → `{ vendor, items: [{ variant_id, title?, quantity }],
+ *                                interval, interval_count, next_billing_date }` per
+ *     `directActionHandlers.create_subscription`.
+ *
+ * Variant references MUST be the internal UUID (CLAUDE.md § Local conventions —
+ * "Internal joins use UUIDs, never `shopify_*_id`. Shopify is being sunset."). The
+ * spec's ground-truth case cited Corrie's confirm turn logging Shopify variant id
+ * `42614433448109`; converting at the writer boundary — not at the effector — is
+ * how we keep both forms from circulating downstream. This helper REJECTS a
+ * Shopify-numeric-id in the variant_id slot (returns null); the DB-backed sibling
+ * [[resolveAssistedPurchaseIntentToParams]] is the resolver that turns a Shopify
+ * variant id (or SKU) into the internal UUID before calling this helper.
+ */
+export interface AssistedPurchaseIntent {
+  actionType: "create_order" | "create_subscription";
+  /** Internal UUID from `product_variants.id`. Not a Shopify numeric id. */
+  variantId: string;
+  title?: string | null;
+  quantity?: number | null;
+  unitCents?: number | null;
+  /** subscription-only — required for `create_subscription`. */
+  interval?: "day" | "week" | "month" | "year" | null;
+  intervalCount?: number | null;
+  /** ISO date (YYYY-MM-DD). Required for `create_subscription`. */
+  nextBillingDate?: string | null;
+  /** Optional vendor override; defaults to 'internal' (Shopify is being sunset). */
+  vendor?: "internal" | "shopify" | null;
+}
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function buildAssistedPurchaseParams(
+  input: AssistedPurchaseIntent,
+): Record<string, unknown> | null {
+  if (!input.variantId || typeof input.variantId !== "string") return null;
+  // Reject a Shopify numeric id (or any non-UUID) in the variant_id slot — the
+  // reader at [[handleAssistedCreate]] passes this straight to the create effector,
+  // which joins on the internal UUID. Silent acceptance of a Shopify id would
+  // reproduce the exact "both forms circulating" bug the spec calls out.
+  if (!UUID_REGEX.test(input.variantId)) return null;
+  const q = Math.max(1, Math.floor(input.quantity ?? 1));
+  const vendor = input.vendor ?? "internal";
+  if (input.actionType === "create_order") {
+    const item: Record<string, unknown> = { variant_id: input.variantId, quantity: q };
+    if (input.title) item.title = input.title;
+    if (typeof input.unitCents === "number") item.unit_cents = input.unitCents;
+    return { vendor, line_items: [item] };
+  }
+  // create_subscription — the SDK requires interval / interval_count / next_billing_date.
+  if (!input.interval || !input.intervalCount || !input.nextBillingDate) return null;
+  const item: Record<string, unknown> = { variant_id: input.variantId, quantity: q };
+  if (input.title) item.title = input.title;
+  return {
+    vendor,
+    items: [item],
+    interval: input.interval,
+    interval_count: input.intervalCount,
+    next_billing_date: input.nextBillingDate,
+  };
+}
+
+/**
+ * Raw purchase-intent shape as Sol authors it on the Direction's
+ * `plan.playbook_seed_context.purchase_intent` (or as the confirm_items turn
+ * captures it). May reference the variant by internal UUID, Shopify variant id,
+ * or SKU — this resolver hands the reference to `findVariant` and only proceeds
+ * when it resolves to an internal UUID (Phase 2 bullet 4).
+ *
+ * Fix 1 (pre-merge spec-test regression — sec:real-vuln): `unit_cents` and
+ * `vendor` are DELIBERATELY ABSENT from this shape. Ticket customer text can
+ * influence Sol's structured Direction, and validatePlanForPath does not (and
+ * should not) allowlist per-item pricing/vendor fields — a prompt-injected
+ * customer could otherwise steer the assisted purchase toward an unauthorized
+ * price or a Shopify vendor branch. Price flows from the resolved
+ * `product_variants.price_cents` server-side; vendor flows from the playbook
+ * step's `config.vendor` default (seeded per playbook, out of ticket-directions
+ * reach). Never re-add these fields here.
+ */
+export interface RawAssistedPurchaseIntent {
+  actionType: "create_order" | "create_subscription";
+  variantId?: string | null;
+  shopifyVariantId?: string | null;
+  sku?: string | null;
+  title?: string | null;
+  quantity?: number | null;
+  interval?: "day" | "week" | "month" | "year" | null;
+  intervalCount?: number | null;
+  nextBillingDate?: string | null;
+}
+
+/**
+ * Phase 2 bullets 4 + 5 + Fix 1 (sec:real-vuln): resolve a raw purchase intent
+ * (any variant reference shape) to the internal-UUID params object at the
+ * ROUTING boundary. Returns null when the variant cannot be resolved — the
+ * caller is expected to fail at routing (ask the customer) rather than start
+ * the playbook with a payload that will only trip the Phase-1 guard at the
+ * terminal step.
+ *
+ * Trust boundary: EVERY numeric price + vendor selection is derived
+ * server-side from the workspace-scoped `product_variants` row (or is deliberately
+ * omitted so the playbook step's config default wins). Nothing on the raw
+ * ticket-directions payload can influence the outgoing `unit_cents` or `vendor`
+ * — the RawAssistedPurchaseIntent shape above has no fields for them, so a
+ * caller that tried to pass either would fail typechecking; but even if a
+ * caller reaches into `Record<string, unknown>`, we NEVER read those keys here.
+ */
+export async function resolveAssistedPurchaseIntentToParams(
+  admin: Admin,
+  workspaceId: string,
+  raw: RawAssistedPurchaseIntent,
+): Promise<Record<string, unknown> | null> {
+  const { findVariant } = await import("@/lib/product-variants");
+  const ref: { id?: string; shopifyVariantId?: string; sku?: string } = {};
+  if (raw.variantId) ref.id = raw.variantId;
+  if (raw.shopifyVariantId) ref.shopifyVariantId = String(raw.shopifyVariantId);
+  if (raw.sku) ref.sku = raw.sku;
+  if (!ref.id && !ref.shopifyVariantId && !ref.sku) return null;
+  // findVariant is workspace-scoped and returns the internal ProductVariant row.
+  // A cross-workspace Shopify id or a bogus SKU resolves to null — we treat that
+  // as "unresolvable at routing" per Phase 2 bullet 5.
+  const variant = await findVariant(workspaceId, ref);
+  if (!variant) return null;
+  return buildAssistedPurchaseParams({
+    actionType: raw.actionType,
+    variantId: variant.id,
+    title: raw.title ?? variant.title ?? null,
+    quantity: raw.quantity ?? null,
+    // Fix 1 (sec:real-vuln): unit_cents is ALWAYS the resolved variant's
+    // server-side price — never a value carried on the ticket-directions
+    // payload. Vendor is omitted so the playbook step's config default wins;
+    // the `assisted-order-purchase` / `assisted-subscription-purchase` playbook
+    // steps are seeded with vendor='internal' and that is the only vendor a
+    // Sol-routed assisted purchase should ever dispatch on.
+    unitCents: variant.price_cents ?? null,
+    interval: raw.interval ?? null,
+    intervalCount: raw.intervalCount ?? null,
+    nextBillingDate: raw.nextBillingDate ?? null,
+  });
+}
 
 /**
  * Pure result→response mapper for the assisted-purchase terminal step. Extracted
@@ -1435,11 +1589,73 @@ export function interpretAssistedCreateResult(input: {
     };
   }
   const okName = input.personaName ? input.personaName : "our team";
+  // Phase 1 of an-assisted-purchase-carries-the-item-the-customer-actually-picked —
+  // do NOT promise "I've flagged it for a quick review." The 2026-08-13 failure only
+  // minted a CEO card that sat unread for four days; a sentence in the product that
+  // asserts owned follow-up when none is performed is exactly what left Corrie in the
+  // dark. Escalation still runs (escalateAndCardOnAssistedPurchaseFailure), but the
+  // customer-facing message no longer claims a scheduled review.
   return {
     action: "respond",
-    response: `${okName} ran into an issue finishing this. I've flagged it for a quick review.`,
+    response: `${okName} ran into an issue finishing this.`,
     context: { assisted_purchase_last_error: result.error ?? null },
     systemNote: `[Playbook] ${actionType} — handler failed: ${result.error || "unknown error"}`,
+  };
+}
+
+/**
+ * Phase 1 of an-assisted-purchase-carries-the-item-the-customer-actually-picked —
+ * pre-dispatch guard for [[handleAssistedCreate]]. Sibling to the vaultedPmId guard:
+ * the same fail-closed invariant applied to the OTHER required input. An order with
+ * no items is never a valid order, and dispatching one into `action-executor.ts` only
+ * produces the "create_order missing line_items" rejection the ticket has no way to
+ * recover from.
+ *
+ * Returns null if the merged params carry at least one well-formed item; otherwise
+ * returns a RECOVERABLE `action:'respond'` refusal that asks the customer what to
+ * order — the conversation continues and they can answer in one reply. The generic
+ * "ran into an issue finishing this" text is reserved for a genuine handler failure,
+ * so this refusal uses distinct copy and a distinct systemNote (they have different
+ * causes and different fixes; conflating them in the logs is what left the class of
+ * failure invisible).
+ *
+ * Item shape: `create_order` reads `p.line_items[]`, `create_subscription` reads
+ * `p.items[]` (mirror of `directActionHandlers` in `action-executor.ts`). An entry
+ * missing a `variant_id` is malformed — the internal commerce SDK's item shape has
+ * `variant_id` as the required UUID reference; without it the effector cannot resolve
+ * the SKU. Pure — no DB, no network.
+ */
+export function assistedCreateMissingItemsGuard(input: {
+  actionType: "create_order" | "create_subscription";
+  params: Record<string, unknown>;
+}): AssistedCreateInterpretation | null {
+  const { actionType, params } = input;
+  const itemsField = actionType === "create_order" ? "line_items" : "items";
+  const raw = params[itemsField];
+  const wellFormed =
+    Array.isArray(raw) &&
+    raw.length > 0 &&
+    raw.every(
+      (it) =>
+        it &&
+        typeof it === "object" &&
+        typeof (it as Record<string, unknown>).variant_id === "string" &&
+        ((it as Record<string, unknown>).variant_id as string).length > 0,
+    );
+  if (wellFormed) return null;
+  const shapeHint = !raw
+    ? "missing"
+    : !Array.isArray(raw)
+      ? "malformed (not an array)"
+      : raw.length === 0
+        ? "empty"
+        : "malformed (item missing variant_id)";
+  return {
+    action: "respond",
+    response:
+      "Before I place this, which product and flavor would you like me to order? Reply with the product and I'll take it from there.",
+    context: { assisted_purchase_missing_items: true },
+    systemNote: `[Playbook] ${actionType} — refusing to dispatch: ${itemsField} ${shapeHint} in resolved params (Phase-1 empty-order invariant).`,
   };
 }
 async function handleAssistedCreate(
@@ -1461,6 +1677,21 @@ async function handleAssistedCreate(
       action: "respond",
       response: "I need a payment method on file before I can finish this. Let me get that set up first.",
       systemNote: `[Playbook] ${actionType} — no vaulted_payment_method_id in context; refusing to dispatch (Phase-1 invariant).`,
+    };
+  }
+
+  // Sibling guard on the OTHER required input: an order with no items is never a
+  // valid order (see [[assistedCreateMissingItemsGuard]]). Same shape as the
+  // vaultedPmId guard above — refuse to call the handler, return a RECOVERABLE
+  // reply asking what to order. Phase 1 of
+  // an-assisted-purchase-carries-the-item-the-customer-actually-picked.
+  const preDispatchRefusal = assistedCreateMissingItemsGuard({ actionType, params: merged });
+  if (preDispatchRefusal) {
+    return {
+      action: preDispatchRefusal.action,
+      response: preDispatchRefusal.response,
+      context: preDispatchRefusal.context,
+      systemNote: preDispatchRefusal.systemNote,
     };
   }
 
