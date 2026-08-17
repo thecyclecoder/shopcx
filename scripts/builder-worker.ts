@@ -860,6 +860,28 @@ function sh(cmd: string, args: string[], opts: { timeout?: number; cwd?: string 
   return { code: r.status ?? -1, out: r.stdout || "", err: r.stderr || "" };
 }
 
+/**
+ * a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 1 — resolve the
+ * current head SHA of `origin/<branch>` (40-char), returning null on any failure (branch missing,
+ * fetch error, transient network). Used by the security-review lane to record which SHA a review
+ * actually covered; a null just means Phase 2's freshness gate treats it as not-fresh (conservative:
+ * re-review). Best-effort — never throws.
+ */
+function resolveOriginBranchSha(branch: string): string | null {
+  const b = String(branch || "").trim();
+  if (!b) return null;
+  try {
+    const fetched = sh("git", ["fetch", "origin", b]);
+    if (fetched.code !== 0) return null;
+    const rev = sh("git", ["rev-parse", `origin/${b}`]);
+    if (rev.code !== 0) return null;
+    const sha = rev.out.trim();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
 // Async (NON-blocking) exec — REQUIRED for the long-running claude/tsc/apply steps so concurrent
 // build lanes actually overlap. spawnSync freezes the whole event loop and would serialize lanes.
 function shAsync(cmd: string, args: string[], opts: { timeout?: number; idleTimeout?: number; cwd?: string; env?: NodeJS.ProcessEnv; onLine?: (line: string) => void; input?: string } = {}): Promise<{ code: number; out: string; err: string; killed?: "idle" | "hardcap" }> {
@@ -13819,12 +13841,17 @@ async function runSpecTestJob(job: Job) {
     if (isPreMerge && branch) {
       try {
         const { enqueueSecurityReviewJob } = await import("../src/lib/security-agent");
+        // a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 1 — capture the
+        // branch's current head at enqueue so the row carries the intended-to-cover SHA even before the
+        // review runs. The worker lane will overwrite with the AUTHORITATIVE run-time SHA on completion.
+        const headSha = resolveOriginBranchSha(branch);
         const r = await enqueueSecurityReviewJob(db, {
           branch,
           previewOrigin: previewOrigin ?? "",
           specSlug: slug,
           prNumber: typeof job.pr_number === "number" ? job.pr_number : null,
           workspaceId: job.workspace_id,
+          headSha,
         });
         console.log(`${tag} solo Vault security-review: ${r.enqueued ? "enqueued" : "skipped"}${r.reason ? ` (${r.reason})` : ""}`);
       } catch (e) {
@@ -25523,7 +25550,7 @@ async function runSecurityReviewJob(job: Job) {
     actor: "vault",
     metadata: { job_id: job.id, kind: "security-review" },
   });
-  let instr: { mode?: string; merge_sha?: string; branch?: string; preview_origin?: string; spec_slug?: string; pr_number?: number | null; verdict?: string; authored_slug?: string; finding_signature?: string } = {};
+  let instr: { mode?: string; merge_sha?: string; branch?: string; preview_origin?: string; spec_slug?: string; pr_number?: number | null; verdict?: string; authored_slug?: string; finding_signature?: string; head_sha?: string | null } = {};
   try {
     instr = job.instructions ? JSON.parse(job.instructions) : {};
   } catch {
@@ -25704,14 +25731,23 @@ async function runSecurityReviewJob(job: Job) {
         console.log(`${tag} no branch → no-op`);
         return;
       }
-      console.log(`${tag} reviewing unmerged branch ${branch} (spec ${parentSlug}${previewOrigin ? `, preview ${previewOrigin}` : ""})`);
+      // ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 1 — stamp the
+      // AUTHORITATIVE reviewed-head SHA onto `instr` BEFORE dispatching the review, so every terminal write
+      // in applySecurityVerdictToJob (which does `JSON.stringify({...instr, verdict, …})`) carries it.
+      // Enqueue-time headSha may be null (server-side callers) or stale (a push landed between enqueue and
+      // run) — the run-time value the worker resolves here is what the Phase-2 freshness gate reads.
+      // Best-effort: a resolve failure (branch just deleted / transient) leaves whatever the enqueue
+      // recorded, and a null on completion is Phase-2's not-fresh signal (conservative — re-review).
+      const reviewedHeadSha = resolveOriginBranchSha(branch);
+      if (reviewedHeadSha) instr.head_sha = reviewedHeadSha;
+      console.log(`${tag} reviewing unmerged branch ${branch} (spec ${parentSlug}${previewOrigin ? `, preview ${previewOrigin}` : ""}${reviewedHeadSha ? `, head ${reviewedHeadSha.slice(0, 12)}` : ""})`);
       basePrompt = securityBranchPrompt(branch, previewOrigin, parentSlug, instr.pr_number ?? null);
       source = { kind: "branch", branch, previewOrigin };
       contextLabel = `unmerged branch ${branch}`;
       specLabel = `unmerged ${parentSlug} (${branch})`;
       activityReason = (verdict, review) =>
         `Security review of unmerged ${parentSlug} (branch ${branch}): ${verdict} — ${review}`.slice(0, 4000);
-      activityMetadata = { branch, preview_origin: previewOrigin, job_id: job.id };
+      activityMetadata = { branch, preview_origin: previewOrigin, head_sha: reviewedHeadSha, job_id: job.id };
     } else {
       // ── Phase 1: per-merged-diff security pass. ──
       const mergeSha = instr.merge_sha || "";

@@ -151,6 +151,22 @@ export interface SecurityBranchInstructions {
   spec_slug: string;
   /** the build's PR number, when known. */
   pr_number?: number | null;
+  /**
+   * ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 1 — the head
+   * SHA the review actually covered. Written twice on happy path:
+   *   1. at ENQUEUE by `enqueueSecurityReviewBranch` when the caller supplies `headSha` (whatever the
+   *      branch's tip resolved to at enqueue time) — a best-effort record so a review that never runs
+   *      still carries what it INTENDED to cover.
+   *   2. at RUN by the worker lane (scripts/builder-worker.ts `runSecurityReviewJob`, branch mode) as
+   *      the AUTHORITATIVE value: the SHA the worker actually checked out just before dispatching the
+   *      review. If a push landed between enqueue and run, the run-time value is what counts — Phase 2's
+   *      freshness gate keys off this stamp, not the enqueue-time one.
+   *
+   * `null` (or absent) on a completed row means "the review covered NO known SHA" — a legacy row from
+   * before Phase 1 shipped, or a run whose worker crashed before stamping. Phase 2 treats those rows as
+   * NOT-fresh (conservative default for a security gate: re-review whenever we can't prove currency).
+   */
+  head_sha?: string | null;
   /** set on a TERMINAL job by the box: the verdict it reached. */
   verdict?: string;
   /** set when the box authored a fix: the slug it wrote. */
@@ -355,6 +371,14 @@ export interface EnqueueSecurityReviewBranchInput {
   prNumber?: number | null;
   /** override the workspace; else resolved from the latest job / first workspace. */
   workspaceId?: string;
+  /**
+   * ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 1 — the branch's
+   * current head SHA at enqueue time, if the caller can resolve it. Server-side callers (Inngest / route
+   * handlers) may not have local git access and pass `null`/omit — the RUN-TIME worker still stamps the
+   * authoritative reviewed-SHA on completion, so an unknown enqueue-time value is fine. Recorded onto
+   * `instructions.head_sha` on insert so the row carries the intended-to-cover SHA even before the run.
+   */
+  headSha?: string | null;
   /**
    * ⭐ security-real-vuln-deadlock-breaker Phase 2 — bypass the "unchanged branch" dedup (2) ONLY.
    *
@@ -667,6 +691,11 @@ async function enqueueSecurityReviewBranch(admin: Admin, input: EnqueueSecurityR
     preview_origin: String(input.previewOrigin || ""),
     spec_slug: input.specSlug,
     pr_number: input.prNumber ?? null,
+    // a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 1 — record the
+    // caller-supplied enqueue-time head (null when the caller has no git access to resolve it). The worker
+    // lane overrides with the AUTHORITATIVE run-time reviewed SHA on completion, so an unknown enqueue-time
+    // value is fine.
+    head_sha: input.headSha ?? null,
   };
   const { error } = await admin.from("agent_jobs").insert({
     workspace_id: workspaceId,
