@@ -19732,12 +19732,22 @@ async function runPrResolveJob(job: Job) {
   // decide" verdicts, so a self-requeue would just re-park.
   let paxFollowUpNeeded = false;
   let paxFollowUpReason = "";
+  // Hoist head/base SHA out so the outer finally's enqueuePaxFollowUp can reuse the same
+  // resolve_fingerprint (build_sha:base_sha) — Phase 2 point 4: a same-input re-queue must
+  // increment the attempt counter, not fan out under a fresh fingerprint.
+  let paxHeadSha: string | null = null;
+  let paxBaseSha: string | null = null;
   try {
   // Re-check PR state (idempotent / de-duped): only act on an OPEN, not-already-MERGEABLE PR. mergeable
   // can be null (GitHub still computing) → re-check briefly; if still unknown, attempt anyway (the
   // webhook flagged it CONFLICTING). already mergeable / merged / closed → no-op completed.
   const prResp = await gh("GET", `/repos/${REPO}/pulls/${prNumber}`);
-  const pr = prResp.json as { state?: string; merged?: boolean; mergeable?: boolean | null; html_url?: string; message?: string; head?: { ref?: string }; base?: { ref?: string } };
+  const pr = prResp.json as { state?: string; merged?: boolean; mergeable?: boolean | null; html_url?: string; message?: string; head?: { ref?: string; sha?: string }; base?: { ref?: string; sha?: string } };
+  // Capture head/base SHA as soon as the PR fetch succeeds so an early-return path (worktree
+  // add fails BEFORE snapshot/provenance) still carries the resolve_fingerprint into the
+  // outer finally's follow-up enqueue.
+  if (typeof pr.head?.sha === "string" && pr.head.sha) paxHeadSha = pr.head.sha;
+  if (typeof pr.base?.sha === "string" && pr.base.sha) paxBaseSha = pr.base.sha;
   const prUrl = pr.html_url || `https://github.com/${REPO}/pull/${prNumber}`;
 
   // pax-never-reports-nothing-to-resolve-on-a-pr-state-it-could-not-read (Phase 1) — SPLIT the guard.
@@ -20111,11 +20121,16 @@ async function runPrResolveJob(job: Job) {
     if (paxFollowUpNeeded) {
       try {
         const { enqueuePaxFollowUp } = await import("../src/lib/github-pr-resolve");
+        // Phase 2 point 4 — pass the SHAs we already fetched so the SDK computes the SAME
+        // resolve_fingerprint the standing dirty-PR backstop would; the attempt counter then
+        // increments on the same-input row instead of a fresh fingerprint fanning out a sibling.
         const followUp = await enqueuePaxFollowUp(db, {
           workspaceId: wsId,
           prNumber,
           branch,
           reason: paxFollowUpReason,
+          headSha: paxHeadSha,
+          baseSha: paxBaseSha,
         });
         if (followUp.enqueued) {
           console.log(`${tag} pax follow-up attempt ${followUp.attempt} enqueued for PR #${prNumber}`);
