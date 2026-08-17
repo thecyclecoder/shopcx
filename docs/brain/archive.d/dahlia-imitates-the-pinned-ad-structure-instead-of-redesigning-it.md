@@ -1,0 +1,1 @@
+- **Dahlia imitates the pinned ad's structure instead of redesigning it** · verified 2026-08-17 · → [[lifecycles/ad-creative]]
