@@ -40,7 +40,6 @@ import {
   qaCreativeViaBoxSession,
   type QcSessionDispatcher,
   runQaCreativeCopyViaBoxSession,
-  parseCopyQaVerdict,
   insertCopyQaVerdict,
   type CopyQcSessionDispatcher,
   type CopyQaDeclaredIntent,
@@ -882,7 +881,20 @@ export interface CopyAuthorSessionInputs {
     verdict: AuthorModeCopy,
   ) => Promise<
     | { ok: true; maxVerdict: CopyQaVerdict }
-    | { ok: false; reason: string; maxVerdict: CopyQaVerdict | null }
+    | {
+        ok: false;
+        reason: string;
+        maxVerdict: CopyQaVerdict | null;
+        /** max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — true when the
+         *  !ok result came from OUR side (parse_error after re-ask OR dispatch_error) rather
+         *  than a Max-authored bounce (below-floor / hard-gate fail). The loop uses this to
+         *  SKIP consuming a Dahlia revise attempt on a failure Max never actually authored:
+         *  the QA runner already re-asked Max once, the caller closure already emitted the
+         *  `max_copy_qc_verdict_unparseable` director_activity audit, and the loop simply
+         *  accepts the current copy without bouncing. Only a verdict Max actually returned
+         *  (below floor, or a hard-gate fail) is a real bounce that costs an attempt. */
+        ourSideFailure?: boolean;
+      }
   >;
   /** dahlia-max-live-timeline — best-effort live progress narration for the Dahlia→Max ping-pong.
    *  The caller (the runner) writes each note to `agent_jobs.session_note` so the box/session card
@@ -1950,6 +1962,21 @@ export async function runCopyAuthorSession(
       note("Max is grading the copy…");
       const maxCheck = await inputs.verifyMaxCopyQc(verdict);
       if (!maxCheck.ok) {
+        if (maxCheck.ourSideFailure) {
+          // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — an OUR-SIDE
+          // failure (parse_error after the QA runner's one-shot re-ask, OR dispatch_error) must
+          // NOT consume one of Dahlia's revise attempts, because Max never actually authored a
+          // verdict for Dahlia to answer to. The caller closure already emitted the
+          // `max_copy_qc_verdict_unparseable` director_activity audit; here we simply accept
+          // the copy she wrote and return ok (with a null Max verdict — the ad_campaigns row
+          // gets stamped max_qc_eligible=null, treated as pass-through by Bianca's filter,
+          // identical to the "no dispatcher injected" branch below).
+          note("Max's verdict couldn't be parsed after a re-ask — audited and accepting the copy without consuming a revise attempt.");
+          lastMaxCopyQcMissed = false;
+          lastMaxCopyQcVerdict = null;
+          lastAuthorVerdict = null;
+          return { kind: "ok", verdict, attempts: attempt + 1, maxCopyQcVerdict: null };
+        }
         lastReason = maxCheck.reason;
         lastValidatorMisses = undefined;
         lastFirewallMisses = undefined;
@@ -2215,7 +2242,25 @@ async function runCopyQcForCreative(
     siblingRenders?: RenderedPlacement[];
   },
   dispatch: CopyQcSessionDispatcher,
-): Promise<{ verdict: CopyQaVerdict } | { verdict: null; reason: string }> {
+): Promise<
+  | { verdict: CopyQaVerdict }
+  | {
+      /** max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — an OUR-SIDE
+       *  failure (parse_error after re-ask OR dispatch_error). `ourSideFailure` propagates
+       *  upward so the revise loop does NOT decrement Dahlia's MAX_COPY_AUTHOR_REVISE_ATTEMPTS
+       *  budget on a failure Max never actually authored, and the caller closure emits a
+       *  `director_activity` audit (`action_kind='max_copy_qc_verdict_unparseable'`) carrying
+       *  Max's raw first ~500 chars so the evaporating verdict is visible instead of silent. */
+      verdict: null;
+      reason: string;
+      ourSideFailure: boolean;
+      /** Populated on parse_error — the FIRST dispatch's raw text (first ~500 chars) for audit. */
+      firstRawHead?: string;
+      /** Populated on parse_error — the RE-ASK's raw text (first ~500 chars) when the re-ask
+       *  ran and also failed to parse. Absent when we could not attempt a re-ask. */
+      secondRawHead?: string;
+    }
+> {
   // max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok Phase 2 — collect the
   // canonical + every sibling into one list of RenderedPlacements. Only the formats the SKILL
   // recognises (COPY_QC_CREATIVE_FORMATS) survive the filter so a stray unknown-format render
@@ -2236,13 +2281,16 @@ async function runCopyQcForCreative(
           .jpeg({ quality: 82 })
           .toBuffer();
       } catch (err) {
-        return { verdict: null, reason: `image_undecodable_${render.format}: ${errText(err)}` };
+        // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — an image-normalize
+        // error is OUR-SIDE too (Max never saw the image; there's nothing for Dahlia to answer to).
+        return { verdict: null, reason: `image_undecodable_${render.format}: ${errText(err)}`, ourSideFailure: true };
       }
       const imagePath = join(tmpdir(), `creative-copy-qc-${runId}-${render.format}.jpg`);
       try {
         await writeFile(imagePath, normalized);
       } catch (err) {
-        return { verdict: null, reason: `tmpfile_write_failed_${render.format}: ${errText(err)}` };
+        // Same OUR-SIDE class — tmpfile write failure on our disk, Max never saw the render.
+        return { verdict: null, reason: `tmpfile_write_failed_${render.format}: ${errText(err)}`, ourSideFailure: true };
       }
       tmpFiles.push({ format: render.format, path: imagePath });
     }
@@ -2279,28 +2327,32 @@ async function runCopyQcForCreative(
       },
       dispatch,
     );
-    if (outcome.kind !== "ok") {
-      return { verdict: null, reason: outcome.reason };
+    if (outcome.kind === "ok") {
+      return { verdict: outcome.verdict };
     }
-    const parsed = parseCopyQaVerdict(outcome.resultText, {
-      runTargetTemperature: input.audienceTemperature,
-    });
-    if (parsed.kind !== "ok") {
-      // DIAGNOSTIC (2026-07-19) — copy-QC has been missing every grade with
-      // `copy_qc_verdict_no_json_block` (Max's session returns no JSON), silently blocking ALL
-      // ad postability. The dispatcher never logged Max's raw output, so the actual failure mode
-      // (prose-only / empty / truncated response) was invisible. Log a bounded snippet of the raw
-      // resultText on any parse miss so the precise cause is diagnosable, then remove once fixed.
-      const raw = outcome.resultText ?? "";
-      console.warn("copy_qc_parse_miss_raw", {
-        reason: parsed.reason,
-        rawLength: raw.length,
-        rawHead: raw.slice(0, 500),
-        rawTail: raw.length > 700 ? raw.slice(-200) : "",
+    if (outcome.kind === "parse_error") {
+      // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — the QA runner
+      // already re-asked Max ONCE inside runQaCreativeCopyViaBoxSession (short RESUME turn,
+      // quoting the exact parse reason + restating the required envelope). This is the SETTLE:
+      // both attempts failed to parse, so we surface the raw heads for the caller's
+      // director_activity audit + flag `ourSideFailure` so the revise loop does not consume one
+      // of Dahlia's revise attempts on a failure Max never actually authored.
+      console.warn("copy_qc_parse_miss_after_reask", {
+        reason: outcome.reason,
+        firstRawHead: outcome.firstRawHead,
+        secondRawHead: outcome.secondRawHead ?? "(no re-ask attempted)",
       });
-      return { verdict: null, reason: `copy_qc_parse_error: ${parsed.reason}` };
+      return {
+        verdict: null,
+        reason: outcome.reason,
+        ourSideFailure: true,
+        firstRawHead: outcome.firstRawHead,
+        secondRawHead: outcome.secondRawHead,
+      };
     }
-    return { verdict: parsed.verdict };
+    // dispatch_error — same OUR-SIDE class (session errored / dispatcher threw); no raw text
+    // to audit, just the reason code.
+    return { verdict: null, reason: outcome.reason, ourSideFailure: true };
   } finally {
     for (const f of tmpFiles) {
       void unlink(f.path).catch(() => {});
@@ -3537,9 +3589,64 @@ async function stockProduct(
                 ).catch((err) => ({
                   verdict: null as null,
                   reason: `max_copy_qc_threw: ${errText(err)}`,
+                  ourSideFailure: true as const,
+                  firstRawHead: undefined as string | undefined,
+                  secondRawHead: undefined as string | undefined,
                 }));
                 if (!qcRun.verdict) {
-                  console.warn("max_copy_qc_verdict_missed", { workspaceId, productId, reason: qcRun.reason });
+                  // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — an
+                  // OUR-SIDE failure (parse_error after re-ask, dispatch_error, or a thrown
+                  // exception): the QA runner already re-asked Max ONCE, both attempts came back
+                  // unparseable/undispatchable, so Max's verdict is a genuine miss on our wire.
+                  // Emit a growth director_activity row carrying the parse reason + Max's raw
+                  // first ~500 chars so this evaporating supervisor is visible — the 2026-08-12
+                  // Amazing Coffee case (only 41 copy-QC sessions ever run, and this failure mode
+                  // left no trace anywhere). Best-effort — never crash the loop on the audit.
+                  const ourSide = "ourSideFailure" in qcRun ? qcRun.ourSideFailure === true : false;
+                  console.warn("max_copy_qc_verdict_missed", {
+                    workspaceId,
+                    productId,
+                    reason: qcRun.reason,
+                    ourSideFailure: ourSide,
+                  });
+                  if (ourSide) {
+                    const firstRawHead = "firstRawHead" in qcRun ? qcRun.firstRawHead : undefined;
+                    const secondRawHead = "secondRawHead" in qcRun ? qcRun.secondRawHead : undefined;
+                    void recordDirectorActivity(admin, {
+                      workspaceId,
+                      directorFunction: "growth",
+                      actionKind: "max_copy_qc_verdict_unparseable",
+                      specSlug: "max-critique-reaches-dahlia-and-the-box-card-shows-one-face",
+                      reason:
+                        `max copy-QC verdict was unparseable for ${productTitle} (${angle.source} angle) — ` +
+                        `${qcRun.reason}`.slice(0, 500),
+                      metadata: {
+                        product_id: productId,
+                        product_title: productTitle,
+                        angle_source: angle.source,
+                        angle_hook: angle.hook,
+                        audience_temperature: verdict.audience_temperature,
+                        parse_reason: qcRun.reason,
+                        first_raw_head: firstRawHead ?? null,
+                        second_raw_head: secondRawHead ?? null,
+                        autonomous: true,
+                      },
+                    }).catch((e) => {
+                      console.warn("max_copy_qc_verdict_unparseable_activity_failed", {
+                        workspaceId,
+                        productId,
+                        err: errText(e),
+                      });
+                    });
+                    // Signal the loop to accept the copy without consuming one of Dahlia's four
+                    // revise attempts — Max never actually authored a critique for her to answer.
+                    return {
+                      ok: false,
+                      reason: buildMaxQcReviseReason(null),
+                      maxVerdict: null,
+                      ourSideFailure: true,
+                    };
+                  }
                   return { ok: false, reason: buildMaxQcReviseReason(null), maxVerdict: null };
                 }
                 if (isCopyQcEligible(qcRun.verdict)) {

@@ -22638,30 +22638,54 @@ async function runAdCreativeJob(job: Job) {
   // rollback lever (the ad-creative kill switch in Phase 3 is the ONLY rollback), so a frozen
   // switch produces nothing rather than a Max-less creative.
   let copyQcCounter = 0;
-  const copyQcDispatcher: CopyQcSessionDispatcher = async (prompt, allowedImagePath) => {
+  // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — the QC dispatcher now
+  // mirrors the copy-author dispatcher's resume shape. `runQaCreativeCopyViaBoxSession` uses
+  // this to RESUME Max's SAME session for the one-shot re-ask on a parse_error (his prior verdict
+  // context stays cache-warm, so the re-ask is a short "re-emit in the correct envelope" turn
+  // instead of paying the full prompt again). Same missing-session / account-hop failsafes as
+  // the copy-author dispatcher — either signals "settle as parse_error" upstream.
+  const copyQcDispatcher: CopyQcSessionDispatcher = async (prompt, allowedImagePath, resume) => {
     copyQcCounter++;
-    const qcTag = `${tag}[copy-qc#${copyQcCounter}]`;
+    const qcTag = `${tag}[copy-qc#${copyQcCounter}]${resume ? "[resume]" : ""}`;
     try {
-      const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
-        configDir: cfg,
-        kind: "ad-creative-copy-qc",
-        // Least-privilege — same profile as `sandbox: "qc"` / the copy-author lane; the QC child
-        // only Reads ONE tmp jpeg + emits ONE JSON envelope, so we strip every SUPABASE_/GITHUB_/
-        // META_/ANTHROPIC_/OPENAI_ credential.
-        sandbox: "qc",
-        timeout: AD_CREATIVE_QC_TIMEOUT_MS,
-        idleTimeout: AD_CREATIVE_QC_IDLE_MS,
-        // Reuse the QC PreToolUse gate — the shared predicate allows Read on any path in the
-        // comma-separated AD_CREATIVE_QC_ALLOWED_IMAGE env + TodoWrite, denies everything else.
-        // Same env-var name keeps the gate script single-source-of-truth across QC / author / copy-qc.
-        permissionGate: { hookCommand: qcPermissionHookCommand },
-        extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
-      }));
+      const run = await runBoxLane(
+        (cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+          configDir: cfg,
+          kind: "ad-creative-copy-qc",
+          // Least-privilege — same profile as `sandbox: "qc"` / the copy-author lane; the QC child
+          // only Reads ONE tmp jpeg + emits ONE JSON envelope, so we strip every SUPABASE_/GITHUB_/
+          // META_/ANTHROPIC_/OPENAI_ credential.
+          sandbox: "qc",
+          timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+          idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+          // Reuse the QC PreToolUse gate — the shared predicate allows Read on any path in the
+          // comma-separated AD_CREATIVE_QC_ALLOWED_IMAGE env + TodoWrite, denies everything else.
+          // Same env-var name keeps the gate script single-source-of-truth across QC / author / copy-qc.
+          permissionGate: { hookCommand: qcPermissionHookCommand },
+          extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+        }),
+        resume ? { sessionConfigDir: resume.sessionConfigDir, sessionId: resume.sessionId } : undefined,
+      );
+      // FAILSAFE 1 — RESUME whose session the box no longer has. Signal the caller to settle as
+      // parse_error rather than trying to rebuild context (the re-ask is a short-turn prompt that
+      // assumes Max's prior context, so a fresh session couldn't answer it usefully).
+      if (resume && isMissingSessionError(run.raw || "")) {
+        console.warn(`${qcTag} resume session ${resume.sessionId} missing on box — signaling parse_error settle`);
+        return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: true };
+      }
+      // FAILSAFE 2 — RESUME whose pinned account was capped mid-loop: runBoxLane hops to a healthy
+      // account and re-runs the SHORT re-ask on a FRESH session there — which has NO cached context,
+      // so its output is unusable. Detect the hop + signal missingSession so the caller settles as
+      // parse_error rather than trusting a context-less re-ask.
+      if (resume && run.configDir && resume.sessionConfigDir && run.configDir !== resume.sessionConfigDir) {
+        console.warn(`${qcTag} resume account-hopped ${resume.sessionConfigDir}→${run.configDir} (cap) — short prompt ran context-less; signaling parse_error settle`);
+        return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: true };
+      }
       if (run.isError) console.warn(`${qcTag} copy-QC session errored — fail-closed to dispatch_error`);
-      return { resultText: run.resultText || "", isError: run.isError };
+      return { resultText: run.resultText || "", isError: run.isError, sessionId: run.session, sessionConfigDir: run.configDir, missingSession: false };
     } catch (err) {
       console.error(`${qcTag} copy-QC dispatch threw: ${errText(err)}`);
-      return { resultText: "", isError: true };
+      return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: false };
     }
   };
   console.log(`${tag} per-creative max-copy-qc box session engaged (box-session-only invariant — DAHLIA_QC_COPY_MODE gate retired)`);
@@ -22798,24 +22822,39 @@ async function runAdCreativeCopyAuthorJob(job: Job) {
     // sandbox / gate / env pattern as the copy-author dispatcher above (single tmp jpeg, minimal
     // env, TodoWrite + Read on the allowed image only).
     let copyQcCounter = 0;
-    const copyQcDispatcher: CopyQcSessionDispatcher = async (prompt, allowedImagePath) => {
+    // max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — mirror the
+    // production lane's resume-capable QC dispatcher so runQaCreativeCopyViaBoxSession can
+    // re-ask Max's SAME session on a parse_error here too. Same missing-session / account-hop
+    // failsafes as the copy-author dispatcher.
+    const copyQcDispatcher: CopyQcSessionDispatcher = async (prompt, allowedImagePath, resume) => {
       copyQcCounter++;
-      const qcTag = `${tag}[copy-qc#${copyQcCounter}]`;
+      const qcTag = `${tag}[copy-qc#${copyQcCounter}]${resume ? "[resume]" : ""}`;
       try {
-        const run = await runBoxLane((cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
-          configDir: cfg,
-          kind: "ad-creative-copy-qc",
-          sandbox: "qc",
-          timeout: AD_CREATIVE_QC_TIMEOUT_MS,
-          idleTimeout: AD_CREATIVE_QC_IDLE_MS,
-          permissionGate: { hookCommand: qcPermissionHookCommand },
-          extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
-        }));
+        const run = await runBoxLane(
+          (cfg, sid) => runBoxSession(prompt, sid, REPO_DIR, {
+            configDir: cfg,
+            kind: "ad-creative-copy-qc",
+            sandbox: "qc",
+            timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+            idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+            permissionGate: { hookCommand: qcPermissionHookCommand },
+            extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+          }),
+          resume ? { sessionConfigDir: resume.sessionConfigDir, sessionId: resume.sessionId } : undefined,
+        );
+        if (resume && isMissingSessionError(run.raw || "")) {
+          console.warn(`${qcTag} resume session ${resume.sessionId} missing on box — signaling parse_error settle`);
+          return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: true };
+        }
+        if (resume && run.configDir && resume.sessionConfigDir && run.configDir !== resume.sessionConfigDir) {
+          console.warn(`${qcTag} resume account-hopped ${resume.sessionConfigDir}→${run.configDir} (cap) — short prompt ran context-less; signaling parse_error settle`);
+          return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: true };
+        }
         if (run.isError) console.warn(`${qcTag} copy-QC session errored — fail-closed to dispatch_error`);
-        return { resultText: run.resultText || "", isError: run.isError };
+        return { resultText: run.resultText || "", isError: run.isError, sessionId: run.session, sessionConfigDir: run.configDir, missingSession: false };
       } catch (err) {
         console.error(`${qcTag} copy-QC dispatch threw: ${errText(err)}`);
-        return { resultText: "", isError: true };
+        return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: false };
       }
     };
     const { runAdCreativeLoop } = await import("../src/lib/ads/creative-agent");

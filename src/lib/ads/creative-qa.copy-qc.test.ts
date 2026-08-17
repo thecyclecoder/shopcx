@@ -66,11 +66,35 @@ test("(b) computeCopyQcPreCheck: competitor leak → validator pass:false + bloc
   assert.match(result.trustedContextBlock, /no_competitor_leak: fail/);
 });
 
+// max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 — a full parseable
+// verdict, minted here as fixture bytes so the (c) prompt-pinning test can go through the QA
+// runner's inline parse without landing in the parse_error re-ask branch. The exact envelope
+// shape is what `.claude/skills/max-copy-qc/SKILL.md` documents.
+const stubParseableVerdictJson = JSON.stringify({
+  hard_gate_pass: true,
+  hard_gates: {
+    no_fabrication: true,
+    no_cold_offer: true,
+    no_competitor_leak: true,
+    render_ok: true,
+  },
+  persuasion_score: 8,
+  persuasion_rubric: {
+    lf8: 2,
+    schwartz: 1,
+    cialdini: 2,
+    hopkins: 1,
+    sugarman: 2,
+    evidence: [],
+  },
+  verdict_reason: "stub verdict for prompt-pinning test",
+});
+
 test("(c) runQaCreativeCopyViaBoxSession: dispatcher receives the TRUSTED CONTEXT block as the prompt", async () => {
   let captured: { prompt: string; imagePath: string } | null = null;
   const dispatch: CopyQcSessionDispatcher = async (prompt, imagePath) => {
     captured = { prompt, imagePath };
-    return { resultText: '{"hard_gate_pass":true}', isError: false };
+    return { resultText: stubParseableVerdictJson, isError: false };
   };
   const outcome = await runQaCreativeCopyViaBoxSession(
     {
@@ -89,9 +113,14 @@ test("(c) runQaCreativeCopyViaBoxSession: dispatcher receives the TRUSTED CONTEX
   // Max reads it to align his hard-gate output on the same six rail names.
   assert.match(cap!.prompt, /BEGIN_VALIDATOR_TRUSTED_CONTEXT_v1/);
   // The outcome MUST carry the same validator result the block reported, so a downstream
-  // observer can compare Max's hard-gates against the SSOT rails.
+  // observer can compare Max's hard-gates against the SSOT rails, AND the parsed verdict
+  // from the inline parse step (max-critique-reaches-dahlia-and-the-box-card-shows-one-face
+  // Phase 1 — the QA runner now parses inline so a parse_error can be re-asked at the SAME
+  // boundary).
   if (outcome.kind === "ok") {
     assert.equal(outcome.validator.pass, true);
+    assert.equal(outcome.verdict.hard_gate_pass, true);
+    assert.equal(outcome.verdict.persuasion_score, 8);
   }
 });
 
@@ -677,4 +706,170 @@ test("(f) parseCopyQaVerdict: hard-gate fail carries scroll_stop unchanged (advi
   // scroll_stop MUST persist on a fail — that's the advisory contract from Phase 1.
   assert.equal(parsed.verdict.scroll_stop.headline_readable_in_3_frames, 1);
   assert.equal(parsed.verdict.scroll_stop.first_line_earns_the_second, 0);
+});
+
+// ── max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 ───────────────────────
+// A Max verdict that doesn't parse is RE-ASKED once against the exact schema instead of being
+// silently dropped. Three cases pin the wire:
+//   (i) FIRST dispatch parses ok → no re-ask (the happy path stays cheap).
+//   (ii) FIRST dispatch parse_error + SECOND dispatch parses ok → outcome.kind='ok'; the
+//        dispatcher was invoked exactly twice, the second call carried the session's resume
+//        pin (the same session id + configDir the first call returned), and the re-ask prompt
+//        cited the parse reason + restated the required envelope shape.
+//   (iii) BOTH dispatches parse_error → outcome.kind='parse_error' with BOTH raw heads on the
+//         outcome so the caller's director_activity audit can quote what Max actually returned.
+
+const badImageQcShape = JSON.stringify({
+  hard_gate_pass: true,
+  hard_gates: {
+    pass: true,
+    noFabricatedPhotoCaption: true,
+    transformationPhotorealistic: true,
+    headlineExact: true,
+    textLegible: true,
+    noBarePrice: true,
+  },
+  verdict_reason: "wrong shape — image-QC keys instead of copy-QC keys",
+});
+
+test("(i) Phase 1: first dispatch parses ok → outcome.kind='ok', dispatcher invoked exactly once (no re-ask on the happy path)", async () => {
+  let calls = 0;
+  const dispatch: CopyQcSessionDispatcher = async () => {
+    calls++;
+    return { resultText: stubParseableVerdictJson, isError: false, sessionId: "sess-1", sessionConfigDir: "/cfg/a", missingSession: false };
+  };
+  const outcome = await runQaCreativeCopyViaBoxSession(
+    {
+      copy: cleanCopy,
+      brief: stubBrief,
+      context: { audience_temperature: "warm", competitorAdvertisers: [], ourBrand: "Amazing Coffee" },
+      imagePath: "/tmp/pinned.jpg",
+    },
+    dispatch,
+  );
+  assert.equal(calls, 1);
+  assert.equal(outcome.kind, "ok");
+});
+
+test("(ii) Phase 1: parse_error → RESUME the same session with a re-ask that names the parse reason + restates the envelope → parse ok → outcome.kind='ok'", async () => {
+  const recorded: Array<{
+    prompt: string;
+    resume: { sessionId: string; sessionConfigDir: string | null } | undefined;
+  }> = [];
+  const dispatch: CopyQcSessionDispatcher = async (prompt, _img, resume) => {
+    recorded.push({ prompt, resume });
+    if (recorded.length === 1) {
+      // First turn: Max returns the wrong shape (image-QC hard_gates spelling) — the exact
+      // 2026-08-12 Amazing Coffee failure mode.
+      return { resultText: badImageQcShape, isError: false, sessionId: "sess-max-1", sessionConfigDir: "/cfg/max-a", missingSession: false };
+    }
+    // Second turn: Max fixes the shape.
+    return { resultText: stubParseableVerdictJson, isError: false, sessionId: "sess-max-1", sessionConfigDir: "/cfg/max-a", missingSession: false };
+  };
+  const outcome = await runQaCreativeCopyViaBoxSession(
+    {
+      copy: cleanCopy,
+      brief: stubBrief,
+      context: { audience_temperature: "warm", competitorAdvertisers: [], ourBrand: "Amazing Coffee" },
+      imagePath: "/tmp/pinned.jpg",
+    },
+    dispatch,
+  );
+  assert.equal(recorded.length, 2, "the QA runner must invoke the dispatcher exactly twice: first dispatch + one re-ask");
+  // The re-ask must RESUME Max's SAME session, pinned to the same account (configDir), so his
+  // prior verdict context stays cache-warm.
+  assert.deepEqual(recorded[1].resume, { sessionId: "sess-max-1", sessionConfigDir: "/cfg/max-a" });
+  // The re-ask prompt must (a) quote the parse reason verbatim, and (b) restate the required
+  // envelope's exact key names so Max can correct the shape.
+  assert.match(recorded[1].prompt, /parse_error_reason:/);
+  assert.match(recorded[1].prompt, /no_fabrication/);
+  assert.match(recorded[1].prompt, /no_cold_offer/);
+  assert.match(recorded[1].prompt, /no_competitor_leak/);
+  assert.match(recorded[1].prompt, /render_ok/);
+  assert.match(recorded[1].prompt, /hard_gate_pass/);
+  // The re-ask must be a FORMATTING correction — it must instruct Max to keep his judgement
+  // identical and re-emit ONLY the envelope, not to re-review the creative.
+  assert.match(recorded[1].prompt, /Keep your judgement identical/);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.verdict.hard_gate_pass, true);
+  }
+});
+
+test("(iii) Phase 1: parse_error twice → outcome.kind='parse_error' carrying BOTH raw heads for the audit", async () => {
+  let calls = 0;
+  const dispatch: CopyQcSessionDispatcher = async () => {
+    calls++;
+    // Both turns return the wrong shape — settle as parse_error after one re-ask.
+    return { resultText: badImageQcShape, isError: false, sessionId: "sess-max-2", sessionConfigDir: "/cfg/max-b", missingSession: false };
+  };
+  const outcome = await runQaCreativeCopyViaBoxSession(
+    {
+      copy: cleanCopy,
+      brief: stubBrief,
+      context: { audience_temperature: "warm", competitorAdvertisers: [], ourBrand: "Amazing Coffee" },
+      imagePath: "/tmp/pinned.jpg",
+    },
+    dispatch,
+  );
+  assert.equal(calls, 2, "exactly ONE re-ask; a second failure is a genuine miss");
+  assert.equal(outcome.kind, "parse_error");
+  if (outcome.kind === "parse_error") {
+    assert.match(outcome.reason, /copy_qc_parse_error/);
+    assert.match(outcome.reason, /re_ask_parse_error/);
+    // Both raw heads MUST land on the outcome so the caller's director_activity row can quote
+    // what Max actually returned (the 8/12 case left NO trace anywhere — this is the fix).
+    assert.ok(outcome.firstRawHead && outcome.firstRawHead.length > 0);
+    assert.ok(outcome.secondRawHead && outcome.secondRawHead.length > 0);
+    // The raw heads MUST carry Max's actual bytes, not a reason code.
+    assert.match(outcome.firstRawHead, /noFabricatedPhotoCaption/);
+  }
+});
+
+test("(iii) Phase 1: first dispatch returned no sessionId → cannot re-ask; settle as parse_error immediately (no phantom re-ask)", async () => {
+  let calls = 0;
+  const dispatch: CopyQcSessionDispatcher = async () => {
+    calls++;
+    return { resultText: badImageQcShape, isError: false };
+  };
+  const outcome = await runQaCreativeCopyViaBoxSession(
+    {
+      copy: cleanCopy,
+      brief: stubBrief,
+      context: { audience_temperature: "warm", competitorAdvertisers: [], ourBrand: "Amazing Coffee" },
+      imagePath: "/tmp/pinned.jpg",
+    },
+    dispatch,
+  );
+  assert.equal(calls, 1, "no re-ask when the first dispatch didn't establish a session id to resume");
+  assert.equal(outcome.kind, "parse_error");
+  if (outcome.kind === "parse_error") {
+    assert.match(outcome.reason, /no session_id to re-ask/);
+  }
+});
+
+test("(iii) Phase 1: re-ask hits a lost session → settle as parse_error, no rebuild attempt", async () => {
+  let calls = 0;
+  const dispatch: CopyQcSessionDispatcher = async () => {
+    calls++;
+    if (calls === 1) {
+      return { resultText: badImageQcShape, isError: false, sessionId: "sess-max-3", sessionConfigDir: "/cfg/max-c", missingSession: false };
+    }
+    // Re-ask: the box lost the session between turns (rare edge — restart / rotation).
+    return { resultText: "", isError: true, sessionId: null, sessionConfigDir: null, missingSession: true };
+  };
+  const outcome = await runQaCreativeCopyViaBoxSession(
+    {
+      copy: cleanCopy,
+      brief: stubBrief,
+      context: { audience_temperature: "warm", competitorAdvertisers: [], ourBrand: "Amazing Coffee" },
+      imagePath: "/tmp/pinned.jpg",
+    },
+    dispatch,
+  );
+  assert.equal(calls, 2, "re-ask was attempted exactly once; a lost session settles rather than looping");
+  assert.equal(outcome.kind, "parse_error");
+  if (outcome.kind === "parse_error") {
+    assert.match(outcome.reason, /re_ask_session_lost/);
+  }
 });

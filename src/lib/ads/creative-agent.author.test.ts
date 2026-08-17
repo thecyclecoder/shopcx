@@ -2074,3 +2074,53 @@ test("runCopyAuthorSession: ad-name invalid (competitor brand token) → revise 
   }
 });
 
+// ── max-critique-reaches-dahlia-and-the-box-card-shows-one-face Phase 1 ────────────────────
+// A copy-QC OUR-SIDE failure (parse_error after re-ask OR dispatch_error) must NOT decrement
+// Dahlia's revise budget. Only a verdict Max actually returned (below floor / hard-gate fail)
+// is a real bounce that costs an attempt. This pair asserts both halves of that split.
+
+test("Phase 1: verifyMaxCopyQc returning ourSideFailure → loop accepts the copy on the first attempt WITHOUT bouncing (no revise budget consumed)", async () => {
+  const { dispatch, calls } = scriptedDispatcher([{ resultText: envelope() }]);
+  let closureCalls = 0;
+  const ourSideClosure: NonNullable<CopyAuthorSessionInputs["verifyMaxCopyQc"]> = async () => {
+    closureCalls++;
+    return {
+      ok: false,
+      reason: "copy_qc_parse_error: hard_gate_pass_not_boolean; re_ask_parse_error: hard_gate_pass_not_boolean",
+      maxVerdict: null,
+      ourSideFailure: true,
+    };
+  };
+  const outcome = await runCopyAuthorSession(sessionInputs({ verifyMaxCopyQc: ourSideClosure }), dispatch);
+  assert.equal(outcome.kind, "ok", "an OUR-SIDE Max failure must NOT bounce Dahlia — the copy she authored is accepted");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.attempts, 1, "no revise attempt consumed on an our-side failure — only Max verdicts (below-floor / hard-gate) cost an attempt");
+    assert.equal(outcome.maxCopyQcVerdict, null, "no verdict body when Max never authored one; row lands max_qc_eligible=null (Bianca reads null as pass-through)");
+  }
+  assert.equal(calls.length, 1, "Dahlia was invoked exactly once — she was not asked to revise");
+  assert.equal(closureCalls, 1, "the Max closure fired once (on the first attempt); an our-side failure does not re-invoke it");
+});
+
+test("Phase 1: real Max bounce still consumes a revise attempt (below-floor verdict) — the split preserves the real-bounce behavior", async () => {
+  const { dispatch, calls } = scriptedDispatcher([
+    { resultText: envelope({ headline: "Weak" }) },
+    { resultText: envelope({ headline: "Strong" }) },
+  ]);
+  const belowFloor = copyQcVerdictP3(4);
+  const pass = copyQcVerdictP3(9);
+  let i = 0;
+  const closure: NonNullable<CopyAuthorSessionInputs["verifyMaxCopyQc"]> = async () => {
+    const verdict = i++ === 0 ? belowFloor : pass;
+    if (isCopyQcEligible(verdict)) return { ok: true, maxVerdict: verdict };
+    // A real Max verdict — the ourSideFailure flag is NOT set (Max authored a verdict, we
+    // just didn't like it). This is the branch that MUST bounce Dahlia.
+    return { ok: false, reason: buildMaxQcReviseReason(verdict), maxVerdict: verdict };
+  };
+  const outcome = await runCopyAuthorSession(sessionInputs({ verifyMaxCopyQc: closure }), dispatch);
+  assert.equal(outcome.kind, "ok");
+  if (outcome.kind === "ok") {
+    assert.equal(outcome.attempts, 2, "one real bounce ⇒ two Dahlia dispatches");
+  }
+  assert.equal(calls.length, 2);
+});
+
