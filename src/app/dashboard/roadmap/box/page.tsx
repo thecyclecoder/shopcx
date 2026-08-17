@@ -36,11 +36,6 @@ interface LaneRow {
   // /api/roadmap/box. Null on a session that hasn't yet emitted a TodoWrite (or a pre-Phase-1 row).
   session_note?: string | null;
   session_checklist?: SessionChecklistItem[] | null;
-  // consolidate-premerge-checks-one-session Phase 2 — true for a `spec-test` lane whose underlying job's
-  // `spec_branch` is a `claude/*` PR branch (fused pre-merge session emits BOTH the spec-test verdict AND
-  // the security verdict in one JSON). The card renders TWO avatars (Vera + Vault) + a 'spec-test ·
-  // security' label; a post-ship spec-test lane (no branch) still renders single-persona.
-  fused_pre_merge?: boolean;
   // chained-phase-session-resume Phase 2 — true when this lane's job started as a RESUME of a prior
   // claude -p session (chained-phase carry-forward, or a mid-run queued_resume flip = cache-warm), false
   // when it started FRESH (cache-cold). The card renders a small `resumed`/`fresh` chip on build lanes
@@ -107,7 +102,6 @@ interface Job {
   phase?: string | null; // queued-jobs-log: "Phase N" (from instructions, or the spec's next-unshipped phase)
   spec_missing?: boolean; // fold-guard-live-build: the spec page would 404 (folded/archived/deleted)
   director_function?: string | null; // box-grading-session-and-account-count-fixes Phase 3 (grade/coach kinds)
-  fused_pre_merge?: boolean; // consolidate-premerge-checks-one-session Phase 2 (queued fused pre-merge spec-test)
 }
 interface FailedJob {
   id: string;
@@ -260,30 +254,12 @@ function personaForKind(kind: string, directorFunction?: string | null) {
   return kind === "platform-director" ? getPersona("platform") : getPersona(kind);
 }
 
-// consolidate-premerge-checks-one-session Phase 2 — for a fused pre-merge spec-test lane the SAME session
-// emits BOTH verdicts (spec-test + security) off the same loaded branch diff, so the card renders both
-// personas + a static dual label. The label is static because the fused session is Codex-primary and Codex
-// has no TodoWrite, so we can't lean on the live session_checklist to pick the active sub-task; the card
-// must render correctly with an empty checklist. A non-fused spec-test lane (post-ship / no branch) resolves
-// to null and the caller falls back to the single-persona path.
-function fusedPreMergeInfo(
-  kind: string,
-  fusedPreMerge?: boolean,
-): { personas: [AgentPersona, AgentPersona]; title: string; label: string } | null {
-  if (kind !== "spec-test" || !fusedPreMerge) return null;
-  return {
-    personas: [getPersona("spec-test"), getPersona("security-review")],
-    title: "Vera → Vault · pre-merge check",
-    label: "spec-test · security",
-  };
-}
-
 // box-page-both-avatars-ping-pong Phase 1 — an ad-creative-copy-author session is a PING-PONG: Dahlia
 // (ad-creative) authors a creative, then Max (ad-creative-copy-qc / growth grader) independently grades
 // it, bouncing back and forth across the revise loop under ONE parent job. The card renders BOTH avatars
 // so the collaboration is visible at a glance — otherwise it reads as one long single-agent Dahlia
-// session. Every other kind (that isn't also a fused pre-merge lane) falls back to the single-avatar
-// path via the caller's `dual ?? single` compose.
+// session. Every other kind falls back to the single-avatar path via the caller's `dual ?? single`
+// compose.
 function pingPongInfo(
   kind: string,
 ): { personas: [AgentPersona, AgentPersona]; title: string; label: string } | null {
@@ -333,12 +309,12 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
   const isCoach = lane.kind === "director-coach";
   const persona = personaForKind(lane.kind, lane.director_function);
   const gc = gradeCoachInfo(lane.kind, lane.director_function); // grade/coach kinds → "Ada Grading" etc.
-  // A card renders BOTH personas' avatars when the session has two collaborators: a fused pre-merge lane
-  // (spec-test job on a claude/* branch — ONE session emitting Vera's + Vault's verdicts off the same
-  // loaded diff) OR an ad-creative-copy-author ping-pong (Dahlia authors + Max independently grades under
-  // ONE parent job across the revise loop). Both cases render dual-avatar + a dual title + a static
-  // sub-task label chip; every other kind falls back to the single-avatar / single-persona path.
-  const dual = fusedPreMergeInfo(lane.kind, lane.fused_pre_merge) ?? pingPongInfo(lane.kind);
+  // A card renders BOTH personas' avatars when the session has two collaborators: an
+  // ad-creative-copy-author ping-pong (Dahlia authors + Max independently grades under ONE parent job
+  // across the revise loop) renders dual-avatar + a dual title + a static sub-task label chip; every
+  // other kind falls back to the single-avatar / single-persona path. The spec-test lane is Vera's
+  // deterministic run alone; Vault's security review is its own separate lane with his own face.
+  const dual = pingPongInfo(lane.kind);
   // box-page-both-avatars-ping-pong Phase 2 — when Phase 1's checklist names an in-progress step whose
   // text unambiguously maps to Dahlia (authoring/revising) or Max (grading), swap the ping-pong card's
   // avatar to that persona's single photo so the currently-active actor is visible at a glance. Null
@@ -355,11 +331,10 @@ function LaneCell({ lane }: { lane: LaneRow | null }) {
   return (
     <div className="flex min-h-[88px] flex-col gap-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       {/* Row 1: avatar + name (full width — no longer truncated by the chips) + elapsed time. A dual-
-          persona lane (fused pre-merge OR ad-creative ping-pong) shows BOTH avatars side-by-side, unless
-          the ping-pong is currently mid-flight AND Phase 1's checklist unambiguously names the active
-          actor — then a single ACTIVE avatar swaps in (title/label chip below still reflect the dual
-          composition so the ping-pong context stays visible in text). Every other lane keeps its single
-          avatar. */}
+          persona lane (ad-creative ping-pong) shows BOTH avatars side-by-side, unless the ping-pong is
+          currently mid-flight AND Phase 1's checklist unambiguously names the active actor — then a
+          single ACTIVE avatar swaps in (title/label chip below still reflect the dual composition so
+          the ping-pong context stays visible in text). Every other lane keeps its single avatar. */}
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5">
           {active ? (
@@ -634,9 +609,9 @@ function QueuedJobsLog({ jobs }: { jobs: Job[] }) {
           {jobs.map((j) => {
             const persona = personaForKind(j.kind, j.director_function);
             const gc = gradeCoachInfo(j.kind, j.director_function); // grade/coach kinds → "Ada Grading" etc.
-            // A queued dual-persona job (fused pre-merge spec-test OR ad-creative-copy-author ping-pong)
-            // renders both personas + a dual title, same as the in-flight lane treatment.
-            const dual = fusedPreMergeInfo(j.kind, j.fused_pre_merge) ?? pingPongInfo(j.kind);
+            // A queued dual-persona job (ad-creative-copy-author ping-pong) renders both personas + a
+            // dual title, same as the in-flight lane treatment.
+            const dual = pingPongInfo(j.kind);
             // A queued job's slug is only a real spec page for the spec-slug kinds (and not if it was folded).
             const slugIsLink = SPEC_SLUG_KINDS.has(j.kind) && !j.spec_missing;
             return (
