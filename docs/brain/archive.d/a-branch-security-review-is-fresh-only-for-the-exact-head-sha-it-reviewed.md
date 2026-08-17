@@ -1,0 +1,1 @@
+- **A branch security review is fresh only for the exact head SHA it reviewed** · verified 2026-08-17 · → [[../libraries/security-agent]], [[../libraries/vercel-project]], [[../libraries/preview-capture]]
