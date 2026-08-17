@@ -1462,6 +1462,16 @@ export function buildAssistedPurchaseParams(
  * captures it). May reference the variant by internal UUID, Shopify variant id,
  * or SKU — this resolver hands the reference to `findVariant` and only proceeds
  * when it resolves to an internal UUID (Phase 2 bullet 4).
+ *
+ * Fix 1 (pre-merge spec-test regression — sec:real-vuln): `unit_cents` and
+ * `vendor` are DELIBERATELY ABSENT from this shape. Ticket customer text can
+ * influence Sol's structured Direction, and validatePlanForPath does not (and
+ * should not) allowlist per-item pricing/vendor fields — a prompt-injected
+ * customer could otherwise steer the assisted purchase toward an unauthorized
+ * price or a Shopify vendor branch. Price flows from the resolved
+ * `product_variants.price_cents` server-side; vendor flows from the playbook
+ * step's `config.vendor` default (seeded per playbook, out of ticket-directions
+ * reach). Never re-add these fields here.
  */
 export interface RawAssistedPurchaseIntent {
   actionType: "create_order" | "create_subscription";
@@ -1470,19 +1480,26 @@ export interface RawAssistedPurchaseIntent {
   sku?: string | null;
   title?: string | null;
   quantity?: number | null;
-  unitCents?: number | null;
   interval?: "day" | "week" | "month" | "year" | null;
   intervalCount?: number | null;
   nextBillingDate?: string | null;
-  vendor?: "internal" | "shopify" | null;
 }
 
 /**
- * Phase 2 bullets 4 + 5: resolve a raw purchase intent (any variant reference
- * shape) to the internal-UUID params object at the ROUTING boundary. Returns
- * null when the variant cannot be resolved — the caller is expected to fail at
- * routing (ask the customer) rather than start the playbook with a payload that
- * will only trip the Phase-1 guard at the terminal step.
+ * Phase 2 bullets 4 + 5 + Fix 1 (sec:real-vuln): resolve a raw purchase intent
+ * (any variant reference shape) to the internal-UUID params object at the
+ * ROUTING boundary. Returns null when the variant cannot be resolved — the
+ * caller is expected to fail at routing (ask the customer) rather than start
+ * the playbook with a payload that will only trip the Phase-1 guard at the
+ * terminal step.
+ *
+ * Trust boundary: EVERY numeric price + vendor selection is derived
+ * server-side from the workspace-scoped `product_variants` row (or is deliberately
+ * omitted so the playbook step's config default wins). Nothing on the raw
+ * ticket-directions payload can influence the outgoing `unit_cents` or `vendor`
+ * — the RawAssistedPurchaseIntent shape above has no fields for them, so a
+ * caller that tried to pass either would fail typechecking; but even if a
+ * caller reaches into `Record<string, unknown>`, we NEVER read those keys here.
  */
 export async function resolveAssistedPurchaseIntentToParams(
   admin: Admin,
@@ -1505,11 +1522,16 @@ export async function resolveAssistedPurchaseIntentToParams(
     variantId: variant.id,
     title: raw.title ?? variant.title ?? null,
     quantity: raw.quantity ?? null,
-    unitCents: raw.unitCents ?? variant.price_cents ?? null,
+    // Fix 1 (sec:real-vuln): unit_cents is ALWAYS the resolved variant's
+    // server-side price — never a value carried on the ticket-directions
+    // payload. Vendor is omitted so the playbook step's config default wins;
+    // the `assisted-order-purchase` / `assisted-subscription-purchase` playbook
+    // steps are seeded with vendor='internal' and that is the only vendor a
+    // Sol-routed assisted purchase should ever dispatch on.
+    unitCents: variant.price_cents ?? null,
     interval: raw.interval ?? null,
     intervalCount: raw.intervalCount ?? null,
     nextBillingDate: raw.nextBillingDate ?? null,
-    vendor: raw.vendor ?? null,
   });
 }
 

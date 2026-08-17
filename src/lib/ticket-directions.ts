@@ -800,6 +800,15 @@ export async function resolveSolChosenPlaybook(
         );
         const actionType =
           slug === "assisted-subscription-purchase" ? "create_subscription" : "create_order";
+        // Fix 1 (sec:real-vuln): `unit_cents` and `vendor` are DELIBERATELY not
+        // forwarded from `intentRaw` — the assisted-purchase Direction plan is
+        // Sol-authored from customer-controlled text, and a prompt-injected
+        // customer could otherwise steer the outgoing dispatch toward an
+        // unauthorized price or the Shopify vendor branch. Price is derived
+        // server-side from the resolved `product_variants.price_cents`; vendor
+        // is omitted so the playbook step's config default ('internal') wins.
+        // The resolver's `RawAssistedPurchaseIntent` shape has no fields for
+        // either, so this is enforced by types as well as by omission here.
         const params = await resolveAssistedPurchaseIntentToParams(admin, workspace_id, {
           actionType,
           variantId: (intentRaw.variant_id as string | undefined) ?? null,
@@ -807,12 +816,10 @@ export async function resolveSolChosenPlaybook(
           sku: (intentRaw.sku as string | undefined) ?? null,
           title: (intentRaw.title as string | undefined) ?? null,
           quantity: (intentRaw.quantity as number | undefined) ?? null,
-          unitCents: (intentRaw.unit_cents as number | undefined) ?? null,
           interval:
             (intentRaw.interval as "day" | "week" | "month" | "year" | undefined) ?? null,
           intervalCount: (intentRaw.interval_count as number | undefined) ?? null,
           nextBillingDate: (intentRaw.next_billing_date as string | undefined) ?? null,
-          vendor: (intentRaw.vendor as "internal" | "shopify" | undefined) ?? null,
         });
         if (!params) return null;
         seed_context.assisted_purchase_params = params;
