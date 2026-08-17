@@ -12,7 +12,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { deriveLifecycleStage, type LifecycleContext, type LifecycleStageName, type LifecycleStageStatus } from "./build-lifecycle";
-import { buildLifecycleContext } from "./build-lifecycle-context";
+import { buildLifecycleContext, hasReachedMain, lifecyclePillForCurrent } from "./build-lifecycle-context";
 import type { SpecCard } from "./brain-roadmap";
 import type { AgentJob } from "./agent-jobs";
 
@@ -209,4 +209,53 @@ test("builtOnBranch: one-shot spec, build job still building → false", () => {
   const job = { kind: "build", status: "building" } as unknown as AgentJob;
   const c = buildLifecycleContext({ spec, job, testRun: null, humanResolutions: new Map(), liveSpecTestSlugs: new Set(), security: undefined, folded: false });
   assert.equal(c.builtOnBranch, false);
+});
+
+// ── ⭐ CEO 2026-08-17 — "Awaiting fold" must not appear on an unmerged spec ──────────────────────
+// The 5-stage lifecycle has no MERGE node, so a spec that cleared spec-test + security landed on
+// `fold` and read "Awaiting fold" (a post-merge state) while its PR was still open. Observed on
+// an-assisted-purchase-carries-the-item-the-customer-actually-picked (PR #2512 open + mergeable).
+test("hasReachedMain: built-but-unmerged phases are NOT on main", () => {
+  const spec = {
+    status: "in_testing",
+    phases: [
+      { build_sha: "dae14a9ed", merge_sha: null, status: "in_progress" },
+      { build_sha: "dae14a9ed", merge_sha: null, status: "in_progress" },
+    ],
+  } as unknown as Parameters<typeof hasReachedMain>[0];
+  assert.equal(hasReachedMain(spec, false), false);
+});
+
+test("hasReachedMain: every phase merged ⇒ on main", () => {
+  const spec = {
+    status: "in_testing",
+    phases: [
+      { build_sha: "a1", merge_sha: "m1", status: "shipped" },
+      { build_sha: "a2", merge_sha: "m1", status: "shipped" },
+    ],
+  } as unknown as Parameters<typeof hasReachedMain>[0];
+  assert.equal(hasReachedMain(spec, false), true);
+});
+
+test("hasReachedMain: folded or shipped short-circuits true", () => {
+  const bare = { status: "in_testing", phases: [] } as unknown as Parameters<typeof hasReachedMain>[0];
+  assert.equal(hasReachedMain(bare, true), true); // folded
+  const shipped = { status: "shipped", phases: [{ build_sha: "a", merge_sha: null, status: "x" }] } as unknown as Parameters<typeof hasReachedMain>[0];
+  assert.equal(hasReachedMain(shipped, false), true);
+});
+
+test("hasReachedMain: a zero-phase spec never asserts unmerged", () => {
+  const oneShot = { status: "in_testing", phases: [] } as unknown as Parameters<typeof hasReachedMain>[0];
+  assert.equal(hasReachedMain(oneShot, false), true);
+});
+
+test("the Fold node reads 'Awaiting merge' until the PR lands", () => {
+  const derivation = { current: "fold", currentStatus: "active" } as unknown as Parameters<typeof lifecyclePillForCurrent>[0];
+  const unmerged = lifecyclePillForCurrent(derivation, null, null, null, false);
+  assert.equal(unmerged.label, "Awaiting merge");
+  assert.match(String(unmerged.title), /has not merged/);
+  const merged = lifecyclePillForCurrent(derivation, null, null, null, true);
+  assert.equal(merged.label, "Awaiting fold");
+  // The old tooltip claimed "shipped" on an unmerged spec — it must now say merged.
+  assert.match(String(merged.title), /Merged to main/);
 });
