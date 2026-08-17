@@ -19743,13 +19743,97 @@ async function runPrResolveJob(job: Job) {
     return;
   }
 
+  // pax-never-reports-nothing-to-resolve-on-a-pr-state-it-could-not-read (Phase 2) — end-of-pass
+  // self-requeue hook. Pax is enqueued by the webhook on the transition INTO conflicting; once that
+  // event has fired, no further event brings it back. If a pass ends without landing a resolution
+  // and the PR is still open + conflicting, THIS PASS re-queues itself under a bounded attempt
+  // counter (via enqueuePaxFollowUp). Cap → real_blocker sentinel row → founder sees a stuck PR
+  // instead of a silent one.
+  //
+  // The flag is set at:
+  //   • worktree-add failed (infra failure that never even reached the resolver)
+  //   • escalate() → surface-to-owner (no spec identified for this branch — the current job parks
+  //     needs_attention, but without a rebuild-on-main to close the PR, it stays conflicting).
+  // Deliberate human-needed parks (provenance failure, origin mismatch, advisory-supersede, the
+  // Phase 1 unreadable-cap path) do NOT set this flag — those are already the resolver's "human,
+  // decide" verdicts, so a self-requeue would just re-park.
+  let paxFollowUpNeeded = false;
+  let paxFollowUpReason = "";
+  // Hoist head/base SHA out so the outer finally's enqueuePaxFollowUp can reuse the same
+  // resolve_fingerprint (build_sha:base_sha) — Phase 2 point 4: a same-input re-queue must
+  // increment the attempt counter, not fan out under a fresh fingerprint.
+  let paxHeadSha: string | null = null;
+  let paxBaseSha: string | null = null;
+  try {
   // Re-check PR state (idempotent / de-duped): only act on an OPEN, not-already-MERGEABLE PR. mergeable
   // can be null (GitHub still computing) → re-check briefly; if still unknown, attempt anyway (the
   // webhook flagged it CONFLICTING). already mergeable / merged / closed → no-op completed.
   const prResp = await gh("GET", `/repos/${REPO}/pulls/${prNumber}`);
-  const pr = prResp.json as { state?: string; merged?: boolean; mergeable?: boolean | null; html_url?: string; head?: { ref?: string }; base?: { ref?: string } };
+  const pr = prResp.json as { state?: string; merged?: boolean; mergeable?: boolean | null; html_url?: string; message?: string; head?: { ref?: string; sha?: string }; base?: { ref?: string; sha?: string } };
+  // Capture head/base SHA as soon as the PR fetch succeeds so an early-return path (worktree
+  // add fails BEFORE snapshot/provenance) still carries the resolve_fingerprint into the
+  // outer finally's follow-up enqueue.
+  if (typeof pr.head?.sha === "string" && pr.head.sha) paxHeadSha = pr.head.sha;
+  if (typeof pr.base?.sha === "string" && pr.base.sha) paxBaseSha = pr.base.sha;
   const prUrl = pr.html_url || `https://github.com/${REPO}/pull/${prNumber}`;
-  if (!prResp.ok || pr.state !== "open" || pr.merged) {
+
+  // pax-never-reports-nothing-to-resolve-on-a-pr-state-it-could-not-read (Phase 1) — SPLIT the guard.
+  // Old code collapsed transport failure, closed, and merged into one 'no longer open — nothing to
+  // resolve' completed no-op — a failed fetch was recorded as a successful decision that the PR was
+  // terminal. Job 5720fb3a completed in 27s with 'state=undefined merged=undefined' while PR #2486
+  // was OPEN + CONFLICTING; the ledger said the resolver had already looked, so nothing re-picked it
+  // up and the branch stranded. Now:
+  //   • !prResp.ok OR a 200 with a missing/unrecognized `state` → the PR state is UNKNOWN. Retryable
+  //     failure with an error prefix that keeps this attempt out of the general resolve-attempts cap
+  //     (the resolver never ran) but IS counted against its own unreadable-state cap. On cap → the
+  //     current job flips to `needs_attention` with a real reason ("could not read PR state") rather
+  //     than looping.
+  //   • pr.state === 'closed' or pr.merged === true → genuinely terminal, keep the clean `completed`
+  //     path unchanged.
+  const stateReadable = prResp.ok && (pr.state === "open" || pr.state === "closed");
+  const stateIsTerminal = stateReadable && (pr.state === "closed" || pr.merged === true);
+  if (!stateReadable) {
+    const {
+      PR_RESOLVE_UNREADABLE_STATE_ERROR_PREFIX,
+      PR_RESOLVE_MAX_UNREADABLE_STATE_ATTEMPTS_FOR_TESTS: MAX_UNREADABLE,
+      countPriorUnreadablePrStateAttempts,
+      prSpecSlug,
+    } = await import("../src/lib/github-pr-resolve");
+    const httpDetail = !prResp.ok
+      ? `HTTP ${prResp.status}${typeof pr.message === "string" && pr.message ? `: ${pr.message.slice(0, 200)}` : ""}`
+      : `200 with state=${JSON.stringify((pr as { state?: unknown }).state)}`;
+    const errorLine = `${PR_RESOLVE_UNREADABLE_STATE_ERROR_PREFIX}: could not read PR #${prNumber} state (${httpDetail})`;
+    const { data: priorRows } = await db
+      .from("agent_jobs")
+      .select("id, status, error")
+      .eq("workspace_id", wsId)
+      .eq("kind", "pr-resolve")
+      .eq("spec_slug", prSpecSlug(prNumber))
+      .neq("id", job.id);
+    const prior = (priorRows ?? []) as Array<{ status: string; error: string | null }>;
+    const priorUnreadable = countPriorUnreadablePrStateAttempts(prior);
+    if (priorUnreadable + 1 >= MAX_UNREADABLE) {
+      await update(job.id, {
+        status: "needs_attention",
+        pr_url: prUrl,
+        pr_number: prNumber,
+        error: errorLine,
+        log_tail: `${errorLine}\ncap reached — ${priorUnreadable + 1} consecutive unreadable-state attempts on PR #${prNumber}; escalating instead of retrying. A human should check the PR's actual state (the resolver never ran — this is not a 'no longer open' verdict).`,
+      });
+      console.log(`${tag} PR #${prNumber} unreadable-state cap (${priorUnreadable + 1}/${MAX_UNREADABLE}) → needs_attention`);
+      return;
+    }
+    await update(job.id, {
+      status: "failed",
+      pr_url: prUrl,
+      pr_number: prNumber,
+      error: errorLine,
+      log_tail: `${errorLine}\nleaving retryable — the PR's state was not readable, so the resolver did not run (attempt ${priorUnreadable + 1}/${MAX_UNREADABLE}). The next dirty-PR pass will re-enqueue.`,
+    });
+    console.log(`${tag} PR #${prNumber} unreadable state → failed retry ${priorUnreadable + 1}/${MAX_UNREADABLE}: ${errorLine}`);
+    return;
+  }
+  if (stateIsTerminal) {
     await update(job.id, { status: "completed", pr_url: prUrl, pr_number: prNumber, log_tail: `PR #${prNumber} no longer open (state=${pr.state} merged=${pr.merged}) — nothing to resolve` });
     console.log(`${tag} PR #${prNumber} not open (state=${pr.state}) — no-op`);
     return;
@@ -19846,6 +19930,12 @@ async function runPrResolveJob(job: Job) {
   const add = sh("git", ["worktree", "add", "-B", branch, wt, `origin/${branch}`]);
   if (add.code !== 0) {
     await update(job.id, { status: "failed", error: "worktree add failed", log_tail: add.err.slice(-2000) });
+    // Phase 2: infra failure — the resolver never ran, PR is still conflicting. Self-requeue so
+    // the next pass gets a clean worktree slot (the general retry cap excludes worktree-add
+    // failures via PR_RESOLVE_INFRA_FAILURE_RE, but the standing dirty-PR backstop would still
+    // fingerprint-refuse a same-input re-enqueue → the follow-up bypasses that dedup).
+    paxFollowUpNeeded = true;
+    paxFollowUpReason = `worktree add failed: ${add.err.slice(-200)}`;
     return;
   }
   sh("ln", ["-sfn", join(REPO_DIR, "node_modules"), join(wt, "node_modules")]);
@@ -19996,6 +20086,11 @@ async function runPrResolveJob(job: Job) {
         await surfacePrToOwner(wsId, prNumber, prUrl, why);
         await update(job.id, { status: "needs_attention", pr_url: prUrl, pr_number: prNumber, error: `needs a human merge: ${why}`, log_tail: `${why}\n\n${raw.slice(-1500)}` });
         console.log(`${tag} surfaced PR #${prNumber} to owner: ${why}`);
+        // Phase 2: PR is still open + conflicting and nothing rebuilt the build (no spec identified).
+        // Enqueue ONE bounded follow-up so the next pass gets another crack rather than ending the
+        // story on one failed pass. Cap → real_blocker sentinel (see enqueuePaxFollowUp).
+        paxFollowUpNeeded = true;
+        paxFollowUpReason = `escalate-surface (no build spec identified for ${branch}): ${why}`;
       }
     };
 
@@ -20041,6 +20136,40 @@ async function runPrResolveJob(job: Job) {
     console.log(`${tag} ✓ resolved PR #${prNumber}, pushed ${branch} → green`);
   } finally {
     sh("git", ["worktree", "remove", "--force", wt]);
+  }
+  } finally {
+    // pax-never-reports-nothing-to-resolve-on-a-pr-state-it-could-not-read (Phase 2) — outer
+    // finally: if this pass ended with the PR still open + conflicting (worktree add fell over
+    // BEFORE the resolver ran, or escalate() surfaced with no rebuild-on-main to close the PR),
+    // enqueue ONE follow-up pr-resolve job carrying an attempt counter. Bounded — on the
+    // MAX_FOLLOWUP+1th call, the helper does NOT enqueue and instead surfaces a real_blocker
+    // sentinel row so a human sees "pax-followup exhausted: needs a human merge". Best-effort:
+    // a throw here never derails the outer job's already-written outcome.
+    if (paxFollowUpNeeded) {
+      try {
+        const { enqueuePaxFollowUp } = await import("../src/lib/github-pr-resolve");
+        // Phase 2 point 4 — pass the SHAs we already fetched so the SDK computes the SAME
+        // resolve_fingerprint the standing dirty-PR backstop would; the attempt counter then
+        // increments on the same-input row instead of a fresh fingerprint fanning out a sibling.
+        const followUp = await enqueuePaxFollowUp(db, {
+          workspaceId: wsId,
+          prNumber,
+          branch,
+          reason: paxFollowUpReason,
+          headSha: paxHeadSha,
+          baseSha: paxBaseSha,
+        });
+        if (followUp.enqueued) {
+          console.log(`${tag} pax follow-up attempt ${followUp.attempt} enqueued for PR #${prNumber}`);
+        } else if (followUp.capped) {
+          console.log(`${tag} pax follow-up exhausted (${followUp.attempt} attempts) for PR #${prNumber} — surfaced real_blocker`);
+        } else if (followUp.reason) {
+          console.log(`${tag} pax follow-up NOT enqueued for PR #${prNumber}: ${followUp.reason}`);
+        }
+      } catch (e) {
+        console.error(`${tag} pax follow-up hook failed for PR #${prNumber}:`, e instanceof Error ? e.message : e);
+      }
+    }
   }
 }
 

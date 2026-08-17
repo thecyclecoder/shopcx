@@ -27,7 +27,18 @@ The **ONE** targeted raw read is `specs.status` (the OVERRIDE-ONLY column the ca
 - **`SpecDiagnosis`** — per spec: `slug`, `title`, `owner`, `parent`, `goalSlug` (via `milestone_id`), `derivedStatus`, `rawStatus` (the override column), `phases: PhaseDiag[]`, `jobs: JobDiag[]` (latest per kind, with `ageMinutes` + `heartbeatAgeMinutes`), `specTest`, `security`, `lifecycle` (the gate), `detectors: DetectorResult[]`, and `stuck: StuckVerdict`.
 - **`StuckVerdict`** — `{ isStuck, severity, detector, reason, sinceMinutes, suggestedAction }`. Primary = the highest-severity matched detector; `deferred-parked`/`awaiting-human` (and any deferred spec) are never `isStuck`.
 - **`CLASSIFIERS`** — the ordered list of named anomaly classifiers (the extension point). See the [[../recipes/pipeline-doctor]] table for each detector's meaning + source signals: `stored-status-override-violation` (CRITICAL), `failed-gate`, `zombie-session`, `stuck-in-testing`, `built-not-stamped`, `in-testing-needs-human`, `awaiting-human`, `drift-suspect`, `not-claimed`, `deferred-parked`.
+- **`BUILT_NOT_STAMPED_STATUSES`** — the shared status set that gates `detectBuiltNotStamped` (`{ "planned", "in_progress" }`). **DO NOT narrow this to a single status** (see the reachability trap below). Pinned by `npm run test:built-not-stamped`.
+- **`detectBuiltNotStamped`** — exported so the pinning test can invoke it directly with a synthesized `SpecDiagnosis`, no DB.
 - **`Severity`** = `none｜info｜low｜medium｜high｜critical`; plus `DetectorResult`, `PhaseDiag`, `JobDiag`, `SpecTestDiag`, `DiagnoseOptions` types.
+
+## The `built-not-stamped` reachability trap  *(unstamped-phase-cannot-silently-strand-a-build Phase 1)*
+
+`detectBuiltNotStamped` alarms on the "the build ran yet `stampPhaseBuilt` never advanced any phase" case — its reason string names exactly that. Its status guard **MUST admit `planned`**, not only `in_progress`, because:
+
+- Spec status is a rollup over DERIVED phase status ([[brain-roadmap]] `deriveSpecCardStatus` → `rollupPhaseStatus`), and [[specs-table]] `derivePhaseStatus` returns `in_progress` **only when `build_sha` is non-null**.
+- The missed-stamp case is precisely `build_sha === null` on every phase. So every phase derives `planned`, the spec derives `planned`, and a `derivedStatus === "in_progress"` guard is **mutually exclusive with the case the classifier is written to catch**. The alarm reads as coverage while being permanently unreachable — the worst kind of dark signal.
+
+The current guard is `BUILT_NOT_STAMPED_STATUSES.has(d.derivedStatus)` with the set `{"planned", "in_progress"}`; the other two guards (latest build job is `completed`/`merged`, `anyPhaseBuilt` is false) are what make the signal specific — a spec that never built is correctly ignored (no completed build job), a spec that advanced normally is correctly ignored (`anyPhaseBuilt` trips). **Do not narrow the status set to one value again; the pinning test `test:built-not-stamped` fails deterministically if you do.** Ground-truth incident: the card-removal spec sat 17 hours with an open, mergeable, CI-green PR carrying a real credential leak, because the one alarm for the failure could not fire in the exact case it names.
 
 ## Callers
 

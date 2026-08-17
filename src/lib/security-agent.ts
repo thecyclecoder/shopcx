@@ -484,8 +484,10 @@ async function enqueueSecurityReviewDiff(admin: Admin, input: EnqueueSecurityRev
  *   1. ONE OPEN review per branch — skip if any security-review job with `spec_branch === branch` is in a
  *      live/surfaced status (queued / claimed / building / needs_input / needs_approval / queued_resume /
  *      needs_attention).
- *   2. ONE CLEAN review per UNCHANGED branch — skip if the branch already has a `completed` review that is
- *      NEWER than the latest build-job push on the branch. A clean review proves the branch's current diff
+ *   2. ONE CLEAN review per UNCHANGED branch — skip if the branch already has a `completed`, genuinely
+ *      CLEAN (non-`real-vuln`) review that is NEWER than the latest build-job push on the branch. A
+ *      review that FOUND something never suppresses the next pass — otherwise the finding's fix can
+ *      never be re-checked and the pre-merge tests gate blocks that PR forever (2026-08-17 hotfix). A clean review proves the branch's current diff
  *      is clean; re-reviewing the exact same diff every standing pass is the Vault loop. We only re-review
  *      once a genuinely newer build commit lands (the build job's `updated_at` advances past the review) —
  *      THAT new diff might re-introduce something the prior pass cleared, which is the only case the
