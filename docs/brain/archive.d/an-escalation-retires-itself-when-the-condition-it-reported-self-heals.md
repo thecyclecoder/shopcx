@@ -1,0 +1,1 @@
+- **An escalation retires itself when the condition it reported self-heals** · verified 2026-08-17 · → [[../libraries/escalation-recheck]] + [[../libraries/escalation-retirement-sweep]]

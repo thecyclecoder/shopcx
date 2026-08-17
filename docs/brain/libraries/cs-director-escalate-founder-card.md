@@ -39,6 +39,7 @@ The card metadata includes:
 - `recommended_remedy` — Phase 2's structured suggestion (null when absent) so a downstream approver can pick it up without re-parsing the body
 - `agent_job_id` — cs-director-call job ID so the approvals-feed enrichment can join to the audit trail
 - `partial_remedy_outcome` — Phase 1 of [[../specs/june-does-the-in-leash-part-before-escalating-the-residue]]. The compact outcome (status + landed_actions + failed_actions + planned_action_types + message_delivered + refusal_reason) of the in-leash actions the executor fired BEFORE minting the card. Null when the verdict carried no `remedy`.
+- `retire_when: { kind: 'ticket_terminal', ticket_id }` ([[../specs/an-escalation-retires-itself-when-the-condition-it-reported-self-heals]] Phase 1) — a self-heal descriptor the [[escalation-retirement-sweep]] reads on each pass. Carried unconditionally since `ticket_id` is a load-bearing input to every founder escalation — when the linked ticket reaches `status='closed'`, the card automatically retires with the evidence recorded.
 
 ## Gotchas
 
@@ -50,4 +51,4 @@ The card metadata includes:
 
 ## Related
 
-[[cs-director]] · [[cs-director-verdict-note]] · [[cs-director-ticket-transition]] · [[../tables/dashboard_notifications]] · [[../tables/director_activity]]
+[[cs-director]] · [[cs-director-verdict-note]] · [[cs-director-ticket-transition]] · [[../tables/dashboard_notifications]] · [[../tables/director_activity]] · [[escalation-recheck]] · [[escalation-retirement-sweep]]
