@@ -339,10 +339,17 @@ const detectInTestingNeedsHuman: Classifier = (d) => {
   };
 };
 
-/** HIGH — status=in_progress AND the latest build job completed/merged, but no phase advanced (no build_sha
- *  stamped). The build ran but its provenance never landed on the phases. */
-const detectBuiltNotStamped: Classifier = (d) => {
-  if (d.derivedStatus !== "in_progress") return null;
+/** HIGH — the latest build job completed/merged, but no phase advanced (no build_sha stamped). The build
+ *  ran but its provenance never landed on the phases.
+ *
+ *  Reachability trap: spec status is a rollup over DERIVED phase status, and derivePhaseStatus returns
+ *  `in_progress` only when a phase's `build_sha` is non-null. So the missed-stamp case this classifier
+ *  exists to catch derives `planned`, not `in_progress` — narrowing the status guard to a single value
+ *  would silently mask the alarm for the exact case its own reason string describes. The gate here is
+ *  membership in the shared set below; NEVER narrow it to one status. */
+export const BUILT_NOT_STAMPED_STATUSES: ReadonlySet<SpecStatus | "folded"> = new Set(["planned", "in_progress"]);
+export const detectBuiltNotStamped: Classifier = (d) => {
+  if (!BUILT_NOT_STAMPED_STATUSES.has(d.derivedStatus)) return null;
   const build = latestBuildJob(d);
   if (!build || (build.status !== "completed" && build.status !== "merged")) return null;
   if (anyPhaseBuilt(d)) return null; // some phase carries a build_sha / is shipped — it DID advance
