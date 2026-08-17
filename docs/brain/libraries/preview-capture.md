@@ -13,11 +13,20 @@ One `claude/*` build branch = one Vercel preview deployment (Phase 1 flipped the
 The single-shot capture.
 
 1. Refuses a non-`claude/*` branch (returns `{ updated: false, reason: "not a claude/* branch" }`).
-2. Calls [[vercel-project]] `getLatestReadyDeploymentForBranch(branch, commitSha)` to find the latest deployment for the branch. Preferring a READY deployment whose `meta.githubCommitSha` matches keeps a stale earlier preview from being mis-attributed to a later commit on the same branch.
+2. Calls [[vercel-project]] `getLatestReadyDeploymentForBranch(branch, commitSha)` to find the deployment. When `commitSha` is supplied, the lookup returns ONLY a READY for THAT sha (never a substitute from another commit — [[../specs/a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed]] Phase 3).
 3. Reads the current `agent_jobs.preview_url` + `preview_state`; updates only when the values differ — idempotent.
 4. **Never NULLs an already-persisted URL** on a re-poll that briefly fails to surface READY (Vercel's listing is eventually-consistent). The URL only advances forward; the state column always reflects the latest known state.
 
 Returns `{ updated, previewUrl, previewState, reason? }`. Never throws — every error path collapses to a `reason` string.
+
+### `computePersistedPreviewFields(lookup)` → `{ previewUrl, previewState }`
+
+The pure "what do we persist" decision, extracted so it is unit-testable in isolation from Vercel / Supabase — [[../specs/a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed]] Phase 3. The invariant it enforces:
+
+- **`previewUrl` is drawn STRICTLY from `lookup.ready`.** Because Phase 3's SHA-scoped `getLatestReadyDeploymentForBranch` leaves `lookup.ready` null on a mismatched-SHA miss (no cross-SHA substitution), a caller that supplied `commitSha` gets `previewUrl: null` on that miss — never a URL from another commit's deployment. The 2026-08-17 defect (PR 2486's branch pointed at `7bf057e97`'s pre-merge build for 22 min after merge commit `d8727bf05` landed without its own deployment) cannot recur.
+- **`previewState` still reflects `lookup.latest`** (the branch's newest deployment of any state) for operator visibility — the operator sees "preview exists / still BUILDING" progress regardless of the SHA match.
+
+Pinned by `src/lib/preview-capture.persist-sha-scope.test.ts`.
 
 ### `pollCapturePreviewUrl(opts, poll?)` → `PreviewCaptureResult`
 

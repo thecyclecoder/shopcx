@@ -7,10 +7,18 @@
  * [[vercel-project]] `getLatestReadyDeploymentForBranch` and persists it on the owning
  * [[../tables/agent_jobs]] row:
  *
- *   - `preview_url`   the `https://…vercel.app` URL of the latest READY deployment for the branch.
- *                     Set ONCE the deployment reaches READY; null while it's still BUILDING / unmatched.
+ *   - `preview_url`   the `https://…vercel.app` URL of the READY deployment FOR THE CALLER'S SHA (or,
+ *                     when no `commitSha` was supplied, the branch's newest READY). Set ONCE that
+ *                     deployment reaches READY; null while it's still BUILDING / unmatched. When
+ *                     `commitSha` was supplied AND no READY exists for THAT sha, the URL stays null —
+ *                     no cross-SHA substitution (a-branch-security-review-is-fresh-only-for-the-exact-
+ *                     head-sha-it-reviewed Phase 3). A prior successfully-captured URL is preserved
+ *                     via the "advance forward only" write below (not clobbered to null on a mid-poll
+ *                     miss).
  *   - `preview_state` the latest known Vercel state (`QUEUED` / `INITIALIZING` / `BUILDING` / `READY` /
- *                     `ERROR` / `CANCELED`) — M3 reads "preview exists" from this.
+ *                     `ERROR` / `CANCELED`) reflecting the branch's newest deployment — M3 reads
+ *                     "preview exists" from this. State can advance even when `preview_url` stays null
+ *                     (Phase 3: the newest deployment on the branch may be for a different SHA).
  *
  * Read-only against Vercel — this module cannot promote or merge anything (that is M4's
  * bounded action). Best-effort + idempotent by design:
@@ -29,7 +37,40 @@ import {
   getLatestReadyDeploymentForBranch,
   previewHttpsUrl,
   type DeploymentState,
+  type LatestDeploymentLookup,
 } from "@/lib/vercel-project";
+
+/**
+ * ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 3 — the pure
+ * "what do we persist" decision, extracted so it is unit-testable in isolation from Vercel/Supabase.
+ *
+ * The invariant this pins: `previewUrl` is drawn STRICTLY from `lookup.ready`, AND ONLY when
+ * `lookup.readyForRequestedSha === true`. The SHA-scoped `getLatestReadyDeploymentForBranch` sets
+ * `readyForRequestedSha=false` + `ready=null` on a mismatched-SHA miss (no cross-SHA substitution),
+ * so a caller that supplied `commitSha` gets `previewUrl: null` on that miss — never a URL from
+ * another commit's deployment. Gating on `lookup.readyForRequestedSha` at this seam makes the
+ * SHA-satisfaction predicate explicit at the point of persistence, so a future refactor that lets
+ * a non-satisfying `ready` slip through the lookup would still be caught here.
+ *
+ * `previewState` still tracks the branch's newest deployment (`lookup.latest`) so an operator sees
+ * "preview exists / still BUILDING" progress regardless. A no-`commitSha` caller has
+ * `readyForRequestedSha=true` iff any READY exists on the branch — unchanged behavior.
+ */
+export function computePersistedPreviewFields(lookup: LatestDeploymentLookup): {
+  previewUrl: string | null;
+  previewState: DeploymentState | null;
+} {
+  const chosen = lookup.ready ?? lookup.latest;
+  // Two-of-two gate: (a) the lookup says the READY satisfies the caller's SHA request AND (b) the
+  // deployment is genuinely READY. Either alone is insufficient — (a) alone would let a lookup that
+  // sets readyForRequestedSha=true against a non-READY row leak a URL; (b) alone would restore the
+  // pre-Phase-3 cross-SHA substitution if `ready` were ever set to a non-satisfying deployment.
+  const previewUrl = lookup.readyForRequestedSha && lookup.ready?.state === "READY"
+    ? previewHttpsUrl(lookup.ready)
+    : null;
+  const previewState = chosen?.state ?? null;
+  return { previewUrl, previewState };
+}
 
 export interface PreviewCaptureResult {
   /** Whether the agent_jobs row was actually updated (false on no-op / unchanged / no-branch). */
@@ -86,11 +127,10 @@ export async function capturePreviewUrlForJob(opts: CaptureOptions): Promise<Pre
     };
   }
 
-  // Prefer the READY deployment when present (the URL we want to persist). Fall back to the latest
-  // of any state so M3 can see "preview exists / still BUILDING" before READY lands.
-  const chosen = lookup.ready ?? lookup.latest;
-  const previewUrl = chosen?.state === "READY" ? previewHttpsUrl(chosen) : null;
-  const previewState = chosen?.state ?? null;
+  // Phase 3: draw `preview_url` from `computePersistedPreviewFields` (the pure decision above), which
+  // pulls the URL STRICTLY from `lookup.ready` — null on a mismatched-SHA miss, never a substitute
+  // from another commit's deployment. See the helper's docblock.
+  const { previewUrl, previewState } = computePersistedPreviewFields(lookup);
 
   // Read the current row + only update when something actually changes — idempotent re-poll.
   const admin = createAdminClient();
