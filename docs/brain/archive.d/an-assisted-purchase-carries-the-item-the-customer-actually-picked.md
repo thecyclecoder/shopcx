@@ -1,0 +1,1 @@
+- **An assisted purchase carries the item the customer actually picked** · verified 2026-08-17 · → [[../libraries/playbook-executor]], [[../libraries/assisted-purchase-direction]]
