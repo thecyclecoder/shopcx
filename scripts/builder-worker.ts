@@ -6954,6 +6954,30 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     console.error(`${tag} standing escalation reconcile failed (continuing):`, e instanceof Error ? e.message : e);
   }
   try {
+    // an-escalation-retires-itself-when-the-condition-it-reported-self-heals (Phase 2) — sweep every
+    // OPEN, retirable CEO escalation and dismiss the ones whose `metadata.retire_when` condition is
+    // provably healed (ticket closed, parked job left needs_attention, subscription/order now exists).
+    // Reads the SAME feed the founder sees via `buildApprovalsFeed`, retires ONLY on positive proof,
+    // fails-closed on any DB read hiccup, records one director_activity row per retirement so the
+    // audit trail names the evidence — never a bare clear.
+    const sweep = await import("../src/lib/escalation-retirement-sweep").then((m) =>
+      m.retireHealedEscalations(db, job.workspace_id),
+    );
+    if (sweep.retired.length) {
+      const preview = sweep.retired
+        .slice(0, 3)
+        .map((r) => `${r.notificationId.slice(0, 8)}: ${r.evidenceReason}`)
+        .join(" · ");
+      const more = sweep.retired.length > 3 ? ` (+${sweep.retired.length - 3} more)` : "";
+      notes.push(`retirement sweep → dismissed ${sweep.retired.length} healed card(s): ${preview}${more}`);
+    } else if (sweep.scanned) {
+      notes.push(`retirement sweep: ${sweep.scanned} pending escalated, ${sweep.unreadable} unreadable, none healed`);
+    }
+  } catch (e) {
+    notes.push(`retirement sweep failed: ${errText(e)}`);
+    console.error(`${tag} standing retirement sweep failed (continuing):`, e instanceof Error ? e.message : e);
+  }
+  try {
     // director-zero-backlog-error-autonomy (Phase 1) — reconcile the OPEN error backlog: every open
     // error_events row + open loop_alerts incident that slipped Rafa's event trigger gets re-driven to a
     // terminal state (enqueue a diagnosis where none exists, confirm a covered one, escalate a stuck fix).

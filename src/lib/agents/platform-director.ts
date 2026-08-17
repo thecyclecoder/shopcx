@@ -61,6 +61,11 @@ import { resolveNodeOwner } from "@/lib/control-tower/node-registry";
 import { setSpecStatus, listSpecs } from "@/lib/specs-table";
 import { getOpenRepairs } from "@/lib/repair-agent";
 import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
+import {
+  RETIRE_WHEN_METADATA_KEY,
+  type EscalationRecheckDescriptor,
+  validateEscalationRecheckDescriptor,
+} from "@/lib/escalation-recheck";
 import { getGoal, getGoals, getRoadmap, getRoadmapFilters, getSpec, listArchivedSlugs, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
 import { enqueueSpecTestIfDue, ACTIVE_STATUSES } from "@/lib/agent-jobs";
 import { buildGate } from "@/lib/agents/director-directives";
@@ -1965,7 +1970,27 @@ export async function escalateApprovalRequestToCeo(
   target: DirectorTargetJob,
   diagnosis: string,
   director: EscalatingDirector = ADA_IDENTITY,
+  /**
+   * an-escalation-retires-itself-when-the-condition-it-reported-self-heals Phase 1 — the typed
+   * retire-when descriptor persisted on the row's `metadata.retire_when` jsonb slot (the key name
+   * is defined ONCE by `RETIRE_WHEN_METADATA_KEY` in [[../escalation-recheck]]). Absent = the
+   * card is non-retirable at read time (fail-closed). A malformed descriptor is rejected + logged;
+   * the card is still emitted without a descriptor so the raise path never fails-open on a schema
+   * mistake. See [[../escalation-recheck]].
+   */
+  retireWhen?: EscalationRecheckDescriptor,
 ): Promise<{ ok: boolean; created: boolean }> {
+  let validatedRetireWhen: EscalationRecheckDescriptor | undefined;
+  if (retireWhen !== undefined) {
+    const v = validateEscalationRecheckDescriptor(retireWhen);
+    if (v.valid) {
+      validatedRetireWhen = v.value;
+    } else {
+      console.warn(
+        `[platform-director] escalateApprovalRequestToCeo(job=${target.id}) retire_when rejected: ${v.reason}`,
+      );
+    }
+  }
   const note = `🛠️ ${director.label} escalated this to you — outside the leash / a call only you should make:\n${diagnosis}`.slice(0, 4000);
   const { data: notifs } = await admin
     .from("dashboard_notifications")
@@ -1976,7 +2001,13 @@ export async function escalateApprovalRequestToCeo(
   const existing = (notifs ?? []).find((n) => (n.metadata as Record<string, unknown> | null)?.["agent_job_id"] === target.id);
 
   if (existing) {
-    const meta = { ...((existing.metadata as Record<string, unknown> | null) ?? {}), routed_to_function: CEO, escalated_by_director: director.slug, escalation_reason: diagnosis.slice(0, 2000) };
+    const meta: Record<string, unknown> = {
+      ...((existing.metadata as Record<string, unknown> | null) ?? {}),
+      routed_to_function: CEO,
+      escalated_by_director: director.slug,
+      escalation_reason: diagnosis.slice(0, 2000),
+    };
+    if (validatedRetireWhen) meta[RETIRE_WHEN_METADATA_KEY] = validatedRetireWhen;
     const body = `${note}\n\n${(existing.body as string) ?? ""}`.slice(0, 4000);
     const { error } = await admin.from("dashboard_notifications").update({ metadata: meta, body, read: false }).eq("id", existing.id);
     return { ok: !error, created: false };
@@ -1986,7 +2017,7 @@ export async function escalateApprovalRequestToCeo(
   // is durable. The reconciler is idempotent on agent_job_id, so it won't double-emit; and the target stays
   // needs_approval, so the reconciler keeps (never dismisses) it until the CEO decides.
   const content = buildApprovalContent(target as unknown as ApprovalJobRow);
-  const meta = {
+  const meta: Record<string, unknown> = {
     agent_job_id: target.id,
     kind: target.kind,
     spec_slug: target.spec_slug ?? null,
@@ -1997,12 +2028,13 @@ export async function escalateApprovalRequestToCeo(
     escalated_by_director: director.slug,
     escalation_reason: diagnosis.slice(0, 2000),
   };
+  if (validatedRetireWhen) meta[RETIRE_WHEN_METADATA_KEY] = validatedRetireWhen;
   const { error } = await admin.from("dashboard_notifications").insert({
     workspace_id: target.workspace_id,
     type: APPROVAL_REQUEST_TYPE,
     title: content.title,
     body: `${note}\n\n${content.body}`.slice(0, 4000),
-    link: meta.deep_link,
+    link: meta["deep_link"] as string,
     metadata: meta,
     read: false,
     dismissed: false,
@@ -2060,6 +2092,15 @@ function ceoEscalationNotification(args: {
    *     2026-08-11 on `pr-2438` + `pr-2450`, both of which had already merged.
    */
   metadata?: Record<string, unknown>;
+  /**
+   * an-escalation-retires-itself-when-the-condition-it-reported-self-heals Phase 1 — the typed,
+   * machine-checkable "what would retire this card" descriptor. Validated at write time; a
+   * malformed value is rejected and the card is minted with NO descriptor (defaults to
+   * non-retirable). Persisted under the shared `RETIRE_WHEN_METADATA_KEY` (`'retire_when'`) key so
+   * the Phase-2 sweep can read it back with `readEscalationRecheckDescriptor`.
+   * See [[../escalation-recheck]].
+   */
+  retireWhen?: EscalationRecheckDescriptor;
 }) {
   const note = `🛠️ Ada (Platform/DevOps Director) escalated this to you:\n${args.diagnosis}`.slice(0, 4000);
   const nowIso = new Date().toISOString();
@@ -2087,6 +2128,11 @@ function ceoEscalationNotification(args: {
       escalation_seen_count: 1,
       escalation_first_seen_at: nowIso,
       escalation_last_seen_at: nowIso,
+      // an-escalation-retires-itself-when-the-condition-it-reported-self-heals Phase 1 — carry the
+      // typed retire_when descriptor when the caller supplied one. Absence remains the default
+      // (Phase 2 sweep treats missing/malformed as non-retirable). Keyed via the shared constant
+      // so the sweep's reader and this writer stay in lockstep.
+      ...(args.retireWhen ? { [RETIRE_WHEN_METADATA_KEY]: args.retireWhen } : {}),
     },
     read: false,
     dismissed: false,
@@ -2272,8 +2318,41 @@ export { openBuildStuckCardExistsForSpec };
 
 export async function escalateDiagnosisToCeo(
   admin: Admin,
-  args: { workspaceId: string; specSlug: string | null; title: string; diagnosis: string; dedupeKey: string; deepLink: string; escalationKind: string; metadata?: Record<string, unknown> },
+  args: {
+    workspaceId: string;
+    specSlug: string | null;
+    title: string;
+    diagnosis: string;
+    dedupeKey: string;
+    deepLink: string;
+    escalationKind: string;
+    metadata?: Record<string, unknown>;
+    /**
+     * an-escalation-retires-itself-when-the-condition-it-reported-self-heals Phase 1 — the typed
+     * retire_when descriptor the Phase-2 sweep uses to decide whether this card's condition has
+     * self-healed. Persisted on `metadata.retire_when` (the key is defined once by
+     * `RETIRE_WHEN_METADATA_KEY` in [[../escalation-recheck]]). Absence defaults to NON-retirable at
+     * read time (fail-closed).
+     */
+    retireWhen?: EscalationRecheckDescriptor;
+  },
 ): Promise<{ emitted: boolean; bumped?: boolean; loopDetected?: boolean; error?: PostgrestError }> {
+  // Validate the descriptor at write time so a malformed value from a bad caller is refused HERE
+  // rather than silently persisted (and the Phase-2 reader would reject at read time anyway, so
+  // catching the bug at the raise path is the earlier + more actionable gate). A rejected descriptor
+  // is dropped with a console.warn; the card is still emitted (WITHOUT the descriptor) so the raise
+  // path never fails-open on a schema mistake and the founder still sees the surface.
+  let validatedRetireWhen: EscalationRecheckDescriptor | undefined;
+  if (args.retireWhen !== undefined) {
+    const v = validateEscalationRecheckDescriptor(args.retireWhen);
+    if (v.valid) {
+      validatedRetireWhen = v.value;
+    } else {
+      console.warn(
+        `[platform-director] escalateDiagnosisToCeo(${args.dedupeKey}) retire_when rejected: ${v.reason}`,
+      );
+    }
+  }
   // one-open-escalation-per-thing Phase 1 — an escalation is a STATE (one open card), not an event.
   // First, try to touch an existing OPEN card for this dedupe_key (bump counter + last_seen_at). Three
   // outcomes drive the fork below:
@@ -2330,7 +2409,9 @@ export async function escalateDiagnosisToCeo(
   // Notification FIRST, checked — a surface nobody can see is worse than none. If the insert fails (constraint/
   // RLS/shape), do NOT silently proceed: surface the error and do NOT write a phantom `escalated` activity row
   // (so the dedupe ledger never marks a never-surfaced escalation as done). The caller logs a hard warning.
-  const { error: notifError } = await admin.from("dashboard_notifications").insert(ceoEscalationNotification(args));
+  const { error: notifError } = await admin
+    .from("dashboard_notifications")
+    .insert(ceoEscalationNotification({ ...args, retireWhen: validatedRetireWhen }));
   if (notifError) {
     // one-open-escalation-per-thing Phase 1 — a concurrent sweep won the race and inserted an OPEN
     // card for the same dedupe_key between our read and this insert. The DB constraint caught it.

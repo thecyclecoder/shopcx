@@ -27,6 +27,8 @@
  * and [[../../docs/brain/libraries/cs-director.md]] for the escalate_founder → CEO-card contract.
  */
 
+import { RETIRE_WHEN_METADATA_KEY, type EscalationRecheckDescriptor } from "@/lib/escalation-recheck";
+
 export interface EscalateFounderCardInput {
   /** The ticket that June ruled `escalate_founder` on — the card body links back to it. */
   ticketId: string;
@@ -123,6 +125,15 @@ export interface EscalateFounderCardRow {
      * downstream approver/replay can read the settled work here without re-parsing the body.
      */
     partial_remedy_outcome: PartialRemedyCardInput | null;
+    /**
+     * an-escalation-retires-itself-when-the-condition-it-reported-self-heals Phase 1 — the typed
+     * retire_when descriptor the Phase-2 sweep uses to decide whether this card's condition has
+     * self-healed. The founder-escalation carries `{ kind: 'ticket_terminal', ticket_id }` since
+     * the healing condition is "the ticket closed resolved and is not escalated." Present iff the
+     * caller supplied a descriptor. The key is expressed via the `[RETIRE_WHEN_METADATA_KEY]`
+     * computed property so a rename of the persisted key never falls out of sync.
+     */
+    [RETIRE_WHEN_METADATA_KEY]?: EscalationRecheckDescriptor;
   };
 }
 
@@ -277,6 +288,16 @@ export function buildEscalateFounderCard(input: EscalateFounderCardInput): Escal
       agent_job_id: jobId,
       recommended_remedy: recommendedRemedyMeta,
       partial_remedy_outcome: partialRemedyOutcome ?? null,
+      // an-escalation-retires-itself-when-the-condition-it-reported-self-heals Phase 1 — a
+      // founder-escalation heals when the linked ticket closes resolved and is not escalated.
+      // Recorded UNCONDITIONALLY here because ticket_id is the load-bearing input; a card WITHOUT
+      // this descriptor defaults to non-retirable at read time, which is the wrong contract for a
+      // per-ticket escalation. Keyed via the shared `RETIRE_WHEN_METADATA_KEY` constant so the
+      // writer and the Phase-2 reader (`readEscalationRecheckDescriptor`) share ONE definition.
+      [RETIRE_WHEN_METADATA_KEY]: {
+        kind: "ticket_terminal",
+        ticket_id: ticketId,
+      } as EscalationRecheckDescriptor,
     },
   };
 }
