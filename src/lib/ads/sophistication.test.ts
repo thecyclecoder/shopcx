@@ -30,6 +30,7 @@ function makeAngle(hook: string | null, mechanismClaim: string | null): Competit
     winnerTier: null,
     winnerScore: null,
     conceptTags: null,
+    wireframe: null,
   };
 }
 

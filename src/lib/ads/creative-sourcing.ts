@@ -19,6 +19,7 @@ import { errText } from "@/lib/error-text";
 import { getMetaUserToken } from "@/lib/meta-ads";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import type { ConceptTags } from "@/lib/creative-skeleton";
+import type { SkeletonElement } from "@/lib/ads/decision-engine";
 
 // ── dahlia-researches-from-winners-flow-ad-library Phase 1 — declared-intent envelope ──────────
 /** The intent Dahlia declares FIRST for every creative task — carried through the whole pipeline
@@ -194,6 +195,22 @@ export interface CompetitorAngle {
    *  brief, and by Max (Phase 2) to grade competitor selection + temperature fit against the
    *  benchmark. */
   conceptTags: ConceptTags | null;
+  /** dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — the pinned
+   *  ad's stored WIREFRAME from `creative_skeletons`: the element/zone/prominence map, the
+   *  product presentation (packshot / held-in-hand / lifestyle / before_after), and the copy
+   *  rhythm (`punchiness` tags). Threaded through so the render prompt carries the SOURCE
+   *  ad's own structure as the binding layout — reproduce THIS map with OUR content — instead
+   *  of the model receiving one sentence of "reuse this composition" against a page of other
+   *  instructions. Null when the skeleton predates the extractor (all three columns null); the
+   *  renderer then falls back to today's behaviour (a `sourceWireframe`-absent prompt is
+   *  byte-identical to a pre-Phase-3 prompt). `elements` reuses [[./decision-engine]]
+   *  `SkeletonElement` so the wire-in never drifts from the shape the substitution engine
+   *  gates on (`creative_skeletons_elements_shape_chk`). */
+  wireframe: {
+    elements: SkeletonElement[];
+    productPresentation: string[];
+    punchiness: string[];
+  } | null;
 }
 
 export interface CompetitorAngleOptions {
@@ -275,7 +292,7 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
   let query = admin
     .from("creative_skeletons")
     .select(
-      "advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url, resume_advertising, winner_tier, winner_score, concept_tags",
+      "advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url, resume_advertising, winner_tier, winner_score, concept_tags, elements, product_presentation, punchiness",
     )
     .eq("workspace_id", workspaceId)
     .eq("status", "analyzed")
@@ -302,6 +319,50 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
   return rankByWinnerSignalAndIntent(mapped, q.intent);
 }
 
+/** dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — coerce ONE
+ *  `creative_skeletons` row's `elements` jsonb + `product_presentation` text[] + `punchiness`
+ *  text[] into the typed `CompetitorAngle.wireframe`. Every branch is drop-open — a legacy row
+ *  whose extractor never ran (all three null / non-array) coerces to null so the renderer's
+ *  wireframe-absent path stays byte-identical to a pre-Phase-3 prompt. Element rows narrowed
+ *  to the shape [[./decision-engine]] `SkeletonElement` requires — an unknown zone / role or a
+ *  missing prominence drops the element (never a partial that would trip the substitution
+ *  engine's shape gate). Pure. */
+function coerceWireframe(
+  rawElements: unknown,
+  rawProductPresentation: unknown,
+  rawPunchiness: unknown,
+): CompetitorAngle["wireframe"] {
+  const VALID_ZONES = new Set<SkeletonElement["zone"]>(["header", "hero", "body", "footer", "cta"]);
+  const VALID_ROLES = new Set<SkeletonElement["role"]>([
+    "hook", "mechanism", "proof", "offer", "risk_reversal", "social_proof", "price",
+  ]);
+  const elements: SkeletonElement[] = Array.isArray(rawElements)
+    ? (rawElements as unknown[]).flatMap((e) => {
+        if (!e || typeof e !== "object") return [];
+        const row = e as { zone?: unknown; role?: unknown; prominence?: unknown };
+        const zone = row.zone;
+        const role = row.role;
+        const prominence = row.prominence;
+        if (typeof zone !== "string" || !VALID_ZONES.has(zone as SkeletonElement["zone"])) return [];
+        if (typeof role !== "string" || !VALID_ROLES.has(role as SkeletonElement["role"])) return [];
+        if (typeof prominence !== "number" || !Number.isFinite(prominence)) return [];
+        return [{
+          zone: zone as SkeletonElement["zone"],
+          role: role as SkeletonElement["role"],
+          prominence,
+        }];
+      })
+    : [];
+  const productPresentation: string[] = Array.isArray(rawProductPresentation)
+    ? (rawProductPresentation as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+    : [];
+  const punchiness: string[] = Array.isArray(rawPunchiness)
+    ? (rawPunchiness as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+    : [];
+  if (elements.length === 0 && productPresentation.length === 0 && punchiness.length === 0) return null;
+  return { elements, productPresentation, punchiness };
+}
+
 /** PURE — map ONE `creative_skeletons` row (the shared select column set) to a `CompetitorAngle`.
  *  Single source of truth for the mapping so `queryProvenAngles` (the shelf reader) and
  *  `getCompetitorAngleBySkeletonId` (the pinned-ad reader) can never drift. */
@@ -321,6 +382,7 @@ export function mapRowToCompetitorAngle(r: Record<string, unknown>): CompetitorA
     winnerTier: (r.winner_tier as string | null) ?? null,
     winnerScore: r.winner_score == null ? null : Number(r.winner_score),
     conceptTags: coerceConceptTags(r.concept_tags),
+    wireframe: coerceWireframe(r.elements, r.product_presentation, r.punchiness),
   };
 }
 
@@ -337,7 +399,7 @@ export async function getCompetitorAngleBySkeletonId(
   const { data } = await admin
     .from("creative_skeletons")
     .select(
-      "advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url, resume_advertising, winner_tier, winner_score, concept_tags",
+      "advertiser, hook, framework, mechanism_claim, proof, offer, days_running, heat, destination_domain, image_url, resume_advertising, winner_tier, winner_score, concept_tags, elements, product_presentation, punchiness",
     )
     .eq("workspace_id", workspaceId)
     .eq("id", skeletonId)

@@ -3130,6 +3130,12 @@ async function stockProduct(
         conceptTags: c.conceptTags,
         winnerTier: c.winnerTier,
         winnerScore: c.winnerScore,
+        // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — carry the
+        // pinned/shelf ad's stored wireframe (elements/product_presentation/punchiness) through
+        // `angle.raw` so `buildCreativeBrief` can surface it on `brief.sourceWireframe` and the
+        // generation call site can hand it to `generateCreative`. Null when the source skeleton
+        // predates the extractor — the render then falls through to today's behaviour.
+        wireframe: c.wireframe,
       } as Record<string, unknown>,
     }));
   // cold-prospecting-never-imitates-a-warm-hot-offer-or-retargeting-competitor-ad Phase 2 —
@@ -3286,6 +3292,12 @@ async function stockProduct(
           designReferenceUrl: plan.designReferenceUrl,
           compositionTransfer: plan.useCompositionTransfer,
           aspectRatio: packPlan.canonical.aspectRatio,
+          // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — hand
+          // the source ad's stored wireframe (populated by buildCreativeBrief from
+          // angle.raw.wireframe) to the renderer so buildPrompt emits the binding SOURCE
+          // STRUCTURE clause. Absent (own-brand angle / pre-extractor skeleton) → the prompt
+          // is byte-identical to today.
+          sourceWireframe: brief.sourceWireframe,
         });
         // Phase 2 of ad-creative-requires-real-packshot-never-invent-packaging — thread the real
         // packshot URL to the QA vision compare so packagingFaithful can reject a fabricated pack
@@ -3333,6 +3345,8 @@ async function stockProduct(
             designReferenceUrl: plan.designReferenceUrl,
             compositionTransfer: plan.useCompositionTransfer,
             aspectRatio: sib.aspectRatio,
+            // Phase 3 — siblings render from the SAME brief + same source wireframe as canonical.
+            sourceWireframe: brief.sourceWireframe,
           });
           siblingRenders.push({ format: sib.format, buffer: sibGen.buffer, mimeType: sibGen.mimeType });
         }
@@ -3846,6 +3860,8 @@ async function stockProduct(
                     designReferenceUrl: plan.designReferenceUrl,
                     compositionTransfer: plan.useCompositionTransfer,
                     aspectRatio: PLACEMENT_ASPECT[fmt],
+                    // Phase 3 — regen renders from the SAME brief + same source wireframe.
+                    sourceWireframe: brief.sourceWireframe,
                   });
                   if (fmt === "feed_4x5") {
                     currentCanonicalBuffer = regen.buffer;

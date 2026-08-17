@@ -9,7 +9,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { CreativeBrief } from "@/lib/ads/creative-brief";
-import { buildPrompt } from "./creative-generate";
+import { buildPrompt, SOURCE_STRUCTURE_HEADER } from "./creative-generate";
+import type { SkeletonElement } from "@/lib/ads/decision-engine";
 
 function brief(hook: string): CreativeBrief {
   return {
@@ -86,4 +87,58 @@ test("buildPrompt: a competitor imitation carries a NO THIRD-PARTY BRANDS rule (
   assert.ok(prompt.includes("NO THIRD-PARTY BRANDS"), "imitation prompt must carry the no-third-party-brand hard rule");
   assert.ok(/Red Bull/.test(prompt) && /Monster/.test(prompt), "names the concrete brands that leaked");
   assert.ok(/before.?frame|before.?state|before/i.test(prompt), "covers a staged before-state prop");
+});
+
+// ── dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 ────────────────
+
+test("buildPrompt: sourceWireframe absent → no SOURCE STRUCTURE clause (byte-identical to today)", () => {
+  const { prompt } = buildPrompt(brief("New daily superfood coffee"), true, undefined, true);
+  assert.ok(!prompt.includes(SOURCE_STRUCTURE_HEADER), "no source wireframe = no clause");
+});
+
+test("buildPrompt: sourceWireframe lands the binding SOURCE STRUCTURE clause IMMEDIATELY after refClause", () => {
+  const elements: SkeletonElement[] = [
+    { zone: "header", role: "hook", prominence: 9 },
+    { zone: "hero", role: "mechanism", prominence: 8 },
+    { zone: "footer", role: "offer", prominence: 6 },
+  ];
+  const { prompt } = buildPrompt(
+    brief("Ditch the 3pm crash"),
+    true,
+    undefined,
+    true,
+    undefined,
+    { elements, productPresentation: ["packshot"], punchiness: ["short", "declarative"] },
+  );
+  const idxRef = prompt.indexOf("REUSE ITS WINNING COMPOSITION");
+  const idxSource = prompt.indexOf(SOURCE_STRUCTURE_HEADER);
+  assert.ok(idxRef >= 0, "refClause present on the imitation path");
+  assert.ok(idxSource > idxRef, "SOURCE STRUCTURE lands AFTER refClause (earliest instructions weigh heaviest)");
+  // Elements enumerated in reading order (header → hero → body → footer → cta), prominence in the label.
+  assert.ok(/header · hook \(prominence 9\)/.test(prompt));
+  assert.ok(/hero · mechanism \(prominence 8\)/.test(prompt));
+  assert.ok(/footer · offer \(prominence 6\)/.test(prompt));
+  const headerIdx = prompt.indexOf("header · hook");
+  const heroIdx = prompt.indexOf("hero · mechanism");
+  const footerIdx = prompt.indexOf("footer · offer");
+  assert.ok(headerIdx < heroIdx && heroIdx < footerIdx, "elements listed in reading order");
+  // Product presentation verbatim; punchiness verbatim.
+  assert.ok(/PRODUCT PRESENTATION.*packshot/.test(prompt), "product presentation stated verbatim");
+  assert.ok(/COPY RHYTHM.*short, declarative/.test(prompt), "copy rhythm stated verbatim from punchiness tags");
+  // BINDING language + no-invent guard names the roles the source ad OMITS.
+  assert.ok(/BINDING/.test(prompt), "phrased as binding, not decorative");
+  assert.ok(/Do NOT invent any element type not in this list/.test(prompt));
+  assert.ok(/proof \/ risk_reversal \/ social_proof \/ price/.test(prompt), "names the omitted roles the model must not invent");
+});
+
+test("buildPrompt: sourceWireframe with a `before_after` product presentation still emits STRUCTURE regardless of imitation flag", () => {
+  const { prompt } = buildPrompt(
+    brief("some hook"),
+    false, // no design ref — still emit STRUCTURE when supplied
+    undefined,
+    false,
+    undefined,
+    { elements: [{ zone: "hero", role: "proof", prominence: 9 }], productPresentation: ["before_after"], punchiness: [] },
+  );
+  assert.ok(prompt.includes(SOURCE_STRUCTURE_HEADER), "wireframe clause fires whenever wireframe is supplied");
 });

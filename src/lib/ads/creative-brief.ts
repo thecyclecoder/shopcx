@@ -25,6 +25,7 @@ import { chooseGroundedSubstitute, isCompetitorOffer, stripCompetitorOffer } fro
 import { competitorFocalIsWarmHot, type CreativeIntent } from "@/lib/ads/creative-sourcing";
 import type { ConceptTags } from "@/lib/creative-skeleton";
 import { selectConfirmedBenefits, type ConfirmedBenefit } from "@/lib/ads/creative-imitation";
+import type { SkeletonElement } from "@/lib/ads/decision-engine";
 
 type Row = Record<string, unknown>;
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
@@ -370,6 +371,23 @@ export interface CreativeBrief {
    */
   confirmedBenefits?: ConfirmedBenefit[];
   /**
+   * dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — the source
+   * (pinned/imitated competitor) ad's stored WIREFRAME: its element/zone/prominence map, how the
+   * product is presented (packshot / held-in-hand / lifestyle / before_after), and the copy
+   * rhythm from its `punchiness` tags. Threaded here from `angle.raw.wireframe` (stockProduct
+   * mirrors [[./creative-sourcing]] `CompetitorAngle.wireframe` onto every competitor-source
+   * angle) so `generateCreative` can emit a binding SOURCE STRUCTURE clause without a second DB
+   * read. Null when the source skeleton predates the extractor OR the angle isn't a competitor
+   * imitation — the render then falls through to today's behaviour (a `sourceWireframe`-absent
+   * prompt is byte-identical). `elements` reuses [[./decision-engine]] `SkeletonElement` so the
+   * shape stays in lockstep with the substitution engine's own contract.
+   */
+  sourceWireframe?: {
+    elements: SkeletonElement[];
+    productPresentation: string[];
+    punchiness: string[];
+  } | null;
+  /**
    * swap-competitor-offer-slot-for-our-grounded-proof-benefit-or-feature-in-debrand Phase 1 —
    * derived product features (ingredient count, format) surfaced as the LAST-RESORT substitute
    * pool for `chooseGroundedSubstitute` when the competitor's offer slot needs swapping and the
@@ -491,6 +509,29 @@ export async function buildCreativeBrief(
   // before/after if THAT reviewer submitted one — never borrow another customer's photo under this number
   // (the 2026-07-10 "84 lbs headline / 63 lbs caption / third person's photo" inconsistency).
   //
+  // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — thread the
+  // pinned/imitated source ad's wireframe onto the brief. stockProduct threads it via
+  // `angle.raw.wireframe` (from [[./creative-sourcing]] `CompetitorAngle.wireframe`); we surface
+  // a typed field here so the generation call site + Phase-1's before/after predicate can both
+  // read it. Own-brand angles (`raw` absent OR `raw.wireframe` absent/null) leave the field null
+  // and the render falls through to today's behaviour.
+  const rawWireframe = angle.raw && typeof angle.raw === "object" && "wireframe" in angle.raw
+    ? (angle.raw as { wireframe?: unknown }).wireframe
+    : null;
+  let sourceWireframe: CreativeBrief["sourceWireframe"] = null;
+  if (rawWireframe && typeof rawWireframe === "object" && !Array.isArray(rawWireframe)) {
+    const wf = rawWireframe as { elements?: unknown; productPresentation?: unknown; punchiness?: unknown };
+    sourceWireframe = {
+      elements: Array.isArray(wf.elements) ? (wf.elements as SkeletonElement[]) : [],
+      productPresentation: Array.isArray(wf.productPresentation)
+        ? (wf.productPresentation as unknown[]).filter((s): s is string => typeof s === "string")
+        : [],
+      punchiness: Array.isArray(wf.punchiness)
+        ? (wf.punchiness as unknown[]).filter((s): s is string => typeof s === "string")
+        : [],
+    };
+  }
+
   // dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 1 — the attach is no longer
   // gated on a keyword match against the ANGLE'S text (a competitor's own "slimming" hook is not consent
   // to render a body transformation). It attaches when we have a transformation-source angle whose own
@@ -499,10 +540,14 @@ export async function buildCreativeBrief(
   // `renderBeforeAfter` flag on the object gates whether the RENDER emits a two-photo IMAGE — a false
   // flag still surfaces the reviewer + quote as ordinary `leadProof` text (evidence stays; the image
   // directive is what a keyword should not decide).
+  //
+  // Phase 3 wire-in: when the caller doesn't supply `opts.sourceProductPresentation`, fall back to
+  // the source wireframe's productPresentation here — so a pinned ad whose stored wireframe carries
+  // `before_after` self-consents to a before/after render even when no owner-side signal was passed.
   const renderBeforeAfter = shouldRenderBeforeAfter({
     treatment: opts.treatment,
     authorNotes: opts.authorNotes,
-    sourceProductPresentation: opts.sourceProductPresentation,
+    sourceProductPresentation: opts.sourceProductPresentation ?? sourceWireframe?.productPresentation ?? null,
   });
   let transformation: CreativeBrief["transformation"] = null;
   if (transformationStories.length && (renderBeforeAfter || angle.source === "transformation")) {
@@ -722,7 +767,7 @@ export async function buildCreativeBrief(
     );
   }
 
-  return { productTitle, angle, authorNotes: opts.authorNotes?.trim() || null, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags, leadBenefitWeave, confirmedBenefits, productFeatures };
+  return { productTitle, angle, authorNotes: opts.authorNotes?.trim() || null, leadProof, transformation, supportingBenefits, proofStack, offer, imageRefs, guardrails, competitorDna, conceptTags, leadBenefitWeave, confirmedBenefits, productFeatures, sourceWireframe };
 }
 
 /**
