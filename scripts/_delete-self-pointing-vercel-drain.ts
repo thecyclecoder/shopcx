@@ -27,6 +27,7 @@
  */
 import { VERCEL_PROJECT_IDS } from "../src/lib/vercel-project";
 import { errText } from "../src/lib/error-text";
+import { summarizeDrain } from "../src/lib/vercel-drain-redact";
 
 const { TEAM_ID } = VERCEL_PROJECT_IDS;
 const DRAIN_ID = "drn_kQkATjjmtVrTnRrj";
@@ -73,7 +74,11 @@ async function main(): Promise<void> {
     );
   }
   const before = await probe.json().catch(() => ({}));
-  console.log(`delete-self-pointing-vercel-drain — found drain: ${JSON.stringify(before).slice(0, 400)}`);
+  // Never log the raw response body — it can include a delivery secret / headers / userinfo.
+  // Print an allowlisted summary only (id + name + status + redacted endpoint).
+  console.log(
+    `delete-self-pointing-vercel-drain — found drain: ${summarizeDrain(before)}`,
+  );
 
   // Step 2 — DELETE.
   const del = await fetch(drainUrl(DRAIN_ID), {
