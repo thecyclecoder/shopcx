@@ -1,0 +1,1 @@
+- **Research › Ads hides do-not-use ads by default (Show hidden toggle)** · verified 2026-08-17 · → [[../lifecycles/creative-finder]]
