@@ -4059,6 +4059,131 @@ export async function retestOriginBranchSecurityIfFixMerged(
 }
 
 /**
+ * ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 4 — the fix-LANDED
+ * sibling of [[retestOriginBranchSecurityIfFixMerged]] (which fires on MERGE and only sees the diff-mode
+ * standalone-fix-spec case, `regression_of_slug`). Under **fixes-as-phases** — the branch-mode path — the
+ * fix for a real-vuln finding lands as a `kind='fix'` phase on the ORIGIN spec, built ON the origin's own
+ * `claude/build-<origin>` branch. That build's push is the moment the system can NAME PRECISELY when the
+ * finding may have been closed — no inference required. This function is that direct signal: given the
+ * set of phase positions just stamped built by [[../../scripts/builder-worker]] `finalizeBuiltPhase`, if
+ * any carries `metadata.security_review_job_id` (the two-way link `spawnPreMergeFix` stamped in
+ * [[pre-merge-fix]] Phase 4 for a security-driven fix), enqueue a FORCED fresh branch-mode security
+ * review of the origin's branch.
+ *
+ * WHY DIRECT INSTEAD OF THE FRESHNESS HEURISTIC. Phase 2's SHA-keyed freshness comparison is the safety
+ * net for every OTHER way a branch can change (build push, conflict-resolution merge, human push). But
+ * relying on it for the fix-landed case is inference — a chain of deployment-status webhook → pre-merge
+ * spec-test → solo Vault enqueue that any dropped link silently breaks (the 2026-08-17 defect: fix Phase 1
+ * built at 13:24, zero re-reviews since). The fix-landed path is the ONE case the system knows the exact
+ * moment to re-ask, so it says so directly.
+ *
+ * WHY NOT extend [[retestOriginBranchSecurityIfFixMerged]]? That function fires on MERGE, and looks up
+ * `spec.regression_of_slug` — a link only `authorSecurityFixSpec` (diff-mode) sets. A branch-mode
+ * real-vuln uses `spawnPreMergeFix` (a phase on the origin — no separate spec, no `regression_of_slug`),
+ * so the existing function is dead code for this case. It also can't fire before merge, and the whole
+ * point of Phase 4 is to unblock the merge (a real-vuln blocks the PR that the merge would be waiting for
+ * — the "circular condition" the spec cites). Kept as-is because its diff-mode intent is still valid; the
+ * branch-mode fixes-as-phases case is exclusively handled here.
+ *
+ * IDEMPOTENCY. `force: true` bypasses ONLY dedup (2) — the SHA-based freshness — so a fresh review
+ * always enqueues even when the caller can't prove the head moved. Guard (0) (merged branch — deleted
+ * ref) and guard (1) (one OPEN review per branch — no concurrent duplicates) STILL apply, so a re-review
+ * that would target a deleted ref or stack on top of an in-flight review is refused. This is exactly the
+ * idempotency shape the spec calls for ("Guard (1) — one OPEN review per branch — already prevents a
+ * duplicate when a review is in flight. Reuse it rather than adding a second dedupe.").
+ *
+ * SAFETY. Best-effort + never throws. Returns whether it enqueued, plus the count of eligible fix-phase
+ * positions it found — for observability. A metadata-read failure / missing spec / non-fix phase all
+ * no-op with a reason. `positions` is the set the caller just stamped BUILT; positions the caller did
+ * NOT stamp are ignored so a re-run of `finalizeBuiltPhase` for a prior phase never re-fires this.
+ */
+export interface RetestBranchSecurityIfFixPhaseLandedResult {
+  /** true iff a fresh security review was enqueued for the branch. */
+  enqueued: boolean;
+  /** the reason the enqueue succeeded/skipped (surfaced in logs; guard-(0)/(1) skips are common + expected). */
+  reason: string;
+  /** the count of positions in the caller-supplied set whose `metadata.security_review_job_id` was set. */
+  matchingFixPhaseCount: number;
+}
+export async function retestBranchSecurityIfFixPhaseLanded(
+  workspaceId: string,
+  slug: string,
+  positions: number[],
+  branch: string,
+  headSha: string | null,
+  adminClient?: Admin,
+): Promise<RetestBranchSecurityIfFixPhaseLandedResult> {
+  const skip = (reason: string, matches = 0): RetestBranchSecurityIfFixPhaseLandedResult => ({ enqueued: false, reason, matchingFixPhaseCount: matches });
+  if (!workspaceId || !slug || !branch || !positions.length) {
+    return skip("missing context (workspace/slug/branch/positions)");
+  }
+  if (!branch.startsWith("claude/build-")) {
+    return skip(`not a claude/build-* branch (${branch})`);
+  }
+  const admin = adminClient || createAdminClient();
+  try {
+    const spec = await getSpecFromDb(workspaceId, slug);
+    if (!spec) return skip(`no spec row for ${slug}`);
+    const positionSet = new Set(positions);
+    // Consider ONLY the phases the caller just stamped BUILT in this cycle. A phase whose metadata carries
+    // security_review_job_id AND is a `kind='fix'` phase is a landed security fix. Non-fix phases are
+    // skipped even if metadata leaks in from an unrelated write — the security-driven path only stamps
+    // fix phases (see [[pre-merge-fix]] `spawnPreMergeFix`).
+    const matches = (spec.phases ?? []).filter((p) => {
+      if (!positionSet.has(p.position)) return false;
+      if (p.kind !== "fix") return false;
+      const meta = ((p as { metadata?: Record<string, unknown> | null }).metadata ?? {}) as Record<string, unknown>;
+      const linkedId = meta.security_review_job_id;
+      return typeof linkedId === "string" && linkedId.length > 0;
+    });
+    if (matches.length === 0) {
+      return skip("no landed phase carries a security_review_job_id link");
+    }
+
+    // We KNOW a security fix just landed — force the re-review. Guards (0) + (1) still apply inside the
+    // enqueue chokepoint. `headSha` is passed through so the fresh review's `instructions.reviewed_head_sha`
+    // is stamped correctly at enqueue time (the worker still overrides on completion with the run-time SHA).
+    // Look up the branch's latest build row for the preview URL + PR number — the fresh review's row wants
+    // the same context the previous ones carried.
+    const { data: latestBuild } = await admin
+      .from("agent_jobs")
+      .select("preview_url, pr_number")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", slug)
+      .eq("kind", "build")
+      .eq("spec_branch", branch)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const buildRow = (latestBuild as { preview_url?: string | null; pr_number?: number | null } | null) ?? null;
+
+    const { enqueueSecurityReviewJob } = await import("@/lib/security-agent");
+    const r = await enqueueSecurityReviewJob(admin, {
+      branch,
+      previewOrigin: buildRow?.preview_url ?? "",
+      specSlug: slug,
+      prNumber: typeof buildRow?.pr_number === "number" ? buildRow.pr_number : null,
+      workspaceId,
+      headSha,
+      force: true,
+    });
+    if (r.enqueued) {
+      console.log(
+        `[security-fix-phase-landed] ${slug} phase(s) ${matches.map((p) => p.position).join(",")} → forced fresh security review of ${branch}`,
+      );
+      return { enqueued: true, reason: r.reason ?? branch, matchingFixPhaseCount: matches.length };
+    }
+    return skip(`enqueue skipped: ${r.reason ?? "unknown"}`, matches.length);
+  } catch (e) {
+    console.warn(
+      `[security-fix-phase-landed] retest for ${slug} threw (continuing):`,
+      e instanceof Error ? e.message : e,
+    );
+    return skip(`threw: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+/**
  * The post-merge effects of a merged `kind='build'` job — the shared body run by BOTH paths that flip a
  * build to `merged`: the board-render reconcile ([[reconcileMergedJobs]], for a manual squash-merge) and
  * the auto-merge webhook path ([[handleAutoMergedBuildBranch]], auto-ship-pipeline). Extracting it keeps

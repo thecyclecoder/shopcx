@@ -860,6 +860,28 @@ function sh(cmd: string, args: string[], opts: { timeout?: number; cwd?: string 
   return { code: r.status ?? -1, out: r.stdout || "", err: r.stderr || "" };
 }
 
+/**
+ * a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 1 — resolve the
+ * current head SHA of `origin/<branch>` (40-char), returning null on any failure (branch missing,
+ * fetch error, transient network). Used by the security-review lane to record which SHA a review
+ * actually covered; a null just means Phase 2's freshness gate treats it as not-fresh (conservative:
+ * re-review). Best-effort — never throws.
+ */
+function resolveOriginBranchSha(branch: string): string | null {
+  const b = String(branch || "").trim();
+  if (!b) return null;
+  try {
+    const fetched = sh("git", ["fetch", "origin", b]);
+    if (fetched.code !== 0) return null;
+    const rev = sh("git", ["rev-parse", `origin/${b}`]);
+    if (rev.code !== 0) return null;
+    const sha = rev.out.trim();
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
 // Async (NON-blocking) exec — REQUIRED for the long-running claude/tsc/apply steps so concurrent
 // build lanes actually overlap. spawnSync freezes the whole event loop and would serialize lanes.
 function shAsync(cmd: string, args: string[], opts: { timeout?: number; idleTimeout?: number; cwd?: string; env?: NodeJS.ProcessEnv; onLine?: (line: string) => void; input?: string } = {}): Promise<{ code: number; out: string; err: string; killed?: "idle" | "hardcap" }> {
@@ -13819,12 +13841,17 @@ async function runSpecTestJob(job: Job) {
     if (isPreMerge && branch) {
       try {
         const { enqueueSecurityReviewJob } = await import("../src/lib/security-agent");
+        // a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 1 — capture the
+        // branch's current head at enqueue so the row carries the intended-to-cover SHA even before the
+        // review runs. The worker lane will overwrite with the AUTHORITATIVE run-time SHA on completion.
+        const headSha = resolveOriginBranchSha(branch);
         const r = await enqueueSecurityReviewJob(db, {
           branch,
           previewOrigin: previewOrigin ?? "",
           specSlug: slug,
           prNumber: typeof job.pr_number === "number" ? job.pr_number : null,
           workspaceId: job.workspace_id,
+          headSha,
         });
         console.log(`${tag} solo Vault security-review: ${r.enqueued ? "enqueued" : "skipped"}${r.reason ? ` (${r.reason})` : ""}`);
       } catch (e) {
@@ -25586,7 +25613,20 @@ async function applySecurityVerdictToJob(
       originTitle,
       branch,
       failing,
+      // ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 4 — the fix
+      // phase(s) spawnPreMergeFix appends get stamped with this security-review-job-id on their metadata.
+      // When the origin's build later lands that fix phase, [[../src/lib/agent-jobs]]
+      // `retestBranchSecurityIfFixPhaseLanded` (fired from finalizeBuiltPhase) reads that link and
+      // DIRECTLY enqueues a fresh branch-mode security review — no dependence on the Phase-2 SHA
+      // freshness heuristic to infer the branch moved.
+      securityReviewJobId: job.id,
     });
+    // ⭐ Phase 4 — record the REVERSE leg of the link: which fix phase positions this security review is
+    // waiting on. Written to `instr` so the terminal update below persists it into `instructions`
+    // alongside `verdict='real-vuln'`. The fix-landed hook reads the forward link (phase → job); the
+    // reverse leg is for observability + debugging ("what fix is this review waiting on?"). No safety
+    // dependence on this — the forward link alone drives the enqueue.
+    const waitingOnFixPositions = out.spawned ? (out.appendedPositions ?? []) : [];
     const outcome = out.spawned
       ? `security Fix phase appended to [[${parentSlug}]] + build resumed (attempt ${out.attempts + 1})`
       : out.escalated
@@ -25604,6 +25644,7 @@ async function applySecurityVerdictToJob(
         routed: "fixes-as-phases",
         fix_check_keys: failing.map((f) => f.check_key),
         spawn_escalated: out.escalated ?? false,
+        waiting_on_fix_positions: waitingOnFixPositions,
       },
     });
     // Terminal but NOT security-green: the verdict stays 'real-vuln' so `isSecurityGreenForBranch` holds the
@@ -25612,11 +25653,11 @@ async function applySecurityVerdictToJob(
     await update(job.id, {
       status: "completed",
       error: null,
-      instructions: JSON.stringify({ ...instr, verdict, routed: "fixes-as-phases" }),
+      instructions: JSON.stringify({ ...instr, verdict, routed: "fixes-as-phases", waiting_on_fix_positions: waitingOnFixPositions }),
       log_tail: `real-vuln → ${outcome}\n\n${review}`.slice(-2000),
     });
     await emitVerdict();
-    console.log(`${tag} real-vuln on in-flight branch → ${outcome}`);
+    console.log(`${tag} real-vuln on in-flight branch → ${outcome}${waitingOnFixPositions.length ? ` (waiting on fix positions ${waitingOnFixPositions.join(",")})` : ""}`);
     return;
   }
   if (verdict === "real-vuln") {
@@ -25739,7 +25780,7 @@ async function runSecurityReviewJob(job: Job) {
     actor: "vault",
     metadata: { job_id: job.id, kind: "security-review" },
   });
-  let instr: { mode?: string; merge_sha?: string; branch?: string; preview_origin?: string; spec_slug?: string; pr_number?: number | null; verdict?: string; authored_slug?: string; finding_signature?: string } = {};
+  let instr: { mode?: string; merge_sha?: string; branch?: string; preview_origin?: string; spec_slug?: string; pr_number?: number | null; verdict?: string; authored_slug?: string; finding_signature?: string; reviewed_head_sha?: string | null } = {};
   try {
     instr = job.instructions ? JSON.parse(job.instructions) : {};
   } catch {
@@ -25920,14 +25961,23 @@ async function runSecurityReviewJob(job: Job) {
         console.log(`${tag} no branch → no-op`);
         return;
       }
-      console.log(`${tag} reviewing unmerged branch ${branch} (spec ${parentSlug}${previewOrigin ? `, preview ${previewOrigin}` : ""})`);
+      // ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 1 — stamp the
+      // AUTHORITATIVE reviewed-head SHA onto `instr` BEFORE dispatching the review, so every terminal write
+      // in applySecurityVerdictToJob (which does `JSON.stringify({...instr, verdict, …})`) carries it.
+      // Enqueue-time headSha may be null (server-side callers) or stale (a push landed between enqueue and
+      // run) — the run-time value the worker resolves here is what the Phase-2 freshness gate reads.
+      // Best-effort: a resolve failure (branch just deleted / transient) leaves whatever the enqueue
+      // recorded, and a null on completion is Phase-2's not-fresh signal (conservative — re-review).
+      const reviewedHeadSha = resolveOriginBranchSha(branch);
+      if (reviewedHeadSha) instr.reviewed_head_sha = reviewedHeadSha;
+      console.log(`${tag} reviewing unmerged branch ${branch} (spec ${parentSlug}${previewOrigin ? `, preview ${previewOrigin}` : ""}${reviewedHeadSha ? `, head ${reviewedHeadSha.slice(0, 12)}` : ""})`);
       basePrompt = securityBranchPrompt(branch, previewOrigin, parentSlug, instr.pr_number ?? null);
       source = { kind: "branch", branch, previewOrigin };
       contextLabel = `unmerged branch ${branch}`;
       specLabel = `unmerged ${parentSlug} (${branch})`;
       activityReason = (verdict, review) =>
         `Security review of unmerged ${parentSlug} (branch ${branch}): ${verdict} — ${review}`.slice(0, 4000);
-      activityMetadata = { branch, preview_origin: previewOrigin, job_id: job.id };
+      activityMetadata = { branch, preview_origin: previewOrigin, reviewed_head_sha: reviewedHeadSha, job_id: job.id };
     } else {
       // ── Phase 1: per-merged-diff security pass. ──
       const mergeSha = instr.merge_sha || "";
@@ -27700,6 +27750,34 @@ async function dispatchJob(job: Job) {
           }
         } catch (e) {
           console.error(`${tag} stampPhaseBuilt import failed (non-fatal):`, e instanceof Error ? e.message : e);
+        }
+      }
+      // ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 4 — a landed
+      // fix for a security finding explicitly asks to be re-checked. If any position we just stamped
+      // BUILT is a `kind='fix'` phase whose `metadata.security_review_job_id` was stamped by
+      // spawnPreMergeFix (branch-mode real-vuln arm of applySecurityVerdictToJob), enqueue a fresh
+      // branch-mode security review DIRECTLY — no dependence on the Phase-2 SHA freshness heuristic to
+      // infer the branch moved. Guard (1) (one OPEN review per branch) inside the enqueue chokepoint is
+      // the sole dedupe (the spec's point 3: "prefer enqueuing over skipping when the two are
+      // ambiguous"). Non-security fix phases (regression fixes / spec-test fails) carry no link and
+      // no-op through this helper. Best-effort + never throws.
+      if (branch && positionsToStamp.size) {
+        try {
+          const { retestBranchSecurityIfFixPhaseLanded } = await import("../src/lib/agent-jobs");
+          const r = await retestBranchSecurityIfFixPhaseLanded(
+            job.workspace_id,
+            slug,
+            Array.from(positionsToStamp),
+            branch,
+            opts.headSha,
+          );
+          if (r.enqueued) {
+            console.log(`${tag} fix-landed: enqueued fresh security review of ${branch} (${r.matchingFixPhaseCount} matching phase(s))`);
+          } else if (r.matchingFixPhaseCount > 0) {
+            console.log(`${tag} fix-landed: ${r.matchingFixPhaseCount} security-linked fix phase(s) but re-review not enqueued — ${r.reason}`);
+          }
+        } catch (e) {
+          console.error(`${tag} fix-landed re-review dispatch threw (non-fatal):`, e instanceof Error ? e.message : e);
         }
       }
       // ACCUMULATION — the stamp above is now persisted, so this read reflects the just-built phase. Fails OPEN.

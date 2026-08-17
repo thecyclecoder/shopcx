@@ -164,18 +164,51 @@ export async function listDeploymentsForBranch(branch: string, limit = 20): Prom
 export type LatestDeploymentLookup = {
   /** The newest deployment for the branch, regardless of state. null if Vercel hasn't picked the branch up yet. */
   latest: Deployment | null;
-  /** The newest READY deployment for the branch (preferring a matching commit SHA when given). null if none yet. */
+  /**
+   * The READY deployment for the caller's request. When `commitSha` is supplied, this is ONLY set to
+   * the READY deployment whose `meta.githubCommitSha` matches — no cross-SHA substitution
+   * (a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 3). When
+   * `commitSha` is omitted, this is the newest READY on the branch (regardless of commit).
+   */
   ready: Deployment | null;
+  /**
+   * a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 3 — the
+   * distinguishable "did we find what you asked for" signal. `true` iff `ready` satisfies the
+   * caller's request: (a) `commitSha` supplied AND a READY deployment for THAT sha was found, or
+   * (b) `commitSha` omitted AND at least one READY deployment exists on the branch. `false` on a
+   * SHA-miss (no READY for the requested `commitSha` — the caller can tell "no preview for THIS
+   * sha yet" apart from "no preview at all" using `latestReadyOnBranch` below).
+   */
+  readyForRequestedSha: boolean;
+  /**
+   * a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 3 — the newest
+   * READY on the branch REGARDLESS of commit SHA. Always populated so a caller can distinguish
+   * "no preview at all" (`null`) from "preview exists but for a different commit" (non-null with
+   * `ready === null` on a SHA-supplied miss). Never used as a substitute for `ready` — this is
+   * observability only.
+   */
+  latestReadyOnBranch: Deployment | null;
 };
 
 /**
  * Resolve the preview deployment for a `claude/*` build branch:
  *   - `latest`: newest of any state (so the caller can show "still BUILDING")
- *   - `ready`:  newest READY (the URL to persist as the build's preview_url)
+ *   - `ready`:  the READY deployment for the caller's request (see below)
+ *   - `readyForRequestedSha`: `true` iff `ready` satisfies the caller's request
+ *   - `latestReadyOnBranch`: the newest READY on the branch regardless of commit — for observability
  *
- * When `commitSha` is supplied, prefer a READY deployment whose meta.githubCommitSha matches —
- * keeps a stale earlier preview from being mis-attributed to a later commit on the same branch.
- * Falls back to the newest READY on the branch when no exact-SHA match is present.
+ * ⭐ a-branch-security-review-is-fresh-only-for-the-exact-head-sha-it-reviewed Phase 3 — the SHA-scoped
+ * miss no longer substitutes another commit's deployment. When `commitSha` is supplied and no READY
+ * matches that exact SHA, `ready` is `null` and `readyForRequestedSha` is `false` — the caller can
+ * tell "no preview for this SHA yet" apart from "no preview at all" (the branch's newest READY, if
+ * any, is exposed under `latestReadyOnBranch` for observability, NEVER for substitution). This closes
+ * the 2026-08-17 defect: merge commit `d8727bf05` (14:05) produced no deployment; between 14:05 and
+ * the next successful deploy at 14:27, the old fallback would have returned `7bf057e97`'s pre-merge
+ * build as "the branch's ready preview", and any pre-merge check pointed at that origin would have
+ * verified code the branch no longer had.
+ *
+ * When `commitSha` is OMITTED, the caller is asking for the branch's newest preview and a substitution
+ * is not possible — `ready` returns the newest READY on the branch, exactly as before.
  *
  * Production deployments are filtered out — `target: "production"` is excluded.
  */
@@ -187,12 +220,21 @@ export async function getLatestReadyDeploymentForBranch(
   const previews = deployments.filter((d) => d.target !== "production");
   const latest = previews[0] ?? null;
   const readyOnly = previews.filter((d) => d.state === "READY");
+  const latestReadyOnBranch = readyOnly[0] ?? null;
+  // Phase 3: a supplied commitSha binds `ready` STRICTLY to a READY deployment for that exact SHA.
+  // No fallback to `latestReadyOnBranch` — a caller asking about a specific commit needs "yes / no /
+  // wait", never a silent substitution. A caller that omits `commitSha` is asking about the branch's
+  // newest preview, so `ready` falls back to `latestReadyOnBranch` (unchanged behavior).
   let ready: Deployment | null = null;
+  let readyForRequestedSha = false;
   if (commitSha) {
     ready = readyOnly.find((d) => d.meta.githubCommitSha === commitSha) ?? null;
+    readyForRequestedSha = ready !== null;
+  } else {
+    ready = latestReadyOnBranch;
+    readyForRequestedSha = ready !== null;
   }
-  if (!ready) ready = readyOnly[0] ?? null;
-  return { latest, ready };
+  return { latest, ready, readyForRequestedSha, latestReadyOnBranch };
 }
 
 /** The preview URL (with https://) for a deployment row, or null if none. */
