@@ -1,0 +1,1 @@
+- **Spec phase-check greps are smart-case, so a casing difference can't park a correct build** · verified 2026-08-17 · → [[../libraries/spec-phase-checks-table]] · [[../libraries/spec-check-runner]] · [[../libraries/specs-table]] · [[../recipes/what-makes-a-buildable-spec]]
