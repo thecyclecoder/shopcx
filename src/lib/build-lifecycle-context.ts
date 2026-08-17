@@ -118,6 +118,29 @@ const JOB_STATUS_LABEL: Record<JobStatus, string> = {
 };
 
 /**
+ * ⭐ CEO 2026-08-17 — has this spec's work actually reached `main`?
+ *
+ * The 5-stage lifecycle (`spec-review → build → spec-test → security-test → fold`) has NO node for
+ * the MERGE, so once spec-test and security clear, a spec lands on `fold` and the chip read
+ * "Awaiting fold" — a post-merge state — while its PR was still open and unmerged. The tooltip went
+ * further and asserted "Spec is shipped". Reported on
+ * `an-assisted-purchase-carries-the-item-the-customer-actually-picked`, whose PR (#2512) was open
+ * and mergeable while the card claimed it was waiting to be folded.
+ *
+ * Merged means: the spec is folded, its derived status is `shipped`, or every phase carries a
+ * `merge_sha`. Phases that are built-but-unmerged carry a `build_sha` and a NULL `merge_sha` —
+ * exactly the state that was rendering as "Awaiting fold". A zero-phase (one-shot) spec has no
+ * per-phase evidence, so we fall back to the spec-level signals and do NOT claim unmerged.
+ *
+ * Pure.
+ */
+export function hasReachedMain(spec: SpecCard, folded: boolean): boolean {
+  if (folded || spec.status === "shipped") return true;
+  if (spec.phases.length === 0) return true; // no per-phase evidence — don't assert unmerged
+  return spec.phases.every((p) => !!p.merge_sha || p.status === "rejected");
+}
+
+/**
  * Compute the human-friendly pill label + tooltip for the CURRENT stage's chip on the timeline.
  *
  * The Phase 1 helper labels stages structurally (`active`/`done`/etc.) but the chip should read like
@@ -133,6 +156,11 @@ export function lifecyclePillForCurrent(
   job: AgentJob | null,
   fold: PendingFold | null,
   valePass: boolean | null,
+  /** ⭐ CEO 2026-08-17 — false when the spec is built + green but its PR has NOT merged. Without
+   *  this the Fold node claims "Awaiting fold" (a post-merge state) on an open PR. Defaults true so
+   *  a caller that has not been updated keeps the previous label rather than silently mislabelling
+   *  the other direction. */
+  reachedMain: boolean = true,
 ): { label?: string; title?: string } {
   const { current, currentStatus } = derivation;
   // Done = no pill (the floating chip was hidden on a fully-shipped lifecycle).
@@ -200,7 +228,17 @@ export function lifecyclePillForCurrent(
   // Fold (active without a folding row) — the spec passed both gates (spec-test + security) and is
   // waiting for the auto-fold gate's next pass to enqueue the batch fold-build.
   if (current === "fold") {
-    return { label: "Awaiting fold", title: "Spec is shipped + verified + security-clear; the auto-fold gate will pick it up on the next pass." };
+    // ⭐ CEO 2026-08-17 — built + verified + security-clear is NOT shipped. Until the PR merges the
+    // code is not on main, and calling that "Awaiting fold" (or "shipped" in the tooltip) reads as a
+    // later state than reality — the same claiming-an-unverified-artifact class as the phase-stamp
+    // and preview-lookup defects found the same day.
+    if (!reachedMain) {
+      return {
+        label: "Awaiting merge",
+        title: "Built on its branch and green on both pre-merge gates (spec-test + security) — but the PR has not merged, so this is not on main yet. Fold runs after the merge.",
+      };
+    }
+    return { label: "Awaiting fold", title: "Merged to main + verified + security-clear; the auto-fold gate will pick it up on the next pass." };
   }
 
   return {};

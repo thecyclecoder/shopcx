@@ -780,6 +780,53 @@ export async function resolveSolChosenPlaybook(
   const seed_context =
     seed && typeof seed === "object" && !Array.isArray(seed) ? (seed as Record<string, unknown>) : {};
 
+  // Phase 2 of an-assisted-purchase-carries-the-item-the-customer-actually-picked —
+  // when routing an assisted-purchase playbook, populate `assisted_purchase_params` on
+  // the seed_context from Sol's `purchase_intent` (variant + quantity + interval),
+  // resolving the variant to its internal UUID. This is the ROUTING boundary; the
+  // customer's choice is unambiguous here. If the write already happened (Sol pre-populated
+  // it) leave it alone. If the intent can't be resolved to a live variant, DO NOT proceed —
+  // returning null falls the caller through so Sol can re-ask on the next turn (Phase 2
+  // bullet 5: fail at routing, while the customer is still in the conversation).
+  if (
+    slug === "assisted-order-purchase" ||
+    slug === "assisted-subscription-purchase"
+  ) {
+    if (!seed_context.assisted_purchase_params) {
+      const intentRaw = seed_context.purchase_intent as Record<string, unknown> | undefined;
+      if (intentRaw && typeof intentRaw === "object") {
+        const { resolveAssistedPurchaseIntentToParams } = await import(
+          "@/lib/playbook-executor"
+        );
+        const actionType =
+          slug === "assisted-subscription-purchase" ? "create_subscription" : "create_order";
+        // Fix 1 (sec:real-vuln): `unit_cents` and `vendor` are DELIBERATELY not
+        // forwarded from `intentRaw` — the assisted-purchase Direction plan is
+        // Sol-authored from customer-controlled text, and a prompt-injected
+        // customer could otherwise steer the outgoing dispatch toward an
+        // unauthorized price or the Shopify vendor branch. Price is derived
+        // server-side from the resolved `product_variants.price_cents`; vendor
+        // is omitted so the playbook step's config default ('internal') wins.
+        // The resolver's `RawAssistedPurchaseIntent` shape has no fields for
+        // either, so this is enforced by types as well as by omission here.
+        const params = await resolveAssistedPurchaseIntentToParams(admin, workspace_id, {
+          actionType,
+          variantId: (intentRaw.variant_id as string | undefined) ?? null,
+          shopifyVariantId: (intentRaw.shopify_variant_id as string | undefined) ?? null,
+          sku: (intentRaw.sku as string | undefined) ?? null,
+          title: (intentRaw.title as string | undefined) ?? null,
+          quantity: (intentRaw.quantity as number | undefined) ?? null,
+          interval:
+            (intentRaw.interval as "day" | "week" | "month" | "year" | undefined) ?? null,
+          intervalCount: (intentRaw.interval_count as number | undefined) ?? null,
+          nextBillingDate: (intentRaw.next_billing_date as string | undefined) ?? null,
+        });
+        if (!params) return null;
+        seed_context.assisted_purchase_params = params;
+      }
+    }
+  }
+
   return { playbook_id: (pb as { id: string }).id, slug, seed_context };
 }
 

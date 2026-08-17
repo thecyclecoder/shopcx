@@ -6,7 +6,7 @@ import { getLatestSpecTestRuns, getHumanResolutionCounts, getHumanCheckResolutio
 import { getSecurityStateBySlug, type SecurityStateBySlug } from "@/lib/security-agent";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { deriveLifecycleStage } from "@/lib/build-lifecycle";
-import { buildLifecycleContext, lifecyclePillForCurrent } from "@/lib/build-lifecycle-context";
+import { buildLifecycleContext, lifecyclePillForCurrent, hasReachedMain } from "@/lib/build-lifecycle-context";
 import LifecycleControls from "./LifecycleControls";
 import LifecycleTimeline from "./LifecycleTimeline";
 import BranchPosition from "./BranchPosition";
@@ -146,7 +146,7 @@ function Card({ spec, job, fold, testRun, humanResolved, status, goalSlugs, sour
   // used (so a CEO reading "Building…" / "Folding…" / "Vale pending" sees no copy regression).
   const lifecycleCtx = buildLifecycleContext({ spec, job, testRun, humanResolutions, liveSpecTestSlugs, security, folded });
   const derivation = deriveLifecycleStage(lifecycleCtx);
-  const pill = lifecyclePillForCurrent(derivation, job, fold, lifecycleCtx.valePass);
+  const pill = lifecyclePillForCurrent(derivation, job, fold, lifecycleCtx.valePass, hasReachedMain(spec, folded));
   return (
     <div
       data-spec-search={`${spec.title} ${spec.slug} ${spec.owner || ""} ${spec.parent || ""} ${spec.summary || ""}`.toLowerCase()}

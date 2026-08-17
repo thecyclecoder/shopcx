@@ -18,7 +18,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { getTimecard, type TimecardView } from "@/lib/spec-timecards";
 import { readMarioThresholds, type MarioThreshold } from "@/lib/mario";
 import { deriveLifecycleStage } from "@/lib/build-lifecycle";
-import { buildLifecycleContext, lifecyclePillForCurrent } from "@/lib/build-lifecycle-context";
+import { buildLifecycleContext, lifecyclePillForCurrent, hasReachedMain } from "@/lib/build-lifecycle-context";
 import LifecycleTimeline, { type WaitDisplay } from "../LifecycleTimeline";
 import BranchPosition from "../BranchPosition";
 import StatusControl from "../StatusControl";
@@ -113,7 +113,7 @@ export default async function SpecDetailPage({ params }: { params: Promise<{ slu
     folded: false,
   });
   const derivation = deriveLifecycleStage(lifecycleCtx);
-  const pill = lifecyclePillForCurrent(derivation, job, fold, lifecycleCtx.valePass);
+  const pill = lifecyclePillForCurrent(derivation, job, fold, lifecycleCtx.valePass, hasReachedMain(spec.card, false));
 
   // spec-detail-timecard-timeline Phase 2 / Fix 1 — resolve every open_wait row on the timecard
   // into a friendly WaitDisplay label BEFORE render, so the WaitRow never surfaces a raw slug
