@@ -33,6 +33,24 @@ interface Props {
   primaryColor: string;
 }
 
+// Phase 2 — plain customer-facing messages for every refusal
+// `removePaymentMethod` can return. No raw error codes on screen; no markdown;
+// at most two sentences per paragraph per the customer-voice rules. The UI does
+// not offer the Remove control on non-braintree cards, but `not_removable_here`
+// is still mapped defensively in case a stale row races the click.
+function removalRefusalMessage(code: string): string {
+  if (code === "not_removable_here") {
+    return "That card is saved in your Shopify account, not in our portal. To remove it, sign in to your Shopify account and open your payment methods there.";
+  }
+  if (code === "pinned_to_active_subscription") {
+    return "That card is currently paying for one of your subscriptions. Switch that subscription to another card first, then come back and remove this one.";
+  }
+  if (code === "last_card_for_active_subscription") {
+    return "This is the only card paying for an active subscription. Add a replacement card and make it the default before removing this one.";
+  }
+  return "We couldn't remove that card. Please try again in a moment.";
+}
+
 export function PaymentMethodsSection({ primaryColor }: Props) {
   const [methods, setMethods] = useState<PortalPaymentMethod[]>([]);
   const [loading, setLoading] = useState(true);
@@ -44,6 +62,14 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
   const [tokenError, setTokenError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+
+  // Phase 2 — remove-card flow. `confirmingId` gates the destructive click on a
+  // two-step confirmation (removal is irreversible from the customer's side);
+  // `removingId` marks the in-flight row; `removeError` is a per-card message
+  // keyed by payment-method id so refusing one card doesn't blank the others.
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [removingId, setRemovingId] = useState<string | null>(null);
+  const [removeError, setRemoveError] = useState<Record<string, string>>({});
   // When set, the add-card flow was deep-linked from a subscription: the new card
   // is pinned to THIS sub (not made default), then we return to it.
   const [forSub, setForSub] = useState<string | null>(null);
@@ -104,6 +130,45 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
       if (!res.ok || !data?.client_token) { setTokenError(data?.message || data?.error || "Couldn't start card entry."); return; }
       setClientToken(data.client_token);
     } catch { setTokenError("Couldn't start card entry."); }
+  }
+
+  // Phase 2 — POST to the removePaymentMethod route. Refusals are surfaced
+  // per-card via `removeError`; on success we drop the row locally and, if the
+  // handler promoted a replacement default (`new_default_id`), reflect that on
+  // the sibling row so the "Default" badge stays truthful without a reload.
+  async function removeCard(paymentMethodId: string) {
+    if (removingId) return;
+    setRemovingId(paymentMethodId);
+    setRemoveError((prev) => {
+      const next = { ...prev };
+      delete next[paymentMethodId];
+      return next;
+    });
+    try {
+      const res = await fetch("/api/portal?route=removePaymentMethod", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ paymentMethodId }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; new_default_id?: string | null };
+      if (!res.ok || data?.error) {
+        setRemoveError((prev) => ({ ...prev, [paymentMethodId]: removalRefusalMessage(String(data?.error || "")) }));
+        return;
+      }
+      const promotedId = data?.new_default_id ?? null;
+      setMethods((prev) => {
+        const filtered = prev.filter((m) => m.id !== paymentMethodId);
+        if (!promotedId) return filtered;
+        return filtered.map((m) => (m.id === promotedId ? { ...m, is_default: true } : m));
+      });
+      setConfirmingId(null);
+      setToast("Card removed.");
+    } catch {
+      setRemoveError((prev) => ({ ...prev, [paymentMethodId]: removalRefusalMessage("") }));
+    } finally {
+      setRemovingId(null);
+    }
   }
 
   async function saveCard() {
@@ -218,26 +283,89 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
         </div>
       ) : (
         <ul className="space-y-3">
-          {methods.map((m) => (
-            <li key={m.id} className="flex items-center justify-between rounded-xl border border-zinc-200 bg-white p-4 shadow-sm">
-              <div className="flex items-center gap-4">
-                <CardLogo brand={m.brand} />
-                <div>
-                  <div className="text-sm font-semibold text-zinc-900">
-                    {m.brand || "Card"} ending in {m.last4 || "••••"}
+          {methods.map((m) => {
+            // Phase 2 — the removePaymentMethod route only acts on Braintree-
+            // vaulted cards; a Shopify-Payments card lives in Shopify's vault
+            // and the customer must remove it from her Shopify account page.
+            // Offering a Remove button here that is guaranteed to fail would
+            // be the same false-instruction failure this spec exists to end.
+            const canRemove = m.provider === "braintree";
+            const isConfirming = confirmingId === m.id;
+            const isRemoving = removingId === m.id;
+            const errMsg = removeError[m.id];
+            return (
+              <li key={m.id} className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm">
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-4">
+                    <CardLogo brand={m.brand} />
+                    <div>
+                      <div className="text-sm font-semibold text-zinc-900">
+                        {m.brand || "Card"} ending in {m.last4 || "••••"}
+                      </div>
+                      <div className="mt-0.5 text-xs text-zinc-500">
+                        {m.expiration_month && m.expiration_year ? `Expires ${m.expiration_month}/${m.expiration_year.slice(-2)}` : ""}
+                      </div>
+                    </div>
                   </div>
-                  <div className="mt-0.5 text-xs text-zinc-500">
-                    {m.expiration_month && m.expiration_year ? `Expires ${m.expiration_month}/${m.expiration_year.slice(-2)}` : ""}
+                  <div className="flex items-center gap-3">
+                    {m.is_default && (
+                      <span className="rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-white" style={{ background: primaryColor }}>
+                        Default
+                      </span>
+                    )}
+                    {canRemove && !isConfirming && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setConfirmingId(m.id);
+                          setRemoveError((prev) => {
+                            const next = { ...prev };
+                            delete next[m.id];
+                            return next;
+                          });
+                        }}
+                        disabled={removingId !== null}
+                        className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-700 hover:border-rose-300 hover:text-rose-700 disabled:opacity-50"
+                      >
+                        Remove
+                      </button>
+                    )}
                   </div>
                 </div>
-              </div>
-              {m.is_default && (
-                <span className="rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-white" style={{ background: primaryColor }}>
-                  Default
-                </span>
-              )}
-            </li>
-          ))}
+                {isConfirming && (
+                  <div className="mt-3 rounded-lg border border-rose-200 bg-rose-50 p-3">
+                    <p className="text-xs font-semibold text-rose-900">
+                      Remove this card from your saved payment methods?
+                    </p>
+                    <p className="mt-0.5 text-xs text-rose-800">
+                      This can&apos;t be undone. You can always add the card again later.
+                    </p>
+                    <div className="mt-3 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => removeCard(m.id)}
+                        disabled={isRemoving}
+                        className="rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
+                      >
+                        {isRemoving ? "Removing…" : "Yes, remove"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmingId(null)}
+                        disabled={isRemoving}
+                        className="rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-700 hover:border-zinc-400 disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {errMsg && (
+                  <p className="mt-2 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700">{errMsg}</p>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
 
