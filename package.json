@@ -154,6 +154,8 @@
     "test:escalation-card-metadata": "tsx --test src/lib/agents/platform-director.escalation-metadata.test.ts",
     "test:escalate-founder-dedupe": "tsx --test src/lib/cs-director-escalate-founder-card.dedupe.test.ts",
     "test:assisted-purchase-failure-card": "tsx --test src/lib/assisted-purchase-failure-card.test.ts",
+    "test:escalation-recheck": "tsx --test src/lib/escalation-recheck.test.ts",
+    "test:escalation-retirement-sweep": "tsx --test src/lib/escalation-retirement-sweep.test.ts",
     "test:founder-escalation-stale-recheck-selection": "tsx --test src/lib/inngest/founder-escalation-stale-recheck.selection.test.ts",
     "test:growth-director-brief": "tsx --test src/lib/agents/growth-director-brief.test.ts",
     "test:growth-director-analytical-brief": "tsx --test src/lib/agents/growth-director-analytical-brief.test.ts",

@@ -25,6 +25,8 @@
  * contract.
  */
 
+import { RETIRE_WHEN_METADATA_KEY, type EscalationRecheckDescriptor } from "@/lib/escalation-recheck";
+
 /** The subset of `CreateSubscriptionInput` (billing_interval + billing_interval_count + items) the
  * card body needs to render the "Plan agreed to" line. Kept local to this module so no import from
  * commerce/subscription.ts is required — the runtime shape is duck-typed on the call site. */
@@ -91,6 +93,18 @@ export interface AssistedPurchaseFailureCardRow {
     /** the plan the customer agreed to, verbatim from the assisted-purchase context, so a downstream
      *  approver / bounce-back handler can pick it up structurally without re-parsing the body. */
     plan: AssistedPlanSummary;
+    /**
+     * an-escalation-retires-itself-when-the-condition-it-reported-self-heals Phase 1 — the typed
+     * retire_when descriptor the Phase-2 sweep uses to decide whether this card's condition has
+     * self-healed. An assisted-purchase failure heals when the customer NOW has the thing the failed
+     * action was trying to create (a subscription for `create_subscription`, an order for
+     * `create_order`) — the 2026-08-14 ground-truth cards `a5376176` + `6c8ef178` are exactly this
+     * shape (the system linked the customer's accounts + changed her subscription cadence hours
+     * later; her subscription then existed). Present unconditionally: customer_id + action_type are
+     * both load-bearing inputs to this card, so the descriptor can always be built. Keyed via the
+     * shared `RETIRE_WHEN_METADATA_KEY` computed property so a future rename touches ONE line.
+     */
+    [RETIRE_WHEN_METADATA_KEY]: EscalationRecheckDescriptor;
   };
 }
 
@@ -202,6 +216,15 @@ export function buildAssistedPurchaseFailureCard(
       agent_job_id: jobId ?? null,
       failure_error: trim(failureError),
       plan,
+      // an-escalation-retires-itself-when-the-condition-it-reported-self-heals Phase 1 — the
+      // customer already consented to buy; the failure heals the moment the thing exists. Mapping
+      // is direct: create_subscription → subscription_exists ; create_order → order_exists. Keyed
+      // via the shared `RETIRE_WHEN_METADATA_KEY` so the writer + Phase-2 reader share ONE key.
+      [RETIRE_WHEN_METADATA_KEY]: {
+        kind: "action_satisfied",
+        action: actionType === "create_subscription" ? "subscription_exists" : "order_exists",
+        customer_id: customerId,
+      },
     },
   };
 }
