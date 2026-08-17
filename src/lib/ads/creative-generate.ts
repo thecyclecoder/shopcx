@@ -154,6 +154,59 @@ export interface GenerateCreativeOpts {
     productPresentation: string[];
     punchiness: string[];
   } | null;
+  /** ⭐ CEO 2026-08-17 (#1 — "one ad, three ratios, not three different ads"). The CANONICAL
+   *  placement's finished render as a `data:` URI, handed to every SIBLING placement so the pack is
+   *  ONE creative re-laid-out per aspect rather than three independent imaginings of one brief.
+   *  Observed on ad dcd6d536: the 4:5 was a packshot ad and the 9:16 a completely different
+   *  before/after transformation ad. Absent (i.e. the canonical's own render) → byte-identical to
+   *  the previous prompt. */
+  canonicalRenderDataUrl?: string;
+  /** ⭐ CEO 2026-08-17 (#3 — the pack renders too narrow). Real printed pack size from
+   *  `product_variants.package_dimensions`, so the render reproduces the pouch's true proportions
+   *  instead of inferring them. Absent → no clause emitted. */
+  packageDimensions?: PackageDimensions;
+}
+
+/** ⭐ CEO 2026-08-17 (#3). Real printed pack size, stored per-variant so a render never guesses the
+ *  silhouette. Any subset may be present — the clause names only what is known. */
+export interface PackageDimensions {
+  widthMm?: number | null;
+  heightMm?: number | null;
+  depthMm?: number | null;
+}
+
+/** Pure. The pack-dimension clause; empty when nothing usable is known, so a product without
+ *  measured packaging renders byte-identically to before. */
+export function formatPackageDimensionsClause(dims?: PackageDimensions | null): string {
+  if (!dims) return "";
+  const parts: string[] = [];
+  if (dims.widthMm) parts.push(`${dims.widthMm}mm wide`);
+  if (dims.heightMm) parts.push(`${dims.heightMm}mm tall`);
+  if (dims.depthMm) parts.push(`${dims.depthMm}mm deep`);
+  if (!parts.length) return "";
+  const ratio =
+    dims.widthMm && dims.heightMm
+      ? ` Its width-to-height ratio is ${(dims.widthMm / dims.heightMm).toFixed(2)}:1 — match that silhouette exactly. A pouch rendered narrower than its real proportions reads as a different product.`
+      : "";
+  return `\n\nPACK PROPORTIONS (render the product at its REAL size): the physical pack is ${parts.join(" × ")}.${ratio}`;
+}
+
+/** ⭐ CEO 2026-08-17 (#1). Sentinel header for the same-ad-new-ratio clause a sibling placement
+ *  receives. Grep-able so a test can prove siblings are re-layouts, not fresh concepts. */
+export const SAME_AD_NEW_RATIO_HEADER = "SAME AD — NEW RATIO (this is a re-layout, not a new concept):";
+
+/** Pure. The clause that turns a sibling render into a re-layout of the canonical. */
+export function formatSameAdNewRatioClause(hasCanonical: boolean, aspectRatio: string): string {
+  if (!hasCanonical) return "";
+  return (
+    `\n\n${SAME_AD_NEW_RATIO_HEADER} the FIRST image is the FINISHED canonical version of THIS EXACT AD. ` +
+    `Reproduce it at ${aspectRatio}: the same concept, same headline wording, same hero product shot, same props, ` +
+    `same colour treatment, same proof elements, same overall feel. You are RE-FLOWING one finished ad into a new ` +
+    `frame — moving and rescaling what is already there so it composes correctly at ${aspectRatio} — NOT designing a ` +
+    `second ad from the same brief. Do NOT introduce any element the canonical does not have (no new photos, no ` +
+    `before/after panels, no extra badges), and do NOT drop an element it does have. A viewer seeing both side by ` +
+    `side must recognise them as the same ad in two sizes.`
+  );
 }
 
 /** ceo-feedback-render-edits-the-existing-ad-format-in-place-not-a-new-whole-pack-ad Phase 1 —
@@ -238,7 +291,23 @@ function formatSourceStructureClause(
   return `\n\n${SOURCE_STRUCTURE_HEADER} — this is BINDING; the source ad's own map is the treatment. Reproduce THIS structure, filled with OUR content):\n${bodyLines}`;
 }
 
-export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatment?: GenerateCreativeOpts["treatment"], compositionTransfer?: boolean, ceoReviseReason?: string, sourceWireframe?: GenerateCreativeOpts["sourceWireframe"]): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
+export function buildPrompt(
+  brief: CreativeBrief,
+  hasDesignRef: boolean,
+  treatment?: GenerateCreativeOpts["treatment"],
+  compositionTransfer?: boolean,
+  ceoReviseReason?: string,
+  sourceWireframe?: GenerateCreativeOpts["sourceWireframe"],
+  /** ⭐ CEO 2026-08-17 — the real output ratio. Was hardcoded to "4:5" in three places, so every
+   *  9:16 / 1:1 sibling was literally instructed "Design a 4:5 static ad … Output 4:5" while the
+   *  API rendered a different frame. That mismatch is a direct cause of siblings composing as
+   *  their own ads rather than re-layouts. */
+  aspectRatio: string = "4:5",
+  /** ⭐ CEO 2026-08-17 (#1) — canonical render supplied ⇒ this is a sibling re-layout. */
+  hasCanonicalReference: boolean = false,
+  /** ⭐ CEO 2026-08-17 (#3) — real pack proportions. */
+  packageDimensions?: PackageDimensions | null,
+): { prompt: string; expectedCopy: GeneratedCreative["expectedCopy"] } {
   // For a COMPOSITION-TRANSFER (competitor imitation), the angle.hook is the COMPETITOR's proven hook —
   // it may carry THEIR brand/product name (e.g. "MUD\WTR Mushroom Tea Blend - Up to 43% Off"). Rendering
   // it verbatim over OUR packshot is a brand mismatch the QC gate correctly rejects (2026-07-13). So for
@@ -301,7 +370,7 @@ export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatme
 
   // HEADLINE clause — imitation vs own-brand (see isImitation note above).
   const headlineClause = isImitation
-    ? `HEADLINE: the proven competitor angle to ECHO is "${headline}". Echo only its STRUCTURE and ENERGY, never its words. Write OUR headline that names ONLY ${brief.productTitle} and references ONLY our product — REMOVE any competitor brand name, product name, or trademark (never render another brand's name anywhere). CRITICAL — three things to strip, not just the brand: (1) DROP any product ATTRIBUTE or ingredient descriptor that is NOT true of ${brief.productTitle} (e.g. competitor says "protein coffee" / "keto" / "collagen" and we are not that; when the competitor's product noun differs from ours, SWAP IN OURS — the real product noun shown on the pack, never their attribute). (2) DROP any BENEFIT, RESULT, or PROMISE that is not what ${brief.productTitle} actually delivers — if the competitor's hook promises "deeper sleep" / "younger skin" / "weight loss" and OUR product is for a DIFFERENT benefit, do NOT carry their benefit over; lead with OUR real benefit. The headline must promise ONLY what our product does. (3) NEVER carry over a SPECIFIC, UNVERIFIED CLAIM from the competitor's hook — no efficacy TIMEFRAME ("10 weeks", "30 days", "overnight"), no QUANTITY / numeric RESULT ("lose 40 lbs", "3x"), no PERCENTAGE — unless it is a verified fact about ${brief.productTitle}. Echoing the competitor's number/timeframe as ours (e.g. their "10 Weeks to Younger Skin" → "10 Weeks to Steady Energy") is a FABRICATION, not an imitation. Big, bold, correctly spelled, 1–2 key phrases highlighted in a color block.`
+    ? `HEADLINE: the proven competitor angle to ECHO is "${headline}". ⭐ ECHO THE WORDS WHEN THEY APPLY TO US (CEO 2026-08-17). The test is TRUTH ABOUT OUR PRODUCT, never where the words came from. That hook won on a specific rhetorical MOVE — a reframe, a category comparison, a curiosity gap, an accusation, a contrarian flip — and the move usually lives IN the wording. So DEFAULT TO KEEPING THE LINE, close to verbatim, and change only the specific words that fail the truth test below. A hook carrying no competitor brand name, no untrue attribute and no unverified number is a CATEGORY TRUTH we are equally entitled to say — keep it. Collapsing a sharp reframe into a flat benefit restatement (e.g. "Meet Nature's Ozempic" → "Appetite Suppression And Weight Loss In A Cup") throws away the exact thing worth imitating and is the #1 failure of this path; the literal restatement is never the right answer. THE TRUTH TEST, applied word by word: (1) ATTRIBUTE / ingredient descriptor — KEEP it if it is genuinely true of ${brief.productTitle}; swap in our real equivalent only when it is not (their "protein coffee" when we are not a protein coffee). (2) BENEFIT / RESULT / PROMISE — KEEP it if ${brief.productTitle} actually delivers it, including when the competitor happens to say it first and says it well; drop it only when we do not deliver it. Do not discard a benefit merely because a competitor used the phrase. (3) SPECIFIC NUMBER, TIMEFRAME OR PERCENTAGE — keep ONLY when it is a verified fact about ${brief.productTitle} ("10 weeks", "lose 40 lbs", "3x"); an unverified figure carried over is a FABRICATION, not an imitation. Never render another company's BRAND NAME, product name or trademark anywhere. Big, bold, correctly spelled, 1-2 key phrases highlighted in a color block.`
     : `HEADLINE (render EXACTLY, correct spelling, no dropped/repeated words): "${headline}" — big, bold, with 1–2 key phrases highlighted in a color block.`;
 
   // When the render is not emitting a before/after image, the model must NOT free-associate a
@@ -332,7 +401,9 @@ export function buildPrompt(brief: CreativeBrief, hasDesignRef: boolean, treatme
     ? `\n\n${AUTHOR_NOTES_HEADER} the owner asked for this ad and left specific directions. Apply them EXACTLY when designing this ad (they override the generic composition below on any conflict). THE DIRECTIONS: "${briefNote.replace(/"/g, "'")}".`
     : "";
 
-  const prompt = `Design a 4:5 static ad for ${brief.productTitle}. ${refClause}${sourceStructureClause}${treatmentClause}${ceoEditClause}${authorNotesClause}
+  const sameAdClause = formatSameAdNewRatioClause(hasCanonicalReference, aspectRatio);
+  const packDimsClause = formatPackageDimensionsClause(packageDimensions);
+  const prompt = `Design a ${aspectRatio} static ad for ${brief.productTitle}. ${sameAdClause}${refClause}${sourceStructureClause}${treatmentClause}${ceoEditClause}${authorNotesClause}${packDimsClause}
 
 ${headlineClause}
 
@@ -356,7 +427,7 @@ NO COMPETITOR OFFER (hard rule — applies to EVERY format render: Feed 4:5, Ree
 
 NO THIRD-PARTY BRANDS (hard rule — EVERY format + EVERY panel incl. any before/after frame): the ONLY branded product, package, logo, wordmark, or label anywhere in the image is OUR own ${brief.productTitle}. NEVER paint, render, or depict any OTHER company's product, can, bottle, box, logo, or recognizable branded item — not the competitor whose composition you are reusing, and not an unrelated brand used to stage a "before" state (NO Red Bull, Monster, Starbucks, or any real energy-drink / coffee / supplement can or bottle; NO recognizable third-party packaging of any kind). To depict a "before" problem state, use a generic, UN-branded prop or a person's expression — never a real brand's product. Rendering any third-party brand on our ad is a trademark/brand-safety defect (the 2026-07-19 Guru Focus render leaked real Red Bull and Monster cans into a before-frame).
 
-HARD RULES: never show a bare MSRP / sticker price alone. The reviewer NAME and QUOTE must be rendered EXACTLY as given (they are real reviews) — never invent a name, alter a quote, or add a fake "verified purchase" checkmark badge.${noTransformationRule} A before/after transformation image must be PHOTOREALISTIC (a real photograph of a real person) — never a cartoon, illustration, drawing, or 3D/CGI render. Every claim must match the copy given (no new claims). Output ${"4:5"}, no watermark.`;
+HARD RULES: never show a bare MSRP / sticker price alone. The reviewer NAME and QUOTE must be rendered EXACTLY as given (they are real reviews) — never invent a name, alter a quote, or add a fake "verified purchase" checkmark badge.${noTransformationRule} A before/after transformation image must be PHOTOREALISTIC (a real photograph of a real person) — never a cartoon, illustration, drawing, or 3D/CGI render. Every claim must match the copy given (no new claims). Output ${aspectRatio}, no watermark.`;
 
   // expectedCopy.headline drives the QC exact-headline check. For an imitation we deliberately let the model
   // rewrite the headline off the competitor's brand, so there is no exact string to assert — leave it BLANK,
@@ -384,7 +455,15 @@ export function isOverlayRenderModeEnabled(): boolean {
  *  [[../../../docs/brain/reference/competitor-ad-adaptation]] Part 2 for the exact rules
  *  (Nano Banana will otherwise sneak in a flavor caption like "CINNAMON LATTE"). Deterministic
  *  + pure. */
-export function buildTextFreeScenePrompt(brief: CreativeBrief, hasDesignRef: boolean, compositionTransfer?: boolean): string {
+export function buildTextFreeScenePrompt(
+  brief: CreativeBrief,
+  hasDesignRef: boolean,
+  compositionTransfer?: boolean,
+  /** ⭐ CEO 2026-08-17 — real output ratio (was hardcoded "4:5" on every placement). */
+  aspectRatio: string = "4:5",
+  /** ⭐ CEO 2026-08-17 (#3) — real pack proportions. */
+  packageDimensions?: PackageDimensions | null,
+): string {
   const isImitation = !!compositionTransfer && hasDesignRef;
   const refClause = isImitation
     ? "The FIRST image is a PROVEN, high-performing competitor ad. REUSE ITS WINNING COMPOSITION — the visual hierarchy, focal structure, where the product sits, the negative space, the lighting, the mood. But REPLACE its product with OUR product (from the other provided images) and its drink / props / garnish with what fits OUR flavor. Change everything that identifies the competitor (their brand name, product, logo, claims); copy the STRUCTURE, never their words or marks."
@@ -404,8 +483,9 @@ PRODUCT / SCENE (Part 2 rules from the competitor-ad-adaptation reference):
 - Cluster the product to one side so the scene leaves an L-shaped clean dark zone (top band + a side column) for the copy overlay that lands on top of this base.
 
 NO THIRD-PARTY BRANDS (hard rule): the ONLY branded product, package, logo, wordmark, or label anywhere in the image is OUR own ${brief.productTitle}. NEVER paint, render, or depict any OTHER company's product, can, bottle, box, logo, or recognizable branded item — not the competitor whose composition you are reusing.
+${formatPackageDimensionsClause(packageDimensions)}
 
-Output ${"4:5"}, no watermark.`;
+Output ${aspectRatio}, no watermark.`;
 }
 
 /** Fetch the raw bytes behind a design-reference URL (a signed competitor skeleton URL or a
@@ -431,7 +511,11 @@ export async function generateCreative(workspaceId: string, brief: CreativeBrief
   const aspectRatio = opts.aspectRatio ?? "4:5";
   // Only fully-qualified http(s) / data URIs — some product_media / review-image rows store a relative
   // storage path, which the Gemini fetch can't resolve. Skip those rather than fail the whole generation.
+  // ⭐ CEO 2026-08-17 (#1): on a SIBLING render the canonical's finished image leads, so the
+  // prompt's "the FIRST image is the finished canonical version of THIS EXACT AD" is literally true
+  // and the model re-flows that ad instead of re-imagining the brief.
   const imageUrls = [
+    ...(opts.canonicalRenderDataUrl ? [opts.canonicalRenderDataUrl] : []),
     ...(opts.designReferenceUrl ? [opts.designReferenceUrl] : []),
     ...brief.imageRefs.map((r) => r.url),
   ].filter((u) => typeof u === "string" && /^(https?:|data:)/.test(u));
@@ -444,7 +528,7 @@ export async function generateCreative(workspaceId: string, brief: CreativeBrief
   // path. `expectedCopy` still drives the caller's QA — but on the overlay path spelling is
   // guaranteed exact by construction (a real font engine, not a diffusion model).
   if (isOverlayRenderModeEnabled()) {
-    const textFreePrompt = buildTextFreeScenePrompt(brief, hasRef, opts.compositionTransfer);
+    const textFreePrompt = buildTextFreeScenePrompt(brief, hasRef, opts.compositionTransfer, aspectRatio, opts.packageDimensions);
     const isImitation = !!opts.compositionTransfer && hasRef;
     const headline = isImitation ? stripCompetitorOfferArtifacts(brief.angle.hook) : brief.angle.hook;
     const trust = brief.proofStack.slice(0, 4).join(" · ");
@@ -490,7 +574,17 @@ export async function generateCreative(workspaceId: string, brief: CreativeBrief
     return { buffer, mimeType, prompt: textFreePrompt, expectedCopy, sideBySide };
   }
 
-  const { prompt, expectedCopy } = buildPrompt(brief, hasRef, opts.treatment, opts.compositionTransfer, opts.ceoReviseReason, opts.sourceWireframe);
+  const { prompt, expectedCopy } = buildPrompt(
+    brief,
+    hasRef,
+    opts.treatment,
+    opts.compositionTransfer,
+    opts.ceoReviseReason,
+    opts.sourceWireframe,
+    aspectRatio,
+    !!opts.canonicalRenderDataUrl,
+    opts.packageDimensions,
+  );
   // Render-side no-competitor-leak deterministic guard (Phase 1) — after the strip
   // helper scrubbed the imitation headline AND the NO COMPETITOR OFFER hard rule was
   // negative-prompted into the composed prompt, a lingering freebie artifact token in

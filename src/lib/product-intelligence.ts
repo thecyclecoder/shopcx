@@ -83,6 +83,11 @@ export interface ProductIntelligence {
     bySlotPrefix: (prefix: string) => Row[];
     isolatedPackshots: string[]; // from product_variants.isolated_image_url
   };
+  /** ⭐ CEO 2026-08-17 (#3) — the hero pack's REAL printed size in mm, from
+   *  `product_variants.package_{width,height,depth}_mm`. Fed to the ad render prompt so the pouch's
+   *  proportions match the physical product instead of being inferred from a packshot (our Amazing
+   *  Coffee pouch rendered visibly too narrow on ad dcd6d536). Null when no variant is measured. */
+  packageDimensions?: { widthMm: number | null; heightMm: number | null; depthMm: number | null } | null;
   blogPosts: Row[];
   seoKeywords: Row[];
   /** Store/brand-wide selling points (workspace-level, same for every product): guarantee, 700k customers,
@@ -161,6 +166,19 @@ export async function getProductIntelligence(
   const isolatedPackshots = ((variants.data ?? []) as Row[])
     .map((v) => v.isolated_image_url as string | null)
     .filter((u): u is string => !!u);
+  // ⭐ CEO 2026-08-17 (#3) — first variant that carries a measured pack. Variants of one product
+  // share a pouch size, so the first measured row is representative; null when none are measured.
+  const num = (v: unknown): number | null => (typeof v === "number" && v > 0 ? v : null);
+  const measuredVariant = ((variants.data ?? []) as Row[]).find(
+    (v) => num(v.package_width_mm) || num(v.package_height_mm) || num(v.package_depth_mm),
+  );
+  const packageDimensions = measuredVariant
+    ? {
+        widthMm: num(measuredVariant.package_width_mm),
+        heightMm: num(measuredVariant.package_height_mm),
+        depthMm: num(measuredVariant.package_depth_mm),
+      }
+    : null;
 
   // Blogs: resolve linked post_ids → posts.
   const postIds = ((postLinks.data ?? []) as { post_id: string }[]).map((p) => p.post_id);
@@ -229,6 +247,7 @@ export async function getProductIntelligence(
       bySlotPrefix: (prefix: string) => mediaRows.filter((m) => String(m.slot ?? "").startsWith(prefix)),
       isolatedPackshots,
     },
+    packageDimensions,
     blogPosts,
     seoKeywords: (seoKeywords.data ?? []) as Row[],
     variants: (variants.data ?? []) as Row[],
