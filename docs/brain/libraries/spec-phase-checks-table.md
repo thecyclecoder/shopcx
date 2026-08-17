@@ -48,6 +48,39 @@ Closing the holes stops new bad checks, but every check authored BEFORE the fix 
 
 The two known-good repairs already applied by hand on 2026-08-02 (subscription-mutation's `verifyContractEndState` + `test:.*mutation-verify`; placeholder's `resolvePlaceholderSafeMessage|stripUnsubstitutedPlaceholders`) sit correctly outside the offender set — the subscription-mutation names are pinned in the spec body and the placeholder pattern is an alternation both of whose branches the placeholder spec names.
 
+### Grep is smart-case: shouldGrepCaseInsensitively
+
+[[../specs/spec-phase-check-grep-is-smart-case]] Phase 1 — this module exports the ONE
+`shouldGrepCaseInsensitively(pattern: string): boolean` predicate that decides whether a spec's
+grep check matches case-insensitively. Rule (ripgrep's `--smart-case` semantic): the predicate
+returns `true` when the pattern contains NO uppercase ASCII letter — the author is writing a
+prose phrase and cannot know the source's capitalization — and `false` otherwise (any uppercase
+means the author is naming an identifier like `VERCEL_LOG_DRAIN`, `ErrorSource`, or
+`onRequestError` where casing is load-bearing).
+
+BOTH grep lanes route through this single predicate so they cannot drift: [[spec-check-runner]]
+`buildGrepArgv` prepends `-i` when it returns true (deliberately NOT ripgrep's own `-S` flag —
+the predicate must be the sole answer so the sibling lane can't diverge), and [[specs-table]]
+`defaultRunGitGrepOnBranch` inserts `-i` the same way (`git grep` has no `--smart-case` flag at
+all, which is precisely why the userland predicate exists). Both lanes append a `[smart-case: -i]`
+marker to their evidence string when the case-insensitive path fired, so a reader of a failed
+check can tell which matching mode ran.
+
+Ground-truth incident (2026-08-14 to 2026-08-17): the spec
+`replace-log-drain-with-in-process-onrequesterror` built all three of its phases correctly onto
+its branch and then parked for three days on ONE check whose pattern read
+`cannot filter by log level` while the page it checked wrote that phrase with the first word
+capitalized for emphasis. Three redrives re-failed the identical grep, the redrive cap fired,
+Ada correctly declined a fourth as a loop, and the spec died on the board with correct code
+sitting on its branch. This is the rail that closes that defect class. Escape hatch: put an
+uppercase letter in the pattern when casing IS load-bearing.
+
+Pinned by `src/lib/spec-check-runner.smart-case.test.ts` (`npm run test:grep-smart-case`) — the
+predicate returns true for a lowercase phrase and false for `VERCEL_LOG_DRAIN` / `ErrorSource` /
+`onRequestError`; `buildGrepArgv` includes `-i` for the former and omits it for the latter; and
+the exact historical case (`cannot filter by log level` matching `CANNOT filter by log level`
+under the `-i` flag; NOT matching without it) is pinned.
+
 ### Grep path security: validateGrepPath
 
 Grep checks treat `params.path` as a spec-authored capability boundary. `validateGrepPath` (co-exported, called by `validateExecutableCheck` for every grep check) rejects paths that are absolute, empty, NUL-embedded, traverse outside the repo with `..` segments, or start with `'-'` (would be parsed as an option/preprocessor by ripgrep). The runner also passes the value after an argv `--` separator (see [[spec-check-runner]] `defaultExecutors.grep`), but this validator is the primary gate: a rejected path never reaches spawn at all.
