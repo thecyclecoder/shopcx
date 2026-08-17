@@ -50,6 +50,7 @@
     "predeploy": "npm run predeploy:static && npm run check:policy-contradictions",
     "test:all": "tsx scripts/_run-registered-tests.ts",
     "test:grep-smart-case": "tsx --test src/lib/spec-check-runner.smart-case.test.ts",
+    "test:specs-table-resolve-branch-ref": "tsx --test src/lib/specs-table.resolve-branch-ref.test.ts",
     "test:built-not-stamped": "tsx --test src/lib/pipeline-doctor.built-not-stamped.test.ts",
     "test:chain-advance-skip": "tsx --test src/lib/agent-jobs.chain-advance-skip.test.ts",
     "test:vercel-drain-redact": "tsx --test src/lib/vercel-drain-redact.test.ts",
