@@ -82,6 +82,8 @@ const routeMap: Record<string, RouteHandler>
 
 ### `paymentMethods` — re-export from `./payment-methods`
 
+### `removePaymentMethod` — re-export from `./remove-payment-method`
+
 ### `orderDetail` — re-export from `./order-detail`
 
 ## Callers

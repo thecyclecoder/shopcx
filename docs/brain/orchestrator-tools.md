@@ -77,6 +77,7 @@ Sonnet returns `{action_type, actions: [...]}` with the action type and params; 
 
 ### Payment
 - `switch_payment_method` — change the default card on a sub
+- **Remove a card** — customer-only portal action ([[lifecycles/customer-portal]] § Payment methods → Remove a card) via [[libraries/portal__handlers__remove-payment-method]]; no orchestrator direct action (PCI stance: support cannot remove on behalf). The `get_payment_methods` tool distinguishes **STOREFRONT-VAULTED** (customer can add + remove via portal) from **SHOPIFY PAYMENT METHODS** (must be removed via Shopify account page) so the AI never directs a customer to a control that doesn't exist.
 - (new-card recovery is webhook-driven; see [[lifecycles/dunning]])
 
 ### Crisis (see [[lifecycles/crisis-campaign]])

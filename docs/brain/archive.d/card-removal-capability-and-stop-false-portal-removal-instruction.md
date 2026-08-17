@@ -1,0 +1,1 @@
+- **Card removal: make the portal removal path renewal-safe, actually reachable, and stop the AI promising a flow that doesn't exist** · verified 2026-08-17 · → [[lifecycles/customer-portal]]
