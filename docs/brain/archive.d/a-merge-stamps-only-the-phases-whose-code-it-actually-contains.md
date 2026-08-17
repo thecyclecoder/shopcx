@@ -1,0 +1,1 @@
+- **A merge stamps only the phases whose code it actually contains** · verified 2026-08-17 · → [[../libraries/agent-jobs#applymergedbuildeffects--function--chain-and-cardstate-under-automerge-phase-1]] + [[../libraries/spec-test-runs#auto-fold-gate--gate-b-fold-on-machine-spec-test-pass--security-clear-fold-on-spec-test-pass-task-29-specsbuild-card-lifecycle-timeline-phase-3]]

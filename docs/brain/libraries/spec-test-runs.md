@@ -152,7 +152,7 @@ permanent brain pages), so the spec-test agent's green grade over the `## Verifi
 sufficient to fold. **Human QA is advisory** — a `needs_human` *verdict*, a waiting/failed `needs_human` *check*, or a human
 `failed` resolution NEVER blocks the fold (task #29).
 - `getAutoFoldEligibleSlugs(workspaceId)` → `string[]` — the shipped-not-archived specs whose **machine spec-test passed AND
-  security cleared**:
+  security cleared** (Phase 2 adds pre-fold assertions from [[../specs/a-merge-stamps-only-the-phases-whose-code-it-actually-contains]]):
   - **Spec-test gate (the shared `isCleanMachinePassRun` predicate — same helper the pre-merge gate calls):** latest run a
     **clean machine pass** (agent-verdict `approved` **OR `needs_human`**) **with `run.checks.length >= 1`** (the run ASSERTED
     at least one check) · 0 **unresolved auto-`fail` regressions**.
@@ -192,6 +192,7 @@ sufficient to fold. **Human QA is advisory** — a `needs_human` *verdict*, a wa
     Same signal Phase 1's `securityCompletedClean` reads, so the [[build-lifecycle]] Security node and this gate **can never
     disagree**. A spec with a live or surfaced security-review **defers** the fold (hitting the rail = escalate, never fold past
     it); a shipped spec missing a security-review record entirely also defers (the post-merge enqueue hasn't fired yet).
+  - **Pre-fold assertions ([[../specs/a-merge-stamps-only-the-phases-whose-code-it-actually-contains]] Phase 2):** Before folding, verify each phase's claimed `merge_sha` really contains that phase's `build_sha` (reuse the Phase-1 containment helper from [[agent-jobs]] — one definition of "this merge carried this phase"). On containment failure, defer the fold (leave the spec on the board, record the reason naming the specific phase and missing evidence). Additionally, refuse to fold while an OPEN pull request still exists for the spec's build branch (`claude/build-{slug}`) — the presence of an open PR is evidence the spec is not finished. On PR refusal, defer the fold, never auto-repair. A spec that is FOLDED but whose phases fail the containment test is a live incident (not history) — surface those to the operator rather than auto-repairing them (un-folding is a judgment call, and the brain page may have already been rewritten).
   - **fold-guard-live-build:** a slug with a live `build`/`spec-test` `agent_jobs` row (status in `ACTIVE_STATUSES`) is **also
     excluded** — auto-folding it would orphan the running build (its spec page 404s the moment the fold merges), so the fold is
     deferred until the job is terminal (the next gate pass re-picks it up), never dropped. This mirrors the manual fold guard
