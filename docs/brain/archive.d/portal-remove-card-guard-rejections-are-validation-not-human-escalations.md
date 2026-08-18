@@ -1,0 +1,2 @@
+- **Remove-payment-method guard rejections are UI-gating validation, not 'unrecognized portal errors'** · verified 2026-08-18 · → [[../libraries/portal__route#validation-errors-that-shouldnt-create-tickets]] + [[../libraries/portal__remediation#source-prevention]] + [[../libraries/portal__handlers__remove-payment-method]] + [[../libraries/needs-attention-route#the-fix-sessions-evidence-must-contain-the-actual-failure-not-the-trailing-claude-json]]
+
