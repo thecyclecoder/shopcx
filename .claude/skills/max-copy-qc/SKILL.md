@@ -154,11 +154,43 @@ or in-copy phrase in `evidence` — no unattributed hard-gate fails.**
    verbatim slogan the brief traced to a competitor's ad (an "imitation" creative rewrites the
    competitor angle for OUR brand; the competitor name never survives). Cite the competitor
    phrase.
-4. **`render_ok`** — the on-image text is legible AND the caption doesn't reference something
+4. **`render_ok`** — the text WE authored is legible AND the caption doesn't reference something
    the image doesn't show ("look at the pouch" when there's no pouch, "the yellow label" when
    the pack is red). This is NOT the full render-defect QC — Dahlia's own creative-qc pass
    already ran; you're the cross-check for caption↔image consistency. Cite the mismatch on a
-   fail. **This gate is COARSE + global** — for the granular per-format creative critique
+   fail.
+
+   ⭐ **SCOPE — judge only the text we author and composite** (CEO 2026-08-18). That means the
+   headline, subhead, review quote, badge, CTA and any callout WE placed. The product's OWN
+   printed packaging — ingredient icon rows, supplement-facts panels, net-weight lines, cert
+   seals, any fine print on the pack — is **OUT OF SCOPE**. Do not grade it, do not spell-check
+   it, and never fail this gate on it.
+
+   ⭐ **NEVER fail on text too small to read.** If lettering is below the size where you can
+   confidently resolve a glyph at native resolution, you have NO SIGNAL — report it as out of
+   scope, not as a defect. Do not guess at letters and do not report a misspelling you inferred
+   from a blurry or upscaled region. A confident verdict on unreadable pixels is worse than no
+   verdict: it is a false positive that blocks a good ad.
+
+   Ground truth (2026-08-18, campaign `a981b57f`): a caption that graded a clean 10/10 with every
+   copy rail passing was hard-failed on `render_ok` for "misspelled package labels
+   ('METABOLISH')". The pack text was CORRECT as printed. That icon row is ~7px tall at native
+   resolution — below the size at which any reader can adjudicate a glyph — and the render
+   prompt's own PRODUCT FIDELITY rule deliberately tells the model to render it softly
+   defocused, exactly as fine print looks in a real product photo. So the gate failed a good ad
+   over an artifact the pipeline ASKED for. The CEO had to override it to ship.
+
+   Fail this gate when text WE placed is garbled, cut off, overlapping, or misspelled. Not when
+   the pack's own small print is soft.
+
+   This is NOT a new policy — it PORTS a rule Dahlia's own creative-QA has carried all along.
+   [[../../../src/lib/ads/creative-qa.ts]] `textLegible` already says: "Do NOT fail for
+   sub-readable micro-text on the product PACKAGE — the tiny ingredient-icon ring or fine-print
+   band on the pouch that is below readable size at ad scale (like the illegible fine print on
+   any real product photo)", and `packagingFaithful` scopes those icons out for the same reason.
+   That is why the render CLEARED Dahlia's gate and then died on yours: the two QC layers
+   disagreed about the same pixels. Keep them in lockstep — if one layer's scope changes, change
+   the other in the same PR. **This gate is COARSE + global** — for the granular per-format creative critique
    (mis-scaled products, hallucinated offers/badges, in-pixel competitor leaks, on-image
    legibility per format), see the **per-format creative QC** section below and emit
    `creative[]` on the verdict.
@@ -200,7 +232,7 @@ fails.
 | `product_scale_ok` | the product renders at an unbelievable size for a real SKU — a giant pack floating over a tiny mug, a bottle stretched to twice the height it would be on a shelf, a pack shrunk to the size of a coin. Cite the format + the size mismatch |
 | `no_hallucinated_offer_or_badge` | the image bakes an offer / badge / sticker / text callout NOT in the brief — e.g. a "FREE TOTE" badge Nano Banana invented from a competitor hook, an "AS SEEN ON TV" sticker no product actually has, a bogus discount tag ("50% OFF" when the real offer is "34% off"). This is a creative-side twin of `no_hallucinated_offer_or_badge`'s copy sibling `no_fabrication`. Cite the fabricated element |
 | `no_in_pixel_competitor_leak` | a competitor's brand name, logo, verbatim slogan, or offer is visible in the pixels — even when the caption is clean, the pixels can carry a leak (a competitor's wordmark left on the pack, a "FREE TOTE" badge that was really the competitor's promo). This is the creative twin of copy's `no_competitor_leak`. Cite the leaked element |
-| `on_image_text_legible` | on-image text is illegible or the hierarchy fails for THIS format's crop — a headline that fit at 4:5 but was squeezed off-frame in the 9:16 story crop, a subhead that overlaps the pack in the 1:1 right-column, a badge that's readable in one format and mush in another. This is per-format; the copy-side `render_ok` was one binary over one image |
+| `on_image_text_legible` | text WE authored and composited is illegible or the hierarchy fails for THIS format's crop — a headline that fit at 4:5 but was squeezed off-frame in the 9:16 story crop, a subhead that overlaps the pack in the 1:1 right-column, a badge that's readable in one format and mush in another. This is per-format; the copy-side `render_ok` was one binary over one image. **SAME SCOPE RULE as `render_ok` (CEO 2026-08-18): the product's own printed pack fine print is OUT OF SCOPE — never fail on it, and never fail on lettering too small to resolve a glyph at native resolution. No signal means out-of-scope, not defect.** |
 
 **Backwards compatibility:** if the FORMATS block lists only ONE format (a single-image
 legacy call), emit ONE `creative[]` entry for it. If the invocation prompt does NOT
