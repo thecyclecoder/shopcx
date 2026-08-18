@@ -1,0 +1,1 @@
+- **Control Tower shows switched-off agent lanes as off instead of stuck** · verified 2026-08-17 · → [[../libraries/control-tower]]

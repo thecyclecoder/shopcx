@@ -746,22 +746,20 @@ export function isWorkerUnavailable(row: WorkerRow | null, livenessWindowMs: num
   return false;
 }
 
+/**
+ * True iff a `LoopHistoryRow.produced` blob is the `{blocked_off:true, offBy, scope}` shape emitted
+ * by `writeSuppressedClaimHeartbeats` when the box worker refuses to claim under a kill-switch cascade.
+ * A single predicate so `evalAgentKind` (and any future caller) share ONE definition of
+ * "the CEO intentionally froze this lane" — the authoritative control-plane state that must be
+ * evaluated BEFORE queued-job aging so a switched-off queue never reads as a stuck-jobs failure.
+ * (control-tower-agent-kind-switch-off-precedes-stuck-jobs)
+ */
+export function isAgentKindBlockedOff(produced: unknown): produced is { blocked_off: true; offBy?: unknown; scope?: unknown } {
+  return typeof produced === "object" && produced !== null && (produced as { blocked_off?: unknown }).blocked_off === true;
+}
+
 export function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null, activeJobs: ActiveJob[], workerStartedAt: string | null = null, workerUnavailable = false): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
-  // control-tower-suppress-agent-stuck-during-worker-outage Phase 1 — when the box build worker
-  // itself is stale/absent/crash-looping, its `liveness` red is the useful alert and every
-  // queued/queued_resume row is waiting on the SAME parent (the worker can't claim while it's
-  // down). Opening a stuck_jobs red on each healthy agent lane (pr-resolve, spec-test, …) just
-  // duplicates the box-tile page and pins the wrong lane. Building/claimed jobs are NOT
-  // suppressed — a genuinely-wedged in-flight job is still a lane-specific failure and stays
-  // red. Once the worker recovers (isWorkerUnavailable=false) every stuck threshold behaves as
-  // before; the worker-restart clamp (workerStartedAt → jobStuckSince) then grants the fresh
-  // uptime a fair drain window before any queued row can trip red.
-  const relevantForStuck = workerUnavailable
-    ? activeJobs.filter((j) => j.kind === loop.agentKind && j.status !== "queued" && j.status !== "queued_resume")
-    : activeJobs.filter((j) => j.kind === loop.agentKind);
   const mine = activeJobs.filter((j) => j.kind === loop.agentKind);
-  const threshold = loop.stuckThresholdMs ?? 60 * 60_000;
-  const stuck = relevantForStuck.filter((j) => ageMs(jobStuckSince(j, workerStartedAt)) > threshold);
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -772,6 +770,34 @@ export function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null
     lastProduced: latest?.produced ?? null,
     detail: latest?.detail ?? null,
   };
+  // control-tower-agent-kind-switch-off-precedes-stuck-jobs Phase 1 — a kill switch is an
+  // intentional control-plane state written by writeSuppressedClaimHeartbeats when the worker
+  // refuses to claim (`{blocked_off:true, offBy, scope}`). Evaluate that BEFORE stuck-job aging
+  // so a switched-off lane with queued rows past the threshold renders amber/off, not a red
+  // stuck_jobs incident. The latest beat is authoritative: once the switch is removed and the
+  // next claim succeeds, the launch-path's completion beat overwrites this one; and if a queued
+  // row genuinely wedges after the switch is lifted, the stuck-job path below still fires on the
+  // very next tick because `blocked_off` will no longer be the latest beat.
+  if (isAgentKindBlockedOff(latest?.produced)) {
+    const producedObj = latest!.produced as { offBy?: unknown; scope?: unknown };
+    const offBy = typeof producedObj.offBy === "string" ? producedObj.offBy : "unknown";
+    const scope = typeof producedObj.scope === "string" ? producedObj.scope : "unknown";
+    return { ...base, color: "amber", statusText: `off by ${offBy} (${scope})`, violation: null };
+  }
+  // control-tower-suppress-agent-stuck-during-worker-outage Phase 1 — when the box build worker
+  // itself is stale/absent/crash-looping, its `liveness` red is the useful alert and every
+  // queued/queued_resume row is waiting on the SAME parent (the worker can't claim while it's
+  // down). Opening a stuck_jobs red on each healthy agent lane (pr-resolve, spec-test, …) just
+  // duplicates the box-tile page and pins the wrong lane. Building/claimed jobs are NOT
+  // suppressed — a genuinely-wedged in-flight job is still a lane-specific failure and stays
+  // red. Once the worker recovers (isWorkerUnavailable=false) every stuck threshold behaves as
+  // before; the worker-restart clamp (workerStartedAt → jobStuckSince) then grants the fresh
+  // uptime a fair drain window before any queued row can trip red.
+  const relevantForStuck = workerUnavailable
+    ? mine.filter((j) => j.status !== "queued" && j.status !== "queued_resume")
+    : mine;
+  const threshold = loop.stuckThresholdMs ?? 60 * 60_000;
+  const stuck = relevantForStuck.filter((j) => ageMs(jobStuckSince(j, workerStartedAt)) > threshold);
   if (stuck.length) {
     const oldest = stuck.reduce((a, b) => (ageMs(jobStuckSince(a, workerStartedAt)) > ageMs(jobStuckSince(b, workerStartedAt)) ? a : b));
     return {
@@ -780,24 +806,6 @@ export function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null
       statusText: `${stuck.length} job${stuck.length === 1 ? "" : "s"} stuck (oldest ${elapsed(jobStuckSince(oldest, workerStartedAt))})`,
       violation: { reason: "stuck_jobs", detail: `${stuck.length} ${loop.agentKind} job(s) stuck in ${stuck[0].status} past ${Math.round(threshold / 60_000)}m (oldest ${elapsed(jobStuckSince(oldest, workerStartedAt))}, job ${oldest.id.slice(0, 8)}).` },
     };
-  }
-  // claim-rpc-kill-switch-enforcement Phase 2 — the box worker calls
-  // public.claim_agent_job_diag whenever a `claim_agent_job` returns null and
-  // writes an agent-kind heartbeat whose `produced` carries
-  // `{blocked_off:true, offBy, scope}` naming the first ancestor node_id whose
-  // kill switch fired (see writeSuppressedClaimHeartbeats in
-  // scripts/builder-worker.ts). Render that as amber "off by <ancestor>
-  // (<scope>)" so a switched-off tile is not confused with a green silent-idle
-  // (or a false red). The latest beat is authoritative: once the switch is
-  // removed and the next claim succeeds, the launch-path's completion beat
-  // overwrites this one and the tile returns to green.
-  const producedObj = (latest?.produced && typeof latest.produced === "object")
-    ? (latest.produced as { blocked_off?: unknown; offBy?: unknown; scope?: unknown })
-    : null;
-  if (producedObj && producedObj.blocked_off === true) {
-    const offBy = typeof producedObj.offBy === "string" ? producedObj.offBy : "unknown";
-    const scope = typeof producedObj.scope === "string" ? producedObj.scope : "unknown";
-    return { ...base, color: "amber", statusText: `off by ${offBy} (${scope})`, violation: null };
   }
   // Genuinely-idle or running-within-threshold = green (no false positives).
   if (mine.length) {

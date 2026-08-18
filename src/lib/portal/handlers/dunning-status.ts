@@ -1,6 +1,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getPaymentMethodsUrl } from "@/lib/portal-urls";
 
 export const dunningStatus: RouteHandler = async ({ auth, route, url }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -38,12 +39,6 @@ export const dunningStatus: RouteHandler = async ({ auth, route, url }) => {
   const inRecovery = ["active", "skipped"].includes(cycle.status);
   const failed = ["paused", "exhausted"].includes(cycle.status);
 
-  // Payment update URL
-  const { data: ws } = await admin.from("workspaces")
-    .select("shopify_myshopify_domain")
-    .eq("id", auth.workspaceId)
-    .single();
-
   return jsonOk({
     ok: true, route, contractId,
     in_recovery: inRecovery,
@@ -60,6 +55,7 @@ export const dunningStatus: RouteHandler = async ({ auth, route, url }) => {
       recovered_at: cycle.recovered_at,
     },
     payment_failures: failures || [],
-    payment_update_url: ws?.shopify_myshopify_domain ? `https://${ws.shopify_myshopify_domain}/account` : null,
+    // OUR portal, never the Shopify account page — see [[portal-urls]] and ticket c969f235.
+    payment_update_url: await getPaymentMethodsUrl(auth.workspaceId, auth.shop),
   });
 };

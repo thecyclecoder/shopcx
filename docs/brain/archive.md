@@ -12,6 +12,23 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **A branch security review is fresh only for the exact head SHA it reviewed** · verified 2026-08-17 · → [[../libraries/security-agent]], [[../libraries/vercel-project]], [[../libraries/preview-capture]]
+- **A merge stamps only the phases whose code it actually contains** · verified 2026-08-17 · → [[../libraries/agent-jobs#applymergedbuildeffects--function--chain-and-cardstate-under-automerge-phase-1]] + [[../libraries/spec-test-runs#auto-fold-gate--gate-b-fold-on-machine-spec-test-pass--security-clear-fold-on-spec-test-pass-task-29-specsbuild-card-lifecycle-timeline-phase-3]]
+- **An assisted purchase carries the item the customer actually picked** · verified 2026-08-17 · → [[../libraries/playbook-executor]], [[../libraries/assisted-purchase-direction]]
+- **An escalation retires itself when the condition it reported self-heals** · verified 2026-08-17 · → [[../libraries/escalation-recheck]] + [[../libraries/escalation-retirement-sweep]]
+- **Card removal: make the portal removal path renewal-safe, actually reachable, and stop the AI promising a flow that doesn't exist** · verified 2026-08-17 · → [[lifecycles/customer-portal]]
+- **Control Tower shows switched-off agent lanes as off instead of stuck** · verified 2026-08-17 · → [[../libraries/control-tower]]
+- **Dahlia imitates the pinned ad's structure instead of redesigning it** · verified 2026-08-17 · → [[lifecycles/ad-creative]]
+- **Max's critique reaches Dahlia, and the box card shows one face at a time** · verified 2026-08-17 · → [[lifecycles/ad-creative]]
+- **Pax never reports "nothing to resolve" on a PR state it could not read** · verified 2026-08-17 · → [[../libraries/github-pr-resolve]]
+- **Phase accumulation verifies the pushed branch, not the box's local copy** · verified 2026-08-17 · → [[../libraries/specs-table]]
+- **Redact Vercel drain diagnostics in ops scripts** · verified 2026-08-17 · → [[../libraries/vercel-drain-redact]]
+- **Redact Vercel drain endpoint path segments from diagnostics** · verified 2026-08-17 · → [[../libraries/vercel-drain-redact]]
+- **Replace the self-feeding Vercel log drain with in-process onRequestError** · verified 2026-08-17 · → [[../integrations/vercel-log-drain]]
+- **Research › Ads hides do-not-use ads by default (Show hidden toggle)** · verified 2026-08-17 · → [[../lifecycles/creative-finder]]
+- **Retire the fused Vera+Vault session everywhere it still claims to exist** · verified 2026-08-17 · → [[../libraries/spec-check-runner]]
+- **Spec phase-check greps are smart-case, so a casing difference can't park a correct build** · verified 2026-08-17 · → [[../libraries/spec-phase-checks-table]] · [[../libraries/spec-check-runner]] · [[../libraries/specs-table]] · [[../recipes/what-makes-a-buildable-spec]]
+- **A phase that builds but loses its stamp must not silently strand the spec forever** · verified 2026-08-17 · → [[lifecycles/spec-build-pipeline]]
 - **Stop segment-coverage stale-tail alerts for customers updated after the refresh cron** · verified 2026-08-15 · → [[../libraries/control-tower]]
 - **Align ticket analyzer work probe June-decision lookup with the cron** · verified 2026-08-15 · → [[lifecycles/control-tower]]
 - **Blocked pre-purchase buyer → pivot to assisted purchase; never loop on cache-clear, invent store UI, or false-resolve** · verified 2026-08-12 · → [[../recipes/checkout-stuck-concierge-flow]], [[../libraries/checkout-stuck-intent]], [[../libraries/assisted-purchase-direction]], [[../libraries/cora-triage-pass]]
