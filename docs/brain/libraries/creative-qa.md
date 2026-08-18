@@ -136,6 +136,30 @@ Pinned by [[../../../src/lib/ads/creative-qa.dahlia-rubric.test.ts]] (12 cases).
 
 ## Per-format creative-QC ([[../archive.d/max-qc-grades-the-creative-per-format-not-just-a-binary-render-ok]] Phase 1)
 
+### ⭐ `render_ok` scope — the pack's own fine print is OUT OF SCOPE (CEO 2026-08-18)
+
+Both Max gates that judge on-image text — the coarse copy-side `hard_gates.render_ok` and the
+per-format `on_image_text_legible` — now grade ONLY the text WE author and composite (headline,
+subhead, review quote, badge, CTA). The product's own printed packaging (ingredient icon rows,
+supplement-facts panels, net-weight lines, cert seals) is out of scope, and **no gate may fail on
+lettering too small to resolve a glyph at native resolution** — no signal means out-of-scope, not
+defect.
+
+**Why.** Campaign `a981b57f` (Amazing Coffee, 2026-08-18) authored a caption Max graded a clean
+10/10 with every copy rail passing, then hard-failed `render_ok` for "misspelled package labels
+('METABOLISH')". The pack text was CORRECT as printed. That icon row is ~7px tall at native
+resolution — below the size at which any reader can adjudicate a glyph — and `buildPrompt`'s own
+PRODUCT FIDELITY clause deliberately instructs the renderer to leave that band softly defocused,
+exactly as fine print looks in a real product photo. The gate failed a good ad over an artifact
+the pipeline ASKED for, and the CEO had to `override_postable` it to ship.
+
+**This was a DIVERGENCE, not a missing policy.** `runQaCreative`'s own `textLegible` has always
+carried the rule ("Do NOT fail for sub-readable micro-text on the product PACKAGE…"), and
+`packagingFaithful` scopes the same icons out. That is why the render cleared Dahlia's QA and
+then died on Max's — two QC layers disagreeing about the same pixels. The rule is now mirrored
+into [[../../../.claude/skills/max-copy-qc/SKILL]]; if either layer's scope changes, change both
+in the same PR.
+
 Max's binary `hard_gates.render_ok` was one boolean over ONE canonical image — coarse
 enough that a mis-scaled product in the 1:1 crop, a hallucinated "FREE TOTE" badge in the
 Feed 4:5, and a competitor's offer leaked into the 9:16 pixels all passed into the bin
