@@ -34,6 +34,7 @@ The route short-circuits on **predictable validation failures** that the custome
 - `insufficient_points` (loyalty redeem out of budget)
 - `would_remove_last_item` / `would_remove_all_regular_products` (subscription constraints)
 - Any `error` message matching `/^insufficient points/i` (Appstle text variant)
+- Remove-payment-method guard codes: `pinned_to_active_subscription`, `last_card_for_active_subscription`, `not_removable_here`, `payment_method_not_found`, `payment_method_not_in_group`, `missing_paymentMethodId`. Cards are customer-only by PCI design (no agent removal action), and `PaymentMethodsSection.tsx` renders plain-language customer guidance for each of these codes (switch that sub's card, add a replacement first, remove via the Shopify account, etc.). A guarded refusal is UI-gating validation, not a support event — real case: ticket `c969f235` (G Esposito) escalated to a human three times because a legitimate `pinned_to_active_subscription` refusal was double-handled here. See [[portal__handlers__remove-payment-method]].
 
 These flow through `[[portal__remediation]]` if a stale ticket still lands (belt-and-suspenders), but the route gate stops them spawning in the first place. See [[portal__remediation]] for downstream auto-dismiss + replay logic.
 

@@ -67,6 +67,30 @@ test("a genuinely unrecognized error still → human", () => {
   assert.equal(r.disposition, "human");
 });
 
+// ── Remove-payment-method guard codes (portal-remove-card-guard-rejections-are-
+// validation-not-human-escalations spec) ──
+//
+// The stable codes emitted by remove-payment-method.ts are UI-gating validation:
+// PaymentMethodsSection.tsx maps each to plain-language customer guidance, and
+// cards are customer-only by PCI design (no agent remedy). The PRIMARY suppression
+// is route.ts VALIDATION_ERRORS (stops the ticket at all); this is the backstop
+// for any that predate the guard or reach classification via another path. Real
+// case: ticket c969f235 (G Esposito) — a legitimate pinned_to_active_subscription
+// refusal was escalating to a human three times over the same Mastercard.
+for (const code of [
+  "pinned_to_active_subscription",
+  "last_card_for_active_subscription",
+  "not_removable_here",
+  "payment_method_not_found",
+  "payment_method_not_in_group",
+  "missing_paymentMethodId",
+]) {
+  test(`remove-payment-method guard code ${code} → dismiss (not the human fallthrough)`, () => {
+    const r = classifyPortalFailure(ctx(code));
+    assert.equal(r.disposition, "dismiss");
+  });
+}
+
 // ── healPortalAction: frequency route case (portal-remediation-frequency-route-replay spec) ──
 //
 // Before Phase 1, `ctx.route === "frequency"` fell through to the default branch

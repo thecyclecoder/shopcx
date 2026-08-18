@@ -149,7 +149,20 @@ async function handle(req: NextRequest) {
     // UI-gating guardrails (the portal should never offer the action that empties
     // a subscription) — same class as insufficient_points. Suppress here so a
     // legitimate last-item removal never spawns a portal-action-failed ticket.
-    const VALIDATION_ERRORS = new Set(["date_too_early", "date_too_far", "invalid_date", "missing_contractId", "missing_nextBillingDate", "missing_address1", "missing_city", "missing_provinceCode", "missing_zip", "no_changes", "not_logged_in", "first_order_not_delivered", "insufficient_points", "would_remove_last_item", "would_remove_all_regular_products", "variant_not_selectable"]);
+    //
+    // The remove-payment-method guard codes (pinned_to_active_subscription,
+    // last_card_for_active_subscription, not_removable_here,
+    // payment_method_not_found, payment_method_not_in_group,
+    // missing_paymentMethodId) belong in the same bucket. Cards are customer-only
+    // by PCI design (no agent removal action), and PaymentMethodsSection.tsx maps
+    // every one of these codes to plain-language customer guidance (switch that
+    // sub's card, add a replacement first, remove via Shopify account, etc.). A
+    // guarded refusal is UI-gating validation, not a support event — a legitimate
+    // rejection was spawning a "Portal action needs help: removepaymentmethod"
+    // ticket that escalated to a human (real case: ticket c969f235, G Esposito,
+    // one Mastercard ending 9009 saved three times where only the pinned copy
+    // ever bills).
+    const VALIDATION_ERRORS = new Set(["date_too_early", "date_too_far", "invalid_date", "missing_contractId", "missing_nextBillingDate", "missing_address1", "missing_city", "missing_provinceCode", "missing_zip", "no_changes", "not_logged_in", "first_order_not_delivered", "insufficient_points", "would_remove_last_item", "would_remove_all_regular_products", "variant_not_selectable", "pinned_to_active_subscription", "last_card_for_active_subscription", "not_removable_here", "payment_method_not_found", "payment_method_not_in_group", "missing_paymentMethodId"]);
     // Some validation errors carry a dynamic message instead of a stable code
     // (e.g. loyalty redeem returns "Insufficient points. Need 1500, have 297").
     // These are UI-gating issues — the portal should never offer the action —

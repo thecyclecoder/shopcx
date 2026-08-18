@@ -154,6 +154,27 @@ export function classifyPortalFailure(
         "Customer tried to remove the only product on the subscription. Invalid request the cancel flow should have blocked — nothing to complete.",
     };
   }
+  // Belt-and-suspenders backstop for the remove-payment-method guard codes. The
+  // PRIMARY suppression is [[portal__route]]'s VALIDATION_ERRORS set (stops the
+  // ticket spawning at all) — this branch cleans up any that predate the guard
+  // or reach classification via another path. Cards are customer-only by PCI
+  // design (no agent remedy) and PaymentMethodsSection.tsx already renders plain-
+  // language customer guidance for each of these codes, so a guarded refusal is
+  // UI-gating validation, not a support event.
+  if (
+    e.includes("pinned_to_active_subscription") ||
+    e.includes("last_card_for_active_subscription") ||
+    e.includes("not_removable_here") ||
+    e.includes("payment_method_not_found") ||
+    e.includes("payment_method_not_in_group") ||
+    e.includes("missing_paymentmethodid")
+  ) {
+    return {
+      disposition: "dismiss",
+      reason:
+        "Remove-payment-method guard rejection. The portal already tells the customer to switch that sub's card, add a replacement first, or remove via the Shopify account — nothing for a human to do.",
+    };
+  }
 
   // ── Transient Appstle/infra errors → retry ──
   const transient =
