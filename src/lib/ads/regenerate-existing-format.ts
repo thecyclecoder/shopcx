@@ -101,6 +101,37 @@ export function reconstructAngleFromRow(
   };
 }
 
+/** Sentinel header for the in-place edit clause. Exported so a test can pin it and the render
+ *  provenance can be recognised later. */
+export const IN_PLACE_EDIT_HEADER = "EDIT THE EXISTING AD (apply the change, redesign nothing):";
+
+/**
+ * PURE — compose the prompt for a surgical in-place edit by REPLAYING the original render prompt
+ * with the owner's change layered on top.
+ *
+ * Why replay instead of rebuild (CEO 2026-08-18): the rebuild path derives a fresh brief via
+ * `buildCreativeBrief(pi, angle)` and then renders from it, which silently drops every rail the
+ * ORIGINAL render carried but the rebuild doesn't know about — the cold-offer strip, the owner's
+ * `authorNotes`, the composition-transfer reference that made it an imitation, and the treatment
+ * steer. Campaign c7fe4815 came back from an edit as a generic, offer-laden ad that no longer
+ * resembled the competitor structure it was built to mimic. The original prompt already encodes
+ * all of it, so replaying it preserves them by construction rather than re-deriving them and
+ * getting it wrong.
+ *
+ * The current rendered image is handed to the model as the FIRST image, so "reproduce this and
+ * change only X" is anchored to actual pixels rather than to a description of them.
+ */
+export function buildInPlaceEditPrompt(originalPrompt: string, reviseReason: string): string {
+  return [
+    `${IN_PLACE_EDIT_HEADER} the FIRST image is the CURRENT, finished version of THIS EXACT AD. Reproduce it faithfully — same layout, same composition, same headline and sub-headline wording, same colours, same product placement, same proof bar — and apply ONLY the change described below. Do not redesign, do not re-lay-out, do not add elements that are not already there, and do not "improve" anything you were not asked to change.`,
+    `THE CHANGE TO APPLY: ${reviseReason}`,
+    `Everything not named in that change must come out pixel-faithful to the first image.`,
+    ``,
+    `CONTEXT ONLY — the prompt the current version was rendered from is reproduced below so you keep its rules (audience, offer treatment, source structure, product fidelity). It is NOT a brief to re-execute from scratch; the first image is the source of truth for what this ad already looks like.`,
+    originalPrompt,
+  ].join("\n\n");
+}
+
 /**
  * The main entry — surgical in-place regen of ONE placement format on an EXISTING campaign.
  *
@@ -159,6 +190,13 @@ export async function regenerateExistingFormat(
     return { ok: false, reason: vidErr?.message ? `no_ad_video_for_format:${vidErr.message}` : "no_ad_video_for_format" };
   }
   const adVideoId = (video as { id: string }).id;
+  // Hoisted: the replay path (step 4) reads the persisted per-placement render prompt out of this
+  // row's meta, and hands the ad's CURRENT image to the model as the edit anchor.
+  const existingMeta = ((video as { meta?: Record<string, unknown> | null }).meta ?? {}) as Record<string, unknown>;
+  const currentImageUrl = (() => {
+    const u = (video as { static_jpg_url?: unknown }).static_jpg_url;
+    return typeof u === "string" && /^https?:/.test(u) ? u : undefined;
+  })();
 
   // 3) Reconstruct the CreativeBrief so the render carries the campaign's real angle + proof.
   const loadPi = deps.loadPi ?? getProductIntelligence;
@@ -197,13 +235,36 @@ export async function regenerateExistingFormat(
   const campaignTemperature = (campaign as { audience_temperature?: string | null }).audience_temperature ?? null;
   if (campaignTemperature === "cold") brief.offer = null;
 
-  // 4) Render ONE format at its declared aspect ratio, threading the CEO note into the prompt.
+  // 4) Render ONE format at its declared aspect ratio.
+  //
+  // PREFERRED PATH (CEO 2026-08-18): replay the ORIGINAL prompt for this placement with the edit
+  // layered on, anchored to the current pixels. The rebuilt `brief` above cannot carry the rails
+  // the original render had — the owner's authorNotes, the composition-transfer reference, the
+  // treatment steer — so re-deriving from it turns a surgical edit into a fresh generic ad
+  // (campaign c7fe4815, 2026-08-18). Replaying keeps them by construction.
+  //
+  // Gated on `prompt_truncated`: the persisted prompt is capped at write time, and replaying a
+  // string cut mid-sentence would be worse than rebuilding. Falls back to the rebuild path when
+  // the prompt is missing (pre-Phase-4 rows) or truncated — with the cold rail above still applied.
+  const priorRender = (existingMeta as { render?: { prompt?: unknown; prompt_truncated?: unknown } }).render;
+  const priorPrompt = typeof priorRender?.prompt === "string" ? priorRender.prompt.trim() : "";
+  const priorUsable = priorPrompt.length > 0 && priorRender?.prompt_truncated !== true;
+  const overridePrompt = priorUsable ? buildInPlaceEditPrompt(priorPrompt, trimmedReason) : undefined;
+
   const generate = deps.generate ?? generateCreative;
   let render: Awaited<ReturnType<typeof generateCreative>>;
   try {
     render = await generate(workspaceId, brief, {
       aspectRatio: PLACEMENT_ASPECT[format],
       ceoReviseReason: trimmedReason,
+      ...(overridePrompt
+        ? {
+            overridePrompt,
+            // Hand the model the ad as it exists today as the FIRST image, so "reproduce this and
+            // change only X" is anchored to pixels rather than to a description of them.
+            ...(currentImageUrl ? { canonicalRenderDataUrl: currentImageUrl } : {}),
+          }
+        : {}),
     });
   } catch (err) {
     return { ok: false, reason: `render_failed:${errText(err)}` };
@@ -231,7 +292,6 @@ export async function regenerateExistingFormat(
 
   // Merge storage_path into meta rather than overwriting the whole object — the row may carry an
   // archetype / generated_by we want to preserve.
-  const existingMeta = ((video as { meta?: Record<string, unknown> | null }).meta ?? {}) as Record<string, unknown>;
   const nextMeta = { ...existingMeta, storage_path: storagePath };
   const { error: updErr } = await admin
     .from("ad_videos")

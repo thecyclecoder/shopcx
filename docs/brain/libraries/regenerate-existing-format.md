@@ -95,7 +95,33 @@ can never classify a rebuilt angle as cold and `imageOfferForAudience` would pas
 through. The column records what the creative was actually authored for. Pinned by cases (e)/(e2)
 in `regenerate-existing-format.test.ts` — cold strips, warm/hot keep.
 
-### ⚠️ Still divergent — the regen is not yet a faithful in-place edit
+### ✅ An edit REPLAYS the original prompt (CEO 2026-08-18, Phase 2)
+
+The offer was one of **four** rails the fresh path applies that a rebuilt brief cannot carry. Rather
+than re-deriving each one and hoping the list stays complete, an edit now **replays the original
+per-placement prompt** — persisted at `ad_videos.meta.render.prompt` (Phase 4 render provenance) —
+with the owner's change layered on top, and hands the ad's CURRENT image to the model as the FIRST
+image so "reproduce this, change only X" is anchored to pixels rather than to a description of them.
+
+`buildInPlaceEditPrompt(originalPrompt, reviseReason)` composes it behind the `IN_PLACE_EDIT_HEADER`
+sentinel; `generateCreative` accepts it as `opts.overridePrompt` and skips `buildPrompt` while still
+computing `expectedCopy` from the brief so the caller's garble QA is unchanged.
+
+Because the original prompt already encodes the cold-offer treatment, the owner's `authorNotes`, the
+composition-transfer/SOURCE STRUCTURE clause and the treatment steer, replaying it **preserves every
+rail by construction** — including rails added later that this file has never heard of.
+
+**Guards.**
+- Gated on `prompt_truncated`: the persisted prompt is capped at write time, and replaying a string
+  cut mid-sentence is worse than rebuilding. Truncated ⇒ fall back.
+- Missing prompt (pre-Phase-4 rows) ⇒ fall back to the rebuild path, with the cold rail above still
+  applied, so legacy creatives remain editable.
+
+Pinned by cases (f)/(f2)/(f3) in `regenerate-existing-format.test.ts`: the original prompt is
+replayed verbatim with the change appended and the current render passed as the anchor; a truncated
+prompt is never replayed; a row with no persisted prompt still regenerates.
+
+### Historical — the divergence this replaced
 
 The offer was one of **four** rails the fresh path applies that this path does not. Compare:
 

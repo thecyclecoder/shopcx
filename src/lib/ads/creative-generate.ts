@@ -138,6 +138,16 @@ export interface GenerateCreativeOpts {
    *  drifting back to a generic fresh render. Absent (normal fresh-pack path) → no clause emitted,
    *  the prompt is byte-identical to today. */
   ceoReviseReason?: string;
+  /** ceo-feedback-render-edits-in-place Phase 2 (CEO 2026-08-18) — a fully-composed prompt to hand
+   *  Nano Banana INSTEAD of the one `buildPrompt` would derive. Used by
+   *  [[./regenerate-existing-format]] so a CEO edit re-renders the creative that EXISTS: it replays
+   *  the original per-placement prompt (persisted at `ad_videos.meta.render.prompt`) with the edit
+   *  layered on top, which preserves every rail the original render carried — the cold-offer strip,
+   *  the owner's `authorNotes`, the composition-transfer reference, the treatment steer — instead of
+   *  re-deriving them from a rebuilt brief and losing the ones the rebuild doesn't know about.
+   *  `expectedCopy` is still computed from the brief so the caller's QA is unchanged. Absent ⇒
+   *  byte-identical to today. */
+  overridePrompt?: string;
   /** dahlia-imitates-the-pinned-ad-structure-instead-of-redesigning-it Phase 3 — the source
    *  (pinned/imitated competitor) ad's stored WIREFRAME: its element/zone/prominence map, how
    *  the product is presented (packshot / held-in-hand / lifestyle / before_after), and the copy
@@ -587,7 +597,7 @@ export async function generateCreative(workspaceId: string, brief: CreativeBrief
     return { buffer, mimeType, prompt: textFreePrompt, expectedCopy, sideBySide };
   }
 
-  const { prompt, expectedCopy } = buildPrompt(
+  const { prompt: derivedPrompt, expectedCopy } = buildPrompt(
     brief,
     hasRef,
     opts.treatment,
@@ -605,6 +615,9 @@ export async function generateCreative(workspaceId: string, brief: CreativeBrief
   // seeded with a competitor's promotional graphic language. Refuse to hand the prompt
   // to Nano Banana and let the retry loop take another attempt; the sentinel error
   // rides the existing `qa_or_gen_failed` regen path in `creative-agent.ts`.
+  // ceo-feedback-render-edits-in-place Phase 2 — an explicit prompt replaces the derived one.
+  // `expectedCopy` still comes from the brief so the caller's garble QA is unchanged.
+  const prompt = opts.overridePrompt ?? derivedPrompt;
   if (opts.compositionTransfer && renderPromptHasCompetitorOffer(prompt)) {
     throw new RenderPromptCompetitorOfferError(prompt);
   }

@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import {
   regenerateExistingFormat,
   reconstructAngleFromRow,
+  IN_PLACE_EDIT_HEADER,
   type RegenerateExistingFormatDeps,
 } from "./regenerate-existing-format";
 import { CEO_EDIT_HEADER, buildPrompt } from "./creative-generate";
@@ -455,4 +456,109 @@ test("(e2) a WARM campaign's in-place regen keeps its offer (the rail is cold-on
   );
   assert.equal(res.ok, true);
   assert.notEqual(seen[0], null, "warm/hot keep the offer — only cold strips it");
+});
+
+// ── (f) IN-PLACE EDITS REPLAY THE ORIGINAL PROMPT (CEO 2026-08-18) ────────────────────────────
+// The rebuild path derives a fresh brief and renders from it, dropping every rail the ORIGINAL
+// render carried that the rebuild cannot know about — the owner's authorNotes, the
+// composition-transfer reference that made it an imitation, the treatment steer. Campaign
+// c7fe4815 came back from an edit as a generic, offer-laden ad that no longer resembled the
+// competitor structure it was built to mimic. Replaying the persisted prompt keeps them all.
+test("(f) an edit REPLAYS the persisted render prompt with the change layered on", async () => {
+  const original = "Design a 4:5 static ad for Amazing Coffee. SOURCE STRUCTURE (reproduce this layout): centred pouch, dark studio.";
+  const { admin } = makeAdmin({
+    campaigns: [{ id: "camp-1", workspace_id: "ws-1", product_id: "prod-1", angle_id: "angle-1" }],
+    videos: [
+      {
+        id: "vid-feed",
+        workspace_id: "ws-1",
+        campaign_id: "camp-1",
+        format: "feed_4x5",
+        static_jpg_url: "https://example.test/current.jpg",
+        meta: { render: { prompt: original, prompt_truncated: false } },
+      },
+    ],
+  });
+  const { deps } = fakeDeps();
+  const opts: Array<Record<string, unknown>> = [];
+  const inner = deps.generate!;
+  deps.generate = async (ws, brief, o) => {
+    opts.push(o as unknown as Record<string, unknown>);
+    return inner(ws, brief, o);
+  };
+
+  const res = await regenerateExistingFormat(
+    admin as never,
+    {
+      workspaceId: "ws-1",
+      adCampaignId: "camp-1",
+      format: "feed_4x5",
+      ceoReviseReason: "make the sub-headline catchy, not a mechanism statement",
+    },
+    deps,
+  );
+  assert.equal(res.ok, true, JSON.stringify(res));
+  const sent = String(opts[0]?.overridePrompt ?? "");
+  assert.ok(sent.includes(IN_PLACE_EDIT_HEADER), "must carry the in-place edit header");
+  assert.ok(sent.includes(original), "the ORIGINAL prompt is replayed verbatim, so its rails survive");
+  assert.ok(/make the sub-headline catchy/.test(sent), "the owner's change is layered on");
+  assert.equal(
+    opts[0]?.canonicalRenderDataUrl,
+    "https://example.test/current.jpg",
+    "the current render is handed over as the edit anchor",
+  );
+});
+
+test("(f2) a TRUNCATED persisted prompt is NOT replayed (falls back to the rebuild)", async () => {
+  const { admin } = makeAdmin({
+    campaigns: [{ id: "camp-1", workspace_id: "ws-1", product_id: "prod-1", angle_id: "angle-1" }],
+    videos: [
+      {
+        id: "vid-feed",
+        workspace_id: "ws-1",
+        campaign_id: "camp-1",
+        format: "feed_4x5",
+        static_jpg_url: "https://example.test/current.jpg",
+        meta: { render: { prompt: "Design a 4:5 static ad for Amazing Coff", prompt_truncated: true } },
+      },
+    ],
+  });
+  const { deps } = fakeDeps();
+  const opts: Array<Record<string, unknown>> = [];
+  const inner = deps.generate!;
+  deps.generate = async (ws, brief, o) => {
+    opts.push(o as unknown as Record<string, unknown>);
+    return inner(ws, brief, o);
+  };
+
+  const res = await regenerateExistingFormat(
+    admin as never,
+    { workspaceId: "ws-1", adCampaignId: "camp-1", format: "feed_4x5", ceoReviseReason: "bigger pouch" },
+    deps,
+  );
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(opts[0]?.overridePrompt, undefined, "a prompt cut mid-sentence must never be replayed");
+});
+
+test("(f3) a pre-Phase-4 row with no persisted prompt still regenerates (rebuild fallback)", async () => {
+  const { admin } = makeAdmin({
+    campaigns: [{ id: "camp-1", workspace_id: "ws-1", product_id: "prod-1", angle_id: "angle-1" }],
+    videos: [{ id: "vid-feed", workspace_id: "ws-1", campaign_id: "camp-1", format: "feed_4x5", static_jpg_url: "old", meta: {} }],
+  });
+  const { deps } = fakeDeps();
+  const opts: Array<Record<string, unknown>> = [];
+  const inner = deps.generate!;
+  deps.generate = async (ws, brief, o) => {
+    opts.push(o as unknown as Record<string, unknown>);
+    return inner(ws, brief, o);
+  };
+
+  const res = await regenerateExistingFormat(
+    admin as never,
+    { workspaceId: "ws-1", adCampaignId: "camp-1", format: "feed_4x5", ceoReviseReason: "bigger pouch" },
+    deps,
+  );
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(opts[0]?.overridePrompt, undefined);
+  assert.ok(String(opts[0]?.ceoReviseReason ?? "").includes("bigger pouch"), "the note still reaches the rebuild path");
 });
