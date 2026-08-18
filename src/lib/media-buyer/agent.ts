@@ -44,7 +44,7 @@ import type { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { detectWinners, amplifyWinner, type DetectedWinner } from "@/lib/ads/winning-creative-detect";
-import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, hasFreshMetaSignal, META_SIGNAL_MAX_AGE_DAYS, resolveWinnerSource, type MetaCpaReactivation } from "@/lib/media-buyer/meta-cpa-signal";
+import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, hasFreshMetaSignal, hasLiveDeliveringAdsets, META_SIGNAL_MAX_AGE_DAYS, resolveWinnerSource, type MetaCpaReactivation } from "@/lib/media-buyer/meta-cpa-signal";
 import {
   incrementExploitSpawned,
   listActiveWinnersForProduct,
@@ -2025,8 +2025,39 @@ export async function runMediaBuyerLoop(
   // ad_publish_jobs, no Meta motion.
   if (policy?.trust_meta_reported_signal) {
     const fresh = await hasFreshMetaSignal(admin, opts.workspaceId, opts.metaAdAccountId, nowMs);
-    if (!fresh) {
-      const reason = `no fresh Meta signal — newest adset scorecard for this account is older than ${META_SIGNAL_MAX_AGE_DAYS}d (or absent). Run the insights/scorecard ingest.`;
+    // ⭐ COLD START (CEO 2026-08-18). A stale signal has TWO causes that need OPPOSITE responses,
+    // and this gate used to conflate them:
+    //
+    //   (a) ads ARE running but the scorecard ingest is behind/broken → going dormant is CORRECT;
+    //       acting on a stale read would move real money against numbers we don't trust.
+    //   (b) NOTHING is running on the account → there is no signal to be stale. Refusing here is a
+    //       deadlock: Bianca won't launch without signal, no signal exists because nothing is live,
+    //       and launching is the only thing that could ever produce signal.
+    //
+    // Ground truth: the "Amazing Coffee & Creamer" account (d6d619a5) went dark on 2026-08-08 when
+    // its last ads stopped. `meta_ad_accounts.last_sync_at` stayed current (synced minutes before
+    // the pass), the daily scorecard cron kept running and kept writing rows for the OTHER accounts
+    // — but this one had nothing to report, so its newest scorecard sat 10 days old and every pass
+    // reported "Run the insights/scorecard ingest." The ingest was never the problem.
+    //
+    // Case (b) is inherently safe to let through: with zero ACTIVE adsets there is nothing to
+    // promote and nothing to kill, so the only plan the agent can produce is a replenish (launch).
+    // The freshness bar still guards every decision that consumes performance data — because those
+    // only exist when something is live, which is exactly case (a).
+    const coldStart = fresh ? false : !(await hasLiveDeliveringAdsets(admin, opts.workspaceId, opts.metaAdAccountId));
+    if (!fresh && coldStart) {
+      await recordDirectorActivity(admin, {
+        workspaceId: opts.workspaceId,
+        directorFunction: GROWTH_DIRECTOR_FUNCTION,
+        actionKind: "media_buyer_cold_start_admitted",
+        specSlug: null,
+        reason:
+          "Media Buyer pass proceeding on a COLD-START account — no ACTIVE adsets, so the absent Meta signal is expected, not a broken ingest. Only a replenish/launch is reachable (nothing live to promote or kill).",
+        metadata: { meta_ad_account_id: opts.metaAdAccountId, trust_source: "meta_reported", cold_start: true, autonomous: true },
+      });
+    }
+    if (!fresh && !coldStart) {
+      const reason = `no fresh Meta signal — ads are live on this account but the newest adset scorecard is older than ${META_SIGNAL_MAX_AGE_DAYS}d. Run the insights/scorecard ingest.`;
       await recordDirectorActivity(admin, {
         workspaceId: opts.workspaceId,
         directorFunction: GROWTH_DIRECTOR_FUNCTION,

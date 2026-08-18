@@ -1051,10 +1051,11 @@ test("buildShadowActivityRows — mixed plan → one row per plan action (promot
 type Row = Record<string, unknown>;
 type Tables = Record<string, Row[]>;
 interface Filter {
-  kind: "eq" | "neq" | "in" | "not_is_null";
+  kind: "eq" | "neq" | "in" | "not_is_null" | "or";
   col: string;
   val?: unknown;
   vals?: unknown[];
+  disjuncts?: string[];
 }
 function matchesJoined(row: Row, filters: Filter[]): boolean {
   for (const f of filters) {
@@ -1063,6 +1064,20 @@ function matchesJoined(row: Row, filters: Filter[]): boolean {
     if (f.kind === "neq" && v === f.val) return false;
     if (f.kind === "in" && !(f.vals ?? []).includes(v)) return false;
     if (f.kind === "not_is_null" && (v === null || v === undefined)) return false;
+    // PostgREST `.or("a.is.null,b.eq.true,c.is.true")` — the row passes when ANY disjunct holds.
+    // ready-to-test.ts widened its predicate this way for the CEO postability override; the mock
+    // had no `.or`, so these cases died on `campaignsQuery.or is not a function` rather than on
+    // the behaviour under test.
+    if (f.kind === "or") {
+      const ok = (f.disjuncts ?? []).some((d) => {
+        const [col, op, raw] = d.split(".");
+        const cell = row[col];
+        if (op === "is") return raw === "null" ? cell === null || cell === undefined : cell === (raw === "true");
+        if (op === "eq") return String(cell) === raw;
+        return false;
+      });
+      if (!ok) return false;
+    }
   }
   return true;
 }
@@ -1079,6 +1094,7 @@ function makeFakeAdminForProductScope(tables: Tables) {
       neq: (col: string, val: unknown) => typeof c;
       in: (col: string, vals: unknown[]) => typeof c;
       not: (col: string, op: string, val: unknown) => typeof c;
+      or: (expr: string) => typeof c;
       then: (onFulfilled: (v: { data: Row[]; error: null }) => unknown) => Promise<unknown>;
     } = {
       select: () => c,
@@ -1089,6 +1105,7 @@ function makeFakeAdminForProductScope(tables: Tables) {
         if (op === "is" && val === null) filters.push({ kind: "not_is_null", col });
         return c;
       },
+      or: (expr) => { filters.push({ kind: "or", col: "", disjuncts: expr.split(",") }); return c; },
       then: (onFulfilled) => Promise.resolve(resolve()).then(onFulfilled),
     };
     return c;
@@ -1101,6 +1118,7 @@ function makeFakeAdminForProductScope(tables: Tables) {
         neq: (col: string, val: unknown) => chain(table).neq(col, val),
         in: (col: string, vals: unknown[]) => chain(table).in(col, vals),
         not: (col: string, op: string, val: unknown) => chain(table).not(col, op, val),
+        or: (expr: string) => chain(table).or(expr),
       };
     },
   } as unknown as Parameters<typeof readCurrentTestCohortSize>[0];

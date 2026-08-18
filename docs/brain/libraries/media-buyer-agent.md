@@ -10,6 +10,37 @@ The Media Buyer is the FIRST autonomous static-ad optimizer in this repo — the
 - **Live publishes into the test cohort** — the agent inserts [[../tables/ad_publish_jobs]] rows with `origin='media-buyer-test'` + `publish_active=true` and fires `ad-tool/publish-to-meta`. [[media-buyer-publish-gate]] (Phase 1) then decides whether the ad actually ships ACTIVE — a wrong ad set or over-ceiling projection DOWNGRADES + escalates.
 - **Every action** stamps one [[../tables/director_activity]] row (`director_function='growth'`) citing the source `meta_ad_id` + realized ROAS + policy version, so the audit trail names the concrete creative, not the wrapper adset.
 
+## ⭐ Cold start vs stale signal (CEO 2026-08-18)
+
+The TRUST-META freshness gate (`hasFreshMetaSignal`) conflated two states that need OPPOSITE
+responses:
+
+| state | right response |
+|---|---|
+| Ads ARE live, scorecard ingest is behind | **dormant** — never move money against numbers we distrust |
+| NOTHING is live on the account | **proceed** — there is no signal to be stale, and launching is the only thing that can ever create one |
+
+Treating (b) as (a) is a deadlock: Bianca won't launch without signal, no signal exists because
+nothing is running, and only a launch would produce signal.
+
+`hasLiveDeliveringAdsets` in [[meta-cpa-signal]] is the discriminator — it reads
+[[../tables/meta_adsets]] for an `effective_status='ACTIVE'` row rather than the scorecards,
+because the scorecards are exactly what goes missing in case (b). It **fails closed**: a read
+error returns `true` (not-cold-start) so a broken read can never unlock the launch path.
+
+Admitting case (b) is inherently safe: with zero ACTIVE adsets there is nothing to promote and
+nothing to kill, so the only reachable plan is a replenish/launch. Every decision that consumes
+performance data stays behind the freshness bar — those only exist when something is live, which
+is case (a). The admission writes a `media_buyer_cold_start_admitted` [[../tables/director_activity]]
+row so a proceed-on-absent-signal is never silent.
+
+**Ground truth.** The "Amazing Coffee & Creamer" account (`d6d619a5`) went dark on 2026-08-08 when
+its last ads stopped. `meta_ad_accounts.last_sync_at` stayed current (synced minutes before the
+pass), the daily scorecard cron kept running and kept writing rows for the OTHER three accounts —
+but this one had nothing to report, so its newest adset scorecard sat 10 days old and every pass
+told the founder to "Run the insights/scorecard ingest." The ingest was never the problem, and the
+message sent every investigation in the wrong direction.
+
 ## The five verbs
 
 Every pass emits at most five kinds of typed action:

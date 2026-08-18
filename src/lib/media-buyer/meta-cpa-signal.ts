@@ -113,6 +113,34 @@ async function activeAdsetLifetimeMetrics(admin: Admin, workspaceId: string, met
 
 /** Is Meta's reported adset signal fresh enough to act on? (freshness replaces the internal-resolve
  *  coverage gate when trusting Meta.) `nowMs` overridable for tests. */
+/**
+ * hasLiveDeliveringAdsets — does this account have ANY adset Meta considers ACTIVE right now?
+ *
+ * Reads [[../../tables/meta_adsets]] (the synced account structure) rather than the scorecards,
+ * BECAUSE the scorecards are the thing that goes missing in the case this exists to detect: an
+ * account with nothing running produces no insights rows, so no scorecard is written, so a
+ * freshness read cannot tell "the ingest is broken" from "there is nothing to ingest".
+ *
+ * `meta_ad_accounts.last_sync_at` proves the structure sync itself is healthy, so an empty result
+ * here is a real answer ("no live adsets"), not a read failure.
+ */
+export async function hasLiveDeliveringAdsets(
+  admin: Admin,
+  workspaceId: string,
+  metaAdAccountId: string,
+): Promise<boolean> {
+  const { data, error } = await admin
+    .from("meta_adsets")
+    .select("meta_adset_id")
+    .eq("workspace_id", workspaceId)
+    .eq("meta_ad_account_id", metaAdAccountId)
+    .eq("effective_status", "ACTIVE")
+    .limit(1);
+  // Fail CLOSED: a read error must not be read as "cold start" and unlock the launch path.
+  if (error) return true;
+  return ((data ?? []) as unknown[]).length > 0;
+}
+
 export async function hasFreshMetaSignal(admin: Admin, workspaceId: string, metaAdAccountId: string, nowMs: number = Date.now()): Promise<boolean> {
   const { data } = await admin
     .from("iteration_scorecards_daily")
