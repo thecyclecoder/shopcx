@@ -134,7 +134,7 @@ export async function regenerateExistingFormat(
   // 1) Load the campaign row — abort if it isn't ours (workspace scope + id).
   const { data: campaign, error: campErr } = await admin
     .from("ad_campaigns")
-    .select("id, workspace_id, product_id, angle_id")
+    .select("id, workspace_id, product_id, angle_id, audience_temperature")
     .eq("workspace_id", workspaceId)
     .eq("id", adCampaignId)
     .maybeSingle();
@@ -181,6 +181,21 @@ export async function regenerateExistingFormat(
   }
   const angle = reconstructAngleFromRow(angleRow);
   const brief = await buildBrief(pi, angle);
+
+  // ⭐ COLD RAIL ON THE REGEN (CEO 2026-08-18). The fresh-pack path strips the offer off a cold
+  // creative's IMAGE before rendering — `brief.offer = imageOfferForAudience(angle, brief.offer)`
+  // in [[./creative-agent]] `stockProduct`, added after the 2026-07-17 run put a discount on a
+  // cold static. This in-place regen never inherited that line, so a CEO edit re-rendered a cold
+  // ad WITH the offer: campaign c7fe4815 ("steaming mug pouch gut hook", audience_temperature
+  // 'cold') came back carrying "Up to 34% off + free shipping" and "$1.76/serving vs a $4-8
+  // coffee/latte" baked into the pixels.
+  //
+  // We key off the PERSISTED `ad_campaigns.audience_temperature`, not the reconstructed angle:
+  // `reconstructAngleFromRow` hardcodes `source:'ad_angle'`, so `resolveAudienceTemperature`
+  // can never classify a rebuilt angle as cold and `imageOfferForAudience` would pass the offer
+  // straight through. The column is what the creative was actually authored for.
+  const campaignTemperature = (campaign as { audience_temperature?: string | null }).audience_temperature ?? null;
+  if (campaignTemperature === "cold") brief.offer = null;
 
   // 4) Render ONE format at its declared aspect ratio, threading the CEO note into the prompt.
   const generate = deps.generate ?? generateCreative;
