@@ -305,19 +305,16 @@ export function StorefrontPage({
             <>
             <CompleteOrderBanner guaranteeCopy={data.page_content?.guarantee_copy ?? null} />
             <HeroSection data={data} bundle={!!bundleName} />
-            {/* Survey chapter — interactive lead-capture quiz placed right
-                after the hero to rescue the ~70% hero→ch1 drop-off, capture
-                zero-party data, and gate the signup code behind email/phone.
-                Replaces the (structurally dead) quiz popup variant. Hardcoded
-                coffee-specific ("1 cup/2 cups", coffee styles), so it only
-                renders for products with show_survey=true (the coffee products)
-                — non-coffee products would show a nonsensical survey otherwise.
-                (Lander refinements round 3.) */}
-            {/* Bundle PDP drops the survey (and the addons/pricing chapters below). */}
-            {!bundleName && data.page_content?.show_survey && <SurveyChapter data={data} />}
             {/* Shared content body — the full chapter set, identical across
-                the standard PDP and the ad variants (see StandardChapters). */}
-            <StandardChapters data={data} reviewSlug={reviewSlug} bundle={!!bundleName} />
+                the standard PDP and the ad variants (see StandardChapters).
+                The survey chapter rides along inside it, below the price
+                table (see `showSurvey`). */}
+            <StandardChapters
+              data={data}
+              reviewSlug={reviewSlug}
+              bundle={!!bundleName}
+              showSurvey={!bundleName && !!data.page_content?.show_survey}
+            />
             </>
             )}
           </main>
@@ -345,7 +342,7 @@ export function StorefrontPage({
  * while attention is highest), then the "learn more" zone below the price
  * table for shoppers who scroll past pricing wanting more.
  */
-function StandardChapters({ data, reviewSlug, bundle = false }: { data: PageData; reviewSlug: string; bundle?: boolean }) {
+function StandardChapters({ data, reviewSlug, bundle = false, showSurvey = false }: { data: PageData; reviewSlug: string; bundle?: boolean; showSurvey?: boolean }) {
   const wsSlug = data.workspace.storefront_slug || "";
   const wsName = data.workspace.name || "Superfoods Company";
   return (
@@ -365,6 +362,17 @@ function StandardChapters({ data, reviewSlug, bundle = false }: { data: PageData
           <BundlePriceTableSection data={data} />
         </>
       )}
+      {/* Survey chapter — interactive lead-capture quiz: a personalized-pack
+          recommendation that ends in a real price-table column, plus the
+          optional email/phone path that applies the signup discount on-page.
+          Sits BELOW the price table (not under the hero) so it reads as a
+          "not sure which pack?" assist for shoppers who scrolled past pricing
+          without picking, instead of blocking the hero→body path. Hardcoded
+          coffee-specific ("1 cup/2 cups", coffee styles), so it only renders
+          for products with show_survey=true (the coffee products) — non-coffee
+          products would show a nonsensical survey otherwise. The bundle PDP
+          drops it along with the addons/pricing chapters above. */}
+      {showSurvey && !bundle && <SurveyChapter data={data} />}
       {/* "Learn more" zone — detail / social-proof chapters for shoppers who
           scroll past pricing. Kept, not cut. */}
       <UGCSection data={data} slug={reviewSlug} workspaceSlug={wsSlug} />
