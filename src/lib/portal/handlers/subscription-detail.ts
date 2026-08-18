@@ -7,6 +7,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer, checkPortalBan, portalFetch } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getPaymentMethodsUrl } from "@/lib/portal-urls";
 import { transformSubscription, getProductMap } from "@/lib/portal/helpers/transform-subscription";
 import {
   getSubscription,
@@ -135,14 +136,18 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
     }
   }
 
-  // Payment update URL
+  // Payment update URL — OUR portal, never the Shopify account page. Ticket
+  // c969f235: pointing a customer at Shopify's account page sends her to a
+  // vault we cannot write to, so the card actions we describe do not exist
+  // there. Resolved through [[portal-urls]] so every surface agrees.
+  const paymentUpdateUrl = await getPaymentMethodsUrl(auth.workspaceId, auth.shop);
+
+  // Still needed for the Shopify ADMIN GraphQL call below (internal API, not a
+  // customer-facing URL) — the storefront account page is no longer referenced.
   const { data: ws } = await admin.from("workspaces")
     .select("shopify_myshopify_domain")
     .eq("id", auth.workspaceId)
     .single();
-  const paymentUpdateUrl = ws?.shopify_myshopify_domain
-    ? `https://${ws.shopify_myshopify_domain}/account`
-    : null;
 
   // Delivery address: prefer subscription's shipping_address, fall back
   // to the last order for this sub, then customer default.
@@ -377,7 +382,7 @@ export const subscriptionDetail: RouteHandler = async ({ auth, route, url }) => 
       appliedDiscounts,
       crisisBanner,
       paymentMethod,
-      paymentManageUrl: "https://account.superfoodscompany.com/profile",
+      paymentManageUrl: paymentUpdateUrl,
       tax: taxQuote
         ? {
             tax_cents: taxQuote.tax_cents,

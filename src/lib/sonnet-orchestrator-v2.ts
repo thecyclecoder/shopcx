@@ -10,6 +10,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
+import { getPaymentMethodsUrl } from "@/lib/portal-urls";
 import { retrieveContext } from "@/lib/rag";
 import { getShopifyOnHandByVariant, getAmplifierOnHandBySku } from "@/lib/inventory/read";
 import { logAiUsage, type ClaudeUsage } from "@/lib/ai-usage";
@@ -2229,17 +2230,21 @@ async function getPaymentMethods(admin: Admin, wsId: string, custId: string): Pr
   // did not exist (the portal was list + add only, no remove). The portal now
   // supports removal on Braintree-vaulted (STOREFRONT-VAULTED) cards via the
   // remove_payment_method route (customer-only, PCI stance — support cannot
-  // revoke a card on the customer's behalf), so the guidance below distinguishes
-  // the two provider paths accurately. It also states the billing-safe truth
-  // about duplicate cards (dunning dedupes by last4 + expiry) so the AI can
-  // reassure a customer who is worried about duplicate charges without inventing
-  // a self-serve step to make them go away.
+  // revoke a card on the customer's behalf).
+  //
+  // Ticket c969f235 fix: the URL here used to be the SHOPIFY account page, and
+  // the Shopify-card bullet told the AI to send the customer there to tidy up.
+  // G esposito followed that for two days looking for a delete button that does
+  // not exist on a vault we do not own. Shopify is a sunsetting origin, so we
+  // never hand a customer a Shopify URL: the portal now lists ONLY storefront-
+  // vaulted cards, and this block points at OUR portal, resolved through
+  // [[portal-urls]] so it cannot drift from the link we email.
+  const manageUrl = await getPaymentMethodsUrl(wsId);
   parts.push(
-    "\nManage payment methods URL: https://account.superfoodscompany.com/profile" +
+    `\nManage payment methods URL: ${manageUrl}` +
     "\n- STOREFRONT-VAULTED cards: the customer CAN add a new card and CAN remove a saved card from the portal Payment Methods section. The AI must NOT offer to remove a card on the customer's behalf — the removal path is customer-only (deliberate PCI stance) and there is no agent-side revoke action. Guide the customer to Manage Payment Methods → Remove and answer any follow-up from there." +
-    "\n- SHOPIFY PAYMENT METHODS: OUR portal cannot remove or set-default these — they live in Shopify's vault. The customer must remove/change them from their Shopify account page (Manage account → Payment methods on the storefront). Do NOT tell the customer to remove them from our portal — that will not work." +
-    "\n- Duplicate saved cards (same brand/last4/expiry) are billing-safe: the dunning + renewal pipeline dedupes charges by last4 + expiry, so a duplicate never causes a double charge. Say that plainly if the customer is worried about being charged twice; still respect a genuine wish to tidy up her wallet by pointing to the removal path above." +
-    "\nShopify Payments does NOT expose a way to programmatically set the default; the customer must do it from her Shopify account page.",
+    "\n- SHOPIFY PAYMENT METHODS: legacy cards in Shopify's vault. They are NOT shown in our portal and the customer does not need to do anything about them — they only back legacy Shopify-Payments subscriptions. NEVER send the customer to a Shopify account page to manage them, and never describe them as duplicates she must clean up." +
+    "\n- Duplicate saved cards (same brand/last4/expiry) are billing-safe: the dunning + renewal pipeline dedupes charges by last4 + expiry, so a duplicate never causes a double charge. Say that plainly if the customer is worried about being charged twice. If the SAME physical card appears in both lists above, that is one card mirrored across two vaults during the migration — it bills once.",
   );
   return parts.join("\n");
 }
