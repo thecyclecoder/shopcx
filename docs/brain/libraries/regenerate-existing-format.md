@@ -75,3 +75,39 @@ runAdCreativeJob (job.instructions = {ad_campaign_id, format, revise_reason, …
 ---
 
 [[../README]] · [[../../CLAUDE]] · [[creative-generate]] · [[creative-agent]] · [[ad-review-feedback-router]] · [[../tables/ad_campaigns]] · [[../tables/ad_videos]]
+
+## ⭐ The cold rail survives an in-place regen (CEO 2026-08-18)
+
+The fresh-pack path strips the offer off a **cold** creative's IMAGE before rendering —
+`brief.offer = imageOfferForAudience(angle, brief.offer)` in [[creative-agent]] `stockProduct`,
+added after the 2026-07-17 run baked a discount into a cold static. This in-place regen rebuilds
+its own brief (`buildBrief(pi, angle)`) and **never inherited that line**, so a CEO edit re-rendered
+a cold ad WITH the offer.
+
+**Ground truth 2026-08-18.** Campaign `c7fe4815` ("steaming mug pouch gut hook",
+`audience_temperature='cold'`) came back from a feedback edit carrying
+`Up to 34% off + free shipping (25% Subscribe & Save + up to 12% for 3+ units)` and
+`$1.76/serving vs a $4-8 coffee/latte` baked into the pixels.
+
+The rail keys off the **persisted `ad_campaigns.audience_temperature`**, not the reconstructed
+angle: `reconstructAngleFromRow` hardcodes `source:'ad_angle'`, so `resolveAudienceTemperature`
+can never classify a rebuilt angle as cold and `imageOfferForAudience` would pass the offer straight
+through. The column records what the creative was actually authored for. Pinned by cases (e)/(e2)
+in `regenerate-existing-format.test.ts` — cold strips, warm/hot keep.
+
+### ⚠️ Still divergent — the regen is not yet a faithful in-place edit
+
+The offer was one of **four** rails the fresh path applies that this path does not. Compare:
+
+| fresh pack (`stockProduct`) | in-place regen |
+|---|---|
+| `buildCreativeBrief(pi, angle, stories, { pureCompetitor, authorNotes })` | `buildBrief(pi, angle)` — no stories, no owner notes, no riff flag |
+| `imageOfferForAudience` cold strip | ✅ fixed above |
+| `planCompositionTransfer` → `compositionTransfer` + `designReferenceUrl` | not passed — the competitor imitation structure is lost |
+| per-creative `treatment` steer | not passed |
+
+So a feedback edit still re-renders a **generic** ad with the CEO note attached rather than editing
+the creative that exists — which is why an imitation comes back not looking like its source. The
+durable fix is to stop rebuilding a brief at all and reuse the ORIGINAL prompt, which is already
+persisted per placement at `ad_videos.meta.render.prompt` (Phase 4 render provenance), applying the
+CEO edit on top. That preserves every rail by construction instead of re-deriving them.

@@ -28,6 +28,9 @@ interface FakeCampaign {
   workspace_id: string;
   product_id: string | null;
   angle_id: string | null;
+  /** The persisted band the creative was authored for — the cold rail keys off THIS, not the
+   *  reconstructed angle (reconstructAngleFromRow hardcodes source:'ad_angle'). */
+  audience_temperature?: string | null;
 }
 interface FakeVideo {
   id: string;
@@ -382,4 +385,74 @@ test("(f) reconstructAngleFromRow maps hook_one_liner + lead_benefit_anchor into
   const empty = reconstructAngleFromRow(null);
   assert.equal(empty.hook, "");
   assert.equal(empty.leadBenefit, "");
+});
+
+// ── (e) THE COLD RAIL SURVIVES AN IN-PLACE REGEN (CEO 2026-08-18) ─────────────────────────────
+// The fresh-pack path strips the offer off a cold creative's IMAGE before rendering
+// (`imageOfferForAudience` in creative-agent stockProduct, added after the 2026-07-17 run baked a
+// discount into a cold static). This in-place regen never inherited that line, so a CEO edit
+// re-rendered campaign c7fe4815 ("steaming mug pouch gut hook", audience_temperature='cold')
+// carrying "Up to 34% off + free shipping" and "$1.76/serving vs a $4-8 coffee/latte" in the pixels.
+// Keyed off the PERSISTED column, not the reconstructed angle: reconstructAngleFromRow hardcodes
+// source:'ad_angle', so resolveAudienceTemperature can never see a rebuilt angle as cold.
+function fakeBriefWithOffer(): ReturnType<typeof fakeBrief> {
+  const b = fakeBrief() as unknown as { offer: unknown };
+  b.offer = { headline: "Up to 34% off + free shipping", disclaimer: "25% Subscribe & Save", perServing: "$1.76/serving" };
+  return b as unknown as ReturnType<typeof fakeBrief>;
+}
+
+test("(e) a COLD campaign's in-place regen strips the offer from the image brief", async () => {
+  const { admin } = makeAdmin({
+    campaigns: [{ id: "camp-1", workspace_id: "ws-1", product_id: "prod-1", angle_id: "angle-1", audience_temperature: "cold" }],
+    videos: [{ id: "vid-feed", workspace_id: "ws-1", campaign_id: "camp-1", format: "feed_4x5", static_jpg_url: "old", meta: {} }],
+  });
+  const { deps } = fakeDeps();
+  const seen: Array<unknown> = [];
+  deps.buildBrief = async () => fakeBriefWithOffer();
+  const inner = deps.generate!;
+  deps.generate = async (ws, brief, opts) => {
+    seen.push((brief as { offer?: unknown }).offer);
+    return inner(ws, brief, opts);
+  };
+
+  const res = await regenerateExistingFormat(
+    admin as never,
+    {
+      workspaceId: "ws-1",
+      adCampaignId: "camp-1",
+      format: "feed_4x5",
+      ceoReviseReason: "make the pouch bigger",
+    },
+    deps,
+  );
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(seen[0], null, "a cold campaign must render with NO offer on the static");
+});
+
+test("(e2) a WARM campaign's in-place regen keeps its offer (the rail is cold-only)", async () => {
+  const { admin } = makeAdmin({
+    campaigns: [{ id: "camp-1", workspace_id: "ws-1", product_id: "prod-1", angle_id: "angle-1", audience_temperature: "warm" }],
+    videos: [{ id: "vid-feed", workspace_id: "ws-1", campaign_id: "camp-1", format: "feed_4x5", static_jpg_url: "old", meta: {} }],
+  });
+  const { deps } = fakeDeps();
+  const seen: Array<unknown> = [];
+  deps.buildBrief = async () => fakeBriefWithOffer();
+  const inner = deps.generate!;
+  deps.generate = async (ws, brief, opts) => {
+    seen.push((brief as { offer?: unknown }).offer);
+    return inner(ws, brief, opts);
+  };
+
+  const res = await regenerateExistingFormat(
+    admin as never,
+    {
+      workspaceId: "ws-1",
+      adCampaignId: "camp-1",
+      format: "feed_4x5",
+      ceoReviseReason: "make the pouch bigger",
+    },
+    deps,
+  );
+  assert.equal(res.ok, true);
+  assert.notEqual(seen[0], null, "warm/hot keep the offer — only cold strips it");
 });
