@@ -31,6 +31,7 @@ import {
   MAX_COPY_PACK_ENTRIES,
   readActiveCohortProductIds,
   readCurrentTestCohortSize,
+  readLiveCohortConceptTags,
   resolveReplenishAdCopy,
   SENSOR_TRUST_MAX_AGE_MS,
   type MediaBuyerLoser,
@@ -2347,4 +2348,59 @@ test("agent.ts — Phase 1 wiring: runMediaBuyerLoop calls runGraduateForCrowned
     /result\.outcome === "graduated"[\s\S]*?opts\.metaExecutor\.updateObjectStatus\(token, testAdsetId, "PAUSED"\)/.test(src),
     "runGraduateForCrownedWinners must pause the source test ad set on outcome==='graduated' — otherwise spend doubles instead of handing over",
   );
+});
+
+// ── LIVE-CONCEPT DIVERSITY reads REAL adset state (CEO 2026-08-18) ────────────────────────────
+// `publish_active`/`publish_status` record what WE published and are never reconciled with Meta,
+// so on their own they mean "we once published this". The diversity gate treated that as "live",
+// which permanently burned a concept the moment it launched — a paused adset's concept could never
+// be tested again. Ground truth: Amazing Coffee reported live=[comparison,curiosity,social-proof,
+// story,transformation] while Meta had ZERO ACTIVE adsets on the product (all PAUSED since
+// mid-July), in the same pass that `readCurrentTestCohortSize` reported split=0/4.
+test("readLiveCohortConceptTags: a PAUSED adset's concept is NOT live (it must be testable again)", async () => {
+  const admin = makeFakeAdminForProductScope({
+    ad_publish_jobs: [
+      { workspace_id: "ws", campaign_id: "c-paused", meta_adset_id: "as-paused", origin: "media-buyer-test", publish_active: true, publish_status: "published" },
+    ],
+    ad_campaigns: [{ id: "c-paused", workspace_id: "ws", product_id: "p1", concept_tag: "comparison" }],
+    meta_adsets: [{ workspace_id: "ws", meta_campaign_id: "camp-1", meta_adset_id: "as-paused", effective_status: "PAUSED" }],
+  });
+  const tags = await readLiveCohortConceptTags(admin as never, {
+    workspaceId: "ws",
+    productId: "p1",
+    testMetaCampaignId: "camp-1",
+  });
+  assert.deepEqual([...tags], []);
+});
+
+test("readLiveCohortConceptTags: an ACTIVE adset's concept IS live (diversity still holds)", async () => {
+  const admin = makeFakeAdminForProductScope({
+    ad_publish_jobs: [
+      { workspace_id: "ws", campaign_id: "c-live", meta_adset_id: "as-live", origin: "media-buyer-test", publish_active: true, publish_status: "published" },
+    ],
+    ad_campaigns: [{ id: "c-live", workspace_id: "ws", product_id: "p1", concept_tag: "story" }],
+    meta_adsets: [{ workspace_id: "ws", meta_campaign_id: "camp-1", meta_adset_id: "as-live", effective_status: "ACTIVE" }],
+  });
+  const tags = await readLiveCohortConceptTags(admin as never, {
+    workspaceId: "ws",
+    productId: "p1",
+    testMetaCampaignId: "camp-1",
+  });
+  assert.deepEqual([...tags], ["story"]);
+});
+
+test("readLiveCohortConceptTags: a just-published adset the structure sync hasn't seen counts as live (diversity-safe)", async () => {
+  const admin = makeFakeAdminForProductScope({
+    ad_publish_jobs: [
+      { workspace_id: "ws", campaign_id: "c-fresh", meta_adset_id: "as-fresh", origin: "media-buyer-test", publish_active: true, publish_status: "published" },
+    ],
+    ad_campaigns: [{ id: "c-fresh", workspace_id: "ws", product_id: "p1", concept_tag: "curiosity" }],
+    meta_adsets: [], // sync lag — no row yet
+  });
+  const tags = await readLiveCohortConceptTags(admin as never, {
+    workspaceId: "ws",
+    productId: "p1",
+    testMetaCampaignId: "camp-1",
+  });
+  assert.deepEqual([...tags], ["curiosity"], "must not double-post a concept while the sync lags");
 });

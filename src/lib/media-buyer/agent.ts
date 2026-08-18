@@ -1364,16 +1364,58 @@ export async function readCurrentTestCohortSize(
  */
 export async function readLiveCohortConceptTags(
   admin: Admin,
-  args: { workspaceId: string; productId: string | null },
+  args: { workspaceId: string; productId: string | null; testMetaCampaignId?: string | null },
 ): Promise<Set<string>> {
   const { data: liveJobsRaw } = await admin
     .from("ad_publish_jobs")
-    .select("campaign_id")
+    .select("campaign_id, meta_adset_id")
     .eq("workspace_id", args.workspaceId)
     .eq("origin", MEDIA_BUYER_TEST_ORIGIN)
     .eq("publish_active", true)
     .eq("publish_status", "published");
-  const campaignIds = ((liveJobsRaw ?? []) as Array<{ campaign_id: string | null }>)
+  let liveJobs = (liveJobsRaw ?? []) as Array<{ campaign_id: string | null; meta_adset_id: string | null }>;
+
+  // ⭐ CEO 2026-08-18 — `publish_active` / `publish_status` record what WE published, and are
+  // never reconciled against Meta. On their own they mean "we once published this", so a concept
+  // stayed "live" forever once launched and the diversity gate burned it permanently: a paused
+  // adset's concept could never be tested again, and replenish starved a slot at a time.
+  //
+  // Ground truth 2026-08-18: for Amazing Coffee this returned
+  // [comparison, curiosity, social-proof, story, transformation] while Meta reported ZERO ACTIVE
+  // adsets on the product — every one PAUSED since mid-July. Workspace-wide, of 22 jobs flagged
+  // active+published, exactly ONE was ACTIVE at Meta. The same pass reported `split=0/4` from
+  // `readCurrentTestCohortSize`, so the two readers contradicted each other in one breath.
+  //
+  // `readCurrentTestCohortSize` already learned this lesson — the 2026-07-12 over-launch (8 live,
+  // double the ceiling) came from the same ad_publish_jobs-only shape, and it was moved onto
+  // `countLiveTestAdsetsInCampaign`. This is that fix applied to its sibling: narrow to adsets that
+  // actually OCCUPY a slot right now, using the same FREED_ADSET_STATUSES notion of "freed" so the
+  // two readers can't drift again.
+  //
+  // Fails toward DIVERSITY-SAFE: an adset with no `meta_adsets` row yet (just published, structure
+  // sync hasn't caught up) still counts as live, so a pass can't double-post one concept while the
+  // sync lags.
+  if (args.testMetaCampaignId) {
+    const { FREED_ADSET_STATUSES } = await import("@/lib/media-buyer/publish-gate");
+    const { data: adsetRows } = await admin
+      .from("meta_adsets")
+      .select("meta_adset_id, effective_status")
+      .eq("workspace_id", args.workspaceId)
+      .eq("meta_campaign_id", args.testMetaCampaignId);
+    const known = new Map<string, string>();
+    for (const r of (adsetRows ?? []) as Array<{ meta_adset_id: string; effective_status: string | null }>) {
+      known.set(String(r.meta_adset_id), String(r.effective_status ?? "").toUpperCase());
+    }
+    liveJobs = liveJobs.filter((j) => {
+      const id = j.meta_adset_id ? String(j.meta_adset_id) : null;
+      if (!id) return true; // no adset recorded — can't disprove it's live; keep it (diversity-safe)
+      const eff = known.get(id);
+      if (eff === undefined) return true; // sync lag on a fresh publish — treat as live
+      return !FREED_ADSET_STATUSES.has(eff);
+    });
+  }
+
+  const campaignIds = liveJobs
     .map((j) => j.campaign_id)
     .filter((id): id is string => !!id);
   if (!campaignIds.length) return new Set<string>();
@@ -2328,6 +2370,9 @@ export async function runMediaBuyerLoop(
   const liveConceptTags = await readLiveCohortConceptTags(admin, {
     workspaceId: opts.workspaceId,
     productId: cohortProductId,
+    // Scope "live" to adsets actually occupying a slot in THIS cohort's testing campaign —
+    // same campaign the cohort-size reader uses, so the two can't disagree.
+    testMetaCampaignId: cohort?.testMetaCampaignId ?? null,
   });
 
   // media-buyer-explore-exploit-split-on-crown Phase 2 — winner-aware split reads:
