@@ -13,7 +13,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectMetaCpaLosers, type MetaCpaLoserOptions } from "./meta-cpa-signal";
+import { detectMetaCpaLosers, hasLiveDeliveringAdsets, type MetaCpaLoserOptions } from "./meta-cpa-signal";
 
 type MockRow = Record<string, unknown>;
 type FilterKind = "eq" | "in" | "gte";
@@ -162,4 +162,44 @@ test("Phase 1 pin — WITH an active cold-scaler cohort covering the adset's par
   const admin = makeAdmin(fixture(/*withColdScalerCohort*/ true));
   const losers = await detectMetaCpaLosers(admin, opts);
   assert.equal(losers.length, 0, `expected 0 losers with cold-scaler exclusion, got ${losers.length}`);
+});
+
+// ── COLD START vs STALE SIGNAL (CEO 2026-08-18) ──────────────────────────────────────────────
+// `hasFreshMetaSignal` alone cannot separate two states that need opposite responses: ads running
+// with a lagging ingest (go dormant — don't spend against numbers we distrust) versus an account
+// with nothing live at all (there is no signal to be stale; refusing is a deadlock, because
+// launching is the only thing that can ever produce signal). `hasLiveDeliveringAdsets` is the
+// discriminator. Ground truth: account d6d619a5 ("Amazing Coffee & Creamer") went dark 2026-08-08;
+// its structure sync stayed current and the scorecard cron kept running for other accounts, yet
+// every pass reported "Run the insights/scorecard ingest."
+test("hasLiveDeliveringAdsets: an account with an ACTIVE adset is NOT a cold start", async () => {
+  const admin = makeAdmin({
+    meta_adsets: [
+      { workspace_id: WS, meta_ad_account_id: ACC, meta_adset_id: "as_1", effective_status: "ACTIVE" },
+    ],
+  });
+  assert.equal(await hasLiveDeliveringAdsets(admin, WS, ACC), true);
+});
+
+test("hasLiveDeliveringAdsets: only PAUSED adsets ⇒ cold start (the launch path must open)", async () => {
+  const admin = makeAdmin({
+    meta_adsets: [
+      { workspace_id: WS, meta_ad_account_id: ACC, meta_adset_id: "as_1", effective_status: "PAUSED" },
+      { workspace_id: WS, meta_ad_account_id: ACC, meta_adset_id: "as_2", effective_status: "CAMPAIGN_PAUSED" },
+    ],
+  });
+  assert.equal(await hasLiveDeliveringAdsets(admin, WS, ACC), false);
+});
+
+test("hasLiveDeliveringAdsets: no adsets at all ⇒ cold start", async () => {
+  assert.equal(await hasLiveDeliveringAdsets(makeAdmin({ meta_adsets: [] }), WS, ACC), false);
+});
+
+test("hasLiveDeliveringAdsets: another account's ACTIVE adset does NOT count as ours", async () => {
+  const admin = makeAdmin({
+    meta_adsets: [
+      { workspace_id: WS, meta_ad_account_id: "act_other", meta_adset_id: "as_x", effective_status: "ACTIVE" },
+    ],
+  });
+  assert.equal(await hasLiveDeliveringAdsets(admin, WS, ACC), false);
 });
