@@ -165,6 +165,32 @@ async function loadLedger(admin: Admin): Promise<RoutedLedger> {
 export const PARK_RETRY_ACTION_KIND = "park_retry";
 
 /**
+ * Slice a parked job's `log_tail` for inclusion as EVIDENCE in the Fix phase's failing-check text.
+ *
+ * The tricky case is `tooling_failure` — specifically "branch pushed but PR creation failed" — where
+ * the earlier fix (of a-merge-stamps-only-the-phases-whose-code-it-actually-contains) intentionally
+ * put the `formatPrCreateFailureDiagnostic` output at the START of the log_tail so a triaging human
+ * would see the ACTUAL per-attempt GitHub status + body. A bare `.slice(-400)` dropped that head and
+ * left only the trailing Claude CLI usage JSON (parked build job `3a83a31d` — Fix 1 of
+ * [[../../../docs/brain/specs/portal-remove-card-guard-rejections-are-validation-not-human-escalations]]).
+ *
+ * Fix: when the log_tail STARTS with the ensurePr diagnostic marker (`PR-create failed after`), take
+ * a HEAD slice so the diagnostic is preserved. For any other park class the TAIL slice is still
+ * correct (Bo's real_blocker summary lives at the end of his output). No behavior change for the
+ * common case — the change is narrowly gated on the marker string.
+ *
+ * Kept pure + exported so a unit test can pin the regression without spinning up the router.
+ */
+export function evidenceLogTailSlice(logTail: string | null | undefined, budget = 400): string {
+  if (!logTail) return "(none)";
+  if (logTail.length <= budget) return logTail;
+  if (logTail.startsWith("PR-create failed") || logTail.startsWith("ensurePr:")) {
+    return logTail.slice(0, budget);
+  }
+  return logTail.slice(-budget);
+}
+
+/**
  * A human label for a parked job. `spec_slug` is overloaded — for a `cs-director-call` it holds a
  * TICKET UUID, so the card titled itself "Park needs eyes: 1eddd352-ad99-4173-95fa-89b9dff49712",
  * which tells the founder nothing about what is stuck or why they should care. Resolve the real
@@ -363,7 +389,7 @@ async function routeAuthorBlocker(admin: Admin, row: ParkedRow, klass: BlockerRo
           // "diagnose first" the actual instruction, and the park reason + log tail below are the
           // evidence to start from.
           `The build of [[../specs/${row.spec_slug}]] parked and the classifier could NOT determine why (class stayed 'unknown' past the stale window). Diagnose it from the evidence below FIRST, then fix it inline on this branch so the origin can resume. If the cause turns out to be something this lane cannot fix — a genuine product/design decision, an external outage, or a spec that is simply wrong — do NOT guess at a code change: say so plainly in your summary and leave it failing, and it will escalate to the founder instead.`;
-  const evidence = `Park reason: ${(row.error ?? "(none recorded)").slice(0, 300)}\nLog tail: ${(row.log_tail ?? "(none)").slice(-400)}`;
+  const evidence = `Park reason: ${(row.error ?? "(none recorded)").slice(0, 300)}\nLog tail: ${evidenceLogTailSlice(row.log_tail)}`;
 
   // security-review-spec-avalanche fix (2026-07-03) — a build blocker now appends a Fix PHASE to the ORIGIN
   // + resumes its build (fixes-as-phases, [[../pre-merge-fix]]), NOT a standalone `{slug}-fix-blocker-{hash}`

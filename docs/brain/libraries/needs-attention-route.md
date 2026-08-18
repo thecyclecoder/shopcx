@@ -68,6 +68,10 @@ A parked **`cs-director-call`** or **`security-review`** stays on the CEO fail-s
 
 Marker: `routed_unclassified`. `needs_attention_class` is plain `text` (no enum), and every `routed_*` marker participates in `clearRoutedZombie` via a prefix check, so no extra wiring is needed.
 
+### The Fix session's evidence must contain the ACTUAL failure, not the trailing Claude JSON
+
+`routeAuthorBlocker` composes each Fix phase's failing-check text as `Park reason: {row.error}\nLog tail: {evidenceLogTailSlice(row.log_tail)}`. The slicer defaults to a **tail** slice — correct for a `real_blocker` park whose useful info is Bo's final summary at the end — but for the `tooling_failure` class specifically "branch pushed but PR creation failed" the log_tail is deliberately written HEAD-first: [[../libraries/pr-create-diagnostic]] `formatPrCreateFailureDiagnostic` puts the per-attempt GitHub HTTP status + body at the START (that fix was Fix 1 of [[../specs/a-merge-stamps-only-the-phases-whose-code-it-actually-contains]]). A bare `.slice(-400)` drops the diagnostic and leaves only the trailing Claude CLI usage JSON, so the resulting Fix session sees `"modelUsage":{"claude-opus-4-7":{…}}` where it should see `attempt 3 (HTTP 503): {"message":"Service Unavailable"}`. `evidenceLogTailSlice` gates on the marker string (`PR-create failed after` or `ensurePr:` prefix) and returns a HEAD slice in that case; every other class keeps the historical TAIL slice unchanged. Pinned by `needs-attention-route.evidence-log-tail.test.ts`. Concrete case that triggered the fix: parked build job `3a83a31d` of [[../specs/portal-remove-card-guard-rejections-are-validation-not-human-escalations]] (Fix 1).
+
 ## The card a park produces must be READABLE and HONEST
 
 The pre-2026-08-11 backstop card titled itself `Park needs eyes: {spec_slug}` and bodied itself with `no_route_match` + the raw park error + 400 chars of raw JSON `log_tail`. The founder's verdict on it: *"a card with no action available and a hard-to-understand word wall. I literally can't do anything about this."* Both halves were fair:
