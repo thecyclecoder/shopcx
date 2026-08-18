@@ -1,0 +1,1 @@
+- **A kill switch can always be turned back on** · verified 2026-08-18 · → [[../tables/kill_switches]]
