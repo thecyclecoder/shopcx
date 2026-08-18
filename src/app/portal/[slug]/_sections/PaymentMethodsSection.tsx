@@ -285,10 +285,11 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
         <ul className="space-y-3">
           {methods.map((m) => {
             // Phase 2 — the removePaymentMethod route only acts on Braintree-
-            // vaulted cards; a Shopify-Payments card lives in Shopify's vault
-            // and the customer must remove it from her Shopify account page.
-            // Offering a Remove button here that is guaranteed to fail would
-            // be the same false-instruction failure this spec exists to end.
+            // vaulted cards. Since ticket c969f235 the list handler no longer
+            // returns Shopify-Payments cards at all, so in practice every row
+            // here is removable; the guard stays as defense in depth so a
+            // future caller that widens the query can never render a Remove
+            // button that is guaranteed to fail.
             const canRemove = m.provider === "braintree";
             const isConfirming = confirmingId === m.id;
             const isRemoving = removingId === m.id;

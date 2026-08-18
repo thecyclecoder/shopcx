@@ -4,10 +4,18 @@
  * Hosted Fields integration which lands as a follow-up. The shape of
  * this endpoint is forward-compatible with the eventual mutations.
  *
- * Returns ALL active payment methods on the customer + any linked
- * customer profiles. A linked account's saved cards are usable by the
- * shared person; the dunning pipeline already treats them as one
+ * Returns the active STOREFRONT-VAULTED (Braintree) payment methods on the
+ * customer + any linked customer profiles. A linked account's saved cards are
+ * usable by the shared person; the dunning pipeline already treats them as one
  * eligible pool, so the portal mirrors that.
+ *
+ * Shopify-Payments cards are deliberately NOT listed (ticket c969f235). They
+ * live in a vault we have no write access to, so every control the portal
+ * offers refuses them — and because the migration mirrors one physical card
+ * into both vaults, listing them showed the SAME card two or three times with
+ * no working Remove button. The renewal path reads the table directly, so the
+ * legacy cards still back legacy Shopify-Payments subscriptions exactly as
+ * before; only the customer-facing list changed.
  *
  * Output shape:
  * {
@@ -57,6 +65,17 @@ export const paymentMethods: RouteHandler = async ({ auth, route }) => {
     .eq("workspace_id", auth.workspaceId)
     .in("customer_id", ids)
     .eq("status", "active")
+    // Ticket c969f235 — storefront-vaulted (Braintree) cards ONLY. A
+    // Shopify-Payments card lives in a vault we cannot write to: we cannot
+    // remove it, cannot set it default, and `removePaymentMethod` refuses it
+    // with `not_removable_here`. Listing it produced a row with no working
+    // control on it, which G esposito read as a duplicate card she was stuck
+    // with — the same physical card mirrored across both vaults by the
+    // migration showed up three times. Shopify is a sunsetting origin; the
+    // legacy cards still back legacy Shopify-Payments subscriptions and the
+    // renewal path reads them directly from the table, so hiding them here
+    // changes only what the customer is shown, never what we charge.
+    .eq("provider", "braintree")
     .order("is_default", { ascending: false })
     .order("created_at", { ascending: false });
 
