@@ -10,6 +10,33 @@ The Media Buyer is the FIRST autonomous static-ad optimizer in this repo — the
 - **Live publishes into the test cohort** — the agent inserts [[../tables/ad_publish_jobs]] rows with `origin='media-buyer-test'` + `publish_active=true` and fires `ad-tool/publish-to-meta`. [[media-buyer-publish-gate]] (Phase 1) then decides whether the ad actually ships ACTIVE — a wrong ad set or over-ceiling projection DOWNGRADES + escalates.
 - **Every action** stamps one [[../tables/director_activity]] row (`director_function='growth'`) citing the source `meta_ad_id` + realized ROAS + policy version, so the audit trail names the concrete creative, not the wrapper adset.
 
+## ⭐ Concept diversity reads REAL adset state (CEO 2026-08-18)
+
+`readLiveCohortConceptTags` feeds the replenish diversity gate — a ready creative whose
+`concept_tag` is already live is skipped so a cohort never fatigues on one concept. It used to
+derive "live" from `ad_publish_jobs` alone (`origin='media-buyer-test' AND publish_active AND
+publish_status='published'`).
+
+Those columns record what WE published and are **never reconciled against Meta**. On their own they
+mean "we once published this", so a concept was **burned permanently the moment it launched** — once
+its adset paused, that concept could never be tested again, and replenish starved one slot at a time.
+
+**Ground truth 2026-08-18.** For Amazing Coffee the reader returned
+`[comparison, curiosity, social-proof, story, transformation]` while Meta reported **zero ACTIVE
+adsets** on the product — every one PAUSED since mid-July. Workspace-wide, of 22 jobs flagged
+active+published, exactly **one** was ACTIVE at Meta. In the SAME pass `readCurrentTestCohortSize`
+reported `split=0/4`, so the two readers contradicted each other in one breath. A 10/10
+Max-eligible `comparison` creative ("split shelf ingredients versus one cup") was refused a slot on
+that basis.
+
+**The fix is one its sibling already had.** `readCurrentTestCohortSize` learned this in July — the
+2026-07-12 over-launch (8 live, double the ceiling) came from the same `ad_publish_jobs`-only shape
+and was moved onto [[media-buyer-publish-gate]] `countLiveTestAdsetsInCampaign`. The concept reader
+now narrows the same way, reusing `FREED_ADSET_STATUSES` so the two definitions of "occupying a
+slot" cannot drift again. It **fails diversity-safe**: an adset with no `meta_adsets` row yet (fresh
+publish, structure sync behind) still counts as live, so a pass can't double-post one concept while
+the sync lags.
+
 ## ⭐ Cold start vs stale signal (CEO 2026-08-18)
 
 The TRUST-META freshness gate (`hasFreshMetaSignal`) conflated two states that need OPPOSITE
