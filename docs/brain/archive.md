@@ -12,6 +12,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **A kill switch can always be turned back on** · verified 2026-08-18 · → [[../tables/kill_switches]]
+- **Remove-payment-method guard rejections are UI-gating validation, not 'unrecognized portal errors'** · verified 2026-08-18 · → [[../libraries/portal__route#validation-errors-that-shouldnt-create-tickets]] + [[../libraries/portal__remediation#source-prevention]] + [[../libraries/portal__handlers__remove-payment-method]] + [[../libraries/needs-attention-route#the-fix-sessions-evidence-must-contain-the-actual-failure-not-the-trailing-claude-json]]
 - **A branch security review is fresh only for the exact head SHA it reviewed** · verified 2026-08-17 · → [[../libraries/security-agent]], [[../libraries/vercel-project]], [[../libraries/preview-capture]]
 - **A merge stamps only the phases whose code it actually contains** · verified 2026-08-17 · → [[../libraries/agent-jobs#applymergedbuildeffects--function--chain-and-cardstate-under-automerge-phase-1]] + [[../libraries/spec-test-runs#auto-fold-gate--gate-b-fold-on-machine-spec-test-pass--security-clear-fold-on-spec-test-pass-task-29-specsbuild-card-lifecycle-timeline-phase-3]]
 - **An assisted purchase carries the item the customer actually picked** · verified 2026-08-17 · → [[../libraries/playbook-executor]], [[../libraries/assisted-purchase-direction]]
