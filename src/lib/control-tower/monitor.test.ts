@@ -1217,6 +1217,84 @@ test("Auto-merge remap race — the `all` (unbypassed) count query joins tickets
   );
 });
 
+// ── tickets-awaiting-decision unclaimed dispatch-intent exclusion ────────────
+// Spec: ticket-decision-workprobe-exclude-unclaimed-dispatch-intents.
+// Originating false page (signal `loop:ai:orchestrator`, verdict monitor-false-positive):
+// an inbound row was inserted with `dispatch_pending_at` stamped by dispatchInboundMessage but
+// the unified handler's `clearDispatchIntent` never ran (the ticket/inbound-message event was
+// lost / handler restart / Inngest delivery gap). That inbound never crossed the handler claim
+// boundary and never reached callSonnetOrchestratorV2, so no ai:orchestrator beat can exist —
+// yet the tickets-awaiting-decision probe counted it as orchestrator demand and flipped the
+// tile red. The correct owner is the `tickets-awaiting-handler-dispatch` probe + the
+// unanswered-inbound-backstop cron, which already re-fire the lost dispatch. Fix: gate every
+// count query in the case on `.is("dispatch_pending_at", null)` so an un-cleared intent is
+// STRUCTURALLY excluded from the decision-demand surface — no subtraction, no race.
+
+test("Unclaimed dispatch — tickets-awaiting-decision probe filters out non-NULL dispatch_pending_at rows", () => {
+  const block = ticketsAwaitingDecisionCaseBlock();
+  assert.match(
+    block,
+    /\.is\(\s*"dispatch_pending_at"\s*,\s*null\s*\)/,
+    "`tickets-awaiting-decision` case must call .is(\"dispatch_pending_at\", null) — an un-cleared dispatch intent means the handler never claimed the inbound and never invoked the AI orchestrator, so counting it as decision-demand pages the ai:orchestrator owner on a recoverable upstream miss the unanswered-inbound-backstop cron is about to re-fire. See ticket-decision-workprobe-exclude-unclaimed-dispatch-intents.",
+  );
+});
+
+test("Unclaimed dispatch — every count query in the tickets-awaiting-decision case gates on dispatch_pending_at IS NULL (symmetric filter)", () => {
+  // Symmetric across allRes / excludedRes / solFirstTouchAckRes / the solFirstTouchDispatchExcluded
+  // follow-up: an asymmetric filter would leak an unclaimed inbound into the total-count residual
+  // even though its counterpart was pruned upstream (Math.max(0, all - excluded - ...) still
+  // yields the leak). The msg-side `.lte("created_at", decisionSettleCutoffIso)` pin is the
+  // established shape for this — count the msg-side settle cutoffs, then assert the dispatch
+  // filter appears on every one of them.
+  const block = ticketsAwaitingDecisionCaseBlock();
+  const dispatchFilterMatches = block.match(/\.is\(\s*"dispatch_pending_at"\s*,\s*null\s*\)/g) ?? [];
+  const msgCutoffMatches = block.match(/\.lte\(\s*"created_at"\s*,\s*decisionSettleCutoffIso\s*\)/g) ?? [];
+  assert.equal(
+    dispatchFilterMatches.length,
+    msgCutoffMatches.length,
+    `every ticket_messages count query in the tickets-awaiting-decision case must gate on .is("dispatch_pending_at", null) — found ${msgCutoffMatches.length} msg-side settle cutoffs and ${dispatchFilterMatches.length} dispatch_pending_at null filters. An asymmetric filter re-opens the class ticket-decision-workprobe-exclude-unclaimed-dispatch-intents is designed to close.`,
+  );
+  assert.ok(
+    msgCutoffMatches.length >= 4,
+    `expected ≥4 msg-side settle cutoffs (one per ticket_messages count query — allRes / excludedRes / solFirstTouchAckRes / solFirstTouchDispatchExcluded), found ${msgCutoffMatches.length}. Did the case body shape change?`,
+  );
+});
+
+test("Unclaimed dispatch — tickets-awaiting-decision case does NOT reintroduce the .not(\"dispatch_pending_at\", ...) shape (that lives on the handler-dispatch probe)", () => {
+  // Keeps the two probes semantically separate. The handler-dispatch probe queries for
+  // non-NULL / aged un-cleared stamps (lost dispatches it must re-fire). The decision probe
+  // filters those out (they can't have produced an orchestrator beat). Reintroducing `.not(...)`
+  // here would flip the surface back to counting exactly the class we just excluded.
+  const block = ticketsAwaitingDecisionCaseBlock();
+  assert.doesNotMatch(
+    block,
+    /\.not\(\s*"dispatch_pending_at"\s*,\s*"is"\s*,\s*null\s*\)/,
+    "`tickets-awaiting-decision` case must NOT call .not(\"dispatch_pending_at\", \"is\", null) — that predicate defines the sibling `tickets-awaiting-handler-dispatch` probe (aged un-cleared stamps = lost handler dispatches). Bringing it here re-collapses the split-probe design.",
+  );
+});
+
+test("Unclaimed dispatch — only the tickets-awaiting-handler-dispatch case body queries for non-NULL dispatch_pending_at", () => {
+  // Whole-file guard: the dispatch-intent NOT-NULL predicate is the exclusive fingerprint of the
+  // handler-dispatch probe. If any other case (or a stray helper) grows the same predicate, the
+  // split-probe architecture (handler-dispatch counts lost stamps; decision counts everything
+  // else) has silently drifted and the fix regresses.
+  const src = readFileSync(resolve(process.cwd(), "src/lib/control-tower/monitor.ts"), "utf-8");
+  const handlerDispatchMatch = src.match(/case\s+"tickets-awaiting-handler-dispatch":\s*\{([\s\S]*?)\n\s*\}\s*\n\s*(?:case\s+"|default)/);
+  assert.ok(handlerDispatchMatch, "tickets-awaiting-handler-dispatch case block not found in monitor.ts — did the switch shape change?");
+  const handlerBody = handlerDispatchMatch[1];
+  const totalNotNullPredicates = (src.match(/\.not\(\s*"dispatch_pending_at"\s*,\s*"is"\s*,\s*null\s*\)/g) ?? []).length;
+  const handlerNotNullPredicates = (handlerBody.match(/\.not\(\s*"dispatch_pending_at"\s*,\s*"is"\s*,\s*null\s*\)/g) ?? []).length;
+  assert.ok(
+    handlerNotNullPredicates >= 1,
+    `tickets-awaiting-handler-dispatch case must keep its .not("dispatch_pending_at", "is", null) predicate — it IS the probe's inclusion criterion. Found ${handlerNotNullPredicates} in the handler-dispatch case body.`,
+  );
+  assert.equal(
+    totalNotNullPredicates,
+    handlerNotNullPredicates,
+    `the .not("dispatch_pending_at", "is", null) predicate must live ONLY in the tickets-awaiting-handler-dispatch case — file-wide count ${totalNotNullPredicates} exceeded handler-dispatch case count ${handlerNotNullPredicates}. A stray occurrence outside that case (e.g. reintroduced into tickets-awaiting-decision) would double-count aged unclaimed dispatches across two probes and undo the split.`,
+  );
+});
+
 test("evalInlineAgent still flips RED on a settled real inbound with no ai:orchestrator beat (no false negative)", () => {
   // No-false-negative guard for the settle-window + outreach exclusion. The probe now waits
   // through TICKET_DECISION_SETTLE_MS AND subtracts outreach-tagged messages, but a settled

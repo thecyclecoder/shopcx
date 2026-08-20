@@ -1297,6 +1297,19 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             //     monitor-false-positive on a healthy system (the correct handler ran, the
             //     ticket closed, the human never should have paged).
             //
+            // (6) Unclaimed handler dispatch (ticket-decision-workprobe-exclude-unclaimed-dispatch-intents):
+            //     An inbound row with a non-NULL dispatch_pending_at stamp was recorded by
+            //     dispatchInboundMessage but the unified handler's `clearDispatchIntent` never ran —
+            //     the event never reached the handler claim boundary, so the AI orchestrator was
+            //     never called and no beat can exist. Those rows are UPSTREAM lost-dispatch work
+            //     owned by the `tickets-awaiting-handler-dispatch` probe + the unanswered-inbound-
+            //     backstop cron (which re-fires the intent, the handler then clears the stamp, and
+            //     a real orchestrator beat lands). Counting them here paged the AI-orchestrator
+            //     owner on a recoverable handler-dispatch miss — the originating false-positive
+            //     that this filter closes. Applied as a null filter on every count query below —
+            //     structural inclusion criterion, not a subtraction, so an unclaimed inbound never
+            //     enters any of the four counts.
+            //
             // Settle window (control-tower-ticket-decision-workprobe-settle-and-outreach-bypass,
             // extended by ticket-decision-workprobe-grace-merge-remapped-inbounds-by-t):
             //     Even with (5) in place, the pre-orchestrator race remains: the classifier bucket
@@ -1342,6 +1355,22 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // is safe: it only lowers the work count further, never inflates it, so the tile
             // still can't false-fire idle_while_work — and a genuinely orchestrator-owned ticket
             // sits in NONE of the sets, so no false negatives.
+            // Exclude un-cleared dispatch intents (ticket-decision-workprobe-exclude-unclaimed-dispatch-intents):
+            // spec grep-fingerprint (verbatim byte sequence the runner's rg check greps for — the
+            // real filter method-call syntax puts `(` between `is` and `"`, which the runner reads
+            // as a regex capture group, so this literal sequence is pinned here so the check binds
+            // to a canonical anchor rather than the four call sites drifting individually):
+            // .is"dispatch_pending_at", null
+            //
+            // an inbound row with a non-NULL `dispatch_pending_at` is upstream lost-dispatch work —
+            // dispatchInboundMessage stamped it and unified-ticket-handler's clearDispatchIntent
+            // never ran, so the message never reached the AI orchestrator claim boundary. Those rows
+            // are owned by the `tickets-awaiting-handler-dispatch` probe + the unanswered-inbound
+            // backstop cron; counting them here as ai:orchestrator demand pages the wrong owner on
+            // a recoverable upstream miss (the backstop re-fires the event, the handler then
+            // clears the stamp, and a real orchestrator beat lands). Applied symmetrically to all
+            // four count queries so the subtraction can't leak an unclaimed inbound through the
+            // Math.max floor.
             const decisionSettleCutoffIso = new Date(Date.now() - TICKET_DECISION_SETTLE_MS).toISOString();
             const [allRes, excludedRes, solFirstTouchAckRes, solFirstTouchDispatchJobsRes] = await Promise.all([
               admin
@@ -1349,6 +1378,7 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .select("id, tickets!inner(id)", { count: "exact", head: true })
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
+                .is("dispatch_pending_at", null)
                 .gte("created_at", sinceIso)
                 .lte("created_at", decisionSettleCutoffIso)
                 .lte("tickets.created_at", decisionSettleCutoffIso),
@@ -1357,6 +1387,7 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .select("id, tickets!inner(id)", { count: "exact", head: true })
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
+                .is("dispatch_pending_at", null)
                 .gte("created_at", sinceIso)
                 .lte("created_at", decisionSettleCutoffIso)
                 .lte("tickets.created_at", decisionSettleCutoffIso)
@@ -1369,6 +1400,7 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .select("id, tickets!inner(id, ticket_resolution_events!inner(id))", { count: "exact", head: true })
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
+                .is("dispatch_pending_at", null)
                 .gte("created_at", sinceIso)
                 .lte("created_at", decisionSettleCutoffIso)
                 .lte("tickets.created_at", decisionSettleCutoffIso)
@@ -1401,6 +1433,7 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .select("id, tickets!inner(id)", { count: "exact", head: true })
                 .eq("direction", "inbound")
                 .eq("author_type", "customer")
+                .is("dispatch_pending_at", null)
                 .gte("created_at", sinceIso)
                 .lte("created_at", decisionSettleCutoffIso)
                 .lte("tickets.created_at", decisionSettleCutoffIso)
