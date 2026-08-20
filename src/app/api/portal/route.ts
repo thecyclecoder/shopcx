@@ -162,7 +162,21 @@ async function handle(req: NextRequest) {
     // ticket that escalated to a human (real case: ticket c969f235, G Esposito,
     // one Mastercard ending 9009 saved three times where only the pinned copy
     // ever bills).
-    const VALIDATION_ERRORS = new Set(["date_too_early", "date_too_far", "invalid_date", "missing_contractId", "missing_nextBillingDate", "missing_address1", "missing_city", "missing_provinceCode", "missing_zip", "no_changes", "not_logged_in", "first_order_not_delivered", "insufficient_points", "would_remove_last_item", "would_remove_all_regular_products", "variant_not_selectable", "pinned_to_active_subscription", "last_card_for_active_subscription", "not_removable_here", "payment_method_not_found", "payment_method_not_in_group", "missing_paymentMethodId"]);
+    // `vault_declined` is the SAFE classification the vault helper's typed
+    // VaultCreateError maps to (processor decline / gateway rejection — the
+    // customer's own issuer or the merchant's Braintree risk rule saying no).
+    // Same class as the remove-payment-method guard codes: cards are customer-
+    // only by PCI design, PaymentMethodsSection.tsx maps `vault_declined` to
+    // plain-language customer guidance ("check the number, expiry, or CVV, or
+    // try another card"), and no agent/human can vault a card for the customer.
+    // A guarded decline is UI-gating validation, not a support event — a
+    // legitimate decline was spawning a "Portal action needs help:
+    // updatepaymentmethod" ticket that escalated to a human every retry (real
+    // case: ticket ea66c607, one customer retried 24 times; 22 tickets in the
+    // recent window on the same class of decline). A genuine gateway/config
+    // outage still returns `vault_failed` (unchanged) and stays on the
+    // human/monitor path so a real Braintree outage still surfaces.
+    const VALIDATION_ERRORS = new Set(["date_too_early", "date_too_far", "invalid_date", "missing_contractId", "missing_nextBillingDate", "missing_address1", "missing_city", "missing_provinceCode", "missing_zip", "no_changes", "not_logged_in", "first_order_not_delivered", "insufficient_points", "would_remove_last_item", "would_remove_all_regular_products", "variant_not_selectable", "pinned_to_active_subscription", "last_card_for_active_subscription", "not_removable_here", "payment_method_not_found", "payment_method_not_in_group", "missing_paymentMethodId", "vault_declined"]);
     // Some validation errors carry a dynamic message instead of a stable code
     // (e.g. loyalty redeem returns "Insufficient points. Need 1500, have 297").
     // These are UI-gating issues — the portal should never offer the action —

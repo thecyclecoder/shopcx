@@ -197,6 +197,38 @@ export interface VaultResult {
   paypalEmail: string | null;
 }
 
+/**
+ * Typed error thrown by `vaultPaymentMethod` when Braintree refuses the vault.
+ * Carries a stable `code` derived from the verification result:
+ *   - `vault_declined` — the customer's own issuer said no (processor decline)
+ *     OR the merchant's Braintree risk rule said no (gateway rejection). Both
+ *     are keyed off `verification.status` in ('processor_declined',
+ *     'gateway_rejected') — the SDK's canonical signal. Nothing to fix on our
+ *     side; the customer needs to try another card or correct number/CVV/expiry.
+ *     [[../../docs/brain/libraries/portal__remediation]] dismisses this
+ *     disposition and [[../../docs/brain/libraries/portal__handlers__payment-methods]]
+ *     surfaces plain-language guidance to the customer.
+ *   - `vault_error` — everything else (SDK broken, connectivity, misconfig,
+ *     unrecognized SDK shape). Genuine gateway/config problem — keeps the
+ *     `vault_failed` response code on the human/monitor path so a real
+ *     Braintree outage still surfaces.
+ *
+ * The `message` field is the RAW upstream text (processorResponseText /
+ * `Gateway Rejected: <reason>` / SDK error) — safe for a server log line and
+ * preserved so [[../control-tower/error-feed]]'s existing decline / rejection
+ * drop filters keep matching. Callers must NOT surface this message directly
+ * to the customer (it can include instrument-specific processor text); the
+ * caller composes its own plain-language customer message instead.
+ */
+export class VaultCreateError extends Error {
+  code: "vault_declined" | "vault_error";
+  constructor(code: "vault_declined" | "vault_error", message: string) {
+    super(message);
+    this.name = "VaultCreateError";
+    this.code = code;
+  }
+}
+
 export async function vaultPaymentMethod(
   workspaceId: string,
   braintreeCustomerId: string,
@@ -214,11 +246,29 @@ export async function vaultPaymentMethod(
     },
   });
   if (!result.success || !result.paymentMethod) {
+    const verification = (result as {
+      verification?: {
+        status?: string;
+        processorResponseCode?: string;
+        processorResponseText?: string;
+        gatewayRejectionReason?: string;
+      };
+    }).verification;
+    // `verification.status` in ('processor_declined', 'gateway_rejected') is the
+    // canonical SDK signal for a decline — the issuer OR merchant risk rule
+    // said no on the auth attempt (verifyCard:true). Everything else — SDK
+    // broken, connectivity failure, misconfigured gateway, unrecognized shape —
+    // is a genuine gateway/config error and stays on the human/monitor path.
+    const status = verification?.status;
+    const isDecline = status === "processor_declined" || status === "gateway_rejected";
     const msg =
       result.message ||
-      (result as { verification?: { processorResponseText?: string } }).verification?.processorResponseText ||
+      verification?.processorResponseText ||
+      (verification?.gatewayRejectionReason
+        ? `Gateway Rejected: ${verification.gatewayRejectionReason}`
+        : "") ||
       "paymentMethod.create failed";
-    throw new Error(msg);
+    throw new VaultCreateError(isDecline ? "vault_declined" : "vault_error", msg);
   }
   const pm = result.paymentMethod as braintree.PaymentMethod & {
     cardType?: string;

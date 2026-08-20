@@ -51,6 +51,24 @@ function removalRefusalMessage(code: string): string {
   return "We couldn't remove that card. Please try again in a moment.";
 }
 
+// Plain customer-facing message for the add-card vault refusal codes the
+// updatePaymentMethod handler returns. `vault_declined` is a processor
+// decline / gateway rejection (the customer's own issuer or the merchant's
+// Braintree risk rule said no) — customer-fixable, so give the actionable
+// guidance instead of the opaque "Couldn't save the card." Mirrors the
+// remove-payment-method mapping above. Server also sends a `message` string
+// with the same shape, but we key off the code here so the guidance stays
+// consistent even if a future caller forgets to include the message.
+function vaultRefusalMessage(code: string): string {
+  if (code === "vault_declined") {
+    return "That card was declined. Please check the number, expiry, and CVV, or try another card.";
+  }
+  if (code === "no_braintree_customer") {
+    return "We couldn't set up your Braintree profile. Please refresh and try again.";
+  }
+  return "We couldn't save the card. Please try again in a moment.";
+}
+
 export function PaymentMethodsSection({ primaryColor }: Props) {
   const [methods, setMethods] = useState<PortalPaymentMethod[]>([]);
   const [loading, setLoading] = useState(true);
@@ -200,7 +218,19 @@ export function PaymentMethodsSection({ primaryColor }: Props) {
         }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data?.error) { setTokenError(data?.message || data?.error || "Couldn't save the card."); return; }
+      if (!res.ok || data?.error) {
+        // Prefer the code-driven mapping so a decline always shows the
+        // customer-fixable guidance ("check the number, expiry, and CVV…")
+        // instead of a raw error string. Falls through to the server message
+        // for codes we haven't mapped yet.
+        const code = String(data?.error || "");
+        const mapped = code ? vaultRefusalMessage(code) : "";
+        const msg = code === "vault_declined" || code === "no_braintree_customer"
+          ? mapped
+          : (data?.message || mapped || data?.error || "Couldn't save the card.");
+        setTokenError(msg);
+        return;
+      }
 
       if (recover) {
         setRecovered(true);
