@@ -15763,6 +15763,39 @@ async function runCsDirectorCallJob(job: Job) {
         applyResult.ok === true &&
         applyResult.needs_attention !== true &&
         applyResult.awaiting_founder_approval !== true;
+      // Phase 2 of a-cs-director-verdict-cannot-clear-an-unruled-founder-escalation — read the
+      // ticket's PRE-patch state BEFORE `decideCsDirectorTicketTransition` runs so the pure
+      // builder can see whether an earlier `escalate_founder` verdict already stamped the
+      // founder-ruling-pending reason. Widened to `active_playbook_id, escalated_to,
+      // escalation_reason` — the playbook-clear audit note reuses the same read (`preRow` below
+      // no longer needs its own round-trip). Best-effort in a try/catch: a read failure leaves
+      // priorEscalation null AND priorActivePlaybookId null, which reproduces today's behavior
+      // exactly so a transient DB error can NEVER strand a ticket escalated forever (a null
+      // priorEscalation short-circuits the downgrade — the invariant fails safe on read).
+      //
+      // Motivating case: ticket c969f235 (G esposito, 2026-08-18). June ruled `escalate_founder`
+      // at 15:53 → escalation_reason='CEO — awaits founder ruling: …'. A SECOND June session
+      // ruled `author_spec` at 16:36, the pre-Phase-2 transition ran WITHOUT knowledge of the
+      // existing founder page, closed + cleared it, and the customer's 16:53 reply reopened the
+      // ticket unescalated. It sat invisible to the founder for 19h on a $1,628-LTV customer.
+      let priorActivePlaybookId: string | null = null;
+      let priorEscalation: { escalated_to: string | null; escalation_reason: string | null } | null = null;
+      try {
+        const { data: preRow } = await db
+          .from("tickets")
+          .select("active_playbook_id, escalated_to, escalation_reason")
+          .eq("id", ticketId)
+          .maybeSingle();
+        if (preRow) {
+          priorActivePlaybookId = (preRow.active_playbook_id as string | null) ?? null;
+          priorEscalation = {
+            escalated_to: (preRow.escalated_to as string | null) ?? null,
+            escalation_reason: (preRow.escalation_reason as string | null) ?? null,
+          };
+        }
+      } catch (e) {
+        console.warn(`${tag} pre-patch ticket read failed:`, e instanceof Error ? e.message : e);
+      }
       const transition = decideCsDirectorTicketTransition({
         decision: verdict.decision,
         reasoning: verdict.reasoning,
@@ -15776,6 +15809,12 @@ async function runCsDirectorCallJob(job: Job) {
           verdict.decision === "author_spec"
             ? { specWritten: authorOutcomeOk === true, reason: authorFailureReason ?? undefined }
             : null,
+        // Phase 2 of a-cs-director-verdict-cannot-clear-an-unruled-founder-escalation — thread
+        // the pre-patch escalation so the pure builder can downgrade an escalation-clearing
+        // transition to `keep_escalated_founder_ruling_pending` while the founder ruling is
+        // still pending (ticket c969f235). `null` when the read failed → no downgrade, so a DB
+        // error CANNOT strand a ticket escalated forever.
+        priorEscalation,
         ceoUserId,
         now: new Date().toISOString(),
       });
@@ -15783,23 +15822,6 @@ async function runCsDirectorCallJob(job: Job) {
       // approve_remedy de-escalate/close transition — the ticket stays escalated (raiseJuneRemedyApproval
       // already stamped escalated_to=owner) until Dylan approves via SMS and the deferred sweep executes.
       if (transition.action_key !== "noop" && !applyResult?.awaiting_founder_approval) {
-        // Read the ticket's PRE-patch state so we can (1) skip the update when the
-        // patch would be a no-op AND (2) drop an internal sysNote when the patch
-        // actually cleared a previously-active playbook — the audit trail for
-        // docs/brain/specs/post-resolution-inbound-reroute-and-silent-turn-guard.md
-        // Phase 1 (Melissa/eca3f43b). Best-effort; a read failure never rolls back
-        // the completed job, and the sysNote is skipped in that case.
-        let priorActivePlaybookId: string | null = null;
-        try {
-          const { data: preRow } = await db
-            .from("tickets")
-            .select("active_playbook_id")
-            .eq("id", ticketId)
-            .maybeSingle();
-          priorActivePlaybookId = (preRow?.active_playbook_id as string | null) ?? null;
-        } catch (e) {
-          console.warn(`${tag} pre-patch ticket read failed:`, e instanceof Error ? e.message : e);
-        }
         const { error: patchErr, data: patched } = await db
           .from("tickets")
           .update(transition.patch)
@@ -15834,6 +15856,29 @@ async function runCsDirectorCallJob(job: Job) {
               if (noteErr) console.warn(`${tag} playbook-supersede sysNote insert failed: ${noteErr.message}`);
             } catch (e) {
               console.warn(`${tag} playbook-supersede sysNote write threw:`, e instanceof Error ? e.message : e);
+            }
+          }
+          // Phase 2 of a-cs-director-verdict-cannot-clear-an-unruled-founder-escalation — audit
+          // half of the fix. The 16:36 author_spec on ticket c969f235 left NO TRACE at all when
+          // it silently cleared the 15:53 founder page; the ticket read as a dropped hand-off
+          // for 19h. Now that the pure builder downgrades the transition to
+          // `keep_escalated_founder_ruling_pending`, name the downgraded verdict + the founder
+          // escalation it preserved on the ticket thread so the audit shows why the ticket
+          // stayed escalated. Same helper the playbook-clear note uses.
+          if (transition.action_key === "keep_escalated_founder_ruling_pending") {
+            try {
+              const priorReason = priorEscalation?.escalation_reason ?? "unknown reason";
+              const noteBody = `[System] CS Director verdict '${verdict.decision}' would have closed + de-escalated this ticket, but a founder ruling is still pending (escalation_reason: ${priorReason}). Downgraded to keep-escalated-founder-ruling-pending — ticket stays open + escalated until the CEO rules.`;
+              const { error: noteErr } = await db.from("ticket_messages").insert({
+                ticket_id: ticketId,
+                direction: "outbound",
+                visibility: "internal",
+                author_type: "system",
+                body: noteBody.slice(0, 2000),
+              });
+              if (noteErr) console.warn(`${tag} founder-ruling-pending sysNote insert failed: ${noteErr.message}`);
+            } catch (e) {
+              console.warn(`${tag} founder-ruling-pending sysNote write threw:`, e instanceof Error ? e.message : e);
             }
           }
         }

@@ -54,6 +54,21 @@ export type CsDirectorTransitionActionKey =
   | "deescalate_only"
   | "keep_escalated_ceo_owned"
   | "keep_escalated_needs_attention"
+  /**
+   * Phase 1 of a-cs-director-verdict-cannot-clear-an-unruled-founder-escalation. When the
+   * pre-patch ticket carries a `CEO — awaits founder ruling:` escalation_reason (stamped by an
+   * earlier `escalate_founder` verdict) and this session's verdict would otherwise clear it
+   * (`close_and_deescalate` / `deescalate_only`), the transition is DOWNGRADED to this key so
+   * the escalation stays put and the ticket stays open. The single exception is an
+   * `approve_remedy` that RESOLVED the customer's issue (`remedyResolved===true`) — a resolved
+   * issue retires its own escalation, same principle as
+   * an-escalation-retires-itself-when-the-condition-it-reported-self-heals.
+   * Motivating case: ticket c969f235 (G esposito, 2026-08-18). June ruled `escalate_founder` at
+   * 15:53, a second June session ruled `author_spec` at 16:36, the transition closed + cleared
+   * the founder escalation with no card + no note, and the customer's 16:53 reply reopened the
+   * ticket unescalated — 19h invisible to the founder on a $1,628-LTV customer.
+   */
+  | "keep_escalated_founder_ruling_pending"
   | "noop";
 
 /**
@@ -111,6 +126,19 @@ export interface CsDirectorTransitionInput {
   authorSpecOutcome?: CsDirectorAuthorSpecOutcome | null;
   /** Resolved workspace-owner user_id, when the caller can supply it. Optional. */
   ceoUserId?: string | null;
+  /**
+   * Phase 1 of a-cs-director-verdict-cannot-clear-an-unruled-founder-escalation — the ticket's
+   * PRE-patch escalation state, threaded in by `runCsDirectorCallJob` (Phase 2). When
+   * `escalation_reason` starts with the `CEO — awaits founder ruling:` prefix an earlier
+   * `escalate_founder` verdict stamped, this session's verdict is DOWNGRADED to
+   * `keep_escalated_founder_ruling_pending` if it would otherwise clear the escalation — a later
+   * verdict cannot silently retire a founder page that has never been ruled on.
+   *
+   * OPTIONAL — an absent value means the caller could not read the row and MUST behave exactly
+   * like today (no downgrade), so a read failure never strands a ticket escalated forever
+   * (the runner treats a read error as `priorEscalation: null` for exactly this reason).
+   */
+  priorEscalation?: { escalated_to: string | null; escalation_reason: string | null } | null;
   /** ISO timestamp used for `updated_at` / `closed_at` / `resolved_at` — passed in so tests are deterministic. */
   now: string;
 }
@@ -177,12 +205,52 @@ function deescalateOnlyPatch(now: string): Record<string, unknown> {
   };
 }
 
+/**
+ * Phase 1 of a-cs-director-verdict-cannot-clear-an-unruled-founder-escalation — the deterministic
+ * escalation_reason prefix `escalate_founder` stamps to mark a ticket as "AWAITING the CEO's
+ * ruling." Exported so the reader (`isAwaitingFounderRuling`) and the writer
+ * (`ceoOwnedEscalationReason`) key on the SAME literal — the two cannot drift apart.
+ */
+export const FOUNDER_RULING_PREFIX = "CEO — awaits founder ruling:";
+
 function ceoOwnedEscalationReason(reasoning: string): string {
   const trimmed = (reasoning || "").trim();
   const suffix = trimmed.length > 0 ? trimmed : "see cs-director verdict";
   // Cap at 400 chars — a `tickets.escalation_reason` free-text column is small and the full
   // reasoning lives on `director_activity` + the internal note the Phase 1 write dropped.
-  return `CEO — awaits founder ruling: ${suffix}`.slice(0, 400);
+  return `${FOUNDER_RULING_PREFIX} ${suffix}`.slice(0, 400);
+}
+
+/**
+ * Phase 1 of a-cs-director-verdict-cannot-clear-an-unruled-founder-escalation — the pure predicate
+ * that answers "is a founder ruling still pending on this ticket?" Keyed on `escalation_reason`
+ * (not `escalated_to`) because `escalated_to` is also set by `raiseJuneRemedyApproval` and other
+ * lanes, while the reason prefix is the exact marker THIS module writes when `escalate_founder`
+ * fires. A ticket whose reason line starts with `CEO — awaits founder ruling:` was escalated by
+ * an earlier June verdict AND has not yet been ruled on by the CEO — the invariant a later
+ * verdict must not silently violate.
+ */
+export function isAwaitingFounderRuling(
+  prior: { escalation_reason: string | null } | null | undefined,
+): boolean {
+  const reason = prior?.escalation_reason;
+  if (typeof reason !== "string" || reason.length === 0) return false;
+  return reason.startsWith(FOUNDER_RULING_PREFIX);
+}
+
+/**
+ * Phase 1 of a-cs-director-verdict-cannot-clear-an-unruled-founder-escalation — the patch a
+ * downgraded transition applies: clear the pre-escalation playbook fields (the escalation itself
+ * supersedes the playbook the same way a resolution does) + stamp `updated_at`, and NOTHING else.
+ * The ticket stays open (no `status` / `closed_at` / `resolved_at` / `assigned_to`) and stays
+ * escalated (no `escalated_at` / `escalated_to` / `escalation_reason` clear). The founder ruling
+ * has not landed — the founder page cannot be silently retired.
+ */
+function founderRulingPendingPatch(now: string): Record<string, unknown> {
+  return {
+    ...PLAYBOOK_CLEAR_FIELDS,
+    updated_at: now,
+  };
 }
 
 /**
@@ -207,6 +275,30 @@ function needsAttentionEscalationReason(reason: string | undefined): string {
  * the runner treats them as a safety fall-through rather than corrupting the row.
  */
 export function decideCsDirectorTicketTransition(input: CsDirectorTransitionInput): CsDirectorTicketTransition {
+  const raw = decideRawTransition(input);
+  // Phase 1 of a-cs-director-verdict-cannot-clear-an-unruled-founder-escalation — the founder-
+  // escalation-is-sticky invariant: while `escalation_reason` still carries the
+  // `CEO — awaits founder ruling:` prefix an earlier June `escalate_founder` verdict stamped,
+  // any transition that would CLEAR that escalation gets downgraded to a preserving one so the
+  // founder page cannot be silently retired by a later verdict that never ruled on it. The single
+  // exception: an `approve_remedy` that the mutator actually RESOLVED (fired the actions +
+  // delivered the reply) — a resolved issue retires its own escalation (same principle as the
+  // shipped an-escalation-retires-itself-when-the-condition-it-reported-self-heals spec). The
+  // downgrade is scoped to the two escalation-clearing action keys — `keep_escalated_ceo_owned` /
+  // `keep_escalated_needs_attention` / `noop` are already preserving and pass through untouched.
+  const clearsEscalation =
+    raw.action_key === "close_and_deescalate" || raw.action_key === "deescalate_only";
+  const remedyRetires = input.decision === "approve_remedy" && input.remedyResolved === true;
+  if (clearsEscalation && !remedyRetires && isAwaitingFounderRuling(input.priorEscalation)) {
+    return {
+      action_key: "keep_escalated_founder_ruling_pending",
+      patch: founderRulingPendingPatch(input.now),
+    };
+  }
+  return raw;
+}
+
+function decideRawTransition(input: CsDirectorTransitionInput): CsDirectorTicketTransition {
   switch (input.decision) {
     case "author_spec": {
       // Phase 2 of cs-director-spec-claim-must-match-the-actual-write — close ONLY on a confirmed
