@@ -64,6 +64,7 @@
     "test:predeploy-guard-extract": "tsx --test src/lib/predeploy-guard-extract.test.ts",
     "test:chain-advance-selector": "tsx --test src/lib/agent-jobs.chain-advance-selector.test.ts",
     "test:platform-director-escalation-dedupe": "tsx --test src/lib/agents/platform-director-escalation-dedupe.test.ts",
+    "test:cs-director-transition": "tsx --test src/lib/cs-director-ticket-transition.test.ts",
     "test:autonomous-markdown-default-check": "tsx --test src/lib/author-spec.autonomous-markdown-default-check.test.ts",
     "test:pr-resolve-input-keyed-retries": "tsx --test src/lib/github-pr-resolve.input-keyed-retries.test.ts",
     "test:customer-find": "tsx --test src/lib/customer-find.test.ts",
