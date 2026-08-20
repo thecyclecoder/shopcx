@@ -17,7 +17,11 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decideCsDirectorTicketTransition } from "./cs-director-ticket-transition";
+import {
+  FOUNDER_RULING_PREFIX,
+  decideCsDirectorTicketTransition,
+  isAwaitingFounderRuling,
+} from "./cs-director-ticket-transition";
 
 const NOW = "2026-07-08T12:00:00.000Z";
 
@@ -351,6 +355,199 @@ test("june-authored-specs-carry-machine-runnable-checks Phase 2 — a failed aut
   // Escalation not cleared (escalated_at stays), reason stamped.
   assert.equal(t.patch.escalated_at, undefined);
   assert.match(String(t.patch.escalation_reason), /author_spec FAILED \(author_spec_threw\)/);
+});
+
+// ── Phase 1 of a-cs-director-verdict-cannot-clear-an-unruled-founder-escalation ──
+// Motivating case: ticket c969f235 (G esposito, 2026-08-18). June ruled `escalate_founder` at
+// 15:53 (escalation_reason='CEO — awaits founder ruling: …'), a second June session ruled
+// `author_spec` at 16:36, and the pre-change transition unconditionally closed + cleared the
+// founder escalation with no card + no note. The customer's 16:53 reply reopened the ticket
+// UNESCALATED, so it read as a dropped hand-off and sat invisible to the founder for 19h on a
+// $1,628-LTV customer. The invariant these tests pin: while `escalation_reason` still carries
+// the `CEO — awaits founder ruling:` prefix (an earlier `escalate_founder` verdict stamped it),
+// a later verdict that would clear the escalation is DOWNGRADED to
+// `keep_escalated_founder_ruling_pending` — the ticket stays open + escalated. The single
+// exception is an `approve_remedy` that RESOLVED the customer's issue (remedyResolved===true).
+
+const FOUNDER_PRIOR = {
+  escalated_to: "founder-user-123",
+  escalation_reason: `${FOUNDER_RULING_PREFIX} Chargeback storm — needs a CEO ruling.`,
+};
+const NON_FOUNDER_PRIOR = {
+  escalated_to: "someone-else-id",
+  escalation_reason: "approval_pending: refund > threshold",
+};
+
+test("Phase 1 — isAwaitingFounderRuling predicate returns true only for the prefix the writer stamps", () => {
+  assert.equal(isAwaitingFounderRuling(FOUNDER_PRIOR), true);
+  assert.equal(isAwaitingFounderRuling(NON_FOUNDER_PRIOR), false);
+  assert.equal(isAwaitingFounderRuling(null), false);
+  assert.equal(isAwaitingFounderRuling(undefined), false);
+  assert.equal(isAwaitingFounderRuling({ escalation_reason: null } as { escalation_reason: string | null }), false);
+  assert.equal(isAwaitingFounderRuling({ escalation_reason: "" }), false);
+  // Keyed on the prefix, not on `escalated_to` (raiseJuneRemedyApproval also stamps that column).
+  assert.equal(
+    isAwaitingFounderRuling({ escalation_reason: `${FOUNDER_RULING_PREFIX} …` }),
+    true,
+  );
+});
+
+test("Phase 1 — author_spec on a founder-escalated ticket is DOWNGRADED to keep_escalated_founder_ruling_pending (ticket c969f235 — the 16:36 second-session verdict must not clear the 15:53 founder page)", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "author_spec",
+    reasoning: "Analyzer gap — repeat coupon routing.",
+    authorSpecOutcome: { specWritten: true },
+    priorEscalation: FOUNDER_PRIOR,
+    now: NOW,
+  });
+  assert.equal(t.action_key, "keep_escalated_founder_ruling_pending");
+  // The ticket must stay OPEN — the phantom close was half the c969f235 miss.
+  assert.equal(t.patch.status, undefined);
+  assert.equal(t.patch.closed_at, undefined);
+  assert.equal(t.patch.resolved_at, undefined);
+  assert.equal(t.patch.assigned_to, undefined);
+  // The founder escalation must be PRESERVED — no null-outs.
+  assert.equal(t.patch.escalated_at, undefined);
+  assert.equal(t.patch.escalated_to, undefined);
+  assert.equal(t.patch.escalation_reason, undefined);
+  // The pre-escalation playbook IS cleared (the founder-owned escalation supersedes it) and
+  // updated_at is stamped so the change is visible to reader tools.
+  assert.equal(t.patch.active_playbook_id, null);
+  assert.equal(t.patch.playbook_step, 0);
+  assert.equal(t.patch.playbook_exceptions_used, 0);
+  assert.equal(t.patch.updated_at, NOW);
+});
+
+test("Phase 1 — close_no_action on a founder-escalated ticket is DOWNGRADED (a 'nothing to do' verdict must not silently retire the founder page)", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "close_no_action",
+    reasoning: "Phantom charge — nothing to do here.",
+    priorEscalation: FOUNDER_PRIOR,
+    now: NOW,
+  });
+  assert.equal(t.action_key, "keep_escalated_founder_ruling_pending");
+  assert.equal(t.patch.status, undefined);
+  assert.equal(t.patch.escalated_at, undefined);
+  assert.equal(t.patch.escalation_reason, undefined);
+});
+
+test("Phase 1 — message_only on a founder-escalated ticket is DOWNGRADED (a customer message alone cannot retire an unruled founder page)", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "message_only",
+    reasoning: "Customer explanation — no money mutation.",
+    remedy: { customer_message: "Here's what happened…" },
+    priorEscalation: FOUNDER_PRIOR,
+    now: NOW,
+  });
+  assert.equal(t.action_key, "keep_escalated_founder_ruling_pending");
+  assert.equal(t.patch.status, undefined);
+  assert.equal(t.patch.escalated_at, undefined);
+});
+
+test("Phase 1 — approve_remedy UNRESOLVED on a founder-escalated ticket is DOWNGRADED (deescalate_only would have cleared the founder page)", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "approve_remedy",
+    reasoning: "Refund + reply.",
+    remedy: { kind: "refund_order", customer_reply: "We caught the pricing error…" },
+    remedyResolved: false,
+    priorEscalation: FOUNDER_PRIOR,
+    now: NOW,
+  });
+  assert.equal(t.action_key, "keep_escalated_founder_ruling_pending");
+  assert.equal(t.patch.status, undefined);
+  assert.equal(t.patch.escalated_at, undefined);
+  assert.equal(t.patch.escalation_reason, undefined);
+});
+
+test("Phase 1 — approve_remedy RESOLVED on a founder-escalated ticket STILL closes + clears (a resolved issue retires its own escalation)", () => {
+  // The single exception to the sticky invariant — same principle as the shipped
+  // an-escalation-retires-itself-when-the-condition-it-reported-self-heals spec: if the mutator
+  // actually fired the actions + delivered the reply, the customer's issue is resolved and the
+  // founder page it caused is no longer needed. Close + clear.
+  const t = decideCsDirectorTicketTransition({
+    decision: "approve_remedy",
+    reasoning: "Return for full refund + reply — executed cleanly.",
+    remedy: { kind: "refund_return", customer_message: "Send the tabs back with the label…" },
+    remedyResolved: true,
+    priorEscalation: FOUNDER_PRIOR,
+    now: NOW,
+  });
+  assert.equal(t.action_key, "close_and_deescalate");
+  assert.equal(t.patch.status, "closed");
+  assert.equal(t.patch.escalated_at, null);
+  assert.equal(t.patch.escalated_to, null);
+  assert.equal(t.patch.escalation_reason, null);
+});
+
+test("Phase 1 — absent priorEscalation reproduces today's behavior for every verdict (a read failure must NEVER strand a ticket escalated forever)", () => {
+  // author_spec confirmed write — still close+clear
+  let t = decideCsDirectorTicketTransition({
+    decision: "author_spec",
+    reasoning: "x",
+    authorSpecOutcome: { specWritten: true },
+    now: NOW,
+  });
+  assert.equal(t.action_key, "close_and_deescalate");
+  // close_no_action — still close+clear
+  t = decideCsDirectorTicketTransition({ decision: "close_no_action", reasoning: "x", now: NOW });
+  assert.equal(t.action_key, "close_and_deescalate");
+  // approve_remedy unresolved — still deescalate_only
+  t = decideCsDirectorTicketTransition({
+    decision: "approve_remedy",
+    reasoning: "x",
+    remedy: { kind: "refund_order", customer_reply: "…" },
+    now: NOW,
+  });
+  assert.equal(t.action_key, "deescalate_only");
+  // explicit null — same as absent
+  t = decideCsDirectorTicketTransition({
+    decision: "close_no_action",
+    reasoning: "x",
+    priorEscalation: null,
+    now: NOW,
+  });
+  assert.equal(t.action_key, "close_and_deescalate");
+});
+
+test("Phase 1 — a ticket escalated with a NON-founder reason still closes + clears (the invariant is scoped to the founder-ruling prefix, not to any escalation)", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "author_spec",
+    reasoning: "Analyzer gap.",
+    authorSpecOutcome: { specWritten: true },
+    priorEscalation: NON_FOUNDER_PRIOR,
+    now: NOW,
+  });
+  assert.equal(t.action_key, "close_and_deescalate");
+  assert.equal(t.patch.status, "closed");
+  assert.equal(t.patch.escalation_reason, null);
+});
+
+test("Phase 1 — the downgrade does NOT touch keep_escalated_ceo_owned (a fresh escalate_founder verdict re-stamps the reason and passes through)", () => {
+  // A second June session re-escalating the same ticket must still stamp the fresh reason line
+  // (with the current session's reasoning) — the downgrade only fires on the two clearing keys.
+  const t = decideCsDirectorTicketTransition({
+    decision: "escalate_founder",
+    reasoning: "Additional context — still needs CEO.",
+    priorEscalation: FOUNDER_PRIOR,
+    now: NOW,
+  });
+  assert.equal(t.action_key, "keep_escalated_ceo_owned");
+  assert.match(String(t.patch.escalation_reason), /Additional context/);
+});
+
+test("Phase 1 — the downgrade does NOT touch keep_escalated_needs_attention (a failed author_spec on a founder-escalated ticket still stamps the failure reason)", () => {
+  // If the second-session verdict was `author_spec` that FAILED to write, keep_escalated_needs_
+  // attention is already a preserving transition — do NOT downgrade it (the failure-reason stamp
+  // is more informative than the founder-ruling-pending stamp already on the row).
+  const t = decideCsDirectorTicketTransition({
+    decision: "author_spec",
+    reasoning: "Bug identified.",
+    authorSpecOutcome: { specWritten: false, reason: "author_spec_write_returned_false" },
+    priorEscalation: FOUNDER_PRIOR,
+    now: NOW,
+  });
+  assert.equal(t.action_key, "keep_escalated_needs_attention");
+  assert.match(String(t.patch.escalation_reason), /author_spec FAILED/);
 });
 
 test("june-authored-specs-carry-machine-runnable-checks Phase 2 — a failed author_spec WITHOUT a resolvable ceoUserId still keeps-escalated (escalated_to left untouched — the CEO card is the surface)", () => {
