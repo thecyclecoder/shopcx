@@ -3,6 +3,7 @@ import { errText } from "@/lib/error-text";
 import { jsonOk, jsonErr, findCustomer, logPortalAction, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { vaultAndMigratePaymentMethod } from "@/lib/vault-and-migrate-payment-method";
+import { VaultCreateError } from "@/lib/integrations/braintree-customer";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
@@ -60,14 +61,44 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
     saved = { id: result.paymentMethodId };
     migratedCount = result.migratedCount;
   } catch (e) {
-    // Full lossless diagnostic stays in the server log; the public 502 body carries the stable
+    // Full lossless diagnostic stays in the server log; the public body carries the stable
     // error code only (Fix 1 of lossless-error-diagnostics-no-object-object — errText's
     // PostgREST code/details/hint output would leak DB internals to a customer-authenticated
     // portal caller). `no_braintree_customer` is a stable throw-key from the vault helper — a
     // control-flow signal — so it is safe to surface as an error code.
+    //
+    // Vault classification (spec-classify-portal-vault-failed-card-declines-...):
+    // `vaultPaymentMethod` throws a typed [[../../integrations/braintree-customer:VaultCreateError]]
+    // carrying `code='vault_declined'` on a processor decline / gateway rejection
+    // (the customer's own issuer or the merchant's Braintree risk rule said no)
+    // and `code='vault_error'` on anything else (SDK broken, connectivity,
+    // misconfig). A DECLINE is a customer-fixable soft error — return HTTP 400
+    // with `error: 'vault_declined'` + a plain-language customer `message`
+    // (the raw processor text may include PCI-adjacent surface text; we surface
+    // our own guidance instead). [[portal__route]]'s VALIDATION_ERRORS set
+    // (which now includes `vault_declined`) stops the "portal action needs
+    // help" ticket from spawning at all, and [[portal__remediation]]'s
+    // dismiss branch is the belt-and-suspenders backstop for anything that
+    // reaches classification via another path.
+    //
+    // A genuine gateway/config `vault_error` keeps returning HTTP 502
+    // `{ error: 'vault_failed' }` (unchanged) so real Braintree outages still
+    // surface on the human/monitor path — `[portal/payment-method-update] vault
+    // failed:` is the exact log prefix that [[../control-tower/error-feed]]'s
+    // marker-based decline / rejection drop filters key off, so the log line
+    // stays intact regardless of classification.
     const msg = errText(e);
     console.error(`[portal/payment-method-update] vault failed: ${msg}`);
     if (msg === "no_braintree_customer") return jsonErr({ error: "no_braintree_customer" }, 400);
+    if (e instanceof VaultCreateError && e.code === "vault_declined") {
+      return jsonErr(
+        {
+          error: "vault_declined",
+          message: "That card was declined. Please check the number, expiry, and CVV, or try another card.",
+        },
+        400,
+      );
+    }
     return jsonErr({ error: "vault_failed" }, 502);
   }
 

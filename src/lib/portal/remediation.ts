@@ -175,6 +175,25 @@ export function classifyPortalFailure(
         "Remove-payment-method guard rejection. The portal already tells the customer to switch that sub's card, add a replacement first, or remove via the Shopify account — nothing for a human to do.",
     };
   }
+  // vault_declined is the SAFE code payment-method-update returns when the vault
+  // helper's typed VaultCreateError is classified as a processor decline (the
+  // customer's own issuer said no) or a gateway rejection (the merchant's own
+  // Braintree risk rule said no). Cards are customer-only by PCI design — the
+  // portal already tells the customer to check number/expiry/CVV or try another
+  // card, and no agent/human can vault a card for them. Belt-and-suspenders with
+  // the PRIMARY suppression in [[portal__route]]'s VALIDATION_ERRORS set (stops
+  // the ticket spawning at all). A genuine gateway/config error (SDK broken,
+  // misconfig, no_braintree_customer, etc.) keeps returning vault_failed and
+  // falls through to the human branch below so a real Braintree outage still
+  // surfaces. Real case: ticket ea66c607 (24 retries, 22 tickets on the same
+  // decline class before this fix).
+  if (e.includes("vault_declined")) {
+    return {
+      disposition: "dismiss",
+      reason:
+        "Card decline / gateway rejection on vault. The portal already tells the customer to check the card number, expiry, and CVV or try another card — cards are customer-only by PCI design, nothing for a human to do.",
+    };
+  }
 
   // ── Transient Appstle/infra errors → retry ──
   const transient =

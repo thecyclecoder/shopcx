@@ -91,6 +91,29 @@ for (const code of [
   });
 }
 
+// ── vault_declined (portal-vault-classify-processor-decline-vs-error spec) ──
+//
+// vaultPaymentMethod throws a typed VaultCreateError with code='vault_declined'
+// on a processor decline / gateway rejection (customer's own issuer or the
+// merchant's risk rule saying no). payment-method-update surfaces that as
+// { error: 'vault_declined' } (HTTP 400 — customer-fixable, not a 5xx). Cards
+// are customer-only by PCI design, so a clean decline has nothing for a human
+// to do — dismiss. Real case: ticket ea66c607, 24 retries and 22 tickets on
+// the same class of decline before the fix. The primary suppression is
+// [[portal__route]]'s VALIDATION_ERRORS set (stops the ticket at all); this
+// classifier is the backstop for any that predate the guard or reach it via
+// another path. A genuine gateway/config error still returns vault_failed and
+// classifies as human (SDK broken, misconfig, no_braintree_customer, etc.).
+test("vault_declined (processor decline / gateway rejection) → dismiss", () => {
+  const r = classifyPortalFailure(ctx("vault_declined", { route: "updatePaymentMethod" }));
+  assert.equal(r.disposition, "dismiss");
+});
+
+test("vault_failed (genuine gateway/config error) still → human", () => {
+  const r = classifyPortalFailure(ctx("vault_failed", { route: "updatePaymentMethod" }));
+  assert.equal(r.disposition, "human");
+});
+
 // ── healPortalAction: frequency route case (portal-remediation-frequency-route-replay spec) ──
 //
 // Before Phase 1, `ctx.route === "frequency"` fell through to the default branch
