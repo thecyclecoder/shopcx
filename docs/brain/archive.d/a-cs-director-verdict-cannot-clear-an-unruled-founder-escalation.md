@@ -1,0 +1,1 @@
+- **A CS-director verdict cannot silently clear a founder escalation nobody ruled on** · verified 2026-08-20 · → [[../libraries/cs-director]]
