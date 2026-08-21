@@ -1757,7 +1757,14 @@ export const directActionHandlers: Record<
   },
 
   redeem_points: async (ctx, p) => {
-    const { getLoyaltySettings, getRedemptionTiers, validateRedemption, spendPoints } = await import("@/lib/loyalty");
+    const {
+      getLoyaltySettings,
+      getRedemptionTiers,
+      validateRedemption,
+      spendPoints,
+      getMemberByCustomerId,
+      getLinkedShopifyCustomerIds,
+    } = await import("@/lib/loyalty");
     const { getShopifyCredentials } = await import("@/lib/shopify-sync");
     const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
 
@@ -1766,12 +1773,15 @@ export const directActionHandlers: Record<
     const tier = tiers[p.tier_index!];
     if (!tier) return { success: false, error: "Invalid tier" };
 
-    const { data: member } = await ctx.admin
-      .from("loyalty_members")
-      .select("*")
-      .eq("customer_id", ctx.customerId)
-      .eq("workspace_id", ctx.workspaceId)
-      .single();
+    // Resolve the member across the customer_links group. The old
+    // `.eq('customer_id', ctx.customerId)` fast-path returned 'No loyalty
+    // member' whenever the loyalty_members row lived on a sibling profile
+    // (ticket e4d34bba — 16,147 points earned on itsjenrogers@yahoo.com
+    // but the member row lives on jmartwick@yahoo.com). Route through the
+    // link-group-aware chokepoint so points earned anywhere in the group
+    // are redeemable from any linked profile. Spec:
+    // loyalty-redeem-and-coupon-usability-span-linked-accounts Phase 1.
+    const member = await getMemberByCustomerId(ctx.workspaceId, ctx.customerId);
     if (!member) return { success: false, error: "No loyalty member" };
 
     const validation = validateRedemption(member, tier);
@@ -1786,6 +1796,21 @@ export const directActionHandlers: Record<
     const { shop, accessToken } = await getShopifyCredentials(ctx.workspaceId);
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + (settings.coupon_expiry_days || 90));
+
+    // Scope customerSelection to EVERY linked Shopify customer id, not just
+    // the aggregated member's id. Points combine across the link group but
+    // Shopify locks a discount to the customers it was minted for — a code
+    // minted only for the profile the member row lives on fails at checkout
+    // under any sibling profile ('discount code isn't available to you
+    // right now'). Falls back to the member's own shopify_customer_id when
+    // the group expansion turns up nothing (unlinked customer without a
+    // customers row hit on this workspace). Same spec.
+    const linkedShopifyIds = await getLinkedShopifyCustomerIds(ctx.workspaceId, ctx.customerId);
+    const gidSet = new Set<string>(linkedShopifyIds.map((id) => `gid://shopify/Customer/${id}`));
+    if (member.shopify_customer_id) {
+      gidSet.add(`gid://shopify/Customer/${member.shopify_customer_id}`);
+    }
+    const customerGids = [...gidSet];
 
     // Create Shopify discount via GraphQL
     const gqlRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
@@ -1810,9 +1835,7 @@ export const directActionHandlers: Record<
             usageLimit: 1,
             appliesOncePerCustomer: true,
             customerSelection: {
-              customers: {
-                add: [`gid://shopify/Customer/${member.shopify_customer_id}`],
-              },
+              customers: { add: customerGids },
             },
             combinesWith: {
               productDiscounts: settings.coupon_combines_product,
