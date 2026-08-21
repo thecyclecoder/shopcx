@@ -6,6 +6,7 @@ import {
   getRedemptionTiers,
   validateRedemption,
   spendPoints,
+  getLinkedShopifyCustomerIds,
 } from "@/lib/loyalty";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
@@ -105,6 +106,21 @@ export async function POST(request: Request) {
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + settings.coupon_expiry_days);
 
+  // Scope customerSelection to every linked Shopify customer id — a minted
+  // loyalty code has to work at checkout under any linked profile, not just
+  // the one the loyalty_members row lives on. Falls back to the member's
+  // own shopify_customer_id when the internal customer row / link group
+  // isn't resolvable. Spec:
+  // loyalty-redeem-and-coupon-usability-span-linked-accounts Phase 1.
+  const linkedShopifyIds = member.customer_id
+    ? await getLinkedShopifyCustomerIds(workspace_id, member.customer_id)
+    : [];
+  const gidSet = new Set<string>(linkedShopifyIds.map((id) => `gid://shopify/Customer/${id}`));
+  if (member.shopify_customer_id) {
+    gidSet.add(`gid://shopify/Customer/${member.shopify_customer_id}`);
+  }
+  const customerGids = [...gidSet];
+
   try {
     const { shop, accessToken } = await getShopifyCredentials(workspace_id);
 
@@ -127,9 +143,7 @@ export async function POST(request: Request) {
               usageLimit: 1,
               appliesOncePerCustomer: true,
               customerSelection: {
-                customers: {
-                  add: [`gid://shopify/Customer/${member.shopify_customer_id}`],
-                },
+                customers: { add: customerGids },
               },
               combinesWith: {
                 productDiscounts: settings.coupon_combines_product,

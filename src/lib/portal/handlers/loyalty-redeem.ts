@@ -7,6 +7,7 @@ import {
   getRedemptionTiers,
   validateRedemption,
   spendPoints,
+  getLinkedShopifyCustomerIds,
 } from "@/lib/loyalty";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
@@ -60,6 +61,19 @@ export const loyaltyRedeem: RouteHandler = async ({ auth, route, req }) => {
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + settings.coupon_expiry_days);
 
+  // Scope customerSelection to EVERY linked Shopify customer id so the minted
+  // code works at checkout under any linked profile — not just the one the
+  // loyalty_members row happens to live on. Falls back to the checking-out
+  // profile's Shopify id when we can't resolve the internal customer row.
+  // Spec: loyalty-redeem-and-coupon-usability-span-linked-accounts Phase 1.
+  const linkedShopifyIds = customer?.id
+    ? await getLinkedShopifyCustomerIds(auth.workspaceId, customer.id)
+    : [];
+  const gidSet = new Set<string>(linkedShopifyIds.map((id) => `gid://shopify/Customer/${id}`));
+  if (auth.loggedInCustomerId) gidSet.add(`gid://shopify/Customer/${auth.loggedInCustomerId}`);
+  if (member.shopify_customer_id) gidSet.add(`gid://shopify/Customer/${member.shopify_customer_id}`);
+  const customerGids = [...gidSet];
+
   try {
     const { shop, accessToken } = await getShopifyCredentials(auth.workspaceId);
 
@@ -81,7 +95,7 @@ export const loyaltyRedeem: RouteHandler = async ({ auth, route, req }) => {
               usageLimit: 1,
               appliesOncePerCustomer: true,
               customerSelection: {
-                customers: { add: [`gid://shopify/Customer/${member.shopify_customer_id}`] },
+                customers: { add: customerGids },
               },
               combinesWith: {
                 productDiscounts: settings.coupon_combines_product,

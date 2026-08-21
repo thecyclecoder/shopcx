@@ -165,6 +165,50 @@ export async function getMembersInLinkGroup(
   return (rows ?? []) as LoyaltyMember[];
 }
 
+/**
+ * Return every distinct `customers.shopify_customer_id` in the same
+ * link group as `customerId` — the set of Shopify customer identities
+ * that a minted loyalty coupon must be redeemable by so the whole
+ * linked-account person can use their reward regardless of which
+ * profile they check out under.
+ *
+ * A Shopify discount minted via `customerSelection.customers.add`
+ * locks the code to one Shopify customer, so a code minted for the
+ * profile that owns the loyalty_members row is unusable at checkout
+ * under any sibling profile ('discount code isn't available to you
+ * right now'). Callers pass this list — not just
+ * `member.shopify_customer_id` — into `customerSelection.customers.add`
+ * so any linked profile can redeem at checkout.
+ *
+ * Precedent: ticket e4d34bba-7b72-48fd-b041-f0c6e1db3426 (Jennifer
+ * Rogers — 16,147 points earned on itsjenrogers@yahoo.com but the
+ * member row lives on the linked jmartwick@yahoo.com profile, and
+ * every prior LOYALTY-* coupon was pinned to jmartwick's Shopify id,
+ * so nothing worked at checkout).
+ *
+ * Falls back to `[customerId → customers.shopify_customer_id]` when
+ * the customer is unlinked, and to `[]` when nothing in the group
+ * has a `shopify_customer_id` on file. Spec:
+ * loyalty-redeem-and-coupon-usability-span-linked-accounts Phase 1.
+ */
+export async function getLinkedShopifyCustomerIds(
+  workspaceId: string,
+  customerId: string,
+): Promise<string[]> {
+  const admin = createAdminClient();
+  const linkedIds = await expandLinkedCustomerIds(workspaceId, customerId);
+  const { data: rows } = await admin
+    .from("customers")
+    .select("shopify_customer_id")
+    .eq("workspace_id", workspaceId)
+    .in("id", linkedIds);
+  const ids = new Set<string>();
+  for (const r of (rows ?? []) as Array<{ shopify_customer_id?: string | null }>) {
+    if (r.shopify_customer_id) ids.add(String(r.shopify_customer_id));
+  }
+  return [...ids];
+}
+
 export async function getMember(
   workspaceId: string,
   shopifyCustomerId: string,
