@@ -32,6 +32,18 @@
  * Money-safety guardrail: the established baseline is clamped to the active
  * 50%-MSRP floor — we never propose restoring a customer below the floor the
  * pricing cleanup raised everyone to ([[tables/policies]] subscription-pricing).
+ *
+ * Sustained-rate baseline: the "established" rate is a sustained demonstrated
+ * rate — either held across ≥N consecutive recent renewals, or the mode of
+ * post-swap history with ≥N total occurrences — NEVER a single `Math.min` over
+ * one-off promo/introductory orders. Pre-swap-reset history is excluded (a
+ * variant swap resets the price lock, per [[subscriptions]] price-lock-scope):
+ * walking prior orders back, the first order that did not carry this variant
+ * marks the swap-away boundary and truncates the history. When no sustained
+ * rate exists, the detector abstains on that line. Ticket
+ * b99f495e-7717-4553-a1bd-d095bb082094 is the ground-truth case (two disparate
+ * promo renewals + swap-away-and-back → old code auto-proposed an improper
+ * refund + a permanent below-floor restore; hardened detector abstains).
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { resolveLineSnsPct } from "@/lib/appstle-pricing";
@@ -41,6 +53,17 @@ type Admin = ReturnType<typeof createAdminClient>;
 /** $1 and 2% — below this a per-unit difference is rounding/tax noise, not an overcharge. */
 const MATERIAL_OVERCHARGE_CENTS = 100;
 const MATERIAL_OVERCHARGE_PCT = 0.02;
+
+/**
+ * Minimum support for a rate to count as "sustained" — either held across this
+ * many CONSECUTIVE recent renewals, or the mode of post-swap history with at
+ * least this many occurrences. A single Math.min over one-off promo orders is
+ * not a locked rate; the CEO 2026-08-01 ruling honors a demonstrated rate only
+ * over a sustained window. Ticket b99f495e-7717-4553-a1bd-d095bb082094 is the
+ * ground-truth case (two disparate promo renewals at $26.96 + $35.95 → no
+ * sustained baseline → no false overcharge).
+ */
+export const SUSTAINED_BASELINE_MIN_SUPPORT = 3;
 
 export interface OverchargeLine {
   variant_id: string;
@@ -177,6 +200,74 @@ export async function detectOvercharge(
   return detectForSubscription(admin, workspaceId, sub as SubRow, (orders as OrderRow[]) || [], catalog);
 }
 
+/**
+ * Post-swap variant history. Given `prior` orders sorted newest→oldest, walk
+ * back and collect this variant's per-unit prices UNTIL an order is reached
+ * that did not carry the variant — that's the swap-away boundary and anything
+ * older is stale. A per-line variant-swap on an Appstle/internal subscription
+ * resets the price lock to current pricing ([[subscriptions]] price-lock-
+ * scope), so pre-boundary rates cannot be treated as still-locked. A prior
+ * order that carries the variant but with a missing/zero `price_cents` is
+ * counted as still on-variant (does not cross the boundary) but contributes
+ * no rate. Exported for unit tests.
+ */
+export function postSwapVariantHistory(
+  prior: Array<{
+    line_items:
+      | Array<{ variant_id?: string | number; price_cents?: number }>
+      | null;
+  }>,
+  variantId: string,
+): number[] {
+  const out: number[] = [];
+  for (const o of prior) {
+    const match = (o.line_items || []).find(
+      (li) => String(li.variant_id || "") === variantId,
+    );
+    if (!match) break; // swap-away boundary
+    if (match.price_cents) out.push(match.price_cents);
+  }
+  return out;
+}
+
+/**
+ * Sustained-baseline resolver. Given a variant's per-unit history (newest→
+ * oldest, post-swap-reset), return the RELIABLE rate — either the rate held
+ * across ≥`minSupport` consecutive most-recent renewals, or the mode with
+ * ≥`minSupport` total occurrences (tie-broken by the lowest rate — a customer
+ * who paid two rates equally often is grandfathered at the cheaper one). Returns
+ * null when no rate meets the threshold, in which case the detector must
+ * abstain: a single Math.min over unstable/promo history is not a locked rate.
+ * Exported so unit tests can pin the predicate without a live DB.
+ */
+export function sustainedBaseline(
+  history: number[],
+  minSupport: number = SUSTAINED_BASELINE_MIN_SUPPORT,
+): number | null {
+  if (history.length < minSupport) return null;
+  // Run of consecutive same-rate entries at the head (most recent).
+  const head = history[0];
+  let run = 1;
+  for (let i = 1; i < history.length; i++) {
+    if (history[i] === head) run++;
+    else break;
+  }
+  if (run >= minSupport) return head;
+  // Mode with support ≥ minSupport, tie-broken by the lowest rate.
+  const counts = new Map<number, number>();
+  for (const p of history) counts.set(p, (counts.get(p) || 0) + 1);
+  let best: number | null = null;
+  let bestCount = 0;
+  for (const [rate, count] of counts) {
+    if (count < minSupport) continue;
+    if (count > bestCount || (count === bestCount && best != null && rate < best)) {
+      best = rate;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
 async function loadVariantCatalog(
   admin: Admin,
   workspaceId: string,
@@ -223,12 +314,13 @@ async function detectForSubscription(
     const qty = item.quantity || 1;
     if (currentPerUnit <= 0) continue;
 
-    // Historical per-unit prices for this variant across prior renewals.
-    const history: number[] = [];
-    for (const o of prior) {
-      const match = (o.line_items || []).find((li) => String(li.variant_id || "") === variantId);
-      if (match?.price_cents) history.push(match.price_cents);
-    }
+    // Historical per-unit prices for this variant across prior renewals, sorted
+    // newest→oldest and TRUNCATED at the most recent variant-swap boundary. A
+    // variant swap resets the price lock ([[subscriptions]] price-lock-scope),
+    // so pre-swap history is stale — walking back, the first prior order that
+    // did NOT carry this variant marks the swap-away point; anything older is
+    // dropped from the baseline computation.
+    const history = postSwapVariantHistory(prior, variantId);
     if (!history.length) continue;
 
     const cat = catalog.get(variantId);
@@ -236,10 +328,18 @@ async function detectForSubscription(
     const floor = msrp > 0 ? Math.round(msrp * 0.5) : 0;
     const standard = msrp > 0 ? Math.round(msrp * 0.75) : 0;
 
-    // The lowest rate the customer was reliably paying — the locked grandfathered
-    // rate. Clamp UP to the 50% floor: history below the floor was raised by the
-    // pricing cleanup and can no longer be re-offered (active policy).
-    const baselinePerUnit = Math.min(...history);
+    // The rate the customer was RELIABLY paying — a sustained locked rate
+    // (mode with ≥N support, or ≥N consecutive renewals at the same rate) over
+    // the post-swap history. A single Math.min over one-off promo orders is
+    // NOT a locked rate: ticket b99f495e (two disparate promo renewals at
+    // $26.96 + $35.95 rising with quantity) is the ground-truth case where a
+    // Math.min baseline auto-proposed an improper refund + a permanent
+    // below-floor price restore. When no sustained rate exists we skip
+    // detection on this line (no baseline → no signal). Clamp UP to the 50%
+    // floor: history below the floor was raised by the pricing cleanup and
+    // can no longer be re-offered (active policy).
+    const baselinePerUnit = sustainedBaseline(history, SUSTAINED_BASELINE_MIN_SUPPORT);
+    if (baselinePerUnit == null) continue;
     const expectedPerUnit = msrp > 0 ? Math.max(baselinePerUnit, floor) : baselinePerUnit;
 
     // Shape 1: current per-unit materially above the established baseline.
