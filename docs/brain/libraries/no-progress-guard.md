@@ -30,15 +30,22 @@ Returns `streak >= NO_PROGRESS_M`.
 DB-touching wrapper that:
 1. Fetches the latest 30 `ticket_messages` (asc). 30 is enough to cover the streak + the last reset point comfortably.
 2. Runs the pure predicates above.
-3. If tripped, writes `escalated_at = now(), escalation_reason = "no_progress_context_cap", updated_at = now()` via a **compare-and-set** guarded update: `.eq("id", ticketId).eq("workspace_id", workspaceId).is("escalated_at", null).select("id")`. This is the guard-before-mutation pattern the director coaching mandates — an async race with a human who just escalated to a real owner doesn't get overwritten.
-4. Drops a `[System]` note **only when the escalation write actually landed** (one-off, not spammed on every consecutive stuck turn).
-5. Returns `{ tripped, streak }`.
+3. **Routine-cancel in-leash re-send (ticket-`6c12a925` fix)** — if any of the streak inbounds trips [[cancel-journey-guard]] `looksLikeCancelIntent`, calls `attemptCancelJourneyResend` (see below). On a successful launch, drops an explanatory `[System]` note and returns `{tripped: true, streak, resent: true}` — escalation is **skipped** (the ticket is progressing again). The launcher's own `directToCancelTerminal` auto-detect makes sure a customer with a prior `saved_%` outcome isn't re-offered the same save.
+4. Otherwise, writes `escalated_at = now(), escalation_reason = "no_progress_context_cap", updated_at = now()` via a **compare-and-set** guarded update: `.eq("id", ticketId).eq("workspace_id", workspaceId).is("escalated_at", null).select("id")`. This is the guard-before-mutation pattern the director coaching mandates — an async race with a human who just escalated to a real owner doesn't get overwritten.
+5. Drops a `[System]` note **only when the escalation write actually landed** (one-off, not spammed on every consecutive stuck turn).
+6. Returns `{ tripped, streak, resent }`.
 
 Even when the compare-and-set matches zero rows (someone else escalated first), the return still reports `tripped: true` so the caller still short-circuits — a stuck loop must not keep paying for Opus just because a human already owns the ticket.
 
+## `attemptCancelJourneyResend(admin, workspaceId, ticketId)`
+
+Look up the active `cancel_subscription` journey for the workspace ([[../tables/journey_definitions]] `is_active=true`) and launch it via [[journey-delivery]] `launchJourneyForTicket` with `directToCancelTerminal: true`. Returns `false` (no re-send) when any of the required inputs is missing: ticket row not found, ticket has no channel or `customer_id`, no active cancel journey for the workspace. Kept exported so a future Sol cheap-execution path can invoke it directly without going through the no-progress circuit.
+
+**The re-send is not a cancel-for-the-customer path.** It delivers a CTA the customer clicks to complete cancellation via their own confirm button on the mini-site ([[../journeys/cancel]] § "Route past remedies on re-request"). The action-executor's `directActionHandlers` still exposes no cancel action; the north-star self-service-only rule holds.
+
 ## Callers
 
-- [[../inngest/unified-ticket-handler]] `sonnet-orchestrate` block — runs BEFORE `pickOrchestratorModel`. When `{tripped: true}` the handler returns `{status: "no_progress_circuit_tripped", streak}` and never fires the orchestrator.
+- [[../inngest/unified-ticket-handler]] `sonnet-orchestrate` block — runs BEFORE `pickOrchestratorModel`. When `{tripped: true}` the handler returns `{status, streak}` and never fires the orchestrator; `status` is `no_progress_cancel_resent` when the routine-cancel re-send fired (in-leash progress, no escalation) or `no_progress_circuit_tripped` when the escalation path took over.
 
 ## Testing
 

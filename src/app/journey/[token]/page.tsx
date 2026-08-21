@@ -516,27 +516,39 @@ function CancelJourney({
   const [selectedRemedyAction, setSelectedRemedyAction] = useState<string | null>(null);
   const [responses, setResponses] = useState<Record<string, { value: string; label: string }>>({});
 
-  const cancelConfig = config as { cancelJourney?: boolean; metadata?: { subscriptions?: CancelSubscription[]; selectedSubscriptionId?: string } };
+  const cancelConfig = config as { cancelJourney?: boolean; directToCancelTerminal?: boolean; metadata?: { subscriptions?: CancelSubscription[]; selectedSubscriptionId?: string } };
   const metadata = cancelConfig.metadata || {};
   const subscriptions = metadata.subscriptions || [];
   const steps = ((config as { steps?: { key: string; type: string; question: string; options?: { value: string; label: string; emoji?: string }[] }[] }).steps || []);
   const reasonStep = steps.find(s => s.key === "cancel_reason");
 
+  // Route past remedies when the caller already knows the customer has
+  // rejected the offered save in words (see [[cancel-journey-guard]]).
+  // The mini-site still requires the customer's own confirm click — the
+  // flag only skips OFFERS, not the action.
+  const directToTerminal = cancelConfig.directToCancelTerminal === true;
+
   // Auto-select if single subscription, or if orchestrator pre-selected one.
   // The pre-selected case happens when Sonnet emits a journey action with a
   // contract_id — we resolve it to subscription_id at launch time and the API
   // loader stamps it onto metadata so the picker step is skipped.
+  //
+  // `directToCancelTerminal` short-circuits to `confirm_cancel` once the
+  // subscription is resolved (single-sub, pre-selected, or none) —
+  // reason/remedies/ai_chat are skipped so a customer who's already said
+  // "cancel it" in words isn't re-offered the same save.
   useEffect(() => {
+    const terminalPhase = directToTerminal ? "confirm_cancel" : "reason";
     if (metadata.selectedSubscriptionId && subscriptions.some(s => s.id === metadata.selectedSubscriptionId)) {
       setSelectedSubId(metadata.selectedSubscriptionId);
-      setPhase("reason");
+      setPhase(terminalPhase);
     } else if (subscriptions.length === 1) {
       setSelectedSubId(subscriptions[0].id);
-      setPhase("reason");
+      setPhase(terminalPhase);
     } else if (subscriptions.length === 0) {
-      setPhase("reason");
+      setPhase(terminalPhase);
     }
-  }, [subscriptions.length, metadata.selectedSubscriptionId]);
+  }, [subscriptions.length, metadata.selectedSubscriptionId, directToTerminal]);
 
   const submitStep = async (stepKey: string, value: string, label: string) => {
     setResponses(prev => ({ ...prev, [stepKey]: { value, label } }));
@@ -552,7 +564,7 @@ function CancelJourney({
     const sub = subscriptions.find(s => s.id === subId);
     const label = sub?.items.map(i => i.title).join(", ") || subId;
     await submitStep("select_subscription", subId, label);
-    setPhase("reason");
+    setPhase(directToTerminal ? "confirm_cancel" : "reason");
   };
 
   const handleSelectReason = async (value: string, label: string) => {

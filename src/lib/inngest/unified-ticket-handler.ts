@@ -2220,7 +2220,18 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         applyNoProgressCircuit(admin, wsId, tid),
       );
       if (noProgress.tripped) {
-        return { status: "no_progress_circuit_tripped", streak: noProgress.streak };
+        // Distinguish an in-leash re-send (routine cancel — customer kept
+        // asking, we launched a fresh cancel journey routed straight to
+        // confirm-cancel per docs/brain/journeys/cancel.md § "Route past
+        // remedies on re-request") from a genuine escalation so the
+        // status counter and downstream analyzer read the two outcomes
+        // separately.
+        return {
+          status: noProgress.resent
+            ? "no_progress_cancel_resent"
+            : "no_progress_circuit_tripped",
+          streak: noProgress.streak,
+        };
       }
 
       const sonnetDecision = await step.run("sonnet-orchestrate", async () => {

@@ -71,6 +71,18 @@ interface LaunchParams {
   subscriptionId?: string;  // Optional — orchestrator can pass this when it knows
                             // which sub the customer is referencing. Mini-site
                             // skips the picker step when set.
+  /**
+   * For a cancel journey only: route the mini-site straight to the
+   * confirm-cancel terminal step, skipping reason→remedies. Set by callers
+   * that KNOW the customer has already rejected the offered save in words
+   * (e.g. [[no-progress-guard]] re-send). When omitted for a cancel
+   * journey, [[cancel-journey-guard]] `hasRecentSavedRemedy` auto-detects
+   * a prior `saved_%` outcome on the same ticket and sets it. See
+   * [[../journeys/cancel]] § "Route past remedies on re-request". The
+   * customer still completes cancellation only via their own confirm
+   * button — this flag skips OFFERS, not the action.
+   */
+  directToCancelTerminal?: boolean;
 }
 
 // Every journey is live-rendered. The orchestrator's only job is to
@@ -130,7 +142,7 @@ export async function launchJourneyForTicket(params: LaunchParams): Promise<bool
  * Returns true if launched, false if channel doesn't support journeys.
  */
 async function launchJourneyForTicketInner(params: LaunchParams): Promise<boolean> {
-  const { workspaceId, ticketId, customerId, journeyId, journeyName, triggerIntent, channel, leadIn, ctaText, prependAccountLinking, subscriptionId } = params;
+  const { workspaceId, ticketId, customerId, journeyId, journeyName, triggerIntent, channel, leadIn, ctaText, prependAccountLinking, subscriptionId, directToCancelTerminal } = params;
   const admin = createAdminClient();
 
   if (channel === "social_comments") return false;
@@ -204,6 +216,38 @@ async function launchJourneyForTicketInner(params: LaunchParams): Promise<boolea
 
   if (prependAccountLinking) {
     configSnapshot = { ...configSnapshot, prependAccountLinking: true };
+  }
+
+  // ── Cancel-journey re-request guard (ticket 6c12a925) ──
+  // A customer who completed the cancel journey into a `saved_%` outcome
+  // and then re-asks to cancel must NOT see the same remedy step again.
+  // The caller can force it (no-progress resend), or we auto-detect a
+  // prior saved_% completion on this ticket. Either way we stamp the
+  // flag on config_snapshot so the mini-site (page.tsx CancelJourneyClient)
+  // jumps straight to confirm-cancel after the subscription resolves.
+  // See [[cancel-journey-guard]] `hasRecentSavedRemedy` and
+  // [[../journeys/cancel]] § "Route past remedies on re-request".
+  const { isCancelTriggerIntent, hasRecentSavedRemedy } = await import("@/lib/cancel-journey-guard");
+  let directToTerminal = directToCancelTerminal === true;
+  let autoDetected = false;
+  if (!directToTerminal && isCancelTriggerIntent(triggerIntent)) {
+    const priorSave = await hasRecentSavedRemedy(admin, workspaceId, ticketId);
+    if (priorSave.hasSavedRemedy) {
+      directToTerminal = true;
+      autoDetected = true;
+    }
+  }
+  if (directToTerminal) {
+    configSnapshot = { ...configSnapshot, directToCancelTerminal: true };
+    if (autoDetected) {
+      await admin.from("ticket_messages").insert({
+        ticket_id: ticketId,
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: "[System] Cancel journey re-launch routed past remedies — a prior saved_% outcome on this ticket has been rejected in words by the customer (see cancel-journey-guard.hasRecentSavedRemedy).",
+      });
+    }
   }
 
   // Every link pulls fresh data on every click, so a 24h expiry adds
