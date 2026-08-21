@@ -6,12 +6,30 @@ Subscription **overcharge detection + remediation plan**. Read-only detection of
 
 ## The two overcharge shapes
 
-1. **Prior steady-state renewal** — the latest renewal's per-unit realized price is materially (≥ $1 **and** ≥ 2%) above the lowest rate the customer was reliably paying on earlier renewals (silent price creep).
+1. **Prior steady-state renewal** — the latest renewal's per-unit realized price is materially (≥ $1 **and** ≥ 2%) above the **sustained** rate the customer was reliably paying on earlier renewals (silent price creep).
 2. **Dropped grandfathered base** — the sub's effective per-unit is now **≥ MSRP** while order history shows a **lower locked rate** (`baseline < MSRP×0.75`). This is the `pricingPolicy: null` landmine [[appstle-pricing]] heals: the base was dropped and the customer pays full retail on a sub that used to be discounted. Sets `dropped_base: true`.
 
 ## Money-safety guardrail
 
 The established baseline is **clamped UP to the 50%-MSRP floor** — we never propose restoring a customer below the floor the pricing cleanup raised everyone to ([[../tables/policies]] subscription pricing, [[../operational-rules]]). If the floor-clamp eats the delta, no overcharge is emitted. This keeps detection from ever contradicting the active floor policy.
+
+## Sustained-rate baseline (never a single `Math.min`)
+
+The "established" rate is a **sustained demonstrated rate** — a single lowest-order-wins `Math.min` over promo/introductory renewals is NOT a locked rate and previously auto-proposed improper refunds + permanent below-floor restores. Ticket `b99f495e-7717-4553-a1bd-d095bb082094` (Charlene Tso, sub 27843461293) is the ground-truth failure: two disparate promo renewals ($26.96 qty1 · $35.95 qty2, both below the 50% floor) were fed into `Math.min` → detector flagged the renewal at the standard $59.96/unit (= MSRP × 0.75) as a $59.94 overcharge and proposed `partial_refund $59.94 + restore base $53.31` (=$39.98/unit, the exact 50% floor). The CEO 2026-08-01 ruling honors a demonstrated rate only over a sustained window.
+
+`sustainedBaseline(history, minSupport=3)` (exported from `src/lib/subscription-overcharge.ts`) is the predicate. It resolves the baseline in this order:
+
+1. **Head-run path** — walk newest→oldest; if the most-recent `≥ minSupport` renewals all share the same rate, return that rate. This captures a recent price change that has stuck (e.g. a customer moved from $40 to $50 for the last 3 renewals — the current locked rate is $50, not the old $40).
+2. **Mode path** — the rate with the most occurrences in the (post-swap) history, requiring `≥ minSupport` support. Tie-broken by the LOWEST rate (grandfathered at the cheaper one). Catches a stable customer whose recent renewals have one-off dips/spikes that don't break the underlying locked rate.
+3. **Abstain** — no rate meets the threshold → return `null` and the detector skips the line (no signal). Better a missed detection than a false-positive refund on unstable/promo history.
+
+Rate comparisons are exact-cents equality. `SUSTAINED_BASELINE_MIN_SUPPORT = 3` (the module constant) is the floor; a support of 2 would reintroduce the ticket b99f495e failing state.
+
+## Variant-swap lock reset (excluded from the baseline)
+
+A per-line **variant swap resets the price lock** ([[../tables/subscriptions]] price-lock-scope) — pre-swap rates are stale and must not seed the sustained-baseline computation. Charlene swapped Mixed Berry → Peach Mango → Mixed Berry; the pre-return Mixed Berry history was still-locked-looking in the old detector because it grouped by `variant_id` and never checked for swap-away-and-back.
+
+`postSwapVariantHistory(prior, variantId)` (exported) is the walk. Given `prior` orders sorted newest→oldest it collects per-unit prices for the target variant UNTIL the first order that did NOT carry the variant — that order marks the swap-away boundary and everything older is dropped. A prior order that carries the variant but with a missing/zero `price_cents` is on-variant (does not cross the boundary) but contributes no rate. The sustained-baseline predicate runs on the truncated result.
 
 ## The sanctioned source rule
 
@@ -28,6 +46,9 @@ The established baseline is **clamped UP to the 50%-MSRP floor** — we never pr
 - **`buildOverchargePlan(signal) → OverchargePlan`** — the deterministic playbook: `partial_refund(delta)` on the overcharging order + `update_line_item_price(restore_base_cents)` per line + `reply_points`. **Never emits migrate-to-internal** — a pricing error is healed in place.
 - **`formatOverchargeForAgent(signal) → string`** — the human-readable `⚠️ OVERCHARGE DETECTED …` block (charged/expected/delta/dropped_base + per-line restore base + the remediation instruction) baked into the agent context.
 - **`deriveRestoreBase({signal, contractId, variantId, agentBaseCents, project}) → RestoreBaseDecision`** — the sanctioned-source rule for `update_line_item_price`. **The agent may TRIGGER a price correction, but may not INVENT the number.** When the signal names the target variant, its `restore_base_cents` is authoritative and the agent's proposed base is only logged when it materially diverges; when no signal names the variant, the helper refuses a RAISE (`raise_no_signal`) and refuses an immaterial change on either side of the `>= $1 AND >= 2%` materiality floor (`immaterial`) — the same test used at detection. The signal path additionally confirms via the passed-in projector that the projected realized per-unit does not exceed `line.expected_per_unit` (`exceeds_established`), so an internal sub's stacked quantity break can't overshoot the established rate. The projector callback is `(proposedBaseCents: number | null) => Promise<number | null>` — runtime wraps [[pricing]] `resolveSubscriptionPricing`, unit tests pass a fixture. Consumed by [[action-executor]] `update_line_item_price`; the audit-event source label (`overcharge_signal` / `agent_supplied`) is `decision.source`, and every refused raise fires an `agent_message` [[../tables/dashboard_notifications]] row via `isRaiseAttempt(decision.refuseReason)`.
+- **`sustainedBaseline(history, minSupport=SUSTAINED_BASELINE_MIN_SUPPORT) → number | null`** — the sustained-rate predicate (head-run wins; mode fallback with lowest-rate tie-break; abstain when no rate meets support). Unit tests in `src/lib/subscription-overcharge.sustained-baseline.test.ts`.
+- **`postSwapVariantHistory(prior, variantId) → number[]`** — walks prior orders newest→oldest and truncates at the first order missing the variant (the swap-away boundary). Feeds `sustainedBaseline`.
+- **`SUSTAINED_BASELINE_MIN_SUPPORT`** — the module-level minimum support (`3`). Below this a rate is not "reliably paid" and cannot ground an overcharge signal.
 - **`isRaiseAttempt(reason) → boolean`** — true when the refused reason names a RAISE attempt (`raise_no_signal` or `exceeds_established`). The action-executor uses this to fire the CEO-visible `dashboard_notifications` escalation on the refuse path.
 
 ## Signal shape
@@ -48,7 +69,8 @@ The established baseline is **clamped UP to the 50%-MSRP floor** — we never pr
 
 ## Gotchas
 
-- Detection needs **≥ 2 renewals** (a current + ≥ 1 prior to establish a baseline). First renewals are never flagged.
+- Detection needs **≥ 1 current + ≥ `SUSTAINED_BASELINE_MIN_SUPPORT` prior renewals** (currently 3) to establish a baseline. Early-life subs never fire an overcharge signal — the false-positive class the sustained-rate predicate closes was rooted in one/two-order histories.
+- **Variant swap resets history.** After a swap-away-and-back the baseline is computed only over post-return renewals; a customer must accumulate `SUSTAINED_BASELINE_MIN_SUPPORT` renewals on the current variant before the detector can fire on it.
 - Per-unit comparison only — never order totals (totals move with tax/shipping/qty), mirroring the orchestrator PRICE COMPARISON RULE.
 - Draft orders (`source_name = shopify_draft_order`) are excluded from the baseline and the "current" renewal.
 - `restore_base_cents` ignores quantity-break tiers (uses the sns factor only); the historical realized rate already bakes the break in, so a break-priced line restores slightly high — acceptable and customer-favorable, but note it if a sub has aggressive qty breaks.
