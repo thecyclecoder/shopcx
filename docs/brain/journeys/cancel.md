@@ -67,6 +67,18 @@ No neutral outcome — binary.
 
 `open` — ticket stays open between steps so the agent can intervene if needed.
 
+## Route past remedies on re-request
+
+Ticket `6c12a925-8851-4a07-b7be-6ba6234d842f` (Afi, 2026-08) surfaced the trap: a customer completes the cancel journey into a `saved_remedy` (accepted a pause / coupon / skip), hears **"We've updated your subscription. Thank you for staying with us!"**, then immediately re-asks in words *"Cancel my subscription"*. The next cancel-journey delivery would re-present the same remedy step; [[../action-executor]] `directActionHandlers` exposes no cancel action; [[../libraries/no-progress-guard]] escalates to human review with no in-leash tool; the subscription stays active and the customer is trapped.
+
+Structural fix:
+
+- **[[../libraries/journey-delivery]] `launchJourneyForTicket`** — for a cancel-intent launch, invokes [[../libraries/cancel-journey-guard]] `hasRecentSavedRemedy(admin, workspaceId, ticketId)` before creating the `journey_sessions` row. On a prior `saved_%` outcome for this ticket, stamps `config_snapshot.directToCancelTerminal = true` and drops an internal `[System]` note. Callers can also pass the flag explicitly.
+- **`src/app/journey/[token]/page.tsx` `CancelJourneyClient`** — reads `directToCancelTerminal` off the config. When set and the subscription is resolved (single-sub, pre-selected, or none), the phase state machine jumps straight to `confirm_cancel`, skipping subscription→reason→remedies.
+- **[[../libraries/no-progress-guard]] `applyNoProgressCircuit`** — when the 3-inbound streak trips AND [[../libraries/cancel-journey-guard]] `looksLikeCancelIntent` matches any of those inbounds, calls `attemptCancelJourneyResend` INSTEAD of escalating (in-leash progress). Returns `{tripped: true, streak, resent: true}`; the handler stamps `status='no_progress_cancel_resent'`.
+
+**Cancellation still completes only via the customer's own confirm button on the mini-site.** The `directToCancelTerminal` flag skips OFFERS, not the action. The self-service-only rule ([[../operational-rules]] § North star; [[../libraries/sol-direction-apply]] `isSelfServiceOnlyIntent`) still holds — no `directActionHandlers` cancel action is added and no `.update({status: 'cancelled'})` is written on the customer's behalf.
+
 ## Grandfathered pricing
 
 Customers with sub prices below `workspaces.coupon_price_floor_pct` of MSRP are filtered out of coupon remedies (they already have a good deal). Loyalty coupons are always allowed (separate tier system).
@@ -80,6 +92,7 @@ Customers where `subscription_age_days < billing_interval_days` get aggressive s
 | File | Purpose |
 |---|---|
 | `src/lib/cancel-journey-builder.ts` | THE builder — steps + metadata |
+| `src/lib/cancel-journey-guard.ts` | `looksLikeCancelIntent` + `hasRecentSavedRemedy` — route-past-remedies detection ([[../libraries/cancel-journey-guard]]) |
 | `src/lib/remedy-selector.ts` | Haiku remedy selection + Sonnet open-ended chat |
 | `src/lib/journey-launcher.ts` | Launcher |
 | `src/lib/journey-delivery.ts` | Channel delivery |
