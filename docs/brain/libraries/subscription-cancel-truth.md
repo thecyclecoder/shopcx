@@ -38,7 +38,7 @@ Truth for both the SDK verb (`'cancel'`) and the row-status noun (`'cancelled'`)
 
 - [[appstle]] `appstleSubscriptionAction` — direct SDK cancel path (portal / agent / playbook)
 - `src/app/api/webhooks/appstle/[workspaceId]/route.ts` — Appstle-originated cancel via webhook upsert
-- Phase 2 backfill `scripts/_backfill-cancelled-sub-truth.ts` (upcoming) will apply the same patch to historically-cancelled rows
+- `scripts/_backfill-cancelled-sub-truth.ts` — Phase 2 backfill; reuses `buildCancelTruthPatch` to reshape historically-cancelled rows, sourcing `cancelled_at` from the most-recent [[../tables/billing_forecast_events]] `event_type='cancellation'` row for the sub's `shopify_contract_id`, falling back to the sub's `updated_at` when the forecast ledger predates the sub (counted separately in the run summary). Idempotent + resumable + chunked (200/page cursor); dry-run by default, `--apply` to write. Every write is a compare-and-set on the row STILL being `cancelled` in-workspace.
 
 ## Gotchas
 
