@@ -12,6 +12,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **A CS-director verdict cannot silently clear a founder escalation nobody ruled on** · verified 2026-08-20 · → [[../libraries/cs-director]]
+- **Do not count unclaimed inbound dispatches as AI orchestrator work** · verified 2026-08-20 · → [[../libraries/control-tower]]
 - **A kill switch can always be turned back on** · verified 2026-08-18 · → [[../tables/kill_switches]]
 - **Remove-payment-method guard rejections are UI-gating validation, not 'unrecognized portal errors'** · verified 2026-08-18 · → [[../libraries/portal__route#validation-errors-that-shouldnt-create-tickets]] + [[../libraries/portal__remediation#source-prevention]] + [[../libraries/portal__handlers__remove-payment-method]] + [[../libraries/needs-attention-route#the-fix-sessions-evidence-must-contain-the-actual-failure-not-the-trailing-claude-json]]
 - **A branch security review is fresh only for the exact head SHA it reviewed** · verified 2026-08-17 · → [[../libraries/security-agent]], [[../libraries/vercel-project]], [[../libraries/preview-capture]]
