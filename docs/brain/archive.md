@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Stop segment coverage stale-tail false alerts during refresh fan-out** · verified 2026-08-22 · → [[../libraries/control-tower]]
 - **A CS-director verdict cannot silently clear a founder escalation nobody ruled on** · verified 2026-08-20 · → [[../libraries/cs-director]]
 - **Do not count unclaimed inbound dispatches as AI orchestrator work** · verified 2026-08-20 · → [[../libraries/control-tower]]
 - **A kill switch can always be turned back on** · verified 2026-08-18 · → [[../tables/kill_switches]]
