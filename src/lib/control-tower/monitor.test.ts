@@ -18,9 +18,11 @@ import {
   countSegmentStaleTail,
   countStuckDunningCycles,
   SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE,
+  SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE,
   evalAgentKind,
   evalCron,
   evalInlineAgent,
+  evalOutputAssertion,
   evalWorker,
   extractCronExpr,
   extractSolHandleBypassTicketIds,
@@ -34,6 +36,7 @@ import {
   nextFiringAtOrAfter,
   parseCronExpr,
   type ActiveJob,
+  type AssertionInputs,
   type InlineAgentState,
   type LoopHistoryRow,
   type WorkerRow,
@@ -1939,6 +1942,122 @@ test("SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE fingerprint is present in monitor.
       "so a grep locates the post-cron opt-in grace behavior",
   );
   assert.equal(SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE, "segment-coverage-ignore-post-cron-opt-ins");
+});
+
+// ── segment-coverage stale-tail run-in-progress grace (segment-coverage-stale-tail-run-grace) ──
+// During the daily refresh-customer-segments fan-out the monitor can sample the still-in-progress
+// boundary and read a subscriber as stale seconds before its fresh timestamp commits. The
+// assertion waits for the run grace to elapse from the loop's latest heartbeat before declaring
+// a stale tail; a missing heartbeat falls back to enforcing the rule so a never-firing cron
+// can't hide behind the grace.
+const SEGMENT_COVERAGE_LOOP = MONITORED_LOOPS.find((l) => l.id === "refresh-customer-segments-cron")!;
+assert.ok(SEGMENT_COVERAGE_LOOP, "refresh-customer-segments-cron must be a registered monitored loop");
+assert.equal(SEGMENT_COVERAGE_LOOP.outputAssertion, "segment-coverage");
+
+const ONE_HOUR_MS = 60 * 60_000;
+
+function baselineAssertionInputs(overrides: Partial<AssertionInputs>): AssertionInputs {
+  return {
+    escalatedWaiting: 0,
+    oldestEscalatedAt: null,
+    latestTriageJobAt: null,
+    latestSpecTestJobAt: null,
+    overdueInternalSubs: 0,
+    renewalCurrent: {
+      total: 0,
+      charged: 0,
+      skipped_no_payment_method: 0,
+      skipped_zero_total: 0,
+      declined_to_dunning: 0,
+      comp_shipped: 0,
+      comp_blocked: 0,
+      skipped_other: 0,
+    },
+    renewalBaseline: {
+      total: 0,
+      charged: 0,
+      skipped_no_payment_method: 0,
+      skipped_zero_total: 0,
+      declined_to_dunning: 0,
+      comp_shipped: 0,
+      comp_blocked: 0,
+      skipped_other: 0,
+    },
+    stuckDunningCycles: 0,
+    smsSubscribedTotal: 0,
+    smsSubscribedFresh26h: 0,
+    smsSubscribedStale48h: 0,
+    ...overrides,
+  };
+}
+
+function segmentCoverageLatest(ranAtIso: string): LoopHistoryRow {
+  return { ran_at: ranAtIso, ok: true, produced: null, detail: null, duration_ms: null };
+}
+
+test("evalOutputAssertion segment-coverage: does NOT alert on stale-tail while the refresh cron beat is still inside the run grace (false-alert during healthy fan-out)", () => {
+  // A healthy fan-out that started 5 minutes ago — the monitor sampled the still-in-progress
+  // boundary and sees 3 subscribers with a NULL/>48h segments_refreshed_at. That is the
+  // expected shape of an in-progress walk, not a break.
+  const ranAt = new Date(Date.now() - 5 * 60_000).toISOString();
+  const verdict = evalOutputAssertion(
+    "segment-coverage",
+    SEGMENT_COVERAGE_LOOP,
+    segmentCoverageLatest(ranAt),
+    baselineAssertionInputs({
+      smsSubscribedTotal: 500,
+      smsSubscribedFresh26h: 495,
+      smsSubscribedStale48h: 3,
+    }),
+  );
+  assert.equal(verdict, null);
+});
+
+test("evalOutputAssertion segment-coverage: alerts on stale-tail once the refresh cron beat is outside the run grace (real break stays flagged)", () => {
+  // Same stale subscribers, but the last beat was 7 hours ago — well past the 6h run grace.
+  // The cron ran but part of the book didn't refresh, and the tile must go red.
+  const ranAt = new Date(Date.now() - 7 * ONE_HOUR_MS).toISOString();
+  const verdict = evalOutputAssertion(
+    "segment-coverage",
+    SEGMENT_COVERAGE_LOOP,
+    segmentCoverageLatest(ranAt),
+    baselineAssertionInputs({
+      smsSubscribedTotal: 500,
+      smsSubscribedFresh26h: 495,
+      smsSubscribedStale48h: 3,
+    }),
+  );
+  assert.ok(verdict, "stale-tail must trip after the run grace elapses");
+  assert.equal(verdict!.violation.reason, "segment_coverage");
+  assert.ok(
+    /stale-tail/i.test(verdict!.violation.detail),
+    `violation detail should describe the stale-tail: ${verdict!.violation.detail}`,
+  );
+});
+
+test("evalOutputAssertion segment-coverage: missing heartbeat still trips stale-tail (fallback — a never-firing cron can't hide behind the run grace)", () => {
+  const verdict = evalOutputAssertion(
+    "segment-coverage",
+    SEGMENT_COVERAGE_LOOP,
+    null,
+    baselineAssertionInputs({
+      smsSubscribedTotal: 500,
+      smsSubscribedFresh26h: 495,
+      smsSubscribedStale48h: 3,
+    }),
+  );
+  assert.ok(verdict, "no heartbeat ⇒ no grace, stale-tail must still trip");
+  assert.equal(verdict!.violation.reason, "segment_coverage");
+});
+
+test("SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE fingerprint is present in monitor.ts (grep-able marker for the stale-tail run-in-progress grace)", () => {
+  const monitorSrc = readFileSync(resolve(__dirname, "./monitor.ts"), "utf8");
+  assert.ok(
+    monitorSrc.includes("SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE"),
+    "monitor.ts must carry the SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE fingerprint " +
+      "so a grep locates the stale-tail run-in-progress grace behavior",
+  );
+  assert.equal(SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE, "segment-coverage-stale-tail-run-grace");
 });
 
 // Fingerprint guard: the monitor query MUST carry the same internal-* exclusion the payday

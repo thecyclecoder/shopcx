@@ -1522,7 +1522,7 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
 // tile flips red and the monitor opens an alert + pages, exactly like a P1 red.
 
 /** Extra read-only state the output assertions need (one cheap query each). */
-interface AssertionInputs {
+export interface AssertionInputs {
   /** open, routine-owned escalated tickets waiting (escalated_at set, escalated_to null). */
   escalatedWaiting: number;
   /** the OLDEST waiting ticket's escalated_at (min over the waiting set) — how long real work has actually waited, or null. */
@@ -1577,8 +1577,23 @@ const SEGMENT_COVERAGE_MIN_RATIO = 0.95;
 const SEGMENT_COVERAGE_MAX_AGE_MS = 48 * 60 * 60_000;
 /** Below this book size don't judge — a workspace with 0-99 subscribers can noise-fire. */
 const SEGMENT_COVERAGE_MIN_SAMPLE = 100;
-/** Run-in-progress grace: skip the fresh-cohort ratio check while the daily refresh-customer-segments cron is still fanning out (comfortably longer than the observed worst-case fanout). The stale48h check stays active. */
+/** Run-in-progress grace: skip the fresh-cohort ratio check while the daily refresh-customer-segments cron is still fanning out (comfortably longer than the observed worst-case fanout). */
 const SEGMENT_COVERAGE_RUN_GRACE_MS = 6 * 60 * 60_000;
+/**
+ * Stale-tail run-in-progress grace (segment-coverage-stale-tail-run-grace). The stale48h
+ * head-count fires "the cron ran but part of the book didn't refresh" — but during the daily
+ * refresh-customer-segments fan-out the monitor can sample the still-in-progress boundary
+ * (a subscriber whose row committed a fresh segments_refreshed_at seconds after the sample
+ * reads as stale from the monitor's frozen snapshot). Grace = a short window measured from
+ * the latest refresh-customer-segments heartbeat so the assertion waits until the run had
+ * time to finish before declaring a stale tail. Chosen ≥ the observed worst-case fan-out yet
+ * comfortably shorter than the daily cadence (26h) so a real "cron ran + missed the book"
+ * still trips at the next monitor tick outside the grace. A missing heartbeat falls back to
+ * enforcing the stale48h rule normally so a never-firing cron can't hide behind the grace.
+ */
+const SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE_MS = 6 * 60 * 60_000;
+/** Grep-able fingerprint for the stale-tail run-in-progress grace (spec: segment-coverage-stale-tail-run-grace). */
+export const SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE = "segment-coverage-stale-tail-run-grace" as const;
 /**
  * Fingerprint: segment-coverage-ignore-post-cron-opt-ins.
  * The stale-tail head-count only counts subscribed rows that were BOTH present
@@ -1666,7 +1681,7 @@ function producedCount(produced: unknown, key: string): number {
  * + violation) when the loop ran but failed its assertion, else null (assertion
  * holds — leave the Phase 1 tile as-is). Pure given (assertion id, loop, latest beat, inputs).
  */
-function evalOutputAssertion(
+export function evalOutputAssertion(
   assertionId: OutputAssertionId,
   loop: MonitoredLoop,
   latest: LoopHistoryRow | null,
@@ -1815,7 +1830,15 @@ function evalOutputAssertion(
           },
         };
       }
-      if (stale > 0) {
+      // Stale-tail run-in-progress grace (SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE): during the
+      // active daily fan-out the monitor can sample the still-in-progress boundary and read a
+      // subscriber as stale seconds before its fresh timestamp commits. Wait for the run grace
+      // to elapse before declaring a stale tail; a missing heartbeat falls back to enforcing the
+      // stale48h rule so a never-firing cron can't hide behind the grace. Post-cron
+      // created_at/updated_at gates still apply inside countSegmentStaleTail.
+      const withinStaleTailRunGrace =
+        latest?.ran_at != null && ageMs(latest.ran_at) <= SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE_MS;
+      if (stale > 0 && !withinStaleTailRunGrace) {
         return {
           statusText: `${stale} subscriber${stale === 1 ? "" : "s"} stale >${maxAgeH}h`,
           violation: {
