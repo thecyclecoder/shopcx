@@ -1523,9 +1523,45 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
         const isPlaybookRelated = isSentinel ? true : await step.run("classify-playbook-msg", async () => {
           const { data: pb } = await admin.from("playbooks").select("name").eq("id", pbActive).single();
           const pbName = pb?.name || "active issue";
+          // Resolve the playbook step currently awaiting a customer answer — the same step
+          // executePlaybookStep would run (steps ordered by step_order, indexed by
+          // tickets.playbook_step) — and grab the question text the customer literally saw
+          // (the most recent outbound external AI message on this ticket, which is what the
+          // playbook rendered when it asked). Without this the classifier only knows the
+          // playbook NAME, so a substantive yes / address / order-# answer reads as
+          // ambiguous, the lean-NEW_TOPIC default fires, and the playbook is dropped mid-
+          // flow. Ticket 8e2c87d6 (Suzanne Ross 2026-08-24) is the ground-truth incident:
+          // the Replacement Order playbook asked "did you not receive your order at all?",
+          // she answered "I did not receive the order at all" — classified NEW_TOPIC —
+          // then answered the follow-up address question "Thank you. Yes confirming this
+          // is the correct address" and pure-gratitude swallowed the confirmation.
+          const [{ data: tState }, { data: lastOutbound }] = await Promise.all([
+            admin.from("tickets").select("playbook_step").eq("id", tid).single(),
+            admin.from("ticket_messages")
+              .select("body")
+              .eq("ticket_id", tid)
+              .eq("direction", "outbound")
+              .eq("visibility", "external")
+              .eq("author_type", "ai")
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle(),
+          ]);
+          const stepIdx = tState?.playbook_step ?? 0;
+          const { data: pendingStep } = await admin.from("playbook_steps")
+            .select("name, type")
+            .eq("playbook_id", pbActive)
+            .eq("step_order", stepIdx)
+            .maybeSingle();
+          const pendingQuestion = (lastOutbound?.body || "").replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
+          const stepLabel = pendingStep?.name || pendingStep?.type || `step ${stepIdx}`;
+          const pendingBlock = pendingQuestion
+            ? `\nTHE PLAYBOOK JUST ASKED (its pending step "${stepLabel}"):\n"${pendingQuestion}"\n`
+            : "";
           const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
           const result = await claude(
-            `A customer has an active "${pbName}" case being handled. They just sent this message:
+            `A customer has an active "${pbName}" case being handled.${pendingBlock}
+They just sent this message:
 
 "${cleanMsg}"
 
@@ -1533,16 +1569,18 @@ Is this message a continuation of the ${pbName.toLowerCase()} flow, or is the cu
 
 PLAYBOOK = the customer is answering the playbook's prompt, providing requested info (an order #, a yes/no, a specific item they want returned/refunded), confirming, asking a clarifying question about the same issue, or pushing back on an offer in the same flow.
 
+ANSWERS THE PENDING QUESTION OVERRIDES EVERYTHING: If a pending question is shown above and the message supplies what that question asked for — a yes/no, a confirmation, a choice between the options offered, an address, an order number, a "did not receive" answer to a "did you receive it?" question — it is PLAYBOOK. This wins over the lean-NEW_TOPIC default and over any gratitude read of tag-along thanks.
+
 ACCEPT/REJECT OVERRIDES EVERYTHING: If the message accepts or rejects the offer currently on the table ("yes do it", "I'll accept the refund", "no, I want my money back", "that works"), it is PLAYBOOK — even when it is bundled with a tag-on question (e.g. "I'll accept the refund. Are you cancelling the June 15 order?"). The playbook's acceptance handler answers the question AND executes the next step (it generates the return label / issues the resolution). Routing an acceptance to NEW_TOPIC drops it out of the playbook, where there is no return-label guardrail — so the accept signal always wins.
 
-NEW_TOPIC = the customer is switching intent, with NO accept/reject of the active offer. Examples (any of these → NEW_TOPIC, even if the surrounding flow is similar):
+NEW_TOPIC = the customer is switching intent, with NO accept/reject of the active offer AND NOT answering the pending question above. Examples (any of these → NEW_TOPIC, even if the surrounding flow is similar):
   • Requesting a different action: "please pause my subscription" while in a refund flow → NEW_TOPIC
   • Asking about a different subscription / order
   • Adding a new question with no accept/reject ("also, how do I use my points?")
   • Crisis mention ("I got the wrong flavor") while in a generic return flow
-  • Pure gratitude, satisfaction, or acknowledgement with no new ask ("thank you!", "right on", "perfect, ty", "👍") → NEW_TOPIC. A happy thank-you is NOT pushback on an offer.
+  • Pure gratitude with NO substantive content at all — a bare "thank you!", "right on", "perfect, ty", "👍" that carries no answer, confirmation, address, or order info. A message that ANSWERS or CONFIRMS with thanks attached ("Thank you. Yes confirming this is the correct address.") carries substantive content and is PLAYBOOK, not gratitude.
 
-When in doubt, lean NEW_TOPIC — Sonnet has full context to decide if it actually IS the playbook. Calling NEW_TOPIC is cheap (the playbook resumes if Sonnet says so). Calling PLAYBOOK incorrectly buries new asks under stand-firm rounds. The ONE exception to "lean NEW_TOPIC": a clear accept/reject of the active offer is always PLAYBOOK.
+When in doubt, lean NEW_TOPIC — Sonnet has full context to decide if it actually IS the playbook. Calling NEW_TOPIC is cheap (the playbook resumes if Sonnet says so). Calling PLAYBOOK incorrectly buries new asks under stand-firm rounds. The TWO exceptions to "lean NEW_TOPIC": (1) a clear accept/reject of the active offer is always PLAYBOOK; (2) a substantive answer to the pending question above is always PLAYBOOK.
 
 Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: wsId, ticketId: tid, purpose: "playbook-drift-check" });
           return (result || "").trim().toUpperCase().includes("PLAYBOOK");
