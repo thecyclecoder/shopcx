@@ -590,7 +590,8 @@ export interface RemedyStateViolation {
     | "order_not_found"
     | "live_return_would_double_pay"
     | "amount_exceeds_remaining_refundable"
-    | "missing_order_reference";
+    | "missing_order_reference"
+    | "headroom_degraded";
   detail: string;
 }
 
@@ -691,6 +692,25 @@ export function verifyPlanAgainstRemedyStates(
           orderKey: ref.key,
           reason: "order_not_found",
           detail: `money action targets order ${ref.key} which does not exist in this workspace`,
+        },
+      };
+    }
+    // Live Shopify headroom is unreadable — the ledger call failed and we are on the mirror
+    // fallback (see [[../libraries/cx-agent-sdk]] `getOrderRemedyState`, headroom_confidence). A
+    // mirror-only remaining_refundable_cents is stale by definition: it CANNOT see an out-of-band
+    // Shopify refund that already drew down the same money. Authorizing a fresh money remedy off
+    // that fallback is precisely the double-pay the guard exists to block, so we FAIL CLOSED here
+    // (needs_attention → human) rather than trust the mirror. Closes the fail-open gap the
+    // remedy-state-must-see-out-of-band-refunds diff introduced.
+    if (state.headroom_confidence !== "live") {
+      return {
+        ok: false,
+        violation: {
+          actionIndex: i,
+          actionType: step.actionType,
+          orderKey: ref.key,
+          reason: "headroom_degraded",
+          detail: `live Shopify refund headroom is unreadable for order ${ref.key} (headroom_confidence=${state.headroom_confidence}) — refusing to authorize a money remedy off a mirror-only fallback that cannot see an out-of-band Shopify refund`,
         },
       };
     }
