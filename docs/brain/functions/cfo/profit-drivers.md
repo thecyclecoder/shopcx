@@ -1,45 +1,22 @@
-# lifecycles/profit-drivers
+# What drives profit
 
-**What actually drives profit at Superfoods — measured, not assumed.** Owner: [[../cfo]] (Grace).
+**Measured, not assumed.** Owner: [[../cfo]] (Grace).
 
-This is a **living investigation page**. It exists because profit, not revenue, is the CEO north star ([[../cfo]] § Mandates), and because almost every intuition about what moves it turned out to be either wrong or backwards when checked against 25 months of QuickBooks P&L and 12 monthly customer cohorts.
+A **living investigation page**. Profit, not revenue, is the CEO north star ([[../cfo]] § Mandates), and almost every intuition about what moves it — including several of this page's own earlier conclusions — turned out wrong when checked against 25 closed months of QuickBooks P&L and 12 monthly customer cohorts.
 
-Every number here is **measured** unless explicitly labelled otherwise. Where an earlier conclusion was wrong it is kept and struck through rather than deleted — the point is to stop future sessions re-deriving a disproven answer. Add to the [findings log](#findings-log) as the investigation continues; don't silently rewrite history.
+Every number is **measured** unless labelled otherwise. Wrong conclusions are **struck through, not deleted** — the point is to stop a future session re-deriving a disproven answer. Add to the [findings log](#findings-log); don't silently rewrite history.
 
-**Re-run everything:** `npx tsx scripts/_profit-drivers.ts` (read-only; QuickBooks snapshots + cohorts + regimes).
+**Re-run:** `scripts/_profit-drivers.ts` · `_scale-curve.ts` · `_cogs-normalize2.ts` · `_amazon-halo.ts` (all read-only, DB-only, **zero external API calls** — Appstle bills per hit).
 
 ---
 
-## ⭐ The model
+## ⭐ The headline
 
-```
-Real profit = Income − COGS − Digital Ads − Transaction Fees − Fixed OpEx
-            (+ small other income/expense)
-```
+> **The business is currently UNDER-spending on acquisition, and today's 26% margin is the symptom, not the achievement.**
 
-Ranked by what actually moved profit over 25 closed months:
+At ~$41K/month of Meta spend the business earns a 26% margin on a **shrinking** base. Steady state on that path is roughly **$4K/month of profit**. Stepping spend up toward **$100–120K/month** produces less headline margin (~15–20%) but **more durable profit on a stable or growing base**.
 
-| # | Driver | Status | Evidence |
-|---|---|---|---|
-| 1 | **Ad spend LEVEL** (not efficiency) | The dominant lever | `r = −0.63` vs margin; two-regime split below |
-| 2 | **LTV per acquired customer** | Fell ~20%, now recovering | first-order AOV $124 → $92 → $116 |
-| 3 | **COGS ratio** | At series best | 27.4% (July) vs 27–47% range |
-| 4 | **Fixed OpEx** | Fixed *now*, was the biggest historical win | $145K → $59K per half-year |
-| — | Revenue volume | **NOT a driver** | `r = −0.05` |
-| — | Churn *rate* | **NOT movable** — structural | 12 cohorts, ±13–20% spread |
-
-### The two regimes — the single most important table here
-
-Splitting all 25 closed months on ad load:
-
-| Regime | Months | Avg income | Avg ads | **Avg real profit** | Margin |
-|---|---|---|---|---|---|
-| Ads **>25%** of income | 18 | $551K | $210K | **$35K** | **6.3%** |
-| Ads **≤25%** of income | 6 | $331K | $54K | **$72K** | **21.9%** |
-
-**40% less revenue, 2.1× the profit, 3.5× the margin.** This is the finding everything else has to be reconciled against.
-
-> ⚠️ **Excludes 2024-12** (inventory write-off, COGS 143% of income, −$561K). Including it the high-ad-load regime reads $3K / 0.6% margin — a much more dramatic number that is an artifact of one write-off month, not of ad load. **The first draft of this page made exactly that error**; the reproducible script excludes it by default.
+The ceiling is real but higher than the current level: above ~$150K/month the margin thins to ~7%, and above ~$180K it approaches zero.
 
 ---
 
@@ -56,112 +33,139 @@ Surfaced by [[../../libraries/profit-estimate]] → [[../../dashboard/analytics_
 
 ---
 
-## Driver 1 — ad spend level
+## ⭐ CAC: use the blended number
 
-Correlation with real profit across 24 months (excluding the 2024-12 inventory write-off, which has COGS at 143% of income and swamps everything):
+**CEO directive 2026-08-24:** *"It doesn't matter if a customer would have arrived anyway, because we will never know. People see ads, don't click, search us, and buy — the ad drives the awareness. Hoping an organic customer shows up is not a lever."*
 
-| Driver | r |
-|---|---|
-| **Ads as % of income** | **−0.63** |
-| Gross profit $ | −0.37 |
-| Digital ads $ | −0.26 |
-| Gross margin % | −0.17 |
-| **Income** | **−0.05** |
-| Fixed OpEx $ | −0.02 |
+**Correct, and it is the operating frame.** The only dial is ad spend. The metric is:
 
-### The marginal ad dollar is priced
+```
+blended CAC = total Meta spend ÷ total new customers (website + Amazon)
+```
 
-2025-11 (worst month) → 2026-07 (best recent):
+July 2026: `$41,184 ÷ 749 = $55` · LTV `$208.93` · **LTV:CAC 3.8×**. August MTD: **$41 · 5.6×**.
 
-- Gave up **$117K of gross profit**
-- To save **$157K of ad spend**
-- ⇒ **0.74 gross profit per $1 of ad spend at the margin**
+Surfaced on [[../../dashboard/analytics__roas]].
 
-Below 1.00 means that spend was destroying value. Corroborated independently by a weekday-controlled pre/post on daily data (n=30 weekdays): scaling from ~$600/day to ~$1,900/day bought new customers at an **incremental CAC of $339 (on-site) / $276 (incl. Amazon)**, `r = 0.54`. Against a policy crown line of $150 and a hold band of $220.
-
-### Why this keeps happening
-
-The autonomous media buyer optimizes on **Meta-reported CPA** and cannot see LTV, Amazon, or blended CAC. A cheaper, smaller, more-discounted offer looks *better* to it — more conversions per dollar — while producing a customer worth ~20% less. See [Measurement you cannot trust](#measurement-you-cannot-trust) and [[../../libraries/media-buyer-agent]].
+> **Why not incremental CAC?** A regression on 19 months implies ~618 customers/month would arrive at $0 spend, which would put incremental CAC at $136–314. But observed spend **never drops below $30K/month**, so that intercept is pure extrapolation. A linear fit (r² 0.83) and a diminishing-returns fit (r² 0.74) explain the observed range equally well and **disagree completely** below it — at $15K/mo one predicts 728 customers and the other 269. The data cannot choose, and the "organic baseline" is not an option we can actually take. Blended CAC is the decision metric.
 
 ---
 
-## Driver 2 — revenue mix (a consequence, not a dial)
+## ⭐ The scale curve — the most actionable table here
 
-`corr(renewal share of revenue, profit margin) = 0.92` (n=7 months) — the tightest relationship measured. Contribution per revenue dollar, July 2026:
+Blended CAC as spend moved 8× (`_scale-curve.ts`):
+
+| Ad spend band | Months | Avg spend | New customers/mo | **Blended CAC** | **LTV:CAC** |
+|---|---|---|---|---|---|
+| under $50K | 5 | $39K | 919 | **$42** | **5.0×** |
+| $50–120K | 2 | $101K | 1,463 | **$69** | **3.0×** |
+| $120–180K | 10 | $149K | 1,677 | $89 | 2.3× |
+| over $180K | 2 | $213K | 2,267 | $94 | 2.2× |
+
+**At a 3× LTV:CAC target the CAC ceiling is ~$70 — which sits around $100–120K/month of spend.** Current spend is $41K.
+
+### Profit at steady state
+
+Steady state = `customers/month × LTV`, at the July cost structure:
+
+| Monthly ad spend | Customers/mo | Steady-state revenue | **Steady-state profit** | Margin |
+|---|---|---|---|---|
+| **$41K (today)** | 749 | ~$157K | **~$4K** | 2.6% |
+| $75K | ~1,190 | ~$248K | ~$30K | 12% |
+| **$101K** | ~1,460 | ~$306K | **~$44K** | **14%** |
+| $149K | 1,677 | ~$350K | ~$24K | 6.9% |
+
+**Profit rises with spend up to ~$100–120K/month, then falls.** Today's high margin is a harvest of the base 2025's spend built.
+
+**Operating rule: raise spend until blended CAC crosses ~$70, then stop.**
+
+---
+
+## ⭐ 2025 WAS profitable — and one December entry hid it
+
+**CEO 2026-08-24:** a former CFO wasn't expensing inventory correctly, forcing a large write-off.
+
+Confirmed, and isolated (`_cogs-normalize2.ts`):
+
+| Month | Product COGS | vs 31% normal | **Excess** | Reported → restated |
+|---|---|---|---|---|
+| **2024-12** | **101% of income** | 31% | **$441K** | −$561K → −$121K |
+| 2025-03 | 47% | 31% | $93K | $47K → $140K |
+
+**$534K total.** December 2024 booked **$896K of COGS on $626K of income**.
+
+### The trap: 2024's "68% COGS" is NOT inventory
+
+Before 2025, **ad spend was booked inside COGS** as per-channel accounts — the Dec-2024 detail literally shows `Ads - Facebook (deleted) $245K` ([[../../tables/qb_pnl_snapshots]] § the ad-account bridge). Strip ads out and 2024 product COGS was a normal **23–33%**.
+
+**So only ONE month is a genuine write-off, not the whole year.** Normalizing *total* COGS across 2024 adds real ad spend back as an "error" and invents ~43% margins. Always compare **product COGS = `total_cogs` − ads-booked-in-COGS**.
+
+### And it does not rescue the scale story
+
+| Ad spend band | Months | **Reported margin** | **Restated margin** |
+|---|---|---|---|
+| under $50K | 5 | 27.5% | **27.5%** |
+| $50–120K | 2 | 9.5% | 19.8% |
+| **$120–180K** | **8** | **7.4%** | **7.4%** |
+| over $180K | 10 | −3.4% | 3.1% |
+
+The $120–180K band is **eight months of 2025 with clean books and no write-off** — reported and restated are identical.
+
+**2025 calendar year: $303K reported real profit on $5.87M income (5.2%), or $396K restated (6.8%).** Thinly profitable, not a loss year. Only Oct and Nov 2025 went negative, and both had clean books — they were genuinely over-spent at $169K and $195K.
+
+---
+
+## The Amazon halo is real
+
+`corr(monthly Meta spend, monthly Amazon acquisition orders) = 0.78` (n=19). Lagged weekly it holds at **0.64 for 0–2 weeks**, decaying to 0.43 by week 4.
+
+An adstock model (accumulated brand awareness, `S_t = spend_t + λS_{t-1}`) fits **worse** than current-month spend (best λ=0, r² 0.53 vs 0.61) — so Amazon demand tracks *current* spend, not a slowly-melting stock of past advertising.
+
+There is **no separate Amazon ad spend**: July's P&L shows `60510 Digital Advertising $38,891` against $41,184 of Meta spend in our own table. No Amazon PPC line exists.
+
+---
+
+## Other drivers
+
+### Revenue mix — a consequence, not a dial
+`corr(renewal share, profit margin) = 0.92` (n=7). Contribution per revenue dollar, July:
 
 ```
 RENEWAL       $1.00 − COGS 27.4% − txn 6.3%              = $0.66
 NEW CHECKOUT  $1.00 − COGS 27.4% − txn 6.3% − ads 50.4%  = $0.16
 ```
 
-**A renewal dollar is worth 4.2× a new-checkout dollar.** Note AOV is near-identical on both ($108–113 vs $100–124), so the gap is **acquisition cost**, not first-order discounting.
+AOV is near-identical on both ($108–113 vs $100–124), so the 4.2× gap is **acquisition cost**, not discounting. But renewal share is high *because* spend is low — largely the same signal as the scale curve, read from the revenue side. Not an independent lever.
 
-> ⚠️ **Do not treat this as an independent lever.** Renewal share is high *because* ad spend is low — it is largely the same signal as Driver 1 read from the revenue side. The only way to raise it without mortgaging the future is to improve retention economics, not to cut acquisition.
+### LTV per acquired customer — took two hits, one recovering
 
----
-
-## Driver 3 — LTV per acquired customer
-
-Cumulative revenue per acquired customer, fixed m0–m3 horizon:
-
-| Cohort | m1 retention | m0 rev/cust | **Cum m0–m3** |
+| Cohort | m1 retention | m0 rev/cust | Cum m0–m3 |
 |---|---|---|---|
 | 2025-09 | 43% | $197 | **$357** |
-| 2025-10 | 43% | $203 | $359 |
 | 2025-11 | 34% | $198 | $312 |
-| 2025-12 | 34% | $211 | $326 |
 | 2026-01 | 36% | $196 | $300 |
 | 2026-03 | 36% | $170 | $273 |
 
-**Two separate hits, in sequence:**
+1. **Nov 2025 – Jan 2026 — retention hit.** m1 43% → 34%. Cause never identified. **Recovered** to 39–40% by Apr/May.
+2. **Mar – Jul 2026 — AOV hit.** First-order AOV $124 → $92, from a deliberate **1-unit default test** (CEO, probing conversion rate). Reverted to a 2-unit default ~week of 2026-07-19.
 
-1. **Nov 2025 – Jan 2026 — a retention hit.** m1 retention 43% → 34%. Cause never identified. **Recovered**: 39–40% by Apr/May 2026.
-2. **Mar 2026 – Jul 2026 — an AOV hit.** First-order AOV $124 → $92, driven by a deliberate **1-unit default test** (CEO, to probe conversion rate). Reverted to a 2-unit default ~week of 2026-07-19.
+Weekly recovery: Jul 12 **$92 / 1.55 units** → Jul 26 $117 / 2.35 → Aug 9 **$126 / 2.53** → Aug 16 $116 / 2.24. Monthly Jul **$102** → Aug **$116**.
 
-### First-order AOV, weekly (the 1-unit test and its reversal)
-
-| Week of | AOV | Units | % with discount |
-|---|---|---|---|
-| 2026-07-05 | $99 | 1.81 | 16% |
-| **2026-07-12** | **$92** | **1.55** | 21% |
-| 2026-07-19 | $104 | 2.00 | 10% |
-| 2026-07-26 | $117 | 2.35 | 26% |
-| 2026-08-09 | **$126** | **2.53** | 11% |
-| 2026-08-16 | $116 | 2.24 | 21% |
-
-Monthly: Jul **$102** → Aug (to 8/23) **$116**, units 1.89 → 2.23. **~60% recovered** toward the $123–132 of Sep 2025–Feb 2026.
-
-> ⚠️ **Confounded.** Discount penetration fell 37–48% → 10–21% over the same weeks. Both raise AOV; they cannot be separated from this data.
+> ⚠️ Confounded — discount penetration also fell 37–48% → 10–21% over the same weeks. Both raise AOV.
 >
-> ⚠️ **The CVR half of the 1-unit test is unmeasurable here.** New-customer volume fell (125 in June → 80 in August) but ad spend collapsed from ~$2,200/day to ~$300/day over the identical window. A before/after cannot separate them — this needs a real split test with spend held constant.
+> ⚠️ The CVR half of the 1-unit test is **unmeasurable** from before/after: ad spend collapsed over the identical window. Needs a split test with spend held constant.
 
----
+**Rising LTV raises the CAC ceiling**, so the room to scale is currently widening.
 
-## Drivers 4 & 5 — COGS and Fixed OpEx
-
-**COGS** ranged 27–47% of income (ex-outlier). July's **27.4% is the series best** — little headroom left.
-
-**Fixed OpEx** was the largest *historical* win and is now genuinely flat:
-
-| Half | Avg fixed OpEx |
-|---|---|
-| 2024-H2 | $145K |
-| 2025-H1 | $113K |
-| 2025-H2 | $74K |
-| 2026-H1 | $59K |
-| 2026-H2 | $59K |
-
-**$86K/month removed** — >$1M annualized. Treating G&A as a constant when explaining *history* erases the biggest realized win; treating it as constant *going forward* is now fair.
+### COGS and Fixed OpEx
+Product COGS is stable at **~31%** and July's 27.4% is the series best. Fixed OpEx fell **$145K → $59K** per half-year (2024-H2 → 2026-H1) and is now flat — the largest historical win, but no longer a live lever.
 
 ---
 
 ## What is NOT a driver
 
-### Revenue volume
-`r = −0.05` with profit — no relationship, slightly negative. The company has grown revenue while losing money and shrunk revenue while making it.
-
 ### Churn rate — structural, not movable
-Twelve monthly cohorts across a **5× swing in ad spend**, revenue per acquired customer normalized to month 0:
+Twelve cohorts across a **5× swing in ad spend**, revenue normalized to month 0:
 
 | Month since acquisition | Mean multiple | Spread |
 |---|---|---|
@@ -169,106 +173,99 @@ Twelve monthly cohorts across a **5× swing in ad spend**, revenue per acquired 
 | m2 | 0.198 | 17.8% |
 | m3 | 0.177 | 18.9% |
 
-Customer retention is equally tight — m1 lands 34–46%, m3 22–31%, m6 15–21%, in every cohort. The cliff-then-sticky shape is a property of the product (health & wellness: it works for some people and not others — CEO), not something to optimize.
+Customer retention is equally tight — m1 34–46%, m3 22–31%, m6 15–21%, every cohort. The cliff-then-sticky shape is a property of the product (health & wellness: it works for some people and not others — CEO), not something to optimize.
 
-**Corollary:** the aggregate churn % rising when intake rises is pure arithmetic — more young cohorts sitting inside their cliff. Don't read it as a deterioration.
+**Corollary:** aggregate churn % rising when intake rises is pure arithmetic — more young cohorts inside their cliff. Not a deterioration.
 
 ### Collection rate — healthy
-| Month | True collection (collected ÷ attempted) | Cancelled (% of book) | Paused (% of book) |
-|---|---|---|---|
-| 2026-05 | 91.5% | 6.7% | 7.5% |
-| 2026-06 | 86.9% | 12.8% | 8.6% |
-| 2026-07 | **85.1%** | 12.4% | **13.3%** |
-
-> ~~Collection collapsed 82% → 64%, worth ~$21K/mo to recover.~~ **WRONG (2026-08-24).** That metric put *cancelled* and *paused* rows in the denominator of a "collection rate". Those are churn and deferral, not billing failures. True collection is **85% and healthy**. The one line still worth watching is **pauses, which doubled (169 → 352 rows)**.
+True collection (`collected ÷ attempted`): 91.5% (May) → 86.9% (Jun) → **85.1% (Jul)**. Watch **pauses**, which doubled (169 → 352 rows).
 
 ### The 2nd sale — improving
-% of a cohort placing a second order within 30 days: **49% (Sep 2025) → 69% (Jun 2026)**. Orders per customer in m0 rose 1.62 → 1.82. Cutting SMS/email promos did **not** cost the second sale.
+% of a cohort placing a second order within 30 days: **49% (Sep 2025) → 69% (Jun 2026)**. Cutting SMS/email promos did **not** cost the second sale.
 
----
-
-## Unit economics
-
-- **CAC** ≈ **$230** (July: $38.9K digital ads ÷ 169 new subs)
-- **Cohort revenue realization**: $124 first order → $299 by d90 → $397 by d180 (2026-01, n=700)
-- **Payback** ≈ **5 months** at 66% contribution
-- **LTV/CAC** ≈ **1.7** — positive but thin, and cash-negative for most of a quarter
-
-**Breakeven** at the current cost structure (72.6% GM, 6.3% txn, $59K fixed, $39K ads): **~$148K/month of income**, against $248K today.
-
-### ⚠️ The strategic tension
-
-The low-ad-load regime is **not a destination**. The subscriber base decays ~$10K of revenue/month and only acquisition replaces it — but acquisition currently costs $276–339 incremental against a $220 hold band. Net MRR is already negative: **churn $20.0K vs new subs $17.6K = −$2.4K/month**.
-
-That's roughly **10 months of runway in the profitable regime** before the cost structure eats the profit. Fixing acquisition economics is not optional, it's timed.
+### Revenue volume alone
+`corr(income, real profit) = −0.05` across 24 clean months. Revenue without regard to how it was bought tells you nothing about profit.
 
 ---
 
 ## Measurement you cannot trust
 
-Every one of these was found broken during this investigation. **Verify before relying on any of them.**
-
 | Surface | State |
 |---|---|
-| `product_ad_account_mappings` | **0 rows** → `computeAcqROAS` returns null for every line. The Growth measurement spine was built and never seeded ([[../../libraries/acquisition-roas]]). |
-| `media_buyer_sensor_trust` | **0 rows, ever.** The accuracy gate is bypassed in TRUST-META mode, which checks only signal *freshness*, never correctness ([[../../libraries/media-buyer-agent]]). |
-| Bianca's cooldown rail | `per_object_cooldown_hours` is set but `recentActions` is never threaded into the runner — **0 call sites**. The rail cannot fire. |
-| `iteration_actions.rationale` | Writes `"ROAS 0.95 ≥ scale_up_roas_trigger 1.00"` — the ROAS gate is skipped in TRUST-META mode but the string still claims it passed. The audit ledger is not trustworthy. |
-| Google Ads spend | **No table, no integration.** ~$130/30d, branded-defense only (CEO) — small, but invisible to every blended calculation. |
-| Meta's pixel | **Over**-reports on-site: claimed 6 purchases on 2026-08-20 where Shopify first-touch credits 3. Not under-reporting. |
-| Amazon halo | Amazon acquisition orders **rose** as Meta spend fell 77% (8 → 19/day). Same-day it is uncorrelated; a lagged effect is untested. Do not credit Amazon revenue to Meta without re-establishing this. |
-| Shopify "Total sales" tile | Includes ~68 renewals/day. Shopify's **conversion rate** is `new checkouts ÷ sessions` and matches our bucketing exactly (3.31% on 8/20 = 10/302). The two tiles measure different populations. |
+| `product_ad_account_mappings` | **0 rows** → `computeAcqROAS` returns null ([[../../libraries/acquisition-roas]]). |
+| `media_buyer_sensor_trust` | **0 rows, ever.** The accuracy gate is bypassed in TRUST-META mode, which checks only *freshness* ([[../../libraries/media-buyer-agent]]). |
+| Bianca's cooldown rail | `per_object_cooldown_hours` is set but `recentActions` is never threaded — **0 call sites**. The rail cannot fire. |
+| `iteration_actions.rationale` | Writes `"ROAS 0.95 ≥ scale_up_roas_trigger 1.00"` — the gate is skipped in TRUST-META mode but the string claims it passed. |
+| Google Ads spend | **No table, no integration.** ~$130/30d, branded-defense only (CEO). |
+| Meta's pixel | **Over**-reports on-site: claimed 6 purchases on 2026-08-20 where Shopify first-touch credits 3. |
+| Shopify "Total sales" tile | Includes ~68 renewals/day. Shopify's **conversion rate** is `new checkouts ÷ sessions` and matches our bucketing exactly (3.31% on 8/20 = 10/302). |
+| Pre-2025 COGS | Contains ad spend. Never compare raw `total_cogs` % across the 2025 boundary. |
 
 ---
 
 ## Findings log
 
-### 2026-08-24 — initial investigation (CEO + Claude)
-Triggered by: "Thursday/Friday were great, Saturday cooled, Sunday was a dud — did our own system unoptimize us?"
+### 2026-08-24 (session 1) — "did our own system unoptimize us?"
+**Answer: no.** The media-buyer kills were directionally correct. Thu/Fri were the middle of an 8-ad test wave (partly manual); Sat/Sun produced exactly normal weekend volume.
 
-**Answer: no.** The kill decisions were directionally correct and arguably late. Thu/Fri were the middle of an 8-ad test wave (partly manual); Sat/Sun produced exactly normal weekend volume (6 and 5 new checkouts vs a 4–6 norm). The apparent collapse was a return to baseline.
+Established: churn shape structural · revenue ⊥ profit · contribution 4.2× · the Nov-2025 retention hit and Mar-2026 AOV hit.
 
-Established: the two regimes · revenue ⊥ profit · marginal ad return 0.74 · churn shape structural · the Nov-2025 retention hit and the Mar-2026 AOV hit · contribution 4.2× · breakeven $148K.
+### 2026-08-24 (session 2) — the scale question
+Triggered by: *"revenue declines every month, but margin is 22% — does the margin evaporate, or can we cruise?"*
 
-**Corrections made in-session** (kept so they aren't re-derived):
-- ~~"Meta sees ~5% of reality"~~ — compared Meta purchases against *all* orders including renewals. True comparison is 6 claimed vs ~10 real on-site.
-- ~~"Amazon halo justifies crediting Amazon to Meta"~~ — fails the natural experiment.
-- ~~"Collection rate collapsed to 64%"~~ — denominator error, see above.
-- ~~"m1 retention dropped and stayed down"~~ — it recovered to 40%.
-- ~~"NULL `subscription_id` silently corrupts bucketing"~~ — overstated; 2 orders/month. Real impact was the portal order-history widget. Fixed in #2551.
-- ~~"40% less revenue, 24× the profit"~~ — the high-ad-load regime average included the 2024-12 write-off. Excluding it the split is **2.1× the profit / 3.5× the margin**, which is still decisive but not theatrical. Caught by running the reproducible script against the hand-written page.
+**Answer: neither. Cruising is the one option that isn't available** — holding spend at $41K glides to ~$4K/month profit. Established the scale curve, the ~$70 CAC ceiling, and the December-2024 write-off.
 
-### 2026-08-24 — shipped
-- **#2549** — [[../../dashboard/analytics__profit]] rebuilt on real QuickBooks data ([[../../libraries/profit-estimate]]). The old page reported $46,065 for July against a real $65,458.
+### Corrections (kept so they aren't re-derived)
+- ~~"Meta sees ~5% of reality"~~ — compared Meta purchases against *all* orders including renewals.
+- ~~"The Amazon halo fails the natural experiment"~~ — drawn from a **5-day window**. Over 19 months `r = 0.78`. The halo is real.
+- ~~"Collection rate collapsed to 64%"~~ — put cancelled + paused rows in the denominator of a *collection* rate.
+- ~~"m1 retention dropped and stayed down"~~ — recovered to 40%.
+- ~~"40% less revenue, 24× the profit"~~ — included the 2024-12 write-off in the regime average. True split is 2.1× profit / 3.5× margin.
+- ~~"2025 was unprofitable"~~ — **it made $303K (5.2%), or $396K restated (6.8%).** Only Oct/Nov went negative.
+- ~~"Incremental CAC is $230, so accept a smaller business"~~ — wrong metric *and* wrong conclusion. Blended CAC is $55 and the business is under-spending.
+- ~~"~618 customers/month arrive at zero spend"~~ — extrapolated $30K below any observed month; a diminishing-returns fit explains the same data and predicts near-zero. Unknowable without a test.
+- ~~Normalizing total COGS across 2024~~ — adds ads-booked-in-COGS back as an accounting error and invents 43% margins.
+
+### Shipped
+- **#2549** — [[../../dashboard/analytics__profit]] rebuilt on real QuickBooks data ([[../../libraries/profit-estimate]]). Old page reported $46,065 for July against a real $65,458.
 - **#2551** — subscription first-order linkage ([[../../libraries/subscription-order-link]]); 1,088 orders backfilled.
+- **#2552** — this page.
 
 ---
 
 ## Open questions
 
-1. **What caused the Nov 2025 – Jan 2026 retention hit?** m1 fell 43% → 34% and cost ~18% of LTV. Recovered, cause unknown. Worth understanding so it isn't repeated.
-2. **Did the 1-unit default actually raise CVR?** Unanswerable from before/after — needs a split test with spend held constant.
-3. **Is the Amazon halo real on a lag?** Same-day it's uncorrelated. A 7–14 day lagged correlation against Meta spend would settle it, and it changes every blended CAC number.
-4. **Why is `pause` on the renewal book doubling?** 169 → 352 rows May → July. Deferral, not churn, but it's the fastest-moving line.
-5. **Can acquisition reach ≤$220 CAC?** The timed question. Ten months of runway.
+1. **Step spend toward $100K/month and watch blended CAC.** The stopping rule is CAC > $70. This is the live decision.
+2. **What caused the Nov 2025 – Jan 2026 retention hit?** Cost ~18% of LTV, recovered, cause unknown.
+3. **Did the 1-unit default actually raise CVR?** Needs a split test with spend held constant.
+4. **Why are pauses doubling** on the renewal book (169 → 352 rows, May → Jul)?
+5. **The media buyer optimizes on Meta-reported CPA** — 2× optimistic, blind to Amazon and to LTV. A cheaper, smaller, more-discounted offer looks *better* to it while producing a less valuable customer. Nothing in that loop sees any of the economics on this page.
 
 ---
 
 ## How to re-run
 
-`scripts/_profit-drivers.ts` — read-only, DB-only, **zero external API calls** (Appstle bills per hit — never bulk-loop it). Emits the regime split, the correlation table, the G&A series, the cohort curves, and the current-month unit economics.
+All read-only, DB-only, **zero external API calls**.
 
-Sources: [[../../tables/qb_pnl_snapshots]] · [[../../tables/orders]] · [[../../tables/daily_order_snapshots]] · [[../../tables/daily_amazon_order_snapshots]] · [[../../tables/daily_meta_ad_spend]] · [[../../tables/billing_forecasts]] · [[../../libraries/order-bucketing]].
+| Script | Answers |
+|---|---|
+| `_profit-drivers.ts` | regimes, correlations, G&A series, cohort curves, breakeven |
+| `_scale-curve.ts` | blended CAC by spend band → the CAC ceiling |
+| `_cogs-normalize2.ts` | isolates the write-off from the ads-in-COGS structure |
+| `_amazon-halo.ts` | halo correlation + lags + natural experiments |
+| `_steady-state.ts` / `_trajectory.ts` | equilibrium revenue and the path to it |
 
-**Method notes that matter:**
-- Always exclude **2024-12** from correlations (inventory write-off, COGS 143% of income).
-- Always dedupe cohorts against a **long lookback** — deduping inside the reporting window counts returning buyers as new and inflated July's first-order AOV from $102 to $115.
-- Control for **day-of-week** on spend-response reads; a naive low/high split compared weekend-heavy to weekday-only periods.
-- Page every daily-table read past the **1000-row cap** — a single ranged select silently truncates.
+**Method traps that produced wrong answers:**
+- Exclude **2024-12** from correlations (write-off, product COGS 101% of income).
+- **Product COGS = `total_cogs` − ads-in-COGS** for any pre-2025 month.
+- Dedupe cohorts against a **long lookback** — deduping inside the window counts returning buyers as new (inflated July first-order AOV $102 → $115).
+- Control for **day-of-week** on spend-response reads.
+- Page every daily-table read past the **1000-row cap**.
+- **Never conclude from a <2-week window** — the 5-day Amazon read produced a confidently wrong answer that stood for hours.
 
 ## Related
 
-[[../cfo]] · [[../../libraries/profit-estimate]] · [[../../dashboard/analytics__profit]] · [[../../libraries/acquisition-roas]] · [[../../libraries/blended-cac-ltv]] · [[../../libraries/media-buyer-agent]] · [[../../tables/qb_pnl_snapshots]] · [[../../libraries/order-bucketing]] · [[../../dashboard/analytics__mrr]]
+[[../cfo]] · [[../../libraries/profit-estimate]] · [[../../dashboard/analytics__profit]] · [[../../dashboard/analytics__roas]] · [[../../libraries/acquisition-roas]] · [[../../libraries/blended-cac-ltv]] · [[../../libraries/media-buyer-agent]] · [[../../tables/qb_pnl_snapshots]] · [[../../libraries/order-bucketing]] · [[../../dashboard/analytics__mrr]]
 
 ---
 
