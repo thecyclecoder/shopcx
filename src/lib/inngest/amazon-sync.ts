@@ -36,10 +36,16 @@ export const amazonSyncOrders = inngest.createFunction(
 
     if (!conn?.is_active) return { status: "skipped", reason: "inactive" };
 
-    // Calculate date range
+    // Calculate date range — DAY-ALIGNED (UTC), never clock-relative.
+    // `processOrderReport` upserts whole (snapshot_date, order_bucket) rows, so a
+    // clock-time window would hand it a PARTIAL first day (only the slice after
+    // the current time) and clobber that day's complete row with it. Snapping the
+    // start to 00:00Z and the end to tomorrow 00:00Z keeps every day in the
+    // window whole, so each upsert re-asserts a full day.
     const syncDays = Math.min(days || 30, 90);
-    const endDate = new Date().toISOString();
-    const startDate = new Date(Date.now() - syncDays * 86400000).toISOString();
+    const todayUtcMs = Date.parse(new Date().toISOString().slice(0, 10) + "T00:00:00Z");
+    const startDate = new Date(todayUtcMs - syncDays * 86400000).toISOString();
+    const endDate = new Date(todayUtcMs + 86400000).toISOString();
 
     // Request report
     const reportId = await step.run("request-report", async () => {
@@ -197,7 +203,7 @@ export const amazonSyncAsins = inngest.createFunction(
   }
 );
 
-// ── Daily cron: sync last 3 days for all active connections ──
+// ── Daily cron: sync a 30-day rolling window for all active connections ──
 export const amazonDailySyncCron = inngest.createFunction(
   {
     id: "amazon-daily-sync",
@@ -222,7 +228,13 @@ export const amazonDailySyncCron = inngest.createFunction(
           data: {
             workspace_id: conn.workspace_id,
             connection_id: conn.id,
-            days: 3, // Last 3 days catches late-reporting orders
+            // Amazon keeps materializing orders well past the order date — SnS
+            // renewals and Pending→Shipped transitions in particular. A day that
+            // falls out of this window is frozen FOREVER at whatever the last
+            // sync saw, so the window must outlast settlement, not just "late
+            // reporting". Measured 2026-08-24: a 3-day window left Jun–Aug
+            // understated by ~$18.1K of checkout revenue (July alone -18%).
+            days: 30,
           },
         });
       });
