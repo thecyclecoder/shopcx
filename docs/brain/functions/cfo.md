@@ -12,6 +12,14 @@ The permanent owner of **the company's numbers** — revenue, margin, cash, CAC,
 - **North-star metrics:** net revenue + MRR growth, gross + contribution margin %, LTV:CAC, CAC payback period. These are the numbers the [[ceo]] scoreboard is *measured in* — the CFO is the authoritative source for each.
 - **Data we have:** [[../tables/orders]], [[../tables/subscriptions]], dunning ([[../lifecycles/dunning]]), Meta ad spend ([[../integrations/meta]] / [[../lifecycles/ad-render]]), refunds + returns ([[../lifecycles/return-pipeline]]), payments ([[../integrations/braintree]] / Shopify Payments), tax ([[../integrations/avalara]]). The raw material exists across the departments — the CFO's job is to reconcile it into one financial truth.
 
+## ⭐ [What drives profit](cfo/profit-drivers.md) — read this first
+
+**[cfo/profit-drivers.md](cfo/profit-drivers.md)** is the living, evidence-backed answer to *"what actually moves the north star?"*, measured against 25 closed months of QuickBooks P&L and 12 monthly customer cohorts. It is the CFO's standing analytical record — **add to its findings log, don't re-derive it.**
+
+The headline, because it inverts the intuition: across 25 months, **revenue is uncorrelated with profit (`r = −0.05`)** while **ad load is the dominant driver (`r = −0.63`)**. Months where ads exceeded 25% of income averaged **6.3% margin**; months at or below averaged **21.9%** — on 40% *less* revenue.
+
+It also records what has been **disproven** (churn rate is structural, not a lever; revenue volume; the "2nd sale" theory) and which measurement surfaces are **known-broken** and must not be trusted without re-verification.
+
 ## Mandates (perpetual)
 
 ### Financial data & unit economics — the CEO north-star feed
