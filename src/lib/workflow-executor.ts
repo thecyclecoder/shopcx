@@ -29,6 +29,14 @@ export interface WorkflowContext {
     easypost_status: string | null; // pre_transit, in_transit, out_for_delivery, delivered, return_to_sender, failure, unknown
     easypost_detail: string | null; // last event message e.g. "Refused", "Delivered to Front Door"
     easypost_location: string | null; // city, state of last event
+    // Fields sourced from the LIVE lookupTracking call via the shared shipment fact pack helper
+    // (Phase 1 of director-shipment-claims-must-cite-a-live-tracker-read). Populated ONLY when the
+    // live call succeeded — a null on `live_source` after a lookup attempt means the reader fell
+    // back to the cached easypost_* columns (labeled as cached in the internal note).
+    live_source: "live" | "cached_fallback" | "unavailable" | null;
+    live_days_since_last_scan: number | null; // whole days between the LATEST tracker event and now
+    live_last_scan_at: string | null; // ISO datetime of the LATEST tracker event
+    live_has_estimated_delivery: boolean | null;
   } | null;
   subscription: Record<string, unknown> | null;
   workflowSandbox?: boolean;
@@ -147,6 +155,10 @@ export async function buildContext(admin: Admin, workspaceId: string, ticketId: 
         easypost_status: null,
         easypost_detail: null,
         easypost_location: null,
+        live_source: null,
+        live_days_since_last_scan: null,
+        live_last_scan_at: null,
+        live_has_estimated_delivery: null,
       };
 
       // Try to get real-time Shopify fulfillment status with carrier events
@@ -453,42 +465,76 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
   );
 
   if (needsEasyPost) {
-    try {
-      const { lookupTracking } = await import("@/lib/easypost");
-      const tracking = await lookupTracking(
-        ctx.workspaceId,
-        ctx.fulfillment.tracking_number,
-        ctx.fulfillment.carrier || undefined,
-      );
-      ctx.fulfillment.easypost_status = tracking.status;
+    // Phase 1 of director-shipment-claims-must-cite-a-live-tracker-read: route through the shared
+    // shipment fact pack helper so this workflow renders shipment state from a LIVE lookupTracking
+    // read (with a real datetime per event + derived days-since-last-scan), not from the cached
+    // easypost_* columns which carry no per-scan timestamp. On live failure the helper labels the
+    // cached fallback with its `easypost_checked_at` age so the internal note never presents cached
+    // data as current.
+    const { createShipmentFactPackReader } = await import("@/lib/shipment-facts");
+    const reader = createShipmentFactPackReader(ctx.workspaceId);
+    const cachedShipmentColumns = ctx.order ? {
+      status: (ctx.order.easypost_status as string | null) ?? null,
+      detail: (ctx.order.easypost_detail as string | null) ?? null,
+      location: (ctx.order.easypost_location as string | null) ?? null,
+      checked_at: (ctx.order.easypost_checked_at as string | null) ?? null,
+    } : undefined;
+    const pack = await reader.read({
+      tracking_number: ctx.fulfillment.tracking_number,
+      carrier: ctx.fulfillment.carrier,
+      cached: cachedShipmentColumns,
+    });
+    ctx.fulfillment.live_source = pack.source;
+    if (pack.source === "live") {
+      ctx.fulfillment.easypost_status = pack.status;
+      ctx.fulfillment.live_days_since_last_scan = pack.days_since_last_scan;
+      ctx.fulfillment.live_last_scan_at = pack.last_scan_at;
+      ctx.fulfillment.live_has_estimated_delivery = pack.has_estimated_delivery;
       // For return_to_sender, grab the first event with that status (the reason: "Refused", "Unclaimed", etc.)
-      // For other statuses, grab the last event (most recent update)
-      const reasonEvent = tracking.status === "return_to_sender"
-        ? tracking.events.find(e => e.status === "return_to_sender")
+      // For other statuses, grab the last event (most recent update).
+      const reasonEvent = pack.status === "return_to_sender"
+        ? pack.events.find(e => e.status === "return_to_sender")
         : null;
-      const lastEvent = tracking.events[tracking.events.length - 1];
+      const lastEvent = pack.events.length > 0 ? pack.events[pack.events.length - 1] : null;
       const detailEvent = reasonEvent || lastEvent;
       if (detailEvent) {
         ctx.fulfillment.easypost_detail = detailEvent.message;
-        ctx.fulfillment.easypost_location = [detailEvent.city, detailEvent.state].filter(Boolean).join(", ");
+        ctx.fulfillment.easypost_location = detailEvent.location ?? "";
       }
-
-      // Sync EasyPost data back to order + post note on Shopify order
+      // Sync live EasyPost data back to order + post note on Shopify order.
       if (ctx.order?.id) {
         const { syncEasyPostToOrder } = await import("@/lib/easypost-order-sync");
         await syncEasyPostToOrder({
           workspaceId: ctx.workspaceId,
           orderId: ctx.order.id as string,
           shopifyOrderId: ctx.order.shopify_order_id as string | null,
-          trackingResult: tracking,
+          trackingResult: {
+            status: pack.status,
+            estimatedDelivery: pack.estimated_delivery,
+            events: pack.events.map(e => ({
+              status: e.status,
+              message: e.message,
+              datetime: e.datetime,
+              city: undefined,
+              state: undefined,
+              zip: undefined,
+            })),
+          },
         });
       }
-
-      // Add internal note with EasyPost findings
-      await addNote(admin, ctx, `EasyPost tracking lookup: status "${tracking.status}"${lastEvent ? ` — "${lastEvent.message}" at ${ctx.fulfillment.easypost_location || "unknown location"}` : ""}. Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.`);
-    } catch (err) {
-      // EasyPost lookup failed (no funds, config issue) — fall back to Shopify data
-      console.error("[workflow] EasyPost lookup failed, falling back to Shopify:", err);
+      const scanTimeStr = pack.last_scan_at ? ` (last scan ${String(pack.last_scan_at).slice(0, 19)} UTC, ${pack.days_since_last_scan ?? "?"}d ago)` : "";
+      const eddStr = pack.has_estimated_delivery ? " · EDD present" : " · no EDD";
+      await addNote(admin, ctx, `Live tracker read: status "${pack.status}"${scanTimeStr}${eddStr}${lastEvent ? ` — "${lastEvent.message}" at ${ctx.fulfillment.easypost_location || "unknown location"}` : ""}. Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.`);
+    } else if (pack.source === "cached_fallback") {
+      // Live call failed — populate ctx from the cached columns AND label them cached (never
+      // as current) in the internal note.
+      ctx.fulfillment.easypost_status = pack.cached_status;
+      ctx.fulfillment.easypost_detail = pack.cached_detail;
+      ctx.fulfillment.easypost_location = pack.cached_location;
+      const ageStr = pack.cached_age_days != null ? `${pack.cached_age_days}d ago` : "unknown age";
+      const checked = pack.checked_at ? String(pack.checked_at).slice(0, 19) : "never";
+      console.error("[workflow] EasyPost lookup failed, falling back to cached columns:", pack.reason);
+      await addNote(admin, ctx, `Live tracker read FAILED (${pack.reason}) — showing CACHED easypost columns (last polled ${checked} UTC, ${ageStr}); this is when we last asked, NOT when the carrier last scanned. Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.`);
     }
   }
 
