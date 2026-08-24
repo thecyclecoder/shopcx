@@ -113,9 +113,14 @@ export async function internalSubscriptionAction(
   if (!sub) return { success: false, error: "Internal subscription not found" };
 
   const statusMap: Record<string, string> = { pause: "paused", cancel: "cancelled", resume: "active" };
+  // A cancelled sub has no next charge to advertise. Nulling it here (not
+  // at each reader) keeps the CS director brief, founder escalation card,
+  // portal detail, and agent context panel from surfacing a stale date.
+  const patch: Record<string, unknown> = { status: statusMap[action], updated_at: new Date().toISOString() };
+  if (action === "cancel") patch.next_billing_date = null;
   await admin
     .from("subscriptions")
-    .update({ status: statusMap[action], updated_at: new Date().toISOString() })
+    .update(patch)
     .eq("id", sub.id);
   if (sub.customer_id) await syncCustomerSubscriptionStatus(sub.customer_id);
   return { success: true };

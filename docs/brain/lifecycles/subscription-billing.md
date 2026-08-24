@@ -190,6 +190,20 @@ For internal subs these are pure DB updates. For Appstle subs we also call Appst
 
 [[../inngest/portal-auto-resume]] runs every minute, picks up subs where `pause_resume_at <= now()`, calls `resume()`.
 
+## Cancelling — clear the next-billing date at the write
+
+**A cancelled sub must not report a live next charge.** Every writer that flips `subscriptions.status → 'cancelled'` also sets `next_billing_date = NULL` in the same update. Enforced at the five known writers so a downstream reader (CS director brief, founder escalation card, portal detail, agent context panel) can render `next_billing_date` verbatim without a per-caller `status === 'cancelled'` guard.
+
+- **`internalSubscriptionAction(ws, contractId, 'cancel')`** ([[../libraries/internal-subscription]]) — internal-sub canonical cancel; adds `next_billing_date: null` alongside `status: 'cancelled'`.
+- **`appstleSubscriptionAction(ws, contractId, 'cancel', …)`** ([[../libraries/appstle]]) — Appstle-sub canonical cancel; adds `next_billing_date: null` in the local mirror after the Appstle DELETE succeeds.
+- **`exhaustInternalDunning`** ([[../inngest/internal-dunning]]) — dunning-exhausted internal-sub cancel; adds `next_billing_date: null`. Recovery re-sets the date when the customer updates their card.
+- **Journey-outcomes cancel fallback** ([[../inngest/journey-outcomes]]) — the `outcome === 'cancelled'` branch's no-`shopify_contract_id` fallback DB write; adds `next_billing_date: null`.
+- **Appstle webhook** ([[../inngest/appstle-subscription-handler]]) — when `mapStatus(status) === 'cancelled'` the upsert force-nulls `next_billing_date`, even if Appstle's own payload still carries a date.
+
+**Do not guard at the readers.** The column is the source of truth; a reader-side guard leaves the stale value for the next consumer to trip over. Ground-truth incident: ticket `8af43dd1` (Bonnie Marlette, 2026-08-24) — the CS director escalated to the founder asserting a cancelled sub "still carries an active 8-week cadence with a live next-charge on 2026-09-11" and asked for a $209.13 refund. Every renewal had in fact billed while the subscription was still active; only the leftover `next_billing_date` column looked live. A sibling row on the same customer carried a `next_billing_date` ten months in the past — the same shape of stale column.
+
+**Reactivation.** `cancelled → active` is still supported (see below). Per the "modify first, activate LAST" rule, the caller sets `next_billing_date` BEFORE flipping status back to `active` — the null-on-cancel invariant does not interfere.
+
 ## Reactivating a cancelled subscription + manual price edits (money-safety)
 
 **A cancelled subscription CAN be reactivated** — `cancelled → active` is supported, not just `paused → active`. Use `appstleSubscriptionAction(ws, contractId, "resume")`, which PUTs Appstle `subscription-contracts-update-status?status=ACTIVE`. The local row goes `cancelled → active` too.

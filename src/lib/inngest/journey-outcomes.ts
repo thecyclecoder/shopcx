@@ -113,9 +113,10 @@ export const journeySessionCompleted = inngest.createFunction(
               "Customer via cancel journey",
             );
           } else {
+            // A cancelled sub has no next charge to advertise.
             await admin
               .from("subscriptions")
-              .update({ status: "cancelled" })
+              .update({ status: "cancelled", next_billing_date: null })
               .eq("id", session.subscription_id);
           }
         }
