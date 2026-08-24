@@ -1808,6 +1808,48 @@ test("verifyPlanAgainstRemedyStates — a money step with no resolvable order re
   assert.equal(verdict.violation.reason, "missing_order_reference");
 });
 
+test("verifyPlanAgainstRemedyStates — REJECTS a partial_refund BELOW mirror remaining_refundable when headroom_confidence='degraded' (out-of-band Shopify refund could double-pay)", () => {
+  // The fail-open gap the remedy-state-must-see-out-of-band-refunds diff introduced: the mirror
+  // says remaining_refundable is $200 but the live Shopify ledger call FAILED (degraded fallback),
+  // so the mirror cannot see an out-of-band Shopify refund that already drew down the same money.
+  // A refund BELOW mirror remaining_refundable that would otherwise slip through must be REJECTED.
+  const state: CxOrderRemedyState = {
+    ...cleanState(),
+    total_cents: 20000,
+    refunds_succeeded_cents: 0,
+    remaining_refundable_cents: 20000,
+    headroom_confidence: "degraded",
+    out_of_band_refunds_cents: 0,
+  };
+  const ref = extractRemedyOrderRefFromStep({ shopify_order_id: "SC135494" })!;
+  const plan: RemedyActionStep[] = [
+    { actionType: "partial_refund", actionParams: { shopify_order_id: "SC135494", amount_cents: 5000, reason: "shipping" } },
+  ];
+  const states = new Map<string, CxOrderRemedyState>();
+  states.set(ref.key, state);
+  const verdict = verifyPlanAgainstRemedyStates(plan, states);
+  assert.equal(verdict.ok, false);
+  if (verdict.ok) throw new Error("unreachable");
+  assert.equal(verdict.violation.reason, "headroom_degraded");
+  assert.equal(verdict.violation.actionType, "partial_refund");
+  // Detail names the order key and that live Shopify headroom is unreadable.
+  assert.match(verdict.violation.detail, /SC135494/);
+  assert.match(verdict.violation.detail, /headroom_confidence=degraded/);
+  assert.match(verdict.violation.detail, /unreadable/i);
+});
+
+test("verifyPlanAgainstRemedyStates — headroom_confidence='live' with no open returns and amount ≤ remaining still PASSES (baseline unaffected)", () => {
+  const state = cleanState();
+  const ref = extractRemedyOrderRefFromStep({ shopify_order_id: "SC135494" })!;
+  const plan: RemedyActionStep[] = [
+    { actionType: "partial_refund", actionParams: { shopify_order_id: "SC135494", amount_cents: 5000, reason: "shipping" } },
+  ];
+  const states = new Map<string, CxOrderRemedyState>();
+  states.set(ref.key, state);
+  const verdict = verifyPlanAgainstRemedyStates(plan, states);
+  assert.equal(verdict.ok, true);
+});
+
 test("extractRemedyOrderRefFromStep — canonicalizes an order_number smuggled into shopify_order_id", () => {
   // partial_refund's executor resolves a non-digit shopify_order_id against the order_number column
   // (action-executor.ts:2227). The extractor mirrors that so the state lookup matches what the
