@@ -32,6 +32,7 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { linkGroupIds } from "@/lib/customer-links";
 import { suggestEmailCorrection } from "@/lib/email-typo";
+import { getOrderRefundLedger, type OrderRefundLedger } from "@/lib/refund-ledger";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -265,16 +266,49 @@ export interface CxOrderRemedyState {
   financial_status: string | null;
   total_cents: number;
   /**
-   * Sum of `order_refunds.amount_cents` where `status IN ('succeeded','settled')`. The
-   * "already succeeded" number the remaining-refundable computation subtracts from `total_cents`.
+   * Total refunds actually settled on the order. When `headroom_confidence='live'` this is the
+   * Shopify-transaction ledger's `refundedCents` (mirrored + out-of-band). When the live ledger
+   * can't be read (`headroom_confidence='degraded'`) it falls back to the sum of
+   * `order_refunds.amount_cents` where `status IN ('succeeded','settled')` — accurate for our own
+   * refunds but blind to money moved directly in the Shopify admin.
    */
   refunds_succeeded_cents: number;
   /**
-   * `total_cents - refunds_succeeded_cents` (floored at 0). The CEILING for any NEW money remedy
-   * on this order — a partial_refund whose `amount_cents` exceeds this is a double-pay.
+   * The CEILING for any NEW money remedy on this order — a partial_refund whose `amount_cents`
+   * exceeds this is a double-pay. When `headroom_confidence='live'` this is the ledger's
+   * `refundableCents` (`max(0, sale - refunded - pending)`, so an out-of-band refund lowers it
+   * correctly). When `headroom_confidence='degraded'` this is the mirror fallback
+   * `total_cents - refunds_succeeded_cents` (floored at 0) — the caller MUST refuse a money
+   * decision rather than trust the number, per the spec's "refund guard that cannot verify
+   * headroom must refuse" rule.
    */
   remaining_refundable_cents: number;
-  /** Every succeeded/settled refund mirror row, most-recent-first. */
+  /**
+   * Sum of settled Shopify refunds NOT reconciled to a row in `public.order_refunds` — money
+   * moved outside ShopCX (a manual refund in the Shopify admin, an Appstle-side refund, etc.).
+   * `> 0` explains WHY `remaining_refundable_cents` is lower than the mirror-only math implies;
+   * this is the exact signal that would have prevented the SC126000 double-refund proposal on
+   * ticket dac9f0c7 (yvette jong, 2026-08-24). Zero when the live ledger reads clean OR when the
+   * ledger call failed and we're in `headroom_confidence='degraded'` fallback (we don't invent an
+   * out-of-band figure we couldn't read).
+   */
+  out_of_band_refunds_cents: number;
+  /**
+   * How much to trust `refunds_succeeded_cents` + `remaining_refundable_cents`:
+   *  - `"live"`   — computed from the Shopify transactions ledger (`getOrderRefundLedger`); the
+   *                 numbers include out-of-band refunds and are the true headroom right now.
+   *  - `"degraded"` — the ledger call failed (Shopify down, non-Shopify order, missing
+   *                   shopify_order_id) OR no order was resolved. The numbers reflect only what
+   *                   `public.order_refunds` mirrors, so an out-of-band refund is invisible and
+   *                   headroom is potentially OVERSTATED. A refund guard that cannot verify
+   *                   headroom must REFUSE, never assume — this is the marker to check first.
+   */
+  headroom_confidence: "live" | "degraded";
+  /**
+   * The `order_refunds` mirror rows kept for provenance. When `headroom_confidence='live'` these
+   * are no longer the source of the totals (the ledger is) — they explain WHICH of the settled
+   * refunds ShopCX itself issued, so `refunded_so_far - sum(succeeded_refunds) === out_of_band`.
+   */
   succeeded_refunds: CxRemedyRefundRow[];
   /** Every non-cancelled return on the order, most-recent-first. */
   returns: CxRemedyReturnRow[];
@@ -309,10 +343,21 @@ const REMEDY_STATE_LIVE_RETURN_EXCLUDED_STATUSES = new Set(["cancelled"]);
  * up-front) can pass `orderId` and skip a second lookup. Read-only; safe to call from a Sonnet
  * tool or the box CX SDK.
  */
+export interface GetOrderRemedyStateOpts {
+  /**
+   * Injectable Shopify-ledger reader — defaults to [[refund-ledger]] `getOrderRefundLedger`.
+   * Overridable so the unit test can pin the live-vs-degraded branching without hitting
+   * Shopify. The real path passes the workspaceId + resolved internal order UUID, matching
+   * `getOrderRefundLedger`'s CLAUDE.md hard-rule contract (internal joins use UUIDs).
+   */
+  getLedger?: (workspaceId: string, orderId: string) => Promise<OrderRefundLedger>;
+}
+
 export async function getOrderRemedyState(
   admin: Admin,
   workspaceId: string,
   ref: CxOrderRemedyStateRef,
+  opts?: GetOrderRemedyStateOpts,
 ): Promise<CxOrderRemedyState> {
   const empty: CxOrderRemedyState = {
     found: false,
@@ -324,6 +369,10 @@ export async function getOrderRemedyState(
     total_cents: 0,
     refunds_succeeded_cents: 0,
     remaining_refundable_cents: 0,
+    out_of_band_refunds_cents: 0,
+    // No order → no ledger read → cannot claim a trustworthy headroom. `degraded` so a caller
+    // treats the zero as "unknown", not "clean".
+    headroom_confidence: "degraded",
     succeeded_refunds: [],
     returns: [],
     open_returns: [],
@@ -417,7 +466,19 @@ export async function getOrderRemedyState(
   );
 
   const totalCents = order.total_cents ?? 0;
-  const remaining = Math.max(0, totalCents - refunds_succeeded_cents);
+  // Mirror-only fallback numbers — used ONLY when the live ledger call fails, so a caller sees the
+  // (potentially overstated) mirror figure with `headroom_confidence='degraded'` and can refuse the
+  // money decision rather than trust it. See CxOrderRemedyState.headroom_confidence.
+  const mirrorRefundedCents = refunds_succeeded_cents;
+  const mirrorRemainingCents = Math.max(0, totalCents - mirrorRefundedCents);
+
+  const getLedger = opts?.getLedger ?? getOrderRefundLedger;
+  const ledger = await getLedger(workspaceId, order.id);
+
+  const liveRefundedCents = ledger.ok ? ledger.refundedCents : mirrorRefundedCents;
+  const liveRemainingCents = ledger.ok ? ledger.refundableCents : mirrorRemainingCents;
+  const outOfBandCents = ledger.ok ? ledger.outOfBandCents : 0;
+  const headroomConfidence: CxOrderRemedyState["headroom_confidence"] = ledger.ok ? "live" : "degraded";
 
   return {
     found: true,
@@ -427,8 +488,10 @@ export async function getOrderRemedyState(
     shopify_order_id: order.shopify_order_id ?? null,
     financial_status: order.financial_status ?? null,
     total_cents: totalCents,
-    refunds_succeeded_cents,
-    remaining_refundable_cents: remaining,
+    refunds_succeeded_cents: liveRefundedCents,
+    remaining_refundable_cents: liveRemainingCents,
+    out_of_band_refunds_cents: outOfBandCents,
+    headroom_confidence: headroomConfidence,
     succeeded_refunds,
     returns,
     open_returns,
@@ -455,8 +518,14 @@ export function formatOrderRemedyState(state: CxOrderRemedyState): string {
     parts.push(`ORDER REMEDY STATE for ${label}: (order not found in this workspace)`);
     return parts.join("\n");
   }
+  const oob = state.out_of_band_refunds_cents > 0
+    ? ` · out_of_band ${DOLLARS(state.out_of_band_refunds_cents)}`
+    : "";
+  const confidence = state.headroom_confidence === "degraded"
+    ? " · ⚠ HEADROOM DEGRADED (live ledger unreadable — mirror-only figures; a refund guard must REFUSE, not trust)"
+    : "";
   parts.push(
-    `ORDER REMEDY STATE for ${label}: total ${DOLLARS(state.total_cents)} · financial_status=${state.financial_status ?? "?"} · refunded_so_far ${DOLLARS(state.refunds_succeeded_cents)} · REMAINING REFUNDABLE ${DOLLARS(state.remaining_refundable_cents)}`,
+    `ORDER REMEDY STATE for ${label}: total ${DOLLARS(state.total_cents)} · financial_status=${state.financial_status ?? "?"} · refunded_so_far ${DOLLARS(state.refunds_succeeded_cents)}${oob} · REMAINING REFUNDABLE ${DOLLARS(state.remaining_refundable_cents)}${confidence}`,
   );
   if (state.succeeded_refunds.length === 0) {
     parts.push("  refunds: (none)");

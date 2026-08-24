@@ -64,6 +64,7 @@ Pure computation extracted for unit-testing without hitting the network. Reconci
 
 - **`get_order_refund_ledger`** — Sonnet data tool on [[sonnet-orchestrator-v2]] (alongside `get_returns` / `get_payment_methods`). Takes `order_number`, resolves it to `orders.id` scoped by workspace + linked-customer ids, then formats the ledger for the model. Documented in [[../orchestrator-tools]].
 - **`loadCsDirectorCallBrief`** (`scripts/builder-worker.ts` → `runCsDirectorCallJob`). For each recent Shopify order on the escalated ticket's customer (up to 5), the brief renders one `charged / refunded / REFUNDABLE / OUT-OF-BAND` line so June rules on the real refundable balance instead of hitting a rail.
+- **[[cx-agent-sdk]] `getOrderRemedyState`** — the mandatory pre-money-remedy read consumed by the CS director + the money-remedy guard + the founder escalation card. Phase 1 of [[../specs/remedy-state-must-see-out-of-band-refunds]] routes its `refunds_succeeded_cents` + `remaining_refundable_cents` through this ledger (not the mirror alone), and surfaces `out_of_band_refunds_cents` + `headroom_confidence` so a caller can tell mirrored from unmirrored money and refuse on a degraded read. Derived-from ticket dac9f0c7 (yvette jong, 2026-08-24): SC126000 had $65.28 total, $5.32 mirrored, and a $59.96 out-of-band Shopify refund — the mirror-only reader would have authorized a double refund.
 
 ## See also
 
