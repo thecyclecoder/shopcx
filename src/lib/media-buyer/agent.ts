@@ -516,6 +516,73 @@ async function readLatestSensorTrust(
 }
 
 /**
+ * How far back to read `iteration_actions` when feeding the per-object cooldown rail.
+ *
+ * Deliberately WIDER than any sane `per_object_cooldown_hours` (24h today): the pure
+ * function does the actual age comparison, so over-fetching is inert, while
+ * under-fetching would silently disable the rail for objects whose last action sits
+ * just outside the window.
+ */
+export const RECENT_ACTIONS_LOOKBACK_MS = 72 * 3600_000;
+
+/**
+ * Read this account's recent `iteration_actions` so `computeMediaBuyerPlan` can enforce
+ * `per_object_cooldown_hours` — "at most one budget change per adset per day" (CEO
+ * 2026-08-24).
+ *
+ * ## Why this exists
+ *
+ * The rail was fully implemented in the PURE function but nothing ever fed it.
+ * `recentActions` is optional (so pre-rail unit tests keep the old behaviour) and the
+ * runner never passed it — **zero call sites** — so `inCooldown()` returned `{in:false}`
+ * for every object and the rail could not fire. Observed consequence: adset
+ * 120249488919900682 was scaled at 2026-08-18 22:00 and again at 2026-08-19 04:00, six
+ * hours apart, and adset 120250143054030326 compounded +20% steps from $259 to $1,114 a
+ * day in ~20 hours.
+ *
+ * Returns EVERY action type, not just budget changes. An object we just paused should
+ * not be scaled in the same window either, and the decision engine's mirror of this rail
+ * gates the same way.
+ */
+async function readRecentIterationActions(
+  admin: Admin,
+  workspaceId: string,
+  metaAdAccountId: string,
+  nowMs: number,
+): Promise<
+  Array<{
+    object_id: string;
+    action_type: string;
+    created_at: string;
+    before_budget_cents: number | null;
+    after_budget_cents: number | null;
+  }>
+> {
+  const since = new Date(nowMs - RECENT_ACTIONS_LOOKBACK_MS).toISOString();
+  const { data, error } = await admin
+    .from("iteration_actions")
+    .select("object_id, action_type, created_at, before_budget_cents, after_budget_cents")
+    .eq("workspace_id", workspaceId)
+    .eq("meta_ad_account_id", metaAdAccountId)
+    .gte("created_at", since)
+    .order("created_at", { ascending: false })
+    .limit(500);
+  if (error) {
+    // Fail CLOSED-ish: an unreadable ledger must not silently disable the rail. Returning
+    // [] would do exactly that, so surface it — the caller treats a throw as a pass abort
+    // rather than scaling blind.
+    throw new Error(`readRecentIterationActions: ${error.message}`);
+  }
+  return (data ?? []) as Array<{
+    object_id: string;
+    action_type: string;
+    created_at: string;
+    before_budget_cents: number | null;
+    after_budget_cents: number | null;
+  }>;
+}
+
+/**
  * Build the dormant plan shape the pass returns when the sensor-trust gate denies —
  * mirrors the no-active-policy dormancy shape (0 promote/kill/replenish, empty summary
  * naming the denial reason). Kept in one place so the two dormancy paths stay in sync.
@@ -2397,6 +2464,17 @@ export async function runMediaBuyerLoop(
       })
     : [];
 
+  // ── Scale-edit rails (CEO 2026-08-24: one budget change per adset per day) ─
+  // The per-object cooldown rail lives in the pure plan-computer but was inert because
+  // `recentActions` was never passed — zero call sites — so `inCooldown()` always
+  // returned false. Feeding it here is what actually arms `per_object_cooldown_hours`.
+  const recentActions = await readRecentIterationActions(
+    admin,
+    opts.workspaceId,
+    opts.metaAdAccountId,
+    nowMs,
+  );
+
   // ── Compute the plan ──────────────────────────────────────────────────────
   const plan = computeMediaBuyerPlan({
     policy,
@@ -2412,6 +2490,8 @@ export async function runMediaBuyerLoop(
     activeWinnersForExploit,
     cohortTargetCount: opts.cohortTargetCount,
     liveConceptTags,
+    recentActions,
+    nowMs,
   });
 
   // ── Shadow branch (media-buyer-shadow-mode Phase 2) ───────────────────────
@@ -2473,6 +2553,38 @@ export async function runMediaBuyerLoop(
   // ── Persist: iteration_actions + director_activity + ad_publish_jobs ──────
   const writes = { iterationActionsInserted: 0, directorActivityRows: 0, publishJobsInserted: 0, amplifiedAdCampaignIds: [] as string[] };
   const nowIso = new Date(nowMs).toISOString();
+
+  // ── Scale-rail suppressions are CITED, never silent ───────────────────────
+  // One `media_buyer_scale_rail_deferred` row per promote the pure plan-computer
+  // dropped. Without this the pass just looks "quiet" — the same failure mode that
+  // let a dead cooldown rail go unnoticed while budgets compounded 4x in 20 hours.
+  for (const d of plan.deferred) {
+    const detail =
+      d.rail === "per_object_cooldown"
+        ? `last action ${d.sinceLastActionMs != null ? (d.sinceLastActionMs / 3600_000).toFixed(1) : "?"}h ago, cooldown ${d.cooldownMs != null ? (d.cooldownMs / 3600_000).toFixed(0) : "?"}h`
+        : `would-be delta $${((d.wouldBeDelta ?? 0) / 100).toFixed(0)}, already $${((d.cumulativeSoFar ?? 0) / 100).toFixed(0)} of $${((d.ceiling ?? 0) / 100).toFixed(0)} ceiling`;
+    const rec = await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      actionKind: "media_buyer_scale_rail_deferred",
+      specSlug: null,
+      reason: `Promote on adset ${d.targetObjectId} deferred — ${d.rail} (${detail}). ${d.rationale}`,
+      metadata: {
+        rail: d.rail,
+        target_object_id: d.targetObjectId,
+        source_meta_ad_id: d.sourceMetaAdId,
+        policy_version_id: d.policyVersionId,
+        since_last_action_ms: d.sinceLastActionMs ?? null,
+        cooldown_ms: d.cooldownMs ?? null,
+        would_be_delta_cents: d.wouldBeDelta ?? null,
+        cumulative_so_far_cents: d.cumulativeSoFar ?? null,
+        ceiling_cents: d.ceiling ?? null,
+        meta_ad_account_id: opts.metaAdAccountId,
+        autonomous: true,
+      },
+    });
+    if (rec.recorded) writes.directorActivityRows += 1;
+  }
 
   // iteration_actions rows for promote (scale_up) + kill (pause). Same shape the
   // decision-engine persistActions writes — the executor picks these up on next pass.
