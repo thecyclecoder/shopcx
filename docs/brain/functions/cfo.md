@@ -16,7 +16,11 @@ The permanent owner of **the company's numbers** — revenue, margin, cash, CAC,
 
 **[cfo/profit-drivers.md](cfo/profit-drivers.md)** is the living, evidence-backed answer to *"what actually moves the north star?"*, measured against 25 closed months of QuickBooks P&L and 12 monthly customer cohorts. It is the CFO's standing analytical record — **add to its findings log, don't re-derive it.**
 
-The headline: **the business is currently UNDER-spending on acquisition, and today's 26% margin is the symptom, not the achievement.** At ~$41K/month of Meta spend it earns 26% on a *shrinking* base, and steady state on that path is ~$4K/month of profit. Stepping spend toward **$100–120K/month** yields less headline margin (~15–20%) but more durable profit on a stable base. The operating rule is one number: **raise spend until blended CAC crosses ~$70, then stop** (3× LTV:CAC).
+The headline: **the business is currently UNDER-spending on acquisition, and today's 26% margin is the symptom, not the achievement.** At ~$41K/month of Meta spend it earns 26% on a *shrinking* base, and steady state on that path is ~$4K/month of profit.
+
+**The staged plan (CEO 2026-08-24):** **Phase 1** — step to **$55K/month** to match cancels with new subs and stop the base decaying. **Phase 2** — **+15%/month** toward **~$100K**, paced by cash (Meta is on credit cards, so this month's spend is next month's payment; a faster ramp digs a *deeper* hole for the same endpoint).
+
+**Stop rule: hold whenever blended CAC crosses $110. Never exceed $139** — break-even is `LTV $209 × 66.3% contribution`. The ceiling is set by the **marginal** customer, not a benchmark ratio; band averages hide a marginal CAC of $224 between $101K and $149K of spend.
 
 CAC means the **blended** number — total ad spend ÷ total new customers across website *and* Amazon ([[../dashboard/analytics__roas]]). Per CEO directive: *"hoping an organic customer shows up is not a lever."*
 

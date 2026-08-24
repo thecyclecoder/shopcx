@@ -6,7 +6,7 @@ A **living investigation page**. Profit, not revenue, is the CEO north star ([[.
 
 Every number is **measured** unless labelled otherwise. Wrong conclusions are **struck through, not deleted** — the point is to stop a future session re-deriving a disproven answer. Add to the [findings log](#findings-log); don't silently rewrite history.
 
-**Re-run:** `scripts/_profit-drivers.ts` · `_scale-curve.ts` · `_cogs-normalize2.ts` · `_amazon-halo.ts` (all read-only, DB-only, **zero external API calls** — Appstle bills per hit).
+**Re-run:** `scripts/_profit-drivers.ts` · `_scale-curve.ts` · `_cogs-normalize2.ts` · `_amazon-halo.ts` · `_ramp-plan.ts` (all read-only, DB-only, **zero external API calls** — Appstle bills per hit).
 
 ---
 
@@ -14,9 +14,11 @@ Every number is **measured** unless labelled otherwise. Wrong conclusions are **
 
 > **The business is currently UNDER-spending on acquisition, and today's 26% margin is the symptom, not the achievement.**
 
-At ~$41K/month of Meta spend the business earns a 26% margin on a **shrinking** base. Steady state on that path is roughly **$4K/month of profit**. Stepping spend up toward **$100–120K/month** produces less headline margin (~15–20%) but **more durable profit on a stable or growing base**.
+At ~$41K/month of Meta spend the business earns a 26% margin on a **shrinking** base. Steady state on that path is roughly **$4K/month of profit**. Stepping spend toward **~$100K/month** produces less headline margin (~14%) but **more durable profit on a stable base**.
 
-The ceiling is real but higher than the current level: above ~$150K/month the margin thins to ~7%, and above ~$180K it approaches zero.
+**The plan (CEO):** Phase 1 → $55K/month to match cancels and stop the decline. Phase 2 → +15%/month toward ~$100K, cash-paced. **Stop whenever blended CAC crosses $110; never exceed $139** (break-even = LTV × contribution margin). See [§ The staged plan](#-the-staged-plan-ceo-2026-08-24).
+
+The ceiling is **~$100K/month**, where the *marginal* customer starts costing more than they return — not the $150–180K the band averages suggest.
 
 ---
 
@@ -62,7 +64,36 @@ Blended CAC as spend moved 8× (`_scale-curve.ts`):
 | $120–180K | 10 | $149K | 1,677 | $89 | 2.3× |
 | over $180K | 2 | $213K | 2,267 | $94 | 2.2× |
 
-**At a 3× LTV:CAC target the CAC ceiling is ~$70 — which sits around $100–120K/month of spend.** Current spend is $41K.
+> ⚠️ **These are band AVERAGES. Do not size a ramp from them** — see § The ceiling below. An average CAC of $89 at $149K/month hides a *marginal* CAC of $224 for the customers between $101K and $149K.
+
+### ⭐ The ceiling — derived, not benchmarked
+
+> ~~**At a 3× LTV:CAC target the CAC ceiling is ~$70.**~~ **Wrong.** $70 is just `$209 ÷ 3` — an imported DTC convention, not anything derived from this business. It caps spend at roughly half of what the economics actually support.
+
+**Break-even CAC** is where a customer's lifetime contribution equals what you paid:
+
+```
+LTV $209 × contribution margin 66.3% = $139
+```
+
+Above $139 blended CAC a customer destroys value; below it, it adds. That is the real hard ceiling.
+
+But the decision is about the **marginal** customer, not the average. Band-to-band:
+
+| Step | Δ spend | Δ customers | **Marginal CAC** | vs $139 break-even |
+|---|---|---|---|---|
+| $39K → $101K | $62K | +544 | **$114** | ✅ profitable (+$25/customer) |
+| $101K → $149K | $48K | +214 | **$224** | ❌ **destroys value** |
+| $149K → $213K | $64K | +590 | $108 | ⚠️ n=2 band, 2025 economics — don't trust |
+
+**The wall is around $100K/month**, where marginal CAC crosses break-even. Not $150–180K.
+
+Practical operating rule, with margin for LTV being wrong:
+
+- **Hold at any level where blended CAC crosses $110** — the signal you've entered the $224 marginal zone.
+- **Never exceed $139** blended CAC.
+
+> ⚠️ **Everything above scales linearly with LTV.** The $208.93 blended LTV is the dashboard's own *uncalibrated* figure. At $250 LTV break-even is $166; at $180 it's $119 and the ramp barely works. **Re-derive the ceiling whenever LTV is recalibrated.**
 
 ### Profit at steady state
 
@@ -75,9 +106,50 @@ Steady state = `customers/month × LTV`, at the July cost structure:
 | **$101K** | ~1,460 | ~$306K | **~$44K** | **14%** |
 | $149K | 1,677 | ~$350K | ~$24K | 6.9% |
 
-**Profit rises with spend up to ~$100–120K/month, then falls.** Today's high margin is a harvest of the base 2025's spend built.
+**Profit rises with spend up to ~$100K/month, then falls.** Today's high margin is a harvest of the base 2025's spend built.
 
-**Operating rule: raise spend until blended CAC crosses ~$70, then stop.**
+---
+
+## ⭐ The staged plan (CEO 2026-08-24)
+
+> **Phase 1** — match incoming subs with cancels ("stay flat").
+> **Phase 2** — raise acquisition **slowly**. Meta is paid on credit cards, so this month's spend is next month's payment. No $30K → $100K jumps.
+
+**The binding constraint is CASH, not CAC.** A customer costs money today and repays over ~5 months, so a ramp faster than the payback period compounds the cash gap even when every cohort is profitable.
+
+### Phase 1 — $41K → $55K/month
+
+Churn **$20.0K** MRR vs new-sub **$17.6K** ⇒ **13.6% more new subs** needed to hold flat. At the measured marginal response (7.38 customers per $1K):
+
+| | Now | Phase 1 |
+|---|---|---|
+| Spend | $41K/mo ($1,370/day) | **$55K/mo ($1,830/day)** |
+| Total new customers | 749 | ~851 |
+| Blended CAC | $55 | **~$65** |
+
+Marginal CAC on this step is ~$114 against a $139 break-even — genuinely profitable, and it protects the ~618/month baseline that carries essentially all the profit. **~$14K/month more on the card.**
+
+### Phase 2 — +15%/month to ~$100K
+
+Incremental cash cost versus holding at $41K (the delta the card float must fund):
+
+| Ramp rate | Deepest incremental cash hole |
+|---|---|
+| **+15%/month** | **~$270K** by month 10 |
+| +25%/month | ~$227K by month 7 |
+| +40%/month | ~$275K by month 7 |
+
+A faster ramp digs a **deeper** hole for the same endpoint — spend leaves immediately, the cohort repays over ~5 months.
+
+**+15%/month reaches ~$100K in about five months and keeps the monthly card increase under ~$10K.**
+
+Be clear what Phase 2 buys: between $55K and $100K you acquire at ~$114 against a $139 break-even — about **$25 of profit per customer**. Real, but thin. It is mostly **converting cash into revenue slightly better than break-even**, and its main value is arresting the decline of the profitable base.
+
+**Stop rule:** hold the level for a month whenever blended CAC crosses **$110**.
+
+Model: `scripts/_ramp-plan.ts`.
+
+---
 
 ---
 
@@ -136,10 +208,12 @@ So Meta-reported CPA isn't a *worse* number — it's a **different denominator**
 | Threshold | Was | Now | Blended equivalent |
 |---|---|---|---|
 | `crown_max_cpa_cents` | $150 | **$240** | ~$37 (5.6× LTV:CAC) |
-| `hold_band_max_cpa_cents` | $220 | **$450** | ~$70 — the 3× ceiling |
+| `hold_band_max_cpa_cents` | $220 | **$450** | ~$70 blended — see note |
 | `slow_kill_max_cpa_cents` | $300 | **$600** | must exceed the hold band |
 
 > ⚠️ **The slow-kill move is not optional.** [[../../libraries/testing-results-sdk]] `tierForTest` evaluates the slow-kill rule **before** the hold band (`testing-results-sdk.ts:93` vs `:95`), so past `slow_kill_min_spend_cents` ($600) the slow-kill ceiling **is** the effective kill line. Raising the hold band alone changes almost nothing. Keep `slow_kill_max_cpa_cents > hold_band_max_cpa_cents` — the 1.36× ratio is preserved.
+
+> **Why $450 and not higher.** $450 ÷ 6.4 = ~$70 blended, which is *conservative* against the $139 break-even — deliberately. This is a **per-adset** kill line, not the account ceiling. Setting it at the account-level break-even would keep every below-average adset alive; the point is to cull the weak ones while the account blend stays comfortably profitable. If LTV is recalibrated upward, revisit — the hard floor is that no adset above `$139 × 6.4 ≈ $890` Meta CPA can ever be worth keeping.
 
 Applied by `scripts/_retune-media-buyer-cpa-thresholds.ts` (idempotent; writes a `media_buyer_cpa_thresholds_rebased` [[../../tables/director_activity]] row). **Re-measure the 6.4× ratio periodically** — it moves with ATT, creative mix, and the Amazon share.
 
@@ -241,7 +315,7 @@ Established: churn shape structural · revenue ⊥ profit · contribution 4.2× 
 ### 2026-08-24 (session 2) — the scale question
 Triggered by: *"revenue declines every month, but margin is 22% — does the margin evaporate, or can we cruise?"*
 
-**Answer: neither. Cruising is the one option that isn't available** — holding spend at $41K glides to ~$4K/month profit. Established the scale curve, the ~$70 CAC ceiling, and the December-2024 write-off.
+**Answer: neither. Cruising is the one option that isn't available** — holding spend at $41K glides to ~$4K/month profit. Established the scale curve, the December-2024 write-off, and (session 3) the staged Phase 1/Phase 2 ramp with the ceiling derived from marginal CAC rather than a 3× benchmark.
 
 ### Corrections (kept so they aren't re-derived)
 - ~~"Meta sees ~5% of reality"~~ — compared Meta purchases against *all* orders including renewals.
@@ -253,6 +327,8 @@ Triggered by: *"revenue declines every month, but margin is 22% — does the mar
 - ~~"Incremental CAC is $230, so accept a smaller business"~~ — wrong metric *and* wrong conclusion. Blended CAC is $55 and the business is under-spending.
 - ~~"Meta-reported CPA is ~2x optimistic"~~ — Shopify only sees clicks; it cannot see view-through, cross-device, or Amazon. Meta CPA is a DIFFERENT denominator (~6.4x blended), not a worse one. The thresholds were on the wrong basis, not the signal.
 - ~~"~618 customers/month arrive at zero spend"~~ — extrapolated $30K below any observed month; a diminishing-returns fit explains the same data and predicts near-zero. Unknowable without a test.
+- ~~"The CAC ceiling is ~$70 (3× LTV:CAC)"~~ — an imported DTC benchmark, not derived. Break-even is **$139** (LTV × contribution margin) and the *marginal* CAC crosses it around **$100K/month**. The $70 rule capped spend at roughly half what the economics support.
+- ~~"$150–180K/month is still fine"~~ — read off band AVERAGES. Marginal CAC between $101K and $149K is **$224**, well above break-even.
 - ~~Normalizing total COGS across 2024~~ — adds ads-booked-in-COGS back as an accounting error and invents 43% margins.
 
 ### Shipped
@@ -264,7 +340,7 @@ Triggered by: *"revenue declines every month, but margin is 22% — does the mar
 
 ## Open questions
 
-1. **Step spend toward $100K/month and watch blended CAC.** The stopping rule is CAC > $70. This is the live decision.
+1. **Execute Phase 1 ($41K → $55K), then ramp +15%/month toward ~$100K.** Stop-rule: hold whenever blended CAC crosses **$110**; never exceed **$139**. This is the live decision.
 2. **What caused the Nov 2025 – Jan 2026 retention hit?** Cost ~18% of LTV, recovered, cause unknown.
 3. **Did the 1-unit default actually raise CVR?** Needs a split test with spend held constant.
 4. **Why are pauses doubling** on the renewal book (169 → 352 rows, May → Jul)?
@@ -283,6 +359,7 @@ All read-only, DB-only, **zero external API calls**.
 | `_cogs-normalize2.ts` | isolates the write-off from the ads-in-COGS structure |
 | `_amazon-halo.ts` | halo correlation + lags + natural experiments |
 | `_steady-state.ts` / `_trajectory.ts` | equilibrium revenue and the path to it |
+| `_ramp-plan.ts` | Phase 1 sizing + Phase 2 ramp scenarios with the incremental cash cost |
 
 **Method traps that produced wrong answers:**
 - Exclude **2024-12** from correlations (write-off, product COGS 101% of income).
@@ -291,6 +368,8 @@ All read-only, DB-only, **zero external API calls**.
 - Control for **day-of-week** on spend-response reads.
 - Page every daily-table read past the **1000-row cap**.
 - **Never conclude from a <2-week window** — the 5-day Amazon read produced a confidently wrong answer that stood for hours.
+- **Never size a ramp from band AVERAGES.** The marginal cost between bands is the decision number; averages understated it by ~2.5x ($89 average vs $224 marginal between $101K and $149K).
+- **Never model absolute cash from cohorts alone** — the existing base isn't in them, so an absolute series shows losses where the month actually profited. Model the DELTA vs a do-nothing baseline.
 
 ## Related
 
