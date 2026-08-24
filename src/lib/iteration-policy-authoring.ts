@@ -76,7 +76,64 @@ export interface IterationPolicyDraft {
   never_pause_object_ids?: string[];
   /** Safety branch. Omit ⇒ shadow (the CEO's non-negotiable read-only-before-armed default). */
   mode?: IterationPolicyMode;
+
+  // ── TRUST-META decision tree ───────────────────────────────────────────────
+  // These drive `tierForTest` ([[../ads/testing-results-sdk]]) — the SSOT for
+  // Bianca's crown/kill AND the dashboard's dud badge. They were previously
+  // ABSENT from the draft, so authoring a new version silently dropped every one
+  // of them to its DB default and reset the whole decision tree. Carry them.
+  //
+  // Omitting a field still falls back to the column default, so pre-existing
+  // callers are unchanged — but a re-tune that means to preserve the tree must
+  // now pass them explicitly.
+  /** `true` ⇒ crown/kill run off Meta-reported CPA rather than internal ROAS. */
+  trust_meta_reported_signal?: boolean | null;
+  /** CPA at or below which a test crowns. Compared against META-REPORTED CPA. */
+  crown_max_cpa_cents?: number | null;
+  /** Spend floor before a crown can be called. */
+  crown_min_spend_cents?: number | null;
+  /** Purchase floor before a crown can be called (anti-noise). */
+  crown_min_purchases?: number | null;
+  /** crown < CPA ≤ this ⇒ hold/promising. Above ⇒ dud at the deadline. */
+  hold_band_max_cpa_cents?: number | null;
+  /** Spend at which the early leading-signal trim may fire. */
+  early_trim_min_spend_cents?: number | null;
+  /** Deadline spend — past this, 0 purchases or CPA > hold band ⇒ dud. */
+  max_test_spend_cents?: number | null;
+  /**
+   * Slow-kill spend floor. NOTE: `tierForTest` evaluates the slow-kill rule
+   * BEFORE the hold band, so past this spend `slow_kill_max_cpa_cents` is the
+   * EFFECTIVE kill line — it must stay above `hold_band_max_cpa_cents` or the
+   * hold band is dead code.
+   */
+  slow_kill_min_spend_cents?: number | null;
+  /** CAC ceiling past `slow_kill_min_spend_cents`. Keep > `hold_band_max_cpa_cents`. */
+  slow_kill_max_cpa_cents?: number | null;
+  trim_max_cost_per_atc_cents?: number | null;
+  trim_max_cpm_cents?: number | null;
+  /** Dahlia composite-score floor for a creative to be publishable. */
+  dahlia_rubric_min_composite?: number | null;
 }
+
+/**
+ * Draft fields that fall back to the column default when omitted. Kept as an
+ * explicit list so a new decision-tree column is a compile-time prompt to
+ * decide whether authoring should carry it.
+ */
+const OPTIONAL_DECISION_TREE_FIELDS = [
+  "trust_meta_reported_signal",
+  "crown_max_cpa_cents",
+  "crown_min_spend_cents",
+  "crown_min_purchases",
+  "hold_band_max_cpa_cents",
+  "early_trim_min_spend_cents",
+  "max_test_spend_cents",
+  "slow_kill_min_spend_cents",
+  "slow_kill_max_cpa_cents",
+  "trim_max_cost_per_atc_cents",
+  "trim_max_cpm_cents",
+  "dahlia_rubric_min_composite",
+] as const satisfies ReadonlyArray<keyof IterationPolicyDraft>;
 
 export interface AuthorIterationPolicyInput {
   workspaceId: string;
@@ -144,7 +201,15 @@ export async function authorIterationPolicy(
     // media-buyer-shadow-mode Phase 1 — a freshly authored draft lands `shadow` unless the
     // caller explicitly overrides. The flip to `armed` is a separate, audited action.
     mode: draft.mode ?? "shadow",
-  };
+  } as Record<string, unknown>;
+
+  // Carry the TRUST-META decision-tree fields when supplied. Omitted fields are
+  // left OFF the insert entirely so the column default applies — writing an
+  // explicit `null` would blank a NOT-NULL-defaulted column instead.
+  for (const k of OPTIONAL_DECISION_TREE_FIELDS) {
+    const v = draft[k];
+    if (v !== undefined && v !== null) row[k] = v;
+  }
 
   const { data, error } = await admin
     .from("iteration_policies")
