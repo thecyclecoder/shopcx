@@ -2,7 +2,7 @@
 
 **When:** the founder wants to work the open-ticket queue — "how many open tickets", "what's in my queue", "walk me through the open tickets", "/open-tickets". This is the founder's *working* loop for support: one ticket at a time, decide, move on.
 
-**Why:** in steady state **every OPEN ticket should be escalated to the CEO.** The autonomous lanes close what they can resolve, so a ticket that is still open is by definition one that Sol couldn't finish and June couldn't rule on. That makes the queue small and high-signal — and it makes an *unescalated* open ticket a **defect**, not a queue item: something dropped it. The founder shouldn't have to notice that by eye.
+**Why:** in steady state **every OPEN ticket should be escalated to the CEO or actively assigned to a human agent.** The autonomous lanes close what they can resolve, so a ticket that is still open is by definition one that Sol couldn't finish and June couldn't rule on. That makes the queue small and high-signal — and it makes an *unescalated, unassigned* open ticket a **defect**, not a queue item: something dropped it. A ticket a human agent has taken (`assigned_to` is set) is legitimately open and legitimately unescalated — the human IS the owner. The founder shouldn't have to notice a dropped hand-off by eye, and shouldn't be pulled in on a ticket a human is actively working.
 
 The second reason: **Sol's and June's write-ups are claims, not ground truth, and they have been wrong on load-bearing facts.** On 2026-08-03 two of two founder escalations were materially wrong:
 
@@ -23,7 +23,7 @@ npx tsx scripts/open-tickets.ts list
 
 Per ticket: customer · subject · age · idle · **escalation health** · how many June verdicts exist · open CEO cards.
 
-**Read the escalation health line first.** `⚠️ DEFECT — open Nh, NOT escalated` means an open ticket past the 30-minute just-created grace that nobody escalated. That is a pipeline bug (a dropped hand-off), not a customer problem — surface it to the founder separately from the queue itself, and investigate why the lane dropped it.
+**Read the escalation health line first.** `⚠️ DEFECT — open Nh, NOT escalated` means an open ticket past the 30-minute just-created grace that nobody escalated *and* no human agent has taken. That is a pipeline bug (a dropped hand-off), not a customer problem — surface it to the founder separately from the queue itself, and investigate why the lane dropped it. `owned by <name> — human-worked` means a human agent (resolved from `workspace_members.display_name`) has picked the ticket up — legitimately open and not a defect; leave it to them.
 
 ### 2. Take ONE ticket. Never batch.
 
@@ -66,7 +66,7 @@ Then execute the choice, verify it landed, and move to the next ticket.
 - **Execute through the chokepoints**, never raw writes: `directActionHandlers` / `executeSonnetDecision` (refunds, coupons, account actions), `subscriptionAction` (pause/cancel/resume), `sendThreadedReply`, `closeTicket`. See [[run-orchestrator-action]] and [[customer-remedy]].
 - **Order actions so a failure can't lie to the customer.** Do the money/account mutation FIRST and abort before the reply if it fails — never tell someone you refunded them when the refund errored.
 - **Customer-facing text follows [[../../../docs/brain/customer-voice]]** — plain text, no markdown, ≤2 sentences per paragraph, mirror their language, no reflexive apology, sign with the persona already on the thread.
-- **An unescalated open ticket is a defect to report**, not one to quietly escalate and move past.
+- **An unescalated, unassigned open ticket is a defect to report**, not one to quietly escalate and move past. An unescalated *assigned* ticket is owned by that human — leave it to them.
 
 ## Related
 
