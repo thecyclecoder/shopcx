@@ -69,8 +69,17 @@ async function main() {
       if (!documentId) { console.log("  report timed out, skip"); continue; }
 
       const tsv = await downloadReport(conn.id, conn.marketplace_id, documentId);
-      const res = await processOrderReport({ workspaceId: conn.workspace_id, connectionId: conn.id, reportTsv: tsv });
-      console.log(`  processed: ${res.orderCount} orders · ${res.snapshotCount} agg snapshots · ${res.productSnapshotCount} product snapshots`);
+      const res = await processOrderReport({
+        workspaceId: conn.workspace_id,
+        connectionId: conn.id,
+        reportTsv: tsv,
+        windowStart: cursor,
+        windowEnd: chunkEnd,
+      });
+      console.log(
+        `  processed: ${res.orderCount} orders · ${res.snapshotCount} agg snapshots · ${res.productSnapshotCount} product snapshots` +
+          ` · pruned ${res.prunedAggregate} agg + ${res.prunedProduct} product stale row(s)`,
+      );
 
       // Reconcile per-product sum vs aggregate for each (date, bucket) in this window.
       const { data: agg } = await admin
