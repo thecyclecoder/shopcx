@@ -18,6 +18,8 @@ import assert from "node:assert/strict";
 import {
   createShipmentFactPackReader,
   formatShipmentFactForBrief,
+  STALL_THRESHOLD_DAYS,
+  isShipmentDark,
 } from "./shipment-facts";
 import type { TrackingStatus } from "./easypost";
 
@@ -135,6 +137,28 @@ test("no tracking number → unavailable (never a live call)", async () => {
   const pack = await reader.read({ tracking_number: null });
   assert.equal(pack.source, "unavailable");
   assert.equal(calls, 0);
+});
+
+test("Phase 2 stall gate: a shipment dark ≥ STALL_THRESHOLD_DAYS is 'dark'; under-threshold is not", () => {
+  // Suzanne (ticket 8e2c87d6, 2026-08-24) was 11 days dark — the derived-from case for this gate.
+  assert.equal(isShipmentDark(11), true, "11 days dark must trip the stall gate");
+  assert.equal(isShipmentDark(STALL_THRESHOLD_DAYS), true, "boundary: exactly threshold is dark");
+  assert.equal(isShipmentDark(STALL_THRESHOLD_DAYS - 1), false, "one day under threshold is NOT dark");
+  assert.equal(isShipmentDark(0), false, "0 days since last scan is not dark");
+});
+
+test("Phase 2 stall gate: unknown scan age (null) does NOT trip the gate — never block on missing data", () => {
+  // A missing days_since_last_scan means we could not measure — refuse to route to
+  // replacement on absence of evidence. The gate fires ONLY on measured darkness.
+  assert.equal(isShipmentDark(null), false);
+  assert.equal(isShipmentDark(undefined), false);
+});
+
+test("Phase 2 pinned constant: STALL_THRESHOLD_DAYS is the review-in-source value referenced by the brain page", () => {
+  // The spec explicitly requires a named source-level constant (not a prompt embedding),
+  // and the brain page (docs/brain/lifecycles/return-pipeline.md § Dark shipment) MUST
+  // state the value. If this changes, update the brain page in the same PR.
+  assert.equal(STALL_THRESHOLD_DAYS, 7);
 });
 
 test("format: live read line cites days since last scan and EDD presence", async () => {

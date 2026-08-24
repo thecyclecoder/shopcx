@@ -705,12 +705,107 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
     return;
   }
 
+  // Phase 2 of director-shipment-claims-must-cite-a-live-tracker-read: BEFORE any "still in
+  // transit, give it a few more days" reassurance, gate on the LIVE days-since-last-scan from
+  // Phase 1's fact pack. A shipment past the stall threshold routes to the replacement path
+  // (the Returns Policy's remedy for a carrier-lost / never-received shipment) instead of a
+  // wait-and-see reply. Suzanne's shipment (ticket 8e2c87d6, 2026-08-24) was 11 days dark
+  // when the orchestrator told her to wait a few more days — that reassurance reads as
+  // informed and is not.
+  const { isShipmentDark, STALL_THRESHOLD_DAYS } = await import("@/lib/shipment-facts");
+  if (
+    ctx.fulfillment.live_source === "live" &&
+    isShipmentDark(ctx.fulfillment.live_days_since_last_scan)
+  ) {
+    await routeDarkShipmentToReplacement(admin, config, ctx, ctx.fulfillment.live_days_since_last_scan ?? STALL_THRESHOLD_DAYS);
+    return;
+  }
+
   // In transit, within threshold
   const locationInfo = (ctx.fulfillment.easypost_location || ctx.fulfillment.latest_location)
     ? ` It was last seen in ${ctx.fulfillment.easypost_location || ctx.fulfillment.latest_location}.`
     : "";
   const estimateInfo = ctx.fulfillment.estimated_delivery ? ` Estimated delivery: {{fulfillment.estimated_delivery}}.` : "";
   await sendReply(admin, ctx, (config.reply_in_transit as string) || `Your order {{order.order_number}} shipped on {{fulfillment.date}} via {{fulfillment.carrier}}.${locationInfo}${estimateInfo} Track it here: {{fulfillment.url}}`, config.reply_in_transit_status as string);
+}
+
+/**
+ * Phase 2 of director-shipment-claims-must-cite-a-live-tracker-read — the dark-shipment
+ * routing that replaces a "wait a few more days" reassurance. Mirrors the "other return-
+ * to-sender" path in `executeOrderTracking`: stamps the order as returned, tags the ticket,
+ * assigns the Replacement Order playbook, and sends a plain-text, no-apology,
+ * two-sentence-max reply per [[docs/brain/customer-voice.md]] § Dark shipments.
+ */
+async function routeDarkShipmentToReplacement(
+  admin: Admin,
+  config: Record<string, unknown>,
+  ctx: WorkflowContext,
+  daysSinceLastScan: number,
+): Promise<void> {
+  if (!ctx.order) return;
+  const detail = `dark ${daysSinceLastScan}d since last scan`;
+  await addNote(
+    admin,
+    ctx,
+    `Order ${ctx.order.order_number} treated as DARK — live tracker read shows ${daysSinceLastScan}d since last scan (threshold ${(await import("@/lib/shipment-facts")).STALL_THRESHOLD_DAYS}d). Suppressing "wait a few more days" reassurance and routing to the Replacement Order playbook. Carrier: ${ctx.fulfillment?.carrier}. Tracking: ${ctx.fulfillment?.tracking_number}.`,
+  );
+
+  const tagSlug = "dark-shipment";
+  await admin.from("orders").update({
+    delivery_status: "returned",
+    sync_resolved_at: new Date().toISOString(),
+    sync_resolved_note: detail,
+  }).eq("id", ctx.order.id);
+
+  if (ctx.order.shopify_order_id) {
+    const { addOrderTags } = await import("@/lib/shopify-order-tags");
+    await addOrderTags(ctx.workspaceId, ctx.order.shopify_order_id as string, [`delivery:${tagSlug}`]);
+  }
+
+  const { addTicketTag } = await import("@/lib/ticket-tags");
+  await addTicketTag(ctx.ticketId, "dark-shipment");
+
+  const { data: replacementPlaybook } = await admin.from("playbooks")
+    .select("id")
+    .eq("workspace_id", ctx.workspaceId)
+    .eq("name", "Replacement Order")
+    .eq("is_active", true)
+    .limit(1).single();
+
+  const playbookUpdates: Record<string, unknown> = {
+    status: "open",
+    updated_at: new Date().toISOString(),
+  };
+  if (replacementPlaybook) {
+    playbookUpdates.active_playbook_id = replacementPlaybook.id;
+    playbookUpdates.playbook_step = 0;
+    playbookUpdates.playbook_context = {
+      easypost_status: ctx.fulfillment?.easypost_status,
+      easypost_detail: detail,
+      easypost_location: ctx.fulfillment?.easypost_location,
+      replacement_reason: "dark_shipment",
+      dark_days_since_last_scan: daysSinceLastScan,
+      dark_last_scan_at: ctx.fulfillment?.live_last_scan_at ?? null,
+      identified_order_id: ctx.order?.id,
+      identified_order: ctx.order?.order_number,
+      tracking_number: ctx.fulfillment?.tracking_number,
+      carrier: ctx.fulfillment?.carrier,
+    };
+  }
+
+  await admin.from("tickets").update(playbookUpdates).eq("id", ctx.ticketId);
+
+  // Customer-voice: plain text, no markdown, at most two sentences per paragraph, no reflexive
+  // apology (see docs/brain/customer-voice.md § Dark shipments). Two short sentences: state the
+  // fact and the fix. NEVER quote a stall duration derived from amplifier_shipped_at (the ship
+  // date is when we handed it over, not when the carrier last touched it — see Phase 1 rule).
+  const defaultReply = "Your package has not been scanned by the carrier in over a week, so we are treating it as lost in transit. We are getting a replacement to you now.";
+  await sendReply(
+    admin,
+    ctx,
+    (config.reply_dark_shipment as string) || defaultReply,
+    (config.reply_dark_shipment_status as string) || "open",
+  );
 }
 
 async function executeCancelRequest(admin: Admin, config: Record<string, unknown>, ctx: WorkflowContext): Promise<void> {

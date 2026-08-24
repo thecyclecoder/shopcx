@@ -110,6 +110,34 @@ export interface ShipmentFactPackReaderOptions {
 
 const MS_PER_DAY = 1000 * 60 * 60 * 24;
 
+/**
+ * Stall threshold (Phase 2 of director-shipment-claims-must-cite-a-live-tracker-read).
+ * A live tracker read that shows a shipment has not been scanned in ≥ STALL_THRESHOLD_DAYS
+ * is DARK — the "still in transit, give it a few more days" reassurance is not permitted
+ * and the flow routes to the replacement path (what the Returns Policy prescribes for a
+ * carrier-lost or never-received shipment).
+ *
+ * Chosen at **7 days**: USPS Ground Advantage typically delivers in 2-5 days, so a full
+ * calendar week with no carrier scan means the package has stopped moving — the reassurance
+ * "give it a few more days" is a lie at that point. Suzanne's shipment (ticket 8e2c87d6,
+ * 2026-08-24) was 11 days dark when the orchestrator told her to wait, well past this line.
+ * Pinned as a named constant here (not embedded in a prompt) so it is reviewable in code;
+ * see [[docs/brain/lifecycles/return-pipeline.md]] § Dark shipment for the reasoning and
+ * [[docs/brain/customer-voice.md]] § Dark shipments for the wording rule.
+ */
+export const STALL_THRESHOLD_DAYS = 7;
+
+/**
+ * True when a live tracker read has measured a shipment as dark for at least
+ * STALL_THRESHOLD_DAYS. Returns false when `daysSinceLastScan` is null/undefined —
+ * absence of evidence never trips the gate (we route to replacement only on a
+ * MEASURED stall, never on missing data).
+ */
+export function isShipmentDark(daysSinceLastScan: number | null | undefined): boolean {
+  if (daysSinceLastScan === null || daysSinceLastScan === undefined) return false;
+  return daysSinceLastScan >= STALL_THRESHOLD_DAYS;
+}
+
 function toWholeDays(fromIso: string | null | undefined, now: Date): number | null {
   if (!fromIso) return null;
   const parsed = Date.parse(fromIso);

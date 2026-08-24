@@ -137,6 +137,23 @@ Partial returns of multi-item orders use items_subtotal-based math, not the full
 
 Always filter with `.not("easypost_shipment_id", "is", null)` when finding refundable returns. See [[../tables/returns]] gotchas.
 
+## Dark shipment — never tell a customer to keep waiting on a package the carrier stopped scanning
+
+[[../specs/director-shipment-claims-must-cite-a-live-tracker-read]] Phase 2 wires the reassurance-gate at the outbound side of the order-tracking workflow. The wedge: a "still in transit, give it a few more days" reply on a package the carrier has not scanned in over a week reads as informed and is not — Suzanne Ross's shipment (ticket 8e2c87d6, 2026-08-24) was 11 days dark when the orchestrator told her to wait.
+
+The pipe:
+
+1. Phase 1's shared [[../libraries/shipment-facts|shipment fact pack helper]] performs a live `lookupTracking` call and returns `days_since_last_scan` derived from the LATEST tracker event.
+2. `executeOrderTracking` in `src/lib/workflow-executor.ts` calls `isShipmentDark(daysSinceLastScan)` from the same module. A live-read `days_since_last_scan >= STALL_THRESHOLD_DAYS` returns `true` and the "still in transit" reassurance branch is skipped.
+3. Dark shipments route into the same replacement path used by "Other return-to-sender" (§ Phase 1) via the `routeDarkShipmentToReplacement` helper: order stamped `delivery_status='returned'` with note `dark Nd since last scan`, Shopify order tagged `delivery:dark-shipment`, ticket tagged `dark-shipment`, ticket bound to the workspace's `Replacement Order` playbook with `replacement_reason='dark_shipment'` and the measured `dark_days_since_last_scan` / `dark_last_scan_at` for downstream audit.
+4. Customer-facing reply follows [[../customer-voice]] § Dark shipments — plain text, no markdown, two short sentences, no reflexive apology. Default text: *"Your package has not been scanned by the carrier in over a week, so we are treating it as lost in transit. We are getting a replacement to you now."*
+
+**Stall threshold — pinned at 7 days.** `STALL_THRESHOLD_DAYS = 7` in `src/lib/shipment-facts.ts`. USPS Ground Advantage typically delivers in 2-5 days, so a full calendar week without a carrier scan means the package has stopped moving and "give it a few more days" is a lie at that point. The value is a named source constant (never a prompt embedding) so it is reviewable; if it changes, update this section in the same PR (unit-pinned in `src/lib/shipment-facts.test.ts` § "Phase 2 pinned constant").
+
+**Gate on measured darkness only.** `isShipmentDark(null)` and `isShipmentDark(undefined)` return `false` — a missing `days_since_last_scan` (live call failed → the pack is `cached_fallback`) never routes to replacement. Absence of evidence is not evidence of stall; the replacement path fires only on a measured live-tracker gap. `live_source === 'live'` is asserted at the call site so the gate never fires from a cached-fallback fact pack.
+
+**Never derive stall from `amplifier_shipped_at`.** The ship date is when we handed the package to the carrier, not when the carrier last scanned it — on Suzanne's order those differed by three days. Phase 1's rule (live_last_scan_at is the ONLY source for stall duration) carries into this gate.
+
 ## Crisis return autopilot
 
 When a crisis campaign issues a return (e.g. wrong item shipped during an OOS event), the Sonnet orchestrator owns the entire flow. No agent intervention, no escalation. See feedback_crisis_return_auto. The orchestrator picks the return-from order, calls `createFullReturn()` with `freeLabel=true`, and tells the customer "your refund will land in X days." The pipeline takes care of the rest.
