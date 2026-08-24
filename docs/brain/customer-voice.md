@@ -145,7 +145,7 @@ When a message contains hardship language ("on disability", "fixed income", "lim
 
 ## Dark shipments — never tell a customer to keep waiting
 
-When a live tracker read shows a shipment has not been scanned in ≥ `STALL_THRESHOLD_DAYS` (currently 7 days — pinned in `src/lib/shipment-facts.ts`), the "still in transit, give it a few more days" reassurance is **not permitted**. That message reads as informed and is not — the package has stopped moving. The flow routes to the replacement path, per [[../specs/director-shipment-claims-must-cite-a-live-tracker-read]] Phase 2 and [[lifecycles/return-pipeline]] § Dark shipment.
+When a live tracker read shows a shipment has not been scanned in ≥ `STALL_THRESHOLD_DAYS` (currently 7 days — pinned in `src/lib/shipment-facts.ts`), the "still in transit, give it a few more days" reassurance is **not permitted**. That message reads as informed and is not — the package has stopped moving. The flow routes to the replacement path, per [[../specs/director-shipment-claims-must-cite-a-live-tracker-read]] Phase 2 and [[lifecycles/return-pipeline]] § Dark shipment. Computed via [[../libraries/shipment-facts|the shared shipment fact pack helper]].
 
 **Wording rules for the customer-facing dark-shipment reply:**
 
