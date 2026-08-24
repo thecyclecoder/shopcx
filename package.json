@@ -76,6 +76,7 @@
     "test:platform-director-terminal-park": "tsx --test src/lib/agents/platform-director-terminal-park.test.ts",
     "test:june-remedy-approval-reask": "tsx --test src/lib/june-remedy-approval-reask.test.ts",
     "test:error-text": "tsx --test src/lib/error-text.test.ts",
+    "test:shipment-facts": "tsx --test src/lib/shipment-facts.test.ts",
     "test:swap-price-assertion": "tsx --test src/lib/swap-price-assertion.test.ts",
     "test:subscription-items-mutation-verify": "tsx --test src/lib/subscription-items.verifyEndState.test.ts",
     "test:subscription-items-mutation-verify-decline": "tsx --test src/lib/subscription-items.replaceVariantsDecline.test.ts",

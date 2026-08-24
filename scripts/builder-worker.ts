@@ -15379,6 +15379,96 @@ async function loadCsDirectorCallBrief(
     parts.push(`RESOLUTION EVENTS LEDGER: read failed — ${errText(e)}`);
   }
 
+  // Phase 1 of director-shipment-claims-must-cite-a-live-tracker-read: for every recent order on the
+  // ticket's customer that carries a tracking_number, cite a LIVE tracker read (via lookupTracking)
+  // with the derived days-since-last-scan, so June never rules on a stall duration inferred from a
+  // cached column that carries no per-scan timestamp. Motivating case: ticket 8e2c87d6 (Suzanne Ross,
+  // 2026-08-24) — the cached row said in_transit at a Nevada facility and the orchestrator told the
+  // customer to wait a few more days, when the last real scan was eleven days old. The reader dedupes
+  // by tracking number so we make ONE metered call per distinct shipment per brief.
+  try {
+    const { data: ticketRow } = await db
+      .from("tickets")
+      .select("customer_id")
+      .eq("id", ticketId)
+      .maybeSingle();
+    if (ticketRow?.customer_id) {
+      const { data: shipOrders } = await db
+        .from("orders")
+        .select(
+          "id, order_number, fulfillments, amplifier_tracking_number, amplifier_carrier, easypost_status, easypost_detail, easypost_location, easypost_checked_at",
+        )
+        .eq("workspace_id", workspaceId)
+        .eq("customer_id", ticketRow.customer_id)
+        .order("created_at", { ascending: false })
+        .limit(5);
+      const targets: Array<{
+        order_number: string;
+        tracking_number: string | null;
+        carrier: string | null;
+        cached: {
+          status: string | null;
+          detail: string | null;
+          location: string | null;
+          checked_at: string | null;
+        };
+      }> = [];
+      for (const o of shipOrders ?? []) {
+        const fulfillments = (o.fulfillments as
+          | Array<{
+              trackingInfo?: Array<{ number?: string | null; company?: string | null }>;
+            }>
+          | null) ?? [];
+        const shopifyTracking = fulfillments[0]?.trackingInfo?.[0] ?? null;
+        const trackingNumber =
+          (shopifyTracking?.number ?? null) ||
+          ((o.amplifier_tracking_number as string | null) ?? null) ||
+          null;
+        const carrier =
+          (shopifyTracking?.company ?? null) ||
+          ((o.amplifier_carrier as string | null) ?? null) ||
+          null;
+        if (!trackingNumber) continue;
+        targets.push({
+          order_number: (o.order_number as string) ?? "(unknown)",
+          tracking_number: trackingNumber,
+          carrier,
+          cached: {
+            status: (o.easypost_status as string | null) ?? null,
+            detail: (o.easypost_detail as string | null) ?? null,
+            location: (o.easypost_location as string | null) ?? null,
+            checked_at: (o.easypost_checked_at as string | null) ?? null,
+          },
+        });
+      }
+      if (targets.length > 0) {
+        const { createShipmentFactPackReader, formatShipmentFactForBrief } = await import(
+          "../src/lib/shipment-facts"
+        );
+        const reader = createShipmentFactPackReader(workspaceId);
+        parts.push("");
+        parts.push(
+          `LIVE SHIPMENT FACT PACKS (source: lookupTracking against EasyPost; the cached orders.easypost_* columns are a fallback ONLY when the live call fails, and are labeled with the last-poll age so they are never presented as a current scan time — NEVER infer a stall duration from amplifier_shipped_at, that is the handoff date, not the last carrier scan):`,
+        );
+        for (const t of targets) {
+          try {
+            const pack = await reader.read({
+              tracking_number: t.tracking_number,
+              carrier: t.carrier,
+              cached: t.cached,
+            });
+            parts.push(formatShipmentFactForBrief(`order #${t.order_number}`, pack));
+          } catch (e) {
+            parts.push(`  - order #${t.order_number}: shipment fact pack read failed — ${errText(e)}`);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    parts.push("");
+    parts.push(`LIVE SHIPMENT FACT PACKS: read failed — ${errText(e)}`);
+  }
+
   // Triage_runs row — the solver→skeptic transcripts + no-quorum outcome that produced this call.
   // Optional (the runner accepts a null triage_run_id so Phase 1 synthetic tests can dispatch without
   // one), but when present it anchors the CS Director's brief on WHY the quorum missed.
