@@ -82,6 +82,10 @@ export const amazonSyncOrders = inngest.createFunction(
         workspaceId: workspace_id,
         connectionId: connection_id,
         reportTsv,
+        // Same day-aligned window the report was requested for, so the prune can
+        // clear a covered day whose orders all cancelled since the last sync.
+        windowStart: startDate.slice(0, 10),
+        windowEnd: endDate.slice(0, 10),
       });
     });
 

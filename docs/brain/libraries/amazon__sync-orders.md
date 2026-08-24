@@ -32,8 +32,31 @@ async function downloadReport(connectionId: string, marketplaceId: string, docum
 
 ### `processOrderReport` — function
 
+> **Write semantics: the report REPLACES the days it covers.** After upserting the fresh
+> rows it PRUNES — deletes any row for a covered day that the report did not produce, in
+> BOTH [[../tables/daily_amazon_order_snapshots]] and
+> [[../tables/daily_amazon_product_snapshots]]. Without this, a `(date, asin, bucket)` or
+> `(date, bucket)` combination that disappears between syncs (an order cancels, or its
+> bucket/ASIN reclassifies as `Pending` resolves) leaves its row behind forever and every
+> consumer sums the ghost. Measured 2026-08-24 before the fix: 197 of 314 `(date, bucket)`
+> pairs in the per-product table disagreed with the aggregate; 2026-08-13 `recurring` read
+> $990 against a true $414.95 (four real rows + four orphans).
+>
+> - Pass `windowStart`/`windowEnd` so a covered day whose orders ALL cancelled still gets
+>   cleared. Omit them and the prune only covers days actually present in the report.
+> - Fresh rows are written FIRST, then survivors pruned — a day is never momentarily empty.
+> - **A report parsing to 0 order lines skips the prune entirely** (a failed/transient pull
+>   is far likelier than a genuinely empty window, and pruning on it would wipe the window).
+
+
 ```ts
-async function processOrderReport(params: { workspaceId: string; connectionId: string; reportTsv: string; })
+async function processOrderReport(params: {
+  workspaceId: string;
+  connectionId: string;
+  reportTsv: string;
+  windowStart?: string;  // inclusive UTC day (YYYY-MM-DD) the report covers
+  windowEnd?: string;    // EXCLUSIVE UTC day
+}): Promise<{ orderCount; snapshotCount; productSnapshotCount; prunedAggregate; prunedProduct }>
   : Promise<{ orderCount: number; snapshotCount: number; productSnapshotCount: number }>
 ```
 Parses the TSV and upserts TWO snapshot layers from the SAME lines: the aggregate

@@ -201,11 +201,40 @@ export async function downloadReport(
 
 // ── Process TSV and Upsert Snapshots ──
 
+/** Add `n` days to a YYYY-MM-DD UTC day string. */
+function addUtcDays(day: string, n: number): string {
+  const d = new Date(day + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Delete rows by id in chunks — PostgREST caps how many values an `in()` filter takes. */
+async function deleteByIds(admin: Admin, table: string, ids: string[]): Promise<void> {
+  for (let i = 0; i < ids.length; i += 200) {
+    await admin.from(table).delete().in("id", ids.slice(i, i + 200));
+  }
+}
+
 export async function processOrderReport(params: {
   workspaceId: string;
   connectionId: string;
   reportTsv: string;
-}): Promise<{ orderCount: number; snapshotCount: number; productSnapshotCount: number }> {
+  /**
+   * Inclusive UTC day (YYYY-MM-DD) the report window starts. Supply together with
+   * `windowEnd` so the prune below can clear a day the report covers but that
+   * produced NO surviving lines (e.g. every order on it cancelled). Without them
+   * the prune falls back to only the days actually present in the report.
+   */
+  windowStart?: string;
+  /** EXCLUSIVE UTC day (YYYY-MM-DD) the report window ends. */
+  windowEnd?: string;
+}): Promise<{
+  orderCount: number;
+  snapshotCount: number;
+  productSnapshotCount: number;
+  prunedAggregate: number;
+  prunedProduct: number;
+}> {
   const admin = createAdminClient();
   const orders = parseTsvReport(params.reportTsv);
   console.log(`[Amazon Sync] ${orders.length} line items parsed`);
@@ -299,6 +328,65 @@ export async function processOrderReport(params: {
     productSnapshotCount++;
   }
 
+  // ── Prune rows the report no longer supports ──
+  // Both snapshot tables have REPLACE semantics: the report is authoritative for
+  // every day it covers. An upsert alone cannot express that. A (date, asin, bucket)
+  // or (date, bucket) combination that disappears between syncs — an order cancels,
+  // or its bucket/ASIN reclassifies as Pending resolves — leaves its old row behind
+  // FOREVER, and every consumer silently sums the ghost alongside the real row.
+  // Measured 2026-08-24: 197 of 314 (date, bucket) pairs in daily_amazon_product_snapshots
+  // disagreed with the aggregate this way (2026-08-13 recurring read $990 against a true
+  // $414.95 — four correct rows plus four orphans from earlier syncs).
+  // Order matters: fresh rows are written FIRST, then the survivors are pruned, so there
+  // is never a window where a day reads as empty.
+  // SAFETY: an empty parse is far more likely to be a transient/failed pull than a
+  // genuine zero-order window, and pruning on it would delete every covered day's rows.
+  // Upsert-only was harmlessly idempotent here; the prune is not, so bail out instead.
+  const coveredDays = new Set<string>();
+  if (orders.length === 0) {
+    console.warn("[Amazon Sync] report parsed 0 order lines — skipping prune (treating as a failed pull, not an empty window)");
+  } else if (params.windowStart && params.windowEnd) {
+    for (let d = params.windowStart; d < params.windowEnd; d = addUtcDays(d, 1)) coveredDays.add(d);
+  } else {
+    for (const k of Array.from(dailyBuckets.keys())) coveredDays.add(k.split("|")[0]);
+    for (const pb of Array.from(productBuckets.values())) coveredDays.add(pb.date);
+  }
+
+  const aggFresh = new Set(Array.from(dailyBuckets.keys()));
+  const prodFresh = new Set(Array.from(productBuckets.keys()));
+  let prunedAggregate = 0;
+  let prunedProduct = 0;
+
+  for (const day of Array.from(coveredDays)) {
+    const { data: aggRows } = await admin
+      .from("daily_amazon_order_snapshots")
+      .select("id, order_bucket")
+      .eq("amazon_connection_id", params.connectionId)
+      .eq("snapshot_date", day);
+    const staleAgg = (aggRows || []).filter((r) => !aggFresh.has(`${day}|${r.order_bucket}`));
+    if (staleAgg.length) {
+      await deleteByIds(admin, "daily_amazon_order_snapshots", staleAgg.map((r) => r.id as string));
+      prunedAggregate += staleAgg.length;
+    }
+
+    const { data: prodRows } = await admin
+      .from("daily_amazon_product_snapshots")
+      .select("id, asin, order_bucket")
+      .eq("amazon_connection_id", params.connectionId)
+      .eq("snapshot_date", day);
+    const staleProd = (prodRows || []).filter(
+      (r) => !prodFresh.has(`${day}|${r.asin || ""}|${r.order_bucket}`),
+    );
+    if (staleProd.length) {
+      await deleteByIds(admin, "daily_amazon_product_snapshots", staleProd.map((r) => r.id as string));
+      prunedProduct += staleProd.length;
+    }
+  }
+
+  if (prunedAggregate || prunedProduct) {
+    console.log(`[Amazon Sync] pruned ${prunedAggregate} aggregate + ${prunedProduct} per-product stale row(s)`);
+  }
+
   // Update sales channels
   const channelCounts = new Map<string, number>();
   for (const order of orders) {
@@ -327,5 +415,5 @@ export async function processOrderReport(params: {
     updated_at: new Date().toISOString(),
   }).eq("id", params.connectionId);
 
-  return { orderCount: allOrderIds.size, snapshotCount, productSnapshotCount };
+  return { orderCount: allOrderIds.size, snapshotCount, productSnapshotCount, prunedAggregate, prunedProduct };
 }

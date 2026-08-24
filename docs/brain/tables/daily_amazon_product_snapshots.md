@@ -66,6 +66,18 @@ const { data } = await admin.from("daily_amazon_product_snapshots")
   duplicate rows every sync. Empty/no-asin lines store `''`, with `product_id = null`.
 - **`pack_size` is a point-in-time snapshot** of [[amazon_asins]].`pack_size`; re-running a backfill
   after a pack re-resolution updates it.
+- **Rows are pruned, not just upserted.** `processOrderReport` deletes any row for a day the
+  report covers that the report did not produce. Before this existed (fixed 2026-08-24) the
+  table accumulated orphans forever — 197 of 314 `(date, bucket)` pairs disagreed with
+  [[daily_amazon_order_snapshots]]. If you write to this table from anywhere else, you MUST
+  preserve that replace-semantics or the ghosts come back.
+- **Paginate every read.** ~1.5k rows per quarter, and PostgREST silently caps an unbounded
+  `select` at 1000 — a truncated read looks exactly like a real under-count. (Cost me a
+  false "per-product is missing $78K" during the 2026-08-24 fix.) Use `.range()` in a loop.
+- **Reconcile against the aggregate after any backfill.** `scripts/backfill-amazon-product-snapshots.ts`
+  logs per-`(date, bucket)` drift; a clean run prints none. Consumers:
+  [[../libraries/amazon__per-product-revenue]], `src/lib/logistics/cover.ts` (inventory burn →
+  reorder signals), `src/lib/product-intelligence.ts`.
 
 ---
 

@@ -51,8 +51,10 @@ const { count } = await admin.from("daily_amazon_order_snapshots")
 
 - **Rows are REPLACED, not accumulated.** `processOrderReport` upserts on
   `(amazon_connection_id, snapshot_date, order_bucket)`, so whatever report it is
-  handed becomes that day's totals. Feeding it a partial day silently overwrites a
-  complete one. See [[../inngest/amazon-sync]] § Sync-window invariant.
+  handed becomes that day's totals, and then PRUNES any bucket row for a covered
+  day the report did not produce. Feeding it a partial day silently overwrites a
+  complete one. See [[../inngest/amazon-sync]] § Sync-window invariant and
+  [[../libraries/amazon__sync-orders]] § processOrderReport.
 - **A day outside the sync window is frozen forever.** These rows are only as
   complete as the last report that covered them; nothing re-checks an old day.
   Amazon settles orders well after the order date, so a short window permanently
