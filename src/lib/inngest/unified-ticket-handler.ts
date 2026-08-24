@@ -41,6 +41,7 @@ import {
   SILENT_TURN_HOLDING_MESSAGE,
   type SilentTurnReason,
 } from "@/lib/silent-turn-guard";
+import { detectRepeatQuestion } from "@/lib/playbook-repeat-guard";
 import { logAiUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
@@ -1607,21 +1608,19 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         let responseSent = false;
         let escalationRaised = false;
 
-        // Log system note
-        if (pbResult.systemNote) await step.run("pb-note", () => sysNote(admin, tid, pbResult.systemNote!));
-
-        // Send response if one was generated
-        if (pbResult.response) {
-          await step.run("pb-send", () => sendWithDelay(admin, wsId, tid, st.ch, pbResult.response!, cfg.sandbox));
-          responseSent = true;
-        }
-
-        // Escalate + holding message + Slack — the SAME rail two callsites depend on:
+        // Escalate + holding message + Slack — the SAME rail three callsites depend on:
         //   • pbResult.action === "escalate_api_failure" (executor asked for it, pre-existing)
-        //   • the silent-turn guard below (post-auto-advance, Phase 2)
-        // Kept inline as a local closure so both callsites send the byte-identical
+        //   • the silent-turn guard below (post-auto-advance)
+        //   • the repeat-question loop guard on pb-send / pb-adv-send (Phase 2 of
+        //     docs/brain/specs/playbook-drift-classifier-sees-the-pending-question.md —
+        //     Suzanne Ross ticket 8e2c87d6, 2026-08-24 — where the playbook re-asked the
+        //     same "did you not receive your order at all?" and address-confirm questions
+        //     turn after turn because the classifier had dropped her answers as NEW_TOPIC).
+        // Kept inline as a local closure so all callsites send the byte-identical
         // SILENT_TURN_HOLDING_MESSAGE + share the Slack-notify shape. `reason` is a short
         // human string that renders on the sysNote, escalation_reason, and Slack payload.
+        // Declared BEFORE pb-send so the repeat-guard branch (which is invoked from the
+        // send path) can reference it without hitting a TDZ error.
         const raiseHoldingMessageEscalation = async (
           reason: string,
           sysNotePrefix: string,
@@ -1652,6 +1651,72 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
             }
           } catch {}
         };
+
+        // Repeat-question loop guard (Phase 2 of docs/brain/specs/playbook-drift-classifier-
+        // sees-the-pending-question.md). Before sending a customer-facing playbook reply,
+        // compare it against the most recent outbound external AI ticket_messages row on
+        // this ticket (the last thing the playbook said). If the pending body is
+        // substantially identical to it, DO NOT re-send — a playbook that repeats itself
+        // has lost state, not gathered information; a third identical question is never
+        // the right move. Escalate via the same raiseHoldingMessageEscalation rail the
+        // escalate_api_failure branch uses, with a sysNote naming the repeated question
+        // so the defect is visible in the thread rather than silently absorbed by the
+        // customer. detectRepeatQuestion is a pure predicate — see [[../playbook-repeat-
+        // guard]] for the equivalence rules and playbook-repeat-guard.test.ts for pins.
+        // Returns true when the guard fired (caller skips the normal responseSent flip
+        // for the request body but sets escalationRaised + responseSent for the holding
+        // message it delivered).
+        const sendOrEscalateOnRepeat = async (
+          body: string,
+          stepIdGuard: string,
+          stepIdSend: string,
+          stepIdEscalate: string,
+        ): Promise<{ escalated: boolean }> => {
+          const verdict = await step.run(stepIdGuard, async () => {
+            const { data: last } = await admin.from("ticket_messages")
+              .select("body")
+              .eq("ticket_id", tid)
+              .eq("direction", "outbound")
+              .eq("visibility", "external")
+              .eq("author_type", "ai")
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            return detectRepeatQuestion({ pending: body, lastOutbound: last?.body ?? null });
+          });
+          if (verdict.repeat) {
+            await step.run(stepIdEscalate, async () => {
+              await sysNote(
+                admin,
+                tid,
+                `[System] Repeat-question loop guard tripped — ${verdict.note}. Not resending; escalating instead.`,
+              );
+              await raiseHoldingMessageEscalation(
+                `repeat-question loop: ${verdict.note}`,
+                "Playbook repeat-question loop",
+                "🚨 *Playbook Repeat-Question Loop*",
+              );
+            });
+            return { escalated: true };
+          }
+          await step.run(stepIdSend, () => sendWithDelay(admin, wsId, tid, st.ch, body, cfg.sandbox));
+          return { escalated: false };
+        };
+
+        // Log system note
+        if (pbResult.systemNote) await step.run("pb-note", () => sysNote(admin, tid, pbResult.systemNote!));
+
+        // Send response if one was generated (guarded by the repeat-question loop check)
+        if (pbResult.response) {
+          const r = await sendOrEscalateOnRepeat(
+            pbResult.response,
+            "pb-send-repeat-guard",
+            "pb-send",
+            "pb-send-repeat-escalate",
+          );
+          responseSent = true;
+          if (r.escalated) escalationRaised = true;
+        }
 
         // Handle API failure escalation
         if (pbResult.action === "escalate_api_failure") {
@@ -1709,8 +1774,17 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           const pr = r as PlaybookExecResult;
           if (pr.systemNote) await step.run(`pb-adv-note-${advCount}`, () => sysNote(admin, tid, pr.systemNote!));
           if (pr.response) {
-            await step.run(`pb-adv-send-${advCount}`, () => sendWithDelay(admin, wsId, tid, st.ch, pr.response!, cfg.sandbox));
+            const rAdv = await sendOrEscalateOnRepeat(
+              pr.response,
+              `pb-adv-send-${advCount}-repeat-guard`,
+              `pb-adv-send-${advCount}`,
+              `pb-adv-send-${advCount}-repeat-escalate`,
+            );
             responseSent = true;
+            if (rAdv.escalated) {
+              escalationRaised = true;
+              break;
+            }
           }
         }
 

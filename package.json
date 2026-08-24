@@ -239,6 +239,7 @@
     "test:playbook-executor-check-vaulted-pm": "tsx --test src/lib/playbook-executor.check-vaulted-pm.test.ts",
     "test:playbook-executor-assisted-purchase-routing": "tsx --test src/lib/playbook-executor.assisted-purchase-routing.test.ts",
     "test:playbook-executor-assisted-purchase-intent-hardening": "tsx --test src/lib/playbook-executor.assisted-purchase-intent-hardening.test.ts",
+    "test:playbook-repeat-guard": "tsx --test src/lib/playbook-repeat-guard.test.ts",
     "test:proposed-action-aliases": "tsx --test src/lib/proposed-action-aliases.test.ts",
     "test:physical-size-cue": "tsx --test src/lib/ad-tool-config.physical-size-cue.test.ts",
     "test:meta-ads-create": "tsx --test src/lib/meta-ads.create.test.ts",
