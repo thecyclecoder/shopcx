@@ -115,6 +115,34 @@ The $120–180K band is **eight months of 2025 with clean books and no write-off
 
 ---
 
+## ⭐ The basis problem — why the media buyer strangled spend
+
+**CEO 2026-08-24:** *"Meta-reported CPA is not 2× optimistic — Shopify is just underreporting."* Correct. Shopify first-touch only ever sees a **click**. It structurally cannot see a view-through (saw the ad, didn't click, searched the brand later), a cross-device purchase, an ITP-truncated session, or **anything on Amazon**. Those arrive labelled branded-search, direct, or organic.
+
+So Meta-reported CPA isn't a *worse* number — it's a **different denominator**. Measured over the three months with clean insights coverage:
+
+| Month | Meta CPA | Blended CAC | Ratio |
+|---|---|---|---|
+| 2026-05 | $326 | $48 | 6.8× |
+| 2026-06 | $267 | $45 | 6.0× |
+| 2026-07 | $347 | $54 | 6.4× |
+
+**Meta-reported CPA runs ~6.4× blended CAC.** The media buyer's thresholds are absolute dollar figures compared against *Meta's* number, but were set as if Meta CPA were true CAC — so the old $220 kill line demanded a blended CAC of ~$34 while the business ran a healthy ~$54.
+
+**The agent wasn't malfunctioning. It was correctly enforcing a threshold on the wrong basis** — 17 actions in a week, account down to 2 live adsets at $300/day.
+
+### Re-based 2026-08-24 (CEO)
+
+| Threshold | Was | Now | Blended equivalent |
+|---|---|---|---|
+| `crown_max_cpa_cents` | $150 | **$240** | ~$37 (5.6× LTV:CAC) |
+| `hold_band_max_cpa_cents` | $220 | **$450** | ~$70 — the 3× ceiling |
+| `slow_kill_max_cpa_cents` | $300 | **$600** | must exceed the hold band |
+
+> ⚠️ **The slow-kill move is not optional.** [[../../libraries/testing-results-sdk]] `tierForTest` evaluates the slow-kill rule **before** the hold band (`testing-results-sdk.ts:93` vs `:95`), so past `slow_kill_min_spend_cents` ($600) the slow-kill ceiling **is** the effective kill line. Raising the hold band alone changes almost nothing. Keep `slow_kill_max_cpa_cents > hold_band_max_cpa_cents` — the 1.36× ratio is preserved.
+
+Applied by `scripts/_retune-media-buyer-cpa-thresholds.ts` (idempotent; writes a `media_buyer_cpa_thresholds_rebased` [[../../tables/director_activity]] row). **Re-measure the 6.4× ratio periodically** — it moves with ATT, creative mix, and the Amazon share.
+
 ## The Amazon halo is real
 
 `corr(monthly Meta spend, monthly Amazon acquisition orders) = 0.78` (n=19). Lagged weekly it holds at **0.64 for 0–2 weeks**, decaying to 0.43 by week 4.
@@ -197,7 +225,7 @@ True collection (`collected ÷ attempted`): 91.5% (May) → 86.9% (Jun) → **85
 | Bianca's cooldown rail | `per_object_cooldown_hours` is set but `recentActions` is never threaded — **0 call sites**. The rail cannot fire. |
 | `iteration_actions.rationale` | Writes `"ROAS 0.95 ≥ scale_up_roas_trigger 1.00"` — the gate is skipped in TRUST-META mode but the string claims it passed. |
 | Google Ads spend | **No table, no integration.** ~$130/30d, branded-defense only (CEO). |
-| Meta's pixel | **Over**-reports on-site: claimed 6 purchases on 2026-08-20 where Shopify first-touch credits 3. |
+| ~~Meta's pixel over-reports~~ | **Wrong — see § The basis problem.** Shopify only sees a CLICK; it cannot see a view-through, cross-device, an ITP-truncated session, or Amazon at all. Meta-reported CPA is a different denominator, not a worse one. |
 | Shopify "Total sales" tile | Includes ~68 renewals/day. Shopify's **conversion rate** is `new checkouts ÷ sessions` and matches our bucketing exactly (3.31% on 8/20 = 10/302). |
 | Pre-2025 COGS | Contains ad spend. Never compare raw `total_cogs` % across the 2025 boundary. |
 
@@ -223,6 +251,7 @@ Triggered by: *"revenue declines every month, but margin is 22% — does the mar
 - ~~"40% less revenue, 24× the profit"~~ — included the 2024-12 write-off in the regime average. True split is 2.1× profit / 3.5× margin.
 - ~~"2025 was unprofitable"~~ — **it made $303K (5.2%), or $396K restated (6.8%).** Only Oct/Nov went negative.
 - ~~"Incremental CAC is $230, so accept a smaller business"~~ — wrong metric *and* wrong conclusion. Blended CAC is $55 and the business is under-spending.
+- ~~"Meta-reported CPA is ~2x optimistic"~~ — Shopify only sees clicks; it cannot see view-through, cross-device, or Amazon. Meta CPA is a DIFFERENT denominator (~6.4x blended), not a worse one. The thresholds were on the wrong basis, not the signal.
 - ~~"~618 customers/month arrive at zero spend"~~ — extrapolated $30K below any observed month; a diminishing-returns fit explains the same data and predicts near-zero. Unknowable without a test.
 - ~~Normalizing total COGS across 2024~~ — adds ads-booked-in-COGS back as an accounting error and invents 43% margins.
 
