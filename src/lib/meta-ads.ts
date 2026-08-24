@@ -675,8 +675,41 @@ export async function createAd(
 // they always create objects PAUSED so nothing goes live behind the human's
 // back (going-live is a separate governed step in recommendation-execute).
 
-/** Stable name for the shared ABO testing campaign the media-buyer loop reuses. */
+/**
+ * Legacy name for the ABO testing campaign, used when no product name is known.
+ *
+ * ⚠️ Product-blind — every product provisioned without a name collides on this
+ * one campaign, and in Ads Manager it reads as an anonymous "MB — Testing (ABO)"
+ * sitting beside the properly-named per-product campaigns. Prefer
+ * `mbTestingCampaignName(productTitle)`.
+ */
 export const MB_TESTING_CAMPAIGN_NAME = "MB — Testing (ABO)";
+
+/**
+ * Stable, product-scoped name for a media-buyer ABO testing campaign —
+ * `MB — {Product} Testing (ABO)`.
+ *
+ * Matches the convention already live in Ads Manager ("MB — Amazing Creamer
+ * Testing (ABO)", "MB — Amazing Coffee Testing (ABO)"), so a human scanning the
+ * account can tell which product a testing campaign belongs to. Falls back to
+ * the legacy generic name when no product title is supplied.
+ */
+export function mbTestingCampaignName(productTitle?: string | null): string {
+  const t = (productTitle ?? "").trim();
+  return t ? `MB — ${t} Testing (ABO)` : MB_TESTING_CAMPAIGN_NAME;
+}
+
+/**
+ * Rename a Meta object (campaign / adset / ad) — same `POST /{object_id}` shape
+ * as the status and budget setters. Returns Graph's `{ success: true }` body.
+ */
+export async function updateObjectName(
+  token: string,
+  objectId: string,
+  name: string,
+): Promise<Record<string, unknown>> {
+  return metaPost(`${objectId}`, { name }, token);
+}
 
 export interface CreateCampaignArgs {
   name: string;
@@ -782,11 +815,30 @@ export async function createCampaign(
  * media-buyer loop reuses one testing campaign per account so each concept
  * gets its own ad set under a stable parent. Idempotent by exact name match.
  */
-export async function getOrCreateTestingCampaign(token: string, accountId: string): Promise<string> {
+export async function getOrCreateTestingCampaign(
+  token: string,
+  accountId: string,
+  productTitle?: string | null,
+): Promise<string> {
+  const wanted = mbTestingCampaignName(productTitle);
   const existing = await listCampaigns(token, accountId);
-  const hit = existing.find((c) => c.name === MB_TESTING_CAMPAIGN_NAME);
+
+  const hit = existing.find((c) => c.name === wanted);
   if (hit) return hit.id;
-  return createCampaign(token, accountId, { name: MB_TESTING_CAMPAIGN_NAME, abo: true, status: "PAUSED" });
+
+  // Adopt-and-rename: an account provisioned before this was product-aware has an
+  // un-named `MB — Testing (ABO)` campaign. Reusing + renaming it keeps the cohort's
+  // existing `test_meta_campaign_id` valid and avoids stranding a duplicate empty
+  // campaign in Ads Manager. Only when a product title is actually supplied.
+  if (productTitle) {
+    const legacy = existing.find((c) => c.name === MB_TESTING_CAMPAIGN_NAME);
+    if (legacy) {
+      await updateObjectName(token, legacy.id, wanted);
+      return legacy.id;
+    }
+  }
+
+  return createCampaign(token, accountId, { name: wanted, abo: true, status: "PAUSED" });
 }
 
 /**

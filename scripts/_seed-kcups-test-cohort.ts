@@ -109,6 +109,7 @@ async function main() {
   const res = await provisionProductTestCohort(admin, {
     workspaceId: WS,
     productId,
+    productTitle: TARGET_TITLE, // names the campaign `MB — Amazing Coffee K-Cups Testing (ABO)`
     metaAdAccountUuid: String(sibling.meta_ad_account_id),
     metaAccountActId,
     pageId,
