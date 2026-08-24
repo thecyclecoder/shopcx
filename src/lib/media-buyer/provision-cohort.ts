@@ -129,6 +129,11 @@ export function assertCohortReplenishable(cohort: CohortReplenishabilityInput): 
 export interface ProvisionCohortOptions {
   workspaceId: string;
   productId: string;
+  /**
+   * Product title, used ONLY to name the testing campaign
+   * `MB — {Product} Testing (ABO)`. Omit to keep the legacy generic name.
+   */
+  productTitle?: string | null;
   /** `meta_ad_accounts.id` (our UUID) — the cohort's account FK. */
   metaAdAccountUuid: string;
   /** The Meta act id string (e.g. "2352876514967984") — where the campaign/adsets live + budget is charged. */
@@ -174,7 +179,11 @@ export async function provisionProductTestCohort(admin: Admin, opts: ProvisionCo
   const token = await getMetaUserToken(opts.workspaceId);
   if (!token) throw new Error("no_meta_token");
 
-  const campaignId = await getOrCreateTestingCampaign(token, opts.metaAccountActId);
+  // Product-scoped campaign name so Ads Manager reads `MB — {Product} Testing (ABO)`
+  // alongside the other per-product testing campaigns, instead of an anonymous
+  // `MB — Testing (ABO)` nobody can attribute. Omitting `productTitle` keeps the
+  // legacy generic name (other callers are unaffected).
+  const campaignId = await getOrCreateTestingCampaign(token, opts.metaAccountActId, opts.productTitle);
   const ceiling = opts.dailyTestCeilingCents ?? 60000;
   const perTest = opts.perTestDailyBudgetCents ?? 15000;
   // Layer the existing-customer exclusions into the template AND stamp the columns —
