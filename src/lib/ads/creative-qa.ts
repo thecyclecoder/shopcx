@@ -94,9 +94,26 @@ async function normalizeForVision(buffer: Buffer): Promise<Buffer> {
  *  packshot, so a transient fetch failure downstream should not starve the bin on top of that. */
 export interface CreativeQAInput extends Pick<GeneratedCreative, "buffer" | "expectedCopy"> {
   hasTransformation?: boolean;
-  /** Absolute http(s) URL of the real isolated packshot (from product_intelligence.media.isolatedPackshots
-   *  → product_variants.isolated_image_url), threaded by [[creative-agent]] `stockProduct`. */
+  /** Absolute http(s) URL of ONE real isolated packshot. Legacy single-reference field — prefer
+   *  `packshotUrls`, which admits every flavour variant. Still honoured when `packshotUrls` is
+   *  absent so older callers behave identically. */
   packshotUrl?: string | null;
+  /**
+   * EVERY real isolated packshot for the product — one per flavour variant
+   * (`product_variants.isolated_image_url`).
+   *
+   * ⭐ Why this is a list. The reference used to be `isolatedPackshots[0]` — always the FIRST
+   * variant. Superfood Tabs has three (Strawberry Lemonade, Peach Mango, Mixed Berry) and every
+   * hero/lifestyle asset is Peach Mango, so the generator renders Peach Mango and the QC compared
+   * it against Strawberry Lemonade: "wrong dominant pack color, altered flavor art". A correct
+   * render was rejected, and **two of three flavours failed no matter how good the render was**
+   * (job 23308ec5, 2026-08-24).
+   *
+   * The render is not told which flavour to depict, so the QC cannot demand a specific one.
+   * Matching ANY real variant packshot is the correct predicate — a fabricated pack still matches
+   * none of them, so the check keeps its teeth.
+   */
+  packshotUrls?: string[] | null;
   /** Phase 2 of `ad-creative-only-our-real-offer-discount-shown-never-a-competitors` — our REAL
    *  store offer (from `brief.offer`) that the vision QC must compare every rendered discount
    *  against. The three fields together describe every legitimate discount signal we allow on the
@@ -121,6 +138,26 @@ export function summarizeOfferForQa(offer: CreativeQAInput["realOffer"]): string
 /** Fetch + normalize a remote packshot URL for the QA vision compare. Returns null on any fetch /
  *  decode failure so the caller can skip the packagingFaithful check rather than fail the whole
  *  verdict on a transient network hiccup. */
+/** Max reference packshots handed to the vision call — bounds token cost on a many-variant product. */
+export const MAX_REFERENCE_PACKSHOTS = 4;
+
+/**
+ * Resolve the reference packshot list from either field, newest contract first.
+ * PURE. De-duplicates, drops non-http entries, and caps at `MAX_REFERENCE_PACKSHOTS`.
+ */
+export function resolvePackshotUrls(gen: Pick<CreativeQAInput, "packshotUrl" | "packshotUrls">): string[] {
+  const raw = gen.packshotUrls?.length ? gen.packshotUrls : gen.packshotUrl ? [gen.packshotUrl] : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const u of raw) {
+    if (typeof u !== "string" || !/^https?:/.test(u) || seen.has(u)) continue;
+    seen.add(u);
+    out.push(u);
+    if (out.length >= MAX_REFERENCE_PACKSHOTS) break;
+  }
+  return out;
+}
+
 async function loadReferencePackshot(url: string | null | undefined): Promise<Buffer | null> {
   if (!url || typeof url !== "string" || !/^https?:/.test(url)) return null;
   try {
@@ -169,7 +206,11 @@ export async function qaCreative(
   // out-of-band so a slow/broken CDN can be handled as skip rather than as a verdict failure. When
   // present, we hand it to the vision API as a second image and instruct packagingFaithful=compare;
   // when absent, we instruct packagingFaithful=true (skip).
-  const packshot = await loadReferencePackshot(gen.packshotUrl);
+  // Load EVERY variant packshot — the render isn't told which flavour to depict, so matching any
+  // real one is the correct predicate (see `packshotUrls`). A failed fetch drops that reference
+  // only; the check still runs against whatever loaded.
+  const packshots = (await Promise.all(resolvePackshotUrls(gen).map(loadReferencePackshot)))
+    .filter((b): b is Buffer => b !== null);
   // Phase 2 of ad-creative-only-our-real-offer-discount-shown-never-a-competitors — summarize the
   // real store offer for the vision model so `offerConsistent` has a source of truth to compare
   // every rendered discount against. Null → SKIP (offerConsistent forced true locally below).
@@ -181,9 +222,11 @@ export async function qaCreative(
     gen.expectedCopy.offer ? `OFFER: "${gen.expectedCopy.offer}"` : "OFFER: none",
     `TRUST BAR: "${gen.expectedCopy.trust}"`,
     `Has a before/after transformation image: ${gen.hasTransformation ? "yes" : "no"}`,
-    packshot
-      ? `A reference packshot photograph is supplied as the SECOND image below. Compare the ad's rendered product package against it and judge packagingFaithful per the system rules.`
-      : `No reference packshot supplied — set packagingFaithful=true (skip the check).`,
+    packshots.length === 0
+      ? `No reference packshot supplied — set packagingFaithful=true (skip the check).`
+      : packshots.length === 1
+        ? `A reference packshot photograph is supplied as the SECOND image below. Compare the ad's rendered product package against it and judge packagingFaithful per the system rules.`
+        : `${packshots.length} reference packshot photographs are supplied as the images AFTER the ad — these are the product's real FLAVOUR VARIANTS (different pack colours and flavour art, same brand). The ad may legitimately depict ANY ONE of them. Set packagingFaithful=true if the rendered pack matches ANY of the references on wordmark, pack shape and that variant's colours/flavour art. Only set it false if the rendered pack matches NONE of them (an invented pack, a fabricated wordmark, or a competitor's pack). Do NOT fail it merely because the ad shows a different flavour than the first reference.`,
     realOfferSummary
       ? `REAL_OFFER (compare every rendered discount against this — the ONLY discount allowed on the image): ${realOfferSummary}. FAIL offerConsistent if the image shows any percent-off / dollar-off / free-shipping / BOGO / X-for-$Y claim that does not match, or two conflicting discount numbers.`
       : `No real offer supplied — set offerConsistent=true (skip the check).`,
@@ -194,8 +237,8 @@ export async function qaCreative(
     const content: Array<Record<string, unknown>> = [
       { type: "image", source: { type: "base64", media_type: "image/jpeg", data: normalized.toString("base64") } },
     ];
-    if (packshot) {
-      content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: packshot.toString("base64") } });
+    for (const p of packshots) {
+      content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: p.toString("base64") } });
     }
     content.push({ type: "text", text: `Expected copy:\n${expected}\n\nQA this rendered ad. Return only the JSON verdict.` });
     const res = await fetch("https://api.anthropic.com/v1/messages", {
@@ -227,7 +270,7 @@ export async function qaCreative(
     transformationPhotorealistic: json.transformationPhotorealistic === true,
     // Packagingfaithful with no reference supplied is SKIPPED — the model is told to return true and
     // we also enforce it locally so a legacy path (no packshot threaded) can never regress.
-    packagingFaithful: packshot ? json.packagingFaithful === true : true,
+    packagingFaithful: packshots.length > 0 ? json.packagingFaithful === true : true,
     // OfferConsistent with no real offer supplied is SKIPPED — same defense-in-depth as
     // packagingFaithful: the model is told to return true, and we also enforce it locally so a
     // legacy caller that doesn't thread realOffer can never regress a legitimate no-offer render.
@@ -338,15 +381,18 @@ export async function qaCreativeViaBoxSession(
   // allowedImagePath env). A packshot fetch/write failure is treated as "no reference supplied" —
   // buildQcPrompt sees packshotPath=null and instructs the QC to SKIP packagingFaithful (returning
   // true), rather than starving the bin on a transient CDN hiccup on top of the Phase-1 gate.
-  const packshotBuffer = await loadReferencePackshot(gen.packshotUrl);
-  let packshotPath: string | null = null;
-  if (packshotBuffer) {
-    packshotPath = join(tmpdir(), `creative-qc-packshot-${randomUUID()}.jpg`);
+  // Every flavour variant, not just the first — see `packshotUrls`. Each becomes its own tmp jpeg
+  // the QC child may Read, and all of them join the comma-separated allowedImagePath env.
+  const packshotBuffers = (await Promise.all(resolvePackshotUrls(gen).map(loadReferencePackshot)))
+    .filter((b): b is Buffer => b !== null);
+  const packshotPaths: string[] = [];
+  for (const buf of packshotBuffers) {
+    const p = join(tmpdir(), `creative-qc-packshot-${randomUUID()}.jpg`);
     try {
-      await writeFile(packshotPath, packshotBuffer);
+      await writeFile(p, buf);
+      packshotPaths.push(p);
     } catch (err) {
-      console.warn(`[creative-qa] qa_packshot_tmpfile_error err=${errText(err)} — skipping packagingFaithful for this render`);
-      packshotPath = null;
+      console.warn(`[creative-qa] qa_packshot_tmpfile_error err=${errText(err)} — dropping one reference`);
     }
   }
 
@@ -369,14 +415,14 @@ export async function qaCreativeViaBoxSession(
       // Blank headline = a competitor-imitation whose headline was rewritten for our brand → tell the QC to
       // skip the exact-match (keep textLegible + no-competitor-brand strict). See creative-generate buildPrompt.
       imitationHeadline: !gen.expectedCopy.headline?.trim(),
-      packshotPath,
+      packshotPaths,
       realOfferSummary,
     });
 
     // Both tmp paths become the comma-separated allowedImagePath env value. The QC gate's
     // parseAllowedImagePaths splits + trims; a single-image call carries no comma so the set
     // stays a singleton (unchanged legacy behavior).
-    const allowedImagePath = packshotPath ? `${imagePath},${packshotPath}` : imagePath;
+    const allowedImagePath = [imagePath, ...packshotPaths].join(",");
 
     let dispatchResult: { resultText: string; isError: boolean };
     try {
@@ -401,7 +447,7 @@ export async function qaCreativeViaBoxSession(
       // force true locally regardless of what the model returned — same skip semantic as the direct
       // API path. This closes the "packshotUrl was set but the tmpfile write failed" hole so a
       // model that mistakenly says false can't fail-close a legitimate own-brand render.
-      packagingFaithful: packshotPath ? rawChecks.packagingFaithful === true : true,
+      packagingFaithful: packshotPaths.length > 0 ? rawChecks.packagingFaithful === true : true,
       // Phase 2 of ad-creative-only-our-real-offer-discount-shown-never-a-competitors —
       // offerConsistent is only enforced when a real offer summary was actually threaded into the
       // prompt. When no offer reached the QC (own-brand no-offer render, or realOffer=null), we
@@ -424,7 +470,7 @@ export async function qaCreativeViaBoxSession(
   } finally {
     // Best-effort cleanup — a leaked /tmp jpeg is harmless but noise.
     void unlink(imagePath).catch(() => {});
-    if (packshotPath) void unlink(packshotPath).catch(() => {});
+    for (const p of packshotPaths) void unlink(p).catch(() => {});
   }
 }
 
