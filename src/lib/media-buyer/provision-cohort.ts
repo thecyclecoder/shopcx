@@ -142,6 +142,21 @@ export interface ProvisionCohortOptions {
   dailyTestCeilingCents?: number; // $600 default
   perTestDailyBudgetCents?: number; // $150 default
   notes?: string;
+
+  /**
+   * Existing-customer exclusion audiences (bare Meta customaudience ids, same ad
+   * account). BOTH the columns and the template's `excluded_custom_audiences`
+   * are stamped from these.
+   *
+   * ⚠️ Provisioning previously accepted neither, so a fresh cohort landed with
+   * NULL exclusion columns and no `excluded_custom_audiences` in its template.
+   * The publish gate only enforces the exclusion when the COLUMN is set, so a
+   * fresh cohort silently advertised the cold test at existing customers —
+   * inflating its apparent CPA and wasting spend on people who already buy.
+   * Pass both unless the account genuinely has no exclusion audiences.
+   */
+  excludedPurchaserAudienceId?: string | null;
+  excludedAllCustomersAudienceId?: string | null;
 }
 
 export interface ProvisionCohortResult {
@@ -162,7 +177,16 @@ export async function provisionProductTestCohort(admin: Admin, opts: ProvisionCo
   const campaignId = await getOrCreateTestingCampaign(token, opts.metaAccountActId);
   const ceiling = opts.dailyTestCeilingCents ?? 60000;
   const perTest = opts.perTestDailyBudgetCents ?? 15000;
-  const template = buildAdsetTemplate({ pixelId: opts.pixelId, targeting: opts.targeting });
+  // Layer the existing-customer exclusions into the template AND stamp the columns —
+  // the publish gate keys off the columns, the ad set keys off the template, and the
+  // two must agree or the gate refuses with `missing_purchaser_exclusion`.
+  const excludedCustomAudienceIds = [opts.excludedPurchaserAudienceId, opts.excludedAllCustomersAudienceId]
+    .filter((v): v is string => typeof v === "string" && v.length > 0);
+  const template = buildAdsetTemplate({
+    pixelId: opts.pixelId,
+    targeting: opts.targeting,
+    excludedCustomAudienceIds,
+  });
 
   // Insert-time invariant: a per-test cohort MUST carry a testing campaign + template with pixelId, or
   // Bianca's replenish fails closed and the product freezes at whatever slot count it had (the exact
@@ -181,6 +205,8 @@ export async function provisionProductTestCohort(admin: Admin, opts: ProvisionCo
     default_meta_account_id: opts.metaAccountActId,
     default_meta_page_id: opts.pageId,
     default_meta_instagram_user_id: opts.instagramUserId ?? null,
+    excluded_purchaser_audience_id: opts.excludedPurchaserAudienceId ?? null,
+    excluded_all_customers_audience_id: opts.excludedAllCustomersAudienceId ?? null,
     is_active: true,
     notes: opts.notes ?? `per-test-adset cohort — ${(ceiling / 100).toFixed(0)}/day, ${(perTest / 100).toFixed(0)}/test. CEO 2026-07-12.`,
   };
