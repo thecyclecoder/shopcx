@@ -56,6 +56,7 @@
     "test:specs-table-merge-contains-phase-build": "tsx --test src/lib/specs-table.merge-contains-phase-build.test.ts",
     "test:agent-jobs-merge-stamps-contained-phases": "tsx --test src/lib/agent-jobs.merge-stamps-contained-phases.test.ts",
     "test:profit-estimate": "tsx --test src/lib/profit-estimate.test.ts",
+    "test:creative-qa-multi-packshot": "tsx --test src/lib/ads/creative-qa.multi-packshot.test.ts",
     "test:subscription-order-link": "tsx --test src/lib/subscription-order-link.test.ts",
     "test:specs-table-verify-phases-contained-by-merges": "tsx --test src/lib/specs-table.verify-phases-contained-by-merges.test.ts",
     "test:pr-create-diagnostic": "tsx --test src/lib/pr-create-diagnostic.test.ts",

@@ -151,7 +151,15 @@ export interface QcPromptInput {
    *  the outer prompt tells the model to SKIP the check and return `packagingFaithful=true` so a
    *  missing-reference path never false-fails a legitimate render (Phase 1 already gates competitor
    *  composition-transfer against fabricating when a packshot is absent). */
+  /** Legacy single reference — prefer `packshotPaths`. Honoured when the list is absent. */
   packshotPath?: string | null;
+  /**
+   * EVERY real variant packshot on disk, one per flavour. The render is never told which flavour
+   * to depict, so demanding a specific one false-failed correct ads: with a single `[0]` reference
+   * two of Superfood Tabs' three flavours failed regardless of render quality (job 23308ec5).
+   * Matching ANY real variant is the correct predicate — a fabricated pack matches none.
+   */
+  packshotPaths?: string[] | null;
   /** Phase 2 of `ad-creative-only-our-real-offer-discount-shown-never-a-competitors` — the REAL
    *  store offer summary (a single line of the form `HEADLINE: "…" · STRIKETHROUGH: "…" ·
    *  PER_SERVING: "…"`, from `summarizeOfferForQa`). When set, the outer TRUSTED prompt tells the
@@ -189,9 +197,13 @@ export function buildQcPrompt(input: QcPromptInput): string {
   // generate against a competitor graphic without a real packshot, so a no-reference render is not
   // a hallucinated-pack risk. Same trust boundary as imitationRule: this rule comes from our code,
   // never from the untrusted DATA block below.
-  const packshotRule = input.packshotPath
-    ? `PACKAGING-FIDELITY MODE — REFERENCE-VERIFY: read BOTH images. The generated ad is ${input.imagePath}; the REAL isolated packshot for our product is ${input.packshotPath} (a photograph of the ACTUAL product we ship). Set \`packagingFaithful\` = true IFF the product package rendered in the generated ad matches the reference packshot on wordmark (the main brand name / product name printed on the pack), dominant pack colors, flavor art / hero graphic, and overall pack shape/silhouette. FAIL \`packagingFaithful\` on ANY of: an invented pack (a different-shaped bottle/pouch/box the reference doesn't have), a competitor's pack still visible, a wrong-color pack, a fabricated wordmark, a missing/altered flavor art. Sub-readable ingredient icons + supplement-facts fine print are still out of scope (same as the textLegible rule). Fail-closed on ambiguity — if you cannot see both packages clearly enough to compare, return \`packagingFaithful\` = false and cite what you couldn't see in \`issues\`.`
-    : "PACKAGING-FIDELITY MODE — NO REFERENCE: no reference packshot was supplied for this generation (own-brand path or no isolated packshot on record). SKIP the packagingFaithful check and set `packagingFaithful` = true — Phase 1 of the packshot spec already refused to run composition-transfer without a real packshot, so a no-reference render here is not a fabricated-pack risk.";
+  const packshotList = (input.packshotPaths?.length ? input.packshotPaths : input.packshotPath ? [input.packshotPath] : []);
+  const NO_REFERENCE_RULE = "PACKAGING-FIDELITY MODE — NO REFERENCE: no reference packshot was supplied for this generation (own-brand path or no isolated packshot on record). SKIP the packagingFaithful check and set `packagingFaithful` = true — Phase 1 of the packshot spec already refused to run composition-transfer without a real packshot, so a no-reference render here is not a fabricated-pack risk.";
+  const packshotRule = packshotList.length === 0
+    ? NO_REFERENCE_RULE
+    : packshotList.length === 1
+    ? `PACKAGING-FIDELITY MODE — REFERENCE-VERIFY: read BOTH images. The generated ad is ${input.imagePath}; the REAL isolated packshot for our product is ${packshotList[0]} (a photograph of the ACTUAL product we ship). Set \`packagingFaithful\` = true IFF the product package rendered in the generated ad matches the reference packshot on wordmark (the main brand name / product name printed on the pack), dominant pack colors, flavor art / hero graphic, and overall pack shape/silhouette. FAIL \`packagingFaithful\` on ANY of: an invented pack (a different-shaped bottle/pouch/box the reference doesn't have), a competitor's pack still visible, a wrong-color pack, a fabricated wordmark, a missing/altered flavor art. Sub-readable ingredient icons + supplement-facts fine print are still out of scope (same as the textLegible rule). Fail-closed on ambiguity — if you cannot see both packages clearly enough to compare, return \`packagingFaithful\` = false and cite what you couldn't see in \`issues\`.`
+    : `PACKAGING-FIDELITY MODE — REFERENCE-VERIFY (MULTI-VARIANT): read the generated ad at ${input.imagePath} AND all ${packshotList.length} reference packshots: ${packshotList.join(", ")}. These references are the product's real FLAVOUR VARIANTS — same brand and pack shape, DIFFERENT pack colours and flavour art. The ad may legitimately depict ANY ONE of them; nothing tells the renderer which flavour to use. Set \`packagingFaithful\` = true if the rendered pack matches ANY ONE reference on wordmark, overall pack shape/silhouette, and that variant's colours + flavour art. Set it FALSE only if the rendered pack matches NONE of them — an invented pack shape, a fabricated wordmark, a competitor's pack still visible, or colours/flavour art matching no real variant. ⭐ Do NOT fail merely because the ad shows a different flavour than the first reference; that is the expected case. Sub-readable ingredient icons + supplement-facts fine print are out of scope. Fail-closed on ambiguity — if you cannot see the packages clearly enough to compare against any reference, return \`packagingFaithful\` = false and cite what you couldn't see in \`issues\`.`;
   // TRUSTED — the offer-consistency rule (Phase 2 of ad-creative-only-our-real-offer-...). When we
   // thread a real offer summary, the QC must compare every rendered discount/percent-off /
   // free-shipping / BOGO / X-for-$Y claim against that summary and FAIL offerConsistent on any
@@ -211,7 +223,7 @@ export function buildQcPrompt(input: QcPromptInput): string {
     offerRule,
     "",
     `IMAGE: ${input.imagePath}`,
-    ...(input.packshotPath ? [`REFERENCE_PACKSHOT: ${input.packshotPath}`] : []),
+    ...(packshotList.length ? [`REFERENCE_PACKSHOTS (${packshotList.length}, one per real flavour variant): ${packshotList.join(", ")}`] : []),
     "",
     QC_DATA_PROMPT_INJECTION_GUARDRAIL,
     "",

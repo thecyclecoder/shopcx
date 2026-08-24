@@ -619,7 +619,13 @@ export async function buildCreativeBrief(
   if (transformation?.renderBeforeAfter && transformation.beforeAfterImage) {
     imageRefs.push({ role: "before_after", url: transformation.beforeAfterImage });
   }
-  if (pi.media.isolatedPackshots[0]) imageRefs.push({ role: "packshot", url: pi.media.isolatedPackshots[0] });
+  // EVERY variant packshot, not just [0]. The generator is never told which flavour to depict, and
+  // Superfood Tabs' hero/lifestyle assets are all Peach Mango while [0] is Strawberry Lemonade — so
+  // a `[0]`-only reference made the QC reject a correct render, and two of three flavours could
+  // never pass `packagingFaithful` (job 23308ec5, 2026-08-24). The FIRST ref stays first so the
+  // composition-transfer path (which reads one packshot) is byte-identical to before; the extras
+  // exist purely so QC can accept a match against ANY real variant.
+  for (const url of pi.media.isolatedPackshots) imageRefs.push({ role: "packshot", url });
 
   const guardrails = [
     "all claims trace to product-intelligence (no fabrication)",
