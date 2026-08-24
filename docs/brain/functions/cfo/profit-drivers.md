@@ -6,7 +6,7 @@ A **living investigation page**. Profit, not revenue, is the CEO north star ([[.
 
 Every number is **measured** unless labelled otherwise. Wrong conclusions are **struck through, not deleted** — the point is to stop a future session re-deriving a disproven answer. Add to the [findings log](#findings-log); don't silently rewrite history.
 
-**Re-run:** `scripts/_profit-drivers.ts` · `_scale-curve.ts` · `_cogs-normalize2.ts` · `_amazon-halo.ts` · `_ramp-plan.ts` (all read-only, DB-only, **zero external API calls** — Appstle bills per hit).
+**Re-run:** `scripts/_profit-drivers.ts` · `_scale-curve.ts` · `_cogs-normalize2.ts` · `_amazon-halo.ts` · `_ramp-plan.ts` · `_stock-picture.ts` (all read-only, DB-only, **zero external API calls** — Appstle bills per hit).
 
 ---
 
@@ -16,7 +16,7 @@ Every number is **measured** unless labelled otherwise. Wrong conclusions are **
 
 At ~$41K/month of Meta spend the business earns a 26% margin on a **shrinking** base. Steady state on that path is roughly **$4K/month of profit**. Stepping spend toward **~$100K/month** produces less headline margin (~14%) but **more durable profit on a stable base**.
 
-**The plan (CEO):** Phase 1 → $55K/month to match cancels and stop the decline. Phase 2 → +15%/month toward ~$100K, cash-paced. **Stop whenever blended CAC crosses $110; never exceed $139** (break-even = LTV × contribution margin). See [§ The staged plan](#-the-staged-plan-ceo-2026-08-24).
+**The plan (CEO):** **Phase 0 → restock FBA (blocking — Amazon is 66% of acquisition and has ~32 days of stock, nothing inbound).** Phase 1 → $55K/month to match cancels, website-only while Amazon is dark. Phase 2 → +15%/month toward ~$100K, cash-paced, gated on Phase 0. **Stop whenever blended CAC crosses $110; never exceed $139** (break-even = LTV × contribution margin). See [§ The staged plan](#-the-staged-plan-ceo-2026-08-24).
 
 The ceiling is **~$100K/month**, where the *marginal* customer starts costing more than they return — not the $150–180K the band averages suggest.
 
@@ -117,6 +117,34 @@ Steady state = `customers/month × LTV`, at the July cost structure:
 
 **The binding constraint is CASH, not CAC.** A customer costs money today and repays over ~5 months, so a ramp faster than the payback period compounds the cash gap even when every cohort is profitable.
 
+### ⭐ Phase 0 — INVENTORY. This gates everything (CEO 2026-08-24)
+
+> **You cannot buy a customer you cannot ship to.** Checked before any ramp; canonical source is [[../../tables/inventory_levels]] (`location='amplifier_3pl'` / `'fba'`), fed daily from Amplifier by [[../../inngest/sync-3pl-inventory]] — **not** the `qb_*_inventory_snapshots` tables, which are the accounting rollup.
+
+| Path | On hand | Inbound | State |
+|---|---|---|---|
+| **3PL (website)** | **102,995 units** | 0 | ✅ abundant — Tabs 7,268 · Ashwavana 6,359 · Creamer 6,338 · Creatine 4,679 |
+| **FBA (Amazon)** | 843 (165 reserved → **678 net**) | **0** | ❌ **27 of 45 SKUs at zero. None above 200. Nothing on the way.** |
+
+**Amazon is 66% of acquisition** (492 of 749 new customers in July). At July's Amazon run rate (~21 orders/day) that's **~32 days of runway** — optimistic, since the sellers are at zero and the remaining units sit in slow SKUs.
+
+**What an empty FBA does to the ramp**: the 7.38 customers/$1K response was measured with FBA in stock. Website-only, the effective response falls to ~2.53/$1K ⇒ **marginal CAC ~$395**.
+
+> ⚠️ ~~"That's 2.8× break-even."~~ **Wrong — it compares against the BLENDED break-even.** The blend is dragged down by Amazon. Split (July dashboard): **Website LTV $365 · Amazon LTV $127 · blended $209**. Website-only break-even is `$365 × 66.3% = $242`, so website-only ramping runs at **~1.6× break-even**, not 2.8×. Underwater, but far less so — **and a website customer is worth nearly 3× an Amazon one.**
+
+**Coffee is the smaller constraint.** Whole-bean Coffee is out (ASC-COFFEE-1 at 5 units, ASC-COFFEE-3 at 0) and its ad account already runs **zero active adsets**, so it's largely priced in. But **K-Cups have stock**:
+
+| | Units |
+|---|---|
+| K-Cups, 3PL (website) | **3,900** (`SC-COFFEEPOD-NP24`) ≈ 3,500 orders of headroom |
+| K-Cups, FBA (Amazon) | **30 net** — website-only lever |
+
+K-Cups ran **~31 orders/month while barely advertised** at **$89 AOV / 64% sub rate**. It won't carry Phase 1 alone (+102 customers/month needed) but it's an unconstrained SKU to push — and the only coffee-adjacent product sellable today.
+
+> ⚠️ **Set K-Cups its own CAC target.** At $89 AOV vs Tabs' $126 its LTV — and therefore its ceiling — is lower than the blended number.
+
+**Phase 0 exit condition:** FBA restocked. Until then, Phase 1 runs website-only and Phase 2 is blocked — not because the economics collapse, but because two-thirds of the volume can't be reached.
+
 ### Phase 1 — $41K → $55K/month
 
 Churn **$20.0K** MRR vs new-sub **$17.6K** ⇒ **13.6% more new subs** needed to hold flat. At the measured marginal response (7.38 customers per $1K):
@@ -128,6 +156,8 @@ Churn **$20.0K** MRR vs new-sub **$17.6K** ⇒ **13.6% more new subs** needed to
 | Blended CAC | $55 | **~$65** |
 
 Marginal CAC on this step is ~$114 against a $139 break-even — genuinely profitable, and it protects the ~618/month baseline that carries essentially all the profit. **~$14K/month more on the card.**
+
+> ⚠️ **While FBA is empty, point Phase 1 at WEBSITE conversion** — Tabs, Creamer, Ashwavana, Creatine, K-Cups — where 3PL holds 103K units and a customer is worth **$365**, not $209. Expect worse than the $65 blended CAC projected above: that projection assumed Amazon carried two-thirds of the conversions. The compensating factor is the higher website LTV, which lifts the break-even to $242.
 
 ### Phase 2 — +15%/month to ~$100K
 
@@ -146,6 +176,8 @@ A faster ramp digs a **deeper** hole for the same endpoint — spend leaves imme
 Be clear what Phase 2 buys: between $55K and $100K you acquire at ~$114 against a $139 break-even — about **$25 of profit per customer**. Real, but thin. It is mostly **converting cash into revenue slightly better than break-even**, and its main value is arresting the decline of the profitable base.
 
 **Stop rule:** hold the level for a month whenever blended CAC crosses **$110**.
+
+> 🚧 **Phase 2 is GATED on Phase 0.** Ramping to ~$100K with Amazon dark means buying at ~$395 against a $242 website break-even. Restock FBA first.
 
 Model: `scripts/_ramp-plan.ts`.
 
@@ -331,6 +363,9 @@ Triggered by: *"revenue declines every month, but margin is 22% — does the mar
 - ~~"$150–180K/month is still fine"~~ — read off band AVERAGES. Marginal CAC between $101K and $149K is **$224**, well above break-even.
 - ~~Normalizing total COGS across 2024~~ — adds ads-booked-in-COGS back as an accounting error and invents 43% margins.
 
+### 2026-08-24 (session 4) — the stock wrinkle
+CEO: Coffee can't be advertised on stock. Investigation found a **bigger** constraint underneath — **FBA is effectively empty (678 net units, zero inbound, ~32 days) while Amazon is 66% of acquisition**. Phase 0 added and Phase 2 gated on it. Also established the **website/Amazon LTV split ($365 / $127)**, which raises the website-only break-even to $242, and confirmed **K-Cups (3,900 website units) as an unconstrained lever**.
+
 ### Shipped
 - **#2549** — [[../../dashboard/analytics__profit]] rebuilt on real QuickBooks data ([[../../libraries/profit-estimate]]). Old page reported $46,065 for July against a real $65,458.
 - **#2551** — subscription first-order linkage ([[../../libraries/subscription-order-link]]); 1,088 orders backfilled.
@@ -360,6 +395,8 @@ All read-only, DB-only, **zero external API calls**.
 | `_amazon-halo.ts` | halo correlation + lags + natural experiments |
 | `_steady-state.ts` / `_trajectory.ts` | equilibrium revenue and the path to it |
 | `_ramp-plan.ts` | Phase 1 sizing + Phase 2 ramp scenarios with the incremental cash cost |
+| `_stock-picture.ts` / `_fba-runway.ts` | Phase 0 — sellable units per fulfilment path, FBA runway, ramp impact |
+| `_advertisable-mix.ts` / `_kcup-capacity.ts` | acquisition by product vs what we can actually ship |
 
 **Method traps that produced wrong answers:**
 - Exclude **2024-12** from correlations (write-off, product COGS 101% of income).
@@ -367,6 +404,8 @@ All read-only, DB-only, **zero external API calls**.
 - Dedupe cohorts against a **long lookback** — deduping inside the window counts returning buyers as new (inflated July first-order AOV $102 → $115).
 - Control for **day-of-week** on spend-response reads.
 - Page every daily-table read past the **1000-row cap**.
+- **Inventory lives in `inventory_levels`, not `qb_*_inventory_snapshots`.** The qb_ tables are the accounting rollup; the live Amplifier feed is `inventory_levels` (`location='amplifier_3pl'|'fba'|'shopify'`), columns `on_hand / inbound / reserved`.
+- **Never compare a channel's CAC to the BLENDED break-even.** Website LTV $365 vs Amazon $127 — using the $209 blend overstated website-only ramping as 2.8x break-even when it is 1.6x.
 - **Never conclude from a <2-week window** — the 5-day Amazon read produced a confidently wrong answer that stood for hours.
 - **Never size a ramp from band AVERAGES.** The marginal cost between bands is the decision number; averages understated it by ~2.5x ($89 average vs $224 marginal between $101K and $149K).
 - **Never model absolute cash from cohorts alone** — the existing base isn't in them, so an absolute series shows losses where the month actually profited. Model the DELTA vs a do-nothing baseline.

@@ -18,7 +18,9 @@ The permanent owner of **the company's numbers** — revenue, margin, cash, CAC,
 
 The headline: **the business is currently UNDER-spending on acquisition, and today's 26% margin is the symptom, not the achievement.** At ~$41K/month of Meta spend it earns 26% on a *shrinking* base, and steady state on that path is ~$4K/month of profit.
 
-**The staged plan (CEO 2026-08-24):** **Phase 1** — step to **$55K/month** to match cancels with new subs and stop the base decaying. **Phase 2** — **+15%/month** toward **~$100K**, paced by cash (Meta is on credit cards, so this month's spend is next month's payment; a faster ramp digs a *deeper* hole for the same endpoint).
+**The staged plan (CEO 2026-08-24):** **Phase 0 — restock FBA. Blocking.** Amazon is **66% of acquisition** and has **678 net units with nothing inbound** (~32 days), while the website 3PL holds 103K. **Phase 1** — step to **$55K/month** to match cancels, pointed at **website** conversion while Amazon is dark. **Phase 2** — **+15%/month** toward **~$100K**, paced by cash (Meta is on credit cards; a faster ramp digs a *deeper* hole for the same endpoint) and **gated on Phase 0**.
+
+Channel economics differ sharply and the blend hides it: **Website LTV $365 · Amazon LTV $127 · blended $209**. A website customer is worth nearly **3×** an Amazon one, so never judge a single channel against the blended break-even.
 
 **Stop rule: hold whenever blended CAC crosses $110. Never exceed $139** — break-even is `LTV $209 × 66.3% contribution`. The ceiling is set by the **marginal** customer, not a benchmark ratio; band averages hide a marginal CAC of $224 between $101K and $149K of spend.
 
