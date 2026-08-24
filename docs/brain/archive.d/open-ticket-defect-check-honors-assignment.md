@@ -1,0 +1,1 @@
+- **The open-ticket defect check must honor assignment** · verified 2026-08-24 · → [[libraries/cs-director#founder-ruling-sticky-invariant]] · skill: [[../../../.claude/skills/open-tickets]]
