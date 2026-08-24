@@ -304,6 +304,13 @@ async function handleSubscriptionEvent(
       upsertData.next_billing_date = nextBillingDate;
     }
 
+    // A cancelled sub has no next charge to advertise — force-null even if
+    // Appstle's payload still carries a date. Fix at the writer, not each
+    // reader (CS director brief, founder card, portal, agent context).
+    if (mapStatus(status) === "cancelled") {
+      upsertData.next_billing_date = null;
+    }
+
     await admin.from("subscriptions").upsert(upsertData, { onConflict: "workspace_id,shopify_contract_id" });
 
     // Link the subscription's ORIGINATING checkout order (orders.subscription_id).
