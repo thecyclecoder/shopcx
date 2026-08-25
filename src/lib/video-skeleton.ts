@@ -119,9 +119,12 @@ export interface VideoDeconstructResult {
 /**
  * Fetch a LEGACY AdLibrary-hosted video resource.
  *
- * ⚠️ TERMINAL PATH. This exists only to drain the `video_pending` rows the AdLibrary era left
- * behind (64 of them at migration time), whose `image_url` is a Bearer-keyed adlibrary.com resource.
- * It is deliberately self-contained so it survived the deletion of `src/lib/adlibrary.ts`.
+ * ⚠️ TERMINAL PATH — and, as measured, an EMPTY one. It exists to drain `video_pending` rows left
+ * by the AdLibrary era, whose `image_url` is a Bearer-keyed adlibrary.com resource. Verified
+ * 2026-08-25 (`scripts/_verify-video-rows-safe.ts`): all 64 legacy video rows are already
+ * `status='analyzed'` with a local `thumb_path`, and there are ZERO `video_pending` rows — so this
+ * function currently has nothing to fetch. Kept as a safety net in case an old row is ever re-opened.
+ * Deliberately self-contained so it survived the deletion of `src/lib/adlibrary.ts`.
  *
  * No NEW rows can arrive here: the Meta scout collects `staticsOnly` (founder: we research static
  * creative), and a Meta video row's only creative handle would be a snapshot url needing a browser

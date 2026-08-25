@@ -110,7 +110,7 @@ The Ad Library **UI** showed **~180 results** for Erth Labs where the API return
 
 - **Engagement/scale columns** — null on all new rows (accepted; see above).
 - **`call_to_action`** — Meta doesn't expose the CTA button label anywhere.
-- **The video lane** — the scout is statics-only, so no new video rows arrive. The 64 legacy `video_pending` rows drain through a self-contained legacy fetch in [[../libraries/video-skeleton.md]] that needs `ADLIBRARY_API_KEY`; when that key goes, they become undrainable. Expected and accepted.
+- **The video lane** — the scout is statics-only, so no new video rows arrive. ✅ **Nothing is stranded**: all 64 legacy video rows are already `status='analyzed'`, carry a vision hook, and have a local `thumb_path` that downloads as a valid JPEG (verified 2026-08-25, `scripts/_verify-video-rows-safe.ts`). There are **zero** `video_pending` rows. The legacy fetch in [[../libraries/video-skeleton.md]] is therefore a dead safety net, not a live dependency.
 - **The live-proxy route** (`/api/ads/creative-finder/media`) — deleted. It existed to live-fetch AdLibrary creatives for rows with no local copy; the ship-time backfill gave all 1,330 rows a `thumb_path`, and Meta rows can never have a fetchable `image_url`.
 
 ## Related
