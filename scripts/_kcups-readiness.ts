@@ -17,7 +17,6 @@
  */
 import { createAdminClient } from "./_bootstrap";
 import { listCompetitors } from "../src/lib/competitors";
-import { errText } from "../src/lib/error-text";
 
 const WS = process.env.WORKSPACE_ID ?? "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 const KCUPS = "f081a8ee-530b-4789-8654-bd57c3a51569";
@@ -74,20 +73,16 @@ async function main() {
   console.log(`  ${ok(ka.length > 0)} K-Cups ${ka.length} angle(s) · Tabs ${ta.length} angle(s)`);
   for (const a of ka.slice(0, 12)) console.log(`      ${String(a.hook_slug ?? "").padEnd(20)} ${String(a.meta_headline ?? "").slice(0, 52)}  [${a.status ?? "—"}${a.is_active ? "" : ", INACTIVE"}]`);
 
-  // 5. competitors — route through the SDK (src/lib/competitors.ts). The prior hand-rolled query
-  // selected `brand_name` / `is_active`, neither of which exist on `public.competitors` (real columns
-  // are `brand` / `status`); Postgres would return an error with data=null and the destructured shape
-  // read as "0 rows" — the exact silent-empty class the SDK guard exists to prevent.
-  try {
-    const comps = await listCompetitors({ workspaceId: WS });
-    const kcomp = comps.filter((c) => String(c.product_id) === KCUPS);
-    const ccomp = comps.filter((c) => String(c.product_id) === COFFEE);
-    console.log(`\n=== 5. COMPETITORS ===`);
-    console.log(`  K-Cups-scoped ${kcomp.length} · Amazing-Coffee-scoped ${ccomp.length} · workspace total ${comps.length}`);
-    console.log(`  (CEO: coffee competitors also apply to K-Cups, so a shared/unscoped pool is fine)`);
-  } catch (e) {
-    console.log(`\n=== 5. COMPETITORS ===\n  error: ${errText(e)}`);
-  }
+  // 5. competitors — routed through the SDK chokepoint (raw table reads are blocked by
+  // scripts/_check-competitors-sdk-compliance.ts). The prior probe hand-rolled `brand_name` /
+  // `is_active` — neither column exists (the real shape is `brand` + `status`), so the typed SDK
+  // shape is safer for a scoping probe like this.
+  const comps = await listCompetitors({ workspaceId: WS, limit: 10000 });
+  const kcomp = comps.filter((c) => String(c.product_id) === KCUPS);
+  const ccomp = comps.filter((c) => String(c.product_id) === COFFEE);
+  console.log(`\n=== 5. COMPETITORS ===`);
+  console.log(`  K-Cups-scoped ${kcomp.length} · Amazing-Coffee-scoped ${ccomp.length} · workspace total ${comps.length}`);
+  console.log(`  (CEO: coffee competitors also apply to K-Cups, so a shared/unscoped pool is fine)`);
 
   // 6. ready creatives
   const { data: camps } = await admin.from("ad_campaigns")

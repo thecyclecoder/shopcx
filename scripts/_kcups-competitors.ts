@@ -8,18 +8,18 @@ async function main() {
   const { data: p } = await a.from("products").select("id,title").eq("workspace_id", WS);
   const t = new Map((p ?? []).map((x) => [String(x.id), String(x.title)]));
 
-  // Route through the SDK chokepoint (src/lib/competitors.ts) so a wrong column can never silently
-  // read as empty — the very class of bug that guard exists to prevent.
-  const c = await listCompetitors({ workspaceId: WS });
+  // Read `public.competitors` through the SDK chokepoint (raw table reads are blocked by
+  // scripts/_check-competitors-sdk-compliance.ts).
+  const c = await listCompetitors({ workspaceId: WS, limit: 10000 });
   const by: Record<string, number> = {};
-  for (const r of c) {
+  for (const r of c ?? []) {
     const k = r.product_id ? (t.get(String(r.product_id)) ?? String(r.product_id)) : "(unscoped / null)";
     by[k] = (by[k] ?? 0) + 1;
   }
   console.log("competitors by product:");
   for (const [k, v] of Object.entries(by).sort((x, y) => y[1] - x[1])) console.log(`  ${k.padEnd(30)} ${v}`);
 
-  const cof = c.filter((r) => t.get(String(r.product_id)) === "Amazing Coffee");
+  const cof = (c ?? []).filter((r) => t.get(String(r.product_id)) === "Amazing Coffee");
   console.log(`\nAmazing Coffee competitors (CEO: these also apply to K-Cups) — ${cof.length}:`);
   for (const r of cof.slice(0, 14)) console.log(`  ${String(r.brand).padEnd(32)} ${r.status}`);
 
