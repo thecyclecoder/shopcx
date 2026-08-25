@@ -974,6 +974,11 @@ export interface MediaBuyerPlanInputs {
    *
    * Subtracting the crowned count restores the invariant the split intends: explore slots measure
    * ads still being TESTED, never ads already judged. Omit / 0 preserves the pre-fix arithmetic.
+   *
+   * Counts NON-EXHAUSTED winners only — it must agree with `listActiveWinnersForProduct` (which
+   * drives `hasActiveWinner` and therefore the explore TARGET) about what still counts as a winner.
+   * A demoted winner reverts to an ordinary explore slot; if the two readers disagreed, the target
+   * would go back to 4 while the live adsets stopped counting, and replenish would over-launch.
    */
   currentLiveCrownedCount?: number;
   /**
@@ -1610,10 +1615,18 @@ export async function readCurrentLiveCrownedCount(
   }
   if (!live.size) return 0;
 
+  // Only NON-EXHAUSTED winners hold a slot open-but-blocked. An exhausted crown has been demoted
+  // back to an ordinary test adset (`markExploitExhausted` — it already drops out of
+  // `listActiveWinnersForProduct`, so `hasActiveWinner` goes false and the explore target reverts
+  // to the full cohort target). Counting a demoted winner as "crowned" would subtract it from
+  // explore while the target is back at 4, and the plan would replenish ON TOP of adsets that are
+  // still live — the 2026-07-12 over-launch shape (8 live against a ceiling of 4). Same rows, two
+  // readers: they have to agree on what still counts as a winner.
   const { data: crowned, error: crownErr } = await admin
     .from("media_buyer_crowned_winners")
     .select("test_meta_adset_id")
     .eq("workspace_id", args.workspaceId)
+    .eq("exploit_exhausted", false)
     .in("test_meta_adset_id", [...live]);
   if (crownErr) throw new Error(`readCurrentLiveCrownedCount: crowned_winners read failed - ${crownErr.message}`);
 
