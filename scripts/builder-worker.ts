@@ -28457,19 +28457,29 @@ async function dispatchJob(job: Job) {
           // P2/P3 never get stamped (accumulation wedges at "positions 2,3 not built"). Title-scoped instructions
           // (no "Phase N") always fall to this branch, so the omission silently broke every multi-phase spec.
           const idx = phases.findIndex((p) => p.status !== "shipped" && p.status !== "rejected" && !p.build_sha);
-          if (idx >= 0 && phases.length > 1) {
+          if (idx >= 0) {
+            // Derive the phase position for EVERY spec — single-phase included. A one-phase spec is
+            // unambiguously at position 1, so `phasePosition` must be set so `finalizeBuiltPhase` can call
+            // `stampPhaseBuilt` and the commit carries its `Phase: N` trailer backup signal. This used to
+            // be gated on `phases.length > 1`, which left a single-phase spec's `phasePosition = null`
+            // whenever the phase TITLE didn't literally contain "Phase N" — so a phase titled
+            // "P1 — implement the fix" recorded no `build_sha` and was permanently unshippable once the
+            // 2026-08-17 merge step began requiring build evidence.
             phasePosition = idx + 1; // M1 provenance: stamp the next-planned phase's position on the commit
-            // Only scope when there's MORE than one phase — a single-phase spec IS the whole thing in one PR,
-            // and a 0-phase one-shot has nothing to scope. The merge hook falls back to this same "first
-            // not-yet-shipped phase" when the instructions name none, so the phase the agent builds and the
-            // phase the hook stamps are identical by construction (no drift).
-            const phase = phases[idx];
-            const phaseLabel = /^\s*Phase\s+\d+\b/i.test(phase.title) ? phase.title : `Phase ${idx + 1} — ${phase.title}`;
-            nextPhaseScope =
-              `⭐ ONE-PHASE-PER-SESSION (mandate — overrides any "build the whole spec" reading of the scope below): implement ONLY ${phaseLabel}, and its verification. ` +
-              `This spec has ${phases.length} phases; you build EXACTLY this single next-planned phase this session — explicitly do NOT implement any subsequent phase, even if the triggering instruction reads generically ("build {spec}" / "authored by the goal planner"). ` +
-              `After this phase merges, the worker auto-queues the next phase's build; your job is this one phase only. If this phase is already entirely on main, make no edits and return the no_changes_reason form.`;
-            console.log(`${tag} scoped build to next planned phase: ${phaseLabel} (of ${phases.length})`);
+            if (phases.length > 1) {
+              // Instruction-scoping (as opposed to position derivation) is legitimately multi-phase-only:
+              // a single-phase spec IS the whole thing in one PR, and a 0-phase one-shot has nothing to
+              // scope. The merge hook falls back to this same "first not-yet-shipped phase" when the
+              // instructions name none, so the phase the agent builds and the phase the hook stamps are
+              // identical by construction (no drift).
+              const phase = phases[idx];
+              const phaseLabel = /^\s*Phase\s+\d+\b/i.test(phase.title) ? phase.title : `Phase ${idx + 1} — ${phase.title}`;
+              nextPhaseScope =
+                `⭐ ONE-PHASE-PER-SESSION (mandate — overrides any "build the whole spec" reading of the scope below): implement ONLY ${phaseLabel}, and its verification. ` +
+                `This spec has ${phases.length} phases; you build EXACTLY this single next-planned phase this session — explicitly do NOT implement any subsequent phase, even if the triggering instruction reads generically ("build {spec}" / "authored by the goal planner"). ` +
+                `After this phase merges, the worker auto-queues the next phase's build; your job is this one phase only. If this phase is already entirely on main, make no edits and return the no_changes_reason form.`;
+              console.log(`${tag} scoped build to next planned phase: ${phaseLabel} (of ${phases.length})`);
+            }
           }
         } catch (e) {
           console.error(`${tag} next-planned-phase derivation failed (proceeding unscoped — pre-flight still applies):`, e instanceof Error ? e.message : e);
