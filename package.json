@@ -57,6 +57,7 @@
     "test:specs-table-merge-contains-phase-build": "tsx --test src/lib/specs-table.merge-contains-phase-build.test.ts",
     "test:agent-jobs-merge-stamps-contained-phases": "tsx --test src/lib/agent-jobs.merge-stamps-contained-phases.test.ts",
     "test:agent-jobs-audit-enqueue-dedupe": "tsx --test src/lib/agent-jobs.audit-enqueue-dedupe.test.ts",
+    "test:backfill-audit-unstamped-merged-specs": "tsx --test scripts/_backfill-audit-unstamped-merged-specs.test.ts",
     "test:shopify-review-metafields-fold": "tsx --test src/lib/shopify-review-metafields.fold.test.ts",
     "test:profit-estimate": "tsx --test src/lib/profit-estimate.test.ts",
     "test:creative-qa-multi-packshot": "tsx --test src/lib/ads/creative-qa.multi-packshot.test.ts",
