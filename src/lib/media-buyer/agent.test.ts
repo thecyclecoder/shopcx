@@ -1265,9 +1265,11 @@ test("Phase 2 — listReadyToTest filtered by productId returns ONLY that produc
       { campaign_id: "cmp-B1", workspace_id: WS, format: "1x1", media_kind: "video", status: "ready", static_jpg_url: null, meta: null },
     ],
     ad_campaigns: [
-      { id: "cmp-A1", workspace_id: WS, product_id: PRODUCT_A, landing_url: "https://x/A1", created_at: "2026-07-10T00:00:00Z" },
-      { id: "cmp-A2", workspace_id: WS, product_id: PRODUCT_A, landing_url: "https://x/A2", created_at: "2026-07-11T00:00:00Z" },
-      { id: "cmp-B1", workspace_id: WS, product_id: PRODUCT_B, landing_url: "https://x/B1", created_at: "2026-07-12T00:00:00Z" },
+      // status is REQUIRED since ready-to-test-bin-excludes-draft-campaigns (#2584) flipped the
+      // bin from a denylist to an allowlist — a row with no status is no longer postable.
+      { id: "cmp-A1", workspace_id: WS, product_id: PRODUCT_A, status: "ready", landing_url: "https://x/A1", created_at: "2026-07-10T00:00:00Z" },
+      { id: "cmp-A2", workspace_id: WS, product_id: PRODUCT_A, status: "ready", landing_url: "https://x/A2", created_at: "2026-07-11T00:00:00Z" },
+      { id: "cmp-B1", workspace_id: WS, product_id: PRODUCT_B, status: "ready", landing_url: "https://x/B1", created_at: "2026-07-12T00:00:00Z" },
     ],
     ad_publish_jobs: [], // nothing in flight
   };
@@ -1313,6 +1315,7 @@ test("Phase 1 pin — cohort P has 2/4 live in its testing campaign against 25 w
     id: `cmp-P-r${i + 1}`,
     workspace_id: WS,
     product_id: PRODUCT_P,
+    status: "ready",
     landing_url: `https://x/P/r${i + 1}`,
     // Older rows first so the plan's slice(0, deficit) picks the newest two (ready-to-test sorts DESC).
     created_at: `2026-07-${String(i + 1).padStart(2, "0")}T00:00:00Z`,
@@ -1338,7 +1341,7 @@ test("Phase 1 pin — cohort P has 2/4 live in its testing campaign against 25 w
     // Plus one OTHER product's ready row to prove listReadyToTest with productId=P excludes it.
     ad_campaigns: [
       ...readyRows,
-      { id: "cmp-other-r1", workspace_id: WS, product_id: "prod-other", landing_url: "https://x/other/r1", created_at: "2026-07-15T00:00:00Z" },
+      { id: "cmp-other-r1", workspace_id: WS, product_id: "prod-other", status: "ready", landing_url: "https://x/other/r1", created_at: "2026-07-15T00:00:00Z" },
     ],
     ad_publish_jobs: [], // nothing in-flight in the ready-to-test bin
   };
