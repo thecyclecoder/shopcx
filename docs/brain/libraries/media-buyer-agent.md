@@ -86,7 +86,7 @@ Every pass emits at most five kinds of typed action:
 
 ### `MediaBuyerPlan` — interface
 
-The typed plan a pass emits. `policyActive`, `policyVersionId`, `cohortConfigured`, `cohortTargetCount`, `currentTestCohortSize`, `promote[]`, `kill[]`, `replenish[]`, `fatigueReplenish[]`, `exploitSpawn[]`, `splitInfo`, `replenishDiagnostic`, `deferred[]`, `summary`. **`replenishDiagnostic`** ([[../specs/dahlia-andromeda-concept-diversity-tags]] Phase 2): `MediaBuyerReplenishDiagnostic | null` — non-null when the replenish loop partialed because the concept-diversity gate rejected every remaining candidate; the runner reads it to emit `media_buyer_replenish_no_diverse_candidate`. NULL when the deficit was filled OR the ready bin was empty (that hits the existing "ready-to-test bin exhausted" summary line, not a diversity failure). **`exploitSpawn` / `splitInfo`** ([[../specs/media-buyer-explore-exploit-split-on-crown]] Phase 2): `exploitSpawn` is one `MediaBuyerExploitSpawnAction` per exploit slot the winner-aware replenish wants filled (empty when the product has no live non-exhausted winner ⇒ split reverts to 4-explore / 0-exploit). `splitInfo` snapshots `{hasActiveWinner, exploreTarget, exploitSlotCount, liveExploreCount, liveExploitCount, activeWinnerCount}` and rides the `media_buyer_pass_completed` heartbeat's metadata so the audit ledger records WHY replenish targeted 2 instead of 4.
+The typed plan a pass emits. `policyActive`, `policyVersionId`, `cohortConfigured`, `cohortTargetCount`, `currentTestCohortSize`, `promote[]`, `kill[]`, `replenish[]`, `fatigueReplenish[]`, `exploitSpawn[]`, `splitInfo`, `replenishDiagnostic`, `deferred[]`, `summary`. **`replenishDiagnostic`** ([[../specs/dahlia-andromeda-concept-diversity-tags]] Phase 2): `MediaBuyerReplenishDiagnostic | null` — non-null when the replenish loop partialed because the concept-diversity gate rejected every remaining candidate; the runner reads it to emit `media_buyer_replenish_no_diverse_candidate`. NULL when the deficit was filled OR the ready bin was empty (that hits the existing "ready-to-test bin exhausted" summary line, not a diversity failure). **`exploitSpawn` / `splitInfo`** ([[../specs/media-buyer-explore-exploit-split-on-crown]] Phase 2): `exploitSpawn` is one `MediaBuyerExploitSpawnAction` per exploit slot the winner-aware replenish wants filled (empty when the product has no live non-exhausted winner ⇒ split reverts to 4-explore / 0-exploit). `splitInfo` snapshots `{hasActiveWinner, exploreTarget, exploitSlotCount, liveExploreCount, liveExploitCount, liveCrownedCount, activeWinnerCount}` and rides the `media_buyer_pass_completed` heartbeat's metadata so the audit ledger records WHY replenish targeted 2 instead of 4.
 
 ### `MediaBuyerDeferredAction` — interface
 
@@ -239,3 +239,56 @@ For the replenish path to actually insert `ad_publish_jobs` rows, the [[../table
 ## Related
 
 [[../tables/media_buyer_test_cohorts]] · [[../tables/media_buyer_sensor_trust]] · [[../tables/media_buyer_cold_scaler_cohorts]] · [[../tables/media_buyer_cold_scaler_arming_authorization]] · [[media-buyer-publish-gate]] · [[media-buyer-publish-identity]] · [[media-buyer__sensor-trust-probe]] · [[media-buyer__purchaser-overlap]] · [[media-buyer-graduate-scaler]] · [[cold-scaler-cohort]] · [[media-buyer__cold-scaler-arming-gate]] · [[../tables/ad_publish_jobs]] · [[../tables/ad_campaigns]] · [[../tables/products]] · [[../tables/iteration_policies]] · [[../tables/iteration_actions]] · [[../tables/iteration_scorecards_daily]] · [[../tables/director_activity]] · [[../tables/meta_ads]] · [[winning-creative-detect]] · [[ready-to-test]] · [[../meta/decision-engine]] · [[../meta/execution]] · [[builder-worker]] · [[iteration-policy-authoring]] · [[../specs/media-buyer-test-winner-loop]] · [[../specs/media-buyer-sensor-trust-probe]] · [[../specs/media-buyer-product-scoped-test-rail]] · [[../specs/bianca-measure-cold-test-purchaser-overlap]] · [[../specs/graduate-crowned-winners-into-the-cold-scaler-mint-campaign-and-duplicate]] · [[../recipes/measure-cold-test-purchaser-overlap]] · [[../functions/growth]] · [[../operational-rules]] (§ North star — supervisable autonomy)
+
+---
+
+## ⭐ The cohort-seal bug — a crowned winner is NOT an explore slot (CEO 2026-08-25)
+
+**Symptom.** A 10/10 Superfood Tabs creative sat in the ready bin and Bianca would not post it. It
+passed every `listReadyToTest` gate and the product-scoped cold read returned it as the ONLY row.
+
+**Cause.** `exploreDeficit = max(0, exploreTarget − liveExploreCount)`. Crowning drops
+`exploreTarget` 4 → `EXPLORE_TARGET_WITH_WINNER = 2` on the assumption that the winner **graduates
+out** to the cold scaler, vacating its test slot. The graduate never ran — **5 crowned winners, 0
+with a `scaler_meta_adset_id`**, and `media_buyer_cold_scaler_arming_authorization` had **0 rows
+ever** (the scaler was never armed). So the winners stayed live in the test campaign, and
+`readCurrentTestCohortSize` — deliberately origin-agnostic, so it cannot tell a winner from an
+explorer — counted all three as explore. Superfood Tabs sat at **3 live "explore" against a target
+of 2 ⇒ deficit 0**, permanently. Every product that crowns a winner hits this.
+
+**Fix.** `readCurrentLiveCrownedCount(admin, {workspaceId, testMetaCampaignId})` intersects the test
+campaign's LIVE adsets (same `FREED_ADSET_STATUSES` notion of live the cohort-size reader uses) with
+`media_buyer_crowned_winners.test_meta_adset_id`, and the plan subtracts it:
+
+```
+liveExploreCount = currentTestCohortSize − liveExploitCount − liveCrownedCount
+```
+
+Explore slots now measure ads still being **tested**, never ads already **judged**. A winner that is
+paused or graduated stops counting automatically — no backfill. The reader THROWS on a read error
+rather than returning 0: a silent 0 would re-seal the cohort, which is the exact failure it exists to
+prevent. Omitting `currentLiveCrownedCount` (or 0) preserves the pre-fix arithmetic verbatim.
+
+Measured effect on apply: Superfood Tabs 0 → **2 open slots**; Zen Relax 0 → 2; every cohort unsealed.
+
+**Still open:** the graduate itself. Winners now stop *blocking* the cohort, but they still sit in the
+test campaign at test budgets instead of moving to the scaler. Arming the cold scaler + getting
+`graduateCrownedWinnerToScaler` running is the remaining half.
+
+## ⭐ Test adsets are never scaled — spend ramp comes from BREADTH (CEO 2026-08-25)
+
+`per_test_daily_budget_cents` is **$200/day and fixed**. The ramp is bought with MORE concurrent
+tests, not bigger ones. Evidence, from `_breadth-vs-depth.ts` / `_crown-regression.ts`:
+
+- Observed CPA is **flat $100–$200/day** ($312 / $305 / $306) and degrades above it ($337 at $300,
+  $408 at $450). $200 is the top of the plateau.
+- Because CPA is flat inside the plateau, verdict throughput is **identical** whether you run
+  18×$100, 12×$150 or 9×$200 — total spend ÷ CPA is conserved. What breadth costs is audience
+  overlap (frequency peaks at the $150 band) and creative supply; what it buys is nothing. So take
+  the TOP of the plateau: fewer adsets, same throughput, faster individual verdicts.
+- Scaling a winner in place is **value-destroying**: pooled post-crown CPA was **1.89× pre-crown**
+  across all 5 crowned winners, scaled in place with no scale campaign involved.
+- We are **permanently learning-limited** — 2–8 conversions/adset/week against Meta's ~50/week exit.
+  One adset would need ~$2,180/day to exit, more than the whole Phase 1 budget. Meta's optimizer is
+  not a lever at our spend; treat the system as a portfolio of manual bets.
+

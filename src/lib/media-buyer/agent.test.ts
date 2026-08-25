@@ -623,6 +623,69 @@ test("computeMediaBuyerPlan — cohort at target → 0 replenish", () => {
   assert.equal(plan.replenish.length, 0);
 });
 
+// ── Cohort unseal — a crowned winner is not an explore slot (CEO 2026-08-25) ──
+
+test("⭐ cohort unseal — 3 live adsets that are ALL crowned leave 0 explore, so replenish runs again", () => {
+  // The wedge: Superfood Tabs had 3 live adsets, all crowned, against an explore target of 2.
+  // Pre-fix `liveExplore` read 3 ⇒ deficit 0 ⇒ NO ready creative could ever enter, permanently.
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 3,
+      currentLiveCrownedCount: 3,
+      readyToTest: [
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+        { ad_campaign_id: "cmp-2", archetype: null, lander_url: "https://x2", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+      ],
+    }),
+  );
+  assert.equal(plan.splitInfo.liveCrownedCount, 3);
+  assert.equal(plan.splitInfo.liveExploreCount, 0, "3 live − 0 exploit − 3 crowned = 0 explore");
+  assert.ok(plan.replenish.length > 0, "the cohort must no longer be sealed against new creative");
+});
+
+test("cohort unseal — omitting currentLiveCrownedCount preserves the pre-fix arithmetic verbatim", () => {
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 3,
+      readyToTest: [
+        { ad_campaign_id: "cmp-1", archetype: null, lander_url: "https://x1", status: "ready_no_active_ad", formats: [], created_at: "", concept_tag: null, audience_temperature: null },
+      ],
+    }),
+  );
+  assert.equal(plan.splitInfo.liveCrownedCount, 0);
+  assert.equal(plan.splitInfo.liveExploreCount, 3, "no crowned input ⇒ every live adset still counts as explore");
+});
+
+test("cohort unseal — crowned + exploit can never drive the explore count negative", () => {
+  // A racy read could report more crowned/exploit than the cohort holds. Both are clamped.
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      currentTestCohortSize: 2,
+      currentLiveExploitCount: 5,
+      currentLiveCrownedCount: 5,
+      readyToTest: [],
+    }),
+  );
+  assert.equal(plan.splitInfo.liveExploreCount, 0);
+  assert.ok(plan.splitInfo.liveCrownedCount >= 0);
+  assert.ok(plan.splitInfo.liveExploitCount >= 0);
+});
+
+test("cohort unseal — replenish still respects the target, so unsealing cannot over-launch", () => {
+  // The 2026-07-12 shape: 8 live against a ceiling of 4. Unsealing must open slots, never uncap them.
+  const ready = Array.from({ length: 10 }, (_, i) => ({
+    ad_campaign_id: `cmp-${i}`, archetype: null, lander_url: `https://x${i}`,
+    status: "ready_no_active_ad" as const, formats: [], created_at: "", concept_tag: null, audience_temperature: null,
+  }));
+  const plan = computeMediaBuyerPlan(
+    baseInputs({ currentTestCohortSize: 3, currentLiveCrownedCount: 3, readyToTest: ready }),
+  );
+  assert.ok(
+    plan.replenish.length <= plan.splitInfo.exploreTarget,
+    `replenish (${plan.replenish.length}) must never exceed the explore target (${plan.splitInfo.exploreTarget})`,
+  );
+});
+
 // ── Phase 2 — Andromeda concept-diversity gate ───────────────────────────────
 
 test("computeMediaBuyerPlan — replenish SKIPS a ready candidate whose concept_tag ∈ liveConceptTags (a)", () => {

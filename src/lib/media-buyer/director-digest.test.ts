@@ -39,6 +39,7 @@ function plan(overrides: Partial<MediaBuyerPlan> = {}): MediaBuyerPlan {
       exploitSlotCount: 0,
       liveExploreCount: 4,
       liveExploitCount: 0,
+    liveCrownedCount: 0,
       activeWinnerCount: 0,
     },
     replenishDiagnostic: null,
