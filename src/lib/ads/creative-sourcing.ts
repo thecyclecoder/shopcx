@@ -251,6 +251,12 @@ interface QueryOptions {
   minDaysRunning: number;
   requireStillRunning: boolean;
   productId?: string;
+  /**
+   * The RESOLVED shelf: the product itself plus any `competitor_shelf_source_id` sibling
+   * ({@link resolveShelfProductIds}). When present it supersedes `productId` for the
+   * `creative_skeletons.product_id` filter. Absent ⇒ behaviour is identical to before.
+   */
+  productIds?: string[];
   niche?: string;
   limit: number;
   /** dahlia-researches-from-winners-flow-ad-library Phase 1 — when set, the returned rows are
@@ -312,7 +318,11 @@ async function queryProvenAngles(admin: Admin, workspaceId: string, q: QueryOpti
     .order("days_running", { ascending: false, nullsFirst: false })
     .limit(q.limit);
   if (q.requireStillRunning) query = query.eq("resume_advertising", true);
-  if (q.productId) query = query.eq("product_id", q.productId);
+  // A product may imitate from a SIBLING's scouted shelf as well as its own — e.g. Amazing Coffee
+  // K-Cups is the same coffee in a pod, so the coffee competitors legitimately serve it. Resolved
+  // upstream into `productIds`; falls back to the single-product filter verbatim when unset.
+  if (q.productIds?.length) query = query.in("product_id", q.productIds);
+  else if (q.productId) query = query.eq("product_id", q.productId);
   else if (q.niche) query = query.or(`advertiser.ilike.%${q.niche}%,hook.ilike.%${q.niche}%,mechanism_claim.ilike.%${q.niche}%`);
   const { data } = await query;
   const mapped: CompetitorAngle[] = ((data ?? []) as Array<Record<string, unknown>>).map(mapRowToCompetitorAngle);
@@ -491,6 +501,34 @@ export function scoreCompetitorAcquisitionPower(angle: {
  *  function falls back to the shallow 30d/no-resume pool, sets `usedFallback:true`, AND emits a
  *  `dahlia_deeply_proven_fallback` `director_activity` row so a thin-shelf product's fallback is
  *  audit-visible (never silent). */
+/**
+ * Resolve a product into the set of product ids whose competitor shelf it may imitate from:
+ * itself, plus its `products.competitor_shelf_source_id` sibling when one is set.
+ *
+ * ONE HOP ONLY, deliberately — no chains, no cycles, no transitive widening. A DB CHECK forbids
+ * self-reference; this also de-dupes defensively so a future data error cannot produce `IN (x, x)`.
+ *
+ * Why a pointer instead of copying competitor rows (CEO 2026-08-25): the AdLibrary freshness ledger
+ * is keyed on `(workspace_id, keyword)` and the sweep walks products SEQUENTIALLY, so two products
+ * sharing a keyword means whichever sweeps first stamps the ledger and the other is skipped as
+ * fresh — permanently starving whichever sorts second while burning storage on duplicate rows. The
+ * pointer shares the shelf without duplicating either the data or the quota.
+ *
+ * Returns `[productId]` unchanged on any read error — a broken lookup must narrow the shelf, never
+ * silently widen it into another product's competitors.
+ */
+export async function resolveShelfProductIds(admin: Admin, productId: string): Promise<string[]> {
+  const { data, error } = await admin
+    .from("products")
+    .select("competitor_shelf_source_id")
+    .eq("id", productId)
+    .maybeSingle();
+  if (error || !data) return [productId];
+  const source = (data as { competitor_shelf_source_id: string | null }).competitor_shelf_source_id;
+  if (!source || source === productId) return [productId];
+  return [productId, source];
+}
+
 export async function getProvenCompetitorAngles(
   admin: Admin,
   workspaceId: string,
@@ -498,12 +536,15 @@ export async function getProvenCompetitorAngles(
 ): Promise<ProvenAnglesResult> {
   const shallowMinDays = opts.minDaysRunning ?? 30;
   const limit = opts.limit ?? 40;
+  // Resolve the shelf ONCE so the deeply-proven pass and its fallback cannot disagree about scope.
+  const productIds = opts.productId ? await resolveShelfProductIds(admin, opts.productId) : undefined;
 
   if (opts.preferDeeplyProven) {
     const deep = await queryProvenAngles(admin, workspaceId, {
       minDaysRunning: Math.max(60, shallowMinDays),
       requireStillRunning: true,
       productId: opts.productId,
+      productIds,
       niche: opts.niche,
       limit,
       intent: opts.intent,
@@ -516,6 +557,7 @@ export async function getProvenCompetitorAngles(
       minDaysRunning: shallowMinDays,
       requireStillRunning: false,
       productId: opts.productId,
+      productIds,
       niche: opts.niche,
       limit,
       intent: opts.intent,
@@ -550,6 +592,7 @@ export async function getProvenCompetitorAngles(
     minDaysRunning: shallowMinDays,
     requireStillRunning: false,
     productId: opts.productId,
+    productIds,
     niche: opts.niche,
     limit,
     intent: opts.intent,
