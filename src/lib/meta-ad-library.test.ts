@@ -23,6 +23,7 @@ import {
   STATIC_MEDIA_TYPES,
 } from "./meta-ad-library";
 import { CreativeRenderError, isTransientRenderError, isWinner, winnerScore } from "./competitor-ad-types";
+import { creativeScoutSlug, CREATIVE_SCOUT_KIND } from "./ads/creative-scout-job";
 
 // ── 1. failure classification ──────────────────────────────────────────────────────────
 
@@ -158,4 +159,21 @@ test("a removed ad yields no creative handle, so no render is attempted", () => 
   assert.equal(ad.creative_url, null);
   assert.equal(ad.landing_page_url, null);
   assert.equal(ad.destination_domain, null);
+});
+
+// ── enqueue identity ───────────────────────────────────────────────────────────────────
+
+test("creativeScoutSlug always yields a non-empty spec_slug", () => {
+  // agent_jobs.spec_slug is NOT NULL. The first real Inngest firing failed with
+  // "null value in column spec_slug ... violates not-null constraint" because the enqueue omitted
+  // it — invisible to the direct-runner tests, which bypass the enqueue entirely.
+  const withProduct = creativeScoutSlug("221d272d-a6c5-4a5d-86ff-ac693926c992");
+  const without = creativeScoutSlug(null);
+  for (const slug of [withProduct, without]) {
+    assert.ok(slug && slug.length > 0, "slug must be non-empty");
+    assert.ok(slug.startsWith(CREATIVE_SCOUT_KIND), "slug must be namespaced by kind");
+  }
+  // Distinct per product so the in-flight dedupe scopes to one product, not the whole workspace.
+  assert.notEqual(withProduct, without);
+  assert.equal(creativeScoutSlug(undefined), without);
 });
