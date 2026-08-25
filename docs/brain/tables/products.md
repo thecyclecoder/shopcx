@@ -46,6 +46,7 @@ Synced from Shopify Online Store channel. `variants` JSONB is legacy — real so
 | `taxable` | `bool` | ✓ | default: `true` |
 | `physical_dimensions` | `jsonb` | ✓ | ad tool · `{length_in, width_in, height_in, weight_oz?, shape: bag\|box\|bottle\|jar\|pouch\|other}` |
 | `is_advertised` | `bool` | — | default: `false` · true for the 6 hero SKUs the workspace actively advertises (Superfood Tabs / Amazing Coffee / Amazing Creamer / Ashwavana Guru Focus / Ashwavana Zen Relax / Creatine Prime+). Every ad/DR/creative pipeline reads it via [[../libraries/advertised-products]] (`isAdvertisedProduct` / `listAdvertisedProductIds`) so attachment SKUs (Tumbler, Sleep Gummies, Handheld Drink Mixer, Bamboo Coffee Mug) never enter advertising. Seeded by `supabase/migrations/20261015000000_products_is_advertised.sql`. |
+| `competitor_shelf_source_id` | `uuid` | ✓ | → [[products]].id `ON DELETE SET NULL`. **Shared competitor shelf** (CEO 2026-08-25) — another product whose scouted [[creative_skeletons]] (`product_id`) this product may ALSO imitate from. Resolved ONE HOP by `resolveShelfProductIds` in [[../libraries/creative-sourcing]]; `getProvenCompetitorAngles` then filters `.in('product_id', ids)` instead of `.eq`. Live: **Amazing Coffee K-Cups → Amazing Coffee** (same coffee, pod format), taking K-Cups' shelf from **0 → 245** skeletons. **DIRECTED** — Coffee is NOT widened in return. CHECK forbids self-reference. ⚠️ Does NOT affect AdLibrary sweep seeds: `loadApprovedCompetitorsForProduct` stays `.eq('product_id', …)` so no keyword is searched twice. Migration `20261214120000_products_competitor_shelf_source.sql`. |
 
 ## Foreign keys
 
@@ -108,6 +109,8 @@ const { count } = await admin.from("products")
 ```
 
 ## Gotchas
+
+- **A shared competitor shelf is a POINTER, never copied rows** (`competitor_shelf_source_id`). Copying a product's competitors onto a sibling looks equivalent and is not: the AdLibrary freshness ledger [[adlibrary_searches]] is keyed on `(workspace_id, keyword)` — deliberately NOT product-scoped — and [[../inngest/creative-scout]] walks products **sequentially**, stamping the ledger after each `searchAds`. Two products sharing a keyword therefore means whichever sweeps FIRST stamps it and the other is skipped as fresh, so the second product never ingests skeletons of its own and **starves permanently** (the order comes from a `Set`, so it is stable but arbitrary). The pointer shares the shelf without duplicating the data or the quota.
 
 - `variants` JSONB is a **legacy mirror** — source of truth is `product_variants`. Each JSONB element gets `internal_id` stamped on it so legacy readers can resolve the UUID.
 - Internal joins on variants should reference `product_variants.id` (UUID).

@@ -210,6 +210,7 @@
     "test:iteration-policy-authoring": "tsx --test src/lib/iteration-policy-authoring.test.ts",
     "test:media-buyer-agent": "tsx --test src/lib/media-buyer/agent.test.ts",
     "test:media-buyer-crown-and-rail": "tsx --test src/lib/media-buyer/crown-and-rail.test.ts",
+    "test:ads-shelf-source": "tsx --test src/lib/ads/shelf-source.test.ts",
     "test:media-buyer-arming-gate": "tsx --test src/lib/media-buyer/arming-gate.test.ts",
     "test:media-buyer-sensor-trust": "tsx --test src/lib/media-buyer/sensor-trust-probe.test.ts",
     "test:media-buyer-policy-calibrator": "tsx --test src/lib/media-buyer/policy-calibrator.test.ts",

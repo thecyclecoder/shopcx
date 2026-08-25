@@ -708,6 +708,24 @@ export function mbTestingCampaignName(productTitle?: string | null): string {
 }
 
 /**
+ * Replace an ad set's `targeting` spec — same `POST /{object_id}` shape as the status, budget and
+ * name setters. Graph expects the spec JSON-ENCODED in the body, not as a nested object.
+ *
+ * ⚠️ This is a REPLACE, not a merge: Meta overwrites the whole spec. Callers must read the current
+ * targeting first (`getAdSetTargetingAndPixel`) and spread it, or they will silently drop geo, age
+ * and audience exclusions. Introduced to repair legacy adsets minted before the existing-customer
+ * exclusions existed (CEO 2026-08-25); a mid-flight targeting edit also resets Meta's learning
+ * phase, which is a real cost on any account that had actually exited it.
+ */
+export async function updateAdSetTargeting(
+  token: string,
+  adsetId: string,
+  targeting: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return metaPost(`${adsetId}`, { targeting: JSON.stringify(targeting) }, token);
+}
+
+/**
  * Rename a Meta object (campaign / adset / ad) — same `POST /{object_id}` shape
  * as the status and budget setters. Returns Graph's `{ success: true }` body.
  */
