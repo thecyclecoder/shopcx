@@ -175,6 +175,13 @@ export async function buildReviewAggregates(workspaceId: string): Promise<Review
 /**
  * Write one batch of aggregates via `metafieldsSet`. Shopify caps the mutation
  * at 25 metafields per call; each product needs 2, so batches are 12 products.
+ *
+ * ⚠️ `metafieldsSet` is **all-or-nothing per call**: one `Owner does not exist`
+ * (a Shopify product that was deleted while its reviews stayed with us) rejects
+ * the entire batch. `syncReviewMetafields` therefore retries a failed batch one
+ * product at a time so only the genuinely-dead product is skipped — observed
+ * live, where two deleted products cost the other four in their batch their
+ * stars.
  */
 async function writeBatch(
   creds: ShopifyCreds,
@@ -256,14 +263,33 @@ export async function syncReviewMetafields(workspaceId: string): Promise<SyncRes
   const BATCH = 12;
   for (let i = 0; i < aggregates.length; i += BATCH) {
     const batch = aggregates.slice(i, i + BATCH);
+
+    let batchErrors: string[] = [];
     try {
       const { written, errors } = await writeBatch(creds, batch);
       result.written += written;
-      result.errors.push(...errors);
-      if (errors.length) result.skipped += batch.length;
+      batchErrors = errors;
     } catch (err) {
-      result.skipped += batch.length;
-      result.errors.push(errText(err));
+      batchErrors = [errText(err)];
+    }
+
+    if (batchErrors.length === 0) continue;
+
+    // The batch was rejected as a whole. Re-drive it one product at a time so a
+    // single dead owner doesn't cost its 11 neighbours their stars.
+    for (const one of batch) {
+      try {
+        const { written, errors } = await writeBatch(creds, [one]);
+        if (errors.length) {
+          result.skipped += 1;
+          result.errors.push(`${one.shopifyProductId}: ${errors.join("; ")}`);
+        } else {
+          result.written += written;
+        }
+      } catch (err) {
+        result.skipped += 1;
+        result.errors.push(`${one.shopifyProductId}: ${errText(err)}`);
+      }
     }
   }
 
