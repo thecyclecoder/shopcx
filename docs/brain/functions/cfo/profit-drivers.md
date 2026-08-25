@@ -249,13 +249,89 @@ So Meta-reported CPA isn't a *worse* number — it's a **different denominator**
 
 Applied by `scripts/_retune-media-buyer-cpa-thresholds.ts` (idempotent; writes a `media_buyer_cpa_thresholds_rebased` [[../../tables/director_activity]] row). **Re-measure the 6.4× ratio periodically** — it moves with ATT, creative mix, and the Amazon share.
 
-## The Amazon halo is real
+## ⭐ The Amazon halo is real — and it arrives ~12 DAYS LATE (measured 2026-08-25)
 
-`corr(monthly Meta spend, monthly Amazon acquisition orders) = 0.78` (n=19). Lagged weekly it holds at **0.64 for 0–2 weeks**, decaying to 0.43 by week 4.
+`corr(monthly Meta spend, monthly Amazon acquisition orders) = 0.78` (n=19). There is **no separate
+Amazon ad spend**: July's P&L shows `60510 Digital Advertising $38,891` against $41,184 of Meta spend
+in our own table. No Amazon PPC line exists. So Meta spend is the only lever on Amazon demand.
 
-An adstock model (accumulated brand awareness, `S_t = spend_t + λS_{t-1}`) fits **worse** than current-month spend (best λ=0, r² 0.53 vs 0.61) — so Amazon demand tracks *current* spend, not a slowly-melting stock of past advertising.
+The CEO's long-standing observation — *"Amazon results trail a spend ramp by a few days"* — was tested
+on 601 days of daily history (2025-01-01 → 2026-08-24). **It is correct in direction; the lag is
+roughly twice what it feels like.**
 
-There is **no separate Amazon ad spend**: July's P&L shows `60510 Digital Advertising $38,891` against $41,184 of Meta spend in our own table. No Amazon PPC line exists.
+### The response curve
+
+| | peak lag | slope (orders/day per +$1,000/day) |
+|---|---|---|
+| **Website** | **day 0** | 2.79 |
+| **Amazon** | **day 12** | 2.46 · 95% CI 1.44–4.79 |
+
+Amazon's response is **diffuse across roughly days 4–20**, not a sharp delay. Half the response has
+not landed by day 7.
+
+### Why the naive test says "no effect" — and why that is not the answer
+
+At daily resolution, deseasonalized, Amazon's peak correlation with spend is **r=0.091 at lag 0 —
+below the 95% chance threshold (0.165)**. That null is *real but narrow*: it rules out a FAST response,
+nothing more. Power check — the daily test could have detected ≥1.14 orders per $1,000/day (website's
+is 2.79), so a fast effect of meaningful size is genuinely excluded.
+
+The relationship only becomes visible at **~21-day smoothing** (r=0.542 at lag 12). And that is exactly
+the width at which two series that merely drift together will correlate for reasons unrelated to
+advertising — so smoothing alone proves nothing.
+
+### The check that makes it a finding rather than an artifact
+
+If spend *causes* Amazon orders, the correlation must be **asymmetric in time**: stronger when spend
+leads than when orders lead. Shared trend/seasonality is symmetric. At 21-day smoothing:
+
+```
+lag -12   r = 0.072      ← Amazon leads
+lag   0   r = 0.342
+lag +12   r = 0.542  ◄ peak   ← spend leads
+mean spend-leads +0.231   vs   orders-lead +0.025
+```
+
+**Asymmetric toward spend-leading.** Website is carried as a positive control throughout and peaks at
+lag 0 at every smoothing width, which is what proves the test can detect a response at all.
+
+### ⭐ The operating rule this forces
+
+**Never judge a spend change before ~day 14.** A day-7 read sees the website response only and will
+systematically overstate marginal CAC. This is not a caveat — it is the single most load-bearing
+measurement rule on this page, and it invalidated a same-day conclusion (below).
+
+### Caveats — do not quote this as settled
+
+1. **Observational, not experimental.** Confound: we ramp spend when we have stock and launches. If
+   restocks tend to precede spend ramps by ~2 weeks, that reproduces this exact signature with no
+   causation. Only a held-out geo test or a pre-registered step-change settles it.
+2. **Not stable across every spec.** At 28-day smoothing the asymmetry test reads "symmetric"
+   (+0.047). Explainable — smoothing wider than the lag blurs the asymmetry away — but it is a real
+   limit, not one to bury. Effective sample at 21d is ~29 independent windows; the slope CI spans
+   1.44–4.79, a 3.3× range. **The lag is "~1–2 weeks", not "12 days" to the day.**
+3. **The historical slope may not apply while FBA is starved.** It was measured over periods when
+   Amazon had stock to convert the halo. A halo cannot land on an out-of-stock listing — see § Phase 0.
+
+### ~~Amazon demand tracks *current* spend, not past advertising~~ — SUPERSEDED
+
+~~Lagged weekly the correlation holds at 0.64 for 0–2 weeks, decaying to 0.43 by week 4. An adstock
+model (`S_t = spend_t + λS_{t-1}`) fits worse than current-month spend (best λ=0, r² 0.53 vs 0.61) —
+so Amazon demand tracks current spend, not a slowly-melting stock of past advertising.~~
+
+**Why it was wrong:** weekly buckets are too coarse to separate lag 0 from lag 12, and the adstock fit
+was run on *monthly* data where a 12-day lag is inside the bucket and therefore invisible by
+construction. Both readings are consistent with the daily curve above; neither could see it. The
+λ=0 result should never have been read as "no delayed response" — it only says "no slowly-melting
+multi-month stock", which remains true.
+
+### Consequence for the media buyer (supervision, not a bug)
+
+Bianca kills on `pause_window_days = 3` and can ratchet budget every 24h. That is defensible for her
+own proxy — she optimizes Meta-attributed purchases, which respond at lag 0. But it means the control
+loop runs **~12× faster than the feedback signal for the objective that actually matters** (total new
+customers). That is the Goodhart pattern in [[../../operational-rules]] § North star: a bounded proxy,
+optimized fast, with nobody watching the gap. Flagged for [[../media-buyer]] supervision.
 
 ---
 
@@ -366,6 +442,16 @@ Triggered by: *"revenue declines every month, but margin is 22% — does the mar
 ### 2026-08-24 (session 4) — the stock wrinkle
 CEO: Coffee can't be advertised on stock. Investigation found a **bigger** constraint underneath — **FBA is effectively empty (678 net units, zero inbound, ~32 days) while Amazon is 66% of acquisition**. Phase 0 added and Phase 2 gated on it. Also established the **website/Amazon LTV split ($365 / $127)**, which raises the website-only break-even to $242, and confirmed **K-Cups (3,900 website units) as an unconstrained lever**.
 
+### 2026-08-25 — "any way to test the Amazon-trails-spend assumption?"
+**Answer: yes, and it holds — at ~12 days, not "a few".** Website peaks at lag 0, Amazon at lag 12,
+asymmetric toward spend-leading (the check that rules out shared drift). Slope 2.46 orders/day per
++$1,000/day, 95% CI 1.44–4.79.
+
+**This invalidated the previous day's own conclusion.** The Aug-18 ramp's "$452 marginal CAC" was
+measured on day 7 — inside the lag window, before the Amazon response opens. Re-based to ~$173 if the
+historical response lands (still above the $139 break-even, but a different decision). Re-measure
+Aug 30 – Sep 5. See § The Amazon halo, and the new day-14 rule.
+
 ### Shipped
 - **#2549** — [[../../dashboard/analytics__profit]] rebuilt on real QuickBooks data ([[../../libraries/profit-estimate]]). Old page reported $46,065 for July against a real $65,458.
 - **#2551** — subscription first-order linkage ([[../../libraries/subscription-order-link]]); 1,088 orders backfilled.
@@ -392,7 +478,12 @@ All read-only, DB-only, **zero external API calls**.
 | `_profit-drivers.ts` | regimes, correlations, G&A series, cohort curves, breakeven |
 | `_scale-curve.ts` | blended CAC by spend band → the CAC ceiling |
 | `_cogs-normalize2.ts` | isolates the write-off from the ads-in-COGS structure |
-| `_amazon-halo.ts` | halo correlation + lags + natural experiments |
+| `_amazon-halo.ts` | halo correlation + lags + natural experiments (monthly/weekly — too coarse for the lag; see below) |
+| `_amazon-lag-test.ts` | daily-scale cross-correlation w/ website control + circular-shift null + event study |
+| `_amazon-lag-timescale.ts` | sweeps smoothing width 1→28d to find the scale the response lives at; reports the minimum detectable effect |
+| `_amazon-lag-direction.ts` | **the decisive one** — negative-lag scan; asymmetry separates a causal halo from shared drift |
+| `_amazon-lag-magnitude.ts` | slope at peak lag + moving-block bootstrap CI, applied to a live ramp |
+| `_budget-audit.ts` | LIVE Meta account → campaign → adset committed daily budget vs the Phase 1 plan |
 | `_steady-state.ts` / `_trajectory.ts` | equilibrium revenue and the path to it |
 | `_ramp-plan.ts` | Phase 1 sizing + Phase 2 ramp scenarios with the incremental cash cost |
 | `_stock-picture.ts` / `_fba-runway.ts` | Phase 0 — sellable units per fulfilment path, FBA runway, ramp impact |
@@ -406,6 +497,11 @@ All read-only, DB-only, **zero external API calls**.
 - Page every daily-table read past the **1000-row cap**.
 - **Inventory lives in `inventory_levels`, not `qb_*_inventory_snapshots`.** The qb_ tables are the accounting rollup; the live Amplifier feed is `inventory_levels` (`location='amplifier_3pl'|'fba'|'shopify'`), columns `on_hand / inbound / reserved`.
 - **Never compare a channel's CAC to the BLENDED break-even.** Website LTV $365 vs Amazon $127 — using the $209 blend overstated website-only ramping as 2.8x break-even when it is 1.6x.
+- **Never judge a spend change before day 14** — the Amazon response peaks at lag 12. A day-7 read sees the website response only and overstates marginal CAC (it turned $173 into $452).
+- **A detrend window can erase the effect you are looking for.** Subtracting a centred 29-day MA makes any response that builds over weeks invisible *by construction*. Sweep the smoothing width before concluding "no effect".
+- **A lag correlation is not evidence until it is asymmetric.** Two series that drift together correlate at every lag. Always scan NEGATIVE lags: if orders-lead is as strong as spend-leads, it is shared drift.
+- **Always carry a positive control.** Website acquisition must respond at lag 0; if it doesn't, the test is broken, not the hypothesis.
+- **Report the minimum detectable effect alongside any null.** "We found nothing" is meaningless without "we could have found X".
 - **Never conclude from a <2-week window** — the 5-day Amazon read produced a confidently wrong answer that stood for hours.
 - **Never size a ramp from band AVERAGES.** The marginal cost between bands is the decision number; averages understated it by ~2.5x ($89 average vs $224 marginal between $101K and $149K).
 - **Never model absolute cash from cohorts alone** — the existing base isn't in them, so an absolute series shows losses where the month actually profited. Model the DELTA vs a do-nothing baseline.

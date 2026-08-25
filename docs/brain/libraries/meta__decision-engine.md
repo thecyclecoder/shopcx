@@ -129,3 +129,33 @@ it never writes [[../tables/iteration_policies]].
   no duplicate rows.
 
 See [[../specs/storefront-iteration-engine]] (Phase 4) · [[../research/iteration-engine-grounding]].
+
+---
+
+## ⭐ The test rail is FAIL-CLOSED and double-sourced (CEO 2026-08-25)
+
+Bianca owns the test campaign; the Iteration Engine must never mutate it. That rail existed and was
+correctly placed — and **7 `scale_up` actions landed on test adsets between Aug 18 and Aug 24
+anyway**, taking `MB Tabs · skeptic-bloat` from $259 to **$1,337/day** (9× the $150 test budget).
+Every one of those adsets resolves INSIDE the exclusion set today, and their `meta_adsets` rows
+predate the scale-ups, so the historical failure could not be reconstructed from current state.
+
+Rather than guess a root cause, the rail was hardened along both axes that could have produced it:
+
+**1. Fail closed.** `loadTestRailExcludedObjectIds` used to wrap both reads in `catch {}` and return
+whatever had accumulated — so ANY read error (table absence, RLS misread, transient network) yielded
+an **empty exclusion set**, i.e. the rail silently ceased to exist and every test adset became
+scalable. It now THROWS, aborting the pass; no actions are computed and nothing is mutated. *A rail
+whose failure mode is "no rail" is not a rail.*
+
+**2. Two independent sources.** The exclusion set resolves adset ids through `meta_adsets`, a SYNCED
+derived table — an adset missing or stale there is invisible to the rail. The cohort's own
+`test_meta_campaign_id` is authoritative and always present, so `isTestRailObject(row, excluded,
+testCampaignIds)` ALSO refuses any row whose `parent_campaign_id` is a test campaign (the field was
+already on `ScorecardRow`; no new plumbing). Either source going stale leaves the rail standing.
+
+The cold scaler is deliberately NOT excluded — it is the one legitimate scaling target.
+
+Pinned in `src/lib/media-buyer/crown-and-rail.test.ts`, including the wedge case: an adset absent
+from the roster but parented by a test campaign is still refused.
+

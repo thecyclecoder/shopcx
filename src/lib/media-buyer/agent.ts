@@ -622,6 +622,7 @@ function emptySplitInfo(cohortTargetCount: number): MediaBuyerPlan["splitInfo"] 
     exploitSlotCount: 0,
     liveExploreCount: 0,
     liveExploitCount: 0,
+    liveCrownedCount: 0,
     activeWinnerCount: 0,
   };
 }
@@ -789,6 +790,9 @@ export interface MediaBuyerPlan {
     exploitSlotCount: number;
     liveExploreCount: number;
     liveExploitCount: number;
+    /** Crowned winners still parked in the test campaign — excluded from the explore count
+     *  (CEO 2026-08-25 cohort-unseal). Surfaced so the ledger shows WHY explore read as it did. */
+    liveCrownedCount: number;
     activeWinnerCount: number;
   };
   /**
@@ -957,6 +961,21 @@ export interface MediaBuyerPlanInputs {
    * caller — the plan treats the whole cohort as explore.
    */
   currentLiveExploitCount?: number;
+  /**
+   * How many of `currentTestCohortSize` are CROWNED winners still sitting in the test campaign.
+   *
+   * CEO 2026-08-25 — the cohort used to SEAL ITSELF against new creative. Crowning flips the
+   * explore target from `cohortTargetCount` (4) to EXPLORE_TARGET_WITH_WINNER (2) on the
+   * assumption that the winner GRADUATES out to the cold scaler, vacating its test slot. The
+   * graduate never ran (5 crowned winners, 0 with `scaler_meta_adset_id`), so the winners stayed
+   * live in the test campaign and `readCurrentTestCohortSize` — deliberately origin-agnostic —
+   * counted them as explore. Superfood Tabs sat at 3 live "explore" against a target of 2, so
+   * `exploreDeficit` was 0 and NO ready creative could ever enter, permanently.
+   *
+   * Subtracting the crowned count restores the invariant the split intends: explore slots measure
+   * ads still being TESTED, never ads already judged. Omit / 0 preserves the pre-fix arithmetic.
+   */
+  currentLiveCrownedCount?: number;
   /**
    * media-buyer-explore-exploit-split-on-crown Phase 2 — non-exhausted crowned
    * winners for this product, sorted best-CAC-first by the caller (via the
@@ -1217,7 +1236,19 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
   // Guard against a caller passing a live-exploit count that exceeds the total cohort
   // size (a stale/racy read) — clamp so liveExploreCount is never negative.
   const clampedLiveExploit = Math.min(liveExploitCount, Math.max(0, input.currentTestCohortSize));
-  const liveExploreCount = Math.max(0, input.currentTestCohortSize - clampedLiveExploit);
+  // CEO 2026-08-25 — a CROWNED winner still parked in the test campaign is not an explore slot.
+  // It has already been judged; counting it as explore is what sealed the cohort (see
+  // `currentLiveCrownedCount`). Clamp against what is left after exploit so the two subtractions
+  // can never drive the count negative on a racy read.
+  const liveCrownedCount = Math.max(0, input.currentLiveCrownedCount ?? 0);
+  const clampedLiveCrowned = Math.min(
+    liveCrownedCount,
+    Math.max(0, input.currentTestCohortSize - clampedLiveExploit),
+  );
+  const liveExploreCount = Math.max(
+    0,
+    input.currentTestCohortSize - clampedLiveExploit - clampedLiveCrowned,
+  );
   const exploreTarget = hasActiveWinner ? EXPLORE_TARGET_WITH_WINNER : cohortTargetCount;
   const exploitSlotCountThisPass = hasActiveWinner ? EXPLOIT_SLOT_COUNT : 0;
   const exploreDeficit = Math.max(0, exploreTarget - liveExploreCount);
@@ -1228,6 +1259,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
     exploitSlotCount: exploitSlotCountThisPass,
     liveExploreCount,
     liveExploitCount: clampedLiveExploit,
+    liveCrownedCount: clampedLiveCrowned,
     activeWinnerCount: activeWinners.length,
   };
 
@@ -1542,6 +1574,52 @@ export async function readCurrentLiveExploitCount(
   if (args.productId) q = q.eq("product_id", args.productId);
   const { data } = await q;
   return (data ?? []).length;
+}
+
+/**
+ * How many CROWNED winners are still LIVE inside this cohort's test campaign.
+ *
+ * CEO 2026-08-25 (cohort unseal). Scoped exactly like `readCurrentTestCohortSize`'s per-test
+ * branch — same campaign, same "occupying a slot" notion of live (`FREED_ADSET_STATUSES`) — so
+ * the two readers cannot disagree about what is in the cohort. Returns 0 for a legacy/null-campaign
+ * cohort, which preserves the pre-fix arithmetic verbatim on that path.
+ *
+ * Intersects the campaign's live adsets with `media_buyer_crowned_winners.test_meta_adset_id`, so a
+ * winner that has been paused or graduated out stops counting automatically — no backfill needed.
+ *
+ * Throws on a read error rather than reporting 0. A silent 0 here would re-seal the cohort, which
+ * is exactly the failure this reader exists to prevent.
+ */
+export async function readCurrentLiveCrownedCount(
+  admin: Admin,
+  args: { workspaceId: string; testMetaCampaignId: string | null },
+): Promise<number> {
+  if (!args.testMetaCampaignId) return 0;
+  const { FREED_ADSET_STATUSES } = await import("@/lib/media-buyer/publish-gate");
+
+  const { data: adsetRows, error: adsetErr } = await admin
+    .from("meta_adsets")
+    .select("meta_adset_id, effective_status")
+    .eq("workspace_id", args.workspaceId)
+    .eq("meta_campaign_id", args.testMetaCampaignId);
+  if (adsetErr) throw new Error(`readCurrentLiveCrownedCount: meta_adsets read failed - ${adsetErr.message}`);
+
+  const live = new Set<string>();
+  for (const r of (adsetRows ?? []) as Array<{ meta_adset_id: string; effective_status: string | null }>) {
+    if (!FREED_ADSET_STATUSES.has(String(r.effective_status ?? "").toUpperCase())) live.add(String(r.meta_adset_id));
+  }
+  if (!live.size) return 0;
+
+  const { data: crowned, error: crownErr } = await admin
+    .from("media_buyer_crowned_winners")
+    .select("test_meta_adset_id")
+    .eq("workspace_id", args.workspaceId)
+    .in("test_meta_adset_id", [...live]);
+  if (crownErr) throw new Error(`readCurrentLiveCrownedCount: crowned_winners read failed - ${crownErr.message}`);
+
+  return new Set(
+    (crowned ?? []).map((r) => String((r as { test_meta_adset_id: string }).test_meta_adset_id)),
+  ).size;
 }
 
 // ── Active-winners-for-exploit resolver (Phase 2 of the split spec) ──────────
@@ -2455,6 +2533,12 @@ export async function runMediaBuyerLoop(
     workspaceId: opts.workspaceId,
     productId: cohortProductId,
   });
+  // CEO 2026-08-25 - crowned winners still parked in the test campaign are NOT explore slots.
+  // Without this the cohort seals itself the moment it crowns (see `currentLiveCrownedCount`).
+  const currentLiveCrownedCount = await readCurrentLiveCrownedCount(admin, {
+    workspaceId: opts.workspaceId,
+    testMetaCampaignId: cohort?.testMetaCampaignId ?? null,
+  });
   const activeWinnersForExploit = cohortProductId
     ? await resolveActiveWinnersForExploit(admin, {
         workspaceId: opts.workspaceId,
@@ -2487,6 +2571,7 @@ export async function runMediaBuyerLoop(
     readyToTest,
     currentTestCohortSize,
     currentLiveExploitCount,
+    currentLiveCrownedCount,
     activeWinnersForExploit,
     cohortTargetCount: opts.cohortTargetCount,
     liveConceptTags,

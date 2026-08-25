@@ -17,8 +17,16 @@ import { graphFetchJson } from "@/lib/meta/graph-retry";
 const GRAPH_BASE = "https://graph.facebook.com/v21.0";
 
 export interface MetaAdAccount { id: string; name: string; account_status?: number; currency?: string }
-export interface MetaCampaign { id: string; name: string; status: string; objective?: string }
-export interface MetaAdSet { id: string; name: string; status: string; campaign_id?: string }
+export interface MetaCampaign {
+  id: string; name: string; status: string; objective?: string;
+  /** Budget fields are minor units (cents) as STRINGS — Graph returns them that way. Present only on CBO campaigns. */
+  daily_budget?: string; lifetime_budget?: string; effective_status?: string;
+}
+export interface MetaAdSet {
+  id: string; name: string; status: string; campaign_id?: string;
+  /** Budget fields are minor units (cents) as STRINGS. Absent when the parent campaign holds the budget (CBO). */
+  daily_budget?: string; lifetime_budget?: string; effective_status?: string; optimization_goal?: string; created_time?: string;
+}
 export interface MetaPage { id: string; name: string; instagram_user_id: string | null }
 
 /** The active per-workspace user token (ads_management). meta_connections first, workspace token as fallback. */
@@ -66,12 +74,12 @@ export async function listAdAccounts(token: string): Promise<MetaAdAccount[]> {
   return j.data || [];
 }
 export async function listCampaigns(token: string, accountId: string): Promise<MetaCampaign[]> {
-  const j = await metaGet(`${actId(accountId)}/campaigns?fields=id,name,status,objective&limit=300&effective_status=["ACTIVE","PAUSED"]`, token);
+  const j = await metaGet(`${actId(accountId)}/campaigns?fields=id,name,status,objective,daily_budget,lifetime_budget,effective_status&limit=300&effective_status=["ACTIVE","PAUSED"]`, token);
   return j.data || [];
 }
 export async function listAdSets(token: string, accountId: string, campaignId?: string): Promise<MetaAdSet[]> {
   const filtering = campaignId ? `&filtering=[{"field":"campaign.id","operator":"EQUAL","value":"${campaignId}"}]` : "";
-  const j = await metaGet(`${actId(accountId)}/adsets?fields=id,name,status,campaign_id&limit=300&effective_status=["ACTIVE","PAUSED"]${filtering}`, token);
+  const j = await metaGet(`${actId(accountId)}/adsets?fields=id,name,status,campaign_id,daily_budget,lifetime_budget,effective_status,optimization_goal,created_time&limit=300&effective_status=["ACTIVE","PAUSED"]${filtering}`, token);
   return j.data || [];
 }
 

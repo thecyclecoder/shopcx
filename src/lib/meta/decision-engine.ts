@@ -340,6 +340,12 @@ export interface AutonomousInputs {
    * Budget scaling only touches scaling/storefront objects — never the test rail.
    */
   excludedObjectIds: Set<string>;
+  /**
+   * The cohorts' own `test_meta_campaign_id`s. Checked against each row's `parent_campaign_id` as a
+   * SECOND, independent test-rail guard — see {@link isTestRailObject}. Authoritative even when the
+   * synced `meta_adsets` roster behind `excludedObjectIds` is stale or incomplete.
+   */
+  testCampaignIds?: Set<string>;
 }
 
 /**
@@ -454,7 +460,8 @@ export function computeAutonomousActions(input: AutonomousInputs): {
   for (const row of rows) {
     if (row.level !== "adset" && row.level !== "campaign") continue;
     // Media-buyer test rail (Bianca owns it) — never mutate: no pause/unpause/scale/replenish.
-    if (input.excludedObjectIds.has(row.object_id)) continue;
+    // Two independent sources (adset roster + parent campaign) so one going stale cannot open it.
+    if (isTestRailObject(row, input.excludedObjectIds, input.testCampaignIds ?? new Set())) continue;
     if (inCooldown(row.object_id)) continue; // hard stop
 
     const budget = budgets.get(row.object_id) ?? null;
@@ -990,6 +997,7 @@ export async function runDecisionEngine(
       new Date(Date.now() - lookbackDays * 86400_000).toISOString(),
     );
     const excludedObjectIds = await loadTestRailExcludedObjectIds(p.workspaceId, p.adAccountId);
+    const testCampaignIds = await loadTestCampaignIds(p.workspaceId, p.adAccountId);
     const res = computeAutonomousActions({
       rows: adsetCampaignRows,
       policy,
@@ -997,6 +1005,7 @@ export async function runDecisionEngine(
       recentActions,
       nowMs: Date.now(),
       excludedObjectIds,
+      testCampaignIds,
     });
     actions = res.actions;
     escalations = res.escalations;
@@ -1077,36 +1086,101 @@ async function loadTestRailExcludedObjectIds(
 ): Promise<Set<string>> {
   const admin = createAdminClient();
   const excluded = new Set<string>();
-  try {
-    const { data: cohortRows } = await admin
-      .from("media_buyer_test_cohorts")
-      .select("test_meta_campaign_id, test_meta_adset_id")
+
+  // FAIL CLOSED. The previous shape wrapped both reads in `catch {}` and returned whatever had
+  // accumulated — so ANY read error (table absence, RLS misread, transient network) silently
+  // produced an EMPTY exclusion set, i.e. the rail vanished and the engine was free to scale
+  // Bianca's test adsets. Between 2026-08-18 and 2026-08-24 seven scale_ups landed on test adsets
+  // (skeptic-bloat went $259 -> $1,337/day) even though every one of them resolves INSIDE the
+  // exclusion set today. A rail whose failure mode is "no rail" is not a rail. Throwing aborts the
+  // pass; no actions are computed and nothing is mutated, which is the safe direction here.
+  const { data: cohortRows, error: cohortErr } = await admin
+    .from("media_buyer_test_cohorts")
+    .select("test_meta_campaign_id, test_meta_adset_id")
+    .eq("workspace_id", workspaceId)
+    .eq("meta_ad_account_id", adAccountId)
+    .eq("is_active", true);
+  if (cohortErr) {
+    throw new Error(
+      `test rail: media_buyer_test_cohorts read failed (${cohortErr.message}) — aborting the pass ` +
+        `rather than acting with an empty exclusion set.`,
+    );
+  }
+
+  const testCampaignIds: string[] = [];
+  for (const r of (cohortRows || []) as {
+    test_meta_campaign_id: string | null;
+    test_meta_adset_id: string | null;
+  }[]) {
+    if (r.test_meta_campaign_id) {
+      excluded.add(r.test_meta_campaign_id);
+      testCampaignIds.push(r.test_meta_campaign_id);
+    }
+    if (r.test_meta_adset_id) excluded.add(r.test_meta_adset_id);
+  }
+
+  if (testCampaignIds.length) {
+    const { data: adsetRows, error: adsetErr } = await admin
+      .from("meta_adsets")
+      .select("meta_adset_id")
       .eq("workspace_id", workspaceId)
-      .eq("meta_ad_account_id", adAccountId)
-      .eq("is_active", true);
-    const testCampaignIds: string[] = [];
-    for (const r of (cohortRows || []) as {
-      test_meta_campaign_id: string | null;
-      test_meta_adset_id: string | null;
-    }[]) {
-      if (r.test_meta_campaign_id) {
-        excluded.add(r.test_meta_campaign_id);
-        testCampaignIds.push(r.test_meta_campaign_id);
-      }
-      if (r.test_meta_adset_id) excluded.add(r.test_meta_adset_id);
+      .in("meta_campaign_id", testCampaignIds);
+    if (adsetErr) {
+      throw new Error(
+        `test rail: meta_adsets read failed (${adsetErr.message}) — aborting the pass rather than ` +
+          `acting with a partial exclusion set.`,
+      );
     }
-    if (testCampaignIds.length) {
-      const { data: adsetRows } = await admin
-        .from("meta_adsets")
-        .select("meta_adset_id")
-        .eq("workspace_id", workspaceId)
-        .in("meta_campaign_id", testCampaignIds);
-      for (const r of (adsetRows || []) as { meta_adset_id: string }[]) {
-        if (r.meta_adset_id) excluded.add(r.meta_adset_id);
-      }
+    for (const r of (adsetRows || []) as { meta_adset_id: string }[]) {
+      if (r.meta_adset_id) excluded.add(r.meta_adset_id);
     }
-  } catch {
-    // Table absence / RLS misread → return whatever we have (defensive; no writes on this path).
   }
   return excluded;
+}
+
+/**
+ * The ACTIVE test cohorts' campaign ids for this ad account. Authoritative (the cohort row owns the
+ * id) and independent of the synced `meta_adsets` roster. Fails closed for the same reason
+ * {@link loadTestRailExcludedObjectIds} does.
+ */
+async function loadTestCampaignIds(workspaceId: string, adAccountId: string): Promise<Set<string>> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("media_buyer_test_cohorts")
+    .select("test_meta_campaign_id")
+    .eq("workspace_id", workspaceId)
+    .eq("meta_ad_account_id", adAccountId)
+    .eq("is_active", true);
+  if (error) {
+    throw new Error(
+      `test rail: test-campaign read failed (${error.message}) — aborting the pass rather than ` +
+        `acting without the campaign-scoped guard.`,
+    );
+  }
+  const out = new Set<string>();
+  for (const r of (data || []) as { test_meta_campaign_id: string | null }[]) {
+    if (r.test_meta_campaign_id) out.add(r.test_meta_campaign_id);
+  }
+  return out;
+}
+
+/**
+ * Second, INDEPENDENT test-rail check — parent-campaign scoped.
+ *
+ * `loadTestRailExcludedObjectIds` resolves adset ids through `meta_adsets`, a SYNCED derived table.
+ * If an adset is missing or stale there (created between syncs, sync lagging, campaign re-parented),
+ * its id never enters the set and the rail is blind to it — while the cohort's own
+ * `test_meta_campaign_id` is authoritative and always present. So the engine now also refuses any
+ * row whose PARENT CAMPAIGN is a test campaign, independent of the adset roster.
+ *
+ * Two overlapping checks against different sources: the rail survives either one going stale.
+ */
+export function isTestRailObject(
+  row: { object_id: string; parent_campaign_id?: string | null },
+  excludedObjectIds: Set<string>,
+  testCampaignIds: Set<string>,
+): boolean {
+  if (excludedObjectIds.has(row.object_id)) return true;
+  if (row.parent_campaign_id && testCampaignIds.has(row.parent_campaign_id)) return true;
+  return false;
 }

@@ -258,6 +258,38 @@ export async function resolveWinnerSource(
   return { metaAdId, campaign, angle };
 }
 
+/**
+ * One-sided z for the crown confidence bound. 1.28 ≈ 90% one-sided — a business-grade
+ * "we are confident the TRUE CPA is under the crown line", not a research-grade 95%.
+ * CEO 2026-08-25.
+ */
+export const CROWN_CONFIDENCE_Z = 1.28;
+
+/**
+ * The PESSIMISTIC end of the CPA estimate, in cents.
+ *
+ * Why this exists (CEO 2026-08-25): crowning on the POINT estimate at `crown_min_purchases=8`
+ * crowned the luckiest adset, not the best one. Purchases are Poisson, so the relative standard
+ * error of a CPA measured on `n` purchases is 1/sqrt(n) — at n=8 that is 35%, and the 95% interval
+ * on a measured $220 CPA spans $110–$440. A $220 "winner" could not be told apart from a $400 dud.
+ * Measured consequence: pooled post-crown CPA came in at 1.89x pre-crown across all 5 crowned
+ * winners (scaled IN PLACE — no scale campaign involved), which is textbook regression to the mean.
+ *
+ * So a crown now requires the UPPER bound to clear the crown line, not the midpoint:
+ *
+ *     upper = cpa * exp(z / sqrt(purchases))
+ *
+ * The log-scale form keeps the bound strictly positive and is the standard Poisson-rate
+ * approximation. Fewer purchases ⇒ a wider penalty ⇒ a small-sample fluke cannot crown.
+ *
+ * Pure + exported so the rule is unit-testable without a DB.
+ */
+export function crownUpperBoundCpaCents(cpaCents: number, purchases: number, z: number = CROWN_CONFIDENCE_Z): number {
+  if (!Number.isFinite(cpaCents) || cpaCents <= 0) return Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(purchases) || purchases <= 0) return Number.POSITIVE_INFINITY;
+  return cpaCents * Math.exp(z / Math.sqrt(purchases));
+}
+
 export interface MetaCpaWinnerOptions {
   workspaceId: string;
   metaAdAccountId: string;
@@ -266,6 +298,12 @@ export interface MetaCpaWinnerOptions {
   /** A crown ALSO requires this many purchases — not just CPA ≤ crown at ≥ crown_min_spend. ~3 purchases
    *  ($450 at a $150 CPA) is statistical noise; ~8 at target is real signal before scaling. CEO 2026-07-12. */
   crownMinPurchases: number;
+  /**
+   * One-sided z for the crown confidence bound (default {@link CROWN_CONFIDENCE_Z}). Pass 0 to
+   * fall back to the pre-2026-08-25 point-estimate rule — kept as an escape hatch so the bound
+   * can be disabled from config without a deploy.
+   */
+  crownConfidenceZ?: number;
   topK?: number;
 }
 
@@ -274,8 +312,17 @@ export interface MetaCpaWinnerOptions {
  *  DetectedWinner shape the plan/amplifier consume. */
 export async function detectMetaCpaWinners(admin: Admin, opts: MetaCpaWinnerOptions): Promise<DetectedWinner[]> {
   const rows = await activeAdsetLifetimeMetrics(admin, opts.workspaceId, opts.metaAdAccountId);
+  // CEO 2026-08-25 — crown on the PESSIMISTIC end of the CPA estimate, not the midpoint.
+  // `crownUpperBoundCpaCents` widens the measured CPA by the Poisson small-sample penalty, so an
+  // adset that merely drifted under the crown line on a handful of purchases no longer qualifies.
+  const z = opts.crownConfidenceZ ?? CROWN_CONFIDENCE_Z;
   const qualifying = rows
-    .filter((r) => r.purchases >= opts.crownMinPurchases && r.spend_cents >= opts.crownMinSpendCents && r.spend_cents / r.purchases <= opts.crownMaxCpaCents)
+    .filter((r) => {
+      if (r.purchases < opts.crownMinPurchases) return false;
+      if (r.spend_cents < opts.crownMinSpendCents) return false;
+      const cpa = r.spend_cents / r.purchases;
+      return crownUpperBoundCpaCents(cpa, r.purchases, z) <= opts.crownMaxCpaCents;
+    })
     .sort((a, b) => a.spend_cents / a.purchases - b.spend_cents / b.purchases)
     .slice(0, opts.topK ?? 3);
 
