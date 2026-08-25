@@ -1,0 +1,1 @@
+- **Bianca's postable bin takes status='ready' only — a draft creative can never be a replenish candidate** · verified 2026-08-25 · → [[../libraries/ready-to-test]]
