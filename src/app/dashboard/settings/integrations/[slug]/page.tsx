@@ -11,7 +11,6 @@ const NAMES: Record<string, string> = {
   braintree: "Braintree",
   twilio: "Twilio",
   avalara: "Avalara (AvaTax)",
-  klaviyo: "Klaviyo",
   meta: "Meta",
   amplifier: "Amplifier",
   slack: "Slack",

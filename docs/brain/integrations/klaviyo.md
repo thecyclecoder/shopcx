@@ -52,7 +52,24 @@ Two things intentionally left behind:
 - **`generateMissingSummaries` + `polishReviewBodies`** in [[../libraries/klaviyo]] are now uncalled — their only caller was the deleted review-sync cron. They are table-only (read `product_reviews`, write via Haiku) and the in-house reviews program will want both. Do not delete them as "dead code"; they are waiting for a caller.
 - **`isTransientKlaviyoReviewsFetch5xx`** in [[control-tower/error-feed]] can no longer fire (its log line is behind `KLAVIYO_RETIRED`). Kept inert rather than removed with its test suite in the same pass; it retires with the tables.
 
-**Still to do:** [[../libraries/klaviyo-lead]], the Klaviyo card in integrations settings, and the dead `klaviyo_*` tables (`klaviyo_events` 19.7k frozen · `klaviyo_profile_directory` 424 · `klaviyo_sms_campaign_history` 0 · `klaviyo_profile_staging` 0 · `profile_engagement_summary` 0). `db-health.ts` and `migration-drift.ts` already whitelist `klaviyo_*` as retiring. Null the `klaviyo_api_key_encrypted` + `klaviyo_public_key` columns. Remove Klaviyo's onsite JS from the Shopify storefront theme — it is still firing `Viewed Product` / `Added to Cart` / `Active on Site`.
+**Done:** `klaviyo-lead` deleted, the Klaviyo card removed from integrations settings (tile, form, API read + write), and the onsite JS switched off in the Shopify theme (`config/settings_data.json` app embed → `disabled: true`).
+
+### Tables — corrected counts
+
+⚠️ Earlier sunset notes described several of these as empty. That came from `pg_stat_user_tables.n_live_tup`, which is **stale planner stats, not truth**. Real `count(*)`:
+
+| Table | Rows | Disposition |
+|---|---|---|
+| `klaviyo_profile_staging` | 161,620 | ✅ renamed `_deprecated_*_20260825` — no reader anywhere in `src/` |
+| `profile_engagement_summary` | 42,864 | ✅ renamed — last reader was the deleted engagement-backfill |
+| `klaviyo_profile_directory` | 15,754 | ✅ renamed — last reader was the deleted engagement-sync |
+| `klaviyo_events` | 19,745 | ⛔ **kept** — `/api/workspaces/[id]/sms-campaigns/[campaignId]` dedups these Placed Order events against `orders` to catch conversions the Shopify webhook missed. Frozen at 2026-05-14, so it only affects campaigns older than that, but those numbers are real |
+| `klaviyo_sms_campaign_history` | 55 | ⛔ **kept** — backs the marketing/text dashboard's campaign history table via `/api/workspaces/[id]/klaviyo-sms-history` |
+| `profile_events` | 4.66M | ⛔ **never in scope** — dual-sourced; our own SMS pipeline writes `Received SMS` / `Clicked SMS` here |
+
+Renamed, not dropped, per [[../operational-rules]] § Reversible-by-default DB changes. The follow-up drop is a separate deliberate decision once the deprecation window elapses. Two DB functions went with them: `rebuild_engagement_summary(uuid)` and `recompute_klaviyo_attribution(uuid, text)`.
+
+**Still to do:** null the `klaviyo_api_key_encrypted` + `klaviyo_public_key` columns once the app is uninstalled, and decide the fate of the two kept tables + the three `_deprecated_*` ones.
 
 ## Historical reference
 

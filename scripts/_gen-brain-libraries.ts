@@ -214,7 +214,6 @@ const SUMMARIES: Record<string, string> = {
   "meta-test-helpers": "Mock helpers for Meta API in tests.",
   "klaviyo": "⚠️ RETIRED vendor client. `getKlaviyoCredentials` always returns null — see [[klaviyo-retired]]. The table-only helpers (`getReviewsForProducts`, `polishReviewBodies`, `generateMissingSummaries`) read `product_reviews` and still work. See [[../integrations/klaviyo]].",
   "klaviyo-retired": "The ONE chokepoint that guarantees no code path reaches `a.klaviyo.com`. `KLAVIYO_RETIRED` is true forever; enforced by `scripts/_check-no-klaviyo-calls.ts` in `predeploy`. See [[../integrations/klaviyo]].",
-  "klaviyo-lead": "⚠️ RETIRED. Used to push storefront leads into Klaviyo as profiles + consent; `/api/lead` no longer calls it and `upsertKlaviyoLead` always returns false. Deleted in Phase B. See [[klaviyo-retired]].",
   "avalara": "Sales tax client. Quote (SalesOrder) + commit (SalesInvoice) + void. See [[../integrations/avalara]].",
   "avalara-cart": "Quote tax for [[../tables/cart_drafts]] at checkout.",
   "avalara-subscription": "Quote tax for [[../tables/subscriptions]] at billing tick.",
