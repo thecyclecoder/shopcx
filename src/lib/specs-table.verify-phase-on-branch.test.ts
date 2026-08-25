@@ -168,6 +168,89 @@ test("grep-error (git command failed, not a no-match) is reported distinctly fro
   assert.doesNotMatch(verdict.reason, /no match/i);
 });
 
+// ── a-broken-verification-check-cannot-kill-a-build Phase 2 — unevaluable third-state tag ───────
+//
+// Pins the correct state per THIS spec's Phase-2 Verification bullet: "the re-drive path handles
+// the unresolvable outcome". The verifier is the SEAM the re-drive path reads through: it must tag
+// unresolvable + grep-error outcomes with a machine-readable `unevaluable` field so the caller
+// (redriveDeferredBuildOrEscalate's sibling `escalateBrokenCheckWithoutRedriveCount`) can route
+// the build as a broken check instead of consuming a `BUILDER_DEFERRED_REDRIVE_MAX` slot. NEVER
+// upgrades to accumulated:true — an unread artifact still blocks the merge (phantom-ship hazard).
+
+test("unresolvable outcome tags the verdict as unevaluable (kind=unresolvable) carrying pattern + description — never accumulated:true", async () => {
+  const phase: PhaseFlagsForVerify = { id: "phase-1", status: "in_progress", build_sha: null };
+  const grep: GrepCheckParams = { pattern: "cancelled_at", expect: "present" };
+  const deps = makeDeps({
+    loadPhaseFlags: async () => phase,
+    loadPhaseGrepChecks: async () => [{ description: "cancelled_at column exists", params: grep }],
+    runGitGrepOnBranch: async () => ({
+      ok: false,
+      outcome: "unresolvable",
+      evidence: "unresolvable remote-tracking ref for 'claude/build-some-spec'",
+      gitError: "fatal: couldn't find remote ref refs/heads/claude/build-some-spec",
+    }),
+  });
+  const verdict = await verifyPhaseAccumulatedOnBranch(WS, SLUG, 3, BRANCH, deps);
+  assert.equal(verdict.accumulated, false, "MUST still block the merge — phantom-ship hazard");
+  assert.ok(verdict.unevaluable, "MUST carry the unevaluable discriminator");
+  assert.equal(verdict.unevaluable!.kind, "unresolvable");
+  assert.equal(verdict.unevaluable!.checkDescription, "cancelled_at column exists");
+  assert.equal(verdict.unevaluable!.pattern, "cancelled_at");
+});
+
+test("grep-error outcome tags the verdict as unevaluable (kind=grep-error) — the (?i)-PCRE class the spec pins", async () => {
+  const phase: PhaseFlagsForVerify = { id: "phase-1", status: "in_progress", build_sha: null };
+  // Recreate the exact live-incident shape: an (?i) inline flag reaches git grep -E POSIX and gets
+  // refused at compile time. Phase 1 (already shipped this branch) rejects this at authoring; Phase
+  // 2 defends the class against any FUTURE way a check becomes unevaluable — a missing branch ref,
+  // a tool error, a case nobody predicted. Same routing must apply.
+  const grep: GrepCheckParams = { pattern: "(?i)add column if not exists\\s+cancelled_at", expect: "present" };
+  const deps = makeDeps({
+    loadPhaseFlags: async () => phase,
+    loadPhaseGrepChecks: async () => [{ description: "cancelled_at migration exists", params: grep }],
+    runGitGrepOnBranch: async () => ({
+      ok: false,
+      outcome: "grep-error",
+      ref: "origin/claude/build-some-spec",
+      evidence: "git grep failed: Invalid preceding regular expression",
+      gitError: "fatal: -e option, '(?i)add column if not exists\\s+cancelled_at': Invalid preceding regular expression",
+    }),
+  });
+  const verdict = await verifyPhaseAccumulatedOnBranch(WS, SLUG, 1, BRANCH, deps);
+  assert.equal(verdict.accumulated, false);
+  assert.ok(verdict.unevaluable);
+  assert.equal(verdict.unevaluable!.kind, "grep-error");
+  assert.equal(verdict.unevaluable!.pattern, "(?i)add column if not exists\\s+cancelled_at");
+});
+
+test("a genuine no-match does NOT set the unevaluable discriminator — code-gap path stays unchanged", async () => {
+  const phase: PhaseFlagsForVerify = { id: "phase-1", status: "in_progress", build_sha: null };
+  const grep: GrepCheckParams = { pattern: "realCode", expect: "present" };
+  const deps = makeDeps({
+    loadPhaseFlags: async () => phase,
+    loadPhaseGrepChecks: async () => [{ description: "realCode is exported", params: grep }],
+    // A pre-Phase-2 shim shape — no outcome field — MUST NOT be treated as unevaluable. Neither
+    // must an explicit no-match. Both are genuine code gaps and belong on the redrive path.
+    runGitGrepOnBranch: async () => ({ ok: false, evidence: "git grep 'realCode' — no match (expect=present)" }),
+  });
+  const verdict = await verifyPhaseAccumulatedOnBranch(WS, SLUG, 1, BRANCH, deps);
+  assert.equal(verdict.accumulated, false);
+  assert.equal(verdict.unevaluable, undefined, "no-match MUST NOT tag as unevaluable");
+});
+
+test("a passing check does NOT set the unevaluable discriminator", async () => {
+  const phase: PhaseFlagsForVerify = { id: "phase-1", status: "in_progress", build_sha: null };
+  const grep: GrepCheckParams = { pattern: "everythingWorks", expect: "present" };
+  const deps = makeDeps({
+    loadPhaseFlags: async () => phase,
+    loadPhaseGrepChecks: async () => [{ description: "check passes", params: grep }],
+    runGitGrepOnBranch: async () => ({ ok: true, outcome: "match", evidence: "match(es) found" }),
+  });
+  const verdict = await verifyPhaseAccumulatedOnBranch(WS, SLUG, 1, BRANCH, deps);
+  assert.equal(verdict.accumulated, true);
+  assert.equal(verdict.unevaluable, undefined);
+});
+
 test("a legacy shim (no `outcome` field on the result) still lands as a plain failed check — backwards compatible", async () => {
   const phase: PhaseFlagsForVerify = { id: "phase-1", status: "in_progress", build_sha: null };
   const grep: GrepCheckParams = { pattern: "someSymbol", expect: "present" };
