@@ -314,6 +314,55 @@ test("Phase 2 (CEO override): `max_qc_eligible=false` + `override_postable=true`
   assert.equal(readyToTest[0].ad_campaign_id, "C10");
 });
 
+// ── ready-to-test-bin-excludes-draft-campaigns Phase 1 — status allowlist ───────────────────
+// The bin reader now takes `status='ready'` only, not `status != 'archived'`. A `draft` row (no
+// angle_id / no copy) MUST NOT surface even with a landing_url and a ready ad_video sibling —
+// otherwise Bianca's replenish picks it, the publish step refuses it for "no copy source", and
+// an under-provisioned-cohort CEO card is raised every calendar day (the 2026-08-25 Creatine
+// Prime+ incident). The JS-side mirror is the belt-and-suspenders — the fake chain ignores the
+// `.eq('status','ready')` filter arg so this pin proves the mirror is what rejects the row.
+
+test("Phase 1 (allowlist): a `draft` campaign is EXCLUDED even with a landing_url + ready ad_video (unfinished — no angle, no copy)", async () => {
+  const admin = makeAdmin({
+    ad_videos: {
+      data: [
+        { campaign_id: "C12", format: "feed_4x5", media_kind: "static", status: "ready", static_jpg_url: "https://cdn.example/12.jpg", meta: {} },
+      ],
+      error: null,
+    },
+    ad_campaigns: {
+      data: [
+        { id: "C12", landing_url: "https://superfoods.com/products/creatine-prime-plus", status: "draft", created_at: "2026-08-25T10:00:00Z", max_qc_eligible: null, override_postable: null },
+      ],
+      error: null,
+    },
+    ad_publish_jobs: { data: [], error: null },
+  });
+  const { readyToTest } = await listReadyToTest(admin, { workspaceId: "ws-1" });
+  assert.equal(readyToTest.length, 0);
+});
+
+test("Phase 1 (allowlist): an otherwise-identical `ready` campaign SURFACES — the ONLY difference is the status", async () => {
+  const admin = makeAdmin({
+    ad_videos: {
+      data: [
+        { campaign_id: "C13", format: "feed_4x5", media_kind: "static", status: "ready", static_jpg_url: "https://cdn.example/13.jpg", meta: {} },
+      ],
+      error: null,
+    },
+    ad_campaigns: {
+      data: [
+        { id: "C13", landing_url: "https://superfoods.com/products/creatine-prime-plus", status: "ready", created_at: "2026-08-25T10:00:00Z", max_qc_eligible: null, override_postable: null },
+      ],
+      error: null,
+    },
+    ad_publish_jobs: { data: [], error: null },
+  });
+  const { readyToTest } = await listReadyToTest(admin, { workspaceId: "ws-1" });
+  assert.equal(readyToTest.length, 1);
+  assert.equal(readyToTest[0].ad_campaign_id, "C13");
+});
+
 test("Phase 2 (CEO override): `max_qc_eligible=false` + no override (`override_postable=null`) → STILL EXCLUDED (nothing changed for the unrescued rows)", async () => {
   const admin = makeAdmin({
     ad_videos: {
