@@ -422,6 +422,56 @@ export function validateGrepPath(path: unknown): ExecutableCheckValidation {
 }
 
 /**
+ * a-broken-verification-check-cannot-kill-a-build Phase 1 — reject a `grep` whose `pattern` uses a
+ * PCRE-only construct that `git grep` (the engine both the deterministic runner and the merge-gate
+ * verifier ultimately use with POSIX regex) refuses to compile. Anchored to the exact class of
+ * failure the spec documents: an inline flag like `(?i)` — and its siblings `(?:...)`, `(?=...)`,
+ * `(?<name>...)`, `(?>...)` — makes `git grep -E` exit non-zero with
+ * `Invalid preceding regular expression`, which the pre-Phase-1 runner counted as unverified code
+ * and burned three re-drives dismissing the build (cancelled-subs-stop-reporting-a-future-billing-date
+ * + playbook-drift-classifier-sees-the-pending-question, both August 2026).
+ *
+ * The rule is intentionally narrow so the gate cannot false-reject a pattern that runs today: an
+ * unescaped `(?` sequence is the exclusive marker of every PCRE construct git grep POSIX refuses,
+ * and it can never appear in a valid POSIX ERE (`?` after `(` is a quantifier-in-atom-position parse
+ * error). A literal `\(?` (escaped paren, then a `?` quantifier) stays legal. Runs BOTH lanes' engine
+ * refusal criterion — no second definition to drift against — so a check that passes authoring
+ * cannot then fail the merge gate on the same class.
+ *
+ * For case-insensitivity, the runner already applies smart-case (`shouldGrepCaseInsensitively` adds
+ * `-i` when the pattern has no uppercase ASCII), so the supported route is an all-lowercase pattern
+ * — the message says so verbatim. Live example the spec pins: `(?i)add column if not exists\s+cancelled_at`
+ * is refused; the same intent as `add column if not exists.*cancelled_at` (all-lowercase → smart-case)
+ * is accepted and matches identically at both gates.
+ */
+export function validateGrepPatternIsPosixEre(pattern: string): ExecutableCheckValidation {
+  // Scan the pattern once for an unescaped `(` immediately followed by `?`. That two-char sequence
+  // is the exclusive opener for every PCRE construct git grep POSIX refuses (`(?i)`, `(?:...)`,
+  // `(?=...)`, `(?!...)`, `(?<=...)`, `(?<!...)`, `(?<name>...)`, `(?P<name>...)`, `(?>...)`), and
+  // it cannot legally appear in POSIX ERE (`?` is a quantifier and has no atom preceding it here).
+  // An escaped `\(` followed by `?` is a literal paren + optional-quantifier — legal, and skipped.
+  let i = 0;
+  while (i < pattern.length) {
+    const c = pattern[i];
+    if (c === "\\") { i += 2; continue; }
+    if (c === "(" && pattern[i + 1] === "?") {
+      const construct = pattern.slice(i, Math.min(i + 4, pattern.length));
+      return {
+        valid: false,
+        reason:
+          `grep.pattern "${pattern}" uses a PCRE-only construct "${construct}" that git grep ` +
+          `(POSIX) refuses to compile — the check would never run and the build would be dismissed ` +
+          `as unverified. For case-insensitivity use an all-lowercase pattern (the runner ` +
+          `auto-adds -i via smart-case) instead of an inline (?i) flag; drop other (?...) ` +
+          `constructs — POSIX ERE has plain groups (...) only.`,
+      };
+    }
+    i++;
+  }
+  return { valid: true };
+}
+
+/**
  * verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 1 — reject a `grep` whose
  * `pattern` pins an EXACT LITERAL for a name the implementation gets to invent (an npm script name, a
  * `*.test.ts` filename, a kebab-case slug, a camelCase symbol) when the spec body does NOT itself pin
@@ -642,6 +692,13 @@ export function validateExecutableCheck(
       if (typeof pattern !== "string" || !pattern.trim()) {
         return { valid: false, reason: "grep.pattern must be a non-empty string" };
       }
+      // a-broken-verification-check-cannot-kill-a-build Phase 1 — reject a pattern the git-grep POSIX
+      // engine refuses to compile at authoring, before it can reach a build (a PCRE `(?i)` inline flag
+      // is the exact class that stranded cancelled-subs-stop-reporting-a-future-billing-date +
+      // playbook-drift-classifier-sees-the-pending-question in August 2026 — the runner reported an
+      // infrastructure fault and the re-drive path burned three builds treating it as unverified code).
+      const posix = validateGrepPatternIsPosixEre(pattern);
+      if (!posix.valid) return posix;
       if (path !== undefined) {
         // grep.path flows into `rg` as a raw argument, so treat it as an untrusted capability
         // boundary — a spec-authored value must be a safe repo-relative path and can NEVER be
