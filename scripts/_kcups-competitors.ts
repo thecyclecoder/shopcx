@@ -1,5 +1,6 @@
 /** Competitor scoping by product, and where ad angles come from. READ-ONLY. */
 import { createAdminClient } from "./_bootstrap";
+import { listCompetitors } from "../src/lib/competitors";
 const WS = process.env.WORKSPACE_ID ?? "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 
 async function main() {
@@ -7,16 +8,18 @@ async function main() {
   const { data: p } = await a.from("products").select("id,title").eq("workspace_id", WS);
   const t = new Map((p ?? []).map((x) => [String(x.id), String(x.title)]));
 
-  const { data: c } = await a.from("competitors").select("product_id,brand,status").eq("workspace_id", WS);
+  // Route through the SDK chokepoint (src/lib/competitors.ts) so a wrong column can never silently
+  // read as empty — the very class of bug that guard exists to prevent.
+  const c = await listCompetitors({ workspaceId: WS });
   const by: Record<string, number> = {};
-  for (const r of c ?? []) {
+  for (const r of c) {
     const k = r.product_id ? (t.get(String(r.product_id)) ?? String(r.product_id)) : "(unscoped / null)";
     by[k] = (by[k] ?? 0) + 1;
   }
   console.log("competitors by product:");
   for (const [k, v] of Object.entries(by).sort((x, y) => y[1] - x[1])) console.log(`  ${k.padEnd(30)} ${v}`);
 
-  const cof = (c ?? []).filter((r) => t.get(String(r.product_id)) === "Amazing Coffee");
+  const cof = c.filter((r) => t.get(String(r.product_id)) === "Amazing Coffee");
   console.log(`\nAmazing Coffee competitors (CEO: these also apply to K-Cups) — ${cof.length}:`);
   for (const r of cof.slice(0, 14)) console.log(`  ${String(r.brand).padEnd(32)} ${r.status}`);
 

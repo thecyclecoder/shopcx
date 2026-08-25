@@ -1,5 +1,7 @@
 /** The remaining K-Cups blockers: the deferred campaign, angle source, and competitor scoping. READ-ONLY. */
 import { createAdminClient } from "./_bootstrap";
+import { listCompetitors } from "../src/lib/competitors";
+import { errText } from "../src/lib/error-text";
 
 const WS = process.env.WORKSPACE_ID ?? "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 const KCUPS = "f081a8ee-530b-4789-8654-bd57c3a51569";
@@ -41,14 +43,15 @@ async function main() {
     for (const r of data ?? []) console.log(`   sample: ${JSON.stringify(r).slice(0, 200)}`);
   }
 
-  // Competitors — how are they scoped?
-  const { data: comp, error: cerr } = await admin.from("competitors").select("*").eq("workspace_id", WS).limit(3);
-  console.log(`\n=== competitors ===`);
-  if (cerr) { console.log(`  error: ${cerr.message}`); }
-  else {
-    console.log(`  columns: ${Object.keys(comp?.[0] ?? {}).join(", ")}`);
-    const { count } = await admin.from("competitors").select("id", { count: "exact", head: true }).eq("workspace_id", WS);
-    console.log(`  total ${count}`);
+  // Competitors — how are they scoped? Route through the SDK chokepoint so a wrong column can never
+  // silently read as empty (see src/lib/competitors.ts).
+  try {
+    const comps = await listCompetitors({ workspaceId: WS });
+    console.log(`\n=== competitors ===`);
+    console.log(`  columns: ${Object.keys(comps[0] ?? {}).join(", ")}`);
+    console.log(`  total ${comps.length}`);
+  } catch (e) {
+    console.log(`\n=== competitors ===\n  error: ${errText(e)}`);
   }
 }
 main().then(() => process.exit(0)).catch((e) => {
