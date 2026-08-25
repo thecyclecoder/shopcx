@@ -1,0 +1,1 @@
+- **Cancel journey — a saved_remedy the customer immediately re-cancels must route back to the cancel terminal, not loop** · verified 2026-08-25 · → [[../journeys/cancel]]

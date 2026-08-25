@@ -1,0 +1,1 @@
+- **Loyalty redemption + coupon usability must span the linked-account group** · verified 2026-08-25 · → [[../libraries/loyalty]]
