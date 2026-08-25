@@ -1,5 +1,6 @@
 /** Competitor scoping by product, and where ad angles come from. READ-ONLY. */
 import { createAdminClient } from "./_bootstrap";
+import { listCompetitors } from "../src/lib/competitors";
 const WS = process.env.WORKSPACE_ID ?? "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 
 async function main() {
@@ -7,7 +8,7 @@ async function main() {
   const { data: p } = await a.from("products").select("id,title").eq("workspace_id", WS);
   const t = new Map((p ?? []).map((x) => [String(x.id), String(x.title)]));
 
-  const { data: c } = await a.from("competitors").select("product_id,brand,status").eq("workspace_id", WS);
+  const c = await listCompetitors({ workspaceId: WS, limit: 10000 });
   const by: Record<string, number> = {};
   for (const r of c ?? []) {
     const k = r.product_id ? (t.get(String(r.product_id)) ?? String(r.product_id)) : "(unscoped / null)";

@@ -1,5 +1,6 @@
 /** The remaining K-Cups blockers: the deferred campaign, angle source, and competitor scoping. READ-ONLY. */
 import { createAdminClient } from "./_bootstrap";
+import { listCompetitors } from "../src/lib/competitors";
 
 const WS = process.env.WORKSPACE_ID ?? "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 const KCUPS = "f081a8ee-530b-4789-8654-bd57c3a51569";
@@ -41,15 +42,15 @@ async function main() {
     for (const r of data ?? []) console.log(`   sample: ${JSON.stringify(r).slice(0, 200)}`);
   }
 
-  // Competitors — how are they scoped?
-  const { data: comp, error: cerr } = await admin.from("competitors").select("*").eq("workspace_id", WS).limit(3);
+  // Competitors — how are they scoped? Route through the SDK chokepoint
+  // (`src/lib/competitors.ts` -> listCompetitors). A hand-rolled query would
+  // silently read as empty if a column name drifts (an 82-row workspace once
+  // read as 0 because a raw probe selected a non-existent column).
+  const compAll = await listCompetitors({ workspaceId: WS, limit: 10000 });
+  const compSample = compAll.slice(0, 3);
   console.log(`\n=== competitors ===`);
-  if (cerr) { console.log(`  error: ${cerr.message}`); }
-  else {
-    console.log(`  columns: ${Object.keys(comp?.[0] ?? {}).join(", ")}`);
-    const { count } = await admin.from("competitors").select("id", { count: "exact", head: true }).eq("workspace_id", WS);
-    console.log(`  total ${count}`);
-  }
+  console.log(`  columns: ${Object.keys(compSample[0] ?? {}).join(", ")}`);
+  console.log(`  total ${compAll.length}`);
 }
 main().then(() => process.exit(0)).catch((e) => {
   console.error(e instanceof Error ? e.message : JSON.stringify(e));

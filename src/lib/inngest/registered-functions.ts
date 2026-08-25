@@ -146,6 +146,10 @@ import { adsSupervisorCadenceCron, adsSupervisorCadenceSweep } from "@/lib/innge
 import { budgetWatchCron } from "@/lib/inngest/budget-watch";
 import { mediaBuyerGradeCron, mediaBuyerGradeSweep } from "@/lib/inngest/media-buyer-grade";
 import {
+  sensorTrustProbeCron,
+  sensorTrustProbeSweep,
+} from "@/lib/inngest/sensor-trust-probe-cadence";
+import {
   mediaBuyerSelfCorrectingCron,
   mediaBuyerSelfCorrectingSweep,
 } from "@/lib/inngest/media-buyer-self-correcting";
@@ -331,6 +335,8 @@ export const registeredInngestFunctions = [
   budgetWatchCron,
   mediaBuyerGradeCron,
   mediaBuyerGradeSweep,
+  sensorTrustProbeCron,
+  sensorTrustProbeSweep,
   mediaBuyerSelfCorrectingCron,
   mediaBuyerSelfCorrectingSweep,
   inngestFailureCapture,
