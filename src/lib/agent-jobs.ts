@@ -4499,8 +4499,95 @@ export interface MergedSpecPhaseReconcileResult {
   /** total phases flipped to shipped across all reconciled specs this pass. */
   phasesStamped: number;
   /** merge-gate-verifies-real-phase-checks Phase 2 — specs whose blanket back-fill was REFUSED (no verifier,
-   *  or the merged code failed the spec's machine checks) so a phantom-ship can never be minted here. */
+   *  or the merged code failed the spec's machine checks) so a phantom-ship can never be minted here. Also
+   *  carries the hand-off note when a merged spec with NO shipped sibling is routed to `audit-spec-shipped-state`
+   *  instead of being silently dropped (merged-but-unstamped-specs-reach-the-audit-instead-of-being-dropped P1). */
   skipped: string[];
+  /** merged-but-unstamped-specs-reach-the-audit-instead-of-being-dropped P1 — spec slugs whose recovery pass
+   *  handed off to the `audit-spec-shipped-state` lane this pass (a fresh enqueue OR a dedupe hit against an
+   *  in-flight / recent-terminal audit). Surfaced so the standing-pass note shows the hand-off explicitly. */
+  handedOffToAudit?: string[];
+}
+
+/** merged-but-unstamped-specs-reach-the-audit-instead-of-being-dropped P1 — dedupe window for a recent
+ *  terminal (completed/failed/needs_attention) audit job. The recovery pass runs on the platform-director
+ *  standing pass (every few minutes), so an audit the runner already tried but couldn't resolve must not
+ *  be re-queued on every tick — one attempt per day is the ceiling. */
+export const AUDIT_SPEC_SHIPPED_STATE_TERMINAL_DEDUPE_MS = 24 * 60 * 60 * 1000;
+
+/** merged-but-unstamped-specs-reach-the-audit-instead-of-being-dropped P1 — the terminal statuses the
+ *  recent-terminal dedupe branch of `enqueueAuditSpecShippedStateIfDue` matches on. */
+const AUDIT_TERMINAL_STATUSES_FOR_DEDUPE: JobStatus[] = ["completed", "failed", "needs_attention", "merged"];
+
+/**
+ * Shared enqueue for the per-slug `audit-spec-shipped-state` job (merged-but-unstamped-specs-reach-the-
+ * audit-instead-of-being-dropped Phase 1). Both call sites go through here so the director-initiated
+ * `request-audit` path (worker `applyRequestAuditActionInline`) and the automatic reconciler hand-off
+ * (`reconcileMergedSpecPhases` below) cannot drift apart on dedupe or insert shape.
+ *
+ * Dedupe covers TWO cases:
+ *   (1) an OPEN audit for this slug (any `ACTIVE_STATUSES` status) — the in-flight run's verdict will
+ *       surface on completion, so a second row would just stack.
+ *   (2) a RECENT TERMINAL audit within `AUDIT_SPEC_SHIPPED_STATE_TERMINAL_DEDUPE_MS` — a spec the audit
+ *       legitimately could not resolve stays unresolvable until either the merge ledger gains evidence
+ *       or the code changes, so re-queuing every few minutes would be a hot loop. One attempt per day.
+ *
+ * Never stamps a phase itself; only routes the spec to the lane that verifies against the merge ledger.
+ * The fail-closed phantom-ship guard in `reconcileMergedSpecPhases` is preserved — this helper only
+ * handles the queue insert + dedupe, no provenance write.
+ */
+export async function enqueueAuditSpecShippedStateIfDue(
+  workspaceId: string,
+  slug: string,
+  opts: { requestedBy: string; reason: string; adminClient?: Admin; nowMs?: number },
+): Promise<
+  | { enqueued: true; jobId: string }
+  | { enqueued: false; dedup: "open" | "recent_terminal"; existingJobId: string }
+> {
+  const admin = opts.adminClient || createAdminClient();
+  const now = opts.nowMs ?? Date.now();
+  // (1) Any active audit for this slug — the in-flight run's verdict will land on the activity feed,
+  //     so a second row would just stack.
+  const { data: openRow } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "audit-spec-shipped-state")
+    .in("status", ACTIVE_STATUSES)
+    .limit(1)
+    .maybeSingle();
+  if (openRow) return { enqueued: false, dedup: "open", existingJobId: (openRow as { id: string }).id };
+  // (2) A recent terminal audit for this slug — capped so the standing pass can't hot-loop against a
+  //     spec the runner already tried and couldn't resolve.
+  const cutoff = new Date(now - AUDIT_SPEC_SHIPPED_STATE_TERMINAL_DEDUPE_MS).toISOString();
+  const { data: recentRow } = await admin
+    .from("agent_jobs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "audit-spec-shipped-state")
+    .in("status", AUDIT_TERMINAL_STATUSES_FOR_DEDUPE)
+    .gte("updated_at", cutoff)
+    .order("updated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (recentRow) return { enqueued: false, dedup: "recent_terminal", existingJobId: (recentRow as { id: string }).id };
+
+  const { data: inserted, error } = await admin
+    .from("agent_jobs")
+    .insert({
+      workspace_id: workspaceId,
+      spec_slug: slug,
+      kind: "audit-spec-shipped-state",
+      status: "queued",
+      instructions: JSON.stringify({ requested_by: opts.requestedBy, reason: opts.reason }),
+      created_by: null,
+    })
+    .select("id")
+    .single();
+  if (error || !inserted) throw new Error(`enqueue audit-spec-shipped-state failed: ${error?.message ?? "no row"}`);
+  return { enqueued: true, jobId: (inserted as { id: string }).id };
 }
 
 /** merge-gate-verifies-real-phase-checks Phase 2 — a box-side verifier (checks out the merge SHA + runs the
@@ -4558,82 +4645,11 @@ function isVerifyPhaseDeps(deps: unknown): deps is VerifyPhaseDeps {
   return !!d && typeof d.loadPhaseFlags === "function" && typeof d.loadPhaseGrepChecks === "function" && typeof d.runGitGrepOnBranch === "function";
 }
 
-/** Non-terminal `agent_jobs` statuses — an audit already in one of these is in flight, so a second
- *  enqueue would be a duplicate. Mirrors the lifecycle set the director's `request-audit` path uses. */
-const AUDIT_ACTIVE_STATUSES = [
-  "queued",
-  "queued_resume",
-  "claimed",
-  "building",
-  "needs_input",
-  "needs_approval",
-  "blocked_on_usage",
-] as const;
-
-/**
- * merged-but-unstamped-specs-reach-the-audit-instead-of-being-dropped — enqueue the
- * `audit-spec-shipped-state` lane for ONE spec whose phase provenance cannot be recovered mechanically.
- *
- * The audit is the designated owner of "this spec merged but carries no phase provenance": it walks
- * `spec_status_history` for `merge:<sha>` rows plus the squash-merge subjects on origin/main to resolve
- * SHA → PR, then re-stamps each phase with REAL provenance — or leaves a phase unstamped when no merge
- * evidence exists. That is why routing a spec here is safe where blanket-stamping is not: the audit
- * proves the ship, it never assumes it.
- *
- * DEDUPED on an in-flight audit for the same (workspace, slug). This matters more here than on the
- * director path: `reconcileMergedSpecPhases` runs on the platform-director standing pass, so an
- * un-deduped enqueue would mint a fresh audit job on every single pass for any spec the audit cannot
- * resolve — a hot loop. A spec whose audit already ran and terminated WITHOUT resolving it is
- * deliberately re-enqueued (its inputs may since have changed); the in-flight guard is what bounds it.
- *
- * Best-effort by contract — a failure to enqueue must never break the reconcile pass it runs inside.
- */
-export async function enqueueSpecShippedStateAudit(
-  admin: Admin,
-  args: { workspaceId: string; slug: string; reason: string },
-): Promise<{ enqueued: boolean; jobId: string | null; summary: string }> {
-  const { workspaceId, slug, reason } = args;
-  try {
-    const { data: existing } = await admin
-      .from("agent_jobs")
-      .select("id")
-      .eq("workspace_id", workspaceId)
-      .eq("spec_slug", slug)
-      .eq("kind", "audit-spec-shipped-state")
-      .in("status", AUDIT_ACTIVE_STATUSES as unknown as string[])
-      .limit(1)
-      .maybeSingle();
-    if (existing) {
-      const id = (existing as { id: string }).id;
-      return { enqueued: false, jobId: id, summary: `audit already in flight (${id.slice(0, 8)})` };
-    }
-    const { data: inserted, error } = await admin
-      .from("agent_jobs")
-      .insert({
-        workspace_id: workspaceId,
-        spec_slug: slug,
-        kind: "audit-spec-shipped-state",
-        status: "queued",
-        instructions: JSON.stringify({ requested_by: "reconciler:merged-spec-phases", reason }),
-        created_by: null,
-      })
-      .select("id")
-      .single();
-    if (error || !inserted) {
-      return { enqueued: false, jobId: null, summary: `audit enqueue failed: ${error?.message ?? "no row"}` };
-    }
-    const jobId = (inserted as { id: string }).id;
-    return { enqueued: true, jobId, summary: `queued audit-spec-shipped-state (${jobId.slice(0, 8)})` };
-  } catch (e) {
-    return { enqueued: false, jobId: null, summary: `audit enqueue threw: ${errText(e)}` };
-  }
-}
-
 export async function reconcileMergedSpecPhases(
   adminClient?: Admin,
   deps?: { verifyPhaseAccumulated?: VerifyPhaseAccumulatedFn; verifyOnBranchOverride?: VerifyPhaseDeps } | VerifyPhaseDeps,
 ): Promise<MergedSpecPhaseReconcileResult> {
-  const out: MergedSpecPhaseReconcileResult = { reconciled: [], phasesStamped: 0, skipped: [] };
+  const out: MergedSpecPhaseReconcileResult = { reconciled: [], phasesStamped: 0, skipped: [], handedOffToAudit: [] };
   const admin = adminClient || createAdminClient();
   try {
     const { data: jobs } = await admin
@@ -4663,22 +4679,32 @@ export async function reconcileMergedSpecPhases(
         const mergeSha = shippedSibling?.merge_sha ?? null;
         const pr = shippedSibling?.pr ?? null;
         if (!mergeSha) {
-          // merged-but-unstamped-specs-reach-the-audit-instead-of-being-dropped — NO sibling provenance to
-          // copy, so this pass genuinely cannot rescue the spec. It must NOT blanket-stamp (that is the
-          // phantom-ship hole `a-merge-stamps-only-the-phases-whose-code-it-actually-contains` closed on
-          // 2026-08-17). But the old bare `continue` handed off to `audit-spec-shipped-state` in a COMMENT
-          // only — nothing in the codebase ever enqueued that lane, so the spec was silently dropped on this
-          // pass and on every future pass. Measured 2026-08-25: 0 audit jobs had ever run, and 5 specs that
-          // merged + deployed healthy on 2026-08-20/21 still carried `status='planned'` with no PR/SHA,
-          // holding the board open and blocking their dependents. Enqueue the lane the comment promised —
-          // the audit re-derives provenance from the merge ledger and stamps only what it can prove (or
-          // leaves the phase unstamped), so routing here never mints a ship.
-          const audit = await enqueueSpecShippedStateAudit(admin, {
-            workspaceId: j.workspace_id,
-            slug,
-            reason: "merged build with no phase provenance to recover — no shipped sibling to copy a merge SHA from",
-          });
-          out.skipped.push(`${slug}: no recoverable merge SHA → ${audit.summary}`);
+          // merged-but-unstamped-specs-reach-the-audit-instead-of-being-dropped Phase 1 — the recovery
+          // pass cannot rescue this spec (no shipped sibling to copy a merge SHA from), so it hands off
+          // to `audit-spec-shipped-state`. That lane walks `spec_status_history` + the origin/main merge
+          // ledger to re-stamp real provenance or leave the phase unstamped when no evidence exists —
+          // never a blanket stamp, so the phantom-ship guard below stays intact. Dedupe (open + recent
+          // terminal) is centralised in `enqueueAuditSpecShippedStateIfDue` so the standing pass never
+          // hot-loops. Best-effort per spec — a failed enqueue is surfaced in `out.skipped` and the next
+          // pass will retry.
+          try {
+            const res = await enqueueAuditSpecShippedStateIfDue(j.workspace_id, slug, {
+              requestedBy: "reconciler:merged-phase",
+              reason: "merged build has no shipped sibling to copy provenance from — routing to audit lane",
+              adminClient: admin,
+            });
+            (out.handedOffToAudit ??= []).push(slug);
+            if (res.enqueued) {
+              out.skipped.push(`${slug}: no shipped sibling to copy merge SHA — queued audit-spec-shipped-state (job ${res.jobId.slice(0, 8)})`);
+              console.log(`[merged-phase-reconcile] ${slug}: no sibling SHA — queued audit-spec-shipped-state (job ${res.jobId.slice(0, 8)})`);
+            } else {
+              out.skipped.push(`${slug}: no shipped sibling to copy merge SHA — audit-spec-shipped-state already ${res.dedup === "open" ? "in flight" : "ran recently"} (job ${res.existingJobId.slice(0, 8)})`);
+              console.log(`[merged-phase-reconcile] ${slug}: no sibling SHA — audit-spec-shipped-state dedupe=${res.dedup} (existing job ${res.existingJobId.slice(0, 8)})`);
+            }
+          } catch (e) {
+            out.skipped.push(`${slug}: no shipped sibling to copy merge SHA — audit hand-off enqueue failed: ${errText(e)}`);
+            console.warn(`[merged-phase-reconcile] ${slug}: audit hand-off enqueue failed (continuing): ${errText(e)}`);
+          }
           continue;
         }
         // merge-gate-verifies-real-phase-checks P2 — GUARD THE BLANKET STAMP. The old code blanket-stamped

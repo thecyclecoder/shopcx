@@ -17938,19 +17938,23 @@ async function applyRequestAuditActionInline(
   if (!owner) return logInvalid("spec has no declared Owner — out-of-leash for a director auto-apply");
   if (owner !== directorFunction) return logInvalid(`spec owner is ${owner}, not ${directorFunction} — out-of-leash`);
 
-  // Dedupe: if there's already an unfinished audit job for this slug, don't queue a second — the
-  // verdict from the in-flight one will surface to the activity feed anyway. ACTIVE statuses match
-  // the agent_jobs lifecycle's non-terminal states.
-  const { data: existing } = await db
-    .from("agent_jobs")
-    .select("id, status")
-    .eq("workspace_id", workspaceId)
-    .eq("spec_slug", slug)
-    .eq("kind", "audit-spec-shipped-state")
-    .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input", "needs_approval", "blocked_on_usage"])
-    .limit(1)
-    .maybeSingle();
-  if (existing) {
+  // Dedupe + insert go through the shared helper (merged-but-unstamped-specs-reach-the-audit-instead-of-
+  // being-dropped Phase 1) so this director-initiated path and the automatic reconciler hand-off
+  // (`reconcileMergedSpecPhases`) cannot drift on the insert shape or the dedupe window. The helper
+  // covers OPEN (any active status) AND RECENT TERMINAL (within AUDIT_SPEC_SHIPPED_STATE_TERMINAL_DEDUPE_MS)
+  // audits — a spec the runner already tried recently won't be re-queued on every director turn.
+  let enqueueRes: Awaited<ReturnType<typeof import("../src/lib/agent-jobs").enqueueAuditSpecShippedStateIfDue>>;
+  try {
+    const { enqueueAuditSpecShippedStateIfDue } = await import("../src/lib/agent-jobs");
+    enqueueRes = await enqueueAuditSpecShippedStateIfDue(workspaceId, slug, {
+      requestedBy: `director:${directorFunction}`,
+      reason,
+      adminClient: db,
+    });
+  } catch (e) {
+    return logInvalid(`enqueue failed: ${errText(e)}`);
+  }
+  if (!enqueueRes.enqueued) {
     try {
       const { recordDirectorActivity } = await import("../src/lib/director-activity");
       await recordDirectorActivity(db, {
@@ -17959,26 +17963,12 @@ async function applyRequestAuditActionInline(
         actionKind: "requested_audit",
         specSlug: slug,
         reason,
-        metadata: { dedup: true, existing_job_id: (existing as { id: string }).id, autonomous: true },
+        metadata: { dedup: true, dedup_reason: enqueueRes.dedup, existing_job_id: enqueueRes.existingJobId, autonomous: true },
       });
     } catch { /* audit best-effort */ }
-    return { summary: `request-audit for ${slug} already queued (${(existing as { id: string }).id.slice(0, 8)}) — reason logged` };
+    return { summary: `request-audit for ${slug} already ${enqueueRes.dedup === "open" ? "queued" : "ran recently"} (${enqueueRes.existingJobId.slice(0, 8)}) — reason logged` };
   }
-
-  const { data: inserted, error } = await db
-    .from("agent_jobs")
-    .insert({
-      workspace_id: workspaceId,
-      spec_slug: slug,
-      kind: "audit-spec-shipped-state",
-      status: "queued",
-      instructions: JSON.stringify({ requested_by: `director:${directorFunction}`, reason }),
-      created_by: null,
-    })
-    .select("id")
-    .single();
-  if (error || !inserted) return logInvalid(`enqueue failed: ${error?.message ?? "no row"}`);
-  const jobId = (inserted as { id: string }).id;
+  const jobId = enqueueRes.jobId;
 
   try {
     const { recordDirectorActivity } = await import("../src/lib/director-activity");
