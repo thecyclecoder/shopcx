@@ -854,8 +854,12 @@ export async function getOrCreateTestingCampaign(
  * chars of the cohort UUID so the name is human-legible + short enough to fit
  * Meta's 400-char campaign name limit even alongside future suffixes.
  */
-export function coldScalerCampaignName(cohortId: string): string {
-  return `MB — Cold Scaler (${cohortId.slice(0, 8)})`;
+export function coldScalerCampaignName(cohortId: string, productTitle?: string | null): string {
+  const t = (productTitle ?? "").trim();
+  // Mirrors `mbTestingCampaignName` so a human scanning Ads Manager sees the pair:
+  //   "MB — Superfood Tabs Testing (ABO)" / "MB — Superfood Tabs Scaler (ABO)".
+  // The cohort-id form is the fallback for a cohort with no resolvable product.
+  return t ? `MB — ${t} Scaler (ABO)` : `MB — Cold Scaler (${cohortId.slice(0, 8)})`;
 }
 
 /**
@@ -866,7 +870,8 @@ export function coldScalerCampaignName(cohortId: string): string {
  * Shape (per docs/brain/reference/meta-scaling-methodology.md § Account structure
  * "SCALING campaign (CBO) ~85% of budget"):
  *  - `OUTCOME_SALES` objective
- *  - CBO (`abo=false`) — campaign-level `daily_budget` is the cohort's ceiling
+ *  - ABO (`abo=true`) — NO campaign-level budget; each graduated ad set carries its own
+ *    (CEO 2026-08-25 — a CBO scaler concentrated ~95% of spend on one ad)
  *  - `LOWEST_COST_WITHOUT_CAP` — auto-bid, NO bid limit (CEO 2026-07-27). Explicit,
  *    because CBO ad sets inherit the campaign strategy and the account default is
  *    `LOWEST_COST_WITH_BID_CAP` on at least one of our accounts.
@@ -891,18 +896,27 @@ export function coldScalerCampaignName(cohortId: string): string {
 export async function getOrCreateColdScalerCampaign(
   token: string,
   accountId: string,
-  opts: { cohortId: string; dailyCeilingCents: number; name?: string },
+  opts: { cohortId: string; dailyCeilingCents: number; name?: string; productTitle?: string | null },
 ): Promise<string> {
-  const name = opts.name || coldScalerCampaignName(opts.cohortId);
+  const name = opts.name || coldScalerCampaignName(opts.cohortId, opts.productTitle);
   const existing = await listCampaigns(token, accountId);
   const hit = existing.find((c) => c.name === name);
   if (hit) return hit.id;
   return createCampaign(token, accountId, {
     name,
     objective: "OUTCOME_SALES",
-    abo: false,
-    dailyBudgetCents: opts.dailyCeilingCents,
-    bidStrategy: "LOWEST_COST_WITHOUT_CAP", // no bid limit — CEO 2026-07-27
+    // ⭐ ABO, not CBO (CEO 2026-08-25). A CBO / Advantage+ scaler hands ALLOCATION to Meta: the
+    // CEO observed crowned winners moved into one and Meta putting ~95% of spend behind a single
+    // ad, so the portfolio of proven creatives you graduated never actually got funded and the one
+    // ad Meta picked saturated its best audience. Per-adset budgets keep allocation OURS — each
+    // graduated winner keeps its own funding. `dailyCeilingCents` therefore does NOT become a
+    // campaign budget; it stays on the cohort row as the governance cap the graduate sizes
+    // per-adset budgets against.
+    abo: true,
+    // NB: no `bidStrategy` here. On an ABO campaign Meta owns bid strategy at the AD SET level,
+    // and `createCampaign` deliberately omits it (sending it with no campaign budget is rejected).
+    // The "no bid limit" guarantee (CEO 2026-07-27) is preserved by `createAdSet`, which already
+    // defaults `bid_strategy=LOWEST_COST_WITHOUT_CAP` on every ad set the graduate mints.
     status: "PAUSED",
   });
 }

@@ -331,8 +331,13 @@ export async function provisionColdScalerCohort(
 export interface MintAndProvisionColdScalerCampaignOptions {
   workspaceId: string;
   cohortId: string;
-  /** The Meta act id string (e.g. `2352876514967984` or `act_…`) — where the CBO scaler campaign is minted. */
+  /** The Meta act id string (e.g. `2352876514967984` or `act_…`) — where the ABO scaler campaign is minted. */
   metaAccountActId: string;
+  /**
+   * Product title for the campaign name — yields `MB — {Product} Scaler (ABO)`, pairing with the
+   * testing campaign's `MB — {Product} Testing (ABO)`. Omit to fall back to the cohort-id form.
+   */
+  productTitle?: string | null;
 }
 
 export interface MintAndProvisionColdScalerCampaignResult {
@@ -381,6 +386,7 @@ export async function mintAndProvisionColdScalerCampaign(
   const token = await getMetaUserToken(opts.workspaceId);
   if (!token) throw new Error("no_meta_token");
   const campaignId = await getOrCreateColdScalerCampaign(token, opts.metaAccountActId, {
+    productTitle: opts.productTitle ?? null,
     cohortId: cohort.id,
     dailyCeilingCents: cohort.dailyScalerCeilingCents,
   });
