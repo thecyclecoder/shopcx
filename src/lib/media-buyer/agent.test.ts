@@ -2406,9 +2406,23 @@ test("agent.ts — Phase 1 wiring: runMediaBuyerLoop calls runGraduateForCrowned
     /await graduateCrownedWinnerToScaler\(admin,\s*\{/.test(src),
     "runGraduateForCrownedWinners must call graduateCrownedWinnerToScaler — the 4-gate flow the crown branch owes",
   );
+  // The shadow exclusion must remain the LEADING condition; extra conjuncts are allowed so the
+  // guard can be tightened (it now also requires winners.length > 0, so a pass with nothing to
+  // graduate skips the arming-gate evaluation instead of doing pointless work).
   assert.ok(
-    /if \(policy\.mode !== "shadow"\) \{[\s\S]*?await runGraduateForCrownedWinners\(admin,/.test(src),
+    /if \(policy\.mode !== "shadow"[^)]*\) \{[\s\S]*?await runGraduateForCrownedWinners\(admin,/.test(src),
     "runMediaBuyerLoop must gate the graduate call on policy.mode !== 'shadow' — shadow never writes to Meta",
+  );
+  // CEO 2026-08-25 — the arming gate is the authorization graduate Gate 3 reads, and it had ZERO
+  // call sites, so the graduate was structurally unreachable. It must be EVALUATED before the
+  // graduate runs, not merely imported. Also pinned by `npm run check:graduate-rail-wired`.
+  assert.ok(
+    /await runColdScalerArmingGate\(admin,\s*\{/.test(src),
+    "runMediaBuyerLoop must CALL runColdScalerArmingGate — nothing else writes media_buyer_cold_scaler_arming_authorization, so without it graduate Gate 3 can only ever deny",
+  );
+  assert.ok(
+    /cold_scaler_graduate_runner_skipped/.test(src),
+    "the graduate runner's own skip reasons must be surfaced — the original call site discarded them while claiming they were audited",
   );
   assert.ok(
     /result\.outcome === "graduated"[\s\S]*?opts\.metaExecutor\.updateObjectStatus\(token, testAdsetId, "PAUSED"\)/.test(src),

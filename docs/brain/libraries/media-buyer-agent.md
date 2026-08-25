@@ -292,3 +292,56 @@ tests, not bigger ones. Evidence, from `_breadth-vs-depth.ts` / `_crown-regressi
   One adset would need ~$2,180/day to exit, more than the whole Phase 1 budget. Meta's optimizer is
   not a lever at our spend; treat the system as a portfolio of manual bets.
 
+
+---
+
+## ⭐ Why the graduate never ran — a gate nothing evaluates (CEO 2026-08-25)
+
+**Symptom.** 5 crowned winners, **0** with a `scaler_meta_adset_id`. Zero `director_activity` rows
+for the graduate, ever. The single live scaler campaign had been seeded by the CEO's own hand.
+
+**Cause chain.** `graduateCrownedWinnerToScaler`'s **Gate 3** refuses unless a
+[[../tables/media_buyer_cold_scaler_arming_authorization]] row exists and is allowed + unexpired.
+The ONLY writer of that row is [[media-buyer-cold-scaler-arming-gate]] `runColdScalerArmingGate` —
+and it had **ZERO CALL SITES**. So the row never existed, `describeArmingDenial(null)` returned
+*"no arming authorization row for this cohort"*, Gate 3 could only ever deny, and the graduate was
+**structurally unreachable**.
+
+Identical shape to the cooldown rail that was configured but never threaded
+(`_check-scale-rails-wired.ts`). **A gate nothing evaluates is not a gate, it is a wall** — and it
+fails silently, because a rail that never runs raises no error.
+
+**Second defect, which is why nobody noticed.** `runGraduateForCrownedWinners` raises its own skip
+reasons (`no_active_cohort` / `no_meta_token` / `no_meta_account_act_id` / `mint_failed` /
+`no_creative_or_adset`) onto a result object that the call site **DISCARDED** — while the comment
+right there claimed *"Every skip and failure is already logged as a director_activity row inside the
+graduate flow."* Only `graduateCrownedWinnerToScaler`'s four gates audit; the runner's do not. The
+graduate could fail on every winner and leave nothing to find.
+
+**Fixed:** the runner now evaluates `runColdScalerArmingGate` before graduating (ISO-week scoped and
+upserted on `(workspace, account, cohort, iso_week)`, so calling it every pass is idempotent), emits
+`cold_scaler_arming_evaluated` as the POSITIVE record, and emits
+`cold_scaler_graduate_runner_skipped` per discarded skip. Guarded by
+`npm run check:graduate-rail-wired` in `predeploy:static` — adversarially verified: renaming the
+call site fails the check.
+
+### ⚠️ The graduate still will not fire, and the reason is upstream
+
+Wiring the gate makes it **evaluate**; whether it **allows** is a separate question. Measured
+2026-08-25, all three preconditions are empty:
+
+| feed | needed | actual |
+|---|---|---|
+| `media_buyer_shadow_reviews` | ≥20 reviewed in 14d, ≥80% agreement | **0 all time** |
+| `media_buyer_sensor_trust` | ≥7 consecutive green days | **0 all time** |
+| `media_buyer_cold_scaler_cac_ltv_snapshots` | ratio ≥ 3 | **none** |
+
+Pure-gate verdict on today's data: `allowed: false` — `insufficient_sample`, `trust_no_snapshots`.
+
+So the cold-scaler rail was never **commissioned**, not merely unwired: the arming gate is a real
+safety gate whose three evidence feeds have no producers. That is a separate build, and the CEO's
+call — but it is now VISIBLE (a denial with reasons every pass) instead of silent.
+
+Re-check any time with `scripts/_arming-dryrun.ts` (read-only; does not write an authorization row
+or fire the deny-path CEO escalation).
+
