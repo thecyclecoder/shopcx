@@ -43,6 +43,7 @@
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { runColdScalerArmingGate } from "@/lib/media-buyer/cold-scaler-arming-gate";
 import { detectWinners, amplifyWinner, type DetectedWinner } from "@/lib/ads/winning-creative-detect";
 import { detectMetaCpaWinners, detectMetaCpaLosers, detectMetaCpaReactivations, hasFreshMetaSignal, hasLiveDeliveringAdsets, META_SIGNAL_MAX_AGE_DAYS, resolveWinnerSource, type MetaCpaReactivation } from "@/lib/media-buyer/meta-cpa-signal";
 import {
@@ -2435,9 +2436,52 @@ export async function runMediaBuyerLoop(
   // Shadow mode never writes to Meta, so skip the graduate loop there — the
   // shadow branch below short-circuits with zero iteration_actions + zero
   // Meta writes.
-  if (policy.mode !== "shadow") {
+  if (policy.mode !== "shadow" && winners.length > 0) {
     try {
-      await runGraduateForCrownedWinners(admin, {
+      // ⭐ Evaluate the ARMING GATE first (CEO 2026-08-25). `graduateCrownedWinnerToScaler`'s
+      // Gate 3 refuses unless a `media_buyer_cold_scaler_arming_authorization` row exists and is
+      // allowed + unexpired — and `runColdScalerArmingGate`, the ONLY writer of that row, had
+      // ZERO CALL SITES. So the row never existed, Gate 3 could only ever deny, and the graduate
+      // was structurally unreachable: 5 crowned winners, 0 with a `scaler_meta_adset_id`, and the
+      // one live scaler seeded by the CEO's own hand. Same shape as the cooldown rail that was
+      // configured but never threaded — a gate nothing evaluates is not a gate, it is a wall.
+      //
+      // The authorization is ISO-week scoped and upserted on
+      // (workspace, account, cohort, iso_week), so calling it every pass is idempotent: the first
+      // pass of the week evaluates, the rest update the same row in place.
+      const scalerCohort = await getEffectiveMediaBuyerColdScalerCohort(admin, opts.workspaceId, {
+        metaAdAccountId: opts.metaAdAccountId,
+        productId: cohortProductIdForCrown,
+      });
+      if (scalerCohort?.isActive) {
+        const arming = await runColdScalerArmingGate(admin, {
+          workspaceId: opts.workspaceId,
+          metaAdAccountId: opts.metaAdAccountId,
+          coldScalerCohortId: scalerCohort.id,
+          now: new Date(nowMs),
+        });
+        // The gate's own deny path already escalates + audits; this line is the POSITIVE record,
+        // so "we evaluated arming this week" is visible even when it allows.
+        await recordDirectorActivity(admin, {
+          workspaceId: opts.workspaceId,
+          directorFunction: "growth",
+          actionKind: "cold_scaler_arming_evaluated",
+          reason:
+            `Cold-scaler arming for cohort ${scalerCohort.id.slice(0, 8)} (iso week ${arming.isoWeek}): ` +
+            `${arming.status.toUpperCase()}${arming.reasons.length ? ` — ${arming.reasons.map((r) => r.code ?? String(r)).join(", ")}` : ""}.`,
+          metadata: {
+            cold_scaler_cohort_id: scalerCohort.id,
+            iso_week: arming.isoWeek,
+            status: arming.status,
+            authorization_id: arming.authorizationId,
+            reasons: arming.reasons,
+            metrics: arming.metrics,
+            autonomous: true,
+          },
+        }).catch(() => {});
+      }
+
+      const graduate = await runGraduateForCrownedWinners(admin, {
         workspaceId: opts.workspaceId,
         metaAdAccountId: opts.metaAdAccountId,
         productId: cohortProductIdForCrown,
@@ -2447,11 +2491,33 @@ export async function runMediaBuyerLoop(
         metaExecutor: opts.metaExecutor ?? DEFAULT_META_EXECUTOR,
         nowMs,
       });
+
+      // Surface the RUNNER's own skips. `graduateCrownedWinnerToScaler` audits its four gates,
+      // but the reasons raised here — no_active_cohort / no_meta_token / no_meta_account_act_id /
+      // mint_failed / no_creative_or_adset — were pushed onto a result object that the call site
+      // DISCARDED, while the comment below claimed every skip was already logged. That is why the
+      // graduate could fail 5 times and leave no trace anyone could find.
+      for (const sk of graduate.skipped) {
+        await recordDirectorActivity(admin, {
+          workspaceId: opts.workspaceId,
+          directorFunction: "growth",
+          actionKind: "cold_scaler_graduate_runner_skipped",
+          reason: `Graduate skipped for winner ad ${sk.metaAdId}: ${sk.reason}.`,
+          metadata: {
+            source_meta_ad_id: sk.metaAdId,
+            skip_reason: sk.reason,
+            product_id: cohortProductIdForCrown,
+            meta_ad_account_id: opts.metaAdAccountId,
+            autonomous: true,
+          },
+        }).catch(() => {});
+      }
+      if (graduate.graduated.length) {
+        console.info(`[media-buyer] graduated ${graduate.graduated.length} winner(s) into the cold scaler`);
+      }
     } catch (err) {
       // A graduate-block throw must never break the media-buyer pass — the
-      // plan below (promote/kill/replenish) is independent. Every skip and
-      // failure is already logged as a director_activity row inside the
-      // graduate flow; this catch is the pass-level backstop only.
+      // plan below (promote/kill/replenish) is independent.
       console.warn("runGraduateForCrownedWinners failed", {
         workspaceId: opts.workspaceId,
         err: errText(err),
