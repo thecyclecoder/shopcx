@@ -23769,15 +23769,59 @@ async function runCreativeScoutJob(job: Job) {
     const { runCreativeScoutSweep } = await import("../src/lib/ads/creative-scout-runner");
     console.log(`${tag} sweeping workspace ${job.workspace_id.slice(0, 8)}${productId ? ` product ${productId.slice(0, 8)}` : " (all products)"}${force ? " [forced]" : ""}`);
 
+    // ── vision dispatcher ────────────────────────────────────────────────────────────────
+    // This worker has NO ANTHROPIC_API_KEY (stripped by design so Max sessions can't burn API
+    // credits), so the direct Opus vision call inside ingestAd throws `no_anthropic_key` on every
+    // ad — the first real box sweep rendered creatives successfully and then failed all of them
+    // exactly there. Vision therefore runs as a top-level `claude -p` on Max, mirroring the proven
+    // ad-creative-qc dispatcher: least-privilege sandbox, a PreToolUse gate that permits Read on
+    // the ONE temp image and denies everything else.
+    let visionCounter = 0;
+    const visionPermissionHookCommand = `npx tsx ${join(REPO_DIR, "scripts", "ad-creative-qc-permission-gate.ts")}`;
+    const visionDispatch = async (
+      prompt: string,
+      allowedImagePath: string,
+    ): Promise<{ resultText: string; isError: boolean }> => {
+      visionCounter++;
+      const vTag = `${tag}[vision#${visionCounter}]`;
+      try {
+        const run = await runBoxLane((cfg, sid) =>
+          runBoxSession(prompt, sid, REPO_DIR, {
+            configDir: cfg,
+            kind: "creative-scout",
+            // Strip every non-base-OS var: no ANTHROPIC_API_KEY, no SUPABASE_*, no GITHUB_TOKEN,
+            // no META_*/OPENAI_*. The session only needs to Read one jpeg and emit JSON.
+            sandbox: "qc",
+            timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+            idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+            permissionGate: { hookCommand: visionPermissionHookCommand },
+            // The gate reads the allowed path from this env var; the sandbox omits it, so extraEnv
+            // (applied AFTER the sandbox) is the only source.
+            extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+          }),
+        );
+        if (run.isError) console.warn(`${vTag} vision session errored — ad stays eligible next sweep`);
+        return { resultText: run.resultText || "", isError: run.isError };
+      } catch (err) {
+        console.error(`${vTag} vision dispatch threw: ${errText(err)}`);
+        return { resultText: "", isError: true };
+      }
+    };
+
     const r = await runCreativeScoutSweep({
       workspaceId: job.workspace_id,
       productId,
       force,
+      visionDispatch,
     });
 
+    // NOTE `inserted` counts ROWS WRITTEN, which includes rows persisted as status='failed' (an ad
+    // whose creative could not be turned into a skeleton). The first box sweep logged "2 new ·
+    // 0 failed" while both rows were failures — so surface the analyzed/failed split explicitly
+    // rather than letting a broken sweep read as a healthy one.
     detail =
       `${r.products} product(s) · ${r.competitors} competitor(s) · ${r.searched} ad(s) seen · ` +
-      `${r.inserted} new · ${r.reobserved} re-observed · ${r.failed} failed` +
+      `${r.inserted} row(s) written · ${r.reobserved} re-observed · ${r.failed} sweep error(s)` +
       (r.unresolved.length ? ` · unresolved: ${r.unresolved.slice(0, 5).join(", ")}` : "") +
       (r.imitationReviewEnqueued ? " · imitation-review queued" : "");
     await update(job.id, { status: "completed", log_tail: detail });
