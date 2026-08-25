@@ -1,6 +1,10 @@
 # libraries/klaviyo
 
-Klaviyo API client (reviews, profiles, events). See [[../integrations/klaviyo]].
+⚠️ **RETIRED vendor client.** `getKlaviyoCredentials` always returns `null` — see [[klaviyo-retired]] — so `fetchKlaviyoReviews`, `syncReviewPage`, `syncReviewsForWorkspace`, `updateReviewStatus`, and `updateReviewType` are all dead. Deleted in Phase B.
+
+**The table-only helpers still work and are still called:** `getReviewsForProducts` (cancel-journey social proof, via [[remedy-selector]] + the playbook executor), `polishReviewBodies`, `generateMissingSummaries`. They read [[../tables/product_reviews]] + Anthropic and never touched the vendor.
+
+See [[../integrations/klaviyo]].
 
 **File:** `src/lib/klaviyo.ts`
 

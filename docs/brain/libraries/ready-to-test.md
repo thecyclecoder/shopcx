@@ -7,7 +7,7 @@ Queries the **ready-to-test queue** — creatives produced by [[ad-static]], [[a
 ## Behavior
 
 Returns every `ad_campaigns` row that has:
-- `status ≠ 'archived'` (excludes retired campaigns whose landing URL was removed), AND
+- `status = 'ready'` — **allowlist** ([[../specs/ready-to-test-bin-excludes-draft-campaigns]] Phase 1). Pinned by BOTH a DB predicate `.eq('status','ready')` AND a JS-side mirror (`if (c.status !== 'ready') continue`) so a chain-mock or schema drift can't leak a non-postable row. Rejects `draft` (unfinished — no `angle_id`, no copy) and `archived` (retired — landing URL removed) with the same guard; any future non-postable status stays out until it's explicitly admitted. The prior denylist `.neq('status','archived')` let a `draft` reach the bin: replenish picked it, publish refused for "no copy source", and Bianca raised a fresh under-provisioned-cohort CEO card every calendar day (8 cards over ~6 days for Creatine Prime+ on 2026-08-25 — 4 of 8 rows in that bin were draft). AND
 - ≥1 `ad_videos` with `status='ready'` (or `media_kind='static'` final JPG), AND
 - `landing_url` set, AND
 - NO active `ad_publish_jobs` row in `status in ('queued','uploading','creating','published')`, AND

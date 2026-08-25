@@ -42,7 +42,6 @@ import {
   chargebackEvidenceReminder,
 } from "@/lib/inngest/chargeback-processing";
 import { ticketUnsnooze } from "@/lib/inngest/ticket-snooze";
-import { syncKlaviyoReviews } from "@/lib/inngest/sync-reviews";
 import {
   dunningPaymentFailed,
   dunningNewCardRecovery,
@@ -112,11 +111,7 @@ import { autoBlogGenerate } from "@/lib/inngest/auto-blog";
 import { featuredReviewCardsCron } from "@/lib/inngest/featured-review-cards";
 import { socialInsightsSync } from "@/lib/inngest/social-insights";
 import { socialPromoGraphics } from "@/lib/inngest/social-promo-graphics";
-import { klaviyoSmsImport } from "@/lib/inngest/klaviyo-sms-import";
-import { klaviyoEventsImport } from "@/lib/inngest/klaviyo-events-import";
-import { klaviyoAttributionCompute } from "@/lib/inngest/klaviyo-attribution-compute";
-import { klaviyoEngagementBackfill } from "@/lib/inngest/klaviyo-engagement-backfill";
-import { klaviyoEngagementSync } from "@/lib/inngest/klaviyo-engagement-sync";
+import { shopifyReviewMetafieldsSync } from "@/lib/inngest/shopify-review-metafields-sync";
 import { socialCommentModerate } from "@/lib/inngest/social-comment-moderate";
 import { metaHistoricalCommentsSync } from "@/lib/inngest/meta-historical-comments-sync";
 import { ticketResearchRequested, ticketHealRequested } from "@/lib/inngest/ticket-research";
@@ -207,7 +202,6 @@ export const registeredInngestFunctions = [
   chargebackLost,
   chargebackEvidenceReminder,
   ticketUnsnooze,
-  syncKlaviyoReviews,
   dunningPaymentFailed,
   dunningNewCardRecovery,
   dunningBillingSuccess,
@@ -295,11 +289,7 @@ export const registeredInngestFunctions = [
   featuredReviewCardsCron,
   socialInsightsSync,
   socialPromoGraphics,
-  klaviyoSmsImport,
-  klaviyoEventsImport,
-  klaviyoAttributionCompute,
-  klaviyoEngagementBackfill,
-  klaviyoEngagementSync,
+  shopifyReviewMetafieldsSync,
   socialCommentModerate,
   metaHistoricalCommentsSync,
   ticketResearchRequested,

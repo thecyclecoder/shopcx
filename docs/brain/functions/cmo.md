@@ -6,9 +6,9 @@ The permanent owner of **owned + organic marketing** — email, SMS, organic soc
 
 ## Scope + owned metrics
 
-- **Owns:** email marketing (Klaviyo), SMS marketing (Twilio), organic social (FB/IG posts/reels/stories), blog + content/SEO, website editorial content.
+- **Owns:** email marketing (⚠️ **no platform** — Klaviyo is retired, see [[../integrations/klaviyo]]; nothing sends marketing email today), SMS marketing (Twilio), organic social (FB/IG posts/reels/stories), blog + content/SEO, website editorial content, product reviews (⚠️ **no collection** — the Klaviyo review-request flow died 2026-07-01).
 - **North-star metrics:** owned-channel revenue + engagement, email/SMS list growth + revenue-per-send, organic reach/engagement, blog-driven sessions + rank.
-- **Data we have:** Klaviyo, Twilio, Meta organic, [[../lifecycles/product-intelligence]] (content grounding).
+- **Data we have:** Twilio, Meta organic, [[../lifecycles/product-intelligence]] (content grounding), [[../tables/product_reviews]] (10.7k rows, frozen). Klaviyo's engagement + campaign data is frozen at the sunset and no longer refreshes.
 
 ## Mandates (perpetual)
 

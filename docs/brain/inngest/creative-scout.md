@@ -1,5 +1,23 @@
 # inngest/creative-scout
 
+> ## 🔄 CHANGED 2026-08-24 — this function no longer sweeps; it DISPATCHES
+>
+> Source moved to [[../integrations/meta-ad-library.md]]. Meta publishes no media url, so a creative
+> now requires a **browser render**, and Playwright lives on the box — not Vercel.
+>
+> **Vercel discovers, the box renders.** This function keeps the weekly cron
+> (`0 9 * * 1`) and decides WHICH workspaces + products to scout (including the freshness gate),
+> then enqueues one `kind='creative-scout'` [[../tables/agent_jobs.md]] row per product.
+> `scripts/builder-worker.ts` → `runCreativeScoutJob` → `runCreativeScoutSweep` does
+> collect → render → vision → persist as ONE unit (never a half-built skeleton row).
+>
+> Consequences:
+> - Returns what it **queued**, not what it ingested — `{queued, products, skipped, alreadyInflight, noMetaAccess}`. Per-run ingest counts are logged by the box job.
+> - The 7s inter-search throttle is **gone**. It existed to stay under AdLibrary's 10/min paid cap; Meta has no per-search credit.
+> - Access is checked **per workspace** (`hasAdLibraryAccess(workspaceId)`), because the token is per-workspace. A workspace without Meta connected is skipped individually rather than short-circuiting the whole cron.
+> - Enqueue is idempotent per (workspace, product) — an in-flight scout is not re-queued, so a cron retry can't double the render spend.
+
+
 The **deliberate per-product Creative Scout** — the imitate feed for the imitate→innovate loop (CEO 2026-07-12). Replaces the retired workspace-wide `creative-finder` sweep. For each of our products that has ≥1 APPROVED competitor (`competitors.product_id`), it pulls that product's competitors' long-running ads from AdLibrary, vision-deconstructs the statics into [[../tables/creative_skeletons]] **tagged with `competitor_id` + `product_id`**, and parks videos for the [[creative-finder]] video pipeline. Dahlia's `getProvenCompetitorAngles(productId)` ([[../libraries/creative-sourcing]]) then reads exactly that product's shelf — **a product imitates only the competitors WE chose for it**, not a workspace-wide soup.
 
 **File:** `src/lib/inngest/creative-scout.ts`

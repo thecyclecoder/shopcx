@@ -1,0 +1,1 @@
+- **Ads supervisor: product `Superfood Tabs` — Bianca missed a crown on adset `Dahlia - Superfood Tabs - Feel Lighter Every Single Day`** · verified 2026-08-24 · → [[../libraries/ads-supervisor]]

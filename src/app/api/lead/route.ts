@@ -67,7 +67,7 @@ interface Body {
   anonymous_id?: string | null;
   /** Coupon minted for this lead (popup flow), stamped on the lead row. */
   coupon_code?: string | null;
-  /** Quiz answers (Phase 4) — persisted to Klaviyo + the lead for segmentation. */
+  /** Quiz answers (Phase 4) — persisted on the lead for segmentation. */
   properties?: Record<string, unknown>;
   /**
    * Popup email step: mint a customer-scoped single-use coupon now (never
@@ -249,21 +249,13 @@ export async function POST(request: Request) {
       console.warn("[lead] storefront_leads upsert failed:", e?.message || e);
     });
 
-  // Fire Lead to Klaviyo (profile upsert + consent). Fire-and-forget —
-  // never block the response on Klaviyo. The Meta CAPI Lead is handled by
-  // the client `lead_captured` storefront event flowing through the CAPI
-  // cron (deduped on event_id), so we don't double-fire it here.
-  void import("@/lib/klaviyo-lead").then(({ upsertKlaviyoLead }) =>
-    upsertKlaviyoLead(body.workspace_id!, {
-      email,
-      phone: body.phone || null,
-      firstName: body.first_name || null,
-      lastName: body.last_name || null,
-      emailConsent: !!body.email_consent,
-      smsConsent: !!(body.sms_consent && body.phone),
-      properties: { source: body.source || "unknown", ...(body.properties || {}), ...(body.quiz_answers || {}) },
-    }).catch(() => undefined),
-  );
+  // No Klaviyo lead push — the vendor is retired (see @/lib/klaviyo-retired).
+  // This used to fire a profile upsert + consent job at Klaviyo on every lead
+  // capture; the subscription is cancelled, so that was shipping customer PII
+  // to a vendor we have no contract with. The lead lives in our own
+  // `customers` + `storefront_leads` rows above, and the Meta CAPI Lead still
+  // flows via the client `lead_captured` storefront event through the CAPI
+  // cron (deduped on event_id) — untouched by this removal.
 
   // Arm the abandonment fallback: if this lead minted a coupon (popup email
   // step) but never completes the phone step, an Inngest delayed job emails
