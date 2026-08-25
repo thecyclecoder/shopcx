@@ -23,6 +23,7 @@
 
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { KLAVIYO_RETIRED, KLAVIYO_RETIRED_RESULT } from "@/lib/klaviyo-retired";
 
 const PLACED_ORDER_METRIC = "VCkHuL";
 
@@ -35,6 +36,11 @@ export const klaviyoAttributionCompute = inngest.createFunction(
     triggers: [{ event: "marketing/klaviyo-attribution.compute" }],
   },
   async ({ event, step }) => {
+    // Klaviyo is a retired vendor — no code path may call its API. This handler
+    // is kept (unregistered work is worse than a visible no-op) until Phase B
+    // deletes it outright. See @/lib/klaviyo-retired.
+    if (KLAVIYO_RETIRED) return KLAVIYO_RETIRED_RESULT;
+
     const { workspace_id } = event.data as { workspace_id: string };
 
     // Set-based recompute — ONE aggregate UPDATE across all campaigns via the

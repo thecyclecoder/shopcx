@@ -1,6 +1,6 @@
 # libraries/klaviyo-lead
 
-Push a storefront lead into Klaviyo as a profile + (when consented) email/SMS subscriber (storefront-mvp Phase 4f/5).
+⚠️ **RETIRED.** Pushed a storefront lead into Klaviyo as a profile + (when consented) email/SMS subscriber (storefront-mvp Phase 4f/5). `/api/lead` no longer calls it and `upsertKlaviyoLead` returns `false` immediately — no customer PII leaves for a vendor we have no contract with. Deleted in Phase B. See [[klaviyo-retired]].
 
 **File:** `src/lib/klaviyo-lead.ts`
 

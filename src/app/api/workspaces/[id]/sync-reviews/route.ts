@@ -1,53 +1,22 @@
+/**
+ * Manual "sync reviews from Klaviyo" trigger — **retired** (klaviyo-sunset, Phase A).
+ *
+ * The Klaviyo subscription is cancelled and `syncKlaviyoReviews` is a guarded
+ * no-op, so firing the event would report "sync started" and then silently do
+ * nothing. Returning 410 keeps the failure honest for any caller still holding
+ * the URL. The dashboard's Sync button is gone; Phase B deletes this route.
+ *
+ * See `@/lib/klaviyo-retired` and [[../../../../../../docs/brain/dashboard/reviews]].
+ */
 import { NextResponse } from "next/server";
-import { getAuthedUser } from "@/lib/supabase/server";
-import { createAdminClient } from "@/lib/supabase/admin";
-import { inngest } from "@/lib/inngest/client";
+import { KLAVIYO_RETIRED_RESULT } from "@/lib/klaviyo-retired";
 
-export async function POST(
-  request: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const { id: workspaceId } = await params;
-  const { user } = await getAuthedUser();
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
-  const admin = createAdminClient();
-  const { data: member } = await admin
-    .from("workspace_members")
-    .select("role")
-    .eq("workspace_id", workspaceId)
-    .eq("user_id", user.id)
-    .single();
-
-  if (!member || !["owner", "admin"].includes(member.role)) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-  }
-
-  const { data: ws } = await admin
-    .from("workspaces")
-    .select("klaviyo_api_key_encrypted")
-    .eq("id", workspaceId)
-    .single();
-
-  if (!ws?.klaviyo_api_key_encrypted) {
-    return NextResponse.json({ error: "Klaviyo not configured" }, { status: 400 });
-  }
-
-  // Manual sync = full sync (all reviews, not just last 30 days)
-  await inngest.send({
-    name: "klaviyo/sync-reviews",
-    data: { workspace_id: workspaceId, full_sync: true },
-  });
-
-  const { count } = await admin
-    .from("product_reviews")
-    .select("id", { count: "exact", head: true })
-    .eq("workspace_id", workspaceId);
-
-  return NextResponse.json({
-    synced: 0,
-    errors: 0,
-    total_reviews: count || 0,
-    message: "Full review sync started in background",
-  });
+export async function POST() {
+  return NextResponse.json(
+    {
+      error: "Klaviyo review sync is retired — reviews are no longer imported from Klaviyo.",
+      ...KLAVIYO_RETIRED_RESULT,
+    },
+    { status: 410 },
+  );
 }

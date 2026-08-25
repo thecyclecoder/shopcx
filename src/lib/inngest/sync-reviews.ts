@@ -8,6 +8,7 @@ import { inngest } from "./client";
 import { buildSyncUrl, syncReviewPage, generateMissingSummaries } from "@/lib/klaviyo";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import { KLAVIYO_RETIRED, KLAVIYO_RETIRED_RESULT } from "@/lib/klaviyo-retired";
 
 export const syncKlaviyoReviews = inngest.createFunction(
   {
@@ -19,6 +20,18 @@ export const syncKlaviyoReviews = inngest.createFunction(
     ],
   },
   async ({ event, step }) => {
+    // Klaviyo is a retired vendor — no code path may call its API. The cron
+    // trigger stays wired and still beats so Control Tower reads "retired,
+    // deliberately doing nothing" instead of RED "no beats" against the
+    // MONITORED_LOOPS row; Phase B removes the node and its registry row
+    // together. See @/lib/klaviyo-retired.
+    if (KLAVIYO_RETIRED) {
+      await step.run("emit-heartbeat-retired", async () => {
+        await emitCronHeartbeat("sync-klaviyo-reviews", { ok: true, produced: KLAVIYO_RETIRED_RESULT });
+      });
+      return KLAVIYO_RETIRED_RESULT;
+    }
+
     const eventData = event?.data as { workspace_id?: string; full_sync?: boolean } | undefined;
     const workspaceId = eventData?.workspace_id;
     const fullSync = eventData?.full_sync ?? false;

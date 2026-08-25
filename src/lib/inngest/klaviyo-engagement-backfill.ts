@@ -33,6 +33,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { KLAVIYO_RETIRED, KLAVIYO_RETIRED_RESULT } from "@/lib/klaviyo-retired";
 
 const KLAVIYO_REVISION = "2025-01-15";
 
@@ -68,6 +69,11 @@ export const klaviyoEngagementBackfill = inngest.createFunction(
     triggers: [{ event: "marketing/klaviyo-engagement.backfill" }],
   },
   async ({ event, step }) => {
+    // Klaviyo is a retired vendor — no code path may call its API. This handler
+    // is kept (unregistered work is worse than a visible no-op) until Phase B
+    // deletes it outright. See @/lib/klaviyo-retired.
+    if (KLAVIYO_RETIRED) return KLAVIYO_RETIRED_RESULT;
+
     const { workspace_id, days } = event.data as {
       workspace_id: string;
       days?: number;
