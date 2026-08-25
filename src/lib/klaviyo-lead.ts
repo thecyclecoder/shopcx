@@ -2,6 +2,12 @@
  * Klaviyo lead capture — push a storefront lead into Klaviyo as a
  * profile + (when consented) email/SMS subscriber.
  *
+ * ⚠️ **RETIRED — this never calls Klaviyo any more.** The subscription was
+ * cancelled (see [[klaviyo-retired]]) and `/api/lead` no longer invokes this at
+ * all, so no storefront lead's PII leaves for a vendor we have no contract with.
+ * The module is kept for one phase so the removal is reviewable in isolation;
+ * Phase B deletes it. `upsertKlaviyoLead` returns `false` immediately.
+ *
  * Storefront-mvp Phase 4f/5. Best-effort + non-fatal: a missing Klaviyo
  * key or an API hiccup must never block the lead from being saved to our
  * own customers/storefront_leads tables. Callers should not await the
@@ -12,6 +18,7 @@
  *   - POST /api/profile-subscription-bulk-create-jobs → set consent
  */
 import { getKlaviyoCredentials } from "@/lib/klaviyo";
+import { KLAVIYO_RETIRED } from "@/lib/klaviyo-retired";
 
 const BASE = "https://a.klaviyo.com/api";
 const REVISION = "2025-01-15";
@@ -40,8 +47,14 @@ function headers(apiKey: string): Record<string, string> {
  * Upsert the lead's Klaviyo profile and, when consent was given, subscribe
  * them to email / SMS marketing. Returns false on any miss (no key, API
  * error) — the caller treats Klaviyo as advisory.
+ *
+ * **Always returns `false` — Klaviyo is retired.** The guard is explicit rather
+ * than relying on `getKlaviyoCredentials` alone so the dead path is obvious at
+ * the call site being deleted.
  */
 export async function upsertKlaviyoLead(workspaceId: string, lead: KlaviyoLeadInput): Promise<boolean> {
+  if (KLAVIYO_RETIRED) return false;
+
   const creds = await getKlaviyoCredentials(workspaceId);
   if (!creds?.apiKey) return false;
 

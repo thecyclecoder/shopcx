@@ -16,6 +16,7 @@ import { errText } from "@/lib/error-text";
 import { decrypt } from "@/lib/crypto";
 import { resolveProductsByMixedIds } from "@/lib/resolve-products-by-mixed-ids";
 import { HAIKU_MODEL } from "@/lib/ai-models";
+import { KLAVIYO_RETIRED } from "@/lib/klaviyo-retired";
 
 /**
  * Extract Shopify product ID from Klaviyo review relationships.
@@ -67,7 +68,23 @@ interface KlaviyoListResponse {
   links?: { self?: string; next?: string; prev?: string };
 }
 
+/**
+ * Resolve a workspace's Klaviyo credentials.
+ *
+ * **Always `null` — Klaviyo is retired.** This is the credential chokepoint for
+ * every outbound function in this file (`fetchKlaviyoReviews`, `syncReviewPage`,
+ * `updateReviewStatus`, `updateReviewType`) plus [[klaviyo-lead]], so returning
+ * `null` here kills all of them at the root even if a key is still stored on the
+ * workspace row. See [[klaviyo-retired]] for why the machinery is guarded rather
+ * than deleted in this phase.
+ *
+ * The table-only helpers below (`getReviewsForProducts`, `polishReviewBodies`,
+ * `generateMissingSummaries`) never call this and are unaffected — they read
+ * `product_reviews`, which outlives the vendor.
+ */
 export async function getKlaviyoCredentials(workspaceId: string): Promise<{ apiKey: string; publicKey: string | null } | null> {
+  if (KLAVIYO_RETIRED) return null;
+
   const admin = createAdminClient();
   const { data: ws } = await admin
     .from("workspaces")
