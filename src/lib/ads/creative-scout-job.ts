@@ -24,14 +24,16 @@ import { createAdminClient } from "@/lib/supabase/admin";
 export const CREATIVE_SCOUT_KIND = "creative-scout" as const;
 
 /**
- * Stable workspace-scoped `agent_jobs.spec_slug` for the creative-scout job. The column is
- * `NOT NULL` (supabase/migrations/20260618120000_agent_jobs.sql), so an omitted value blocks
- * the insert and no scout row ever lands — every enqueue path routes through
- * `enqueueCreativeScoutJob`, so pinning the slug here is the single boundary that keeps the
- * Vercel-side manual + weekly dispatch and the box worker's `agent_jobs_slug_idx` rollups
- * on the same durable bucket ([[../../../docs/brain/inngest/creative-scout.md]]).
+ * `agent_jobs.spec_slug` is **NOT NULL** — omitting it fails the insert with
+ * `null value in column "spec_slug" ... violates not-null constraint`. It is free text used as a
+ * per-kind identity/dedupe key (cf. `ad-creative-trigger`'s `${KIND}:${productId}`), NOT a
+ * reference to a real spec row.
+ *
+ * This is the exact bug the first real Inngest firing caught: the direct-runner tests bypassed the
+ * enqueue entirely, so the missing column only surfaced when the cron path ran for real.
  */
-export const CREATIVE_SCOUT_SPEC_SLUG = "creative-scout" as const;
+export const creativeScoutSlug = (productId?: string | null): string =>
+  `${CREATIVE_SCOUT_KIND}:${productId ?? "all-products"}`;
 
 export interface CreativeScoutJobInput {
   workspaceId: string;
@@ -57,31 +59,27 @@ export async function enqueueCreativeScoutJob(
   input: CreativeScoutJobInput,
   admin: Admin = createAdminClient(),
 ): Promise<{ enqueued: boolean; jobId: string | null; reason?: string }> {
+  const slug = creativeScoutSlug(input.productId);
   const { data: inflight } = await admin
     .from("agent_jobs")
-    .select("id, instructions")
+    .select("id")
     .eq("workspace_id", input.workspaceId)
     .eq("kind", CREATIVE_SCOUT_KIND)
+    .eq("spec_slug", slug)
     .in("status", ["queued", "running"])
-    .limit(50);
+    .limit(1);
 
-  for (const row of (inflight ?? []) as Array<{ id: string; instructions: string | null }>) {
-    try {
-      const parsed = JSON.parse(row.instructions ?? "{}") as CreativeScoutJobInput;
-      if ((parsed.productId ?? null) === (input.productId ?? null)) {
-        return { enqueued: false, jobId: row.id, reason: "already_inflight" };
-      }
-    } catch {
-      /* an unparseable instruction blob shouldn't block a new enqueue */
-    }
+  const existing = (inflight ?? []) as Array<{ id: string }>;
+  if (existing.length) {
+    return { enqueued: false, jobId: existing[0].id, reason: "already_inflight" };
   }
 
   const { data, error } = await admin
     .from("agent_jobs")
     .insert({
       workspace_id: input.workspaceId,
-      spec_slug: CREATIVE_SCOUT_SPEC_SLUG,
       kind: CREATIVE_SCOUT_KIND,
+      spec_slug: slug,
       status: "queued",
       instructions: JSON.stringify({
         workspaceId: input.workspaceId,

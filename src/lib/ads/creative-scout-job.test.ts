@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import {
   enqueueCreativeScoutJob,
   CREATIVE_SCOUT_KIND,
-  CREATIVE_SCOUT_SPEC_SLUG,
+  creativeScoutSlug,
 } from "./creative-scout-job";
 
 interface CapturedInsert {
@@ -59,12 +59,13 @@ function makeFakeAdmin(): { admin: unknown; captured: CapturedInsert[] } {
   return { admin, captured };
 }
 
-test("the exposed slug constant is a stable, non-empty string (the DB rejects null)", () => {
-  assert.equal(typeof CREATIVE_SCOUT_SPEC_SLUG, "string");
-  assert.ok(CREATIVE_SCOUT_SPEC_SLUG.length > 0);
+test("the exposed slug helper returns stable, non-empty strings (the DB rejects null)", () => {
+  assert.equal(typeof creativeScoutSlug("prod-42"), "string");
+  assert.ok(creativeScoutSlug("prod-42").length > 0);
+  assert.ok(creativeScoutSlug(null).length > 0);
 });
 
-test("insert payload carries workspace_id, kind, status, instructions JSON, and the stable spec_slug", async () => {
+test("insert payload carries workspace_id, kind, status, instructions JSON, and the product spec_slug", async () => {
   const { admin, captured } = makeFakeAdmin();
   const result = await enqueueCreativeScoutJob(
     { workspaceId: "ws-1", productId: "prod-42", force: true },
@@ -79,7 +80,7 @@ test("insert payload carries workspace_id, kind, status, instructions JSON, and 
   assert.equal(row.workspace_id, "ws-1");
   assert.equal(row.kind, CREATIVE_SCOUT_KIND);
   assert.equal(row.status, "queued");
-  assert.equal(row.spec_slug, CREATIVE_SCOUT_SPEC_SLUG);
+  assert.equal(row.spec_slug, creativeScoutSlug("prod-42"));
 
   // The instructions blob is a JSON string the box worker re-parses.
   assert.equal(typeof row.instructions, "string");
@@ -92,7 +93,7 @@ test("the productId is optional — omitted input still stamps a non-null spec_s
   await enqueueCreativeScoutJob({ workspaceId: "ws-1" }, admin as never);
 
   const row = captured[0]!.row;
-  assert.equal(row.spec_slug, CREATIVE_SCOUT_SPEC_SLUG);
+  assert.equal(row.spec_slug, creativeScoutSlug(null));
   assert.ok(row.spec_slug, "spec_slug must be truthy so the NOT NULL insert doesn't fail");
 
   const parsed = JSON.parse(row.instructions as string) as Record<string, unknown>;
