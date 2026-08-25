@@ -35,6 +35,21 @@
  * COUNT does not. `product-reviews/route.ts` splits the same two ways so the
  * PDP header and the product card never disagree.
  *
+ * **The written count includes the off-platform offset.**
+ * `workspaces.storefront_off_platform_review_count` (10,000 for Superfoods)
+ * covers four years of Yotpo reviews that were lost when that system was
+ * retired — real reviews from real customers whose rows we no longer hold. The
+ * in-house storefront already applies this setting; applying it here makes the
+ * Shopify theme derive from the SAME source instead of the ad-hoc `plus: 10107`
+ * / `plus: 10114` literals that used to be scattered through its snippets (and
+ * which had to be removed in the same change, or the offset would land twice).
+ *
+ * The RATING is never offset — you cannot average in reviews whose scores are
+ * gone. Only the count.
+ *
+ * `product_reviews` remains the true record; the metafield is a display value,
+ * which is what it has always been.
+ *
  * Idempotent — recomputes from `product_reviews` every run and writes the
  * current value. Safe to re-run; safe to run while the Klaviyo app is still
  * installed (last writer wins, and we write the same numbers).
@@ -107,6 +122,23 @@ async function getShopifyCreds(workspaceId: string): Promise<ShopifyCreds | null
     .single();
   if (!ws?.shopify_myshopify_domain || !ws?.shopify_access_token_encrypted) return null;
   return { shop: ws.shopify_myshopify_domain, token: decrypt(ws.shopify_access_token_encrypted) };
+}
+
+/**
+ * Reviews collected on systems we no longer hold rows for — four years of Yotpo
+ * before it was retired. Configured per workspace on the storefront-design
+ * settings page and already applied by the in-house storefront, so both
+ * storefronts read one number.
+ */
+export async function getOffPlatformReviewCount(workspaceId: string): Promise<number> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("workspaces")
+    .select("storefront_off_platform_review_count")
+    .eq("id", workspaceId)
+    .single();
+  const n = Number(data?.storefront_off_platform_review_count ?? 0);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
 }
 
 /**
@@ -258,6 +290,14 @@ export async function syncReviewMetafields(workspaceId: string): Promise<SyncRes
     return result;
   }
   result.products = aggregates.length;
+
+  // Fold in the off-platform offset for the WRITTEN value. buildReviewAggregates
+  // stays honest (callers that want the true count get it); only what we publish
+  // to the storefront carries the Yotpo-era reviews.
+  const offset = await getOffPlatformReviewCount(workspaceId);
+  if (offset > 0) {
+    aggregates = aggregates.map((a) => ({ ...a, count: a.count + offset }));
+  }
 
   // 25-metafield cap ÷ 2 per product.
   const BATCH = 12;
