@@ -1,0 +1,1 @@
+- **Classify portal vault_failed card declines instead of escalating each to a human** · verified 2026-08-25 · → [[../libraries/portal__remediation]]
