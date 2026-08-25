@@ -1,0 +1,1 @@
+- **A broken verification check must not be able to kill a build** · verified 2026-08-25 · → [[lifecycles/spec-goal-branch]]
