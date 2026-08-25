@@ -957,6 +957,7 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "social-insights-sync", kind: "cron", owner: "cmo", label: "Social insights sync", description: "Daily organic-social insights/metrics sync.", expectedCadence: "daily (30 8 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "sonnet-prompt-auto-review", kind: "cron", owner: "cs", label: "Sonnet prompt auto-review", description: "Daily auto-review of the orchestrator prompt against recent decisions.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "sync-klaviyo-reviews", kind: "cron", owner: "cmo", label: "Klaviyo reviews sync", description: "Daily product-review sync from Klaviyo.", expectedCadence: "daily (0 3 * * *)", livenessWindowMs: 30 * HOUR },
+  { id: "shopify-review-metafields-sync", kind: "cron", owner: "cmo", label: "Shopify review metafields sync", description: "Daily push of product_reviews aggregates into Shopify reviews.rating + rating_count — the metafields every storefront star and the rich-snippet aggregateRating read. Took over from the retired Klaviyo Reviews app.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
   {
     id: "media-buyer-all-customers-refresh-daily",
     kind: "cron",
