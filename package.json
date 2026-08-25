@@ -195,6 +195,7 @@
     "test:experiment-delivery-audit": "tsx --test src/lib/storefront/experiment-delivery-audit.test.ts",
     "test:ready-to-test": "tsx --test src/lib/ads/ready-to-test.test.ts",
     "test:creative-outcome-attribution": "tsx --test src/lib/ads/creative-outcome-attribution.test.ts",
+    "test:creative-scout-job": "tsx --test src/lib/ads/creative-scout-job.test.ts",
     "test:advertised-products": "tsx --test src/lib/advertised-products.test.ts",
     "test:ad-creative-cadence-gate": "tsx --test src/lib/inngest/ad-creative-cadence.gate.test.ts",
     "test:cleo-blueprint-gate": "tsx --test src/lib/cleo-blueprint.gate.test.ts",

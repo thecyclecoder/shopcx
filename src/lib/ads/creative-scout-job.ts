@@ -23,6 +23,16 @@ import { createAdminClient } from "@/lib/supabase/admin";
 
 export const CREATIVE_SCOUT_KIND = "creative-scout" as const;
 
+/**
+ * Stable workspace-scoped `agent_jobs.spec_slug` for the creative-scout job. The column is
+ * `NOT NULL` (supabase/migrations/20260618120000_agent_jobs.sql), so an omitted value blocks
+ * the insert and no scout row ever lands — every enqueue path routes through
+ * `enqueueCreativeScoutJob`, so pinning the slug here is the single boundary that keeps the
+ * Vercel-side manual + weekly dispatch and the box worker's `agent_jobs_slug_idx` rollups
+ * on the same durable bucket ([[../../../docs/brain/inngest/creative-scout.md]]).
+ */
+export const CREATIVE_SCOUT_SPEC_SLUG = "creative-scout" as const;
+
 export interface CreativeScoutJobInput {
   workspaceId: string;
   /** Scope to one product. Omitted ⇒ every product with approved competitors in the workspace. */
@@ -31,18 +41,22 @@ export interface CreativeScoutJobInput {
   force?: boolean;
 }
 
+type Admin = ReturnType<typeof createAdminClient>;
+
 /**
  * Queue one per-product scout job for the box.
  *
  * Idempotent per (workspace, product): a product that already has a queued/running scout job is NOT
  * re-enqueued, so a cron retry or an on-demand trigger landing during the weekly sweep can't double
  * the render spend on the same competitors.
+ *
+ * `admin` is injectable so a fake supabase chain can exercise the row shape in tests; production
+ * callers omit it and the helper falls back to the real service-role client.
  */
 export async function enqueueCreativeScoutJob(
   input: CreativeScoutJobInput,
+  admin: Admin = createAdminClient(),
 ): Promise<{ enqueued: boolean; jobId: string | null; reason?: string }> {
-  const admin = createAdminClient();
-
   const { data: inflight } = await admin
     .from("agent_jobs")
     .select("id, instructions")
@@ -66,6 +80,7 @@ export async function enqueueCreativeScoutJob(
     .from("agent_jobs")
     .insert({
       workspace_id: input.workspaceId,
+      spec_slug: CREATIVE_SCOUT_SPEC_SLUG,
       kind: CREATIVE_SCOUT_KIND,
       status: "queued",
       instructions: JSON.stringify({
