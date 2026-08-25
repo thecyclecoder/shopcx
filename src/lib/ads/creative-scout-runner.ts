@@ -58,6 +58,8 @@ export async function runCreativeScoutSweep(input: {
   force?: boolean;
   /** Max statics visioned per competitor (bounds Opus spend). */
   visionCap?: number;
+  /** Minimum delivery days for an ad to qualify. Default 7 (see sweepCompetitorLanes). */
+  minWinnerDays?: number;
 }): Promise<ScoutRunResult> {
   const { workspaceId } = input;
   const admin = createAdminClient();
@@ -105,6 +107,7 @@ export async function runCreativeScoutSweep(input: {
           const lane = await sweepCompetitorLanes(workspaceId, seed, {
             domain: seed.expectedDomain ?? null,
             visionCap: input.visionCap ?? 12,
+            minWinnerDays: input.minWinnerDays,
             approvedAdvertisers: approved,
             fetchCreative,
           });

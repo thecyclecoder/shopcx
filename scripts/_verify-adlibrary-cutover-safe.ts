@@ -11,6 +11,7 @@
  */
 import { createAdminClient } from "./_bootstrap";
 import { decrypt } from "../src/lib/crypto";
+import { listCompetitors } from "../src/lib/competitors";
 
 const SAMPLE = Number(process.env.SAMPLE || 25);
 const BUCKET = "creative-shots";
@@ -135,11 +136,15 @@ async function main() {
     }
   }
 
-  const { data: comps } = await admin
-    .from("competitors")
-    .select("id, brand, meta_page_id, status")
-    .eq("status", "approved");
-  const approved = (comps ?? []) as Array<{ brand: string; meta_page_id: string | null }>;
+  // Competitors go through the SDK chokepoint — a raw query here would be exactly the mistake
+  // CLAUDE.md warns about (a wrong column silently reads as zero rows).
+  const approved = (
+    await Promise.all(
+      ((ws ?? []) as Array<{ id: string }>).map((w) =>
+        listCompetitors({ workspaceId: w.id, status: "approved" }),
+      ),
+    )
+  ).flat();
   const resolved = approved.filter((c) => c.meta_page_id);
   console.log(
     `\n  approved competitors     : ${approved.length} · ${resolved.length} already have a meta_page_id`,

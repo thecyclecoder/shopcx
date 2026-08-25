@@ -1029,6 +1029,8 @@ export async function sweepCompetitorLanes(
     domain?: string | null;
     visionCap?: number;
     approvedAdvertisers?: Set<string>;
+    /** Minimum days an ad must have been delivering to be worth visioning. Default 7. */
+    minWinnerDays?: number;
     /** Supplied by the BOX. Without it statics are collected + tracked but never rendered/visioned,
      *  because obtaining Meta creative bytes needs a browser. See [[./meta-ad-library-render]]. */
     fetchCreative?: CreativeFetcher;
@@ -1082,8 +1084,26 @@ export async function sweepCompetitorLanes(
     return result;
   }
 
+  // ── LONGEVITY FLOOR ──────────────────────────────────────────────────────────────────
+  // Under AdLibrary this gate lived in the (paid) winners endpoint, which pre-filtered for us.
+  // Collecting the FULL library ourselves means nothing filters by default, and a first live sweep
+  // ingested MUD\\WTR ads that had been running 1 and 5 days — vision spend on creative that may not
+  // survive the week. Meta gives REAL delivery dates, so we can gate on measured traction rather
+  // than waiting to observe persistence ourselves: an ad Meta says started 96 days ago is proven on
+  // the first sweep that sees it.
+  const winners = pulled.filter((a) => isWinner(a, { minDays: opts.minWinnerDays }));
+  if (winners.length === 0) {
+    // The advertiser IS running ads, none long enough to qualify yet. Distinct from an empty pull:
+    // nothing is wrong upstream, so don't flag it transient — but don't retire existing skeletons
+    // either, since the competitor is clearly still active.
+    console.log(
+      `[creative-scout] "${seed.keyword}": ${pulled.length} static(s) pulled, 0 met the ${opts.minWinnerDays ?? 7}-day floor`,
+    );
+    return result;
+  }
+
   result.source = via === "domain" ? "domain" : "page";
-  const ranked = [...pulled].sort((a, b) => winnerScore(b) - winnerScore(a));
+  const ranked = [...winners].sort((a, b) => winnerScore(b) - winnerScore(a));
   const guarded = filterAdsByApprovedAdvertisers(ranked, approved);
   result.nonMappedDropped = guarded.dropped;
   await collectAndTrack(admin, workspaceId, seed, guarded.kept, cap, result, opts.fetchCreative);

@@ -63,6 +63,38 @@ Playwright is on the **box**, not Vercel. Split (founder 2026-08-24): **Vercel d
 
 The unit is the whole per-product sweep, not just the render — splitting discovery from rendering would write skeleton rows with no creative and no vision, a partial-row state every downstream reader would have to learn to skip.
 
+## ⚠️ Playwright `evaluate` must take a REAL function, never a string
+
+`page.evaluate("async () => {…}")` evaluates the string as an **expression**: it produces a function
+object, serializes it to `undefined`, and never calls it. The renderer shipped that way briefly and
+every render silently looked like a missing creative — the first live scout wrote **6/6
+`status='failed'`** rows for ads that render perfectly by hand. Isolated proof:
+
+| form | result |
+|---|---|
+| real function | `{bytes: 43847, w: 483, h: 600}` ✅ |
+| string form | `undefined` ❌ |
+
+Two lessons baked into [[../libraries/meta-ad-library-render.md]]:
+1. Pass real functions to `evaluate` / `waitForFunction` (arguments go through the second param).
+2. **A missing image defaults to TRANSIENT.** It is only `permanent` when the caller already knows
+   Meta stripped the creative (`isCreativeRemoved`). The original code marked every miss permanent,
+   which wrote `status='failed'` rows whose `dedup_key` would make `splitNewExisting` skip those ads
+   on every future sweep — poisoning them forever. Cleanup: `scripts/_cleanup-poisoned-scout-rows.ts`.
+
+## ⚠️ Longevity floor — collection no longer pre-filters
+
+Under AdLibrary the (paid) winners endpoint pre-filtered for quality. Collecting the FULL library
+ourselves means **nothing** gates by default, and the first live sweep ingested MUD\WTR ads running
+**1 and 5 days** — vision spend on creative that may not survive the week.
+
+`sweepCompetitorLanes` now applies `isWinner` (`minWinnerDays`, default **7**) before ranking and
+capping. Meta's real delivery dates make this stronger than the old observe-persistence-ourselves
+model: an ad Meta says started 96 days ago is proven on the FIRST sweep that sees it.
+
+A competitor with ads but none qualifying logs `"N static(s) pulled, 0 met the 7-day floor"` and is
+**not** flagged transient — nothing is wrong upstream, so existing skeletons must not be retired.
+
 ## ⚠️ Ads Meta took down have NO creative
 
 When Meta removes an ad for Advertising Standards it **strips the creative from the archive**. The snapshot renders copy plus a 60px avatar, forever. Detected at ingestion via the link caption (`isCreativeRemoved`) — two wordings:
@@ -112,6 +144,24 @@ The Ad Library **UI** showed **~180 results** for Erth Labs where the API return
 - **`call_to_action`** — Meta doesn't expose the CTA button label anywhere.
 - **The video lane** — the scout is statics-only, so no new video rows arrive. ✅ **Nothing is stranded**: all 64 legacy video rows are already `status='analyzed'`, carry a vision hook, and have a local `thumb_path` that downloads as a valid JPEG (verified 2026-08-25, `scripts/_verify-video-rows-safe.ts`). There are **zero** `video_pending` rows. The legacy fetch in [[../libraries/video-skeleton.md]] is therefore a dead safety net, not a live dependency.
 - **The live-proxy route** (`/api/ads/creative-finder/media`) — deleted. It existed to live-fetch AdLibrary creatives for rows with no local copy; the ship-time backfill gave all 1,330 rows a `thumb_path`, and Meta rows can never have a fetchable `image_url`.
+
+## Verified live (2026-08-25)
+
+First end-to-end sweep — product **Amazing Coffee**, 6 competitors, `visionCap=2`:
+
+```
+competitors  6      ads seen  19
+NEW ingested 2      re-observed 2     failed 0
+unresolved   none   imitation review queued: true
+[creative-scout] "MUD\WTR": 2 static(s) pulled, 0 met the 7-day floor
+```
+
+Resulting rows: 6 `analyzed`, all with `thumb_path` + a vision hook, creatives downloading as valid
+JPEGs. Sample hooks — *"Same Ritual. Less Cortisol. More Calm."*, *"Not Mushroomy. Just Delicious."*,
+*"Forage all these OR get it all in one cup"* (Erth, 95-96d).
+
+Note those hooks are the **on-image** copy, which differs completely from the API's
+`ad_creative_link_titles` ("40% OFF + FREE Gifts Ends Soon! 🎁") — confirming vision stays mandatory.
 
 ## Related
 [[adlibrary]] (retired) · [[meta-graph]] · [[meta-marketing]] · [[../libraries/creative-skeleton.md]] · [[../tables/competitors.md]] · [[../lifecycles/creative-finder.md]]

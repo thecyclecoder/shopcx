@@ -341,7 +341,7 @@ export async function loadApprovedCompetitorsForProduct(
   const admin = createAdminClient();
   const { data } = await admin
     .from("competitors")
-    .select("id, brand, search_keyword, evidence, category, domain, resolved_advertiser")
+    .select("id, brand, search_keyword, evidence, category, domain, resolved_advertiser, meta_page_id")
     .eq("workspace_id", workspaceId)
     .eq("product_id", productId)
     .eq("status", "approved")
@@ -358,6 +358,10 @@ export async function loadApprovedCompetitorsForProduct(
       // competitor's own domain, so a noisy brand-keyword search can't pollute the shelf with wrong-brand ads.
       expectedDomain: (r.domain as string | null) ?? undefined,
       expectedAdvertiser: (r.resolved_advertiser as string | null) ?? (r.brand as string) ?? undefined,
+      // The already-resolved Meta Page ID. Collection short-circuits resolution entirely when this
+      // is present — a stored page id is authoritative, and Meta has no advertiser-name search to
+      // fall back on, so re-resolving every sweep both wastes calls and risks a fresh miss.
+      metaPageId: (r.meta_page_id as string | null) ?? null,
     }));
 }
 
