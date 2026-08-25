@@ -11,6 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   validateExecutableCheck,
+  validateGrepPatternIsPosixEre,
   isPlainReadonlySql,
   detectBuilderChosenNameInGrep,
   collectSpecPinnedGrepLiterals,
@@ -57,6 +58,86 @@ test("grep requires { pattern, expect } with expect in {present, absent}", () =>
   });
   assert.equal(badExpect.valid, false);
   assert.match((badExpect as { reason: string }).reason, /'present' or 'absent'/);
+});
+
+// ── a-broken-verification-check-cannot-kill-a-build Phase 1 ─────────────────────────────────────
+//
+// A grep pattern the git-grep POSIX engine refuses to compile at build time (the exact class the
+// spec pins: `(?i)add column if not exists\s+cancelled_at`) was being counted as unverified CODE
+// and burning three re-drives before the build was dismissed. `validateGrepPatternIsPosixEre` now
+// rejects that class at authoring so the broken check never reaches a build. Anchored narrowly to
+// the exclusive PCRE opener `(?...` so the gate never false-rejects a pattern that runs today.
+
+test("validateGrepPatternIsPosixEre rejects the exact pattern that dismissed cancelled-subs-stop-reporting-a-future-billing-date", () => {
+  const r = validateGrepPatternIsPosixEre("(?i)add column if not exists\\s+cancelled_at");
+  assert.equal(r.valid, false, "the live-incident pattern must reject at authoring");
+  const reason = (r as { reason: string }).reason;
+  assert.match(reason, /PCRE-only/, "reason must name the offense class");
+  assert.match(reason, /\(\?i\)/, "reason must name (?i) as the case-insensitive alternative to swap");
+  assert.match(reason, /all-lowercase/, "reason must point at the supported route (smart-case via -i)");
+});
+
+test("validateGrepPatternIsPosixEre rejects every git-grep-refused PCRE construct", () => {
+  // git grep -E genuinely refuses each of these with `Invalid preceding regular expression` — the
+  // exclusive marker is `(?` where `(` opens a group. Escaped parens + `?` quantifier stay legal
+  // (tested below).
+  for (const bad of [
+    "(?i)select",
+    "(?:non-capturing)",
+    "(?=lookahead)",
+    "(?!neg-lookahead)",
+    "(?<=behind)",
+    "(?<!not-behind)",
+    "(?<name>foo)",
+    "(?P<py>foo)",
+    "(?>atomic)",
+  ]) {
+    const r = validateGrepPatternIsPosixEre(bad);
+    assert.equal(r.valid, false, `PCRE construct "${bad}" must reject`);
+  }
+});
+
+test("validateGrepPatternIsPosixEre accepts every pattern git grep POSIX genuinely compiles", () => {
+  // Same-intent-as-the-live-incident + a coverage sweep of common shapes the existing suite already
+  // uses — a false rejection blocks spec authoring outright, so the gate MUST NOT overreach.
+  for (const ok of [
+    "add column if not exists.*cancelled_at",   // the -i / smart-case rewrite of the live-incident pattern
+    "runSpecChecks",
+    "test:.*crowned",
+    "^Phase 1",
+    "consume\\(",
+    "\\(?optional-paren\\)?",                    // escaped paren + `?` quantifier: literal (?
+    "select|update",                              // top-level alternation
+    "[A-Z][a-zA-Z0-9]+",                         // char class
+    "handleRedemption",
+    "grep\\.pattern",
+    "SELECT",
+    "cancelled_at",
+  ]) {
+    assert.equal(
+      validateGrepPatternIsPosixEre(ok).valid,
+      true,
+      `pattern "${ok}" is legal POSIX ERE and MUST accept`,
+    );
+  }
+});
+
+test("validateExecutableCheck routes grep.pattern through the POSIX gate", () => {
+  // The whole point of the fix: (?i) reaches the DB via validateExecutableCheck, so the integration
+  // must fire — not just the pure predicate. A rejection here is what makes the broken check never
+  // reach a build.
+  const bad = validateExecutableCheck({
+    exec_kind: "grep",
+    params: { pattern: "(?i)add column if not exists\\s+cancelled_at", expect: "present" },
+  });
+  assert.equal(bad.valid, false);
+  assert.match((bad as { reason: string }).reason, /PCRE-only/);
+
+  const good = validateExecutableCheck({
+    exec_kind: "grep",
+    params: { pattern: "add column if not exists.*cancelled_at", expect: "present" },
+  });
+  assert.equal(good.valid, true, "the -i / smart-case rewrite must pass the same gate");
 });
 
 test("grep.path rejects option-looking, absolute, traversing, NUL, and empty values", () => {
