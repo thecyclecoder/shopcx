@@ -12,6 +12,12 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Ads supervisor: product `Superfood Tabs` — Bianca missed a crown on adset `Dahlia - Superfood Tabs - Feel Lighter Every Single Day`** · verified 2026-08-24 · → [[../libraries/ads-supervisor]]
+- **A cancelled subscription must not report a live next-billing date** · verified 2026-08-24 · → [[lifecycles/subscription-billing]]
+- **A shipment claim in a director verdict must come from a live tracker read** · verified 2026-08-24 · → [[lifecycles/return-pipeline]]
+- **The open-ticket defect check must honor assignment** · verified 2026-08-24 · → [[libraries/cs-director#founder-ruling-sticky-invariant]] · skill: [[../../../.claude/skills/open-tickets]]
+- **Refuse Money Remedies When Live Refund Headroom Is Degraded** · verified 2026-08-24 · → [[libraries/cs-director]]
+- **Remedy state + return ceiling must count out-of-band Shopify refunds** · verified 2026-08-24 · → [[../lifecycles/return-pipeline]]
 - **Stop segment coverage stale-tail false alerts during refresh fan-out** · verified 2026-08-22 · → [[../libraries/control-tower]]
 - **A CS-director verdict cannot silently clear a founder escalation nobody ruled on** · verified 2026-08-20 · → [[../libraries/cs-director]]
 - **Do not count unclaimed inbound dispatches as AI orchestrator work** · verified 2026-08-20 · → [[../libraries/control-tower]]
