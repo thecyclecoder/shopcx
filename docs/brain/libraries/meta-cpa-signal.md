@@ -92,3 +92,24 @@ Pass `crownConfidenceZ: 0` to fall back to the old point-estimate rule without a
 degrade less. All five of ours were crowned at 7–13, too narrow a range to test. With the bar at 15
 this becomes checkable against our own data within about a month.
 
+
+### The crown also discounts CONTAMINATED history (CEO 2026-08-25)
+
+`activeAdsetLifetimeMetrics` now reads [[../tables/meta_adsets]]`.clean_signal_since` per adset and
+drops every insight row on or before that day, via the pure exported
+`insightCountsTowardSignal(snapshotDate, cleanSignalSince)`.
+
+Two independent ways a crown can be wrong, and they need different guards:
+
+| failure | guard |
+|---|---|
+| **small** sample — the luckiest adset wins on noise | `crownUpperBoundCpaCents` (confidence bound) |
+| **contaminated** sample — existing customers converting inside a "cold" test | `clean_signal_since` floor |
+
+The confidence bound does nothing about contamination: 10 purchases are 10 purchases whether or not
+they came from people who already bought. Three legacy adsets (incl. `MB Tabs — Test 02`, the best
+crown candidate at $186 CPA) were running with no existing-customer exclusion at all.
+
+A failed `clean_signal_since` read logs and falls back to counting the full history — failing the
+other way would silently starve every crown across the workspace.
+

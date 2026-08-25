@@ -14,7 +14,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { crownUpperBoundCpaCents, CROWN_CONFIDENCE_Z } from "./meta-cpa-signal";
+import { crownUpperBoundCpaCents, CROWN_CONFIDENCE_Z, insightCountsTowardSignal } from "./meta-cpa-signal";
 import { isTestRailObject } from "@/lib/meta/decision-engine";
 
 // ── crownUpperBoundCpaCents ────────────────────────────────────────────────
@@ -112,4 +112,43 @@ test("a null parent campaign falls back to the roster check without throwing", (
 
 test("an EMPTY campaign set degrades to roster-only — it must not accidentally allow everything", () => {
   assert.equal(isTestRailObject({ object_id: "120250143054030326" }, EXCLUDED, new Set()), true);
+});
+
+// ── insightCountsTowardSignal — contaminated history must not reach a crown ──
+//
+// The wedge: three test adsets (47-49d old) predated the existing-customer exclusion feature, so
+// existing customers could convert inside a "cold" test — inflating purchases and flattering CPA.
+// `crownUpperBoundCpaCents` guards a SMALL sample; it does nothing about a DIRTY one. Repairing the
+// targeting only cleans the signal going forward, while the crown reads LIFETIME totals — so a
+// repaired adset would still be judged on 10 contaminated purchases plus N clean ones.
+
+test("no floor ⇒ every day counts — the default for every adset never repaired", () => {
+  assert.equal(insightCountsTowardSignal("2026-07-01", null), true);
+  assert.equal(insightCountsTowardSignal("2026-07-01", undefined), true);
+});
+
+test("⭐ days BEFORE the repair are discarded — the contaminated purchases can't crown it", () => {
+  assert.equal(insightCountsTowardSignal("2026-07-14", "2026-08-25T14:00:00.000Z"), false);
+  assert.equal(insightCountsTowardSignal("2026-08-24", "2026-08-25T14:00:00.000Z"), false);
+});
+
+test("the cutover DAY itself is discarded — it is partly pre-repair", () => {
+  // Counting it would re-admit exactly the contamination the floor exists to exclude.
+  assert.equal(insightCountsTowardSignal("2026-08-25", "2026-08-25T14:00:00.000Z"), false);
+});
+
+test("days strictly AFTER the repair count", () => {
+  assert.equal(insightCountsTowardSignal("2026-08-26", "2026-08-25T14:00:00.000Z"), true);
+  assert.equal(insightCountsTowardSignal("2026-09-10", "2026-08-25T14:00:00.000Z"), true);
+});
+
+test("a date-only floor works the same as a full timestamp", () => {
+  assert.equal(insightCountsTowardSignal("2026-08-25", "2026-08-25"), false);
+  assert.equal(insightCountsTowardSignal("2026-08-26", "2026-08-25"), true);
+});
+
+test("comparison is lexicographic on ISO days, so month/year boundaries are not special-cased wrong", () => {
+  assert.equal(insightCountsTowardSignal("2026-09-01", "2026-08-31"), true);
+  assert.equal(insightCountsTowardSignal("2026-08-31", "2026-09-01"), false);
+  assert.equal(insightCountsTowardSignal("2027-01-01", "2026-12-31"), true);
 });

@@ -54,6 +54,25 @@ const LIFETIME_LOOKBACK_DAYS = 180;
  * verdict floor reached over the test's life), never a rolling 7-day window that a low-budget adset caps
  * out below.
  */
+/**
+ * Does an insight row count toward an adset's lifetime crown/kill metrics?
+ *
+ * `cleanSignalSince` marks when an adset's signal became trustworthy — set when its audience is
+ * repaired mid-flight (e.g. adding the existing-customer exclusions a legacy adset was minted
+ * without). Everything on or before that DAY is discarded: the cutover day is itself partly
+ * pre-repair, so counting it would re-admit the contamination we are excluding.
+ *
+ * NULL floor ⇒ every row counts, which is the behaviour for every adset that was never repaired.
+ *
+ * Pure + exported: this is the rule that decides whether a contaminated purchase can still reach a
+ * crown, so it is pinned by tests rather than trusted by inspection.
+ */
+export function insightCountsTowardSignal(snapshotDate: string, cleanSignalSince: string | null | undefined): boolean {
+  if (!cleanSignalSince) return true;
+  const floorDay = String(cleanSignalSince).slice(0, 10);
+  return String(snapshotDate).slice(0, 10) > floorDay;
+}
+
 async function activeAdsetLifetimeMetrics(admin: Admin, workspaceId: string, metaAdAccountId: string): Promise<AdsetScorecard[]> {
   const { data: latest } = await admin
     .from("iteration_scorecards_daily")
@@ -84,9 +103,25 @@ async function activeAdsetLifetimeMetrics(admin: Admin, workspaceId: string, met
   // Cumulative lifetime totals per active adset from the insights history.
   const sinceIso = new Date(Date.now() - LIFETIME_LOOKBACK_DAYS * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const adsetIds = active.map((a) => a.object_id);
+  // Per-adset "signal is trustworthy from here" floors. An adset repaired mid-flight (e.g. given the
+  // existing-customer exclusions it was minted without) must not be crowned on the purchases it
+  // banked while contaminated — the confidence bound guards small samples, not dirty ones.
+  const { data: floorRows, error: floorErr } = await admin
+    .from("meta_adsets")
+    .select("meta_adset_id, clean_signal_since")
+    .eq("workspace_id", workspaceId)
+    .in("meta_adset_id", adsetIds);
+  // Fail SAFE-BY-DISCARD is wrong here (it would silently starve every crown); fail open to the
+  // pre-existing behaviour instead, but say so loudly — a missing floor only over-counts history.
+  if (floorErr) console.warn(`[meta-cpa-signal] clean_signal_since read failed (${floorErr.message}) — counting full history`);
+  const cleanFloor = new Map<string, string | null>();
+  for (const r of (floorRows ?? []) as Array<{ meta_adset_id: string; clean_signal_since: string | null }>) {
+    cleanFloor.set(String(r.meta_adset_id), r.clean_signal_since);
+  }
+
   const { data: ins } = await admin
     .from("meta_insights_daily")
-    .select("meta_object_id, spend_cents, purchases, revenue_cents, impressions, clicks, add_to_cart")
+    .select("meta_object_id, snapshot_date, spend_cents, purchases, revenue_cents, impressions, clicks, add_to_cart")
     .eq("workspace_id", workspaceId)
     .eq("meta_ad_account_id", metaAdAccountId)
     .eq("level", "adset")
@@ -95,6 +130,7 @@ async function activeAdsetLifetimeMetrics(admin: Admin, workspaceId: string, met
   const life = new Map<string, { spend: number; purch: number; rev: number; imp: number; clk: number; atc: number }>();
   for (const r of (ins ?? []) as Array<Record<string, unknown>>) {
     const k = String(r.meta_object_id);
+    if (!insightCountsTowardSignal(String(r.snapshot_date), cleanFloor.get(k))) continue;
     const cur = life.get(k) ?? { spend: 0, purch: 0, rev: 0, imp: 0, clk: 0, atc: 0 };
     cur.spend += Number(r.spend_cents ?? 0);
     cur.purch += Number(r.purchases ?? 0);
