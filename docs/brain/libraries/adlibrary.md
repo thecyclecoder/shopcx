@@ -1,5 +1,11 @@
 # `src/lib/adlibrary.ts` — AdLibrary.com discovery client
 
+> ## ⛔ RETIRED 2026-08-24 — module deleted
+>
+> Superseded by [[meta-ad-library]] / [[meta-ad-library-resolve]] / [[meta-ad-library-render]].
+> Kept as provenance for historical `creative_skeletons` rows. See [[../integrations/meta-ad-library.md]].
+
+
 Discovery half of the winning-static-creative finder (Phase 2). Searches [[../integrations/adlibrary]] for long-running competitor + category ads, classifies static vs video at pull time, and fetches creative bytes (Bearer key) for vision. See [[../lifecycles/creative-finder]] · [[../specs/winning-static-creative-finder]].
 
 ## Exports

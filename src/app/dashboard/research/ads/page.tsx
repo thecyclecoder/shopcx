@@ -58,11 +58,6 @@ export default function ResearchAdsPage() {
   const [showHidden, setShowHidden] = useState(false);
   const [hiddenCount, setHiddenCount] = useState(0);
 
-  const proxy = useCallback(
-    (u: string | null): string | null =>
-      u ? `/api/ads/creative-finder/media?workspaceId=${workspace.id}&u=${encodeURIComponent(u)}` : null,
-    [workspace.id],
-  );
 
   // Product dropdown — the advertised (hero) products only.
   useEffect(() => {
@@ -181,7 +176,7 @@ export default function ResearchAdsPage() {
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {ads.map((s) => {
-            const src = s.thumb_url ?? proxy(s.image_url);
+            const src = s.thumb_url;
             return (
               <Link
                 key={s.id}

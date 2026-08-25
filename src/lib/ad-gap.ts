@@ -17,6 +17,7 @@
  * iteration. It optimizes a bounded proxy (cross-brand angle recurrence), the role agent owns the
  * objective. See docs/brain/operational-rules.md § North star.
  */
+import { COMPETITOR_AD_SOURCES } from "@/lib/competitor-ad-types";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 interface CompetitorAdRow {
@@ -149,7 +150,7 @@ export async function buildAdGapReport(
       "advertiser, hook, mechanism_claim, proof, offer, format, call_to_action, days_running, estimated_spend, destination_domain, image_url, seed_kind",
     )
     .eq("workspace_id", workspaceId)
-    .eq("source", "adlibrary")
+    .in("source", COMPETITOR_AD_SOURCES)
     .in("status", ["analyzed", "shortlisted"])
     .not("advertiser", "is", null);
   const compAds = (compData || []) as CompetitorAdRow[];
