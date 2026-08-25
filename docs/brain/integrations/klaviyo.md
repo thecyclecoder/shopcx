@@ -30,6 +30,22 @@ Enforced by [[../libraries/klaviyo-retired]] (`KLAVIYO_RETIRED`, always `true`) 
 - **Email marketing.** `Opened Email` / `Clicked Email` events were still arriving at sunset, i.e. Klaviyo flows were still sending. There is no in-house replacement for marketing email — only transactional ([[../lifecycles/order-confirmation]]) and cart recovery. Owned by [[../functions/cmo]].
 - **Engagement segments.** `profile_engagement_summary` was already empty (its rebuild RPC times out at 2M+ rows). The Klaviyo engagement half of `profile_events` now freezes; the `scripts/segment-analysis-*.ts` one-offs that read it will only see our own SMS events going forward.
 
+## Replacement widgets (in progress)
+
+The Shopify theme's Klaviyo review surfaces are being replaced with our own — see [[../libraries/shopify-review-metafields]] for the star-rating half and `src/app/api/storefront/[workspace]/product-reviews/route.ts` for the widget feed. The homepage already ran this pattern before the sunset: `sections/dr-reviews.liquid` fetches `/api/storefront/superfoods/featured-reviews` with a baked fallback.
+
+What's on the theme today:
+
+| Surface | Mechanism | Blast radius when the embed goes off |
+|---|---|---|
+| 6 live PDP templates (`ashwavana-guru`, `ashwavana-zen`, `acv-gummies`, `sleep-gummies`, `amazing-creamer`, `creatine-prime`) | Klaviyo Reviews **app blocks** (average-rating · product-reviews · product-reviews-list) | Section renders empty |
+| `page.trusted-reviews` + 5 collection lander templates → **25+ live promo collections** | custom-liquid divs `#klaviyo-featured-reviews-carousel` / `#klaviyo-reviews-all`, hydrated by the onsite JS | Section renders empty |
+| Everything else (PDP stars, product cards, rich snippets) | `product.metafields.reviews.rating` / `rating_count` | **Stars vanish store-wide** unless we write the metafields ourselves |
+
+`superfood-tabs`, `amazing-coffee`, and `amazing-coffee-kcups` — the three biggest sellers — carry no Klaviyo review blocks at all.
+
+The onsite JS itself is an **app embed**, in `config/settings_data.json` → `current.blocks` → `shopify://apps/klaviyo-email-marketing-sms/blocks/klaviyo-onsite-embed/…`, `"disabled": false`. Flipping it to `true` is a normal theme-repo commit. `snippets/klaviyo_addToCart.liquid` is orphaned (rendered nowhere). `layout/theme.liquid` has a `klaviyoForms` listener that fires the Meta `Lead` pixel event on popup submit — that dies with the embed too.
+
 ## Phase B (not yet done)
 
 Delete the five Inngest functions + their `MONITORED_LOOPS` rows + kill switches, the manual trigger routes, [[../libraries/klaviyo-lead]], the Klaviyo card in integrations settings, and the dead `klaviyo_*` tables (`klaviyo_events` 19.7k frozen · `klaviyo_profile_directory` 424 · `klaviyo_sms_campaign_history` 0 · `klaviyo_profile_staging` 0 · `profile_engagement_summary` 0). `db-health.ts` and `migration-drift.ts` already whitelist `klaviyo_*` as retiring. Null the `klaviyo_api_key_encrypted` + `klaviyo_public_key` columns. Remove Klaviyo's onsite JS from the Shopify storefront theme — it is still firing `Viewed Product` / `Added to Cart` / `Active on Site`.

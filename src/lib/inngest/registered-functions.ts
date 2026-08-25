@@ -117,6 +117,7 @@ import { klaviyoEventsImport } from "@/lib/inngest/klaviyo-events-import";
 import { klaviyoAttributionCompute } from "@/lib/inngest/klaviyo-attribution-compute";
 import { klaviyoEngagementBackfill } from "@/lib/inngest/klaviyo-engagement-backfill";
 import { klaviyoEngagementSync } from "@/lib/inngest/klaviyo-engagement-sync";
+import { shopifyReviewMetafieldsSync } from "@/lib/inngest/shopify-review-metafields-sync";
 import { socialCommentModerate } from "@/lib/inngest/social-comment-moderate";
 import { metaHistoricalCommentsSync } from "@/lib/inngest/meta-historical-comments-sync";
 import { ticketResearchRequested, ticketHealRequested } from "@/lib/inngest/ticket-research";
@@ -300,6 +301,7 @@ export const registeredInngestFunctions = [
   klaviyoAttributionCompute,
   klaviyoEngagementBackfill,
   klaviyoEngagementSync,
+  shopifyReviewMetafieldsSync,
   socialCommentModerate,
   metaHistoricalCommentsSync,
   ticketResearchRequested,

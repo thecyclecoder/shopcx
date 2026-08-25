@@ -93,6 +93,10 @@ const { count } = await admin.from("product_reviews")
 - **`images` are Klaviyo-relative paths** (`{company_id}/{uuid}.jpg?updated_at=…`), not URLs — 95 rows. Nothing renders them; the assets live on Klaviyo's CDN and die with the account. `scripts/_backfill-review-images-to-storage.ts` mirrors them once the CDN base is supplied.
 - Status enum in use: `published` (9,344) · `rejected` (1,327) · `featured` (74). `pending` / `unpublished` are counted by the dashboard API but no rows carry them.
 
+## Aggregates → Shopify
+
+`reviews.rating` + `reviews.rating_count` on the Shopify product are computed from this table daily by [[../libraries/shopify-review-metafields]]. That aggregate counts **rating-only rows** (no body) — the widget list doesn't. Change one scope and you must change the other, or a PDP header contradicts its own product card.
+
 ## Ad tool
 
 - **Tier-4 PROOF-ONLY ad source** for [[product_ad_angles]]. Qualifying rows: `rating>=4`. Reviews can be **cited** as a proof anchor (`proof_anchor.type='review'`) but must **never lead** an angle — the lead is always a Tier-1/Tier-2 verbatim benefit.
