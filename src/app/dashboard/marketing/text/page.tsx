@@ -87,8 +87,6 @@ export default function TextMarketingListPage() {
   const [history, setHistory] = useState<KlaviyoHistoryRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historySort, setHistorySort] = useState<HistorySort>("send_time");
-  const [importing, setImporting] = useState(false);
-  const [importMessage, setImportMessage] = useState<string | null>(null);
 
   useEffect(() => {
     fetch(`/api/workspaces/${workspace.id}/sms-campaigns`)
@@ -109,25 +107,6 @@ export default function TextMarketingListPage() {
 
   useEffect(() => { loadHistory(historySort); }, [loadHistory, historySort]);
 
-  async function startImport() {
-    setImporting(true);
-    setImportMessage(null);
-    const res = await fetch(`/api/workspaces/${workspace.id}/klaviyo-sms-import`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ history_days: 200 }),
-    });
-    if (res.ok) {
-      setImportMessage("Import started — runs in background. Refresh in a minute.");
-      // Best-effort: re-poll the table after a short delay so the
-      // first few rows appear without a manual refresh.
-      setTimeout(() => loadHistory(historySort), 30_000);
-    } else {
-      const d = await res.json().catch(() => ({}));
-      setImportMessage(d.error || "Import failed to start");
-    }
-    setImporting(false);
-  }
 
   return (
     <div className="mx-auto w-full max-w-screen-2xl px-4 py-6 sm:px-6">
@@ -242,18 +221,10 @@ export default function TextMarketingListPage() {
         <div>
           <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Klaviyo history</h2>
           <p className="mt-0.5 text-xs text-zinc-500">
-            Imported SMS campaign performance from Klaviyo — last ~6 months. <strong>Initial Revenue</strong> excludes subscription auto-renewals (computed locally from Placed Order events with source_name not in subscription_contract*). Klaviyo&apos;s raw revenue appears in grey next to it when they differ.
+            Historical SMS campaign performance imported from Klaviyo before that vendor was retired — frozen, no longer refreshed. <strong>Initial Revenue</strong> excludes subscription auto-renewals (computed locally from Placed Order events with source_name not in subscription_contract*). Klaviyo&apos;s raw revenue appears in grey next to it when they differ.
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {importMessage && <span className="text-xs text-emerald-600">{importMessage}</span>}
-          <button
-            onClick={startImport}
-            disabled={importing}
-            className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
-          >
-            {importing ? "Starting…" : history.length === 0 ? "Import history" : "Re-sync"}
-          </button>
         </div>
       </div>
 

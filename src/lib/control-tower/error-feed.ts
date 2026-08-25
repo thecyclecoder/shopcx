@@ -1170,17 +1170,20 @@ export function isTransientAnthropicOverloadError(message: string | null | undef
  * fetch Klaviyo's `/reviews/` endpoint and, on a non-ok response, log
  * `console.error(\`Klaviyo reviews fetch failed: ${res.status}\`)` and RECOVER: the page
  * loop breaks / the sync returns a graceful no-op with `synced: 0, errors: 0, nextUrl: null`,
- * so the durable `syncKlaviyoReviews` Inngest function (`src/lib/inngest/sync-reviews.ts`,
- * daily 3am cron) still emits its end-of-run heartbeat. Reviews are idempotent by
- * `external_id`, so the next daily beat re-syncs anything a 5xx dropped — no data loss. The
+ * so the durable `syncKlaviyoReviews` Inngest cron still emitted its end-of-run heartbeat.
+ * ⚠️ That cron and every other Klaviyo Inngest function were DELETED in the Klaviyo sunset
+ * (Phase B), and the `fetchAllReviews` / `syncReviewPage` fetches are unreachable behind
+ * `KLAVIYO_RETIRED`, so this signature can no longer be produced. The classifier is kept
+ * inert rather than removed with its test suite in the same pass; it retires with the
+ * `klaviyo_*` tables. The
  * log-drain line is a PRE-RECOVERY sighting of a vendor 5xx the code already handles
  * cleanly; minting a fresh OPEN paged incident + repair fan-out for it churns Platform
  * owners on a loop that already self-heals.
  *
  * `true` ONLY when ALL of:
- *   1. `path` equals `/api/inngest` — the durable `syncKlaviyoReviews` Inngest step is the
- *      only surface that reaches `fetchAllReviews`/`syncReviewPage` today; a different
- *      caller would fire on a different path and stays captured / paged,
+ *   1. `path` equals `/api/inngest` — the durable `syncKlaviyoReviews` Inngest step WAS the
+ *      only surface that reached `fetchAllReviews`/`syncReviewPage`; a different caller
+ *      would fire on a different path and stays captured / paged,
  *   2. the trimmed message begins with the exact `Klaviyo reviews fetch failed:` prefix
  *      (the two `console.error` labels — not any other Klaviyo log), AND
  *   3. the trailing status token parses as a 5xx (500–599).

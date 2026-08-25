@@ -12,10 +12,7 @@ Enforced by [[../libraries/klaviyo-retired]] (`KLAVIYO_RETIRED`, always `true`) 
 |---|---|---|
 | `/dashboard/reviews` moderation | PATCHed Klaviyo `/reviews/{id}/` for every row with a `klaviyo_review_id` — i.e. all ~10.7k | Local-only. `product_reviews` is the sole system of record; rejection reason + explanation persist on the row. See [[../dashboard/reviews]] |
 | `/api/lead` | Fire-and-forget profile upsert + consent push on every storefront lead | **Removed.** No customer PII leaves for the vendor. Meta CAPI Lead is unaffected (it flows via the `lead_captured` storefront event) |
-| `sync-klaviyo-reviews` (cron, 3am) | Pulled `/reviews/` nightly | Guarded no-op that still beats, so Control Tower reads *retired* rather than RED *no beats* |
-| `klaviyo-engagement-sync` (cron, 10:00 UTC) | Pulled 8 metrics into [[../tables/profile_events]] | Same — guarded no-op + heartbeat |
-| `klaviyo-events-import` · `klaviyo-sms-import` · `klaviyo-engagement-backfill` · `klaviyo-attribution-compute` | Event-triggered imports | Guarded no-ops returning `KLAVIYO_RETIRED_RESULT` |
-| `/api/workspaces/[id]/sync-reviews` | Fired a full re-sync | `410 Gone`. The dashboard's Sync button is gone |
+| All six Inngest functions | `sync-klaviyo-reviews` + `klaviyo-engagement-sync` (crons), `klaviyo-events-import` · `klaviyo-sms-import` · `klaviyo-engagement-backfill` · `klaviyo-attribution-compute` (event-triggered) | **Deleted (Phase B)** along with their `MONITORED_LOOPS` rows, the manual trigger routes, and the dashboard buttons that called them |
 
 ## What survives the sunset
 
@@ -46,9 +43,16 @@ What's on the theme today:
 
 The onsite JS itself is an **app embed**, in `config/settings_data.json` → `current.blocks` → `shopify://apps/klaviyo-email-marketing-sms/blocks/klaviyo-onsite-embed/…`, `"disabled": false`. Flipping it to `true` is a normal theme-repo commit. `snippets/klaviyo_addToCart.liquid` is orphaned (rendered nowhere). `layout/theme.liquid` has a `klaviyoForms` listener that fires the Meta `Lead` pixel event on popup submit — that dies with the embed too.
 
-## Phase B (not yet done)
+## Phase B
 
-Delete the five Inngest functions + their `MONITORED_LOOPS` rows + kill switches, the manual trigger routes, [[../libraries/klaviyo-lead]], the Klaviyo card in integrations settings, and the dead `klaviyo_*` tables (`klaviyo_events` 19.7k frozen · `klaviyo_profile_directory` 424 · `klaviyo_sms_campaign_history` 0 · `klaviyo_profile_staging` 0 · `profile_engagement_summary` 0). `db-health.ts` and `migration-drift.ts` already whitelist `klaviyo_*` as retiring. Null the `klaviyo_api_key_encrypted` + `klaviyo_public_key` columns. Remove Klaviyo's onsite JS from the Shopify storefront theme — it is still firing `Viewed Product` / `Added to Cart` / `Active on Site`.
+**Done — the Inngest surface is gone.** Six functions deleted (`sync-reviews`, `klaviyo-engagement-sync`, `klaviyo-engagement-backfill`, `klaviyo-events-import`, `klaviyo-sms-import`, `klaviyo-attribution-compute`), plus their two `MONITORED_LOOPS` rows, the `/sync-reviews` · `/klaviyo-sms-import` · `/klaviyo-engagement-backfill` trigger routes, `scripts/kick-klaviyo-import.ts`, and the two dashboard buttons that called them (integrations "Sync Reviews Now", marketing/text "Import history").
+
+Two things intentionally left behind:
+
+- **`generateMissingSummaries` + `polishReviewBodies`** in [[../libraries/klaviyo]] are now uncalled — their only caller was the deleted review-sync cron. They are table-only (read `product_reviews`, write via Haiku) and the in-house reviews program will want both. Do not delete them as "dead code"; they are waiting for a caller.
+- **`isTransientKlaviyoReviewsFetch5xx`** in [[control-tower/error-feed]] can no longer fire (its log line is behind `KLAVIYO_RETIRED`). Kept inert rather than removed with its test suite in the same pass; it retires with the tables.
+
+**Still to do:** [[../libraries/klaviyo-lead]], the Klaviyo card in integrations settings, and the dead `klaviyo_*` tables (`klaviyo_events` 19.7k frozen · `klaviyo_profile_directory` 424 · `klaviyo_sms_campaign_history` 0 · `klaviyo_profile_staging` 0 · `profile_engagement_summary` 0). `db-health.ts` and `migration-drift.ts` already whitelist `klaviyo_*` as retiring. Null the `klaviyo_api_key_encrypted` + `klaviyo_public_key` columns. Remove Klaviyo's onsite JS from the Shopify storefront theme — it is still firing `Viewed Product` / `Added to Cart` / `Active on Site`.
 
 ## Historical reference
 

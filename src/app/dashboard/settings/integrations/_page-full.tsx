@@ -87,7 +87,6 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
   const [klaviyoApiKeyHint, setKlaviyoApiKeyHint] = useState<string | null>(null);
   const [klaviyoLastSync, setKlaviyoLastSync] = useState<string | null>(null);
   const [klaviyoReviewCount, setKlaviyoReviewCount] = useState<number | null>(null);
-  const [klaviyoSyncing, setKlaviyoSyncing] = useState(false);
 
   // Higgsfield (Ad Tool)
   const [higgsfieldApiKey, setHiggsfieldApiKey] = useState("");
@@ -426,25 +425,6 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
       setKlaviyoReviewCount(null);
       setMessage("Klaviyo disconnected");
     }
-  };
-
-  const handleSyncReviews = async () => {
-    setKlaviyoSyncing(true);
-    setMessage("");
-    try {
-      const res = await fetch(`/api/workspaces/${workspace.id}/sync-reviews`, { method: "POST" });
-      if (res.ok) {
-        const data = await res.json();
-        setMessage(`Synced ${data.synced} reviews${data.errors ? ` (${data.errors} errors)` : ""}`);
-        setKlaviyoLastSync(new Date().toISOString());
-        setKlaviyoReviewCount(data.total_reviews ?? klaviyoReviewCount);
-      } else {
-        setMessage("Review sync failed");
-      }
-    } catch {
-      setMessage("Review sync failed");
-    }
-    setKlaviyoSyncing(false);
   };
 
   // Higgsfield handlers (Ad Tool — dual credential: API key + secret)
@@ -1555,14 +1535,6 @@ export default function IntegrationsPage({ filterSection }: { filterSection?: st
                 </div>
               </div>
               <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={handleSyncReviews}
-                  disabled={klaviyoSyncing}
-                  className="rounded-md border border-indigo-300 px-4 py-2 text-sm font-medium text-indigo-600 transition-colors hover:bg-indigo-50 disabled:opacity-50 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-950"
-                >
-                  {klaviyoSyncing ? "Syncing..." : "Sync Reviews Now"}
-                </button>
                 <button
                   type="button"
                   onClick={handleDisconnectKlaviyo}
