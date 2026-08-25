@@ -12,6 +12,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **A merged-but-unstamped spec must reach the audit lane instead of being silently dropped** · verified 2026-08-25 · → [[../libraries/agent-jobs]]
+- **Bianca's postable bin takes status='ready' only — a draft creative can never be a replenish candidate** · verified 2026-08-25 · → [[../libraries/ready-to-test]]
 - **Ads supervisor: product `Superfood Tabs` — Bianca missed a crown on adset `Dahlia - Superfood Tabs - Feel Lighter Every Single Day`** · verified 2026-08-24 · → [[../libraries/ads-supervisor]]
 - **A cancelled subscription must not report a live next-billing date** · verified 2026-08-24 · → [[lifecycles/subscription-billing]]
 - **A shipment claim in a director verdict must come from a live tracker read** · verified 2026-08-24 · → [[lifecycles/return-pipeline]]
