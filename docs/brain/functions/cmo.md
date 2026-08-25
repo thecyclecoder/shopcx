@@ -22,6 +22,13 @@ Always-on organic posts/reels/stories to FB + IG for engagement, sourced from ex
 - **Metric:** posting cadence kept full, organic reach/engagement.
 - **Specs:** [[../specs/automated-social-scheduler]] ✅
 
+### Review collection
+Keep a live supply of first-party product reviews. Reviews are load-bearing across the business — storefront PDPs, the Shopify theme's star ratings and Google rich snippets, the ad tool's tier-4 proof anchors, [[../lifecycles/product-intelligence]] grounding, cancel-journey social proof, and review cards. They were collected by Klaviyo until that vendor was retired; the last review landed **2026-07-01** and nothing has collected one since.
+- **Objective (Iris owns it):** a steady, honest supply of reviews with enough coverage per product that no PDP reads thin. **Bounded proxy:** reviews collected per month, per product — never "positive reviews," which is the Goodhart failure this mandate must not optimize into.
+- **The asset:** [[../tables/product_reviews]] (10,745 rows, frozen). [[../libraries/shopify-review-metafields]] publishes the aggregates to Shopify daily so the stars survive Klaviyo's removal.
+- **Rails:** an incentive is never conditional on sentiment; a 1–3★ review routes to CS as a save opportunity rather than being buried; a request is never sent to someone who explicitly opted out.
+- **Status:** ⏳ collection dark since 2026-07-01. Display side rebuilt ([[../integrations/klaviyo]] § Replacement widgets).
+
 ### SMS marketing agent (Margo)
 Autonomous owned-channel SMS promos — the CMO-side mirror of Growth's storefront optimizer. **Margo** (worker persona under Iris) runs a cadence engine ([[../inngest/sms-marketing]]) that, on a valid send window, picks a sale theme (VIP / Weekend), tailors the per-segment copy from the DB-driven [[../tables/sms_campaign_templates]] library, and schedules 1-2 promotional sends/week over the [[marketing-text]] pipeline — all within a bounded proxy.
 - **Objective (Iris owns it):** owned-channel SMS revenue. **Bounded proxy (Margo optimizes it):** attributed **revenue-per-send** ([[../sms-segment-performance]]) within the policy's weekly cap + segment scope + send windows.
