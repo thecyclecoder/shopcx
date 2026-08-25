@@ -73,7 +73,7 @@ interface KlaviyoListResponse {
  *
  * **Always `null` — Klaviyo is retired.** This is the credential chokepoint for
  * every outbound function in this file (`fetchKlaviyoReviews`, `syncReviewPage`,
- * `updateReviewStatus`, `updateReviewType`) plus [[klaviyo-lead]], so returning
+ * `updateReviewStatus`, `updateReviewType`), so returning
  * `null` here kills all of them at the root even if a key is still stored on the
  * workspace row. See [[klaviyo-retired]] for why the machinery is guarded rather
  * than deleted in this phase.

@@ -27,7 +27,7 @@ export async function GET(
   const { data: workspace } = await admin
     .from("workspaces")
     .select(
-      "resend_api_key_encrypted, resend_domain, support_email, transactional_from_name, transactional_reply_to_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, klaviyo_api_key_encrypted, klaviyo_public_key, klaviyo_last_sync_at, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted, versium_api_key_encrypted, storefront_domain, storefront_slug, shortlink_domain, twilio_phone_number, google_ads_developer_token_encrypted, google_ads_client_id, google_ads_client_secret_encrypted, google_ads_refresh_token_encrypted, google_ads_customer_id, google_search_console_credentials_encrypted, google_search_console_site_url, braintree_merchant_id, braintree_public_key, braintree_private_key_encrypted, braintree_environment, avalara_account_id, avalara_license_key_encrypted, avalara_company_code, avalara_environment, avalara_origin_address, avalara_default_tax_code, avalara_enabled, twilio_verify_service_sid, higgsfield_api_key_encrypted, higgsfield_secret_encrypted"
+      "resend_api_key_encrypted, resend_domain, support_email, transactional_from_name, transactional_reply_to_email, sandbox_mode, shopify_domain, shopify_client_id_encrypted, shopify_client_secret_encrypted, shopify_access_token_encrypted, shopify_myshopify_domain, shopify_scopes, shopify_multipass_secret_encrypted, appstle_webhook_secret_encrypted, appstle_api_key_encrypted, auto_close_reply, response_delays, help_center_url, help_slug, help_logo_url, help_primary_color, help_custom_domain, meta_page_id, meta_page_access_token_encrypted, meta_instagram_id, meta_page_name, meta_webhook_verify_token, amplifier_api_key_encrypted, amplifier_order_source_code, amplifier_tracking_sla_days, amplifier_cutoff_hour, amplifier_cutoff_timezone, amplifier_shipping_days, slack_bot_token_encrypted, slack_team_id, slack_team_name, slack_connected_at, easypost_test_api_key_encrypted, easypost_live_api_key_encrypted, easypost_test_mode, return_address, default_return_parcel, census_api_key_encrypted, versium_api_key_encrypted, storefront_domain, storefront_slug, shortlink_domain, twilio_phone_number, google_ads_developer_token_encrypted, google_ads_client_id, google_ads_client_secret_encrypted, google_ads_refresh_token_encrypted, google_ads_customer_id, google_search_console_credentials_encrypted, google_search_console_site_url, braintree_merchant_id, braintree_public_key, braintree_private_key_encrypted, braintree_environment, avalara_account_id, avalara_license_key_encrypted, avalara_company_code, avalara_environment, avalara_origin_address, avalara_default_tax_code, avalara_enabled, twilio_verify_service_sid, higgsfield_api_key_encrypted, higgsfield_secret_encrypted"
     )
     .eq("id", workspaceId)
     .single();
@@ -104,14 +104,6 @@ export async function GET(
     meta_instagram_id: workspace.meta_instagram_id,
     meta_webhook_verify_token: workspace.meta_webhook_verify_token,
 
-    // Klaviyo
-    klaviyo_connected: !!workspace.klaviyo_api_key_encrypted,
-    klaviyo_api_key_hint: workspace.klaviyo_api_key_encrypted
-      ? `pk_...${decrypt(workspace.klaviyo_api_key_encrypted).slice(-4)}`
-      : null,
-    klaviyo_public_key: workspace.klaviyo_public_key,
-    klaviyo_last_sync_at: workspace.klaviyo_last_sync_at,
-    klaviyo_review_count: null, // Populated by caller if needed
 
     // Amplifier
     amplifier_connected: !!workspace.amplifier_api_key_encrypted,
@@ -358,15 +350,6 @@ export async function PATCH(
       updates.meta_oauth_state = null;
     }
 
-    // Klaviyo
-    if ("klaviyo_api_key" in body) {
-      if (body.klaviyo_api_key) {
-        updates.klaviyo_api_key_encrypted = encrypt(body.klaviyo_api_key);
-      } else {
-        updates.klaviyo_api_key_encrypted = null;
-      }
-    }
-
     // Google Ads
     if ("google_ads_developer_token" in body) {
       updates.google_ads_developer_token_encrypted = body.google_ads_developer_token
@@ -426,9 +409,6 @@ export async function PATCH(
       }
     }
 
-    if ("klaviyo_public_key" in body) {
-      updates.klaviyo_public_key = body.klaviyo_public_key || null;
-    }
 
     // Amplifier
     if ("amplifier_api_key" in body) {
