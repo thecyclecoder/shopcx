@@ -17,7 +17,7 @@
  */
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { hasAdLibraryKey } from "@/lib/adlibrary";
+
 import { hasFfmpeg, processVideoPending, type VideoProcessResult } from "@/lib/video-skeleton";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
@@ -72,7 +72,10 @@ export const creativeFinderVideoProcess = inngest.createFunction(
   },
   async ({ event, step }) => {
     const result = await (async () => {
-      if (!hasAdLibraryKey()) return { skipped: "no_adlibrary_key" };
+      // Legacy-drain gate: this pipeline can only process `video_pending` rows whose creative is
+      // still hosted on adlibrary.com. Without that key there is nothing it can do — Meta video is
+      // not collected (statics-only scout) and would need a browser render regardless.
+      if (!process.env.ADLIBRARY_API_KEY) return { skipped: "no_legacy_adlibrary_key" };
       if (!hasFfmpeg()) return { skipped: "no_ffmpeg" };
 
       const data = event?.data as { workspaceId?: string; max?: number } | undefined;

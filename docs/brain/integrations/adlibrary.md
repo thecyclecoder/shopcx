@@ -1,5 +1,20 @@
 # adlibrary
 
+> ## ⛔ RETIRED 2026-08-24 — superseded by [[meta-ad-library]]
+>
+> Competitor-ad collection moved to Meta's own Ad Library (`/ads_archive`) when the founder's Meta
+> identity confirmation landed. It is free, official, and carries real per-ad delivery dates,
+> targeting, and Meta's `media_type` classification — none of which this vendor supplied.
+>
+> `src/lib/adlibrary.ts` and `src/lib/adlibrary-winners.ts` are **deleted**. This page is kept
+> because 1,330 historical `creative_skeletons` rows carry `source='adlibrary'` and REAL
+> `heat`/`impression`/`estimated_spend` values that no Meta row will ever have — reading those rows
+> means reading this page. Nothing here describes live code.
+>
+> Still live: `ADLIBRARY_API_KEY` drains the 64 legacy `video_pending` rows
+> ([[../libraries/video-skeleton.md]]). When the subscription ends, those become undrainable.
+
+
 **AdLibrary.com** — ad-intelligence index used to discover long-running competitor + category ads (the winners we reverse-engineer). Chosen because it works with **no KYC**, unlike Meta's Ad Library API which is gated behind facebook.com identity confirmation. See [[../lifecycles/creative-finder]] · [[../specs/winning-static-creative-finder]] · client: [[../libraries/adlibrary]].
 
 ## Auth

@@ -28,7 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ffmpegStatic from "ffmpeg-static";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { fetchCreative } from "@/lib/adlibrary";
+
 import {
   transcribeBuffer,
   whisperCostCents,
@@ -117,6 +117,37 @@ export interface VideoDeconstructResult {
 }
 
 /**
+ * Fetch a LEGACY AdLibrary-hosted video resource.
+ *
+ * ⚠️ TERMINAL PATH. This exists only to drain the `video_pending` rows the AdLibrary era left
+ * behind (64 of them at migration time), whose `image_url` is a Bearer-keyed adlibrary.com resource.
+ * It is deliberately self-contained so it survived the deletion of `src/lib/adlibrary.ts`.
+ *
+ * No NEW rows can arrive here: the Meta scout collects `staticsOnly` (founder: we research static
+ * creative), and a Meta video row's only creative handle would be a snapshot url needing a browser
+ * render, which this Vercel-side pipeline cannot do. When `ADLIBRARY_API_KEY` is finally removed the
+ * remaining legacy rows become undrainable — that is expected and accepted, not a regression to fix
+ * here. See [[../../docs/brain/integrations/meta-ad-library.md]] § what the migration drops.
+ */
+async function fetchLegacyAdLibraryVideo(
+  url: string,
+): Promise<{ buffer: Buffer; contentType: string }> {
+  const key = process.env.ADLIBRARY_API_KEY;
+  if (!key) {
+    throw new Error(
+      "legacy AdLibrary video fetch unavailable: ADLIBRARY_API_KEY is unset. This row predates the " +
+        "Meta Ad Library migration and its creative exists only on adlibrary.com.",
+    );
+  }
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${key}` } });
+  if (!res.ok) throw new Error(`legacy AdLibrary video fetch failed: HTTP ${res.status}`);
+  return {
+    buffer: Buffer.from(await res.arrayBuffer()),
+    contentType: res.headers.get("content-type") ?? "video/mp4",
+  };
+}
+
+/**
  * Download → keyframes + transcript → four-slot skeleton for ONE video creative.
  * `creativeUrl` is the Bearer-keyed AdLibrary video resource url (stored as the
  * row's `image_url`). Transcription is best-effort — a silent / oversized / failing
@@ -126,7 +157,7 @@ export async function deconstructVideo(
   workspaceId: string,
   creativeUrl: string,
 ): Promise<VideoDeconstructResult> {
-  const { buffer, contentType } = await fetchCreative(creativeUrl);
+  const { buffer, contentType } = await fetchLegacyAdLibraryVideo(creativeUrl);
   const bytes = buffer.byteLength;
 
   let transcript = "";

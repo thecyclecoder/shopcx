@@ -519,6 +519,10 @@ const MAX_ADS_SUPERVISOR = Number(process.env.AGENT_TODO_MAX_ADS_SUPERVISOR || 1
 // mirrors ads-supervisor (own supervisory lane, single-workspace at a time so we don't run two Max
 // sessions against the same scout output).
 const MAX_IMITATION_QUALITY_REVIEW = Number(process.env.AGENT_TODO_MAX_IMITATION_QUALITY_REVIEW || 1);
+// creative-scout holds a chromium session open for a whole product sweep (Meta publishes no media
+// url — every static costs a rendered page-load). Concurrency-1 so two sweeps can never contend for
+// the box's memory with parallel browsers.
+const MAX_CREATIVE_SCOUT = Number(process.env.AGENT_TODO_MAX_CREATIVE_SCOUT || 1);
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
@@ -762,7 +766,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ad-review-feedback" | "ads-supervisor" | "imitation-quality-review" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ad-review-feedback" | "ads-supervisor" | "imitation-quality-review" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario" | "creative-scout";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -796,6 +800,7 @@ interface Job {
 // missing an entry here has one visible failure mode (the coarse busy/behind<25 self-update defer
 // no longer force-overrides for that kind), never a wrong claim, so the mirror is safe.
 const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
+  "creative-scout",
   "build",
   "plan",
   "fold",
@@ -4519,7 +4524,7 @@ const LANE_GROUPS = {
       "migration-fix", "deploy-review", "mario", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
       "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
       "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
-      "media-buyer-grade", "ad-creative", "ad-creative-copy-author", "ad-creative-copy-qc", "ad-review-feedback", "imitation-quality-review", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
+      "media-buyer-grade", "ad-creative", "ad-creative-copy-author", "ad-creative-copy-qc", "ad-review-feedback", "imitation-quality-review", "creative-scout", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
       "proposed-model-tier", "audit-spec-shipped-state", "ceo-authorized-out-of-leash",
     ] as const,
   },
@@ -23749,6 +23754,58 @@ async function runImitationQualityReviewClaude(prompt: string, sessionId: string
   return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "imitation-quality-review", sandbox: "max", timeout: IMITATION_QUALITY_REVIEW_TIMEOUT_MS });
 }
 
+/**
+ * creative-scout — collect a product's competitor ads off the Meta Ad Library, render the statics,
+ * vision them, and persist skeletons.
+ *
+ * WHY THIS LANE EXISTS ON THE BOX: Meta's archive publishes no media url. The only handle to a
+ * creative is `ad_snapshot_url`, a JS-rendered page, so producing bytes needs Playwright — which
+ * lives here, not on Vercel. The Inngest cron (`creative-scout-weekly-cron`) decides WHAT to scout
+ * and enqueues this job; this lane does collect → render → vision → persist as one unit so a
+ * skeleton row is never half-built. See docs/brain/integrations/meta-ad-library.md.
+ */
+async function runCreativeScoutJob(job: Job) {
+  const tag = `[creative-scout:${job.id.slice(0, 8)}]`;
+  const { emitAgentHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+  const startedAt = Date.now();
+  let ok = true;
+  let detail = "";
+  try {
+    let instr: { productId?: unknown; force?: unknown } = {};
+    try { instr = job.instructions ? JSON.parse(job.instructions) : {}; } catch { /* not JSON — degrade */ }
+    const productId = typeof instr.productId === "string" && instr.productId ? instr.productId : null;
+    const force = instr.force === true;
+
+    const { runCreativeScoutSweep } = await import("../src/lib/ads/creative-scout-runner");
+    console.log(`${tag} sweeping workspace ${job.workspace_id.slice(0, 8)}${productId ? ` product ${productId.slice(0, 8)}` : " (all products)"}${force ? " [forced]" : ""}`);
+
+    const r = await runCreativeScoutSweep({
+      workspaceId: job.workspace_id,
+      productId,
+      force,
+    });
+
+    detail =
+      `${r.products} product(s) · ${r.competitors} competitor(s) · ${r.searched} ad(s) seen · ` +
+      `${r.inserted} new · ${r.reobserved} re-observed · ${r.failed} failed` +
+      (r.unresolved.length ? ` · unresolved: ${r.unresolved.slice(0, 5).join(", ")}` : "") +
+      (r.imitationReviewEnqueued ? " · imitation-review queued" : "");
+    await update(job.id, { status: "completed", log_tail: detail });
+    console.log(`${tag} ${detail}`);
+  } catch (err) {
+    ok = false;
+    detail = errText(err);
+    await update(job.id, { status: "failed", log_tail: detail.slice(0, 2000) });
+    console.error(`${tag} failed:`, detail);
+  } finally {
+    await emitAgentHeartbeat("creative-scout", {
+      ok,
+      detail: detail.slice(0, 300),
+      durationMs: Date.now() - startedAt,
+    }).catch(() => {});
+  }
+}
+
 async function runImitationQualityReviewJob(job: Job) {
   const tag = `[imitation-quality-review:${job.id.slice(0, 8)}]`;
   const { emitAgentHeartbeat } = await import("../src/lib/control-tower/heartbeat");
@@ -27126,6 +27183,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "calibrate-media-buyer-policy") return runCalibrateMediaBuyerPolicyJob(job);
   if (job.kind === "ads-supervisor") return runAdsSupervisorJob(job);
   if (job.kind === "imitation-quality-review") return runImitationQualityReviewJob(job);
+  if (job.kind === "creative-scout") return runCreativeScoutJob(job);
   // dispatcher-fallthrough: kind === "build" — the build flow below is the implicit default.
   // (Mirrored in scripts/_check-worker-lanes.ts's DISPATCH_BY_FALLTHROUGH so the static check passes
   // without forcing a 400-line refactor of dispatchJob into an `if (job.kind === "build") { ... }` block.)
@@ -29356,6 +29414,7 @@ async function main() {
   const countCalibrateMediaBuyerPolicy = () => [...active.values()].filter((v) => v.kind === "calibrate-media-buyer-policy").length;
   const countAdsSupervisor = () => [...active.values()].filter((v) => v.kind === "ads-supervisor").length;
   const countImitationQualityReview = () => [...active.values()].filter((v) => v.kind === "imitation-quality-review").length;
+  const countCreativeScout = () => [...active.values()].filter((v) => v.kind === "creative-scout").length;
   const countAgentCoach = () => [...active.values()].filter((v) => v.kind === "agent-coach").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
@@ -30018,6 +30077,17 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed imitation-quality-review ${job.id.slice(0, 8)} → ${countImitationQualityReview() + 1}/${MAX_IMITATION_QUALITY_REVIEW} imitation-quality-review lane`);
+        launch(job);
+      }
+      // Fill the creative-scout lane (meta-ad-library migration): collect a product's competitor
+      // ads off Meta's Ad Library, render the statics with Playwright (Meta exposes no media url —
+      // only a JS-rendered ad_snapshot_url), vision them into creative_skeletons. Enqueued
+      // per-product by the creative-scout-weekly-cron Inngest fn. Concurrency-1 — see MAX_CREATIVE_SCOUT.
+      while (laneHasQueued(queuedKinds, ["creative-scout"]) && countCreativeScout() < MAX_CREATIVE_SCOUT) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["creative-scout"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed creative-scout ${job.id.slice(0, 8)} → ${countCreativeScout() + 1}/${MAX_CREATIVE_SCOUT} creative-scout lane`);
         launch(job);
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —

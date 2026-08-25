@@ -21,7 +21,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
 import { throwForAnthropicNetworkError, throwForAnthropicStatus } from "@/lib/anthropic-retry";
-import type { Seed } from "@/lib/adlibrary";
+import { COMPETITOR_AD_SOURCES, type Seed } from "@/lib/competitor-ad-types";
 
 export type CompetitorSource = "llm" | "category_sweep" | "manual" | "whitelisted";
 export type CompetitorStatus = "proposed" | "approved" | "rejected";
@@ -691,7 +691,7 @@ export async function promoteWhitelistedPages(
     .from("creative_skeletons")
     .select("advertiser, destination_domain, seed_keyword")
     .eq("workspace_id", workspaceId)
-    .eq("source", "adlibrary")
+    .in("source", COMPETITOR_AD_SOURCES)
     .not("advertiser", "is", null)
     .not("destination_domain", "is", null)
     .limit(5000);

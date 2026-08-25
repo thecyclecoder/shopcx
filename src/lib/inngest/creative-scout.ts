@@ -27,7 +27,9 @@
 import type { GetStepTools } from "inngest";
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { hasAdLibraryKey, type Seed } from "@/lib/adlibrary";
+import { type Seed } from "@/lib/competitor-ad-types";
+import { hasAdLibraryAccess } from "@/lib/meta-ad-library";
+import { enqueueCreativeScoutJob } from "@/lib/ads/creative-scout-job";
 import {
   loadApprovedCompetitorsForProduct,
   productsWithApprovedCompetitors,
@@ -150,105 +152,89 @@ async function keptSeedsForProduct(
 type StepTools = GetStepTools<typeof inngest>;
 
 /**
- * Sweep every product-with-approved-competitors for one workspace, PRODUCT BY PRODUCT (each product's
- * ~5 competitors at a time — the per-product cadence that keeps every run under AdLibrary's 10/min cap).
- * When `onlyProductId` is set, scopes to that single product (the on-demand per-product path). Then runs
- * the two preserved per-workspace side-effects (whitelisted-page + research-url sync). Throttled 7s/search.
+ * Dispatch one BOX job per product-with-approved-competitors for a workspace.
+ *
+ * ── WHY THIS NO LONGER SWEEPS INLINE ────────────────────────────────────────────────────
+ * It used to call `sweepCompetitorLanes` right here, throttled 7s apart to stay under AdLibrary's
+ * 10-searches/min cap. Both halves of that are now obsolete:
+ *   • Meta creative bytes require a browser render, which Vercel cannot do — see
+ *     [[@/lib/ads/creative-scout-job]] for the Vercel-discovers / box-renders split.
+ *   • There is no per-search credit to conserve. The Meta archive is free, so the throttle that
+ *     existed to protect a paid quota protects nothing.
+ *
+ * What stays on Vercel is the DECISION: which workspaces, which products, and whether the freshness
+ * gate lets a product through. The box does collect → render → vision → persist.
+ *
+ * Note the totals shape changed: this function can no longer report `inserted`/`searched`, because
+ * the work hasn't happened yet when it returns. It reports what it QUEUED. The per-run ingest
+ * numbers are recorded by the box job.
  */
-async function sweepWorkspace(
+async function dispatchWorkspace(
   step: StepTools,
   workspaceId: string,
   force: boolean,
   onlyProductId?: string,
-): Promise<{ totals: IngestResult; products: number; skipped: number; imitationReviewEnqueued: boolean }> {
+): Promise<{ products: number; queued: number; skipped: number; alreadyInflight: number }> {
   const productIds = onlyProductId
     ? [onlyProductId]
     : await step.run(`products-${workspaceId}`, () => productsWithApprovedCompetitors(workspaceId));
 
-  // flag-a-competitor-ad-do-not-use Phase 3: stamp a per-workspace start cutoff BEFORE ingestion so
-  // the post-sweep query for newly-inserted skeleton ids (below) is scoped to THIS sweep's rows —
-  // never a re-review of anything the last sweep already visited (setSkeletonDoNotUse is a compare-
-  // and-set, but re-enqueueing on a duplicate batch would still burn a Max session).
-  const sweepStartIso = await step.run(`sweep-start-${workspaceId}`, () => Promise.resolve(new Date().toISOString()));
+  let queued = 0;
+  let skipped = 0;
+  let alreadyInflight = 0;
 
-  let totals = emptyTotals();
-  let totalSkipped = 0;
   for (const productId of productIds) {
-    const { kept, skipped, approvedAdvertisers } = await step.run(
+    const { kept, skipped: gatedOut } = await step.run(
       `seeds-${workspaceId}-${productId}`,
       () => keptSeedsForProduct(workspaceId, productId, force),
     );
-    totalSkipped += skipped;
-    const approved = new Set(approvedAdvertisers);
-    for (let i = 0; i < kept.length; i++) {
-      const seed = kept[i];
-      const r = await step.run(`sweep-${productId}-${seed.keyword}`, () =>
-        safeSweep(workspaceId, seed, approved),
-      );
-      totals = addTotals(totals, r);
-      if (i < kept.length - 1) await step.sleep(`throttle-${productId}-${i}`, SWEEP_DELAY_MS);
-    }
+    skipped += gatedOut;
+    // Every competitor freshness-gated out ⇒ nothing to scout for this product this run.
+    if (!kept.length) continue;
+
+    const r = await step.run(`enqueue-scout-${workspaceId}-${productId}`, () =>
+      enqueueCreativeScoutJob({ workspaceId, productId, force }),
+    );
+    if (r.enqueued) queued++;
+    else if (r.reason === "already_inflight") alreadyInflight++;
   }
 
-  // Preserved from the old sweep — both keyed off APPROVED competitors, so they survive the fully-deliberate
-  // cut. Category-sweep promotion (auto-discovery) is intentionally gone.
-  await step.run(`promote-whitelisted-${workspaceId}`, () => promoteWhitelistedPages(workspaceId));
-  await step.run(`sync-research-urls-${workspaceId}`, () => syncResearchUrlsFromCreatives(workspaceId));
-
-  // flag-a-competitor-ad-do-not-use Phase 3 — enqueue ONE Max imitation-quality-review job over
-  // THIS sweep's newly-inserted skeletons (vision-analyzed statics only; a video_pending row can't
-  // be judged until the video pipeline drains it). No-op when the sweep inserted nothing new. The
-  // worker (scripts/builder-worker.ts runImitationQualityReviewJob) is the sole caller of Max +
-  // applyBoxImitationQualityReview → setSkeletonDoNotUse with reason='max_weak_imitation_base',
-  // by='max' and the CEO's confirm/override card.
-  const imitationReviewEnqueued = await step.run(`enqueue-imitation-review-${workspaceId}`, async () => {
-    if (totals.inserted <= 0) return false;
-    const { createAdminClient } = await import("@/lib/supabase/admin");
-    const admin = createAdminClient();
-    const { data: freshRows } = await admin
-      .from("creative_skeletons")
-      .select("id")
-      .eq("workspace_id", workspaceId)
-      .eq("status", "analyzed")
-      .eq("media_type", "static")
-      .gte("created_at", sweepStartIso)
-      .limit(200);
-    const ids = ((freshRows ?? []) as Array<{ id: string }>).map((r) => r.id);
-    if (ids.length === 0) return false;
-    try {
-      const r = await enqueueImitationQualityReview({ workspaceId, skeletonIds: ids });
-      if (r.enqueued) {
-        console.log(`[creative-scout] enqueued imitation-quality-review job ${r.jobId?.slice(0, 8)} for ${ids.length} newly-ingested skeleton(s) in workspace ${workspaceId.slice(0, 8)}`);
-      }
-      return r.enqueued;
-    } catch (err) {
-      // Never fail the sweep on a review-enqueue error — the sweep is the load-bearing side-effect.
-      console.error(`[creative-scout] imitation-quality-review enqueue failed for ${workspaceId}:`, err instanceof Error ? err.message : err);
-      return false;
-    }
-  });
-
-  return { totals, products: productIds.length, skipped: totalSkipped, imitationReviewEnqueued };
+  return { products: productIds.length, queued, skipped, alreadyInflight };
 }
 
 export const creativeScoutWeeklyCron = inngest.createFunction(
   { id: "creative-scout-weekly-cron", retries: 1, triggers: [{ cron: "0 9 * * 1" }] },
   async ({ step }) => {
     const result = await (async () => {
-      if (!hasAdLibraryKey()) return { skipped: "no_adlibrary_key" };
       const workspaceIds = await step.run("ad-tool-workspaces", adToolWorkspaceIds);
-      if (!workspaceIds.length) return { workspaces: 0, products: 0, totals: emptyTotals() };
+      if (!workspaceIds.length) return { workspaces: 0, products: 0, queued: 0 };
 
-      let totals = emptyTotals();
       let productCount = 0;
+      let queued = 0;
       let totalSkipped = 0;
+      let inflight = 0;
+      let noAccess = 0;
       for (const workspaceId of workspaceIds) {
-        const r = await sweepWorkspace(step, workspaceId, false);
-        totals = addTotals(totals, r.totals);
+        // Access is PER-WORKSPACE now: /ads_archive answers only to that workspace's ID-confirmed
+        // user token, so a workspace that hasn't connected Meta is skipped individually rather than
+        // the whole cron short-circuiting on one missing env var.
+        const ok = await step.run(`meta-access-${workspaceId}`, () => hasAdLibraryAccess(workspaceId));
+        if (!ok) { noAccess++; continue; }
+        const r = await dispatchWorkspace(step, workspaceId, false);
         productCount += r.products;
+        queued += r.queued;
         totalSkipped += r.skipped;
+        inflight += r.alreadyInflight;
       }
-      return { workspaces: workspaceIds.length, products: productCount, totals, skipped: totalSkipped, freshnessDays: adlibraryFreshnessDays() };
+      return {
+        workspaces: workspaceIds.length,
+        products: productCount,
+        queued,
+        skipped: totalSkipped,
+        alreadyInflight: inflight,
+        noMetaAccess: noAccess,
+        freshnessDays: adlibraryFreshnessDays(),
+      };
     })();
 
     await step.run("emit-heartbeat", async () => {
@@ -261,25 +247,38 @@ export const creativeScoutWeeklyCron = inngest.createFunction(
 export const creativeScoutManualSweep = inngest.createFunction(
   { id: "creative-scout-manual-sweep", retries: 1, triggers: [{ event: "ads/creative-scout.sweep" }] },
   async ({ event, step }) => {
-    if (!hasAdLibraryKey()) return { skipped: "no_adlibrary_key" };
     const data = event.data as { workspaceId?: string; productId?: string; force?: boolean } | undefined;
     // Explicit user action = intentional spend — force=true BYPASSES the freshness gate (re-scout now).
     const force = data?.force === true;
 
     const workspaceIds = data?.workspaceId ? [data.workspaceId] : await step.run("ad-tool-workspaces", adToolWorkspaceIds);
-    if (!workspaceIds.length) return { workspaces: 0, products: 0, totals: emptyTotals(), forced: force };
+    if (!workspaceIds.length) return { workspaces: 0, products: 0, queued: 0, forced: force };
 
-    let totals = emptyTotals();
     let productCount = 0;
+    let queued = 0;
     let totalSkipped = 0;
+    let inflight = 0;
+    let noAccess = 0;
     for (const workspaceId of workspaceIds) {
-      // A single-product on-demand scout (the per-product path Dylan asked for) when productId is given;
-      // else every product in the workspace that has approved competitors.
-      const r = await sweepWorkspace(step, workspaceId, force, data?.productId);
-      totals = addTotals(totals, r.totals);
+      const ok = await step.run(`meta-access-${workspaceId}`, () => hasAdLibraryAccess(workspaceId));
+      if (!ok) { noAccess++; continue; }
+      // A single-product on-demand scout when productId is given; else every product in the
+      // workspace that has approved competitors.
+      const r = await dispatchWorkspace(step, workspaceId, force, data?.productId);
       productCount += r.products;
+      queued += r.queued;
       totalSkipped += r.skipped;
+      inflight += r.alreadyInflight;
     }
-    return { workspaces: workspaceIds.length, products: productCount, totals, skipped: totalSkipped, forced: force, freshnessDays: adlibraryFreshnessDays() };
+    return {
+      workspaces: workspaceIds.length,
+      products: productCount,
+      queued,
+      skipped: totalSkipped,
+      alreadyInflight: inflight,
+      noMetaAccess: noAccess,
+      forced: force,
+      freshnessDays: adlibraryFreshnessDays(),
+    };
   },
 );
