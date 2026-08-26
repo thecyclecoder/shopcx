@@ -4,7 +4,12 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { maxConcurrentTests, buildAdsetTemplate, DEFAULT_TEST_TARGETING } from "./provision-cohort";
+import {
+  maxConcurrentTests,
+  buildAdsetTemplate,
+  DEFAULT_TEST_TARGETING,
+  META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN,
+} from "./provision-cohort";
 
 test("maxConcurrentTests: $600 ceiling / $150 per test = 4 slots", () => {
   assert.equal(maxConcurrentTests({ daily_test_ceiling_cents: 60000, per_test_daily_budget_cents: 15000 }), 4);
@@ -41,9 +46,8 @@ test("buildAdsetTemplate: excludedCustomAudienceIds → composes excluded_custom
   const t = buildAdsetTemplate({ pixelId: "PX", excludedCustomAudienceIds: ["23843000000000001"] });
   // Every DEFAULT_TEST_TARGETING field survives the merge.
   const tt = t.targeting as Record<string, unknown>;
-  assert.equal(tt.age_min, 50);
-  assert.equal(tt.age_max, 65);
-  assert.deepEqual(tt.genders, [2]);
+  assert.deepEqual(tt.geo_locations, { countries: ["US"], location_types: ["home", "recent"] });
+  assert.deepEqual(tt.targeting_automation, { advantage_audience: 1 });
   // Meta's exclusion shape: array of `{ id }` objects (NOT bare strings).
   assert.deepEqual(tt.excluded_custom_audiences, [{ id: "23843000000000001" }]);
 });
@@ -87,23 +91,54 @@ test("buildAdsetTemplate: no excludedCustomAudienceIds (or empty array) leaves t
   assert.equal(Object.prototype.hasOwnProperty.call(t2.targeting, "excluded_custom_audiences"), false);
 });
 
-// Regression-pin: DEFAULT_TEST_TARGETING is the F50-65 converter cohort (docs/brain/reference/meta-scaling-methodology.md).
-// A stray edit reverting to the old 18-65 / no-gender shape confounds the per-creative CPA read the M4 crown
-// depends on — the goal's M1 clean-cold-read fix. If any assertion here fails, DO NOT relax the test; fix the
-// constant (or open a spec if the converter cohort has legitimately changed).
-test("DEFAULT_TEST_TARGETING: pinned to the F50-65 converter cohort (US women 50-65, home+recent, Advantage+ on)", () => {
+// Regression-pin: DEFAULT_TEST_TARGETING is a Meta-valid broad Advantage+ Audience shape.
+// The old F50-65 hard-age default was rejected by Meta at publish because Advantage+ Audience refuses
+// any hard `age_min` above META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN (25). A stray edit reintroducing a hard
+// 50+ minimum on this default would silently republish a 400-rejected payload and freeze the media-buyer
+// replenish loop. If any assertion here fails, DO NOT relax the test; fix the constant (or open a spec
+// if the Advantage+ contract itself has legitimately changed).
+test("META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN: fingerprint stays pinned at Meta's Advantage+ Audience ceiling (25)", () => {
+  assert.equal(META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN, 25);
+});
+
+test("DEFAULT_TEST_TARGETING: broad Meta-valid Advantage+ shape (no hard 50-65 age combo)", () => {
   const t = DEFAULT_TEST_TARGETING as {
-    age_min: number;
-    age_max: number;
-    genders: number[];
+    age_min?: number;
+    age_max?: number;
     geo_locations: { countries: string[]; location_types: string[] };
     targeting_automation: { advantage_audience: number };
   };
-  assert.equal(t.age_min, 50);
-  assert.equal(t.age_max, 65);
-  assert.deepEqual(t.genders, [2]);
+  // Meta rejects Advantage+ Audience with age_min > 25 → the default MUST either omit age_min or keep
+  // it at/under the fingerprint. `age_max` must be omitted so the audience stays broad.
+  const hasAgeMin = Object.prototype.hasOwnProperty.call(t, "age_min");
+  if (hasAgeMin) {
+    assert.ok(
+      typeof t.age_min === "number" && t.age_min <= META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN,
+      `default age_min must be ≤ ${META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN} for Advantage+ Audience`,
+    );
+  }
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(t, "age_max"),
+    false,
+    "default targeting must omit age_max so Advantage+ Audience stays broad",
+  );
+  // Geography stays intact — US home+recent is the ceiling we always test in.
   assert.deepEqual(t.geo_locations.countries, ["US"]);
   assert.deepEqual(t.geo_locations.location_types, ["home", "recent"]);
+  // Advantage+ Audience stays ON — that's the point of the broad shape.
   assert.equal(t.targeting_automation.advantage_audience, 1);
-  assert.notEqual(t.age_min, 18); // explicit regression guard against the old default
+  // Explicit regression guard against the old F50-65 combo that Meta rejected.
+  assert.notEqual(t.age_min, 50);
+  assert.notEqual(t.age_max, 65);
+});
+
+// buildAdsetTemplate must still compose `excluded_custom_audiences` under the new broad default —
+// the existing-customer exclusion rail is orthogonal to the age-controls fix.
+test("buildAdsetTemplate: composes excluded_custom_audiences on the new broad default without age/gender", () => {
+  const t = buildAdsetTemplate({ pixelId: "PX", excludedCustomAudienceIds: ["23843000000000001"] });
+  const tt = t.targeting as Record<string, unknown>;
+  assert.deepEqual(tt.excluded_custom_audiences, [{ id: "23843000000000001" }]);
+  assert.deepEqual(tt.geo_locations, { countries: ["US"], location_types: ["home", "recent"] });
+  assert.deepEqual(tt.targeting_automation, { advantage_audience: 1 });
+  assert.equal(Object.prototype.hasOwnProperty.call(tt, "age_max"), false);
 });
