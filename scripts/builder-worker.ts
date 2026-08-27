@@ -15219,6 +15219,48 @@ async function loadCsDirectorCallBrief(
   const parts: string[] = [];
   parts.push(await loadTriageBrief(db, workspaceId, ticketId));
 
+  // Phase 2 of a-price-complaint-is-answered-from-the-customers-established-rate — surface the
+  // OVERCHARGE FINDING for the ticket's customer in its OWN prominent section, calling
+  // `formatOverchargeForAgent` so the wording matches Sol's context exactly instead of being
+  // paraphrased into a second dialect. Ground truth: ticket 426e00e9 (2026-08-25) escalated to
+  // June with the exact finding word-for-word in Sol's context (`OVERCHARGE DETECTED on sub
+  // 27840741549 (Appstle): renewal #SC136243 charged $59.96, expected $39.98, delta $19.98`) —
+  // June's brief referenced `formatOverchargeForAgent` ZERO times, so she escalated on the
+  // shipping charge instead of the pricing question and asked the founder to rule on something
+  // the system had already answered. Best-effort read (mirrors the non-fatal try/catch shape the
+  // orchestrator uses on the same call) — a detector failure must never block a review.
+  // The Phase 1 precedence sentence rides along so the reviewer inherits the same rule as Sol.
+  try {
+    const { data: ticketRow } = await db
+      .from("tickets")
+      .select("customer_id")
+      .eq("id", ticketId)
+      .maybeSingle();
+    if (ticketRow?.customer_id) {
+      const { detectOverchargesForCustomer, formatOverchargeForAgent } = await import(
+        "../src/lib/subscription-overcharge"
+      );
+      const overcharges = await detectOverchargesForCustomer(workspaceId, ticketRow.customer_id);
+      parts.push("");
+      if (overcharges.length) {
+        parts.push(
+          "OVERCHARGE FINDING (a-price-complaint-is-answered-from-the-customers-established-rate Phase 2) — Sol saw this exact block in her context; you get the same wording so the two of you reason from one set of facts:",
+        );
+        parts.push(overcharges.map(formatOverchargeForAgent).join("\n"));
+        parts.push(
+          "PRECEDENCE: this customer's established rate (the sustained per-unit they were reliably paying) is AUTHORITATIVE for pricing questions. The standard sub price (MSRP × 0.75) MUST NOT be used to justify a charge above the established rate — a renewal that lines up with the standard rate is still an overcharge when it exceeds what this customer had locked. Answer a pricing complaint from the finding, not from the standard rate card.",
+        );
+      } else {
+        parts.push(
+          "OVERCHARGE FINDING (a-price-complaint-is-answered-from-the-customers-established-rate Phase 2): the detector reports no overcharge for this customer. The standard rate card remains the correct comparison here — 'no overcharge' is a valid, well-grounded answer.",
+        );
+      }
+    }
+  } catch (e) {
+    parts.push("");
+    parts.push(`OVERCHARGE FINDING: read failed (non-fatal) — ${errText(e)}`);
+  }
+
   // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
   // append the deterministic CX SDK snapshot so June's verdict is grounded in the same shape Sol
   // and Cora saw — customer + merged identity, subscriptions w/ realized pricing + discounts,
@@ -15523,6 +15565,7 @@ function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): st
     `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> <ticket_id> [json_input]   (verbs: customer · orders · subscriptions · products · policies · bundle · remedy_state)`,
     ``,
     `LIVE REMEDY STATE IS MANDATORY BEFORE ANY MONEY REMEDY (a-money-remedy-must-read-the-live-remedy-state-first Phase 1): if your verdict carries a money action — partial_refund, redeem_points_as_refund, create_replacement_order, or dollar_replacement — you are REQUIRED, for EACH target order, to run \`npx tsx scripts/cx-agent-sdk-tool.ts remedy_state <ticket_id> '{"order_number":"…"}'\` (or shopify_order_id) and reason AGAINST what it returns. The tool surfaces the order's succeeded refunds, remaining refundable value, and any LIVE open return whose refund fires on receipt. Your \`reasoning\` MUST name the remaining refundable value + acknowledge any live open return, and your money amount MUST fit inside remaining refundable AND MUST NOT be proposed on an order with a live open return. A verdict with a money remedy from a session that never called remedy_state on the target order is BLOCKED and escalated to needs_attention — the executor's hard-reject will refuse it deterministically regardless, but a proposal that ignores the state fails the audit trail too. This mirrors the mandatory-precondition shape get_policies already uses for Sol's non-money asks.`,
+    `THE OVERCHARGE FINDING IS MANDATORY BEFORE ESCALATING A PRICING/BILLING COMPLAINT (a-price-complaint-is-answered-from-the-customers-established-rate Phase 3): if this ticket's Direction intent is a pricing or billing complaint (\`pricing_complaint_subscription\` or similar), your \`reasoning\` MUST name what the OVERCHARGE FINDING section of your brief said before you may \`escalate_founder\`. A NULL finding is a VALID and useful answer — 'the detector reports no overcharge, so the standard rate applies' satisfies the requirement. The rule is about consulting the fact, never about forcing a refund. A pricing/billing verdict that escalates to the founder without checking the overcharge finding is BLOCKED and routed to needs_attention rather than passed upward — this mirrors the mandatory-precondition shape the money-remedy \`remedy_state\` rail above uses.`,
     `Investigate read-only (the cx-agent-sdk + improve-box-tools.ts + brain + src + WebSearch) as much as you need, then decide ONE verdict.`,
     `Final message = ONLY one JSON object matching this exact shape:`,
     `  {"decision":"approve_remedy"|"author_spec"|"escalate_founder"|"close_no_action","reasoning":"2-4 sentences citing what you found","remedy":{...RemedyPlan when decision=approve_remedy...},"spec_seed":{"slug":"","title":"","intent":"","problem":""} when decision=author_spec,"recommended_remedy":{"kind":"...","summary":"..."} when decision=escalate_founder and a concrete action is nameable}`,
@@ -15614,6 +15657,60 @@ async function runCsDirectorCallJob(job: Job) {
         log_tail: raw.slice(-2000),
       });
       return;
+    }
+
+    // Phase 3 of a-price-complaint-is-answered-from-the-customers-established-rate — MANDATORY
+    // PRECONDITION on a pricing/billing verdict escalation. A verdict that classifies as a pricing
+    // or billing complaint AND resolves to `escalate_founder` must have consulted the overcharge
+    // finding (or its absence) before it can pass upward. Same mandatory-precondition shape as the
+    // money-remedy `remedy_state` rail above — the executor's downstream check does not exist here,
+    // so this rail is the sole enforcement. Scope is deliberate: pricing/billing intent only, so an
+    // unrelated escalation is never blocked (which would push more work to the founder, the opposite
+    // of the goal). A NULL finding satisfies the requirement — "the detector reports no overcharge"
+    // is itself a valid answer and the brief's Phase-2 section still emits the word 'overcharge' in
+    // that case, so June's reasoning naming it clears the gate. Ground truth: ticket 426e00e9
+    // (2026-08-25) escalated to the founder on a shipping-charge diagnosis while the actual
+    // pricing question — which the overcharge detector had already answered — went unmentioned.
+    try {
+      if (verdict.decision === "escalate_founder") {
+        const { data: latestDirection } = await db
+          .from("ticket_directions")
+          .select("intent")
+          .eq("ticket_id", ticketId)
+          .order("authored_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        const intent = String(latestDirection?.intent ?? "").toLowerCase();
+        const isPricingOrBilling = /pric|billing|overcharge/.test(intent);
+        if (isPricingOrBilling) {
+          // The finding was baked into the brief above via formatOverchargeForAgent (Phase 2) — a
+          // reasoning that actually consulted it will name it. Both branches of the Phase-2 emitter
+          // print the token 'overcharge' (finding-present emits the ⚠️ OVERCHARGE DETECTED block +
+          // the PRECEDENCE sentence; null-finding emits 'the detector reports no overcharge'), so a
+          // raw transcript that never says the word never consulted the fact.
+          const overchargeWasConsulted =
+            /overcharge/i.test(raw) || /overcharge/i.test(verdict.reasoning || "");
+          if (!overchargeWasConsulted) {
+            const skipReason =
+              "cs-director-call escalated a pricing/billing verdict to the founder without checking the overcharge finding (a-price-complaint-is-answered-from-the-customers-established-rate Phase 3) — needs_attention. The finding (or its absence) must be named in the reasoning before a pricing/billing complaint escalates upward.";
+            console.warn(`${tag} ${skipReason}`);
+            await stampAgentSessionNote(
+              ticketId,
+              `June's session ${sessShort}: pricing/billing verdict escalated without consulting the overcharge finding — routed to needs_attention for CX review.`,
+            );
+            await update(job.id, {
+              status: "needs_attention",
+              error: skipReason,
+              log_tail: raw.slice(-2000),
+            });
+            return;
+          }
+        }
+      }
+    } catch (e) {
+      // Best-effort Direction read — a lookup failure must never block a verdict (would push work
+      // to the founder). Log and let the verdict through; the audit trail still captures the raw.
+      console.warn(`${tag} pricing-verdict overcharge-consulted gate best-effort read failed — ${errText(e)}`);
     }
 
     // Phase 1 of cs-director-third-rung-hard-calls-above-triage-quorum: record the verdict to

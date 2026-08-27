@@ -1195,11 +1195,20 @@ async function getCustomerAccount(admin: Admin, wsId: string, custId: string): P
   // Overcharge detection — surface the {charged, expected, delta, dropped_base}
   // signal + the remediation plan so the agent CHECKS for an overcharge before
   // reaching for create_return / cancel on a billing complaint. Read-only.
+  //
+  // Precedence sentence (2026-08-25 ticket 426e00e9): when a signal exists, the
+  // customer's established rate outranks the list-price-derived standard sub
+  // price (MSRP × 0.75) that the per-unit block immediately below emits. The
+  // standard-rate line is kept — an agent still needs it to explain the gap —
+  // but it may not be cited to justify a charge above the established rate.
   try {
     const { detectOverchargesForCustomer, formatOverchargeForAgent } = await import("@/lib/subscription-overcharge");
     const overcharges = await detectOverchargesForCustomer(wsId, custId);
     if (overcharges.length) {
       parts.push("\n" + overcharges.map(formatOverchargeForAgent).join("\n"));
+      parts.push(
+        "PRECEDENCE: this customer has an OVERCHARGE DETECTED finding above. Their established rate (the sustained per-unit they were reliably paying) is AUTHORITATIVE for pricing questions. The standard sub price (MSRP × 0.75) shown in the per-unit block below MUST NOT be used to justify a charge above the established rate — a renewal that lines up with the standard rate is still an overcharge when it exceeds what this customer had locked. Answer a pricing complaint from the finding, not from the standard rate card.",
+      );
     }
   } catch (e) {
     console.error("[orchestrator] overcharge detection failed (non-fatal):", e);
