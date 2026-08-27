@@ -33,6 +33,7 @@ import {
   readCurrentTestCohortSize,
   readLiveCohortConceptTags,
   resolveReplenishAdCopy,
+  normalizeLegacyAdvantageAudienceTargeting,
   SENSOR_TRUST_MAX_AGE_MS,
   type MediaBuyerLoser,
   type MediaBuyerMetaExecutor,
@@ -2017,6 +2018,145 @@ test("Phase 2 — legacy shared-adset cohort (adsetPerTest=false) preserves the 
   assert.equal(built.metaAdsetIdForJob, "6100000000001", "legacy mode publishes INTO cohort.testMetaAdsetId directly");
   assert.equal(built.insert.meta_adset_id, "6100000000001");
   assert.equal(built.insert.create_adset_spec, null);
+});
+
+// ── media-buyer-replenish-sanitizes-legacy-advantage-age-targeting Phase 1 ──
+// A stale cohort row can still carry the legacy F50-65 hard demographic controls with
+// `targeting_automation.advantage_audience:1` — Meta rejects that combination. The replenish
+// builder must strip `age_min` / `age_max` / `genders` on the way into `create_adset_spec` while
+// preserving `geo_locations`, `excluded_custom_audiences`, and everything else on `targeting`.
+
+test("Phase 1 — normalizeLegacyAdvantageAudienceTargeting: stale F50-65 Advantage+ shape is stripped to broad; geo + exclusions preserved", () => {
+  const legacy: Record<string, unknown> = {
+    age_min: 50,
+    age_max: 65,
+    genders: [2],
+    geo_locations: { countries: ["US"], location_types: ["home", "recent"] },
+    targeting_automation: { advantage_audience: 1 },
+    excluded_custom_audiences: [{ id: "aud-purchaser" }, { id: "aud-all-customers" }],
+  };
+  const out = normalizeLegacyAdvantageAudienceTargeting(legacy);
+  assert.equal((out as Record<string, unknown>).age_min, undefined, "age_min must be stripped so Meta accepts the broad Advantage+ shape");
+  assert.equal((out as Record<string, unknown>).age_max, undefined, "age_max must be stripped so Meta accepts the broad Advantage+ shape");
+  assert.equal((out as Record<string, unknown>).genders, undefined, "genders must be stripped so Meta accepts the broad Advantage+ shape");
+  assert.deepEqual(
+    (out as Record<string, unknown>).geo_locations,
+    { countries: ["US"], location_types: ["home", "recent"] },
+    "geo_locations must survive the sanitizer verbatim",
+  );
+  assert.deepEqual(
+    (out as Record<string, unknown>).targeting_automation,
+    { advantage_audience: 1 },
+    "targeting_automation.advantage_audience:1 must survive — the broad-audience contract stays on",
+  );
+  assert.deepEqual(
+    (out as Record<string, unknown>).excluded_custom_audiences,
+    [{ id: "aud-purchaser" }, { id: "aud-all-customers" }],
+    "excluded_custom_audiences must survive the sanitizer verbatim — the purchaser + all-customer exclusions are untouched",
+  );
+});
+
+test("Phase 1 — normalizeLegacyAdvantageAudienceTargeting: NO Advantage+ (no targeting_automation) → returned unchanged (legacy non-Advantage+ shape stays intact)", () => {
+  const legacyNonAdvantage: Record<string, unknown> = {
+    age_min: 50,
+    age_max: 65,
+    genders: [2],
+    geo_locations: { countries: ["US"] },
+  };
+  const out = normalizeLegacyAdvantageAudienceTargeting(legacyNonAdvantage);
+  assert.equal(out, legacyNonAdvantage, "no advantage_audience:1 → same reference (nothing to normalize)");
+  assert.equal((out as Record<string, unknown>).age_min, 50);
+  assert.equal((out as Record<string, unknown>).age_max, 65);
+});
+
+test("Phase 1 — normalizeLegacyAdvantageAudienceTargeting: Advantage+ ON with age_min ≤ 25 → returned unchanged (already Meta-valid)", () => {
+  const validAdvantage: Record<string, unknown> = {
+    age_min: 18,
+    geo_locations: { countries: ["US"] },
+    targeting_automation: { advantage_audience: 1 },
+  };
+  const out = normalizeLegacyAdvantageAudienceTargeting(validAdvantage);
+  assert.equal(out, validAdvantage, "Advantage+ with age_min at/under the ceiling is already valid — no rewrite");
+});
+
+test("Phase 1 — buildReplenishJobInsert: legacy F50-65 Advantage+ cohort template is SANITIZED before publish job insertion; purchaser + all-customer exclusions still compose", () => {
+  const staleTemplate: AdsetTemplateShape = {
+    optimizationGoal: "OFFSITE_CONVERSIONS",
+    billingEvent: "IMPRESSIONS",
+    bidStrategy: "LOWEST_COST_WITHOUT_CAP",
+    pixelId: "px-1",
+    customEventType: "PURCHASE",
+    targeting: {
+      age_min: 50,
+      age_max: 65,
+      genders: [2],
+      geo_locations: { countries: ["US"], location_types: ["home", "recent"] },
+      targeting_automation: { advantage_audience: 1 },
+    },
+  };
+  const stale = cohort({
+    adsetPerTest: true,
+    testMetaAdsetId: null,
+    testMetaCampaignId: "camp-1",
+    perTestDailyBudgetCents: 15_000,
+    dailyTestCeilingCents: 60_000,
+    adsetTemplate: staleTemplate,
+    excludedPurchaserAudienceId: "aud-purchaser",
+    excludedAllCustomersAudienceId: "aud-all-customers",
+    defaultMetaInstagramUserId: "ig-1",
+  });
+  const built = buildReplenishJobInsert({
+    workspaceId: WS,
+    cohort: stale,
+    action: {
+      kind: "replenish",
+      adCampaignId: "cmp-legacy",
+      testMetaAdsetId: null,
+      adsetPerTest: true,
+      dailyTestCeilingCents: stale.dailyTestCeilingCents,
+      rationale: "test",
+    },
+    accountId: "act-1",
+    publishIdentity: { pageId: "page-1", instagramUserId: "ig-1" },
+    videoId: "vid-1",
+    adName: "Legacy Advantage+ regression",
+    destination: "https://x/regression",
+    headlines: ["h"],
+    primaryTexts: ["p"],
+    descriptions: [],
+  });
+  assert.equal(built.ok, true, "the builder must still succeed — a legacy stale template is sanitized, not rejected");
+  if (!built.ok) return;
+  const targeting = built.createAdsetSpec!.targeting as Record<string, unknown>;
+  // The three Meta-rejected keys MUST be gone — that's the whole point of the sanitizer.
+  assert.equal(targeting.age_min, undefined, "age_min:50 must be stripped before publish job insertion");
+  assert.equal(targeting.age_max, undefined, "age_max:65 must be stripped before publish job insertion");
+  assert.equal(targeting.genders, undefined, "genders:[2] must be stripped before publish job insertion");
+  // The broad Advantage+ contract stays on.
+  assert.deepEqual(
+    targeting.targeting_automation,
+    { advantage_audience: 1 },
+    "targeting_automation.advantage_audience:1 must remain — Advantage+ Audience stays on",
+  );
+  assert.deepEqual(
+    targeting.geo_locations,
+    { countries: ["US"], location_types: ["home", "recent"] },
+    "geo_locations must survive verbatim — US home+recent is preserved",
+  );
+  // Both exclusion audiences still compose onto the sanitized targeting (purchaser + all-customer).
+  const exclusions = targeting.excluded_custom_audiences as Array<{ id: string }>;
+  assert.ok(Array.isArray(exclusions), "excluded_custom_audiences must remain an array");
+  const ids = exclusions.map((e) => e.id).sort();
+  assert.deepEqual(
+    ids,
+    ["aud-all-customers", "aud-purchaser"],
+    "BOTH purchaser + all-customer exclusion audiences must compose onto the sanitized targeting — the sanitizer must not drop them",
+  );
+  // The inserted row's create_adset_spec.targeting reflects the same sanitized shape end-to-end.
+  const insertTargeting = built.insert.create_adset_spec!.targeting as Record<string, unknown>;
+  assert.equal(insertTargeting.age_min, undefined);
+  assert.equal(insertTargeting.age_max, undefined);
+  assert.equal(insertTargeting.genders, undefined);
 });
 
 // ── media-buyer-decided-kills-must-execute-on-meta-not-just-be-recorded Phase 1 ──
