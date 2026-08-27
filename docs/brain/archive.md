@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Fix Bianca per-test ad sets rejected by Meta Advantage+ age controls** · verified 2026-08-26 · → [[../libraries/provision-cohort]]
 - **A broken verification check must not be able to kill a build** · verified 2026-08-25 · → [[lifecycles/spec-goal-branch]]
 - **A single-phase spec records its build SHA regardless of how its phase is titled** · verified 2026-08-25 · → [[../libraries/builder-worker.md]]
 - **Cancel journey — a saved_remedy the customer immediately re-cancels must route back to the cancel terminal, not loop** · verified 2026-08-25 · → [[../journeys/cancel]]
