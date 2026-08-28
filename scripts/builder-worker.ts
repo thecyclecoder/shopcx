@@ -71,6 +71,11 @@ import { jobSelect } from "../src/lib/agent-jobs-columns";
 // an actionable `needs_attention` worker heartbeat instead of a silent poll-loop wedge.
 import { verifyClaimAgentJobCooldown, type ClaimCooldownVerification } from "../src/lib/claim-rpc-verify";
 import { runBoxTurnWithFreshFallback, pickNextSession, isMissingSessionError } from "../src/lib/box-session-resume"; // every resumable box-chat lane routes through the same fresh-fallback wrapper (Phase 2); isMissingSessionError powers the copy-author self-heal resume failsafe
+// migration-audit-immediate-charge-races-the-order-now-retry Phase 2 — the accepted terminal-verdict
+// vocabulary the migration-fix lane branches on. Sourced from src/lib/migration-fix.ts so a `code_gap`
+// (or any future) verdict is a RECOGNIZED terminal outcome carried forward with its diagnosis, not a
+// silent fallthrough into the "ended without propose/human_needed" park that discarded the finding.
+import { RECOGNIZED_MIGRATION_FIX_VERDICTS, isRecognisedMigrationFixVerdict } from "../src/lib/migration-fix";
 import type { CopyAuthorSessionDispatcher } from "../src/lib/ads/creative-agent"; // type-only — the impl is dynamic-imported; this pins the resume-aware dispatcher signature at compile time
 import type { CopyQcSessionDispatcher } from "../src/lib/ads/creative-qa"; // type-only — max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 1 dispatcher signature; the impl is dynamic-imported like the author/qa dispatchers
 
@@ -14616,8 +14621,27 @@ async function runMigrationFixJob(job: Job) {
       await update(job.id, { status: "failed", error: "migration-fix run errored", log_tail: raw.slice(-2000) });
       return;
     }
-    // No recognizable status — surface rather than assume fixed.
-    await update(job.id, { status: "needs_attention", error: "migration-fix ended without propose/human_needed", log_tail: raw.slice(-2000) });
+    // Guard-before-mutation (coaching #11 / #12 / #14): only park as needs_attention when the
+    // session's status is genuinely NOT in the accepted vocabulary. Deriving the vocabulary from
+    // src/lib/migration-fix.ts (RECOGNIZED_MIGRATION_FIX_VERDICTS + isRecognisedMigrationFixVerdict)
+    // keeps the fallback in lock-step with the library — the anti-pattern being removed is a
+    // well-formed `code_gap` verdict falling through this branch and its diagnosis being discarded
+    // as "ended without propose/human_needed" (the 2026-08-18 Denise Butler park).
+    if (isRecognisedMigrationFixVerdict(parsed?.status)) {
+      // Every recognised verdict has a handler above; reaching here means a handler was skipped.
+      // Fail loudly rather than silently parking so the missed branch is diagnosed, not hidden.
+      await update(job.id, {
+        status: "needs_attention",
+        error: `migration-fix recognised verdict "${parsed?.status}" fell through — no handler ran`,
+        log_tail: raw.slice(-2000),
+      });
+      return;
+    }
+    await update(job.id, {
+      status: "needs_attention",
+      error: `migration-fix ended without a recognised terminal verdict (${RECOGNIZED_MIGRATION_FIX_VERDICTS.join(" | ")})`,
+      log_tail: raw.slice(-2000),
+    });
   } catch (e) {
     await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
