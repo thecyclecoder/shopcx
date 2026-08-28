@@ -6,26 +6,8 @@ import {
   getRedemptionTiers,
   validateRedemption,
   spendPoints,
-  getLinkedShopifyCustomerIds,
 } from "@/lib/loyalty";
-import { getShopifyCredentials } from "@/lib/shopify-sync";
-import { SHOPIFY_API_VERSION } from "@/lib/shopify";
-
-function generateCode(value: number): string {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let random = "";
-  for (let i = 0; i < 6; i++) random += chars[Math.floor(Math.random() * chars.length)];
-  return `LOYALTY-${value}-${random}`;
-}
-
-const DISCOUNT_CREATE_MUTATION = `
-  mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
-    discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
-      codeDiscountNode { id codeDiscount { ... on DiscountCodeBasic { codes(first: 1) { nodes { code } } } } }
-      userErrors { field message }
-    }
-  }
-`;
+import { createCustomerDiscount } from "@/lib/coupons";
 
 export async function POST(request: Request) {
   // Support both authenticated dashboard users and portal requests
@@ -99,118 +81,63 @@ export async function POST(request: Request) {
 
   const firstName = customer?.first_name || "Customer";
   const lastInitial = customer?.last_name ? customer.last_name[0] : "";
-  const code = generateCode(tier.discount_value);
-  const title = `Loyalty $${tier.discount_value} - ${firstName} ${lastInitial} (${code})`.trim();
 
-  // Compute expiry date
+  // Delegate to the shared chokepoint. It resolves linked shopify customer ids
+  // internally (via getLinkedShopifyCustomerIds), builds the same
+  // customerSelection + combinesWith + customerGets payload the inline path
+  // used, and falls back to the internal mintCustomerCoupon if the linked
+  // group has no shopify_customer_id — behavior-preserving refactor per
+  // docs/brain/specs/review-collection-foundations.md Phase 2 (the loyalty
+  // route was the "one hand-rolled copy" the chokepoint rule forbids).
+  const disc = await createCustomerDiscount(workspace_id, member.customer_id, {
+    amount: tier.discount_value,
+    codePrefix: "LOYALTY",
+    expiryDays: settings.coupon_expiry_days,
+    title: `Loyalty $${tier.discount_value} - ${firstName} ${lastInitial}`.trim(),
+    appliesOnOneTimePurchase: settings.coupon_applies_to !== "subscription",
+    appliesOnSubscription: settings.coupon_applies_to !== "one_time",
+    combinesWith: {
+      productDiscounts: settings.coupon_combines_product,
+      shippingDiscounts: settings.coupon_combines_shipping,
+      orderDiscounts: settings.coupon_combines_order,
+    },
+    // Preserve the pre-refactor edge case where the member row carries a
+    // shopify_customer_id but member.customer_id doesn't (yet) map through
+    // getLinkedShopifyCustomerIds — include it explicitly so nothing drops.
+    additionalShopifyCustomerIds: member.shopify_customer_id
+      ? [String(member.shopify_customer_id)]
+      : [],
+  });
+
+  if (!disc) {
+    return NextResponse.json({ error: "Failed to mint discount" }, { status: 500 });
+  }
+
+  // Compute expiry date for the loyalty_redemptions ledger
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + settings.coupon_expiry_days);
 
-  // Scope customerSelection to every linked Shopify customer id — a minted
-  // loyalty code has to work at checkout under any linked profile, not just
-  // the one the loyalty_members row lives on. Falls back to the member's
-  // own shopify_customer_id when the internal customer row / link group
-  // isn't resolvable. Spec:
-  // loyalty-redeem-and-coupon-usability-span-linked-accounts Phase 1.
-  const linkedShopifyIds = member.customer_id
-    ? await getLinkedShopifyCustomerIds(workspace_id, member.customer_id)
-    : [];
-  const gidSet = new Set<string>(linkedShopifyIds.map((id) => `gid://shopify/Customer/${id}`));
-  if (member.shopify_customer_id) {
-    gidSet.add(`gid://shopify/Customer/${member.shopify_customer_id}`);
-  }
-  const customerGids = [...gidSet];
+  // Deduct points
+  await spendPoints(member, tier.points_cost, `Redeemed ${tier.label}`, disc.shopifyDiscountNodeId);
 
-  try {
-    const { shop, accessToken } = await getShopifyCredentials(workspace_id);
+  // Record redemption
+  await admin.from("loyalty_redemptions").insert({
+    workspace_id,
+    member_id: member.id,
+    reward_tier: tier.label,
+    points_spent: tier.points_cost,
+    discount_code: disc.code,
+    shopify_discount_id: disc.shopifyDiscountNodeId,
+    discount_value: tier.discount_value,
+    status: "active",
+    expires_at: expiresAt.toISOString(),
+  });
 
-    const res = await fetch(
-      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          "X-Shopify-Access-Token": accessToken,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          query: DISCOUNT_CREATE_MUTATION,
-          variables: {
-            basicCodeDiscount: {
-              title,
-              code,
-              startsAt: new Date().toISOString(),
-              endsAt: expiresAt.toISOString(),
-              usageLimit: 1,
-              appliesOncePerCustomer: true,
-              customerSelection: {
-                customers: { add: customerGids },
-              },
-              combinesWith: {
-                productDiscounts: settings.coupon_combines_product,
-                shippingDiscounts: settings.coupon_combines_shipping,
-                orderDiscounts: settings.coupon_combines_order,
-              },
-              customerGets: {
-                appliesOnOneTimePurchase: settings.coupon_applies_to !== "subscription",
-                appliesOnSubscription: settings.coupon_applies_to !== "one_time",
-                items: { all: true },
-                value: {
-                  discountAmount: {
-                    amount: tier.discount_value,
-                    appliesOnEachItem: false,
-                  },
-                },
-              },
-            },
-          },
-        }),
-      },
-    );
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Shopify API error: ${res.status} ${text}`);
-    }
-
-    const gqlResult = await res.json();
-    const userErrors = gqlResult?.data?.discountCodeBasicCreate?.userErrors;
-    if (userErrors?.length > 0) {
-      return NextResponse.json(
-        { error: userErrors.map((e: { message: string }) => e.message).join(", ") },
-        { status: 400 },
-      );
-    }
-
-    const discountNodeId = gqlResult?.data?.discountCodeBasicCreate?.codeDiscountNode?.id || null;
-
-    // Deduct points
-    await spendPoints(member, tier.points_cost, `Redeemed ${tier.label}`, discountNodeId);
-
-    // Record redemption
-    await admin.from("loyalty_redemptions").insert({
-      workspace_id,
-      member_id: member.id,
-      reward_tier: tier.label,
-      points_spent: tier.points_cost,
-      discount_code: code,
-      shopify_discount_id: discountNodeId,
-      discount_value: tier.discount_value,
-      status: "active",
-      expires_at: expiresAt.toISOString(),
-    });
-
-    return NextResponse.json({
-      ok: true,
-      code,
-      discount_value: tier.discount_value,
-      expires_at: expiresAt.toISOString(),
-      new_balance: member.points_balance - tier.points_cost,
-    });
-  } catch (err) {
-    console.error("Loyalty redemption failed:", err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Redemption failed" },
-      { status: 500 },
-    );
-  }
+  return NextResponse.json({
+    ok: true,
+    code: disc.code,
+    discount_value: tier.discount_value,
+    expires_at: expiresAt.toISOString(),
+    new_balance: member.points_balance - tier.points_cost,
+  });
 }
