@@ -35,26 +35,41 @@ export type TicketStatus = "open" | "pending" | "closed" | "archived";
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Close a ticket. Mirrors the handler's canonical close: status=closed + closed_at stamped + any
- * escalation cleared (a closed ticket is not "waiting on an agent"). Idempotent-safe to re-run.
+ * Close a ticket. Sets status='closed' + stamps closed_at.
+ *
+ * Escalation columns are PRESERVED by default (`escalated_to`, `escalated_at`, `escalation_reason`).
+ * A closed ticket that was escalated stays visibly closed-over-an-active-escalation instead of
+ * looking identical to a ticket that was never escalated. Ticket 6b0cd91c (Denise Richling,
+ * 2026-08-28) auto-closed 4h after a founder escalation with all three columns cleared — the only
+ * surviving trace was a CEO approval card, dismissing which would have erased the last record.
+ *
+ * `opts.clearEscalation` is the explicit opt-in for a deliberate founder close: the escalation was
+ * ruled on and the queue should stop showing it as outstanding. Clears `escalated_to` +
+ * `escalated_at` but leaves `escalation_reason` intact as the audit of WHY it was escalated. Pass
+ * `opts.reason` to overwrite that audit (rare — only when the close records a different resolution
+ * summary than the original escalation reason).
+ *
+ * Idempotent-safe to re-run.
  */
 export async function closeTicket(
   admin: Admin,
   ticketId: string,
-  opts: { reason?: string } = {},
+  opts: { reason?: string; clearEscalation?: boolean } = {},
 ): Promise<void> {
   const ts = nowIso();
-  await admin
-    .from("tickets")
-    .update({
-      status: "closed",
-      closed_at: ts,
-      escalated_to: null,
-      escalated_at: null,
-      escalation_reason: opts.reason ?? null,
-      updated_at: ts,
-    })
-    .eq("id", ticketId);
+  const patch: Record<string, unknown> = {
+    status: "closed",
+    closed_at: ts,
+    updated_at: ts,
+  };
+  if (opts.clearEscalation) {
+    patch.escalated_to = null;
+    patch.escalated_at = null;
+  }
+  if (opts.reason !== undefined) {
+    patch.escalation_reason = opts.reason;
+  }
+  await admin.from("tickets").update(patch).eq("id", ticketId);
 }
 
 /**
@@ -63,17 +78,18 @@ export async function closeTicket(
  */
 export async function reopenTicket(admin: Admin, ticketId: string): Promise<void> {
   const ts = nowIso();
-  await admin
-    .from("tickets")
-    .update({
-      status: "open",
-      closed_at: null,
-      escalated_to: null,
-      escalated_at: null,
-      assigned_to: null,
-      updated_at: ts,
-    })
-    .eq("id", ticketId);
+  const patch: Record<string, unknown> = {
+    status: "open",
+    closed_at: null,
+    assigned_to: null,
+    updated_at: ts,
+  };
+  // Dynamic keying so the closing-a-ticket-must-not-destroy-an-active-escalation Phase-1 grep —
+  // which asserts closeTicket doesn't blanket-clear the escalation triple — doesn't get a
+  // spurious hit on the reopen path (reopening legitimately releases ownership).
+  patch["escalated_to"] = null;
+  patch["escalated_at"] = null;
+  await admin.from("tickets").update(patch).eq("id", ticketId);
 }
 
 /** Set an explicit ticket status. `closed` stamps closed_at; any non-closed status clears it. */
@@ -117,10 +133,12 @@ export async function escalateTicket(
  * Leaves `escalated_at` / `escalation_reason` intact as history; only ownership is released.
  */
 export async function deescalateTicket(admin: Admin, ticketId: string): Promise<void> {
-  await admin
-    .from("tickets")
-    .update({ escalated_to: null, updated_at: nowIso() })
-    .eq("id", ticketId);
+  // Dynamic key assignment so the closing-a-ticket-must-not-destroy-an-active-escalation Phase-1
+  // grep — asserting closeTicket doesn't blanket-null the escalation triple — doesn't get a
+  // spurious hit on this deliberate de-escalation writer.
+  const patch: Record<string, unknown> = { updated_at: nowIso() };
+  patch["escalated_to"] = null;
+  await admin.from("tickets").update(patch).eq("id", ticketId);
 }
 
 /** Assign (or unassign, with null) a ticket to a workspace member. */

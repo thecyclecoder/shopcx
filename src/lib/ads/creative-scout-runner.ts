@@ -17,7 +17,11 @@ import {
   promoteWhitelistedPages,
   normalizeBrand,
 } from "@/lib/competitors";
-import { sweepCompetitorLanes, type CreativeFetcher } from "@/lib/creative-skeleton";
+import {
+  sweepCompetitorLanes,
+  type CreativeFetcher,
+  type VisionSessionDispatcher,
+} from "@/lib/creative-skeleton";
 import { CreativeRenderer } from "@/lib/meta-ad-library-render";
 import { CreativeRenderError, type NormalizedAd, type Seed } from "@/lib/competitor-ad-types";
 import { syncResearchUrlsFromCreatives } from "@/lib/research-urls";
@@ -60,6 +64,9 @@ export async function runCreativeScoutSweep(input: {
   visionCap?: number;
   /** Minimum delivery days for an ad to qualify. Default 7 (see sweepCompetitorLanes). */
   minWinnerDays?: number;
+  /** REQUIRED on the box: routes vision through a `claude -p` Max session. Without it the worker
+   *  throws `no_anthropic_key` on every ad — the key is deliberately stripped from its env. */
+  visionDispatch?: VisionSessionDispatcher;
 }): Promise<ScoutRunResult> {
   const { workspaceId } = input;
   const admin = createAdminClient();
@@ -110,6 +117,7 @@ export async function runCreativeScoutSweep(input: {
             minWinnerDays: input.minWinnerDays,
             approvedAdvertisers: approved,
             fetchCreative,
+            visionDispatch: input.visionDispatch,
           });
           result.searched += lane.searched;
           result.inserted += lane.inserted;

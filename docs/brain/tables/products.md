@@ -47,6 +47,7 @@ Synced from Shopify Online Store channel. `variants` JSONB is legacy — real so
 | `physical_dimensions` | `jsonb` | ✓ | ad tool · `{length_in, width_in, height_in, weight_oz?, shape: bag\|box\|bottle\|jar\|pouch\|other}` |
 | `is_advertised` | `bool` | — | default: `false` · true for the 6 hero SKUs the workspace actively advertises (Superfood Tabs / Amazing Coffee / Amazing Creamer / Ashwavana Guru Focus / Ashwavana Zen Relax / Creatine Prime+). Every ad/DR/creative pipeline reads it via [[../libraries/advertised-products]] (`isAdvertisedProduct` / `listAdvertisedProductIds`) so attachment SKUs (Tumbler, Sleep Gummies, Handheld Drink Mixer, Bamboo Coffee Mug) never enter advertising. Seeded by `supabase/migrations/20261015000000_products_is_advertised.sql`. |
 | `competitor_shelf_source_id` | `uuid` | ✓ | → [[products]].id `ON DELETE SET NULL`. **Shared competitor shelf** (CEO 2026-08-25) — another product whose scouted [[creative_skeletons]] (`product_id`) this product may ALSO imitate from. Resolved ONE HOP by `resolveShelfProductIds` in [[../libraries/creative-sourcing]]; `getProvenCompetitorAngles` then filters `.in('product_id', ids)` instead of `.eq`. Live: **Amazing Coffee K-Cups → Amazing Coffee** (same coffee, pod format), taking K-Cups' shelf from **0 → 245** skeletons. **DIRECTED** — Coffee is NOT widened in return. CHECK forbids self-reference. ⚠️ Does NOT affect AdLibrary sweep seeds: `loadApprovedCompetitorsForProduct` stays `.eq('product_id', …)` so no keyword is searched twice. Migration `20261214120000_products_competitor_shelf_source.sql`. |
+| `reviewable` | `bool` | — | default: `true` · Whether the review-collection journey may ask about this product. `false` for add-ons the customer did not choose to buy on merit — the four Shipping Protection rows (`product_type='ShopWill'` / `handle='shipping-insurance'`), the internal `Mystery Item` SKU, and the three `(Free Gift)` duplicates listed in `SHOPIFY_PRODUCT_ALIASES` (src/lib/shopify-review-metafields.ts). Backfilled by `scripts/_backfill-products-reviewable-add-ons.ts` (idempotent, ship-time-ledgered). Migration `20261215120000_review_collection_foundations.sql`. See [[review_requests]]. |
 
 ## Foreign keys
 
@@ -77,6 +78,7 @@ Synced from Shopify Online Store channel. `variants` JSONB is legacy — real so
 - [[product_pricing_tiers]].`product_id`
 - [[product_review_analysis]].`product_id`
 - [[product_reviews]].`product_id`
+- [[review_requests]].`product_id`
 - [[product_seo_keywords]].`product_id`
 - [[product_variants]].`product_id`
 - [[products]].`upsell_product_id`

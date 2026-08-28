@@ -31,12 +31,28 @@
  *   the new version into `supabase_migrations.schema_migrations` with `on conflict do nothing`
  *   so the reconciler doesn't spuriously flag it as merged-but-unapplied.
  *
+ * ⚠️ WORKING TREE ALONE IS NOT ENOUGH — the cross-branch hole (2026-08-28).
+ * Scanning only `supabase/migrations/` sees the BRANCH, never the post-merge tree. Two PRs open
+ * at the same time can each add `20261215120000_*.sql` under a different name; neither branch
+ * contains the other's file, so BOTH pass this check and the collision only exists once both
+ * merge. That is exactly what happened: `review-collection-foundations` merged 17:45 with
+ * `20261215120000_review_collection_foundations.sql`, PR #2617 merged 18:15 with
+ * `20261215120000_subscription_cycle_charges.sql` (its branch was based on b96168a1b5, which
+ * predates the first merge). One migration was silently skipped, the code that upserts into the
+ * un-created table shipped anyway, every write hit PGRST205, and Reva rolled the deploy back.
+ *
+ * So we ALSO diff against the merge target: any version this working tree introduces that already
+ * exists on `origin/main` under a DIFFERENT filename is a collision, even though the branch alone
+ * looks clean. Fails OPEN when the remote ref is unavailable (fresh clone, offline, detached CI) —
+ * the local check still runs, and a missing remote must never turn into a false red.
+ *
  * Wired into `npm run check:duplicate-migration-versions` + chained into `predeploy` alongside
  * the sibling `_check-no-hard-destructive-migrations.ts`.
  *
  * Read-only; never mutates state.
  */
 import { readdirSync } from "fs";
+import { spawnSync } from "child_process";
 import { join } from "path";
 
 const REPO_ROOT = join(__dirname, "..");
@@ -75,6 +91,45 @@ export function detectDuplicateVersions(migrationsDir: string): Cluster[] {
     .sort((a, b) => a.version.localeCompare(b.version));
 }
 
+/**
+ * Migration filenames on a git ref, or null when the ref can't be read (fresh clone / offline /
+ * shallow CI). Null means "cannot judge" and the caller SKIPS the cross-branch half — a missing
+ * remote is never a failure.
+ */
+export function migrationsOnRef(ref: string): string[] | null {
+  const r = spawnSync("git", ["ls-tree", "--name-only", ref, "supabase/migrations/"], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+  });
+  if (r.status !== 0 || !r.stdout) return null;
+  return r.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.endsWith(".sql"))
+    .map((l) => l.split("/").pop() as string);
+}
+
+/**
+ * Versions this working tree introduces that ALREADY exist on the merge target under a DIFFERENT
+ * filename. Pure over its inputs so it unit-tests without git.
+ */
+export function detectCrossBranchCollisions(local: string[], target: string[]): Cluster[] {
+  const byVersion = new Map<string, string>();
+  for (const f of target) {
+    const v = extractPrefix(f);
+    if (v) byVersion.set(v, f);
+  }
+  const out: Cluster[] = [];
+  for (const f of local) {
+    const v = extractPrefix(f);
+    if (!v) continue;
+    const onTarget = byVersion.get(v);
+    // Same version, different file ⇒ they collide once this branch merges.
+    if (onTarget && onTarget !== f) out.push({ version: v, files: [f, `${onTarget} (on merge target)`] });
+  }
+  return out.sort((a, b) => a.version.localeCompare(b.version));
+}
+
 function main(): void {
   const clusters = detectDuplicateVersions(MIGRATIONS_DIR);
   if (clusters.length) {
@@ -98,8 +153,39 @@ function main(): void {
     );
     process.exit(1);
   }
+  // Cross-branch half: a version this tree adds that main already uses on a DIFFERENT file.
+  const TARGET = process.env.MIGRATION_COLLISION_TARGET_REF || "origin/main";
+  const target = migrationsOnRef(TARGET);
+  if (target === null) {
+    console.log(
+      `✓ check-duplicate-migration-versions — every migration file has a unique 14-digit prefix.\n` +
+        `  (cross-branch check skipped — ${TARGET} not readable here; local tree is clean)`,
+    );
+    return;
+  }
+  const local = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql"));
+  const cross = detectCrossBranchCollisions(local, target);
+  if (cross.length) {
+    console.error(
+      `\n❌ check-duplicate-migration-versions — ${cross.length} version(s) collide with ${TARGET}:`,
+    );
+    for (const c of cross) console.error(`  • ${c.version}  ${c.files.join("  ⟷  ")}`);
+    console.error(
+      `\nThis branch is clean ON ITS OWN, but ${TARGET} already uses these versions on a different\n` +
+        `file — so the collision appears the moment this merges, and one migration is silently\n` +
+        `skipped at apply time while the code that depends on it ships. That is the 2026-08-28\n` +
+        `PGRST205 rollback (PR #2617 vs review-collection-foundations).\n\n` +
+        `Fix: bump the trailing NNNNNN on THIS branch's file to the next unused value, e.g.\n` +
+        `  git mv supabase/migrations/${cross[0].version}_your_migration.sql \\\n` +
+        `         supabase/migrations/${String(Number(cross[0].version) + 1).padStart(14, "0")}_your_migration.sql\n` +
+        `and repoint any source comment or wikilink that cites the old filename.\n`,
+    );
+    process.exit(1);
+  }
+
   console.log(
-    `✓ check-duplicate-migration-versions — every migration file has a unique 14-digit prefix.`,
+    `✓ check-duplicate-migration-versions — every migration file has a unique 14-digit prefix, ` +
+      `and none collide with ${TARGET}.`,
   );
 }
 

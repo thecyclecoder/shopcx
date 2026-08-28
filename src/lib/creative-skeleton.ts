@@ -28,6 +28,7 @@ import {
   winnerScore,
   adMatchesCompetitor,
   isTransientRenderError,
+  CreativeRenderError,
   COMPETITOR_AD_SOURCE,
   COMPETITOR_AD_SOURCES,
   type NormalizedAd,
@@ -253,6 +254,85 @@ export async function visionDeconstruct(
   }
   const text: string = (json?.content?.[0]?.text || "").trim();
   return parseSkeleton(text);
+}
+
+// ── box-session vision (meta-ad-library migration, 2026-08-25) ───────────────────────────────
+// Same skeleton contract as `visionDeconstruct`, but the vision pass is a top-level `claude -p` on
+// Max instead of a direct Opus API call — so the lane works on the BOX, which deliberately has no
+// ANTHROPIC_API_KEY (Max sessions must not burn API credits).
+//
+// WHY THIS EXISTS: the creative-scout sweep moved to the box because Meta creative bytes require a
+// Playwright render. The first real box run then failed every ad with `Error: no_anthropic_key` —
+// the render succeeded and the creative was stored, but the skeleton could never be extracted. This
+// mirrors the proven `qaCreativeViaBoxSession` pattern ([[./ads/creative-qa]]): src/ ships the pure
+// logic, scripts/builder-worker.ts owns the process boundary and injects `dispatch`.
+
+/** Injected by the caller: run ONE `claude -p` box session on Max against the image at
+ *  `allowedImagePath` (an ABSOLUTE path) and return its raw result text + an error flag. The caller
+ *  plumbs the path into the PreToolUse gate so the session may Read that exact file and nothing
+ *  else. Implementations MUST strip every non-base-OS env var and MUST be fail-safe — a spawn
+ *  error / cap / timeout surfaces as `isError:true`, which this function turns into a null skeleton
+ *  (a TRANSIENT outcome — see the throw contract below). */
+export type VisionSessionDispatcher = (
+  prompt: string,
+  allowedImagePath: string,
+) => Promise<{ resultText: string; isError: boolean }>;
+
+/** The instruction handed to the box session. Carries the SAME system contract as the API path so
+ *  both produce an identical JSON shape for `parseSkeleton`. */
+export function buildSkeletonVisionPrompt(imagePath: string): string {
+  return `${VISION_SYSTEM}
+
+Read the ad creative image at this exact path and extract its skeleton:
+  ${imagePath}
+
+Return ONLY the JSON object described above — no prose, no preamble, no explanation.`;
+}
+
+/**
+ * Vision-deconstruct one static creative via a `claude -p` box session on Max.
+ *
+ * Contract differences from the API path, both deliberate:
+ *   • An undecodable image returns `null` (permanent — the bytes are not an image).
+ *   • A dispatch error / unparseable verdict THROWS a transient CreativeRenderError, so `ingestAd`
+ *     rethrows and the ad stays eligible next sweep rather than being written `status='failed'`.
+ *     A session that merely times out must never poison an ad's dedup_key forever.
+ */
+export async function visionDeconstructViaBoxSession(
+  imageBuffer: Buffer,
+  dispatch: VisionSessionDispatcher,
+): Promise<CreativeSkeleton | null> {
+  const { writeFile, unlink, mkdtemp } = await import("node:fs/promises");
+  const { join: joinPath } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+
+  let normalized: Buffer;
+  try {
+    normalized = await normalizeForVision(imageBuffer);
+  } catch (err) {
+    // Not an image we can decode — permanent, same as the API path.
+    console.error(`[creative-finder] image normalize failed:`, err);
+    return null;
+  }
+
+  const dir = await mkdtemp(joinPath(tmpdir(), "skeleton-vision-"));
+  const imagePath = joinPath(dir, "creative.jpg");
+  try {
+    await writeFile(imagePath, normalized);
+    const { resultText, isError } = await dispatch(buildSkeletonVisionPrompt(imagePath), imagePath);
+    if (isError) {
+      throw new CreativeRenderError("vision box session errored", false);
+    }
+    const skeleton = parseSkeleton(resultText || "");
+    if (!skeleton) {
+      // The session ran but produced nothing parseable — treat as transient, not as "this ad has no
+      // skeleton". A permanent `failed` row here would retire a perfectly good creative.
+      throw new CreativeRenderError("vision box session returned no parseable skeleton", false);
+    }
+    return skeleton;
+  } finally {
+    await unlink(imagePath).catch(() => {});
+  }
 }
 
 const VIDEO_VISION_SYSTEM = `${VISION_SYSTEM}
@@ -552,6 +632,7 @@ export async function ingestAd(
   ad: NormalizedAd,
   seed: Seed,
   fetchCreative?: CreativeFetcher,
+  visionDispatch?: VisionSessionDispatcher,
 ): Promise<void> {
   const admin = createAdminClient();
   const nowIso = new Date().toISOString();
@@ -591,10 +672,19 @@ export async function ingestAd(
         } catch (e) {
           console.error(`[creative-finder] thumb upload failed for ${ad.ad_key}:`, e);
         }
-        skeleton = await visionDeconstruct(workspaceId, creative.buffer, creative.contentType);
+        // On the BOX there is no ANTHROPIC_API_KEY (Max sessions must not burn API credits), so the
+        // caller injects a `claude -p` dispatcher and vision runs on Max. Everywhere else (Vercel,
+        // a local script) the direct Opus API path is used unchanged.
+        skeleton = visionDispatch
+          ? await visionDeconstructViaBoxSession(creative.buffer, visionDispatch)
+          : await visionDeconstruct(workspaceId, creative.buffer, creative.contentType);
         visionedAt = new Date().toISOString();
         if (!skeleton) status = "failed";
       } catch (err) {
+        // A TRANSIENT vision failure (box session timed out / capped / returned junk) must be
+        // rethrown, not recorded — writing status='failed' would make splitNewExisting skip this
+        // ad on every future sweep over a temporary blip.
+        if (isTransientRenderError(err)) throw err;
         console.error(`[creative-finder] vision failed for ${ad.ad_key}:`, err);
         status = "failed";
       }
@@ -941,6 +1031,7 @@ async function collectAndTrack(
   cap: number,
   result: LaneResult,
   fetchCreative?: CreativeFetcher,
+  visionDispatch?: VisionSessionDispatcher,
 ): Promise<void> {
   const { fresh, existing } = await splitNewExisting(admin, workspaceId, statics);
   result.skippedExisting = existing.length;
@@ -949,7 +1040,7 @@ async function collectAndTrack(
   // NEW ads → full ingest + vision, capped (Opus spend). Highest-signal first (caller pre-ranks).
   for (const ad of fresh.slice(0, cap)) {
     try {
-      await ingestAd(workspaceId, ad, seed, fetchCreative);
+      await ingestAd(workspaceId, ad, seed, fetchCreative, visionDispatch);
       result.inserted++;
     } catch (err) {
       if (isRetryableGraphError(err) || isTransientRenderError(err)) {
@@ -1034,6 +1125,9 @@ export async function sweepCompetitorLanes(
     /** Supplied by the BOX. Without it statics are collected + tracked but never rendered/visioned,
      *  because obtaining Meta creative bytes needs a browser. See [[./meta-ad-library-render]]. */
     fetchCreative?: CreativeFetcher;
+    /** Supplied by the BOX. Routes vision through a `claude -p` Max session, because the worker has
+     *  no ANTHROPIC_API_KEY. Omitted elsewhere ⇒ the direct Opus API path. */
+    visionDispatch?: VisionSessionDispatcher;
   } = {},
 ): Promise<LaneResult> {
   const admin = createAdminClient();
@@ -1106,7 +1200,16 @@ export async function sweepCompetitorLanes(
   const ranked = [...winners].sort((a, b) => winnerScore(b) - winnerScore(a));
   const guarded = filterAdsByApprovedAdvertisers(ranked, approved);
   result.nonMappedDropped = guarded.dropped;
-  await collectAndTrack(admin, workspaceId, seed, guarded.kept, cap, result, opts.fetchCreative);
+  await collectAndTrack(
+    admin,
+    workspaceId,
+    seed,
+    guarded.kept,
+    cap,
+    result,
+    opts.fetchCreative,
+    opts.visionDispatch,
+  );
   return result;
 }
 

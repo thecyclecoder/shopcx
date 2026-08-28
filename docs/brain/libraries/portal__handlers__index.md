@@ -54,6 +54,8 @@ const routeMap: Record<string, RouteHandler>
 
 ### `cancelJourney` — re-export from `./cancel-journey`
 
+### `reviewJourney` — re-export from `./review-journey`
+
 ### `dunningStatus` — re-export from `./dunning-status`
 
 ### `changeDate` — re-export from `./change-date`

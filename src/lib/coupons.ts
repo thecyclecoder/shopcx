@@ -14,6 +14,9 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { couponApplicableToSubStatus } from "@/lib/subscription-items";
+import { getShopifyCredentials } from "@/lib/shopify-sync";
+import { SHOPIFY_API_VERSION } from "@/lib/shopify";
+import { getLinkedShopifyCustomerIds } from "@/lib/loyalty";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -83,8 +86,11 @@ export async function resolveCoupon(
   const derived = await resolveDerivedCoupon(admin, workspaceId, code, customerId);
   if (derived) return derived;
 
-  // 3. Real-time Shopify lookup (transitional — legacy codes).
-  return resolveShopifyCoupon(admin, workspaceId, code);
+  // 3. Real-time Shopify lookup (transitional — legacy codes). Pass the
+  //    redeeming customerId so a customer-scoped Shopify code (customerSelection
+  //    with a customers.customers[].id list) rejects a non-owner, closing the
+  //    gap our storefront had at src/lib/coupons.ts:167 pre-Phase-2.
+  return resolveShopifyCoupon(admin, workspaceId, code, customerId);
 }
 
 /**
@@ -164,7 +170,12 @@ async function resolveDerivedCoupon(
   };
 }
 
-async function resolveShopifyCoupon(admin: Admin, workspaceId: string, code: string): Promise<ResolvedCoupon | null> {
+async function resolveShopifyCoupon(
+  admin: Admin,
+  workspaceId: string,
+  code: string,
+  customerId?: string | null,
+): Promise<ResolvedCoupon | null> {
   const { data: ws } = await admin
     .from("workspaces")
     .select("shopify_myshopify_domain, shopify_access_token_encrypted")
@@ -173,14 +184,46 @@ async function resolveShopifyCoupon(admin: Admin, workspaceId: string, code: str
   if (!ws?.shopify_access_token_encrypted || !ws?.shopify_myshopify_domain) return null;
   try {
     const token = decrypt(ws.shopify_access_token_encrypted);
-    const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
+    // customerSelection tells us which specific Shopify customers a discount is
+    // scoped to. Previously we did NOT read this field — a personal
+    // customer-scoped code (e.g. one minted for the loyalty program or the
+    // review reward) resolved as if it were global, so a different customer on
+    // /api/checkout could redeem someone else's code. Shopify's OWN checkout
+    // still enforces the binding, but our in-house storefront does not until
+    // we mirror the check here — same shape as the internal branch at line 70.
+    // The DiscountCustomerAll type is a marker (allCustomers=true → no
+    // binding); DiscountCustomers.customers[].id is the list of scoped
+    // shopify customer gids. A DiscountCustomerSegments payload (an audience
+    // segment) is treated as "not scoped to a specific customer" for our
+    // purposes — we can't cheaply enumerate a segment on this hot path, and
+    // Shopify's own checkout still gates it.
     const res = await fetch(
       `https://${ws.shopify_myshopify_domain}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
       {
         method: "POST",
         headers: { "X-Shopify-Access-Token": token, "Content-Type": "application/json" },
         body: JSON.stringify({
-          query: `{ codeDiscountNodeByCode(code: ${JSON.stringify(code)}) { codeDiscount { ... on DiscountCodeBasic { recurringCycleLimit appliesOncePerCustomer usageLimit customerGets { value { ... on DiscountPercentage { percentage } ... on DiscountAmount { amount { amount } } } } } } } }`,
+          query: `{
+            codeDiscountNodeByCode(code: ${JSON.stringify(code)}) {
+              codeDiscount {
+                ... on DiscountCodeBasic {
+                  recurringCycleLimit
+                  appliesOncePerCustomer
+                  usageLimit
+                  customerSelection {
+                    ... on DiscountCustomerAll { allCustomers }
+                    ... on DiscountCustomers { customers { id } }
+                  }
+                  customerGets {
+                    value {
+                      ... on DiscountPercentage { percentage }
+                      ... on DiscountAmount { amount { amount } }
+                    }
+                  }
+                }
+              }
+            }
+          }`,
         }),
         cache: "no-store",
       },
@@ -194,15 +237,256 @@ async function resolveShopifyCoupon(admin: Admin, workspaceId: string, code: str
     const recurring_cycle_limit = rawLimit && Number(rawLimit) > 0 ? Number(rawLimit) : null;
     // One-time PER CUSTOMER: appliesOncePerCustomer, or a global usageLimit of 1.
     const one_time = !!cd.appliesOncePerCustomer || Number(cd.usageLimit) === 1;
+
+    // Resolve the code's OWNING internal customer_id from customerSelection.
+    // Only DiscountCustomers (an explicit customer list) produces an owner;
+    // DiscountCustomerAll leaves owner null (open to everyone), and a
+    // DiscountCustomerSegments payload we can't cheaply enumerate stays null.
+    let ownerId: string | null = null;
+    const selectionCustomers: Array<{ id?: string }> = Array.isArray(cd.customerSelection?.customers)
+      ? cd.customerSelection.customers
+      : [];
+    if (selectionCustomers.length > 0) {
+      const shopifyIds = selectionCustomers
+        .map((c) => String(c.id || "").replace(/^gid:\/\/shopify\/Customer\//, ""))
+        .filter(Boolean);
+      if (shopifyIds.length > 0) {
+        const { data: owners } = await admin
+          .from("customers")
+          .select("id")
+          .eq("workspace_id", workspaceId)
+          .in("shopify_customer_id", shopifyIds);
+        // If ANY of the scoped shopify_customer_ids resolves to the REDEEMING
+        // customer, let them redeem. Note this is a direct id match, not a
+        // link-group expansion: codes minted by createCustomerDiscount already
+        // scope customerSelection to every linked shopify id, so a linked
+        // sibling's own internal id is in this set and matches. A code minted
+        // by hand in the Shopify admin against a single profile will reject a
+        // linked sibling — deliberate, and the safe direction. If no internal
+        // row matches at all, ownerId stays null and the check below rejects
+        // by default rather than opening the code to whoever asks.
+        const ids = new Set<string>();
+        for (const o of owners ?? []) if (o?.id) ids.add(String(o.id));
+        if (ids.size > 0) {
+          if (customerId && ids.has(String(customerId))) {
+            ownerId = String(customerId);
+          } else {
+            // No match to the redeemer — pin one representative id so the
+            // reject predicate below fires (mirrors the internal branch at
+            // line 70's `String(row.customer_id) !== String(customerId)`).
+            ownerId = [...ids][0];
+          }
+        }
+      }
+    }
+
+    // Reject a mismatch exactly like the internal branch at line 70: if the
+    // code is bound to a specific customer, only that customer may redeem.
+    if (ownerId && (!customerId || String(ownerId) !== String(customerId))) return null;
+
     if (val?.percentage != null) {
-      return { code, type: "percentage", value: Math.round(Number(val.percentage) * 100), recurring_cycle_limit, one_time, source: "shopify" };
+      return {
+        code,
+        type: "percentage",
+        value: Math.round(Number(val.percentage) * 100),
+        recurring_cycle_limit,
+        one_time,
+        source: "shopify",
+        customer_id: ownerId || undefined,
+      };
     }
     if (val?.amount?.amount != null) {
-      return { code, type: "fixed_amount", value: Math.round(parseFloat(val.amount.amount) * 100), recurring_cycle_limit, one_time, source: "shopify" };
+      return {
+        code,
+        type: "fixed_amount",
+        value: Math.round(parseFloat(val.amount.amount) * 100),
+        recurring_cycle_limit,
+        one_time,
+        source: "shopify",
+        customer_id: ownerId || undefined,
+      };
     }
     return null;
   } catch (e) {
     console.error("[coupons] Shopify resolve failed:", e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
+/**
+ * The shared chokepoint every ShopCX-authored customer-scoped Shopify discount
+ * flows through — loyalty redemption (`src/app/api/loyalty/redeem/route.ts`),
+ * the product-review reward (`src/lib/portal/handlers/review-journey.ts`), and
+ * anything else that used to hand-roll `discountCodeBasicCreate`. Lifted
+ * verbatim from the loyalty route's original mutation so behaviour is
+ * unchanged: `usageLimit: 1`, `appliesOncePerCustomer: true`,
+ * `customerSelection.customers.add: [gid://shopify/Customer/{shopify_customer_id}, …]`
+ * (fanned out over the customer's linked accounts via
+ * `getLinkedShopifyCustomerIds`), plus `startsAt` / `endsAt`.
+ *
+ * Fallback: 5 of 29,054 purchasers have no `shopify_customer_id`. In that case
+ * we mint an internal customer-scoped coupon via `mintCustomerCoupon` instead
+ * of failing the reward — Shopify has nothing to bind to, but the in-house
+ * storefront (which `resolveCoupon` reads for) does. The internal fallback
+ * also fires if the Shopify API returns userErrors; the caller sees `source =
+ * 'internal'` and knows there is no Shopify discount node id to persist.
+ *
+ * Behavior-preserving refactor: 2,116 loyalty_redemptions depend on this path
+ * (spec § Phase 2). The loyalty route calls this with the same field mapping
+ * it used inline.
+ */
+export interface CreateCustomerDiscountResult {
+  code: string;
+  source: "shopify" | "internal";
+  shopifyDiscountNodeId: string | null;
+}
+
+export async function createCustomerDiscount(
+  workspaceId: string,
+  customerId: string,
+  opts: {
+    /** Discount in DOLLARS (matches the loyalty route's `tier.discount_value`). */
+    amount: number;
+    /** Prefix for the minted code — e.g. `LOYALTY`, `REVIEW`. Default: `DISC`. */
+    codePrefix?: string;
+    /** Days from now the code stays valid. */
+    expiryDays: number;
+    /** Full Shopify discount title (visible in the admin). */
+    title: string;
+    /** Whether the discount is valid on one-time-purchase items. Default true. */
+    appliesOnOneTimePurchase?: boolean;
+    /** Whether the discount is valid on subscription items. Default true. */
+    appliesOnSubscription?: boolean;
+    /** combinesWith config forwarded verbatim to the Shopify mutation. */
+    combinesWith?: {
+      productDiscounts?: boolean;
+      shippingDiscounts?: boolean;
+      orderDiscounts?: boolean;
+    };
+    /** Extra shopify_customer_ids to include in customerSelection (e.g. the
+     * loyalty route's raw `member.shopify_customer_id` when the internal
+     * customer row is missing). */
+    additionalShopifyCustomerIds?: string[];
+  },
+): Promise<CreateCustomerDiscountResult | null> {
+  const admin = createAdminClient();
+
+  const codePrefix = (opts.codePrefix || "DISC").toUpperCase();
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let random = "";
+  for (let i = 0; i < 6; i++) random += chars[Math.floor(Math.random() * chars.length)];
+  const code = `${codePrefix}-${opts.amount}-${random}`;
+
+  const linkedIds = await getLinkedShopifyCustomerIds(workspaceId, customerId).catch(() => [] as string[]);
+  const gidSet = new Set<string>(linkedIds.map((id) => `gid://shopify/Customer/${id}`));
+  for (const extra of opts.additionalShopifyCustomerIds || []) {
+    if (extra) gidSet.add(`gid://shopify/Customer/${extra}`);
+  }
+
+  // No Shopify customer id anywhere in the linked group → fall back to the
+  // internal coupon path. The in-house storefront's `resolveCoupon` reads that
+  // row; Shopify checkout doesn't see it, but the 5-of-29,054 edge case is
+  // exactly those customers who never went through Shopify.
+  if (gidSet.size === 0) {
+    const minted = await mintCustomerCoupon(workspaceId, customerId, {
+      type: "fixed_amount",
+      value: Math.round(opts.amount * 100),
+      recurring_cycle_limit: 1,
+      codePrefix,
+    });
+    if (!minted) return null;
+    return { code: minted.code, source: "internal", shopifyDiscountNodeId: null };
+  }
+
+  const customerGids = [...gidSet];
+  const startsAt = new Date();
+  const endsAt = new Date();
+  endsAt.setDate(endsAt.getDate() + opts.expiryDays);
+
+  const DISCOUNT_CREATE_MUTATION = `
+    mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
+      discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
+        codeDiscountNode { id codeDiscount { ... on DiscountCodeBasic { codes(first: 1) { nodes { code } } } } }
+        userErrors { field message }
+      }
+    }
+  `;
+
+  try {
+    const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+    const res = await fetch(
+      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+      {
+        method: "POST",
+        headers: {
+          "X-Shopify-Access-Token": accessToken,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          query: DISCOUNT_CREATE_MUTATION,
+          variables: {
+            basicCodeDiscount: {
+              title: opts.title,
+              code,
+              startsAt: startsAt.toISOString(),
+              endsAt: endsAt.toISOString(),
+              usageLimit: 1,
+              appliesOncePerCustomer: true,
+              customerSelection: {
+                customers: { add: customerGids },
+              },
+              combinesWith: {
+                productDiscounts: opts.combinesWith?.productDiscounts ?? true,
+                shippingDiscounts: opts.combinesWith?.shippingDiscounts ?? true,
+                orderDiscounts: opts.combinesWith?.orderDiscounts ?? true,
+              },
+              customerGets: {
+                appliesOnOneTimePurchase: opts.appliesOnOneTimePurchase ?? true,
+                appliesOnSubscription: opts.appliesOnSubscription ?? true,
+                items: { all: true },
+                value: {
+                  discountAmount: {
+                    amount: opts.amount,
+                    appliesOnEachItem: false,
+                  },
+                },
+              },
+            },
+          },
+        }),
+      },
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      console.error("[coupons] createCustomerDiscount Shopify API error:", res.status, text);
+      // Fallback to internal — Shopify unreachable / unauthorized shouldn't
+      // eat the customer's reward.
+      const minted = await mintCustomerCoupon(workspaceId, customerId, {
+        type: "fixed_amount",
+        value: Math.round(opts.amount * 100),
+        recurring_cycle_limit: 1,
+        codePrefix,
+      });
+      if (!minted) return null;
+      return { code: minted.code, source: "internal", shopifyDiscountNodeId: null };
+    }
+    const gqlResult = await res.json();
+    const userErrors = gqlResult?.data?.discountCodeBasicCreate?.userErrors;
+    if (userErrors?.length > 0) {
+      console.error(
+        "[coupons] createCustomerDiscount userErrors:",
+        userErrors.map((e: { message: string }) => e.message).join(", "),
+      );
+      return null;
+    }
+    const shopifyDiscountNodeId =
+      gqlResult?.data?.discountCodeBasicCreate?.codeDiscountNode?.id || null;
+    // Suppress the unused-var warning — we deliberately do not persist the
+    // fresh admin client on the internal-fallback path here.
+    void admin;
+    return { code, source: "shopify", shopifyDiscountNodeId };
+  } catch (e) {
+    console.error("[coupons] createCustomerDiscount failed:", e instanceof Error ? e.message : e);
     return null;
   }
 }

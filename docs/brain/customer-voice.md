@@ -98,6 +98,12 @@ If the customer rejects the exception and pushes for more, the next message rest
 
 This frames the existing offer as the high-value path. Don't escalate the offer just because they pushed back.
 
+## Pricing complaints — established rate outranks the standard rate card
+
+When a customer asks whether their price went up, the **customer's own demonstrated history is authoritative**, not the list-price-derived standard subscriber rate (MSRP × 0.75) surfaced next to the finding. If the overcharge detector (`detectOverchargesForCustomer` / `formatOverchargeForAgent` in [[libraries/subscription-overcharge]]) has emitted a finding for this customer, the finding governs — a renewal that lines up with the standard rate is still an overcharge when it exceeds what this customer had locked. Answer the complaint from the finding, not from the standard rate card. When no finding exists, the standard rate remains the right comparison — this precedence rule attaches to the case where the two disagree, not to every reply.
+
+Ground truth: 2026-08-25, ticket `426e00e9` (customer sarahmd268@yahoo.com, sub contract `27840741549`) — the context carried `OVERCHARGE DETECTED on sub 27840741549 (Appstle): renewal #SC136243 charged $59.96, expected $39.98, delta $19.98` plus the remediation, and Sol's Direction still read *"her price has NOT recently increased — she renews at $59.96/unit, exactly the standard 25%-off-MSRP subscriber rate."* `$79.95 × 0.75 = $59.96` is the standard-rate line — established-rate precedence keeps that line from winning the argument against the finding sitting beside it.
+
 ## Escalation triggers
 
 - **Return / API failures:** if a refund call fails (Braintree, Shopify), DO NOT close the ticket and DO NOT message the customer with a false-positive. Leave the ticket open and escalate to a human agent.

@@ -510,8 +510,20 @@ async function sendWithDelay(admin: Admin, wsId: string, tid: string, ch: string
 // open, and those are handled by their own status update at
 // escalation time. This avoids tickets sitting in "pending" forever
 // when the customer doesn't reply.
+//
+// Compare-and-set refusal: `.is("escalated_to", null)` blocks the close on any ticket that
+// still has an active founder/human escalation. Reuses the same predicate as the
+// ESCALATED-OR-AGENT-ASSIGNED action gate — the action gate blocks agent ACTIONS, but a positive
+// customer reply was still reaching the setStatus close and nulling escalated_to/at/reason,
+// erasing the founder decision that was still outstanding (ticket 6b0cd91c, Denise Richling
+// 2026-08-28: escalated 17:38, auto-closed 21:22, $102.33 duplicate charge unrefunded).
+// Human/founder closes route through the dashboard action, not setStatus — they stay explicit.
 const setStatus = (admin: Admin, tid: string, _autoResolve: boolean) =>
-  admin.from("tickets").update({ status: "closed", closed_at: new Date().toISOString(), updated_at: new Date().toISOString(), escalated_at: null, escalated_to: null, escalation_reason: null }).eq("id", tid);
+  admin
+    .from("tickets")
+    .update({ status: "closed", closed_at: new Date().toISOString(), updated_at: new Date().toISOString(), escalated_at: null, escalated_to: null, escalation_reason: null })
+    .eq("id", tid)
+    .is("escalated_to", null);
 
 // Pure decision for the post-execute status block. Kept separate from the
 // DB writes so it can be unit-checked (scripts/_regress-workflow-status-authoritative.ts).

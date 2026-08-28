@@ -58,6 +58,7 @@ Every journey defines `jo:positive` / `jo:negative` / `jo:neutral` outcome tags.
 | [[shipping-address]] | `shipping_address` | email, chat, sms | Address confirmed |
 | [[missing-items]] | (no auto-trigger) | email, chat, sms | Items list confirmed |
 | [[select-subscription]] | `select_subscription` | email, chat, sms | Subscription identified |
+| [[product-review]] | `product_review` | email, sms | Customer submitted ≥4 stars |
 
 ## Key principles
 
@@ -109,6 +110,7 @@ Every journey defines `jo:positive` / `jo:negative` / `jo:neutral` outcome tags.
 | `src/lib/marketing-signup-journey-builder.ts` | Marketing signup builder |
 | `src/lib/chat-journey.ts` | Code-driven journey executors for chat fallback |
 | `src/lib/journey-suggest.ts` | Detects journey patterns on agent-assigned tickets |
+| `src/lib/portal/handlers/review-journey.ts` | Review journey portal handler (GET form, POST submit + reward coupon) |
 | `src/app/journey/[token]/page.tsx` | Mini-site multi-step form renderer |
 | `src/app/api/journey/[token]/route.ts` | GET session config |
 | `src/app/api/journey/[token]/step/route.ts` | POST per-step submission |
