@@ -183,6 +183,27 @@ export const reviewJourney: RouteHandler = async ({ auth, route, req, url }) => 
     return jsonErr({ error: "comment_too_short", min: MIN_COMMENT_LENGTH }, 400);
   }
 
+  // Atomic session claim — Fix 1 of docs/brain/specs/review-collection-foundations.md.
+  // Two concurrent POSTs with the same valid token could both pass the earlier
+  // `session.status === 'completed'` check and race, producing duplicate
+  // product_reviews rows AND multiple reward coupons from a single ask. Guard
+  // by claiming the session first: workspace-scoped compare-and-set from
+  // ['pending','in_progress'] → 'processing', selecting id back. Zero rows
+  // returned means a concurrent request already claimed it (or the row was
+  // completed / expired since the earlier read) — bail with 409 BEFORE any
+  // side effect fires. Mirrors the shape at
+  // src/app/api/journey/[token]/submit-payment/route.ts:141.
+  const { data: claimed } = await admin
+    .from("journey_sessions")
+    .update({ status: "processing" })
+    .eq("id", session.id)
+    .eq("workspace_id", auth.workspaceId)
+    .in("status", ["pending", "in_progress"])
+    .select("id");
+  if (!claimed || claimed.length !== 1) {
+    return jsonErr({ error: "session_already_completed_or_processing" }, 409);
+  }
+
   // Route 1-3 stars to CS as a ticket instead of publishing. The moderation
   // rule: a low-star review is a support signal, not display material. The
   // reward is ALWAYS minted (see below) — a low rating does not eat the
@@ -253,7 +274,10 @@ export const reviewJourney: RouteHandler = async ({ auth, route, req, url }) => 
 
   // Mark the session completed even if the reward mint failed (we don't want
   // to lose the review), but surface a null code so the frontend knows to
-  // fall back to a "we'll email your reward" message.
+  // fall back to a "we'll email your reward" message. Compare-and-set on the
+  // 'processing' marker planted at the claim above so a caller who never held
+  // the claim (should be impossible after the earlier CAS but defense-in-
+  // depth) cannot flip the row to 'completed'.
   await admin
     .from("journey_sessions")
     .update({
@@ -267,7 +291,8 @@ export const reviewJourney: RouteHandler = async ({ auth, route, req, url }) => 
       },
     })
     .eq("id", session.id)
-    .eq("workspace_id", auth.workspaceId);
+    .eq("workspace_id", auth.workspaceId)
+    .eq("status", "processing");
 
   return jsonOk({
     ok: true,
