@@ -325,8 +325,99 @@ test("Bash: allowlisted head/tail/wc/ls/cat/grep on repo files allow", () => {
     "head -5 docs/brain/README.md",
     "wc -l docs/brain/README.md",
     "grep foo src/lib/review-request-validator.ts",
+    "tail -n 20 docs/brain/README.md",
+    "grep -r foo src/lib",
+    "grep -e secret src/lib/review-request-validator.ts",
   ]) {
-    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID);
-    assert.equal(v.decision, "allow", `${cmd} should allow`);
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "allow", `${cmd} should allow — got ${v.reason}`);
+  }
+});
+
+test("Bash: cat/head/tail/grep against an absolute path OUTSIDE the repo deny (/etc/*, /root/*, /var/*)", () => {
+  for (const cmd of [
+    "cat /etc/passwd",
+    "cat /etc/shadow",
+    "head -5 /etc/passwd",
+    "head -n 10 /etc/hosts",
+    "tail -f /var/log/auth.log",
+    "tail /root/history",
+    "grep foo /etc/passwd",
+    "grep -r secret /var/log",
+    "grep -e password /etc/shadow",
+  ]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "deny", `${cmd} should deny — got ${v.reason}`);
+  }
+});
+
+test("Bash: cat/head/tail/grep against home-relative credential/config paths deny (~/…)", () => {
+  for (const cmd of [
+    "cat ~/secrets.txt",
+    "head ~/.mypasswords",
+    "tail ~/notes",
+    "grep foo ~/history",
+    // The enumerated .aws/.ssh/.claude regexes already catch these, but the
+    // reader-level path validator must ALSO catch them so the coverage doesn't
+    // depend on the enumeration staying complete.
+    "cat ~/.aws/credentials",
+    "head ~/.ssh/id_rsa",
+  ]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "deny", `${cmd} should deny — got ${v.reason}`);
+  }
+});
+
+test("Bash: cat/head/tail/grep with `..` traversal outside the repo deny", () => {
+  for (const cmd of [
+    "cat ../../etc/passwd",
+    "head -5 ../../../etc/hosts",
+    "grep foo ../../secrets.txt",
+  ]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "deny", `${cmd} should deny — got ${v.reason}`);
+  }
+});
+
+test("Bash: cat/head/tail/grep with env-var expansion in path deny ($HOME/.foo)", () => {
+  // The env-variable-expansion catastrophic-deny catches this at the top-level
+  // Bash gate, but pin it here so a future refactor that narrows that regex
+  // doesn't quietly re-open the reader-path.
+  for (const cmd of [
+    "cat $HOME/.aws/credentials",
+    "grep secret ${HOME}/.mysecret",
+  ]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "deny", `${cmd} should deny — got ${v.reason}`);
+  }
+});
+
+test("Bash: cat/head/tail/grep with NO path operand denies (stdin form has no purpose here)", () => {
+  for (const cmd of ["cat", "head -n 5", "tail", "grep foo"]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "deny", `${cmd} should deny — got ${v.reason}`);
+  }
+});
+
+test("Bash: multi-operand cat/head/grep — one bad operand poisons the whole call", () => {
+  for (const cmd of [
+    "cat docs/brain/README.md /etc/passwd",
+    "head -5 docs/brain/README.md /etc/hosts",
+    "grep foo src/lib/review-request-validator.ts /etc/passwd",
+  ]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "deny", `${cmd} should deny — got ${v.reason}`);
+  }
+});
+
+test("Bash: cat/head/tail/grep with quoting/globbing/backticks (unparseable shape) denies", () => {
+  for (const cmd of [
+    'cat "docs/brain/README.md"',
+    "cat 'docs/brain/README.md'",
+    "cat docs/*/README.md",
+    "cat `echo foo`",
+  ]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "deny", `${cmd} should deny — got ${v.reason}`);
   }
 });
