@@ -72,10 +72,71 @@ type Sub = Record<string, unknown>;
 async function loadSub(admin: ReturnType<typeof createAdminClient>, subscriptionId: string): Promise<Sub | null> {
   const { data } = await admin
     .from("subscriptions")
-    .select("id, is_internal, status, shopify_contract_id, items, customer_id, payment_method_id, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents")
+    .select("id, is_internal, status, shopify_contract_id, items, customer_id, payment_method_id, delivery_price_cents, shipping_protection_added, shipping_protection_amount_cents, last_payment_status")
     .eq("id", subscriptionId)
     .maybeSingle();
   return (data as Sub) || null;
+}
+
+/**
+ * Judge the recovery migration's `immediate_charge` outcome against SETTLED
+ * subscription state, NOT the pre-retry `renewal` transaction. The old
+ * check read the last `renewal` inline the instant the audit row was
+ * created — which is the same instant the deterministic order-now retry
+ * (`commerce.order_now.retry_after_migrate`) fires — and always saw the
+ * OLD failed renewal, so 10/10 measured failures on 2026-08-28 were
+ * false positives whose subs had actually just been paid (ground truth:
+ * audit `ecf8e8fc` / sub `549c234d` / Denise Butler — audit created
+ * `03:21:27.99`, order SHOPCX229 paid $64.96 at `03:21:32.92`, sub reads
+ * `last_payment_status='succeeded'`).
+ *
+ * Passes when EITHER the subscription's `last_payment_status='succeeded'`
+ * OR an [[../tables/orders]] row for this subscription with
+ * `financial_status in ('paid','partially_refunded')` was created after
+ * the migration timestamp (`migration_audits.created_at`). Fails when
+ * neither is true — the audit row's existing MAX_RETRIES=3 budget, re-driven
+ * by [[../inngest/migration-audit-retry]] every 10 min, carries the wait
+ * so the retry gets a chance to settle. Do NOT sleep inline.
+ *
+ * Exported so the ship-time backfill for historical false failures
+ * ([[../../scripts/_backfill-migration-audit-immediate-charge-false-failures]])
+ * uses the SAME predicate the live check does — no drift.
+ */
+export async function reverifyImmediateCharge(
+  admin: ReturnType<typeof createAdminClient>,
+  input: {
+    workspaceId: string;
+    subscriptionId: string;
+    /** `migration_audits.created_at` — the cutoff for the "paid order landed AFTER migration" test. */
+    migratedAt: string;
+    /** Current `subscriptions.last_payment_status` read alongside the sub. */
+    lastPaymentStatus: string | null;
+  },
+): Promise<{ ok: boolean; detail: string }> {
+  type PaidOrder = { id: string; order_number: string | null; financial_status: string | null };
+  const succeededOnSub = input.lastPaymentStatus === "succeeded";
+  let paidOrder: PaidOrder | null = null;
+  if (!succeededOnSub && input.migratedAt) {
+    const { data: order } = await admin
+      .from("orders")
+      .select("id, order_number, financial_status")
+      .eq("workspace_id", input.workspaceId)
+      .eq("subscription_id", input.subscriptionId)
+      .gte("created_at", input.migratedAt)
+      .in("financial_status", ["paid", "partially_refunded"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    paidOrder = (order as PaidOrder | null) ?? null;
+  }
+  const ok = succeededOnSub || !!paidOrder;
+  const orderTag = paidOrder ? (paidOrder.order_number ?? paidOrder.id) : "";
+  const detail = ok
+    ? succeededOnSub
+      ? `settled: last_payment_status=succeeded${orderTag ? ` + order ${orderTag}` : ""}`
+      : `settled: paid order ${orderTag}`
+    : `unsettled: last_payment_status=${input.lastPaymentStatus ?? "null"}, no paid order since ${input.migratedAt || "?"}`;
+  return { ok, detail };
 }
 
 /** Run the full checklist against the current sub state. */
@@ -155,10 +216,13 @@ async function runChecks(admin: ReturnType<typeof createAdminClient>, audit: Rec
     // The immediate recovery charge only exists for a LIVE sub — a recovery
     // that ended cancelled (e.g. a superseded duplicate) never charged.
     if (isLive) {
-      const { data: txn } = await admin
-        .from("transactions").select("id, status").eq("subscription_id", sub.id as string)
-        .eq("type", "renewal").order("created_at", { ascending: false }).limit(1).maybeSingle();
-      push("immediate_charge", txn?.status === "succeeded", txn ? `last renewal ${txn.status}` : "no renewal yet");
+      const settled = await reverifyImmediateCharge(admin, {
+        workspaceId: audit.workspace_id as string,
+        subscriptionId: sub.id as string,
+        migratedAt: String(audit.created_at || ""),
+        lastPaymentStatus: (sub.last_payment_status as string | null | undefined) ?? null,
+      });
+      push("immediate_charge", settled.ok, settled.detail);
     }
   }
 

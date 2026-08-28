@@ -7,6 +7,20 @@
 - **`enqueueMigrationFixJob(admin, { auditId, subscriptionId, workspaceId }) → { enqueued, reason? }`** — insert a `kind='migration-fix'` [[../tables/agent_jobs]] row (`spec_slug = auditId`, `instructions = {audit_id, subscription_id}`). **Idempotent + best-effort:** no-op if an active migration-fix job already exists for the audit. Called inline by [[migration-audit]] `verifyMigration`→`finalize()` on the TRANSITION to `failed` (**event-driven — there is no migration-fix cron**).
 - **`applyMigrationFix(admin, audit, action) → { ok, detail }`** — run ONE owner-approved typed fix against prod. Idempotent where possible. The worker (`runMigrationFixJob`) calls it per `approved` action, then re-runs `verifyMigration(auditId)`.
 - Types: `MigrationFixKind = 'price_reconcile' | 'variant_backfill' | 'appstle_cancel' | 'shipping_protection_convert' | 'remove_line'`; `PriceReconcilePayload` · `VariantBackfillPayload` · `AppstleCancelPayload` · `ShippingProtectionConvertPayload` · `RemoveLinePayload`.
+- **Verdict vocabulary**: `MigrationFixVerdict = 'propose' | 'needs_input' | 'human_needed' | 'code_gap'` + the runtime array `RECOGNIZED_MIGRATION_FIX_VERDICTS` + the type-guard `isRecognisedMigrationFixVerdict(status)` — the four terminal outcomes a migration-fix box session may end with. Consumed by `runMigrationFixJob` in `scripts/builder-worker.ts` so a well-formed `code_gap` is a REPORTED terminal outcome (see "Accepted verdict vocabulary" below), not a fallthrough into `needs_attention`.
+
+## Accepted verdict vocabulary
+
+A migration-fix box session ends with one of exactly four `status` values in its final JSON. The worker branches on each; the fallback branch names the full vocabulary in its error string so a future gap fails loudly rather than silently parking the row as `needs_attention` with the session's diagnosis stranded in the log tail (the 2026-08-18 anti-pattern this vocabulary pins down — a session that had correctly emitted `code_gap` ended `error='migration-fix ended without propose/human_needed'` because the fallback branch predated the `code_gap` handler).
+
+| verdict | Meaning | Worker action |
+|---|---|---|
+| `propose` | The box computed one or more typed `MigrationFixKind` fix actions the owner can approve on [[../dashboard/migrations]]. | Persist as `pending_actions` → `status='needs_approval'`; on approval, run `applyMigrationFix` per action then re-run `verifyMigration(auditId)`. |
+| `needs_input` | The box needs the owner to answer ONE plain-language judgment question inline (see [[../specs/migration-fix-human-input]]). | Park on `status='needs_input'` with `questions [{id,q}]`; the owner's answer via `POST /api/roadmap/answer` resumes the same Max session. |
+| `human_needed` | The failure needs a human, out-of-system action (e.g. no billable card anywhere in the link group). The box has written the diagnosis. | `status='completed'`, `error='human-needed'`; the audit stays `failed` with the diagnosis on the dashboard. |
+| `code_gap` | The failure needs CODE, not data — a RECURRING code/data gap the box has recognized. The box authors a permanent fix spec (`public.specs` + `public.spec_phases` via the author-spec SDK, surfaced on Roadmap). | `status='completed'`, `error='code-gap'`; the diagnosis + authored spec slug ship in the `log_tail`. This sub still needs a hand for now, so the audit stays `failed`; the spec fixes the CLASS on its next build. |
+
+A well-formed `code_gap` is a TERMINAL, REPORTABLE outcome — never a "ended without propose/human_needed" park. The 2026-08-18 anti-pattern (a park backstop that told the founder "you can't fix this from this card" while discarding the session's real finding) is removed by this vocabulary.
 
 ## The five fixes (the judgment auto-heal punts)
 

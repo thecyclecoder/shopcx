@@ -14584,8 +14584,10 @@ async function runMigrationFixJob(job: Job) {
       await update(job.id, { status: "failed", error: "migration-fix run errored", log_tail: raw.slice(-2000) });
       return;
     }
-    // No recognizable status — surface rather than assume fixed.
-    await update(job.id, { status: "needs_attention", error: "migration-fix ended without propose/human_needed", log_tail: raw.slice(-2000) });
+    // No recognizable status — surface rather than assume fixed. Name the FULL recognised
+    // vocabulary (propose | needs_input | human_needed | code_gap) — the earlier message
+    // dropped `code_gap` and `needs_input` and read as if a well-formed diagnosis were a crash.
+    await update(job.id, { status: "needs_attention", error: "migration-fix ended without a recognised terminal verdict (propose | needs_input | human_needed | code_gap)", log_tail: raw.slice(-2000) });
   } catch (e) {
     await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
