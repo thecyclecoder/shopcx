@@ -1,6 +1,6 @@
 # libraries/review-candidacy-permission-gate
 
-Least-privilege PreToolUse permission gate for Sol's review-candidacy box session (review-request-sol-session Phase 4 § Fix 1, tightened in Phase 5 § Fix 2 to path-validate Read/NotebookRead).
+Least-privilege PreToolUse permission gate for Sol's review-candidacy box session (review-request-sol-session Phase 4 § Fix 1, tightened in Phase 5 § Fix 2 to path-validate Read/NotebookRead, fixed in Phase 6 § Fix 3 to close three Bash command-parser bypasses).
 
 **File:** `scripts/review-candidacy-permission-gate.ts`
 
@@ -24,8 +24,8 @@ The gate is split cleanly:
 - `NotebookRead` — same path validation as `Read` via `notebook_path`.
 - `Grep`, `Glob`, `WebSearch`, `WebFetch`, `TodoWrite` — blanket allow (no single-path escape valve).
 - `Bash` matching read-only shell built-ins: `ls`, `wc`, `pwd`, `date`, `echo`, `git status|log|show|diff`.
-- `Bash` matching file-reader built-ins `cat`, `head`, `tail`, `grep` — operand extraction + `isRepoScopedReadPath` validation for every path operand (prevents bare `cat /etc/passwd` or `grep secret ~/.aws/credentials`).
-- `Bash` matching exactly `npx tsx scripts/cx-agent-sdk-tool.ts <verb> <ticket_id>` or `npx tsx scripts/improve-box-tools.ts <tool> <ticket_id>` where `<ticket_id>` MATCHES the `REVIEW_CANDIDACY_TICKET_ID` env var. This ticket-binding stops a customer message from instructing "run against a DIFFERENT ticket" — a cross-ticket read is a hard deny.
+- `Bash` matching file-reader built-ins `cat`, `head`, `tail`, `grep` — operand extraction via `extractFileReaderPaths()` + `isRepoScopedReadPath` validation for every path operand (prevents bare `cat /etc/passwd` or `grep secret ~/.aws/credentials`). The operand parser routes `--long=value` and attached short forms (`-fVALUE`, `-eVALUE`) through the same path-vs-pattern classifier so that `grep --file=/outside/path …` and `grep -f/outside/path …` land in path validation, preventing pattern-file smuggling (fix-review-candidacy-bash-command-parser-bypasses).
+- `Bash` matching exactly `npx tsx scripts/cx-agent-sdk-tool.ts <op> <ticket_id>` or `npx tsx scripts/improve-box-tools.ts <tool> <ticket_id>` where the argv shape is STRICT: exactly five whitespace-separated tokens, `<op>` is a plain identifier (no shell metacharacters, flags, or `$` expansion), and `<ticket_id>` MATCHES the `REVIEW_CANDIDACY_TICKET_ID` env var. This replaces an earlier regex that accepted trailing tokens and was vulnerable to trailing-flag injection (fix-review-candidacy-bash-command-parser-bypasses). The strict `isSdkArgvShape()` check rejects any command containing shell metacharacters (`[`"'*?<>()$\\]`), requires exactly 5 tokens, and ensures no trailing arguments can ride along.
 
 ### Repo-scoped path check (`isRepoScopedReadPath`)
 Applies to `Read`, `NotebookRead`, and file-reader Bash commands. Denies:
@@ -37,6 +37,8 @@ Applies to `Read`, `NotebookRead`, and file-reader Bash commands. Denies:
 - Any resolved path segment in the credential/config set: `{.ssh, .aws, .claude, .config, .netrc, .gnupg, .pgpass}` (case-insensitive).
 
 ### Hard deny Bash patterns (checked BEFORE the allowlist)
+**Chained commands are checked FIRST.** Any `;`, `&&`, or `|` operator in the Bash payload denies immediately — this runs before the ticket-bound SDK allow so an otherwise-valid `npx tsx scripts/cx-agent-sdk-tool.ts <op> <ticket>` trailed by `; cat .env` cannot launder a second command through the shortcut (fix-review-candidacy-bash-command-parser-bypasses).
+
 | Class | Examples |
 |---|---|
 | env inspection | `env`, `printenv`, `/proc/self/environ`, `$SECRET_VAR` expansion |
@@ -56,9 +58,22 @@ Applies to `Read`, `NotebookRead`, and file-reader Bash commands. Denies:
 
 ## Exports
 
-- **`decideReviewCandidacyPermission(toolName, toolInput, ticketId, repoRoot?)`** — the pure decision function. Returns `{ decision: "allow"|"deny", reason: string }`. Tests: 30 cases covering all deny paths and the allowlist.
+- **`decideReviewCandidacyPermission(toolName, toolInput, ticketId, repoRoot?)`** — the pure decision function. Returns `{ decision: "allow"|"deny", reason: string }`. Tests: 44 cases covering all deny paths, the allowlist, and the three fixed Bash bypasses.
 - **`isRepoScopedReadPath(rawPath, repoRoot)`** — path validator for `Read` / `NotebookRead` / file-reader Bash. Returns `{ ok: true }` or `{ ok: false, risk: string }`. Pure; `repoRoot` is caller-supplied for testability.
-- **`extractFileReaderPaths(cmd, reader)`** — operand parser for `cat`/`head`/`tail`/`grep`. Returns path array, or `null` if the command uses shell metacharacters that can't be reasoned about statically. Pure.
+- **`extractFileReaderPaths(cmd, reader)`** — operand parser for `cat`/`head`/`tail`/`grep`. Returns path array, or `null` if the command uses shell metacharacters that can't be reasoned about statically. Routes `--long=value` and attached short forms (`-fVALUE`, `-eVALUE`) through the same path-vs-pattern classifier. Pure.
+- **`isSdkArgvShape(cmd, ticketId, script)`** — strict argv validator for SDK invocations. Rejects any command with shell metacharacters, requires exactly five whitespace-separated tokens (`npx tsx scripts/<script> <op> <ticketId>`), validates `<op>` as a plain identifier, and ensures `<ticketId>` matches. Pure.
+
+## Three closed Bash command-parser bypasses
+
+The gate has been tightened through three specific fixes to prevent customer-controlled messages from bypassing Bash command validation (fix-review-candidacy-bash-read-path-gate § Phase 1, fix-review-candidacy-bash-command-parser-bypasses § Phase 1):
+
+1. **Chain-of-commands bypass.** The `[;&|]` deny check now runs BEFORE the ticket-bound SDK allow, preventing a command like `npx tsx scripts/cx-agent-sdk-tool.ts bundle <ticket> ; cat .env` from laundering a second command through the gate. The chain operator check is the first guard in `isAllowedBashCommand`, so any semicolon, ampersand, or pipe in the payload denies immediately.
+
+2. **SDK argv validation bypass.** The earlier regex `(\s+[^\s]+)?\s+<ticket>(\s|$)` accepted trailing tokens and flags after the ticket id (e.g., `npx tsx scripts/cx-agent-sdk-tool.ts bundle <ticket> --extra-flag` or `npx tsx scripts/cx-agent-sdk-tool.ts bundle <ticket> /etc/passwd`). This has been replaced with a strict `isSdkArgvShape()` check that rejects any command with shell metacharacters (`[`"'*?<>()$\\]`), requires exactly five whitespace-separated tokens, validates the operation as a plain identifier (no special characters), and ensures no trailing arguments.
+
+3. **File-reader flag value bypass.** The `extractFileReaderPaths()` parser now handles `--long=value` form (e.g., `grep --file=/outside/path …`) and attached short forms (e.g., `grep -f/outside/path …`) by splitting them and routing the value through the same path-vs-pattern classifier as the separated form (`grep --file /outside/path` or `grep -f /outside/path`). Similarly, `-eVALUE` and `--regexp=VALUE` are recognized as pattern-supplying forms so subsequent operands are still validated as paths.
+
+All three bypasses are covered by tests: 44 test cases verify that chained commands, trailing tokens, non-identifier ops, and flag-value forms all deny appropriately, while legitimate repo-scoped reads and SDK invocations still allow.
 
 ## Two additional guards in the runner
 
