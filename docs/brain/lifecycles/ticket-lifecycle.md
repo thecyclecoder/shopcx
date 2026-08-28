@@ -180,9 +180,23 @@ Tags applied along the way (idempotent via `src/lib/ticket-tags.ts`):
 - `agent` — if a real human ever sent outbound
 - `j:{intent}` / `w:{type}` / `pb:{slug}` — journey / workflow / playbook applied
 
+## Phase 5.5 — Review-request collection
+
+The **review-candidacy detector** ([[../inngest/review-candidacy-detector-cron]]) fires every 30 minutes and identifies tickets that have been quiet for 24h since the last EXTERNAL message (when we spoke last, measured backward from now — if the customer had the last word, that ticket is excluded). Per-eligible ticket, it enqueues one `review-candidacy` box job for Sol's read-only session.
+
+**Sol's review-candidacy pass (Phase 1 of [[../specs/review-request-sol-session]]).** Sol reads the ticket thread, the customer's recent order history, and the review ladder state, then returns a JSON verdict: `{ ask, product_id, angle, include_coupon, reasoning }`. She never sends; the **worker is the only mutator**. Routing: only customers who have not recently been asked (dedupe via `review_requests` ladder + 24h check) and whose ticket has a real resolution signal (a message from us, on-topic, ≥24h ago) qualify. Sol's session runs under [[../libraries/review-candidacy-permission-gate]], a least-privilege permission gate that prevents malicious ticket content from reading env/credentials/configs.
+
+**Message composition, self-score, and QC (Phase 2 of [[../specs/review-request-sol-session]]).** On an `ask=true` verdict, the worker drafts the review-request message (facts templated, prose by Sol), scores it against a versioned [[../tables/review_message_rubrics|8-criterion rubric]] (100 points, floor 75), and routes to an independent QC reviewer who did not write the draft. The rubric covers question-framing (not a chore), named person, status reversal, voice, identity priming, fact placement, time cost, and continuity. Drafts + scores + QC verdicts are persisted to [[../tables/review_message_drafts]] for later grading and rubric tuning. [[../libraries/review-message-rubric]] · [[../libraries/review-message-drafts]] · [[../libraries/review-request-validator]].
+
+**Delivery + single nudge (Phase 3 of [[../specs/review-request-sol-session]]).** The ask ships via SMS (if SMS-subscribed to marketing) else email (CAN-SPAM compliant, no conditional coupon framing). It threads into the ticket and reuses a single `journey_sessions` row across both channels (preventing double-coupon issues). One nudge follows 3-4 days later for non-responders — email only (a second modality, not a second TCPA exposure), same thread (`Re:` subject), re-raising the same question. Nudge suppresses itself if the customer reviewed, clicked, unsubscribed, or replied. On canary (default: ON), drafts hold 12-24h in pending state while one CEO-inbox digest card per batch rolls up ("5 review requests drafted, sending 9am tomorrow" with clickthrough links); the founder can cancel or edit any draft before the send fires. [[../inngest/review-request-nudge-cron]] · [[../inngest/review-request-canary-digest-cron]] · [[../libraries/review-request-delivery]].
+
+**Downstream suppression.** CSAT (Phase 6) is automatically suppressed for customers who submitted a review — we already have the signal and a third ask in one week would be noise. [[../tables/review_requests]] is the ledger; [[../journeys/product-review]] is the async receive-side handler for submitted reviews.
+
+**Node completeness (CLAUDE.md hard rule).** The detector cron + Sol's box session appear as MONITORED_LOOPS rows in [[../libraries/control-tower]] with owner `cs` (Sol reports to June). Both carry kill switches and emit heartbeats; `review-candidacy` is registered in `BUILDER_WORKER_KINDS` so the node registry never sees an orphan.
+
 ## Phase 6 — CSAT
 
-24 hours after `closed_at`, [[../inngest/ticket-csat]] fires a CSAT survey email/SMS. Response writes `tickets.csat_score`. No response is fine — the survey is non-blocking and never reopens the ticket.
+24 hours after `closed_at`, [[../inngest/ticket-csat]] fires a CSAT survey email/SMS (unless the customer already reviewed per Phase 5.5). Response writes `tickets.csat_score`. No response is fine — the survey is non-blocking and never reopens the ticket.
 
 ## Phase 7 — archive
 
@@ -224,10 +238,14 @@ When `workspaces.sandbox_mode = true`, every outbound message from the AI become
 | `src/lib/inngest/deliver-pending-send.ts` | Outbound delivery cron |
 | `src/lib/inngest/ticket-csat.ts` | CSAT survey 24h post-close |
 | `src/lib/inngest/auto-archive.ts` | Archive old closed tickets |
+| `src/lib/inngest/review-candidacy-detector-cron.ts` | Review-request candidate detection (Phase 5.5) |
+| `scripts/review-candidacy-permission-gate.ts` | Permission gate for Sol's review-candidacy session |
+| `src/lib/inngest/review-request-nudge-cron.ts` | Review-request nudge sender (3-4d followup) |
+| `src/lib/inngest/review-request-canary-digest-cron.ts` | CEO inbox digest for canary-held drafts |
 
 ## Status / open work
 
-**Shipped:** All seven phases — inbound capture (Resend, Twilio, Meta, chat widget), unified pipeline (resolve → fraud short-circuit → playbook/Sonnet → execute), outbound delivery (deliver-pending-send cron), engagement tracking (email_events, SMS callbacks), auto-resolve, CSAT, archive. Sandbox mode + agent-involved escalation gaps both closed. Escalation lifecycle complete: routine-escalated tickets show the "🔍 AI Investigation" badge + triage paper-trail notes, and all three escalation flags clear on every terminal-status write path (Escalated view also filters terminal statuses).
+**Shipped:** All phases — inbound capture (Resend, Twilio, Meta, chat widget), unified pipeline (resolve → fraud short-circuit → playbook/Sonnet → execute), outbound delivery (deliver-pending-send cron), engagement tracking (email_events, SMS callbacks), auto-resolve, **review-request collection** (detector cron → Sol candidacy pass → message composition + QC + delivery + nudge), CSAT, archive. Sandbox mode + agent-involved escalation gaps both closed. Escalation lifecycle complete: routine-escalated tickets show the "🔍 AI Investigation" badge + triage paper-trail notes, and all three escalation flags clear on every terminal-status write path (Escalated view also filters terminal statuses).
 
 ### Guaranteed ticket handling (goal — SHIPPED · folded 2026-07-07)
 
