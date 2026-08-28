@@ -150,6 +150,17 @@ The `KNOWN_JOB_KINDS` constant next to the `Job.kind` union enumerates every kin
 
 When a goal-bound spec's PR becomes DIRTY (its `baseRef` goal-branch advanced past the spec's branch — a rebase/rebuild is needed), the standing-pass reconciler ([[agent-jobs]] `reconcileDirtyGoalMemberPrs`) detects it and enqueues a `pr-resolve` job to rebase-or-rebuild. The `runPrResolveJob` handler now reads `pr.base.ref` dynamically ([[github-pr-resolve]] `getPr` extended) and merges into `origin/{baseRef}` (validated as `main` or `goal/*`; falls back to main) instead of hardcoded `origin/main`. This allows a single `pr-resolve` lane to handle both one-off (merge-to-main) and goal-bound (merge-to-goal-branch) PRs seamlessly.
 
+## Phase-position derivation — `phasePosition` runs for every spec, including single-phase ([[../specs/a-single-phase-spec-records-its-build-sha-regardless-of-phase-title]] Phase 1)
+
+At the top of `runBuildJob`, the worker resolves `phasePosition` (the 1-based index of the phase this session is building). It's the pin `finalizeBuiltPhase` uses to call `stampPhaseBuilt` (recording `build_sha` + flipping the phase to `in_progress`) and the value that becomes the commit's `Phase: N` trailer — the backup signal `finalizeBuiltPhase` scans branch commits for when the derived stamp is missing. If `phasePosition` is null, both routes fail together: no stamp is recorded and no trailer is emitted, so the merge step (which requires build evidence) can never mark the phase shipped.
+
+Derivation order (`scripts/builder-worker.ts` ~L28441):
+
+1. **Instructions-name-phase.** If `job.instructions` literally contains `Phase N`, that N wins (`/\bPhase\s+(\d+)\b/i`). This is the direct signal — a scoped multi-phase build or a spec-test rerun.
+2. **First-unbuilt-phase fallback** (fresh job, no `Phase N` in instructions). Load the spec's phases via [[brain-roadmap]] `getSpec` and pick `findIndex((p) => p.status !== 'shipped' && p.status !== 'rejected' && !p.build_sha)`. The `!p.build_sha` clause is REQUIRED — without it, once P1 is `in_progress` (built, unshipped) the findIndex returns P1 for every subsequent phase build, so multi-phase specs accumulate at "positions 2,3 not built" and never advance.
+
+**Single-phase specs derive too.** Position derivation runs on any `idx >= 0` — a one-phase spec resolves to position 1 unambiguously. Only the `nextPhaseScope` narrowing (the "⭐ ONE-PHASE-PER-SESSION" instruction injected into the build session) stays gated on `phases.length > 1`, because a single-phase spec IS the whole thing in one PR and has nothing to scope. Pre-fix, both were gated together on `phases.length > 1`, which left `phasePosition = null` for any single-phase spec whose title didn't literally contain "Phase N"; a phase titled "P1 — implement the fix" then recorded no `build_sha` and was permanently unshippable once the 2026-08-17 merge step began requiring build evidence.
+
 ## Ephemeral worktree recovery — `removeWorktreeForBranch` third arm (builder-worktree-self-heal-reclaims-ephemeral-branch-pinned-worktrees)
 
 The **branch-side** cleanup helper `removeWorktreeForBranch(branch)` is called before every `git worktree add -B <branch>` to free any stale worktree that's still pinning `<branch>`. It has three arms:

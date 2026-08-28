@@ -1,0 +1,1 @@
+- **A single-phase spec records its build SHA regardless of how its phase is titled** · verified 2026-08-25 · → [[../libraries/builder-worker.md]]

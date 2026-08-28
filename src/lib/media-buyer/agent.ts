@@ -64,7 +64,7 @@ import {
   resolvePublishIdentity,
   type PublishIdentity,
 } from "@/lib/media-buyer/publish-identity";
-import { maxConcurrentTests } from "@/lib/media-buyer/provision-cohort";
+import { maxConcurrentTests, META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN } from "@/lib/media-buyer/provision-cohort";
 import {
   getAdSetTargetingAndPixel,
   getMetaUserToken,
@@ -3681,6 +3681,38 @@ export function ensureExcludedAudiences(
   return { ...targeting, excluded_custom_audiences: existing };
 }
 
+/**
+ * PURE — media-buyer-replenish-sanitizes-legacy-advantage-age-targeting Phase 1.
+ *
+ * The provision-cohort default template is now the Meta-valid broad Advantage+ shape
+ * (see `DEFAULT_TEST_TARGETING` and `META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN` in
+ * [[./provision-cohort]]), but an ALREADY-PERSISTED cohort row can still carry the
+ * legacy F50-65 hard demographic controls copied into `media_buyer_test_cohorts.adset_template`
+ * before the default flipped (or a hand-edited row). This normalizer runs at the money boundary
+ * — the replenish builder — and strips `age_min`/`age_max`/`genders` when
+ * `targeting_automation.advantage_audience === 1` AND `age_min > META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN`
+ * (Meta's contradiction — the shape that trips a 400). Everything else on `targeting` is preserved
+ * verbatim (`geo_locations`, `excluded_custom_audiences`, custom-audience includes, other
+ * `targeting_automation` keys), so purchaser + all-customer exclusion invariants are unaffected.
+ *
+ * NON-mutating: returns the same reference when nothing needs to change (advantage_audience !== 1
+ * OR age_min missing / already ≤ ceiling); returns a fresh copy otherwise so callers can safely
+ * treat it as new state.
+ */
+export function normalizeLegacyAdvantageAudienceTargeting(
+  targeting: Record<string, unknown>,
+): Record<string, unknown> {
+  const auto = targeting.targeting_automation;
+  const advantageOn =
+    !!auto && typeof auto === "object" && (auto as Record<string, unknown>).advantage_audience === 1;
+  if (!advantageOn) return targeting;
+  const ageMin = targeting.age_min;
+  if (typeof ageMin !== "number" || ageMin <= META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN) return targeting;
+  const { age_min: _am, age_max: _ax, genders: _g, ...rest } = targeting;
+  void _am; void _ax; void _g;
+  return rest;
+}
+
 export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): BuildReplenishJobInsertResult {
   const { workspaceId, cohort, action, accountId, publishIdentity, videoId, adName, destination, headlines, primaryTexts, descriptions } = input;
 
@@ -3724,10 +3756,17 @@ export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): Bu
     // `missing_purchaser_exclusion` AND `missing_customer_exclusion` on any per-test publish
     // whose spec doesn't. A cohort with only one id set (e.g. legacy pre-Fix-1 row) forwards
     // the template with just that id; a cohort with neither id set forwards the template unchanged.
-    const targeting = ensureExcludedAudiences(tmpl.targeting, [
-      cohort.excludedPurchaserAudienceId,
-      cohort.excludedAllCustomersAudienceId,
-    ]);
+    // media-buyer-replenish-sanitizes-legacy-advantage-age-targeting Phase 1 — apply the
+    // legacy Advantage+ age-min normalizer at THIS boundary (before the create_adset_spec is
+    // assembled) so a stale cohort row carrying `age_min:50 / age_max:65 / genders:[2]` +
+    // `targeting_automation.advantage_audience:1` never reaches Meta. Exclusions layered on
+    // above are preserved (the sanitizer only touches age_min/age_max/genders).
+    const targeting = normalizeLegacyAdvantageAudienceTargeting(
+      ensureExcludedAudiences(tmpl.targeting, [
+        cohort.excludedPurchaserAudienceId,
+        cohort.excludedAllCustomersAudienceId,
+      ]),
+    );
     createAdsetSpec = {
       campaign_id: campaignId,
       name: adName,

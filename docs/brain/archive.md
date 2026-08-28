@@ -12,7 +12,20 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Stop fraud detector false alerts from coalesced heartbeat window edges** · verified 2026-08-28 · → [[lifecycles/control-tower]]
+- **Review collection — journey, coupon, and schema foundations** · verified 2026-08-28 · → [[journeys/product-review]]
+- **A price complaint must be answered from the customer's own established rate, not the standard rate card** · verified 2026-08-27 · → [[lifecycles/subscription-billing]]
+- **Ads supervisor: product `Amazing Coffee K-Cups` — Dahlia's ready-to-test bin is thin (0/4)** · verified 2026-08-27 · → [[../libraries/ads-supervisor]]
+- **Stop Bianca replenish jobs from reusing stale Advantage+ age targeting** · verified 2026-08-27 · → [[../lifecycles/media-buyer-arming]]
+- **Fix Bianca per-test ad sets rejected by Meta Advantage+ age controls** · verified 2026-08-26 · → [[../libraries/provision-cohort]]
+- **A broken verification check must not be able to kill a build** · verified 2026-08-25 · → [[lifecycles/spec-goal-branch]]
+- **A single-phase spec records its build SHA regardless of how its phase is titled** · verified 2026-08-25 · → [[../libraries/builder-worker.md]]
+- **Cancel journey — a saved_remedy the customer immediately re-cancels must route back to the cancel terminal, not loop** · verified 2026-08-25 · → [[../journeys/cancel]]
+- **Classify portal vault_failed card declines instead of escalating each to a human** · verified 2026-08-25 · → [[../libraries/portal__remediation]]
+- **Loyalty redemption + coupon usability must span the linked-account group** · verified 2026-08-25 · → [[../libraries/loyalty]]
 - **A merged-but-unstamped spec must reach the audit lane instead of being silently dropped** · verified 2026-08-25 · → [[../libraries/agent-jobs]]
+- **Overcharge detector: baseline must be a sustained demonstrated rate (not Math.min of one order) and must honor variant-swap lock resets** · verified 2026-08-25 · → [[../libraries/subscription-overcharge]]
+- **Policy-bait guard must not block a reply that describes an already-completed split refund** · verified 2026-08-25 · → [[../libraries/sol-policy-bait-guard]]
 - **Bianca's postable bin takes status='ready' only — a draft creative can never be a replenish candidate** · verified 2026-08-25 · → [[../libraries/ready-to-test]]
 - **Ads supervisor: product `Superfood Tabs` — Bianca missed a crown on adset `Dahlia - Superfood Tabs - Feel Lighter Every Single Day`** · verified 2026-08-24 · → [[../libraries/ads-supervisor]]
 - **A cancelled subscription must not report a live next-billing date** · verified 2026-08-24 · → [[lifecycles/subscription-billing]]

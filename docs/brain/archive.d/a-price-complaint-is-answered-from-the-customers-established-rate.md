@@ -1,0 +1,1 @@
+- **A price complaint must be answered from the customer's own established rate, not the standard rate card** · verified 2026-08-27 · → [[lifecycles/subscription-billing]]
