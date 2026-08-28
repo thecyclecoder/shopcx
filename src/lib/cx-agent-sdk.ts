@@ -31,6 +31,7 @@
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { linkGroupIds } from "@/lib/customer-links";
+import { getAmplifierOnHandBySku } from "@/lib/inventory/read";
 import { suggestEmailCorrection } from "@/lib/email-typo";
 import { getOrderRefundLedger, type OrderRefundLedger } from "@/lib/refund-ledger";
 
@@ -117,6 +118,21 @@ export interface CxProductVariant {
   id: string;
   title: string | null;
   price_cents: number | null;
+  /** 3PL SKU this variant ships as — the join key for ship truth. */
+  sku: string | null;
+  /**
+   * ⭐ SHIP TRUTH — units the 3PL physically holds for this variant's SKU, from canonical
+   * `inventory_levels` (location='amplifier_3pl'). NULL means we have no 3PL row for the SKU and
+   * therefore cannot vouch for it — treat NULL as unknown, never as "in stock".
+   *
+   * This exists because the SDK previously reported every active variant with a price and NO stock
+   * signal at all, so an agent reading it could not tell a shippable flavor from a dead one. On
+   * 2026-08-28 Sol promised a customer Strawberry Lemonade off this list while the 3PL held zero
+   * (ticket 0c9f11a7); the order could not include it and she was billed anyway.
+   */
+  on_hand: number | null;
+  /** Convenience: `on_hand > 0`. NULL when on_hand is unknown — callers must not coerce it to true. */
+  in_stock: boolean | null;
 }
 
 export interface CxProduct {
@@ -815,6 +831,23 @@ export async function getCxProducts(admin: Admin, workspaceId: string): Promise<
     .eq("workspace_id", workspaceId)
     .eq("status", "active");
   if (!products?.length) return [];
+
+  // ── ship truth ──────────────────────────────────────────────────────────────────────
+  // The 3PL is the ONLY authority for what can actually ship (founder 2026-08-28: "the 3PL is the
+  // only true source of inventory, not Shopify"). Amplifier rows key on SKU and carry no variant
+  // id, so we bridge shopify variant id → sku through `product_variants`, then sku → on-hand.
+  const [{ data: pvRows }, amplifier] = await Promise.all([
+    admin
+      .from("product_variants")
+      .select("shopify_variant_id, sku")
+      .eq("workspace_id", workspaceId),
+    getAmplifierOnHandBySku(admin, workspaceId),
+  ]);
+  const skuByVariant = new Map<string, string>();
+  for (const r of (pvRows ?? []) as Array<{ shopify_variant_id: unknown; sku: unknown }>) {
+    if (r.shopify_variant_id != null && r.sku) skuByVariant.set(String(r.shopify_variant_id), String(r.sku));
+  }
+
   return products.map((p) => {
     const vs = (p.variants as Array<{ id?: string; title?: string; price_cents?: number | null }> | null) ?? [];
     return {
@@ -824,11 +857,19 @@ export async function getCxProducts(admin: Admin, workspaceId: string): Promise<
       status: (p.status as string | null) ?? null,
       variants: vs
         .filter((v) => !!v.id)
-        .map((v) => ({
-          id: String(v.id),
-          title: (v.title as string | null) ?? null,
-          price_cents: (v.price_cents as number | null) ?? null,
-        })),
+        .map((v) => {
+          const sku = skuByVariant.get(String(v.id)) ?? null;
+          // `undefined` (no 3PL row for this SKU) stays NULL — unknown is not "in stock".
+          const onHand = sku ? amplifier.get(sku) : undefined;
+          return {
+            id: String(v.id),
+            title: (v.title as string | null) ?? null,
+            price_cents: (v.price_cents as number | null) ?? null,
+            sku,
+            on_hand: onHand ?? null,
+            in_stock: onHand === undefined ? null : onHand > 0,
+          };
+        }),
     };
   });
 }
@@ -1105,14 +1146,39 @@ export function formatCxSubscriptions(subs: CxSubscription[]): string {
   return lines.join("\n");
 }
 
+/**
+ * Plain-text product catalog for an agent brief — WITH ship truth per variant.
+ *
+ * "active" is a merchandising flag, not a promise that anything can ship. Every variant is now
+ * tagged from the 3PL: `OUT OF STOCK` (0 on hand), `stock unknown` (no 3PL row), or a unit count.
+ * Rendering these identically is what let Sol offer a customer a flavor the warehouse could not
+ * ship (ticket 0c9f11a7, 2026-08-28).
+ */
 export function formatCxProducts(products: CxProduct[]): string {
   if (!products.length) return "PRODUCTS: (no active products)";
-  const lines: string[] = ["PRODUCTS (active — variants + MSRP):"];
+  const oos: string[] = [];
+  const lines: string[] = [
+    "PRODUCTS (active — variants + MSRP + SHIP TRUTH from the 3PL):",
+    "  ⚠️ NEVER offer, promise, or reorder a variant marked OUT OF STOCK or stock unknown — 'active' is a",
+    "     merchandising flag, not a guarantee it can ship. Check this list before naming a flavor.",
+  ];
   for (const p of products) {
     const variants = p.variants
-      .map((v) => `${v.title ?? "(default)"} [${v.id}] @ ${DOLLARS(v.price_cents)}`)
+      .map((v) => {
+        const stock =
+          v.in_stock === null
+            ? "⚠️ stock unknown"
+            : v.in_stock
+              ? `${v.on_hand} on hand`
+              : "⛔ OUT OF STOCK";
+        if (v.in_stock === false) oos.push(`${p.title ?? "(untitled)"} / ${v.title ?? "(default)"}`);
+        return `${v.title ?? "(default)"} [${v.id}] @ ${DOLLARS(v.price_cents)} — ${stock}`;
+      })
       .join(", ");
     lines.push(`  - ${p.title ?? "(untitled)"} · ${variants || "(no variants)"}`);
+  }
+  if (oos.length) {
+    lines.push(`  ⛔ CANNOT SHIP RIGHT NOW (${oos.length}): ${oos.join(" · ")}`);
   }
   return lines.join("\n");
 }
