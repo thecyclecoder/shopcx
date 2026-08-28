@@ -20,6 +20,7 @@ import { randomUUID } from "crypto";
 import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
 import type { TeardownRecipe } from "../src/lib/research-urls";
 import type { SpecPhaseCheckInput } from "../src/lib/spec-phase-checks-table"; // security-fix-autoauthor-machine-check — typed check payload for authorSecurityFixSpec
+import type { SpecAccumulationVerdict } from "../src/lib/specs-table"; // a-broken-verification-check-cannot-kill-a-build Phase 2 — carries the `unevaluablePhases` third-state list the defer path branches on
 import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the director's in-character voice for chat
 // lossless-error-diagnostics-no-object-object Phase 2 — the shared lossless error renderer every
 // diagnostic-persisting catch site funnels through. Kills `[object Object]` on a supabase-js
@@ -28272,7 +28273,10 @@ async function dispatchJob(job: Job) {
         }
       }
       // ACCUMULATION — the stamp above is now persisted, so this read reflects the just-built phase. Fails OPEN.
-      let acc: { complete: boolean; reason: string };
+      // a-broken-verification-check-cannot-kill-a-build Phase 2 — the annotation is the full
+      // `SpecAccumulationVerdict` (not the pre-Phase-2 `{complete, reason}` shape) so `acc.unevaluablePhases`
+      // is visible to the defer branch below without an unsafe cast. The catch-arm rebuilds the same shape.
+      let acc: SpecAccumulationVerdict;
       try {
         const { isSpecAccumulationComplete } = await import("../src/lib/specs-table");
         acc = await isSpecAccumulationComplete(job.workspace_id, slug);
@@ -28415,6 +28419,33 @@ async function dispatchJob(job: Job) {
         // instead of looping). De-duped internally: if the `chain()` above just queued a phase (or any
         // other build is in-flight), the redrive skips. Never throws.
         try {
+          // a-broken-verification-check-cannot-kill-a-build Phase 2 — if the accumulation gate
+          // failed because a check could not be evaluated (git grep refused the pattern, or the
+          // branch ref could not be resolved), route to the broken-check escalation lane INSTEAD
+          // of the redrive-or-escalate path. That lane does NOT write a `redrive_deferred_build`
+          // director_activity row, so `readDeferredRedriveMax`'s count over the last 24h is
+          // preserved for genuine code gaps — a fault in the verification layer is never charged
+          // against the code it was checking. The build stays DEFERRED (accumulation still reads
+          // !complete), the PR stays closed, the ship is blocked — but a repair lane / human is
+          // paged to fix the check, and the spec's history isn't consumed by the infra fault.
+          const unevaluable = acc.unevaluablePhases ?? [];
+          if (unevaluable.length) {
+            const { escalateBrokenCheckWithoutRedriveCount } = await import("../src/lib/roadmap-actions");
+            const outcome = await escalateBrokenCheckWithoutRedriveCount(
+              job.workspace_id,
+              slug,
+              unevaluable.map((u) => ({
+                phasePosition: u.phasePosition,
+                kind: u.kind,
+                checkDescription: u.checkDescription,
+                pattern: u.pattern,
+                reason: u.reason,
+              })),
+              job.id,
+            );
+            console.log(`${tag} broken-check-escalate: ${outcome.action} — ${outcome.reason}`);
+            return;
+          }
           const { redriveDeferredBuildOrEscalate } = await import("../src/lib/roadmap-actions");
           // Phase 2 — carry the un-reconcilable list into the redrive reason so a cap-reached defer
           // escalates to the CEO with the ACTUAL failing check descriptions, not the coarse "not

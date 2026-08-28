@@ -503,6 +503,151 @@ export async function redriveDeferredBuildOrEscalate(
   }
 }
 
+// ── Broken-check escalation (a-broken-verification-check-cannot-kill-a-build Phase 2) ──────────────
+
+/**
+ * a-broken-verification-check-cannot-kill-a-build Phase 2 — one entry per unevaluable check the
+ * accumulation gate could not evaluate on the branch. Handed in from the box worker's defer path
+ * (populated from `SpecAccumulationVerdict.unevaluablePhases`).
+ */
+export interface UnevaluableFailingCheck {
+  phasePosition: number;
+  kind: "grep-error" | "unresolvable";
+  checkDescription: string;
+  pattern?: string;
+  reason: string;
+}
+
+/**
+ * a-broken-verification-check-cannot-kill-a-build Phase 2 — the escalation lane the deferred-PR
+ * completion of a build lane routes to WHEN AND ONLY WHEN at least one unevaluable check is in the
+ * failing set. Distinct from `redriveDeferredBuildOrEscalate` in TWO ways the spec requires:
+ *
+ *  1. **Does NOT consume `BUILDER_DEFERRED_REDRIVE_MAX`.** No `redrive_deferred_build`
+ *     director_activity row is written; the counter that would eventually dismiss a real code-gap
+ *     build stays at whatever the code-gap history left it. A fault in the verification layer must
+ *     never be charged against the code it was checking.
+ *  2. **Escalates the broken check itself, naming the phase + pattern verbatim.** The spec's
+ *     escalation message shape: "phase N check '…' — <GIT ERROR|BRANCH UNRESOLVABLE> (pattern: '…')".
+ *     Author-time Phase-1 caught the mistakes we can predict; this escalation surfaces any
+ *     unpredicted case so a human/repair lane fixes the check instead of the build being dismissed
+ *     as unverified.
+ *
+ * Never a PASS — the accumulation gate still reads `!complete`, the PR stays deferred, the ship is
+ * blocked. The spec's phantom-ship hazard is explicit: "Do NOT make an unevaluable check count as
+ * a PASS. That would be the phantom-ship hole in a new costume."
+ *
+ * Dedupes against an already-in-flight build (matches `redriveDeferredBuildOrEscalate`'s guard) so
+ * a second surface (Mario, a manual Rebuild) that already reopened work never gets stacked with a
+ * duplicate broken-check card.
+ *
+ * Best-effort — never throws. On any DB blip, returns `{action:'skip', reason}` so the caller
+ * (a completed build lane) never dies on an audit surface hiccup.
+ */
+export async function escalateBrokenCheckWithoutRedriveCount(
+  workspaceId: string,
+  slug: string,
+  unevaluable: UnevaluableFailingCheck[],
+  sourceJobId: string,
+): Promise<DeferredRedriveOutcome> {
+  try {
+    if (!unevaluable.length) {
+      return { action: "skip", reason: "no unevaluable checks — nothing to escalate" };
+    }
+    const admin = createAdminClient();
+    // Dedupe — same guard as `redriveDeferredBuildOrEscalate`. A prior surface (Mario reclaim, a
+    // Rebuild tap between our completion and this call, or a resume-after-approval run) may already
+    // have opened an active build for this spec; stacking a needs_approval card on top would double
+    // the CEO signal without moving the fix forward.
+    const { data: activeBuild } = await admin
+      .from("agent_jobs")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", slug)
+      .eq("kind", "build")
+      .in("status", ["queued", "queued_resume", "claimed", "building", "needs_approval", "needs_input"])
+      .limit(1);
+    if (activeBuild && activeBuild.length) {
+      return { action: "skip", reason: "another build already in-flight for this spec" };
+    }
+
+    // Escalation message names each phase + the offending pattern verbatim (per spec's "The
+    // escalation must name the phase position and the offending pattern verbatim").
+    const perCheck = unevaluable.map((u) => {
+      const kindLabel = u.kind === "unresolvable" ? "BRANCH UNRESOLVABLE" : "GIT ERROR";
+      const pat = u.pattern ? ` (pattern: '${u.pattern}')` : "";
+      return `phase ${u.phasePosition} check '${u.checkDescription}' — ${kindLabel}${pat}`;
+    });
+    const summary =
+      `Broken check on ${slug} — ${unevaluable.length} check(s) could not be evaluated ` +
+      `(infrastructure fault, NOT a code gap); build was NOT charged against ` +
+      `${DEFERRED_REDRIVE_MAX_ENV}. Repair the check(s) and re-drive: ${perCheck.join("; ")}`;
+    const pendingActions = [
+      {
+        id: `broken-check-escalate-${Date.now()}`,
+        type: "broken_check",
+        status: "pending" as const,
+        spec_slug: slug,
+        summary: summary.slice(0, 500),
+        checks: unevaluable.map((u) => ({
+          phase_position: u.phasePosition,
+          kind: u.kind,
+          check_description: u.checkDescription,
+          pattern: u.pattern,
+        })),
+      },
+    ];
+    const { error: insErr } = await admin.from("agent_jobs").insert({
+      workspace_id: workspaceId,
+      spec_slug: slug,
+      kind: "build",
+      status: "needs_approval",
+      created_by: null,
+      instructions:
+        `Broken-check escalation (from build job ${sourceJobId}): the phase-accumulation gate ` +
+        `could not evaluate one or more checks on the branch — this is an infrastructure fault in ` +
+        `the verification layer, NOT a code gap in the phase. The re-drive counter was NOT incremented ` +
+        `(so a genuinely-unbuildable spec's cap history is preserved for the code-gap path). Repair ` +
+        `the check(s) below and re-drive:\n\n${perCheck.join("\n")}`.slice(0, 4000),
+      pending_actions: pendingActions,
+    });
+    if (insErr) {
+      return { action: "skip", reason: `broken-check escalate insert failed: ${insErr.message}` };
+    }
+    // Distinct action_kind — the `readDeferredRedriveMax` query above filters on
+    // `redrive_deferred_build` specifically, so this row does NOT contribute to the cap counter.
+    // That is the invariant the spec pins: "It does not count toward the re-drive cap."
+    const { recordDirectorActivity } = await import("@/lib/director-activity");
+    await recordDirectorActivity(admin, {
+      workspaceId,
+      directorFunction: DEFERRED_REDRIVE_DIRECTOR_FUNCTION,
+      actionKind: "broken_check_escalated",
+      specSlug: slug,
+      reason: summary,
+      metadata: {
+        source_job_id: sourceJobId,
+        broken_checks: unevaluable.map((u) => ({
+          phase_position: u.phasePosition,
+          kind: u.kind,
+          check_description: u.checkDescription,
+          pattern: u.pattern,
+          reason: u.reason,
+        })),
+        // Explicit provenance — a downstream audit that grouped by action_kind can see this class
+        // exists (never rolled into `redrive_deferred_build`) so a spike of broken-check
+        // escalations is legible instead of blending into the redrive counter.
+        counted_against_redrive_cap: false,
+      },
+    });
+    return { action: "escalate", reason: summary };
+  } catch (e) {
+    return {
+      action: "skip",
+      reason: `escalateBrokenCheckWithoutRedriveCount threw: ${errText(e)}`,
+    };
+  }
+}
+
 // ── Create PR for a build whose branch pushed but `gh pr create` failed (build-recover-pr-create) ──
 
 /** The exact `error` string the worker stamps when a build succeeds + pushes its branch but the final
