@@ -1,0 +1,1 @@
+- **Close review-candidacy newline Bash chain bypass** · verified 2026-08-28 · → [[../libraries/review-candidacy-permission-gate]]
