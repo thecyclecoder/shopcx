@@ -202,6 +202,7 @@
     "test:advertised-products": "tsx --test src/lib/advertised-products.test.ts",
     "test:ad-creative-cadence-gate": "tsx --test src/lib/inngest/ad-creative-cadence.gate.test.ts",
     "test:cleo-blueprint-gate": "tsx --test src/lib/cleo-blueprint.gate.test.ts",
+    "test:duplicate-migration-versions": "tsx --test scripts/_check-duplicate-migration-versions.test.ts",
     "test:meta-ad-library": "tsx --test src/lib/meta-ad-library.test.ts",
     "test:winning-creative-detect": "tsx --test src/lib/ads/winning-creative-detect.test.ts",
     "test:pair-promoted-lander": "tsx --test src/lib/storefront/pair-promoted-lander.test.ts",
