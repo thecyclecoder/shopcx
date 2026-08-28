@@ -981,11 +981,60 @@ export interface CreateAdSetArgs {
  * publisher_platforms/positions unless the caller opts out), status PAUSED.
  * Returns the new ad-set id.
  */
+/**
+ * Meta's hard cap: with `targeting_automation.advantage_audience = 1`, `age_min` may not exceed 25.
+ * A higher floor is only accepted as a SUGGESTION, never as a control.
+ *
+ *   "With ad sets that use Advantage+ audience, the minimum age audience control can't be set to
+ *    higher than 25: You can add a higher minimum age as a suggestion instead."
+ */
+export const ADVANTAGE_AUDIENCE_MAX_AGE_MIN = 25;
+
+/**
+ * Clamp an ad-set targeting spec so Advantage+ audience cannot be paired with an illegal age floor.
+ *
+ * Why this exists (CEO 2026-08-28): the Amazing Coffee K-Cups cohort carried a legacy 50-65
+ * older-buyer profile alongside `advantage_audience=1`, and Meta refused EVERY mint — ten-plus
+ * attempts across Aug 26-27, each one a `meta_400` that left `meta_adset_id` null. K-Cups had been
+ * unblocked days earlier, a creative was ready and Bianca kept picking it up; the product looked
+ * correctly wired at every layer and still could not launch, because the failure was one call
+ * further down than anyone was looking.
+ *
+ * Clamping (rather than throwing) is the deliberate choice: the alternative is a replenish that
+ * dies on a legacy row, which is exactly the silent-stall behaviour we just spent a day removing.
+ * The caller is told what changed so the correction is auditable, never mute.
+ *
+ * PURE — returns a new spec, never mutates the input.
+ */
+export function sanitizeAdvantageAgeTargeting(
+  targeting: Record<string, unknown>,
+): { targeting: Record<string, unknown>; clamped: null | { from: number; to: number } } {
+  const auto = (targeting.targeting_automation ?? null) as Record<string, unknown> | null;
+  const advantageOn = Number(auto?.advantage_audience ?? 0) === 1;
+  const ageMin = Number(targeting.age_min);
+  if (!advantageOn || !Number.isFinite(ageMin) || ageMin <= ADVANTAGE_AUDIENCE_MAX_AGE_MIN) {
+    return { targeting, clamped: null };
+  }
+  return {
+    targeting: { ...targeting, age_min: ADVANTAGE_AUDIENCE_MAX_AGE_MIN },
+    clamped: { from: ageMin, to: ADVANTAGE_AUDIENCE_MAX_AGE_MIN },
+  };
+}
+
 export async function createAdSet(
   token: string,
   accountId: string,
   args: CreateAdSetArgs,
 ): Promise<string> {
+  // Last line of defence before the wire: a legacy age floor + Advantage+ is a guaranteed meta_400.
+  const { targeting: safeTargeting, clamped } = sanitizeAdvantageAgeTargeting(args.targeting);
+  if (clamped) {
+    console.warn(
+      `[meta-ads] createAdSet "${args.name}": age_min ${clamped.from} is illegal with advantage_audience=1 ` +
+        `(Meta caps it at ${ADVANTAGE_AUDIENCE_MAX_AGE_MIN}); clamped to ${clamped.to} so the mint can proceed. ` +
+        `Fix the source targeting — the clamp is a rail, not the intent.`,
+    );
+  }
   const body: Record<string, unknown> = {
     name: args.name,
     campaign_id: args.campaignId,
@@ -993,7 +1042,7 @@ export async function createAdSet(
     billing_event: args.billingEvent || "IMPRESSIONS",
     bid_strategy: args.bidStrategy || "LOWEST_COST_WITHOUT_CAP",
     promoted_object: { pixel_id: args.pixelId, custom_event_type: args.customEventType || "PURCHASE" },
-    targeting: args.targeting,
+    targeting: safeTargeting,
     status: args.status || "PAUSED",
   };
   if (args.dailyBudgetCents != null) body.daily_budget = Math.round(args.dailyBudgetCents);
