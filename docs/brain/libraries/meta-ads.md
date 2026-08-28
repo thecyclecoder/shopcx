@@ -136,3 +136,29 @@ a manually-targeted ad set, and clamping there would silently destroy a real old
 Pinned in `src/lib/advantage-age-targeting.test.ts`. Audit any time with
 `scripts/_age-targeting-probe.ts` (live adsets + every cohort template, side by side).
 
+### ⚠️ The system had already self-healed this — read the timeline before adding a fix
+
+The autonomous repair loop caught it first and shipped two fixes:
+
+| when | what |
+|---|---|
+| 2026-08-26 | `provision-cohort` drops hard age/gender defaults from `DEFAULT_TEST_TARGETING`, so NEW cohorts carry no age floor |
+| 2026-08-27 12:25 | `normalizeLegacyAdvantageAudienceTargeting` (`agent.ts:3702`) strips age/genders from `create_adset_spec` at replenish-enqueue |
+
+Measured: the last failed mint was **2026-08-27 12:00**; the very next replenish at **13:00 published
+successfully**. Zero failures since. *The loop diagnosed, specced, built, merged and verified its own
+fix in about a day.*
+
+What was still left, and why this rail exists anyway:
+
+1. **The stale cohort row.** The Aug-27 fix STRIPS age downstream; it does not correct the source. The
+   K-Cups template still read 50-65 — a row that lies about what we target. Fixed to 18-65 to match
+   the other five (CEO: *"it should be the same as the rest"*).
+2. **Paths that skip replenish-enqueue.** `normalizeLegacyAdvantageAudienceTargeting` guards ONE
+   call site. `sanitizeAdvantageAgeTargeting` sits in `createAdSet`, so a scaler mint from
+   `graduateCrownedWinnerToScaler` or a manual publish is covered too.
+
+`META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN` (provision-cohort) is now an alias of
+`ADVANTAGE_AUDIENCE_MAX_AGE_MIN` here — one definition, two names. A second literal `25` in another
+module is precisely how a platform limit drifts out of sync.
+

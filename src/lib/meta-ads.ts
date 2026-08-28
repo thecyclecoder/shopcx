@@ -991,6 +991,13 @@ export interface CreateAdSetArgs {
 export const ADVANTAGE_AUDIENCE_MAX_AGE_MIN = 25;
 
 /**
+ * Alias kept because [[../media-buyer/provision-cohort]] published this name first (2026-08-26) and
+ * `agent.ts` + its tests import it. ONE definition, two names — a second literal `25` in another
+ * module is exactly how a platform limit drifts out of sync.
+ */
+export const META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN = ADVANTAGE_AUDIENCE_MAX_AGE_MIN;
+
+/**
  * Clamp an ad-set targeting spec so Advantage+ audience cannot be paired with an illegal age floor.
  *
  * Why this exists (CEO 2026-08-28): the Amazing Coffee K-Cups cohort carried a legacy 50-65
