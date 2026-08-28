@@ -15,9 +15,36 @@
 // can't corrupt an in-flight one.
 
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, checkPortalBan } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, checkPortalBan, findCustomer } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createCustomerDiscount } from "@/lib/coupons";
+
+/**
+ * Expand a customer id to its full customer_links group. Inline copy of
+ * `expandLinkedCustomerIds` (src/lib/loyalty.ts:99, not exported) — used here
+ * to bind the tokenized review session to the AUTHENTICATED portal customer,
+ * so a logged-in customer in the same workspace can NEVER submit a review /
+ * open a CS ticket / mint a reward AS a different customer whose token they
+ * somehow obtained. Fix 2 of docs/brain/specs/review-collection-foundations.md.
+ */
+async function linkedCustomerIdsFor(workspaceId: string, customerId: string): Promise<string[]> {
+  const admin = createAdminClient();
+  const { data: link } = await admin
+    .from("customer_links")
+    .select("group_id")
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", customerId)
+    .maybeSingle();
+  if (!link?.group_id) return [customerId];
+  const { data: peers } = await admin
+    .from("customer_links")
+    .select("customer_id")
+    .eq("workspace_id", workspaceId)
+    .eq("group_id", link.group_id);
+  const ids = new Set<string>([customerId]);
+  for (const p of peers || []) if (p.customer_id) ids.add(p.customer_id);
+  return [...ids];
+}
 
 // Default per-product question set — sourced from the retired Klaviyo flow.
 // The set is per-product-configurable via `journey_definitions.config`; this
@@ -100,14 +127,32 @@ export function buildSeededPrompt(scores: AttributeScores, productTitle: string)
 const MIN_COMMENT_LENGTH = 15;
 
 export const reviewJourney: RouteHandler = async ({ auth, route, req, url }) => {
+  // Fix 2: the tokenized session must be bound to the AUTHENTICATED portal
+  // customer BEFORE any GET returns product data or any POST fires a side
+  // effect. Without this bind, a logged-in customer in the same workspace who
+  // holds another customer's review token could post a forged verified_purchase
+  // review, open a low-star CS ticket, and mint a reward code AS that other
+  // customer. Require auth.loggedInCustomerId, resolve it to the internal
+  // customer for auth.workspaceId, expand the linked-account group, and reject
+  // 403 unless session.customer_id is in that set.
+  if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
+
   const banCheck = await checkPortalBan(auth.workspaceId, auth.loggedInCustomerId);
   if (banCheck) return banCheck;
+
+  const authedCustomer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
+  if (!authedCustomer) return jsonErr({ error: "customer_not_found" }, 404);
+
+  const linkedCustomerIds = await linkedCustomerIdsFor(auth.workspaceId, authedCustomer.id);
+  const linkedSet = new Set(linkedCustomerIds);
 
   const admin = createAdminClient();
 
   // The session token identifies both the customer AND the product being
   // reviewed (via journey_sessions.product_id — new in Phase 1). Callers
-  // pass ?token=… to GET the form and POST the answers.
+  // pass ?token=… to GET the form and POST the answers. Session lookup is
+  // ALSO workspace-scoped so a same-token collision across workspaces cannot
+  // reach the wrong row.
   const token = url.searchParams.get("token") || "";
   if (!token) return jsonErr({ error: "missing_token" }, 400);
 
@@ -115,9 +160,17 @@ export const reviewJourney: RouteHandler = async ({ auth, route, req, url }) => 
     .from("journey_sessions")
     .select("id, workspace_id, customer_id, product_id, status, token_expires_at, responses, config_snapshot")
     .eq("token", token)
+    .eq("workspace_id", auth.workspaceId)
     .maybeSingle();
   if (!session) return jsonErr({ error: "session_not_found" }, 404);
+  // Bind check (Fix 2) — immediately after loading the session, before GET
+  // returns product data or POST claims. The redundant workspace-mismatch
+  // guard below is kept as defense-in-depth even though the .eq above makes
+  // it unreachable.
   if (session.workspace_id !== auth.workspaceId) return jsonErr({ error: "session_workspace_mismatch" }, 403);
+  if (!linkedSet.has(session.customer_id)) {
+    return jsonErr({ error: "session_customer_mismatch" }, 403);
+  }
   if (session.token_expires_at && new Date(session.token_expires_at) < new Date()) {
     return jsonErr({ error: "session_expired" }, 410);
   }
@@ -128,10 +181,13 @@ export const reviewJourney: RouteHandler = async ({ auth, route, req, url }) => 
     return jsonErr({ error: "session_already_completed" }, 409);
   }
 
+  // Product lookup is workspace-scoped so a cross-workspace product id smuggled
+  // in via a stale session row cannot resolve.
   const { data: product } = await admin
     .from("products")
     .select("id, title, image_url, product_type, reviewable")
     .eq("id", session.product_id)
+    .eq("workspace_id", auth.workspaceId)
     .maybeSingle();
   if (!product) return jsonErr({ error: "product_not_found" }, 404);
   if (product.reviewable === false) {
@@ -198,6 +254,12 @@ export const reviewJourney: RouteHandler = async ({ auth, route, req, url }) => 
     .update({ status: "processing" })
     .eq("id", session.id)
     .eq("workspace_id", auth.workspaceId)
+    // Fix 2 also pins the claim to the authenticated customer's linked-account
+    // group, so a stale or forged session id that maps to a customer OUTSIDE
+    // the group cannot be claimed even if the earlier bind check somehow
+    // missed. Belt-and-suspenders — the earlier `linkedSet.has(session.customer_id)`
+    // 403 is the primary gate.
+    .in("customer_id", linkedCustomerIds)
     .in("status", ["pending", "in_progress"])
     .select("id");
   if (!claimed || claimed.length !== 1) {
