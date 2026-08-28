@@ -1,6 +1,7 @@
 /**
  * review-candidacy-permission-gate — the box-side PreToolUse hook for Sol's
- * review-candidacy lane (review-request-sol-session Phase 4 § Fix 1).
+ * review-candidacy lane (review-request-sol-session Phase 4 § Fix 1, tightened
+ * in Phase 5 § Fix 2 to path-validate Read / NotebookRead).
  *
  * WHY THIS EXISTS
  * ---------------
@@ -12,7 +13,7 @@
  * secrets in `process.env`, so the blast radius is real.
  *
  * The FIX is a purpose-built least-privilege gate. Only the surfaces Sol
- * actually needs to reach her verdict — read-only file access, the two
+ * actually needs to reach her verdict — repo-scoped file reads, the two
  * read-only CX SDK CLIs bound to the CLAIMED ticket id, WebSearch — are
  * allowed. Everything else denies with a named reason.
  *
@@ -28,6 +29,7 @@
  * without spawning the hook. `main()` is the thin I/O shell that reads
  * stdin, calls the pure fn, writes stdout, exits.
  */
+import * as path from "node:path";
 
 /** The tool decision the gate emits to claude-code. */
 export type ReviewCandidacyPermissionDecision =
@@ -128,6 +130,81 @@ function escapeRegex(s: string): string {
 }
 
 /**
+ * Credential/config directory segments — denied regardless of whether the
+ * customer message routes them via Bash or Read/NotebookRead. Repo-relative
+ * paths that traverse into `~/.ssh`, `~/.aws`, `~/.claude`, `.config`, etc.
+ * still land here after resolution.
+ */
+const CATASTROPHIC_PATH_SEGMENTS = new Set<string>([
+  ".ssh",
+  ".aws",
+  ".claude",
+  ".config",
+  ".netrc",
+  ".gnupg",
+  ".pgpass",
+]);
+
+/** Any `.env` / `.env.<suffix>` filename, case-insensitive. */
+const DOT_ENV_FILENAME = /^\.env(\.[a-z0-9-]+)?$/i;
+
+/**
+ * Repo-safe path check for Read / NotebookRead — resolves the raw path
+ * against `repoRoot`, then rejects anything that (a) escapes the repo,
+ * (b) mentions a `.env` file at any depth, or (c) touches a credential /
+ * config directory anywhere along its resolved path.
+ *
+ * Pure. `repoRoot` is caller-supplied so tests can pin a fake repo.
+ */
+export function isRepoScopedReadPath(
+  rawPath: unknown,
+  repoRoot: string,
+): { ok: true } | { ok: false; risk: string } {
+  if (typeof rawPath !== "string" || !rawPath.trim()) {
+    return { ok: false, risk: "empty path" };
+  }
+  const trimmed = rawPath.trim();
+
+  // Env variable expansion in a path — never legitimate here, and it
+  // would let the agent lazily reach `$HOME/.aws/credentials` past the
+  // resolver.
+  if (/\$(\{[^}]*\}|[A-Z_][A-Z0-9_]*)/.test(trimmed)) {
+    return { ok: false, risk: "env variable expansion in path" };
+  }
+
+  // Home-relative `~` never expands to inside the repo — deny outright.
+  if (trimmed === "~" || trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+    return { ok: false, risk: "home-relative path (~)" };
+  }
+
+  const resolvedRoot = path.resolve(repoRoot);
+  const resolved = path.resolve(resolvedRoot, trimmed);
+
+  // Must stay under the repo root. `path.relative` returns a leading `..`
+  // when the resolved target is above / outside the root.
+  const rel = path.relative(resolvedRoot, resolved);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    return { ok: false, risk: "path outside the repo" };
+  }
+
+  const base = path.basename(resolved);
+  if (DOT_ENV_FILENAME.test(base)) {
+    return { ok: false, risk: "reading a .env file" };
+  }
+
+  // Every segment of the RESOLVED path (already inside the repo) is
+  // checked — a checked-in `.ssh/authorized_keys` still denies.
+  const segments = resolved.split(path.sep);
+  for (const seg of segments) {
+    if (CATASTROPHIC_PATH_SEGMENTS.has(seg.toLowerCase())) {
+      return { ok: false, risk: `reading a credential/config path segment (${seg})` };
+    }
+  }
+
+  return { ok: true };
+}
+
+/**
  * The PURE decision function — no I/O, no globals except `env` param. Kept
  * pure so a spec-test can pin the invariant without spawning claude-code.
  *
@@ -142,17 +219,33 @@ export function decideReviewCandidacyPermission(
   toolName: string,
   toolInput: Record<string, unknown>,
   ticketId: string | null,
+  repoRoot: string = process.cwd(),
 ): ReviewCandidacyPermissionDecision {
-  // Read-only file/search tools claude-code exposes — Sol may read the
-  // repo, grep the brain, glob a directory, and WebSearch. None can
-  // mutate anything.
+  // Read / NotebookRead are path-checked — the customer message could name
+  // `.env`, `~/.aws/credentials`, or an absolute path outside the repo.
+  // Everything else in the read-only set (Grep/Glob/WebSearch/WebFetch/
+  // TodoWrite) has no single file_path escape valve into a secret, so
+  // stays a blanket allow.
+  if (toolName === "Read" || toolName === "NotebookRead") {
+    const pathKey = toolName === "Read" ? "file_path" : "notebook_path";
+    const check = isRepoScopedReadPath(toolInput[pathKey], repoRoot);
+    if (!check.ok) {
+      return {
+        decision: "deny",
+        reason: `review-candidacy: ${toolName} rejected — ${check.risk}`,
+      };
+    }
+    return {
+      decision: "allow",
+      reason: `review-candidacy: repo-scoped ${toolName}`,
+    };
+  }
+
   const READ_ONLY_TOOLS = new Set([
-    "Read",
     "Grep",
     "Glob",
     "WebSearch",
     "WebFetch",
-    "NotebookRead",
     "TodoWrite", // task-tracker; internal to the session, never external
   ]);
   if (READ_ONLY_TOOLS.has(toolName)) {
@@ -257,7 +350,7 @@ async function main() {
       ? process.env.REVIEW_CANDIDACY_TICKET_ID
       : null;
 
-  emit(decideReviewCandidacyPermission(toolName, toolInput, ticketId));
+  emit(decideReviewCandidacyPermission(toolName, toolInput, ticketId, process.cwd()));
 }
 
 // Run only when invoked directly (not when imported by a unit test).
