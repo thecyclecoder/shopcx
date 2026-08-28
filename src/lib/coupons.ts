@@ -256,11 +256,15 @@ async function resolveShopifyCoupon(
           .select("id")
           .eq("workspace_id", workspaceId)
           .in("shopify_customer_id", shopifyIds);
-        // If ANY of the scoped shopify_customer_ids match the redeeming
-        // customer (or a linked account of theirs), let them redeem. If no
-        // internal row matches, ownerId stays null and the redeem check below
-        // rejects the mismatch by default — safer than opening the code to
-        // whoever asks.
+        // If ANY of the scoped shopify_customer_ids resolves to the REDEEMING
+        // customer, let them redeem. Note this is a direct id match, not a
+        // link-group expansion: codes minted by createCustomerDiscount already
+        // scope customerSelection to every linked shopify id, so a linked
+        // sibling's own internal id is in this set and matches. A code minted
+        // by hand in the Shopify admin against a single profile will reject a
+        // linked sibling — deliberate, and the safe direction. If no internal
+        // row matches at all, ownerId stays null and the check below rejects
+        // by default rather than opening the code to whoever asks.
         const ids = new Set<string>();
         for (const o of owners ?? []) if (o?.id) ids.add(String(o.id));
         if (ids.size > 0) {

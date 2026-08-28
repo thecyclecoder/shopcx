@@ -117,21 +117,60 @@ export async function POST(request: Request) {
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + settings.coupon_expiry_days);
 
-  // Deduct points
-  await spendPoints(member, tier.points_cost, `Redeemed ${tier.label}`, disc.shopifyDiscountNodeId);
+  // `source: 'internal'` means createCustomerDiscount found no Shopify customer
+  // id anywhere in the linked group and fell back to mintCustomerCoupon. That
+  // code is real and the points are genuinely spent — but it resolves ONLY on
+  // the in-house storefront (src/lib/coupons.ts resolveCoupon), NOT at Shopify
+  // checkout, which is still where most traffic goes. Pre-refactor this path
+  // threw and the member kept their points; silently spending them on a code
+  // that fails at the register they actually use is the worse trade. Surface it
+  // on the response so the portal can say where the code works, and warn so it
+  // is visible in logs rather than only as a null shopify_discount_id.
+  if (disc.source === "internal") {
+    console.warn(
+      `[loyalty] internal-coupon fallback for member=${member.id} customer=${member.customer_id} ` +
+        `code=${disc.code} — no linked shopify_customer_id; this code redeems on the in-house ` +
+        `storefront only, not at Shopify checkout.`,
+    );
+  }
 
-  // Record redemption
-  await admin.from("loyalty_redemptions").insert({
-    workspace_id,
-    member_id: member.id,
-    reward_tier: tier.label,
-    points_spent: tier.points_cost,
-    discount_code: disc.code,
-    shopify_discount_id: disc.shopifyDiscountNodeId,
-    discount_value: tier.discount_value,
-    status: "active",
-    expires_at: expiresAt.toISOString(),
-  });
+  // spendPoints + the ledger insert are wrapped: a throw between them leaves a
+  // minted Shopify discount with no loyalty_redemptions row (or spent points
+  // with no record). Pre-refactor both sat inside the route's try/catch; the
+  // extraction dropped that, so restore it rather than surface an unhandled 500.
+  try {
+    // Deduct points
+    await spendPoints(member, tier.points_cost, `Redeemed ${tier.label}`, disc.shopifyDiscountNodeId);
+
+    // Record redemption
+    const { error: ledgerError } = await admin.from("loyalty_redemptions").insert({
+      workspace_id,
+      member_id: member.id,
+      reward_tier: tier.label,
+      points_spent: tier.points_cost,
+      discount_code: disc.code,
+      shopify_discount_id: disc.shopifyDiscountNodeId,
+      discount_value: tier.discount_value,
+      status: "active",
+      expires_at: expiresAt.toISOString(),
+    });
+    if (ledgerError) {
+      // The discount exists and the points are spent — a missing ledger row is
+      // a reconciliation problem, not a reason to fail the member's redemption.
+      console.error(
+        `[loyalty] redemption ledger insert failed for member=${member.id} code=${disc.code}: ${ledgerError.message}`,
+      );
+    }
+  } catch (err) {
+    console.error(
+      `[loyalty] post-mint bookkeeping failed for member=${member.id} code=${disc.code}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return NextResponse.json(
+      { error: "Redemption could not be completed. Support has been notified." },
+      { status: 500 },
+    );
+  }
 
   return NextResponse.json({
     ok: true,
@@ -139,5 +178,11 @@ export async function POST(request: Request) {
     discount_value: tier.discount_value,
     expires_at: expiresAt.toISOString(),
     new_balance: member.points_balance - tier.points_cost,
+    // 'shopify' → redeemable at Shopify checkout AND the in-house storefront
+    // (resolveCoupon's real-time Shopify lookup). 'internal' → in-house
+    // storefront ONLY. The portal needs this to tell the member where their
+    // code works; without it an internal-fallback code looks identical to a
+    // Shopify one right up until it is rejected at checkout.
+    source: disc.source,
   });
 }
