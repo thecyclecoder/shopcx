@@ -17,8 +17,10 @@ import assert from "node:assert/strict";
 import {
   isExpiredReport,
   isChargebackSettled,
+  isFraudCaseResolved,
   DAILY_SUMMARY_TTL_DAYS,
   TERMINAL_CHARGEBACK_STATUSES,
+  TERMINAL_FRAUD_STATUSES,
 } from "./notification-hygiene";
 
 const NOW = Date.parse("2026-08-28T12:00:00Z");
@@ -92,4 +94,46 @@ test("the terminal set covers the statuses the live ledger actually uses", () =>
   assert.ok(TERMINAL_CHARGEBACK_STATUSES.has("won"));
   assert.ok(TERMINAL_CHARGEBACK_STATUSES.has("lost"));
   assert.ok(!TERMINAL_CHARGEBACK_STATUSES.has("under_review"));
+});
+
+// ── isFraudCaseResolved ────────────────────────────────────────────────────
+//
+// /dashboard/fraud is a REAL queue worked daily — measured 2026-08-28, cases created 08:02 were
+// reviewed by 14:03, and all 609 open alerts pointed at already-terminal cases. The notification is
+// a pointer at a closed thing.
+
+test("the two statuses the ledger actually uses are terminal", () => {
+  // Observed: {dismissed: 631, confirmed_fraud: 83} — 100% of 714 cases.
+  assert.equal(isFraudCaseResolved({ status: "dismissed" }), true);
+  assert.equal(isFraudCaseResolved({ status: "confirmed_fraud" }), true);
+});
+
+test("a reviewed_at stamp resolves it even when the status has not settled", () => {
+  assert.equal(isFraudCaseResolved({ status: "open", reviewed_at: "2026-08-28T14:03:00Z" }), true);
+});
+
+test("⭐ an UNKNOWN status is NOT resolved — a future 'escalated' must keep its alert", () => {
+  // Being too narrow costs a stale row. Being too broad hides live fraud. Fail toward keeping.
+  for (const st of ["open", "escalated", "awaiting_review", "in_progress", "needs_action"]) {
+    assert.equal(isFraudCaseResolved({ status: st }), false, `${st} must not be treated as worked`);
+  }
+});
+
+test("a MISSING case is not resolved — never retire a pointer we cannot resolve", () => {
+  assert.equal(isFraudCaseResolved(null), false);
+  assert.equal(isFraudCaseResolved(undefined), false);
+  assert.equal(isFraudCaseResolved({}), false);
+  assert.equal(isFraudCaseResolved({ status: null }), false);
+});
+
+test("fraud status matching is case-insensitive", () => {
+  assert.equal(isFraudCaseResolved({ status: "DISMISSED" }), true);
+  assert.equal(isFraudCaseResolved({ status: "Confirmed_Fraud" }), true);
+});
+
+test("the fraud terminal set is grounded in the live ledger, not a catch-all", () => {
+  assert.ok(TERMINAL_FRAUD_STATUSES.has("dismissed"));
+  assert.ok(TERMINAL_FRAUD_STATUSES.has("confirmed_fraud"));
+  assert.ok(!TERMINAL_FRAUD_STATUSES.has("open"));
+  assert.ok(!TERMINAL_FRAUD_STATUSES.has("escalated"));
 });

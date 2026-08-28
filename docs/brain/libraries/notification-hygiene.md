@@ -37,19 +37,34 @@ gets worked. A surface of log lines does not, and never will.*
 |---|---|---|
 | `sweepExpiredReports` | age > `DAILY_SUMMARY_TTL_DAYS` (7) | a report has no linked record; age is the only honest condition |
 | `sweepSettledChargebacks` | linked [[../tables/chargeback_events]] row is `won`/`lost`/`closed`/`accepted` OR has `finalized_on` | **a live dispute carries an `evidence_due_by` deadline** — sweeping it on age would hide a real one |
+| `sweepResolvedFraudCases` | linked [[../tables/fraud_cases]] row is `dismissed`/`confirmed_fraud`/`resolved`/`closed` OR has `reviewed_at` | `/dashboard/fraud` is a real queue worked daily; an OPEN case must keep its alert |
 
-First run: **239 recaps + 134 settled chargebacks retired; 2 kept.** Both kept rows were
-`under_review` with live deadlines — which is the sweep working, not failing.
+First runs: **239 recaps + 134 settled chargebacks + 609 worked fraud alerts retired; 2 kept.** Both
+kept rows were `under_review` chargebacks with live deadlines — which is the sweep working, not
+failing. Inbox **2,236 → 1,257**.
 
 > ⚠️ That first run surfaced a real finding it deliberately did NOT hide: a `product_unacceptable`
 > dispute for **$123.01**, still `under_review`, whose `evidence_due_by` was **2026-08-23** — five
 > days past due. Being selective is what made it visible.
 
+### ⚠️ How the fraud case was initially misread
+
+Worth recording, because the mistake is instructive. A first pass looked for `fraud_signals` /
+`fraud_decisions` / `order_fraud_reviews`, found none, and concluded fraud had **no working
+surface** — then read two alerts naming the same order as *one alert duplicated*, and proposed
+aggregation plus a severity-routing product decision.
+
+Both readings were wrong. [[../tables/fraud_cases]] + `/dashboard/fraud` **is** the working surface:
+714 cases, **100% in a terminal status** (`dismissed` 631 / `confirmed_fraud` 83), reviewed within
+hours — cases created 08:02 were reviewed by 14:03. And the alerts run **exactly 1.0 per case**; the
+two naming one order were two distinct rule matches, which is correct behaviour.
+
+So fraud needed no product decision at all — it is the chargeback pattern verbatim. **609/609 open
+alerts pointed at already-terminal cases.** The lesson this module encodes: *resolve the pointer
+before judging the pointee.*
+
 ## What it deliberately does NOT sweep
 
-- **`fraud_alert`** — the problem there is *granularity*, not retention. One order (#7141) fired at
-  least three alerts, at LOW/MEDIUM severity, with no action attached. That needs aggregation and a
-  severity routing decision (a product call), not a TTL.
 - **`system`** — mixed: some rows carry an actionable `job_id`, some are pure information under the
   same type. Splitting the actionable ones out is the prerequisite to anything sensible.
 - **Any chargeback whose ledger row cannot be resolved.** An unresolvable `metadata.entity_id` is

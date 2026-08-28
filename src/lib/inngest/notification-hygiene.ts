@@ -21,7 +21,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
-import { sweepExpiredReports, sweepSettledChargebacks } from "@/lib/notification-hygiene";
+import { sweepExpiredReports, sweepSettledChargebacks, sweepResolvedFraudCases } from "@/lib/notification-hygiene";
 
 /** Workspaces with ≥1 undismissed sweepable notification — never a blind all-workspaces fan-out. */
 export async function workspacesWithSweepableNotifications(
@@ -31,7 +31,7 @@ export async function workspacesWithSweepableNotifications(
     .from("dashboard_notifications")
     .select("workspace_id")
     .eq("dismissed", false)
-    .in("type", ["agent_daily_summary", "chargeback_alert"]);
+    .in("type", ["agent_daily_summary", "chargeback_alert", "fraud_alert"]);
   if (error) throw new Error(`workspacesWithSweepableNotifications: ${error.message}`);
   return [...new Set(((data ?? []) as Array<{ workspace_id: string }>).map((r) => r.workspace_id))];
 }
@@ -53,6 +53,8 @@ export const notificationHygieneCron = inngest.createFunction(
     let reportsDismissed = 0;
     let chargebacksDismissed = 0;
     let chargebacksKept = 0;
+    let fraudDismissed = 0;
+    let fraudKept = 0;
 
     for (const workspaceId of workspaceIds) {
       const reports = await step.run(`reports-${workspaceId}`, () =>
@@ -65,6 +67,12 @@ export const notificationHygieneCron = inngest.createFunction(
       );
       chargebacksDismissed += cbs.dismissed;
       chargebacksKept += cbs.kept;
+
+      const fraud = await step.run(`fraud-${workspaceId}`, () =>
+        sweepResolvedFraudCases(admin, { workspaceId, apply: true }),
+      );
+      fraudDismissed += fraud.dismissed;
+      fraudKept += fraud.kept;
     }
 
     const result = {
@@ -72,6 +80,8 @@ export const notificationHygieneCron = inngest.createFunction(
       reportsDismissed,
       chargebacksDismissed,
       chargebacksKept,
+      fraudDismissed,
+      fraudKept,
     };
 
     await step.run("emit-heartbeat", async () => {
@@ -81,8 +91,9 @@ export const notificationHygieneCron = inngest.createFunction(
         // `kept` is reported deliberately: it is the evidence the sweep is selective rather than
         // indiscriminate — a live dispute still wants eyes.
         detail:
-          `retired ${reportsDismissed} expired recap(s) + ${chargebacksDismissed} settled chargeback alert(s) ` +
-          `across ${workspaceIds.length} workspace(s); kept ${chargebacksKept} unsettled chargeback alert(s)`,
+          `retired ${reportsDismissed} expired recap(s), ${chargebacksDismissed} settled chargeback alert(s), ` +
+          `${fraudDismissed} worked fraud alert(s) across ${workspaceIds.length} workspace(s); ` +
+          `kept ${chargebacksKept} unsettled chargeback + ${fraudKept} open fraud alert(s)`,
       });
     });
     return result;
