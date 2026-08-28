@@ -25,6 +25,7 @@ import {
   DEFAULT_TEST_COHORT_TARGET,
   EXPLOIT_SLOT_COUNT,
   EXPLORE_TARGET_WITH_WINNER,
+  escalateMediaBuyerExecuteFailure,
   evaluateSensorTrustSnapshot,
   executeDecidedActionAgainstMeta,
   FATIGUE_REPLENISH_THRESHOLD,
@@ -2382,6 +2383,121 @@ test("agent.ts — runMediaBuyerLoop wires the inline Meta execute path (imports
     /escalateMediaBuyerExecuteFailure\(/.test(src),
     "runMediaBuyerLoop must call escalateMediaBuyerExecuteFailure on any Graph failure — a decided-but-unfired kill must surface, not vanish",
   );
+  // ads-supervisor-fix-fdc11e10-bianca-kill-120253353767090184 —
+  // the sibling silent-skip class: when the iteration_actions upsert errored (or partial-
+  // succeeded so a specific action's rowId was dropped from the returned set) the execute
+  // loop used to `continue` silently — Bianca DECIDED the pause but the Meta call never
+  // fired, no CEO card surfaced, and the dud burned spend for hours until the every-3h
+  // ads-supervisor pass authored a bianca_missed_kill fix-spec. Post-fix each of the three
+  // execute loops MUST escalate via `media_buyer_{kill,promote,reactivate}_persist_failed`
+  // on missing rowId, not silently `continue;`. The pin below fails at merge if the pattern
+  // regresses to the bare skip.
+  assert.ok(
+    /media_buyer_kill_persist_failed/.test(src),
+    "runMediaBuyerLoop must escalate on a missing rowId for a decided kill (not silently continue) — media_buyer_kill_persist_failed",
+  );
+  assert.ok(
+    /media_buyer_promote_persist_failed/.test(src),
+    "runMediaBuyerLoop must escalate on a missing rowId for a decided promote — media_buyer_promote_persist_failed",
+  );
+  assert.ok(
+    /media_buyer_reactivate_persist_failed/.test(src),
+    "runMediaBuyerLoop must escalate on a missing rowId for a decided reactivate — media_buyer_reactivate_persist_failed",
+  );
+  // Guard: no bare `if (!rowId) continue;` inside the execute loops. Every missing rowId
+  // MUST land in the escalation branch, otherwise a decided pause silently disappears again.
+  assert.equal(
+    src.match(/if\s*\(!rowId\)\s*continue;/g),
+    null,
+    "runMediaBuyerLoop's execute loops must not bare-skip on missing rowId — replace with a `media_buyer_*_persist_failed` escalation",
+  );
+});
+
+/**
+ * Fake `dashboard_notifications` admin scoped to the escalation function's two chains:
+ * 1) `.from("dashboard_notifications").select("id").eq(...).eq(...).eq(...).limit(1)` (dedupe pre-check)
+ * 2) `.from("dashboard_notifications").insert(row)` (the CEO card write)
+ *
+ * Returns `{data: [], error: null}` for the dedupe read so the insert always fires; captures
+ * the insert body for the assertion. Kept intentionally minimal — the escalation function is
+ * a leaf, so the fake only supports the exact chains it uses.
+ */
+function makeFakeAdminForEscalation() {
+  const inserts: Array<Record<string, unknown>> = [];
+  const admin = {
+    from(table: string) {
+      if (table !== "dashboard_notifications") {
+        throw new Error(`unexpected table ${table} — the escalation function only writes dashboard_notifications`);
+      }
+      return {
+        select() {
+          const chain: {
+            eq: (col: string, val: unknown) => typeof chain;
+            limit: (n: number) => Promise<{ data: Array<{ id: string }>; error: null }>;
+          } = {
+            eq: (_col: string, _val: unknown) => chain,
+            limit: async (_n: number) => ({ data: [], error: null }),
+          };
+          return chain;
+        },
+        insert(row: Record<string, unknown>) {
+          inserts.push(row);
+          return Promise.resolve({ error: null });
+        },
+      };
+    },
+  } as unknown as Parameters<typeof escalateMediaBuyerExecuteFailure>[0];
+  return { admin, inserts };
+}
+
+test("ads-supervisor-fix-fdc11e10 — escalateMediaBuyerExecuteFailure(media_buyer_kill_persist_failed) fires a distinct 'not persisted to ledger' card (differentiated from a Meta-call failure)", async () => {
+  const { admin, inserts } = makeFakeAdminForEscalation();
+  const result = await escalateMediaBuyerExecuteFailure(admin, {
+    workspaceId: "ws-42",
+    actionKind: "media_buyer_kill_persist_failed",
+    targetLevel: "adset",
+    targetObjectId: "120253353767090184",
+    rationale: "Dud: $329.55 spend, 0 purchases, ROAS 0.00",
+    errorMessage: "iteration_actions upsert failed: RLS policy denied",
+    nowMs: Date.parse("2026-08-28T10:00:00.000Z"),
+  });
+  assert.equal(result.emitted, true, "the escalation must fire (dedupe read returned an empty prior set)");
+  assert.equal(inserts.length, 1, "exactly one dashboard_notifications insert per fresh escalation");
+  const card = inserts[0] as {
+    title: string;
+    body: string;
+    metadata: Record<string, unknown>;
+  };
+  // Title + body must be DIFFERENTIATED from the Meta-call-failed shape — the remediation
+  // is different (check the DB write path, not the Meta connection), so the CEO card must
+  // signal the class up front.
+  assert.match(card.title, /not persisted to ledger/, "persist_failed title must say 'not persisted to ledger', NOT 'failed on Meta'");
+  assert.match(card.body, /iteration_actions ledger upsert returned NO row id/, "persist_failed body must cite the ledger-drop cause, not the Meta connection");
+  assert.match(card.body, /Ledger error:/, "persist_failed body must surface the Supabase error verbatim under a 'Ledger error:' heading");
+  assert.match(card.body, /RLS policy denied/, "persist_failed body must include the upstream error message verbatim");
+  assert.equal(
+    (card.metadata as { escalation_kind: string }).escalation_kind,
+    "media_buyer_kill_persist_failed",
+    "escalation_kind must round-trip on the card so the inbox filter can group persist_failed separately from execute_failed",
+  );
+});
+
+test("ads-supervisor-fix-fdc11e10 — escalateMediaBuyerExecuteFailure keeps the Meta-call-failed card shape unchanged (regression pin: the persist_failed branch must not leak into the execute_failed body)", async () => {
+  const { admin, inserts } = makeFakeAdminForEscalation();
+  await escalateMediaBuyerExecuteFailure(admin, {
+    workspaceId: "ws-42",
+    actionKind: "media_buyer_kill_execute_failed",
+    targetLevel: "adset",
+    targetObjectId: "120253353767090184",
+    rationale: "Dud: $329.55 spend, 0 purchases",
+    errorMessage: "meta_400: Object 120253353767090184 does not exist",
+    nowMs: Date.parse("2026-08-28T10:00:00.000Z"),
+  });
+  const card = inserts[0] as { title: string; body: string };
+  assert.match(card.title, /failed on Meta/, "execute_failed title must say 'failed on Meta' (unchanged)");
+  assert.match(card.body, /the Meta call FAILED/, "execute_failed body must retain the original 'the Meta call FAILED' copy");
+  assert.doesNotMatch(card.body, /not persisted to ledger/, "execute_failed body must NOT leak the persist_failed copy");
+  assert.doesNotMatch(card.body, /Ledger error:/, "execute_failed body must NOT use the persist_failed 'Ledger error:' heading");
 });
 
 // ── media-buyer-explore-exploit-split-on-crown Phase 2 — winner-aware split ──

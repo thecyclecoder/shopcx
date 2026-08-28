@@ -180,12 +180,29 @@ const MEDIA_BUYER_EXECUTE_FAILED_DEEP_LINK = "/dashboard/marketing/ads";
  *
  * Dedupe: at most once per (workspace, object_id, actionKind) per UTC day, so the 2h media-buyer
  * pass cadence never spams the inbox but a persistent Meta failure surfaces daily until fixed.
+ *
+ * `*_persist_failed` variants cover the sibling silent-skip class the [[../ads-supervisor]]
+ * `bianca_missed_kill` finding catches after 3h of burned spend: the `iteration_actions` upsert
+ * errored (or partial-succeeded — the returned row set didn't include an id for this action),
+ * so the inline executor had no `rowId` to compare-and-set on. Before this variant existed the
+ * runner's execute loops silently `continue`d on a missing rowId — Bianca DECIDED the pause
+ * but no CEO card fired and no Meta call happened; the dud burned spend until the every-3h
+ * ads-supervisor pass authored a fix-spec. The variant flips that class from
+ * a silent skip into an immediate per-adset CEO card, on the same cadence as the token/Meta
+ * failure variants.
  */
 export async function escalateMediaBuyerExecuteFailure(
   admin: Admin,
   args: {
     workspaceId: string;
-    actionKind: "media_buyer_kill_execute_failed" | "media_buyer_promote_execute_failed" | "media_buyer_reactivate_execute_failed" | "media_buyer_no_meta_token";
+    actionKind:
+      | "media_buyer_kill_execute_failed"
+      | "media_buyer_promote_execute_failed"
+      | "media_buyer_reactivate_execute_failed"
+      | "media_buyer_no_meta_token"
+      | "media_buyer_kill_persist_failed"
+      | "media_buyer_promote_persist_failed"
+      | "media_buyer_reactivate_persist_failed";
     targetLevel: "adset" | "campaign" | null;
     targetObjectId: string;
     rationale: string;
@@ -207,22 +224,40 @@ export async function escalateMediaBuyerExecuteFailure(
   if ((prior ?? []).length > 0) return { emitted: false };
 
   const verb =
-    args.actionKind === "media_buyer_kill_execute_failed"
+    args.actionKind === "media_buyer_kill_execute_failed" || args.actionKind === "media_buyer_kill_persist_failed"
       ? "kill"
-      : args.actionKind === "media_buyer_promote_execute_failed"
+      : args.actionKind === "media_buyer_promote_execute_failed" || args.actionKind === "media_buyer_promote_persist_failed"
         ? "promote"
-        : args.actionKind === "media_buyer_reactivate_execute_failed"
+        : args.actionKind === "media_buyer_reactivate_execute_failed" || args.actionKind === "media_buyer_reactivate_persist_failed"
           ? "reactivate"
           : "execute";
-  const title = `Media Buyer: ${verb} failed on Meta — ${args.targetObjectId}`;
-  const body =
-    `🛠️ Bianca (Media Buyer, Growth) DECIDED to ${verb} ${args.targetLevel ?? "object"} ${args.targetObjectId} ` +
-    `but the Meta call FAILED. The iteration_actions row is NOT stamped executed — the audit trail ` +
-    `will not claim an action that didn't happen (no-false-promises).\n\n` +
-    `Decision rationale: ${args.rationale}\n\n` +
-    `Meta error: ${args.errorMessage}\n\n` +
-    `Investigate the Meta connection (token scope, object still exists, account rate limit) and either ` +
-    `re-run the pass to retry OR act by hand.`;
+  const persistFailed =
+    args.actionKind === "media_buyer_kill_persist_failed" ||
+    args.actionKind === "media_buyer_promote_persist_failed" ||
+    args.actionKind === "media_buyer_reactivate_persist_failed";
+  const title = persistFailed
+    ? `Media Buyer: ${verb} not persisted to ledger — ${args.targetObjectId}`
+    : `Media Buyer: ${verb} failed on Meta — ${args.targetObjectId}`;
+  const body = persistFailed
+    ? (
+        `🛠️ Bianca (Media Buyer, Growth) DECIDED to ${verb} ${args.targetLevel ?? "object"} ${args.targetObjectId} ` +
+        `but the iteration_actions ledger upsert returned NO row id for this action — the Meta call was never ` +
+        `attempted (no rowId to compare-and-set on). Nothing landed on Meta; the ledger drop hid the decision.\n\n` +
+        `Decision rationale: ${args.rationale}\n\n` +
+        `Ledger error: ${args.errorMessage}\n\n` +
+        `Investigate the iteration_actions write path (Supabase error, RLS filter dropping the returned row, ` +
+        `unique-constraint collision on (workspace_id, meta_ad_account_id, object_id, action_type, snapshot_date)) ` +
+        `and either re-run the pass to retry OR act by hand.`
+      )
+    : (
+        `🛠️ Bianca (Media Buyer, Growth) DECIDED to ${verb} ${args.targetLevel ?? "object"} ${args.targetObjectId} ` +
+        `but the Meta call FAILED. The iteration_actions row is NOT stamped executed — the audit trail ` +
+        `will not claim an action that didn't happen (no-false-promises).\n\n` +
+        `Decision rationale: ${args.rationale}\n\n` +
+        `Meta error: ${args.errorMessage}\n\n` +
+        `Investigate the Meta connection (token scope, object still exists, account rate limit) and either ` +
+        `re-run the pass to retry OR act by hand.`
+      );
 
   const { error } = await admin.from("dashboard_notifications").insert({
     workspace_id: args.workspaceId,
@@ -2814,6 +2849,11 @@ export async function runMediaBuyerLoop(
   // after a successful execute (no-false-promises).
   const rowIdByKey = new Map<string, string>();
   const keyFor = (objectId: string, actionType: "pause" | "unpause" | "scale_up") => `${objectId}:${actionType}`;
+  // Preserved so the per-adset persist_failed escalation below can cite the DB error verbatim
+  // instead of a generic "rowId missing" (the CEO card needs the actual Supabase error to
+  // diagnose the ledger drop). Null when the upsert succeeded but the returned row set didn't
+  // carry an id for a specific action (RLS filter, partial success).
+  let upsertError: string | null = null;
   if (iterationRows.length) {
     const { data: upsertedRows, error } = await admin
       .from("iteration_actions")
@@ -2822,7 +2862,9 @@ export async function runMediaBuyerLoop(
         ignoreDuplicates: false,
       })
       .select("id, object_id, action_type");
-    if (!error) {
+    if (error) {
+      upsertError = error.message;
+    } else {
       writes.iterationActionsInserted = iterationRows.length;
       for (const r of (upsertedRows ?? []) as Array<{ id: string; object_id: string; action_type: string }>) {
         if (r.action_type === "pause" || r.action_type === "unpause" || r.action_type === "scale_up") {
@@ -2855,10 +2897,31 @@ export async function runMediaBuyerLoop(
     });
   } else if (token) {
     const executor = opts.metaExecutor ?? DEFAULT_META_EXECUTOR;
+    // Missing rowId means either the whole upsert errored (see `upsertError`) or the returned
+    // row set dropped this specific action (RLS filter / partial success). Bianca DECIDED the
+    // action but the ledger has no row to compare-and-set on — the Meta call MUST NOT fire (we
+    // have nothing to stamp), and the failure MUST NOT be silent (the pre-fix `continue` was
+    // the exact class the ads-supervisor's `bianca_missed_kill` finding surfaces 3h too late,
+    // after the dud has burned another few hundred dollars). Escalate per-adset instead.
+    const persistFailureMessage = (): string =>
+      upsertError
+        ? `iteration_actions upsert failed: ${upsertError}`
+        : `iteration_actions upsert returned no row id for this action — the ledger drop hid the decision`;
     for (const a of plan.kill) {
       const key = keyFor(a.targetObjectId, "pause");
       const rowId = rowIdByKey.get(key);
-      if (!rowId) continue; // upsert failed for this row — skip; no false claim
+      if (!rowId) {
+        await escalateMediaBuyerExecuteFailure(admin, {
+          workspaceId: opts.workspaceId,
+          actionKind: "media_buyer_kill_persist_failed",
+          targetLevel: a.targetLevel,
+          targetObjectId: a.targetObjectId,
+          rationale: a.rationale,
+          errorMessage: persistFailureMessage(),
+          nowMs,
+        });
+        continue;
+      }
       const result = await executeDecidedActionAgainstMeta({
         admin, token, nowMs,
         action: { rowId, actionType: "pause", targetLevel: a.targetLevel, targetObjectId: a.targetObjectId },
@@ -2878,7 +2941,18 @@ export async function runMediaBuyerLoop(
     for (const a of plan.promote) {
       const key = keyFor(a.targetObjectId, "scale_up");
       const rowId = rowIdByKey.get(key);
-      if (!rowId) continue;
+      if (!rowId) {
+        await escalateMediaBuyerExecuteFailure(admin, {
+          workspaceId: opts.workspaceId,
+          actionKind: "media_buyer_promote_persist_failed",
+          targetLevel: a.targetLevel,
+          targetObjectId: a.targetObjectId,
+          rationale: a.rationale,
+          errorMessage: persistFailureMessage(),
+          nowMs,
+        });
+        continue;
+      }
       const result = await executeDecidedActionAgainstMeta({
         admin, token, nowMs,
         action: { rowId, actionType: "scale_up", targetLevel: a.targetLevel, targetObjectId: a.targetObjectId, afterBudgetCents: a.afterBudgetCents },
@@ -2898,7 +2972,19 @@ export async function runMediaBuyerLoop(
     for (const a of reactivations) {
       const key = keyFor(a.targetObjectId, "unpause");
       const rowId = rowIdByKey.get(key);
-      if (!rowId) continue;
+      const reactivateRationale = `Reactivate adset ${a.targetObjectId}: late attribution recovered CPP $${(a.cppCents / 100).toFixed(0)} ≤ crown.`;
+      if (!rowId) {
+        await escalateMediaBuyerExecuteFailure(admin, {
+          workspaceId: opts.workspaceId,
+          actionKind: "media_buyer_reactivate_persist_failed",
+          targetLevel: "adset",
+          targetObjectId: a.targetObjectId,
+          rationale: reactivateRationale,
+          errorMessage: persistFailureMessage(),
+          nowMs,
+        });
+        continue;
+      }
       const result = await executeDecidedActionAgainstMeta({
         admin, token, nowMs,
         action: { rowId, actionType: "unpause", targetLevel: "adset", targetObjectId: a.targetObjectId },
@@ -2910,7 +2996,7 @@ export async function runMediaBuyerLoop(
         actionKind: "media_buyer_reactivate_execute_failed",
         targetLevel: "adset",
         targetObjectId: a.targetObjectId,
-        rationale: `Reactivate adset ${a.targetObjectId}: late attribution recovered CPP $${(a.cppCents / 100).toFixed(0)} ≤ crown.`,
+        rationale: reactivateRationale,
         errorMessage: result.error ?? "unknown_meta_error",
         nowMs,
       });
