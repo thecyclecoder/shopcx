@@ -1,0 +1,1 @@
+- **Closing a ticket must not destroy an active founder escalation** · verified 2026-08-28 · → [[../lifecycles/ticket-lifecycle]]
