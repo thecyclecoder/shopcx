@@ -36,7 +36,35 @@ import { enforceSwitch } from "@/lib/control-tower/enforce-switch";
 
 const QUIET_HOURS = 24;
 const MAX_AGE_DAYS = 7;
-const BATCH_SIZE = 50;
+/**
+ * Read prefilter — how many candidate rows the SQL sweep pulls back before the
+ * eligibility filters (last-external direction, inflight dedup, verdict
+ * cooldown) narrow the set. Kept wide so that a tick with many recently-
+ * ineligible rows (customer had the last word, prior verdict on file) still
+ * surfaces enough fresh candidates to fill the enqueue cap.
+ */
+export const REVIEW_CANDIDACY_READ_PREFILTER = 150;
+/**
+ * Enqueue cap per tick — bounded to the size of the concurrency-1 Sol
+ * `review-candidacy` lane so the producer matches the consumer's throughput.
+ * A Sol session takes minutes; the box drains one at a time; 30 min between
+ * ticks means only a handful can realistically complete before we sweep again.
+ * A cap of 5 lets the lane clear (or nearly clear) before the next tick adds
+ * more, keeping the Control Tower's stuck-lane threshold reflective of real
+ * worker failure instead of detector backpressure. The remainder defers to
+ * the next tick.
+ */
+export const REVIEW_CANDIDACY_ENQUEUE_CAP = 5;
+/**
+ * Verdict cooldown — how far back the recent-job lookup scans for
+ * `review-candidacy` `agent_jobs` rows in the terminal statuses (completed,
+ * failed, needs_attention). A ticket that already produced a verdict in this
+ * window is suppressed, so the same quiet thread is not reconsidered every
+ * half hour after Sol has spoken. Sized at 2× MAX_AGE_DAYS so any ticket that
+ * would still fall inside the 7-day eligibility window is covered with a full
+ * doubling of margin.
+ */
+export const REVIEW_CANDIDACY_VERDICT_COOLDOWN_HOURS = MAX_AGE_DAYS * 24 * 2;
 
 /**
  * Pure predicate — a ticket qualifies for a Sol review-candidacy session when:
@@ -77,6 +105,77 @@ export function passesReviewCandidacyWindow(ticket: {
   return true;
 }
 
+export type ReviewCandidacyBatchRow = {
+  id: string;
+  workspace_id: string;
+  customer_id: string | null;
+  created_at: string | null;
+};
+
+/**
+ * Pure batch selector — takes the prefiltered candidate rows plus the
+ * lookup maps that the cron's step assembled from `ticket_messages`,
+ * `review_requests`, and `agent_jobs`, then applies:
+ *   1. inflight-job dedup;
+ *   2. recent per-customer ask dedup (Phase 1's coarse guard);
+ *   3. the quiet-outbound window predicate ([[passesReviewCandidacyWindow]]);
+ *   4. **recent-verdict cooldown skip** — the fix Phase 1 of the
+ *      review-candidacy-detector-lane-backpressure-and-completed-verdict-cooldown
+ *      spec exists to add; a ticket whose id appears in `recentVerdictSlugs`
+ *      is dropped and counted separately so operators can see when the
+ *      detector is suppressing repeats vs. silently doing nothing.
+ *   5. **enqueue-cap slice** — bounds the returned `capped` set to
+ *      `REVIEW_CANDIDACY_ENQUEUE_CAP` so the producer matches the
+ *      concurrency-1 Sol lane's throughput; overflow reports as `deferred`.
+ *
+ * Kept pure + exported so both invariants are reviewable in isolation
+ * without a DB, mirroring the triage-escalations selection tests.
+ */
+export function selectReviewCandidacyBatch(input: {
+  rows: ReviewCandidacyBatchRow[];
+  latestExternal: Map<
+    string,
+    { at: string; direction: "inbound" | "outbound" | null }
+  >;
+  inflightSlugs: Set<string>;
+  recentlyAskedCustomers: Set<string>;
+  recentVerdictSlugs: Set<string>;
+  now: number;
+  enqueueCap: number;
+}): {
+  eligible: ReviewCandidacyBatchRow[];
+  capped: ReviewCandidacyBatchRow[];
+  deferred: number;
+  skipped_recent_verdict: number;
+} {
+  let skipped_recent_verdict = 0;
+  const eligible = input.rows.filter((t) => {
+    if (input.inflightSlugs.has(t.id)) return false;
+    if (t.customer_id && input.recentlyAskedCustomers.has(t.customer_id))
+      return false;
+    const last = input.latestExternal.get(t.id);
+    const passesWindow = passesReviewCandidacyWindow({
+      last_external_at: last?.at ?? null,
+      last_external_direction: last?.direction ?? null,
+      created_at: t.created_at,
+      now: input.now,
+    });
+    if (!passesWindow) return false;
+    if (input.recentVerdictSlugs.has(t.id)) {
+      skipped_recent_verdict++;
+      return false;
+    }
+    return true;
+  });
+  const capped = eligible.slice(0, input.enqueueCap);
+  return {
+    eligible,
+    capped,
+    deferred: Math.max(0, eligible.length - capped.length),
+    skipped_recent_verdict,
+  };
+}
+
 export const reviewCandidacyDetectorCron = inngest.createFunction(
   {
     id: "review-candidacy-detector-cron",
@@ -115,7 +214,7 @@ export const reviewCandidacyDetectorCron = inngest.createFunction(
         .gte("updated_at", notOlderThan)
         .lte("updated_at", quietBefore)
         .order("updated_at", { ascending: true })
-        .limit(BATCH_SIZE * 3);
+        .limit(REVIEW_CANDIDACY_READ_PREFILTER);
       const rows = (candidates || []) as Array<{
         id: string;
         workspace_id: string;
@@ -124,7 +223,13 @@ export const reviewCandidacyDetectorCron = inngest.createFunction(
         created_at: string | null;
         updated_at: string | null;
       }>;
-      if (!rows.length) return { eligible: 0, enqueued: 0, deferred: 0 };
+      if (!rows.length)
+        return {
+          eligible: 0,
+          enqueued: 0,
+          deferred: 0,
+          skipped_recent_verdict: 0,
+        };
 
       const ticketIds = rows.map((t) => t.id);
 
@@ -202,18 +307,39 @@ export const reviewCandidacyDetectorCron = inngest.createFunction(
         (inflight || []).map((j) => j.spec_slug as string),
       );
 
-      const eligible = rows.filter((t) => {
-        if (inflightSlugs.has(t.id)) return false;
-        if (t.customer_id && recentlyAskedCustomers.has(t.customer_id)) return false;
-        const last = latestExternal.get(t.id);
-        return passesReviewCandidacyWindow({
-          last_external_at: last?.at ?? null,
-          last_external_direction: last?.direction ?? null,
-          created_at: t.created_at,
+      // Dedupe against RECENT TERMINAL `review-candidacy` verdicts — a ticket
+      // that already produced a completed / failed / needs_attention job
+      // inside the verdict-cooldown window must NOT be re-enqueued on the
+      // next tick (before this filter, a quiet outbound ticket that Sol has
+      // already reviewed once was reconsidered every 30 min for its remaining
+      // 7-day eligibility, filling the concurrency-1 lane with repeat work).
+      // Phase 1 does not persist a `review_requests` ledger row on Sol's
+      // verdict, so the agent_jobs row IS the fingerprint. The window is
+      // sized at 2× MAX_AGE_DAYS so any still-eligible ticket is covered.
+      const verdictCooldownStart = new Date(
+        now - REVIEW_CANDIDACY_VERDICT_COOLDOWN_HOURS * 60 * 60 * 1000,
+      ).toISOString();
+      const { data: recentVerdicts } = await admin
+        .from("agent_jobs")
+        .select("spec_slug")
+        .eq("kind", "review-candidacy")
+        .in("spec_slug", ticketIds)
+        .in("status", ["completed", "failed", "needs_attention"])
+        .gte("created_at", verdictCooldownStart);
+      const recentVerdictSlugs = new Set(
+        (recentVerdicts || []).map((j) => j.spec_slug as string),
+      );
+
+      const { eligible, capped, deferred, skipped_recent_verdict } =
+        selectReviewCandidacyBatch({
+          rows,
+          latestExternal,
+          inflightSlugs,
+          recentlyAskedCustomers,
+          recentVerdictSlugs,
           now,
+          enqueueCap: REVIEW_CANDIDACY_ENQUEUE_CAP,
         });
-      });
-      const capped = eligible.slice(0, BATCH_SIZE);
 
       let enqueued = 0;
       for (const t of capped) {
@@ -235,7 +361,8 @@ export const reviewCandidacyDetectorCron = inngest.createFunction(
       return {
         eligible: eligible.length,
         enqueued,
-        deferred: Math.max(0, eligible.length - capped.length),
+        deferred,
+        skipped_recent_verdict,
       };
     });
 
