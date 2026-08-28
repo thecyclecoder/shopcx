@@ -12,6 +12,10 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Stop fraud detector false alerts from coalesced heartbeat window edges** · verified 2026-08-28 · → [[lifecycles/control-tower]]
+- **A price complaint must be answered from the customer's own established rate, not the standard rate card** · verified 2026-08-27 · → [[lifecycles/subscription-billing]]
+- **Ads supervisor: product `Amazing Coffee K-Cups` — Dahlia's ready-to-test bin is thin (0/4)** · verified 2026-08-27 · → [[../libraries/ads-supervisor]]
+- **Stop Bianca replenish jobs from reusing stale Advantage+ age targeting** · verified 2026-08-27 · → [[../lifecycles/media-buyer-arming]]
 - **Fix Bianca per-test ad sets rejected by Meta Advantage+ age controls** · verified 2026-08-26 · → [[../libraries/provision-cohort]]
 - **A broken verification check must not be able to kill a build** · verified 2026-08-25 · → [[lifecycles/spec-goal-branch]]
 - **A single-phase spec records its build SHA regardless of how its phase is titled** · verified 2026-08-25 · → [[../libraries/builder-worker.md]]
