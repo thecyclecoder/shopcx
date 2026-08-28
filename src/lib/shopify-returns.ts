@@ -114,6 +114,80 @@ export function deriveOrderSubtotalCentsFromLines(
 }
 
 /**
+ * Pure derivation of the refund ceiling for an INTERNAL (non-Shopify) order — the order's own
+ * total minus the terminal refunds already recorded against it, floored at 0. Kept as an exported
+ * pure helper so the arithmetic is unit-testable and lives in one place; the only caller today is
+ * `readReturnCreationRefundLedger`'s no_shopify_order_id branch, which passes the DB-read
+ * `orders.total_cents` and the mirror sum over `RETURN_REFUND_LEDGER_TERMINAL_STATUSES`.
+ *
+ * Phase 1 of [[../../docs/brain/specs/internal-order-returns-blocked-by-refund-headroom-guard]] —
+ * `getOrderRefundLedger` cannot answer for an order that never existed in Shopify, and treating
+ * that as "unverifiable" refused 100% of internal-order returns (SHOPCX*). The ceiling IS knowable
+ * without Shopify: subtotal doesn't apply here because internal orders have no separate Shipping
+ * Protection line to strip — the total IS the customer-paid figure — so we net the mirror's
+ * terminal refunds directly against `orders.total_cents`.
+ */
+export function deriveInternalRefundCeilingCents(input: {
+  orderTotalCents: number;
+  refundedCents: number;
+}): number {
+  const total = Number.isFinite(input.orderTotalCents) ? Math.max(0, Math.round(input.orderTotalCents)) : 0;
+  const refunded = Number.isFinite(input.refundedCents) ? Math.max(0, Math.round(input.refundedCents)) : 0;
+  return Math.max(0, total - refunded);
+}
+
+/**
+ * Discriminated verdict for the creation-time refund-headroom check — the shape the extracted
+ * `assertReturnRefundHeadroom` returns. `ok:true` means the return is safe to create for the
+ * promised `net_refund_cents`; `ok:false` carries the caller-facing `error` string with the two
+ * numbers named. Split into its own type so the callsite reads as a single named check rather than
+ * an inline `if / return { success:false, error }` block that can drift out of place.
+ */
+export type ReturnRefundHeadroomVerdict =
+  | { ok: true }
+  | { ok: false; reason: "unreadable_ledger" | "exceeds_ceiling"; error: string };
+
+/**
+ * Pure headroom check for return creation — a return that promises MORE than the order can
+ * actually pay is worse than no return (the customer ships product back and then chases us).
+ * Extracted from the inline `if (netRefundCents > 0) { ... }` block in `createFullReturn` so the
+ * check's POSITION is expressed as one named call — the extraction is the anti-drift.
+ *
+ * Refuses when:
+ *  - the live ledger is unreadable (refundableCents == null) — a refund guard that cannot verify
+ *    headroom must refuse, never assume. Internal (SHOPCX*) orders bypass this via
+ *    `readReturnCreationRefundLedger`'s `no_shopify_order_id` branch (a local ceiling is
+ *    computed), so this branch fires only for a genuine Shopify outage.
+ *  - `netRefundCents > refundableCents` — the promised net exceeds the live ceiling; both numbers
+ *    are named in the error string.
+ *
+ * `netRefundCents <= 0` is a no-op (there is nothing to promise) and always passes.
+ */
+export function assertReturnRefundHeadroom(input: {
+  netRefundCents: number;
+  refundableCents: number | null;
+  orderNumber: string;
+}): ReturnRefundHeadroomVerdict {
+  const net = Number.isFinite(input.netRefundCents) ? Math.max(0, Math.round(input.netRefundCents)) : 0;
+  if (net <= 0) return { ok: true };
+  if (input.refundableCents == null) {
+    return {
+      ok: false,
+      reason: "unreadable_ledger",
+      error: `Refusing to create return: live refund ledger is unreadable so headroom cannot be verified. Promised net_refund $${(net / 100).toFixed(2)} against unknown live refundable ceiling — a refund guard that cannot verify headroom must refuse, never assume.`,
+    };
+  }
+  if (net > input.refundableCents) {
+    return {
+      ok: false,
+      reason: "exceeds_ceiling",
+      error: `Refusing to create return: net_refund $${(net / 100).toFixed(2)} exceeds live refundable ceiling $${(input.refundableCents / 100).toFixed(2)} on order ${input.orderNumber} (Shopify ledger — includes out-of-band refunds). A return that promises more than the order can pay strands the customer.`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * Live refund headroom for the return-creation + refund-time paths — routes through
  * [[refund-ledger]] `getOrderRefundLedger` so out-of-band Shopify refunds count against the ceiling
  * (Phase 2 of [[../../docs/brain/specs/remedy-state-must-see-out-of-band-refunds]]). Returns both
@@ -122,16 +196,25 @@ export function deriveOrderSubtotalCentsFromLines(
  *                       `sumSucceededOrderRefundsCents`'s mirror-only sum as the input to
  *                       `computeReturnNetRefundCents`.
  *   `refundableCents` — the ledger's `max(0, sale - refunded - pending)` — the HARD CEILING for
- *                       any new refund. `null` when the ledger is unreadable (Shopify down,
- *                       non-Shopify order, missing shopify_order_id); a caller must NOT invent a
- *                       ceiling from a missing signal (that is the current bug the spec fixes).
+ *                       any new refund. `null` when the Shopify ledger itself is unreadable
+ *                       (Shopify down, order_not_found, invalid_input); a caller must NOT invent a
+ *                       ceiling from a missing signal. INTERNAL (non-Shopify) orders are the one
+ *                       exception — see the `no_shopify_order_id` branch below.
  *   `ok`              — false when the ledger call itself failed; the mirror-only fallback for
  *                       `refundedCents` is populated but the creation-time refusal cannot fire.
  *
  * The mirror-only fallback (workspace-scoped sum over `public.order_refunds` where
  * `status IN ('succeeded','settled')`) is retained so a transient Shopify blip cannot make the
- * return over-refund the mirror figure — but a caller that needs to REFUSE (Phase 2 § bullet 2)
- * must key on `refundableCents == null` and treat headroom as unknown, not zero.
+ * return over-refund the mirror figure — but a caller that needs to REFUSE must key on
+ * `refundableCents == null` and treat headroom as unknown, not zero.
+ *
+ * Phase 1 of [[../../docs/brain/specs/internal-order-returns-blocked-by-refund-headroom-guard]]:
+ * `getOrderRefundLedger` returns `{ok:false, reason:'no_shopify_order_id'}` BEFORE any Shopify call
+ * for any order without a shopify_order_id — a structural fact, not a transient failure — so this
+ * function distinguishes THAT reason (compute a local ceiling from `orders.total_cents` via
+ * `deriveInternalRefundCeilingCents`, ok:true) from every OTHER reason (shopify_call_failed /
+ * order_not_found / invalid_input — keep refundableCents=null so the caller's refuse-never-assume
+ * branch still fires; a Shopify outage must not be downgraded into a local guess).
  */
 export async function readReturnCreationRefundLedger(
   admin: ReturnType<typeof createAdminClient>,
@@ -163,9 +246,35 @@ export async function readReturnCreationRefundLedger(
       ok: true,
     };
   }
-  // Ledger unreadable — fall through with the mirror sum so the caller still has a number, but
-  // refundableCents=null signals "cannot verify the ceiling, must refuse on the creation-refusal
-  // check".
+  if (ledger.reason === "no_shopify_order_id") {
+    // Internal (SHOPCX*) order — never existed in Shopify, so the Shopify ledger is structurally
+    // absent, not transiently unreadable. Compute the ceiling locally from orders.total_cents
+    // minus the mirror's terminal refunds. Any OTHER ledger failure reason falls through to the
+    // refuse-never-assume branch below.
+    let orderTotalCents = 0;
+    try {
+      const { data: order } = await admin
+        .from("orders")
+        .select("total_cents")
+        .eq("id", orderId)
+        .eq("workspace_id", workspaceId)
+        .maybeSingle();
+      orderTotalCents = (order?.total_cents as number | null | undefined) ?? 0;
+    } catch {
+      orderTotalCents = 0;
+    }
+    return {
+      refundedCents: mirrorRefundedCents,
+      refundableCents: deriveInternalRefundCeilingCents({
+        orderTotalCents,
+        refundedCents: mirrorRefundedCents,
+      }),
+      ok: true,
+    };
+  }
+  // Ledger unreadable for any other reason (Shopify down, order_not_found, invalid_input) — fall
+  // through with the mirror sum so the caller still has a number, but refundableCents=null signals
+  // "cannot verify the ceiling, must refuse on the creation-refusal check".
   return { refundedCents: mirrorRefundedCents, refundableCents: null, ok: false };
 }
 
@@ -1112,24 +1221,17 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
     });
 
     // Phase 2 § creation-time refusal — a return that promises MORE than the order can actually pay
-    // is worse than no return: the customer ships product back and then chases us. If the live
-    // ledger is readable AND `netRefundCents > refundableCents`, DO NOT create the return; refuse
-    // and escalate with the two numbers named. (When the ledger is unreadable we cannot verify the
-    // ceiling — the refund guard invariant "must refuse, never assume" applies and we still block
-    // rather than trust the mirror-only figure.)
-    if (netRefundCents > 0) {
-      if (refundLedger.refundableCents == null) {
-        return {
-          success: false,
-          error: `Refusing to create return: live refund ledger is unreadable so headroom cannot be verified. Promised net_refund $${(netRefundCents / 100).toFixed(2)} against unknown live refundable ceiling — a refund guard that cannot verify headroom must refuse, never assume.`,
-        };
-      }
-      if (netRefundCents > refundLedger.refundableCents) {
-        return {
-          success: false,
-          error: `Refusing to create return: net_refund $${(netRefundCents / 100).toFixed(2)} exceeds live refundable ceiling $${(refundLedger.refundableCents / 100).toFixed(2)} on order ${params.orderNumber} (Shopify ledger — includes out-of-band refunds). A return that promises more than the order can pay strands the customer.`,
-        };
-      }
+    // is worse than no return: the customer ships product back and then chases us. Extracted to
+    // `assertReturnRefundHeadroom` so the position of the check is expressed as one named call and
+    // cannot drift back into an inline block; the full Phase-2 hoist (moving this call ahead of the
+    // EasyPost purchase + making refusal leave no residue) lands in a follow-up phase.
+    const headroom = assertReturnRefundHeadroom({
+      netRefundCents,
+      refundableCents: refundLedger.refundableCents,
+      orderNumber: params.orderNumber,
+    });
+    if (!headroom.ok) {
+      return { success: false, error: headroom.error };
     }
 
     // Update our DB with EasyPost details + the refund commitment.
