@@ -93,11 +93,22 @@ const CATASTROPHIC_BASH_DENY: readonly { re: RegExp; risk: string }[] = [
  * to appear in the command line, so a customer message that instructs "run
  * this against a different ticket" can't reach that ticket's data.
  *
- * A bounded set of read-only shell built-ins (`ls`, `cat`, `head`, `tail`,
- * `wc`, `grep`, `git status`, `git log`, `git show`, `git diff`, `pwd`,
- * `date`, `echo`) is allowed for basic introspection — none can mutate.
+ * A bounded set of read-only shell built-ins (`ls`, `wc`, `git status`,
+ * `git log`, `git show`, `git diff`, `pwd`, `date`, `echo`) is allowed for
+ * basic navigation — none read arbitrary file contents.
+ *
+ * File-reader built-ins (`cat`, `head`, `tail`, `grep`) also allow, but
+ * their operands are parsed and every path operand is required to pass
+ * `isRepoScopedReadPath` — a bare `cat /etc/passwd` or `grep secret
+ * /home/other/.mysecret` slipped past the enumerated credential-path
+ * regexes above (they list `.env`/`~/.ssh`/`~/.aws`/`~/.claude`/`.netrc`
+ * but not `/etc/*`, `/root/*`, `/var/*`, `/home/<other>/*`, etc.).
  */
-function isAllowedBashCommand(command: string, ticketId: string | null): boolean {
+function isAllowedBashCommand(
+  command: string,
+  ticketId: string | null,
+  repoRoot: string,
+): boolean {
   const cmd = command.trim();
   if (!cmd) return false;
 
@@ -113,15 +124,118 @@ function isAllowedBashCommand(command: string, ticketId: string | null): boolean
     if (boundToTicket("improve-box-tools\\.ts")) return true;
   }
 
-  // Read-only shell built-ins Sol may use for basic navigation. Kept
-  // narrow — a single command per line, no `&&` / `;` chains (those
-  // route through Bash's chain parser, which the catastrophic-deny above
-  // treats as `bash -c` in practice; but we also refuse them here).
+  // Chain-of-commands never allowed — a single-half safe token can't
+  // launder the other half.
   if (/[;&|]/.test(cmd)) return false;
-  const safeHead = /^(ls|cat|head|tail|wc|grep|pwd|date|echo|git\s+(status|log|show|diff))(\s|$)/;
+
+  // File-reader built-ins (cat/head/tail/grep) — parse operands and
+  // require every path to be repo-scoped.
+  const readerMatch = /^(cat|head|tail|grep)(\s|$)/.exec(cmd);
+  if (readerMatch) {
+    const reader = readerMatch[1] as BashFileReader;
+    const paths = extractFileReaderPaths(cmd, reader);
+    if (paths === null) return false; // unparseable shape (quotes/globs/backticks)
+    if (paths.length === 0) return false; // stdin form — nothing pipes to this lane
+    for (const p of paths) {
+      const check = isRepoScopedReadPath(p, repoRoot);
+      if (!check.ok) return false;
+    }
+    return true;
+  }
+
+  // Non-file-reader read-only shell built-ins Sol may use for basic
+  // navigation — kept narrow.
+  const safeHead = /^(ls|wc|pwd|date|echo|git\s+(status|log|show|diff))(\s|$)/;
   if (safeHead.test(cmd)) return true;
 
   return false;
+}
+
+/**
+ * The Bash file-reader built-ins whose path operands MUST be repo-scoped.
+ * Kept OUT of the bare safeHead allow because a customer-message prompt
+ * injection like `cat /etc/passwd` or `head /home/other/.mysecret` slips
+ * past the enumerated `.env` / `~/.aws` / `~/.ssh` catastrophic regexes.
+ */
+const BASH_FILE_READERS = ["cat", "head", "tail", "grep"] as const;
+type BashFileReader = (typeof BASH_FILE_READERS)[number];
+
+/** Flags that consume the NEXT token as their value, per reader. */
+const FILE_READER_FLAGS_WITH_VALUE: Record<BashFileReader, ReadonlySet<string>> = {
+  cat: new Set<string>(),
+  head: new Set<string>(["-n", "-c", "--lines", "--bytes"]),
+  tail: new Set<string>(["-n", "-c", "--lines", "--bytes"]),
+  grep: new Set<string>([
+    "-e",
+    "-f",
+    "-A",
+    "-B",
+    "-C",
+    "-m",
+    "--regexp",
+    "--file",
+    "--after-context",
+    "--before-context",
+    "--context",
+    "--max-count",
+    "--include",
+    "--exclude",
+    "--exclude-dir",
+    "--include-dir",
+  ]),
+};
+
+/** grep flags whose VALUE is itself a path (grep -f pattern-file). */
+const GREP_FLAGS_WITH_PATH_VALUE = new Set<string>(["-f", "--file"]);
+/** grep flags whose VALUE is a pattern (satisfies the grep positional pattern). */
+const GREP_FLAGS_WITH_PATTERN_VALUE = new Set<string>(["-e", "--regexp"]);
+
+/**
+ * Extract the path operands from a `cat`/`head`/`tail`/`grep` command.
+ *
+ * Returns:
+ *  - `string[]` — path operands (possibly empty) when the shape is parseable.
+ *  - `null` — the command uses shell metacharacters we can't statically reason
+ *    about (quotes, globs, backticks, redirections, subshells). The caller
+ *    treats `null` as deny — over-block rather than under-block.
+ *
+ * The chained-command check (`[;&|]`) upstream already rejects `cat foo ; …`,
+ * so this parser only needs to guard against masking within a single command.
+ */
+export function extractFileReaderPaths(cmd: string, reader: BashFileReader): string[] | null {
+  if (/[`"'*?<>()$]/.test(cmd)) return null;
+  const parts = cmd.trim().split(/\s+/);
+  if (parts[0] !== reader) return null;
+  const args = parts.slice(1);
+  const paths: string[] = [];
+  const valueFlags = FILE_READER_FLAGS_WITH_VALUE[reader];
+  // grep's first non-flag positional is the pattern (not a path).
+  let patternSatisfied = reader !== "grep";
+
+  for (let i = 0; i < args.length; i++) {
+    const tok = args[i];
+    if (tok === "--") continue; // argv separator; subsequent tokens still route through the same logic
+    if (tok.startsWith("-")) {
+      if (valueFlags.has(tok)) {
+        const value = args[++i];
+        if (value === undefined) continue;
+        if (reader === "grep" && GREP_FLAGS_WITH_PATH_VALUE.has(tok)) {
+          paths.push(value); // grep -f <file> — <file> is a path operand
+        } else if (reader === "grep" && GREP_FLAGS_WITH_PATTERN_VALUE.has(tok)) {
+          patternSatisfied = true; // pattern came via -e / --regexp
+        }
+        // else: numeric/context arg (-n 5, -c 100, -A 3, --max-count 1, --include=X)
+      }
+      // combined form (-n5, -5, --long=val) has no separate value token
+      continue;
+    }
+    if (!patternSatisfied) {
+      patternSatisfied = true;
+      continue;
+    }
+    paths.push(tok);
+  }
+  return paths;
 }
 
 /** Escape a string for use inside a regex literal (dot, dashes, etc.). */
@@ -278,7 +392,7 @@ export function decideReviewCandidacyPermission(
         };
       }
     }
-    if (isAllowedBashCommand(command, ticketId)) {
+    if (isAllowedBashCommand(command, ticketId, repoRoot)) {
       return {
         decision: "allow",
         reason: "review-candidacy: allowlisted read-only Bash",
@@ -287,7 +401,7 @@ export function decideReviewCandidacyPermission(
     return {
       decision: "deny",
       reason:
-        "review-candidacy: Bash outside the allowlist (only npx tsx scripts/cx-agent-sdk-tool.ts <ticket_id> / improve-box-tools.ts <ticket_id> + read-only shell builtins are allowed)",
+        "review-candidacy: Bash outside the allowlist (only npx tsx scripts/cx-agent-sdk-tool.ts <ticket_id> / improve-box-tools.ts <ticket_id> + read-only shell builtins with repo-scoped file operands are allowed)",
     };
   }
 
