@@ -3941,7 +3941,11 @@ async function deriveWaitingOn(
 
 /**
  * planner-gates-build-queue-on-authored-specs Phase 2 — true when an error thrown by `materializeSpec`
- * was specifically "no specs row for (workspace, slug)" (the author lane silently failed upstream),
+ * was specifically "no specs row for (workspace, slug)". NOTE the cause is NOT implied: the row may
+ * never have been authored, OR it may exist and be folded/archived (boardable = `status IS NULL OR
+ * status <> 'folded'`). The claim-gate distinguishes the two before wording its park reason — see
+ * the `spec_row_missing` branch — because asserting an authoring failure that did not happen aims
+ * the reader at the wrong system (CEO card, 2026-08-28).
  * not a transient DB/connection failure or a different materializer bug. The materializer throws a
  * stable, prefix-matched message — see src/lib/build-spec-materializer.ts `materializeSpec`. Used at
  * every dispatch-time materializeSpec call site to route the "row missing" subset to a soft park
@@ -7364,11 +7368,39 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
   // is still authored, so require a row, not phases≥1 — the empty-body guard downstream rejects a truly
   // empty materialized spec.
   if (!card) {
+    // ⭐ Say what we OBSERVED, then check the obvious alternative before naming a cause.
+    // "no boardable row" has at least two causes and the gate only ever knew the effect:
+    //   (a) the row was never authored — the author lane genuinely failed
+    //   (b) the row EXISTS but is folded/archived — boardable means `status IS NULL OR <> 'folded'`
+    // It used to assert (a) unconditionally. On 2026-08-28 that produced a CEO card reading
+    // "the fix spec never landed in public.specs; author lane silently failed upstream" for a spec
+    // that had been authored, built, merged AND folded the previous day — sending the reader to
+    // debug an authoring lane that was working perfectly. An escalation that states an unverified
+    // cause as fact is worse than one that states only the effect: it aims the investigation.
+    let existsNonBoardable: { status: string | null } | null = null;
+    try {
+      const { createAdminClient } = await import("../src/lib/supabase/admin");
+      const { data } = await createAdminClient()
+        .from("specs")
+        .select("status")
+        .eq("workspace_id", job.workspace_id)
+        .eq("slug", slug)
+        .maybeSingle();
+      existsNonBoardable = (data as { status: string | null } | null) ?? null;
+    } catch {
+      /* best-effort — a failed probe must not change the park verdict, only the wording */
+    }
+    const reason = existsNonBoardable
+      ? `public.specs has a row for ${slug} but it is NOT boardable (status='${existsNonBoardable.status ?? "null"}') — ` +
+        `the spec was authored and then retired, so this build was queued for work that is already closed. ` +
+        `Do not build; re-open the spec if the work is genuinely still wanted.`
+      : `public.specs has no row at all for ${slug} — nothing was ever authored under this slug. ` +
+        `Do not build until the row is authored.`;
     return {
       ok: false,
       disposition: "park",
       parkClass: "spec_row_missing",
-      reason: `public.specs has no boardable row for ${slug} — author lane silently failed upstream; do not build until the row is authored`,
+      reason,
     };
   }
 
