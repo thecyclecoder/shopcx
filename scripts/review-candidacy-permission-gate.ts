@@ -104,6 +104,17 @@ const CATASTROPHIC_BASH_DENY: readonly { re: RegExp; risk: string }[] = [
  * regexes above (they list `.env`/`~/.ssh`/`~/.aws`/`~/.claude`/`.netrc`
  * but not `/etc/*`, `/root/*`, `/var/*`, `/home/<other>/*`, etc.).
  */
+/**
+ * Every shell command-chain separator — semicolon, ampersand, pipe, AND
+ * newline / carriage-return. Newlines separate commands in bash exactly like
+ * `;`, so a customer-message-crafted `git status\ncat /etc/passwd` would
+ * otherwise be laundered through the `safeHead` allow (the `\s` in that
+ * regex matches `\n`). Named + exported so tests can pin the exact character
+ * class the gate depends on, and so a future refactor that widens/narrows
+ * the class fails LOUD instead of silently re-opening a chain form.
+ */
+export const SHELL_COMMAND_SEPARATOR_RE = /[;&|\r\n]/;
+
 function isAllowedBashCommand(
   command: string,
   ticketId: string | null,
@@ -113,9 +124,10 @@ function isAllowedBashCommand(
   if (!cmd) return false;
 
   // Chain-of-commands never allowed — must run BEFORE the ticket-bound SDK
-  // allow, so an otherwise-valid SDK invocation trailed by `; cat .env`
-  // (or `&&`, `|`) can't launder a second command past the shortcut.
-  if (/[;&|]/.test(cmd)) return false;
+  // allow, the file-reader parse, and the safeHead shortcut, so an
+  // otherwise-valid first command trailed by `; cat .env` (or `&&`, `|`, or
+  // a raw newline) can't launder a second command past any allow branch.
+  if (SHELL_COMMAND_SEPARATOR_RE.test(cmd)) return false;
 
   // Read-only CX SDK / improve-box-tools CLIs bound to the claimed ticket
   // id — the argv shape is EXACTLY five whitespace-separated tokens:

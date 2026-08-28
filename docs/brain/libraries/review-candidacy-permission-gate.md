@@ -48,7 +48,7 @@ Applies to `Read`, `NotebookRead`, and file-reader Bash commands. Denies:
 | DB mutation | `psql`, `supabase db\|migration\|functions` |
 | catastrophic FS | `rm -rf`, `chmod`, `chown`, `mv to /` |
 | shell wrappers | `bash -c`, `sh -c`, `eval`, `exec`, `\| bash` |
-| chained commands | any `;` / `&&` / `\|` in the Bash payload |
+| chained commands | any `;` / `&` / `\|` / `\n` / `\r` in the Bash payload (the named `SHELL_COMMAND_SEPARATOR_RE = /[;&\|\r\n]/`, checked BEFORE the SDK / file-reader / safeHead allow branches — `\s` in the safeHead regex matches `\n`, so a `git status\ncat /etc/passwd` chain would otherwise be laundered) |
 
 ### Write tools (blanket deny)
 `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Task`, `Agent`, `ExitPlanMode`.

