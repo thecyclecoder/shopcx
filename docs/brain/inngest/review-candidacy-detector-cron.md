@@ -4,6 +4,8 @@ Cron that finds tickets quiet for 24h since the LAST EXTERNAL message (and we sp
 
 **File:** `src/lib/inngest/review-candidacy-detector-cron.ts`
 
+**Spec folded:** [[../specs/review-candidacy-detector-lane-backpressure-and-completed-de]] — Phase 1 bounded detector output to REVIEW_CANDIDACY_ENQUEUE_CAP=5 per tick (was 50) and added a 14-day cooldown lookup so tickets already assigned a verdict are not reconsidered on the next cron tick.
+
 ## Functions
 
 ### `review-candidacy-detector-cron`
