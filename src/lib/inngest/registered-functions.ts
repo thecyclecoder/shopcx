@@ -12,6 +12,8 @@ import { inngest } from "@/lib/inngest/client";
 import { syncCustomers, syncOrders } from "@/lib/inngest/sync-shopify";
 import { ticketCsatCron } from "@/lib/inngest/ticket-csat";
 import { reviewCandidacyDetectorCron } from "@/lib/inngest/review-candidacy-detector-cron";
+import { reviewRequestNudgeCron } from "@/lib/inngest/review-request-nudge-cron";
+import { reviewRequestCanaryDigestCron } from "@/lib/inngest/review-request-canary-digest-cron";
 import {
   importFileUpload,
   importFileSplit,
@@ -179,6 +181,8 @@ export const registeredInngestFunctions = [
   syncOrders,
   ticketCsatCron,
   reviewCandidacyDetectorCron,
+  reviewRequestNudgeCron,
+  reviewRequestCanaryDigestCron,
   importFileUpload,
   importFileSplit,
   importChunkProcess,

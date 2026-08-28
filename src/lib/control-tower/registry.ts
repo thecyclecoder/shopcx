@@ -694,6 +694,17 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // registeredAt starts the first-tick window so the tile doesn't RED on cut-over.
   // The 45m livenessWindow gives ≥ 1.2× the 30m cadence per assertRegistryInvariants.
   { id: "review-candidacy-detector-cron", kind: "cron", owner: "cs", label: "Review candidacy detector", description: "Every 30 min sweep: find tickets quiet 24h since the last external message (we spoke last) + enqueue a `review-candidacy` Sol box session per qualifying ticket. Sol reads the thread + recent orders read-only and returns a typed { ask, product_id, angle, include_coupon, reasoning } verdict; the worker (not Sol) is the only mutator.", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 45 * MIN, registeredAt: "2026-08-28T00:00:00Z" },
+  // Review-request nudge cron (review-request-sol-session Phase 3). Every 30 min
+  // sweeps for review_requests where the first-touch went out ≥ 3 days ago and no
+  // nudge has fired; suppresses on the spec's list (submitted / clicked / replied /
+  // unsubscribed / already nudged) and queues ONE email via the deliver-pending-sends
+  // outbox (so the ticket UI's cancel-in-flight behaviour applies for free). Owner cs.
+  { id: "review-request-nudge-cron", kind: "cron", owner: "cs", label: "Review request nudge", description: "Every 30 min sweep: for review_requests sent ≥ 3d ago with no nudge and no positive outcome, compare-and-set `nudged_at` + queue ONE email as a pending ticket_message that deliver-pending-sends ships. Single-nudge maximum per ask; the spec's suppression conditions (submitted / clicked / customer-replied / unsubscribed) are enforced by shouldSuppressReviewRequestNudge.", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 45 * MIN, registeredAt: "2026-08-28T00:00:00Z" },
+  // Review-request canary CEO-inbox digest cron (review-request-sol-session Phase 3).
+  // Daily at 08:00 UTC — raises ONE `dashboard_notifications` card per workspace-day
+  // summarizing the review-request drafts on canary hold, so the founder can cancel/edit
+  // a wrong ask before it ships (per-ticket pending_send_at has no list view). Owner cs.
+  { id: "review-request-canary-digest-cron", kind: "cron", owner: "cs", label: "Review request canary digest", description: "Daily digest that raises ONE dashboard_notifications card per workspace-day summarizing the review-request drafts on canary hold (12-24h pending_send_at). The founder cancels or edits any wrong ask before the outbox ships it. Ships ON per the spec (canary flag is a config, not a rewrite).", expectedCadence: "daily (0 8 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-08-28T00:00:00Z" },
   // amplifier-import-reliability-rail Phase 2 — the reconcile sweep for paid orders the 3PL never
   // received. Re-submits any paid order past a 10-minute grace whose amplifier_order_id is still
   // null, under the retry cap, and not held by a non-dismissed fraud_cases row. 30-min window

@@ -75,7 +75,7 @@ export const ticketCsatCron = inngest.createFunction(
     const due = await step.run("find-due", async () => {
       const { data } = await admin
         .from("tickets")
-        .select("id, workspace_id, customer_id, subject, do_not_reply, tags")
+        .select("id, workspace_id, customer_id, subject, do_not_reply, tags, closed_at")
         .eq("status", "closed")
         .is("csat_sent_at", null)
         .not("customer_id", "is", null)
@@ -115,6 +115,11 @@ export const ticketCsatCron = inngest.createFunction(
         //      company / spam); same flag the analyzer skips on.
         //   3. Tags overlap SKIP_TAGS (outreach / auto-reply / spam) —
         //      cheap early filter, shared with the analyzer.
+        //   4. Review-responder suppression (review-request-sol-session
+        //      Phase 3): the customer already left a product review since
+        //      the ticket closed OR the ladder recorded an ask this
+        //      customer submitted. We already know they're happy, and the
+        //      CSAT would be the third thing asked of them in one week.
         const tags = (t.tags as string[] | null) || [];
         let ineligible = t.do_not_reply === true || tags.some(tag => SKIP_TAGS.has(tag));
 
@@ -126,6 +131,34 @@ export const ticketCsatCron = inngest.createFunction(
             .eq("direction", "outbound")
             .neq("visibility", "internal");
           ineligible = (count ?? 0) === 0;
+        }
+
+        // Phase-3 CSAT suppression for review responders. A customer who
+        // left a product_reviews row since the ticket closed OR whose
+        // review_requests row transitioned to `submitted` is a review
+        // responder — CSAT would be the third ask in one week. The check
+        // runs LAST in the eligibility chain because it is the most
+        // expensive read (two per-customer probes); a cheap `do_not_reply`
+        // / tag / no-outbound skip already returns above.
+        if (!ineligible && t.customer_id) {
+          const closedAt = t.closed_at as string | null;
+          const [reviewsRes, requestsRes] = await Promise.all([
+            admin
+              .from("product_reviews")
+              .select("id", { count: "exact", head: true })
+              .eq("customer_id", t.customer_id)
+              .gte("created_at", closedAt ?? new Date(0).toISOString()),
+            admin
+              .from("review_requests")
+              .select("id", { count: "exact", head: true })
+              .eq("customer_id", t.customer_id)
+              .eq("outcome", "submitted"),
+          ]);
+          const reviewedSinceClose = (reviewsRes.count ?? 0) > 0;
+          const submittedAsk = (requestsRes.count ?? 0) > 0;
+          if (reviewedSinceClose || submittedAsk) {
+            ineligible = true;
+          }
         }
 
         if (ineligible) {
