@@ -1,6 +1,6 @@
 # libraries/review-candidacy-permission-gate
 
-Least-privilege PreToolUse permission gate for Sol's review-candidacy box session (review-request-sol-session Phase 4 § Fix 1).
+Least-privilege PreToolUse permission gate for Sol's review-candidacy box session (review-request-sol-session Phase 4 § Fix 1, tightened in Phase 5 § Fix 2 to path-validate Read/NotebookRead).
 
 **File:** `scripts/review-candidacy-permission-gate.ts`
 
@@ -14,21 +14,33 @@ This gate is the fix: a purpose-built least-privilege PreToolUse hook attached t
 
 The gate is split cleanly:
 
-- `decideReviewCandidacyPermission(toolName, toolInput, ticketId)` — the PURE decision function. Unit-tested in `src/lib/review-candidacy-permission-gate.test.ts` (19 tests covering every catastrophic-deny signal and every allowlist entry). Extracted so a regression that widens the gate fails LOUD.
+- `decideReviewCandidacyPermission(toolName, toolInput, ticketId, repoRoot)` — the PURE decision function. Unit-tested in `src/lib/review-candidacy-permission-gate.test.ts` (30 tests covering every catastrophic-deny signal and every allowlist entry, including path-validation cases). Extracted so a regression that widens the gate fails LOUD.
 - `main()` — the thin I/O shell: reads PreToolUse JSON on stdin, reads `REVIEW_CANDIDACY_TICKET_ID` from env, calls the pure fn, writes the `hookSpecificOutput.permissionDecision` on stdout, exits 0.
 
 ## Allow / Deny matrix
 
-### Auto-allow (read-only)
-- `Read`, `Grep`, `Glob`, `WebSearch`, `WebFetch`, `NotebookRead`, `TodoWrite`.
-- `Bash` matching read-only shell built-ins: `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `pwd`, `date`, `echo`, `git status|log|show|diff`.
+### Auto-allow (read-only, with path validation)
+- `Read` — allowed iff the path passes `isRepoScopedReadPath`: must be inside the repo, cannot be `~` or home-relative, cannot expand `$VAR`, cannot be `.env` / `.env.<suffix>`, and cannot traverse into credential dirs `.ssh`, `.aws`, `.claude`, `.config`, `.netrc`, `.gnupg`, `.pgpass`.
+- `NotebookRead` — same path validation as `Read` via `notebook_path`.
+- `Grep`, `Glob`, `WebSearch`, `WebFetch`, `TodoWrite` — blanket allow (no single-path escape valve).
+- `Bash` matching read-only shell built-ins: `ls`, `wc`, `pwd`, `date`, `echo`, `git status|log|show|diff`.
+- `Bash` matching file-reader built-ins `cat`, `head`, `tail`, `grep` — operand extraction + `isRepoScopedReadPath` validation for every path operand (prevents bare `cat /etc/passwd` or `grep secret ~/.aws/credentials`).
 - `Bash` matching exactly `npx tsx scripts/cx-agent-sdk-tool.ts <verb> <ticket_id>` or `npx tsx scripts/improve-box-tools.ts <tool> <ticket_id>` where `<ticket_id>` MATCHES the `REVIEW_CANDIDACY_TICKET_ID` env var. This ticket-binding stops a customer message from instructing "run against a DIFFERENT ticket" — a cross-ticket read is a hard deny.
 
-### Hard deny (checked BEFORE the allowlist)
+### Repo-scoped path check (`isRepoScopedReadPath`)
+Applies to `Read`, `NotebookRead`, and file-reader Bash commands. Denies:
+- Non-string or empty paths.
+- Env variable expansion (`$VAR`, `${VAR}`).
+- Home-relative paths (`~`, `~/path`).
+- Absolute or `..` traversal that escapes the repo root.
+- Any `.env` / `.env.<suffix>` filename (case-insensitive).
+- Any resolved path segment in the credential/config set: `{.ssh, .aws, .claude, .config, .netrc, .gnupg, .pgpass}` (case-insensitive).
+
+### Hard deny Bash patterns (checked BEFORE the allowlist)
 | Class | Examples |
 |---|---|
 | env inspection | `env`, `printenv`, `/proc/self/environ`, `$SECRET_VAR` expansion |
-| credential/config file reads | `.env`, `~/.ssh`, `~/.aws`, `~/.claude`, `~/.config`, `~/.netrc` |
+| credential/config file reads | `.env`, `~/.ssh`, `~/.aws`, `~/.claude`, `~/.config`, `~/.netrc`, `.gnupg`, `.pgpass` |
 | network mutation | `curl -X POST\|PUT\|DELETE\|PATCH`, `curl -d/--data/-F/-T/--upload-file`, `wget --post-*`, `nc`, `ssh`, `scp` |
 | git writes | `git push\|commit\|reset\|checkout\|add\|tag\|rebase\|merge\|cherry-pick\|rm\|clean\|apply\|am\|revert` |
 | DB mutation | `psql`, `supabase db\|migration\|functions` |
@@ -41,6 +53,12 @@ The gate is split cleanly:
 
 ### Unknown / MCP tool
 **Deny by default** (allowlist, not blocklist). A novel tool must be added here explicitly before it can reach the gate.
+
+## Exports
+
+- **`decideReviewCandidacyPermission(toolName, toolInput, ticketId, repoRoot?)`** — the pure decision function. Returns `{ decision: "allow"|"deny", reason: string }`. Tests: 30 cases covering all deny paths and the allowlist.
+- **`isRepoScopedReadPath(rawPath, repoRoot)`** — path validator for `Read` / `NotebookRead` / file-reader Bash. Returns `{ ok: true }` or `{ ok: false, risk: string }`. Pure; `repoRoot` is caller-supplied for testability.
+- **`extractFileReaderPaths(cmd, reader)`** — operand parser for `cat`/`head`/`tail`/`grep`. Returns path array, or `null` if the command uses shell metacharacters that can't be reasoned about statically. Pure.
 
 ## Two additional guards in the runner
 
