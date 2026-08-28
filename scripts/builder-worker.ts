@@ -202,6 +202,16 @@ const MAX_TICKET_IMPROVE = 1;
 // Serialized so a first-touch session never races the self-update reset of REPO_DIR (it reads
 // brain/src in the main checkout, read-only).
 const MAX_TICKET_HANDLE = 1;
+// Review-candidacy sessions (review-request-sol-session Phase 1) run in their
+// OWN concurrency-1 lane: enqueued by the review-candidacy-detector-cron sweep
+// once a ticket has been quiet 24h since the last external message. Sol reads
+// the thread + recent orders READ-ONLY and returns a typed
+// { ask, product_id, angle, include_coupon, reasoning } verdict; the WORKER
+// (deterministic Node — later phases wire the message-authoring, rubric, and
+// send path) is the only mutator. Serialized because Sol's read-only pass is
+// cheap AND the downstream apply path lands in the same CS queue.
+const MAX_REVIEW_CANDIDACY = 1;
+const REVIEW_CANDIDACY_TIMEOUT_MS = 15 * 60 * 1000;
 // Escalation-triage sweeps (box-escalation-triage) run in their OWN concurrency-1 lane: one hourly
 // agent_jobs row per workspace, processed as a batch of solver→skeptic→quorum loops (each loop is 2–4
 // separate top-level Max `claude -p` sessions). Serialized so a long sweep never races other lanes.
@@ -772,7 +782,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ad-review-feedback" | "ads-supervisor" | "imitation-quality-review" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario" | "creative-scout";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "review-candidacy" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ad-review-feedback" | "ads-supervisor" | "imitation-quality-review" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario" | "creative-scout";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -814,6 +824,7 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "product-seed",
   "ticket-improve",
   "ticket-handle",
+  "review-candidacy",
   "spec-chat",
   "triage-escalations",
   "spec-test",
@@ -4508,8 +4519,8 @@ const LANE_GROUPS = {
     kinds: ["build", "plan"] as const,
   },
   customer_service: {
-    cap: MAX_TICKET_HANDLE + MAX_TICKET_ANALYZE + MAX_CS_DIRECTOR_CALL,
-    kinds: ["ticket-handle", "ticket-analyze", "cs-director-call"] as const,
+    cap: MAX_TICKET_HANDLE + MAX_TICKET_ANALYZE + MAX_CS_DIRECTOR_CALL + MAX_REVIEW_CANDIDACY,
+    kinds: ["ticket-handle", "ticket-analyze", "cs-director-call", "review-candidacy"] as const,
   },
   director: {
     cap: MAX_PLATFORM_DIRECTOR + MAX_DIRECTOR_COACH,
@@ -13625,6 +13636,234 @@ function triageRevisePrompt(critique: string, concerns: string[]): string {
     concerns.length ? `Concerns: ${concerns.map((c) => `- ${c}`).join("\n")}` : ``,
     `Incorporate this and emit a corrected SolverProposal — the SAME JSON shape and the same rules as before. If you now believe no safe fix exists, switch decision to "no_action" with an honest reasoning.`,
   ].filter(Boolean).join("\n");
+}
+
+// ── Box-hosted Sol review-candidacy session (review-request-sol-session Phase 1) ──
+// A kind='review-candidacy' job is Sol's read-only review-candidacy pass over ONE
+// quiet ticket enqueued by review-candidacy-detector-cron. Same shape as Sol's
+// ticket-handle first-touch session: a top-level Max `claude -p` (review-candidacy
+// skill) with web search + read-only DB access via the improve-box-tools.ts CLI,
+// no ANTHROPIC_API_KEY set → $0 marginal cost. Sol emits a typed JSON verdict
+// { ask, product_id, angle, include_coupon, reasoning } and NEVER sends; the
+// worker (this file) is the only mutator. Phase 1 stores the verdict on the
+// agent_jobs row so Phase 2's rubric + validator + Phase 3's send path can
+// consume it — the deferred-apply pattern applyBoxMario / applyBoxDeployReview
+// already use elsewhere.
+async function runReviewCandidacyClaude(
+  prompt: string,
+  sessionId: string | null,
+  cwd: string,
+  configDir: string | undefined,
+  jobId: string | null,
+  ticketId: string,
+) {
+  // review-request-sol-session Phase 4 § Fix 1 — least-privilege PreToolUse
+  // gate the lane runs under. Loading customer-controlled ticket messages
+  // INTO the prompt is a prompt-injection surface; without a gate the box
+  // falls back to --dangerously-skip-permissions and a malicious message
+  // could reach env / cred files / arbitrary shell. The gate hard-denies
+  // env inspection / credential-file reads / network mutation / git writes
+  // / DB mutation / arbitrary shell; it allows only Read/Grep/Glob/WebSearch
+  // + the two read-only CX SDK CLIs BOUND to the claimed ticket id. Ticket
+  // id also passed as REVIEW_CANDIDACY_TICKET_ID so the gate refuses a
+  // command that targets a DIFFERENT ticket.
+  return runBoxSession(prompt, sessionId, cwd, {
+    configDir,
+    jobId,
+    kind: "review-candidacy",
+    sandbox: "max",
+    timeout: REVIEW_CANDIDACY_TIMEOUT_MS,
+    permissionGate: {
+      hookCommand: `npx tsx ${join(REPO_DIR, "scripts", "review-candidacy-permission-gate.ts")}`,
+    },
+    extraEnv: { REVIEW_CANDIDACY_TICKET_ID: ticketId },
+  });
+}
+
+interface ReviewCandidacyVerdict {
+  ask: boolean;
+  product_id: string | null;
+  angle: string | null;
+  include_coupon: boolean;
+  reasoning: string;
+}
+
+// Normalize the box's JSON verdict → ReviewCandidacyVerdict. Never throws;
+// returns null on an unparseable/malformed verdict so the runner surfaces
+// needs_attention (matching the cs-director-call runner's fail-safe — a
+// missing / unparseable verdict must NEVER be silently upgraded to an ask).
+// The conservative default is `ask=false` — skipping is always correct.
+function normalizeReviewCandidacyVerdict(raw: unknown): ReviewCandidacyVerdict | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.ask !== "boolean") return null;
+  const productId =
+    typeof r.product_id === "string" && r.product_id.trim().length > 0
+      ? r.product_id.trim()
+      : null;
+  const angle =
+    typeof r.angle === "string" && r.angle.trim().length > 0
+      ? r.angle.trim()
+      : null;
+  const includeCoupon = r.include_coupon === true;
+  const reasoning = typeof r.reasoning === "string" ? r.reasoning : "";
+  // Guard the ASK-shape: when ask=true, the caller must have named a product +
+  // an angle. Silently degrade a shape-broken ask to a skip (ask=false) — the
+  // downstream Phase-2 validator would reject it anyway, and skipping is
+  // always correct when in doubt.
+  const ask = r.ask === true && !!productId && !!angle;
+  return { ask, product_id: productId, angle, include_coupon: includeCoupon, reasoning };
+}
+
+async function runReviewCandidacyJob(job: Job) {
+  const tag = `[review-candidacy:${job.id.slice(0, 8)}]`;
+  let params: { ticket_id?: string; workspace_id?: string; customer_id?: string | null } = {};
+  try {
+    params = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* fall through to the missing-params guard */
+  }
+  const ticketId = params.ticket_id;
+  const workspaceId = job.workspace_id || params.workspace_id || null;
+  if (!ticketId || !workspaceId) {
+    await update(job.id, {
+      status: "failed",
+      error: "review-candidacy job missing ticket_id/workspace_id",
+    });
+    return;
+  }
+
+  // review-request-sol-session Phase 4 § Fix 1 — validate the CLAIMED ticket
+  // BELONGS to job.workspace_id BEFORE we ever load the prompt or spawn the
+  // agent. A spec-authored / rogue-detector agent_jobs row could otherwise
+  // instruct the box to load ticket messages from an unrelated workspace
+  // into the prompt (cross-workspace read + prompt-injection surface). Also
+  // re-assert the params.customer_id ↔ tickets.customer_id when both are
+  // set — a mismatched pair is the same class of untrusted-field bug.
+  // Fail-without-launching on any mismatch.
+  {
+    const { data: ticketRow, error: ticketErr } = await db
+      .from("tickets")
+      .select("id, workspace_id, customer_id")
+      .eq("id", ticketId)
+      .maybeSingle();
+    if (ticketErr) {
+      await update(job.id, {
+        status: "failed",
+        error: `review-candidacy: ticket lookup failed — ${errText(ticketErr)}`,
+      });
+      return;
+    }
+    if (!ticketRow) {
+      await update(job.id, {
+        status: "failed",
+        error: "review-candidacy: ticket not found for claimed ticket_id",
+      });
+      return;
+    }
+    if (ticketRow.workspace_id !== workspaceId) {
+      console.warn(
+        `${tag} refusing to launch — ticket workspace mismatch (job=${workspaceId.slice(0, 8)} · ticket=${String(ticketRow.workspace_id).slice(0, 8)})`,
+      );
+      await update(job.id, {
+        status: "failed",
+        error: "review-candidacy: ticket workspace mismatch — refusing to launch",
+      });
+      return;
+    }
+    if (
+      params.customer_id &&
+      ticketRow.customer_id &&
+      params.customer_id !== ticketRow.customer_id
+    ) {
+      console.warn(
+        `${tag} refusing to launch — customer_id mismatch (params=${String(params.customer_id).slice(0, 8)} · ticket=${String(ticketRow.customer_id).slice(0, 8)})`,
+      );
+      await update(job.id, {
+        status: "failed",
+        error: "review-candidacy: customer_id mismatch — refusing to launch",
+      });
+      return;
+    }
+  }
+
+  try {
+    // Sol sees the SAME base brief the ticket-handle lane builds — the ticket +
+    // customer + last analysis + CX SDK snapshot + mechanisms catalog — because
+    // her per-ticket judgement is the same read-only surface. The rubric,
+    // validator, and send path land in Phase 2 / Phase 3.
+    const brief = await loadTicketHandleBrief(ticketId);
+    const prompt = [
+      `Use the review-candidacy skill (cwd is the repo root). You are Sol (June's Ticket Handler agent), running a READ-ONLY REVIEW-CANDIDACY pass on Max — web search on, no API key.`,
+      ``,
+      `TICKET id ${ticketId} · workspace ${workspaceId} — full context loaded for you:`,
+      brief,
+      ``,
+      `For deterministic READ-ONLY CX data (customer + merged identity, subscriptions w/ realized pricing + discounts, orders w/ per-unit computed, active products), CALL THE SDK, NEVER improvise SQL:`,
+      `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · bundle)`,
+      `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
+      ``,
+      `YOUR ONE JOB: decide whether we should ask this customer for a review right now, and if so, about WHICH product. You NEVER send. The worker is the only mutator; your verdict is applied later by the Phase-2 rubric + validator + Phase-3 delivery path.`,
+      ``,
+      `Skipping is ALWAYS correct when in doubt — nobody is waiting for this message. Ask ONLY when:`,
+      `  • the conversation is genuinely finished (you already see the goodwill in the thread);`,
+      `  • the customer has bought a REVIEWABLE product recently (filter products.reviewable = true — Shipping Protection, Mystery Item, and free-gift lines are not reviewable);`,
+      `  • the customer has NOT already reviewed the product you'd pick, and the ladder (review_requests) hasn't already asked this customer about it;`,
+      `  • per-product review coverage tilts toward the product WE NEED MOST (e.g. Sleep Gummies with 42 reviews over Superfood Tabs with 3,158) when two are both fair game;`,
+      `  • the customer is a repeat buyer (goodwill compounds — you can see the tenure + order count in the CX SDK snapshot).`,
+      ``,
+      `ANGLES (2, per the spec) — assigned per CUSTOMER, not per PRODUCT:`,
+      `  • angle='defend'         — a real detractor's claim, the customer is invited to answer it. Use for a high-tenure customer whose real experience refutes a common complaint we've seen in support.`,
+      `  • angle='fence-sitter'   — a real question from a real support ticket, the customer's tenure is the credential. Use for the customer whose voice would move an on-the-fence buyer.`,
+      ``,
+      `Final message = ONLY one JSON object matching this exact shape:`,
+      `  {"ask": true|false, "product_id": "<uuid>" | null, "angle": "defend"|"fence-sitter" | null, "include_coupon": true|false, "reasoning": "2-4 sentences citing WHAT you found — the product coverage, the tenure, the ticket's resolution, and why THIS customer + THIS product is the right ask (or why not)."}`,
+      `  When ask=false, product_id and angle should be null and include_coupon should be false.`,
+      `  Include NO other keys, NO prose outside the JSON object.`,
+    ].join("\n");
+
+    const { session, resultText, isError, usage, model, configDir: rcDir } = await runBoxLane(
+      (cfg, sid) => runReviewCandidacyClaude(prompt, sid, REPO_DIR, cfg, job.id, ticketId),
+    );
+    await meterAgentJob(job, rcDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: rcDir });
+
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    const verdict = normalizeReviewCandidacyVerdict(parsed);
+    console.log(`${tag} claude finished — verdict: ${verdict ? (verdict.ask ? `ask product=${verdict.product_id?.slice(0, 8) ?? "?"} angle=${verdict.angle}` : "skip") : "(unparseable)"} · isError=${isError}`);
+
+    if (!verdict) {
+      // review-request-sol-session Phase 4 § Fix 1 — do NOT persist raw
+      // session output to log_tail. The raw transcript can carry tool
+      // output that includes secrets (e.g. env leaks the customer message
+      // tried to exfiltrate before the gate caught it, or a stack trace
+      // containing service-role config) — persisting it back to the DB is
+      // the second half of the exfiltration path. Store a bounded
+      // sanitized error naming ONLY the class of failure ("unparseable
+      // verdict") plus a tag so the CX log tail can locate the session.
+      await update(job.id, {
+        status: "needs_attention",
+        error: "review-candidacy returned no parseable verdict",
+        log_tail: `review-candidacy: session ${String(session ?? "").slice(0, 12)} produced no parseable verdict (raw output withheld — see security note)`,
+      });
+      return;
+    }
+
+    // Phase 1 stores the raw verdict on the job's log_tail for the Phase-2
+    // rubric + validator + Phase-3 delivery path to consume. No downstream
+    // apply happens here — the WORKER is the only mutator, but the mutation
+    // (drafting + validating + sending) is Phase 2 + Phase 3's contract.
+    await update(job.id, {
+      status: "completed",
+      log_tail: JSON.stringify(verdict).slice(-2000),
+    });
+  } catch (e) {
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+    await update(job.id, {
+      status: "failed",
+      error: `review-candidacy runner threw: ${errText(e)}`,
+    });
+  }
 }
 
 async function runEscalationTriageJob(job: Job) {
@@ -27362,6 +27601,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "spec-chat") return runSpecChatJob(job);
   if (job.kind === "ticket-improve") return runTicketImproveJob(job);
   if (job.kind === "ticket-handle") return runTicketHandleJob(job);
+  if (job.kind === "review-candidacy") return runReviewCandidacyJob(job);
   if (job.kind === "triage-escalations") return runEscalationTriageJob(job);
   if (job.kind === "spec-test") return runSpecTestJob(job);
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
@@ -29644,6 +29884,7 @@ async function main() {
   const countSpecChat = () => [...active.values()].filter((v) => v.kind === "spec-chat").length;
   const countImprove = () => [...active.values()].filter((v) => v.kind === "ticket-improve").length;
   const countTicketHandle = () => [...active.values()].filter((v) => v.kind === "ticket-handle").length;
+  const countReviewCandidacy = () => [...active.values()].filter((v) => v.kind === "review-candidacy").length;
   const countTriage = () => [...active.values()].filter((v) => v.kind === "triage-escalations").length;
   const countSpecTest = () => [...active.values()].filter((v) => v.kind === "spec-test").length;
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
@@ -29944,6 +30185,16 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed ticket-handle ${job.id.slice(0, 8)} → ${countTicketHandle() + 1}/${MAX_TICKET_HANDLE} ticket-handle lane`);
+        launch(job);
+      }
+      // Fill the review-candidacy lane (review-request-sol-session Phase 1): Sol's
+      // read-only session per quiet ticket, concurrency-1. Serialized so a session
+      // never races the REPO_DIR self-update reset (mirrors the ticket-handle lane).
+      while (laneHasQueued(queuedKinds, ["review-candidacy"]) && countReviewCandidacy() < MAX_REVIEW_CANDIDACY) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["review-candidacy"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed review-candidacy ${job.id.slice(0, 8)} → ${countReviewCandidacy() + 1}/${MAX_REVIEW_CANDIDACY} review-candidacy lane`);
         launch(job);
       }
       // Fill the ticket-improve lane (box-ticket-improve): interactive Max turns, concurrency-1.
