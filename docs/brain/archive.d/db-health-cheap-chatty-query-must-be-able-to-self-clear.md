@@ -1,0 +1,1 @@
+- **Cheap-but-chatty queries self-clear on database time, not call count** · verified 2026-08-28 · → [[libraries/db-health]]
