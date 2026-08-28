@@ -58,7 +58,7 @@ const SUMMARIES: Record<string, string> = {
   "seo-keyword-research.ts": "Generates `product_seo_keywords` via Google Search Console + AI keyword extraction.",
   "sms-wave-promote.ts": "Promotes the next wave of `sms_send_candidates` into `sms_campaign_recipients` based on archetype + replenishment ratio.",
   "social-comment-moderate.ts": "Per-comment moderation pipeline — runs the orchestrator, posts replies, hides/deletes if needed. Writes `social_comments`, `social_comment_replies`.",
-  "sync-inventory.ts": "Shopify inventory sync. Writes `product_variants.inventory_quantity`.",
+  "sync-inventory.ts": "Hourly Shopify inventory sync. Dual-writes canonical `inventory_levels` (location='shopify') + the `products.variants[].inventory_quantity` JSONB mirror, and fans `servings` down to `product_variants`. It does NOT write `product_variants.inventory_quantity` (that column is retired — see the table page).",
   "sync-shopify.ts": "Main Shopify bulk sync — customers, orders, products via GraphQL Bulk Operations. Drives `import_jobs` progress.",
   "ticket-analysis-cron.ts": "Nightly cron that runs `ticket-analyzer.ts` over recent tickets → `ticket_analyses`.",
   "ticket-csat.ts": "Sends CSAT survey 24h after a ticket closes. Writes `tickets.csat_score` on response.",
