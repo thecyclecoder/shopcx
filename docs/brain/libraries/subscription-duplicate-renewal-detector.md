@@ -41,6 +41,19 @@ Best-effort — a detector throw is logged + swallowed so a bug in this observer
 
 - [[../tables/dashboard_notifications]] — one `type='billing_alert'` card per fresh duplicate group.
 
+## Regression tests
+
+Pinned by `src/lib/subscription-duplicate-renewal-detector.test.ts` (registered as `npm run test:subscription-duplicate-renewal-detector` in package.json, executed by `npm run test:all` and the `check:tests-registered` gate):
+
+1. The SHOPCX273/274 shape — two same-day same-sub renewal orders form ONE group with earliest first.
+2. A lone renewal on the day does NOT surface (happy path stays silent).
+3. A manual admin order + a real renewal on the same day is NOT a duplicate renewal (detector filters non-`internal_subscription_renewal` rows).
+4. Two renewals on different subs on the same day are two 1-item buckets — neither surfaces.
+5. Rows missing `subscription_id` / `workspace_id` are dropped without crash / group corruption.
+6. Unparseable `created_at` is dropped without NaN bucket.
+7. Split-by-UTC-midnight goes into separate day buckets (pins the "same-day is a deliberate simplification" behavior; future widen to same-cycle flips this test).
+8. THREE same-day renewals on one sub form ONE group with all three orders sorted ASC by `created_at` (a triple charge is worse than a double and must be surfaced with every offending id).
+
 ## Invariants
 
 - **Read-only against everything except `dashboard_notifications`.** A detector that mutates the state it observes is not a detector — it's an actor that would need its own supervisor. See [[../operational-rules]] § North star.
