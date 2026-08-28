@@ -15,7 +15,7 @@ Dunning orchestrator: payment-failed → card rotation → payday retries → cy
 ### `dunning-new-card-recovery`
 - **Trigger:** event `dunning/new-card-recovery`
 - **Retries:** 2
-- **Concurrency:** `concurrency: [{ limit: 3, key: "event.data.workspace_id" }, { limit: 1, key: "event.data.customer_id" }]` — the per-customer cap is the idempotency invariant: two `dunning/new-card-recovery` events for the SAME customer (two rapid card updates, portal payment-method-update racing a webhook) serialize instead of both driving a recovery charge. The workspace cap (limit 3) stays as the tenant-noise ceiling. Phase 1 of [[../specs/immediate-charge-renewal-paths-need-per-subscription-idempotency]] — two concurrent runs on one customer produced the 4.2-min-apart double-charge on internal sub fd857ad9 (SHOPCX273 + SHOPCX274 both $102.33 on 2026-08-28); the [[../tables/subscription_cycle_charges]] unique index is the belt, this concurrency scope is the suspenders.
+- **Concurrency:** `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]`
 
 
 ### `dunning-billing-success`

@@ -27,12 +27,6 @@ import {
   type RenewalGuardItem,
   type RenewalGuardLine,
 } from "@/lib/subscription-renewal-guard";
-import {
-  claimChargeIdempotency,
-  chargeIdempotencyKeyFromNextBillingDate,
-  resolveChargeIdempotency,
-} from "@/lib/subscription-cycle-charge-claim";
-import { runDuplicateRenewalSweep } from "@/lib/subscription-duplicate-renewal-detector";
 
 // ─── Dunning retry-window filter ────────────────────────────────────
 // Dunning is the source of truth for WHEN the next failed-payment retry is
@@ -330,38 +324,6 @@ export const internalSubscriptionRenewalCron = inngest.createFunction(
         },
       })));
     }
-
-    // Phase 2 of the per-cycle idempotency spec — the duplicate-renewal detector safety net.
-    // Piggy-backs on this cron (no new Inngest cron / control-tower registration overhead): scan
-    // the workspaces this run just fanned out to, group any `internal_subscription_renewal`
-    // orders from the LAST cycle by (subscription_id, YYYY-MM-DD), and surface groups of >=2
-    // via `dashboard_notifications` (`type='billing_alert'`, deduped on
-    // `metadata->>dedupe_key`). Read-only against `public.orders`; the ONLY write is one
-    // notification card per fresh group. Phase 1's `subscription_cycle_charges` unique index is
-    // the primary block — any duplicate SURVIVING to `orders` means a path bypassed the guard,
-    // and this detector is how we notice within a day instead of when a customer writes in.
-    // See [[../libraries/subscription-duplicate-renewal-detector]] +
-    // docs/brain/specs/immediate-charge-renewal-paths-need-per-subscription-idempotency.md § Phase 2.
-    await step.run("scan-duplicate-renewals", async () => {
-      const workspaceIds = Array.from(new Set(due.map((s) => s.workspace_id))).filter(Boolean);
-      const since = new Date(Date.now() - 26 * 60 * 60_000).toISOString();
-      let totalGroups = 0;
-      let totalAlerts = 0;
-      for (const ws of workspaceIds) {
-        try {
-          const res = await runDuplicateRenewalSweep(admin, ws, since);
-          totalGroups += res.groups_found;
-          totalAlerts += res.alerts_inserted;
-        } catch (e) {
-          // Best-effort — a detector failure MUST NOT break the renewal fan-out. Log + continue.
-          console.warn(
-            `[internal-subscription-renewal-cron] duplicate-renewal sweep failed for workspace ${ws}:`,
-            e instanceof Error ? e.message : e,
-          );
-        }
-      }
-      return { workspaces_scanned: workspaceIds.length, duplicate_groups: totalGroups, alerts_inserted: totalAlerts };
-    });
 
     // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1) carrying the per-cycle
     // outcome breakdown (control-tower-renewal-integrity-assertions, Phase 1). The attempts THIS
@@ -1031,77 +993,6 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       return { skipped: true, reason: "zero_total" };
     }
 
-    // ── 2.5. Per-cycle idempotency claim (immediate-charge chokepoint) ──
-    // The `isRenewalAttemptStale` guard above catches a duplicate SCHEDULED attempt but
-    // deliberately exempts immediate-charge callers (portal order-now, payment-method recovery,
-    // appstle orderNowByContract) because they send NO `expected_next_billing_date`. Two of those
-    // triggers arriving close together (4.2 min apart on internal sub fd857ad9, SHOPCX273 +
-    // SHOPCX274 both $102.33 on 2026-08-28) both charged. This claim closes the gap for BOTH
-    // schedule and immediate paths: a unique index on (subscription_id, cycle_key) at
-    // [[../../supabase/migrations/20261215120000_subscription_cycle_charges.sql]] refuses the
-    // second INSERT deterministically; the second trigger becomes a `refused_duplicate` skip
-    // instead of a second Braintree sale. Same-run Inngest step re-runs are identified via
-    // `claimant=event.id` and treated as a resumed claim, not a duplicate. cycle_key is derived
-    // from the sub's pre-advance next_billing_date so successive cycles get fresh keys and
-    // dunning's date-move retry naturally lands on a new key.
-    // See [[../libraries/subscription-cycle-charge-claim]] +
-    // docs/brain/specs/immediate-charge-renewal-paths-need-per-subscription-idempotency.md.
-    const cycleKey = chargeIdempotencyKeyFromNextBillingDate(ctx.sub.next_billing_date as string | null);
-    const claimantId = (event as { id?: string }).id || `sub:${subscription_id}:cycle:${cycleKey}`;
-    const claim = await step.run("claim-charge-idempotency", async () => {
-      const res = await claimChargeIdempotency(admin, {
-        workspace_id,
-        subscription_id,
-        cycle_key: cycleKey,
-        claimant: claimantId,
-        amount_cents: totalCents,
-        source: "internal_subscription_renewal",
-      });
-      if (res.ok) {
-        return { ok: true as const, id: res.id };
-      }
-      return {
-        ok: false as const,
-        existing_status: res.existing.status,
-        existing_claimant: res.existing.claimant,
-        existing_id: res.existing.id,
-      };
-    });
-    if (!claim.ok) {
-      // Another claimant already holds this (subscription_id, cycle_key). Refuse the second
-      // charge — either the first is still in flight (concurrent race) or it already resolved
-      // for this cycle. Dunning drives a fresh cycle_key on decline, so a legitimate retry is
-      // NOT blocked by this refusal.
-      await step.run("emit-outcome-refused-duplicate", () =>
-        emitRenewalOutcomeHeartbeat("skipped_other"),
-      );
-      await step.run("log-refused-duplicate-event", async () => {
-        const { logCustomerEvent } = await import("@/lib/customer-events");
-        await logCustomerEvent({
-          workspaceId: workspace_id,
-          customerId: (ctx.sub.customer_id as string | null) ?? null,
-          eventType: "subscription.renewal_refused_duplicate_cycle",
-          source: "internal_subscription_renewal",
-          summary:
-            `Renewal refused — another charge already claimed cycle ${cycleKey} for this ` +
-            `subscription (status=${claim.existing_status}). No second Braintree sale.`,
-          properties: {
-            subscription_id,
-            cycle_key: cycleKey,
-            existing_claim_id: claim.existing_id,
-            existing_status: claim.existing_status,
-          },
-        });
-      });
-      return {
-        skipped: true,
-        reason: "refused_duplicate_cycle",
-        cycle_key: cycleKey,
-        existing_status: claim.existing_status,
-      };
-    }
-    const claimId = claim.id;
-
     // ── 3. Insert pending transactions row ──────────────────────
     const txnRowId = await step.run("insert-pending-transaction", async () => {
       const { data: row } = await admin
@@ -1198,15 +1089,6 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         },
       });
       await step.run("emit-outcome-declined", () => emitRenewalOutcomeHeartbeat("declined_to_dunning"));
-      // Stamp the cycle claim `failed` — dunning's payday-shifted retry lands on a NEW cycle_key
-      // (resetBillingDateAfterDunning), so this row stays as an audit record of the decline and
-      // does NOT block that retry.
-      await step.run("resolve-charge-idempotency-failed", () =>
-        resolveChargeIdempotency(admin, claimId, {
-          status: "failed",
-          transaction_id: txnRowId || null,
-        }),
-      );
       return { ok: false, failed: true, message: charge.message };
     }
 
@@ -1254,18 +1136,6 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       if (txnRowId) await admin.from("transactions").update({ order_id: order.id }).eq("id", txnRowId);
       return { id: order.id as string, order_number: order.order_number as string };
     });
-
-    // Stamp the cycle claim `succeeded` — any subsequent immediate-charge trigger for this same
-    // (subscription_id, cycle_key) is refused via the unique index at
-    // [[../../supabase/migrations/20261215120000_subscription_cycle_charges.sql]], preventing a
-    // second Braintree sale + order like the 2026-08-28 SHOPCX273/274 double-charge.
-    await step.run("resolve-charge-idempotency-succeeded", () =>
-      resolveChargeIdempotency(admin, claimId, {
-        status: "succeeded",
-        transaction_id: txnRowId || null,
-        order_id: newOrder.id,
-      }),
-    );
 
     // Drop any one_time_next_renewal items now that they've shipped
     // on this renewal — they're spent. Recurring items stay.
