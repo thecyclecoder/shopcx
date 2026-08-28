@@ -1,0 +1,1 @@
+- **Stop fraud detector false alerts from coalesced heartbeat window edges** · verified 2026-08-28 · → [[lifecycles/control-tower]]
