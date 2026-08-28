@@ -74,4 +74,4 @@ One open proposal per finding **signature** (`dbhealth:<category>:<key>`, e.g. `
 
 ## Related
 
-[[../specs/db-health-agent]] · [[control-tower]] · [[repair-agent]] · [[../specs/control-tower-migration-drift-check]] · [[../specs/db-reduce-calls-q-1756037457588317045]] · [[../tables/db_table_size_history]] · [[../tables/agent_jobs]] · [[../tables/loop_heartbeats]] · [[../specs/loop-heartbeats-retention]] · [[../dashboard/control-tower]] · [[../recipes/write-a-migration-apply-script]] · [[../operational-rules]]
+[[../specs/db-health-agent]] · [[control-tower]] · [[repair-agent]] · [[../specs/control-tower-migration-drift-check]] · [[../specs/db-reduce-calls-q-1756037457588317045]] · [[../specs/db-health-cheap-chatty-query-must-be-able-to-self-clear]] · [[../tables/db_table_size_history]] · [[../tables/agent_jobs]] · [[../tables/loop_heartbeats]] · [[../specs/loop-heartbeats-retention]] · [[../dashboard/control-tower]] · [[../recipes/write-a-migration-apply-script]] · [[../operational-rules]]
