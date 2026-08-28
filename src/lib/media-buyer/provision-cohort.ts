@@ -13,7 +13,7 @@
  * See docs/brain/libraries/provision-cohort.md · docs/brain/tables/media_buyer_test_cohorts.md.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
-import { getMetaUserToken, getOrCreateTestingCampaign } from "@/lib/meta-ads";
+import { getMetaUserToken, getOrCreateTestingCampaign, ADVANTAGE_AUDIENCE_MAX_AGE_MIN } from "@/lib/meta-ads";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -27,7 +27,9 @@ type Admin = ReturnType<typeof createAdminClient>;
  * Advantage+ Audience rules, [[../../../docs/brain/reference/meta-scaling-methodology.md]] § "Test audience
  * held constant = broad, no age cap".
  */
-export const META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN = 25;
+// Re-exported from [[../meta-ads]], which owns this Meta API fact and applies it as the last rail
+// before the wire in `createAdSet`. Defining `25` twice is how a platform limit drifts.
+export const META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN = ADVANTAGE_AUDIENCE_MAX_AGE_MIN;
 
 /** The proven cold-test converter cohort (docs/brain/reference/meta-scaling-methodology.md § "Test audience
  *  held constant = broad, no age cap (defaults to 18+), no detailed targeting — let Meta's algorithm find
