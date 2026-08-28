@@ -13649,8 +13649,35 @@ function triageRevisePrompt(critique: string, concerns: string[]): string {
 // agent_jobs row so Phase 2's rubric + validator + Phase 3's send path can
 // consume it — the deferred-apply pattern applyBoxMario / applyBoxDeployReview
 // already use elsewhere.
-async function runReviewCandidacyClaude(prompt: string, sessionId: string | null, cwd: string, configDir?: string, jobId?: string | null) {
-  return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "review-candidacy", sandbox: "max", timeout: REVIEW_CANDIDACY_TIMEOUT_MS });
+async function runReviewCandidacyClaude(
+  prompt: string,
+  sessionId: string | null,
+  cwd: string,
+  configDir: string | undefined,
+  jobId: string | null,
+  ticketId: string,
+) {
+  // review-request-sol-session Phase 4 § Fix 1 — least-privilege PreToolUse
+  // gate the lane runs under. Loading customer-controlled ticket messages
+  // INTO the prompt is a prompt-injection surface; without a gate the box
+  // falls back to --dangerously-skip-permissions and a malicious message
+  // could reach env / cred files / arbitrary shell. The gate hard-denies
+  // env inspection / credential-file reads / network mutation / git writes
+  // / DB mutation / arbitrary shell; it allows only Read/Grep/Glob/WebSearch
+  // + the two read-only CX SDK CLIs BOUND to the claimed ticket id. Ticket
+  // id also passed as REVIEW_CANDIDACY_TICKET_ID so the gate refuses a
+  // command that targets a DIFFERENT ticket.
+  return runBoxSession(prompt, sessionId, cwd, {
+    configDir,
+    jobId,
+    kind: "review-candidacy",
+    sandbox: "max",
+    timeout: REVIEW_CANDIDACY_TIMEOUT_MS,
+    permissionGate: {
+      hookCommand: `npx tsx ${join(REPO_DIR, "scripts", "review-candidacy-permission-gate.ts")}`,
+    },
+    extraEnv: { REVIEW_CANDIDACY_TICKET_ID: ticketId },
+  });
 }
 
 interface ReviewCandidacyVerdict {
@@ -13706,6 +13733,60 @@ async function runReviewCandidacyJob(job: Job) {
     return;
   }
 
+  // review-request-sol-session Phase 4 § Fix 1 — validate the CLAIMED ticket
+  // BELONGS to job.workspace_id BEFORE we ever load the prompt or spawn the
+  // agent. A spec-authored / rogue-detector agent_jobs row could otherwise
+  // instruct the box to load ticket messages from an unrelated workspace
+  // into the prompt (cross-workspace read + prompt-injection surface). Also
+  // re-assert the params.customer_id ↔ tickets.customer_id when both are
+  // set — a mismatched pair is the same class of untrusted-field bug.
+  // Fail-without-launching on any mismatch.
+  {
+    const { data: ticketRow, error: ticketErr } = await db
+      .from("tickets")
+      .select("id, workspace_id, customer_id")
+      .eq("id", ticketId)
+      .maybeSingle();
+    if (ticketErr) {
+      await update(job.id, {
+        status: "failed",
+        error: `review-candidacy: ticket lookup failed — ${errText(ticketErr)}`,
+      });
+      return;
+    }
+    if (!ticketRow) {
+      await update(job.id, {
+        status: "failed",
+        error: "review-candidacy: ticket not found for claimed ticket_id",
+      });
+      return;
+    }
+    if (ticketRow.workspace_id !== workspaceId) {
+      console.warn(
+        `${tag} refusing to launch — ticket workspace mismatch (job=${workspaceId.slice(0, 8)} · ticket=${String(ticketRow.workspace_id).slice(0, 8)})`,
+      );
+      await update(job.id, {
+        status: "failed",
+        error: "review-candidacy: ticket workspace mismatch — refusing to launch",
+      });
+      return;
+    }
+    if (
+      params.customer_id &&
+      ticketRow.customer_id &&
+      params.customer_id !== ticketRow.customer_id
+    ) {
+      console.warn(
+        `${tag} refusing to launch — customer_id mismatch (params=${String(params.customer_id).slice(0, 8)} · ticket=${String(ticketRow.customer_id).slice(0, 8)})`,
+      );
+      await update(job.id, {
+        status: "failed",
+        error: "review-candidacy: customer_id mismatch — refusing to launch",
+      });
+      return;
+    }
+  }
+
   try {
     // Sol sees the SAME base brief the ticket-handle lane builds — the ticket +
     // customer + last analysis + CX SDK snapshot + mechanisms catalog — because
@@ -13741,8 +13822,8 @@ async function runReviewCandidacyJob(job: Job) {
       `  Include NO other keys, NO prose outside the JSON object.`,
     ].join("\n");
 
-    const { session, resultText, isError, raw, usage, model, configDir: rcDir } = await runBoxLane(
-      (cfg, sid) => runReviewCandidacyClaude(prompt, sid, REPO_DIR, cfg, job.id),
+    const { session, resultText, isError, usage, model, configDir: rcDir } = await runBoxLane(
+      (cfg, sid) => runReviewCandidacyClaude(prompt, sid, REPO_DIR, cfg, job.id, ticketId),
     );
     await meterAgentJob(job, rcDir ?? undefined, usage, model);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: rcDir });
@@ -13752,10 +13833,18 @@ async function runReviewCandidacyJob(job: Job) {
     console.log(`${tag} claude finished — verdict: ${verdict ? (verdict.ask ? `ask product=${verdict.product_id?.slice(0, 8) ?? "?"} angle=${verdict.angle}` : "skip") : "(unparseable)"} · isError=${isError}`);
 
     if (!verdict) {
+      // review-request-sol-session Phase 4 § Fix 1 — do NOT persist raw
+      // session output to log_tail. The raw transcript can carry tool
+      // output that includes secrets (e.g. env leaks the customer message
+      // tried to exfiltrate before the gate caught it, or a stack trace
+      // containing service-role config) — persisting it back to the DB is
+      // the second half of the exfiltration path. Store a bounded
+      // sanitized error naming ONLY the class of failure ("unparseable
+      // verdict") plus a tag so the CX log tail can locate the session.
       await update(job.id, {
         status: "needs_attention",
         error: "review-candidacy returned no parseable verdict",
-        log_tail: raw.slice(-2000),
+        log_tail: `review-candidacy: session ${String(session ?? "").slice(0, 12)} produced no parseable verdict (raw output withheld — see security note)`,
       });
       return;
     }

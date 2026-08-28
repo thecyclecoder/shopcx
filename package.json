@@ -58,6 +58,7 @@
     "test:review-message-drafts": "tsx --test src/lib/review-message-drafts.test.ts",
     "test:review-request-delivery": "tsx --test src/lib/review-request-delivery.test.ts",
     "test:journey-definition-probe": "tsx --test src/lib/journey-definition-probe.test.ts",
+    "test:review-candidacy-permission-gate": "tsx --test src/lib/review-candidacy-permission-gate.test.ts",
     "test:grep-smart-case": "tsx --test src/lib/spec-check-runner.smart-case.test.ts",
     "test:broken-check-escalate": "tsx --test src/lib/roadmap-actions.broken-check-escalate.test.ts",
     "test:specs-table-resolve-branch-ref": "tsx --test src/lib/specs-table.resolve-branch-ref.test.ts",
