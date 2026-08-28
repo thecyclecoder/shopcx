@@ -410,6 +410,85 @@ test("Bash: multi-operand cat/head/grep — one bad operand poisons the whole ca
   }
 });
 
+test("Bash: SDK invocation followed by a chain operator denies (`; && |`)", () => {
+  // The `[;&|]` chain deny MUST run before the ticket-bound SDK allow, or an
+  // otherwise-valid SDK invocation trailed by ` ; cat .env` would launder a
+  // second command through the shortcut (review-candidacy-bash-command-parser-bypasses).
+  for (const cmd of [
+    `npx tsx scripts/cx-agent-sdk-tool.ts bundle ${TICKET_ID} ; cat .env`,
+    `npx tsx scripts/cx-agent-sdk-tool.ts bundle ${TICKET_ID} && cat .env`,
+    `npx tsx scripts/improve-box-tools.ts get_customer_account ${TICKET_ID} | tee /tmp/x`,
+  ]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "deny", `${cmd} should deny — got ${v.reason}`);
+  }
+});
+
+test("Bash: SDK invocation with a trailing token after the ticket id denies", () => {
+  // Strict argv-shape: exactly `npx tsx scripts/<script> <op> <ticket>` and
+  // nothing more. A trailing flag / positional arg would be accepted by the
+  // old `(\s|$)`-tailed regex.
+  for (const cmd of [
+    `npx tsx scripts/cx-agent-sdk-tool.ts bundle ${TICKET_ID} --extra-flag`,
+    `npx tsx scripts/cx-agent-sdk-tool.ts bundle ${TICKET_ID} /etc/passwd`,
+    `npx tsx scripts/improve-box-tools.ts get_customer_account ${TICKET_ID} {"foo":1}`,
+  ]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "deny", `${cmd} should deny — got ${v.reason}`);
+  }
+});
+
+test("Bash: SDK invocation with a non-identifier op token denies", () => {
+  for (const cmd of [
+    `npx tsx scripts/cx-agent-sdk-tool.ts $(whoami) ${TICKET_ID}`,
+    `npx tsx scripts/cx-agent-sdk-tool.ts --file=/etc/passwd ${TICKET_ID}`,
+  ]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "deny", `${cmd} should deny — got ${v.reason}`);
+  }
+});
+
+test("Bash: grep `--file=/outside/path` denies even with repo-scoped operands", () => {
+  for (const cmd of [
+    "grep --file=/outside/path docs/brain/README.md src/lib/review-request-validator.ts",
+    "grep --file=/etc/passwd src/lib/review-request-validator.ts",
+    "grep --regexp=foo --file=/root/history src/lib/review-request-validator.ts",
+  ]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "deny", `${cmd} should deny — got ${v.reason}`);
+  }
+});
+
+test("Bash: grep `-f/outside/path` (attached short form) denies", () => {
+  for (const cmd of [
+    "grep -f/outside/path docs/brain/README.md src/lib/review-request-validator.ts",
+    "grep -f/etc/passwd src/lib/review-request-validator.ts",
+  ]) {
+    const v = decideReviewCandidacyPermission("Bash", { command: cmd }, TICKET_ID, REPO_ROOT);
+    assert.equal(v.decision, "deny", `${cmd} should deny — got ${v.reason}`);
+  }
+});
+
+test("Bash: grep `--file=<repo-scoped-pattern-file> <repo-scoped-file>` allows", () => {
+  const v = decideReviewCandidacyPermission(
+    "Bash",
+    { command: "grep --file=docs/patterns.txt src/lib/review-request-validator.ts" },
+    TICKET_ID,
+    REPO_ROOT,
+  );
+  assert.equal(v.decision, "allow", `should allow — got ${v.reason}`);
+});
+
+test("Bash: grep attached-short-form `-esecret` on a repo-scoped file allows", () => {
+  const v = decideReviewCandidacyPermission(
+    "Bash",
+    { command: "grep -esecret src/lib/review-request-validator.ts" },
+    TICKET_ID,
+    REPO_ROOT,
+  );
+  assert.equal(v.decision, "allow", `should allow — got ${v.reason}`);
+});
+
 test("Bash: cat/head/tail/grep with quoting/globbing/backticks (unparseable shape) denies", () => {
   for (const cmd of [
     'cat "docs/brain/README.md"',
