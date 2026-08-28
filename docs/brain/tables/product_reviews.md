@@ -39,6 +39,7 @@ Product reviews with AI summaries. Storefront PDPs, ad-tool proof anchors, produ
 | `rejection_reason` | `text` | ✓ | Why a moderator rejected it. NULL for pre-sunset rejections (that reason lived only in Klaviyo) |
 | `rejection_explanation` | `text` | ✓ | Free-text the moderator typed alongside the reason |
 | `moderated_at` | `timestamptz` | ✓ | Last human moderation action on the row |
+| `attribute_scores` | `jsonb` | ✓ | Slider answers from the product-review journey — e.g. `{"convenience":5,"effectiveness":4,"flavor":5,"expectation":"exceeded"}`. jsonb because the question set is per-product (Flavor is skipped for the Tumbler / Mixer / Mug — see `default set` in the journey definition). NULL for reviews collected before the in-house program (all pre-2026-07-01 rows). Migration `20261215120000_review_collection_foundations.sql`. |
 
 ## Foreign keys
 
