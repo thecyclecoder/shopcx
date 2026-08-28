@@ -1,0 +1,1 @@
+- **Review requests — Sol's post-resolution session, rubric-gated message, delivery + one nudge** · verified 2026-08-28 · → [[../lifecycles/ticket-lifecycle]]
