@@ -12,7 +12,10 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Closing a ticket must not destroy an active founder escalation** · verified 2026-08-28 · → [[../lifecycles/ticket-lifecycle]]
 - **Stop fraud detector false alerts from coalesced heartbeat window edges** · verified 2026-08-28 · → [[lifecycles/control-tower]]
+- **Immediate-charge renewal paths need per-subscription idempotency** · verified 2026-08-28 · → [[../lifecycles/subscription-billing]]
+- **Internal (SHOPCX*) orders can now get a return — headroom guard verifies locally then refuses before spending money** · verified 2026-08-28 · → [[../lifecycles/return-pipeline]]
 - **Review collection — journey, coupon, and schema foundations** · verified 2026-08-28 · → [[journeys/product-review]]
 - **A price complaint must be answered from the customer's own established rate, not the standard rate card** · verified 2026-08-27 · → [[lifecycles/subscription-billing]]
 - **Ads supervisor: product `Amazing Coffee K-Cups` — Dahlia's ready-to-test bin is thin (0/4)** · verified 2026-08-27 · → [[../libraries/ads-supervisor]]
