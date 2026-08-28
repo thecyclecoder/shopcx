@@ -910,6 +910,11 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // the M4 "Graded + self-correcting" milestone's revert consumer. registeredAt graces
   // the first-tick window (newcron-grace).
   { id: "media-buyer-self-correcting-cron", kind: "cron", owner: "growth", label: "Media buyer self-correcting revert", description: "Daily sweep: auto-flips armed Media Buyer cohorts back to `shadow` on a sustained 7-day <5 grade regression (+ CEO escalation).", expectedCadence: "daily (30 14 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-07-09T14:30:00Z" },
+  // notification-hygiene: informational notifications had no terminal state a human did not have
+  // to reach, so 2,237 undismissed rows accrued against 13 real decisions — while 98-100% of the
+  // pile was already READ. Daily sweep retires expired recaps + SETTLED chargeback alerts; a live
+  // dispute is deliberately kept.
+  { id: "notification-hygiene-cron", kind: "cron", owner: "platform", label: "Notification hygiene sweep", description: "Daily: retires expired agent_daily_summary recaps (7d TTL) and chargeback_alert rows whose chargeback_events dispute has settled (won/lost/finalized). Never sweeps an unsettled dispute or a fraud alert.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-08-28T21:00:00Z" },
   { id: "meta-daily-sync", kind: "cron", owner: "growth", label: "Meta daily spend sync", description: "Daily Meta account spend rollup sync.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "storefront-experiments-refresh-cron", kind: "cron", owner: "growth", label: "Storefront experiments refresh", description: "Every-5-min fan-out: recomputes attribution + bandit posteriors for running storefront experiments (near-live test stats). No-ops when no running experiments.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 15 * MIN, registeredAt: "2026-06-22T17:45:00Z" },
   { id: "storefront-lever-decay-cron", kind: "cron", owner: "growth", label: "Storefront lever decay", description: "Daily fan-out: decays lever-importance posteriors toward their prior (re-probe stale levers).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-06-22T19:07:00Z" },

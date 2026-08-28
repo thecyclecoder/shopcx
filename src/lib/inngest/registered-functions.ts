@@ -145,6 +145,7 @@ import { adCreativeCadenceCron, adCreativeCadenceSweep } from "@/lib/inngest/ad-
 import { adsSupervisorCadenceCron, adsSupervisorCadenceSweep } from "@/lib/inngest/ads-supervisor-cadence";
 import { budgetWatchCron } from "@/lib/inngest/budget-watch";
 import { mediaBuyerGradeCron, mediaBuyerGradeSweep } from "@/lib/inngest/media-buyer-grade";
+import { notificationHygieneCron } from "@/lib/inngest/notification-hygiene";
 import {
   mediaBuyerSelfCorrectingCron,
   mediaBuyerSelfCorrectingSweep,
@@ -330,6 +331,7 @@ export const registeredInngestFunctions = [
   adsSupervisorCadenceSweep,
   budgetWatchCron,
   mediaBuyerGradeCron,
+  notificationHygieneCron,
   mediaBuyerGradeSweep,
   mediaBuyerSelfCorrectingCron,
   mediaBuyerSelfCorrectingSweep,
