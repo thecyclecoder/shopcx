@@ -857,6 +857,39 @@ export function isOrderAwaitingFraudScreen(order: { source_name?: string | null 
   return !(INTERNAL_RENEWAL_ORDER_SOURCE_NAMES as readonly string[]).includes(src);
 }
 
+// control-tower-fraud-workprobe-coalesce-grace (signal loop:ai:fraud-detector,
+// verdict monitor-false-positive): successful ai:fraud-detector heartbeats are
+// deliberately coalesced to ≤1/min per loop by emitLoopHeartbeat in
+// src/lib/control-tower/heartbeat.ts (HEARTBEAT_COALESCE_MS = 60_000). So a
+// successful beat at time T represents the run for the order that fired it AND
+// any subsequent order in [T, T + 60s] whose own beat was suppressed by the
+// coalesce. The `orders-awaiting-fraud-screen` probe measures unscreened fraud
+// work; without this grace, an order that arrived at the edge of the 6h
+// liveness window and rode on a coalesced beat that itself fell just outside
+// the window would read as work=1 with okCount=0 and false-fire idle_while_work
+// on the `ai:fraud-detector` tile — the exact monitor-false-positive this spec
+// repairs. The grace intentionally matches the heartbeat writer's coalesce
+// budget so the two timings can't drift apart.
+export const FRAUD_DETECTOR_HEARTBEAT_COALESCE_GRACE_MS = 60_000;
+
+/**
+ * True iff an order created at `orderCreatedAtMs` falls inside the coalescing
+ * coverage window of the latest successful `ai:fraud-detector` heartbeat at
+ * `latestOkBeatAtMs`. The coverage window is `[T, T + graceMs]` — orders in
+ * that range were handled by the detector run that emitted the beat at T, then
+ * saw their own beat coalesced away. `latestOkBeatAtMs=null` (never any
+ * successful beat) returns false (nothing to coalesce). Shared with the DB
+ * probe and the unit tests so the boundary math has one source of truth.
+ */
+export function orderIsInsideFraudCoalesceCoverage(
+  orderCreatedAtMs: number,
+  latestOkBeatAtMs: number | null,
+  graceMs: number = FRAUD_DETECTOR_HEARTBEAT_COALESCE_GRACE_MS,
+): boolean {
+  if (latestOkBeatAtMs == null) return false;
+  return orderCreatedAtMs >= latestOkBeatAtMs && orderCreatedAtMs <= latestOkBeatAtMs + graceMs;
+}
+
 /**
  * Shared list of `agent_jobs.kind='ticket-handle'` `instructions.reason` values that identify a
  * dispatch OWNED by Sol rather than the inline Sonnet orchestrator. Each reason represents a
@@ -1202,12 +1235,43 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             // internal-renewal source_name markers here — the same predicate that
             // isOrderAwaitingFraudScreen enforces in JS. NULL source_name stays in the count
             // (defensive: unknown-source orders are treated as real; matches the pre-fix behavior).
+            //
+            // Coalesce-coverage grace (control-tower-fraud-workprobe-coalesce-grace, signal
+            // loop:ai:fraud-detector, verdict monitor-false-positive): successful heartbeats are
+            // coalesced to ≤1/min per loop by emitLoopHeartbeat (HEARTBEAT_COALESCE_MS). So the
+            // latest successful `ai:fraud-detector` beat at time T represents the order that
+            // fired it AND any subsequent order in [T, T + FRAUD_DETECTOR_HEARTBEAT_COALESCE_GRACE_MS] whose
+            // own beat was suppressed. Without this grace, a quiet edge minute where an order rides
+            // on a coalesced beat that itself fell just outside the 6h liveness window shows up as
+            // work>0 / okCount=0 and false-fires idle_while_work on the tile. We fetch the latest
+            // successful beat regardless of window (T may be before sinceIso) and, when it exists,
+            // exclude orders with `created_at <= T + grace` — those were covered by the coalesced
+            // run. Orders beyond T + grace stay in the count, so a genuine detector outage after a
+            // stale beat still flips the tile red (mirrored by the no-false-negative unit test).
             const excluded = INTERNAL_RENEWAL_ORDER_SOURCE_NAMES.map((n) => `"${n}"`).join(",");
-            const { count } = await admin
+            const latestOkBeat = await admin
+              .from("loop_heartbeats")
+              .select("ran_at")
+              .eq("loop_id", loop.id)
+              .eq("ok", true)
+              .order("ran_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            const latestOkBeatMs = latestOkBeat.data?.ran_at
+              ? Date.parse(latestOkBeat.data.ran_at)
+              : null;
+            let query = admin
               .from("orders")
               .select("id", { count: "exact", head: true })
               .gte("created_at", sinceIso)
               .or(`source_name.is.null,source_name.not.in.(${excluded})`);
+            if (latestOkBeatMs != null) {
+              const coalesceCutoffIso = new Date(
+                latestOkBeatMs + FRAUD_DETECTOR_HEARTBEAT_COALESCE_GRACE_MS,
+              ).toISOString();
+              query = query.gt("created_at", coalesceCutoffIso);
+            }
+            const { count } = await query;
             return count ?? 0;
           }
           case "tickets-awaiting-decision": {
