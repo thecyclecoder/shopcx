@@ -1070,6 +1070,40 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
     if (items.length === 0) {
       return { success: false, error: "No returnable line items on this order" };
     }
+
+    // Phase 2 § "refuse before spending money, and never leave a blocking stub" of
+    // [[../../docs/brain/specs/internal-order-returns-blocked-by-refund-headroom-guard]] — the
+    // refund-headroom guard runs HERE, BEFORE any irreversible step (returns row insert, EasyPost
+    // shipment create, EasyPost buy). All inputs are DB reads (order.total_cents + line_items +
+    // refund ledger) with NO dependency on the shipment, so the block moves cleanly.
+    //
+    // The pre-label net is a WORST-CASE: labelCostCents=0 gives the LARGEST possible net_refund
+    // (any real label deducted post-purchase only shrinks it), so a pass here is a pass after
+    // buy — one check upstream replaces the old post-buy check that could refuse only after burning
+    // a paid label. The final `net_refund_cents` stored on the row still uses the ACTUAL label
+    // (computed after buy, below), matching the [[../tables/policies|`returns` policy]] formula.
+    //
+    // "Leave no residue" choice: DEFER the returns INSERT until AFTER this check passes (rather
+    // than delete-on-refusal). A refusal creates no row at all, so the `.neq('status','cancelled')`
+    // one-return-per-ticket guard in `src/lib/action-executor.ts` cannot see a leftover open stub —
+    // the exact block that stranded ticket 6b0cd91c (Denise Richling, 2026-08-28) after PR #2557.
+    // Deferring is simpler and race-free vs a delete on the refusal path.
+    const orderSubtotalCents = deriveOrderSubtotalCentsFromLines(orderLineItems);
+    const refundLedger = await readReturnCreationRefundLedger(admin, params.workspaceId, params.orderId);
+    const preLabelNetRefundCents = computeReturnNetRefundCents({
+      orderSubtotalCents,
+      labelCostCents: 0,
+      refundsSucceededCents: refundLedger.refundedCents,
+    });
+    const headroom = assertReturnRefundHeadroom({
+      netRefundCents: preLabelNetRefundCents,
+      refundableCents: refundLedger.refundableCents,
+      orderNumber: params.orderNumber,
+    });
+    if (!headroom.ok) {
+      return { success: false, error: headroom.error };
+    }
+
     const { data: row, error: insErr } = await admin
       .from("returns")
       .insert({
@@ -1186,53 +1220,20 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
       });
     }
 
-    // Compute the refund commitment NOW, while we have full context:
-    //   - items: what's being returned (from getReturnableItems)
-    //   - labelCostCents: what EasyPost actually charged us
-    //   - params.freeLabel: policy decision the caller made
-    //   - order.line_items: the source of truth for the refundable SUBTOTAL (excluding Shipping
-    //     Protection); Phase 3 of remedy-state-must-see-out-of-band-refunds — the `returns` policy
-    //     says net_refund = order_subtotal - label_cost and explicitly excludes SP, so computing
-    //     from the full total (tax + shipping folded in) over-promises. The DB still stores
-    //     `order_total_cents` for audit — that column keeps the customer-paid figure.
-    //   - live Shopify ledger (readReturnCreationRefundLedger): refunds ALREADY on this order,
-    //     INCLUDING out-of-band Shopify refunds. Phase 2 of the same spec.
-    //
-    // The downstream pipeline reads net_refund_cents as the contract and never re-derives.
+    // Compute the FINAL net_refund_cents commitment now that EasyPost has told us the actual
+    // label cost. `orderSubtotalCents` + `refundLedger` were already resolved upstream for the
+    // pre-purchase headroom check (they're DB-only and cheap), so we reuse them here and only
+    // recompute with the actual label. Phase 3 of remedy-state-must-see-out-of-band-refunds — the
+    // `returns` policy says net_refund = order_subtotal - label_cost and explicitly excludes
+    // Shipping Protection; the DB still stores `order_total_cents` for audit (the customer-paid
+    // figure). The downstream pipeline reads net_refund_cents as the contract and never re-derives.
     const orderTotalForAudit = (order?.total_cents as number | null | undefined) ?? 0;
     const finalLabelCostCents = params.freeLabel ? 0 : labelCostCents;
-    // Phase 3 — subtotal is line_items[].price_cents × quantity EXCLUDING any Shipping Protection
-    // line. `public.orders` has no subtotal column (columns: total_cents, line_items,
-    // shipping_protection_amount_cents, avalara_total_tax_cents; probed 2026-08-24), so we derive.
-    const orderSubtotalCents = deriveOrderSubtotalCentsFromLines(orderLineItems);
-    // Phase 2 of remedy-state-must-see-out-of-band-refunds — read the LIVE Shopify refund ledger
-    // (mirrored + out-of-band). Before this shipped the ceiling was `orderTotal - Σ mirror` and any
-    // out-of-band refund silently over-paid on delivery — yvette SC126000 (ticket dac9f0c7,
-    // 2026-08-24): $65.28 order, $5.32 mirrored + $59.96 out-of-band on Shopify, return created
-    // with net_refund_cents = $55.86 against $5.32 of real headroom, so only $5.32 could ever
-    // settle and the customer chased us for 25 days. Symmetric with the money-remedy hard-reject
-    // in [[cs-director]] (Phase 1) and the refund-time re-check in [[../inngest/returns]]
-    // `returnsIssueRefund`.
-    const refundLedger = await readReturnCreationRefundLedger(admin, params.workspaceId, params.orderId);
     const netRefundCents = computeReturnNetRefundCents({
       orderSubtotalCents,
       labelCostCents: finalLabelCostCents,
       refundsSucceededCents: refundLedger.refundedCents,
     });
-
-    // Phase 2 § creation-time refusal — a return that promises MORE than the order can actually pay
-    // is worse than no return: the customer ships product back and then chases us. Extracted to
-    // `assertReturnRefundHeadroom` so the position of the check is expressed as one named call and
-    // cannot drift back into an inline block; the full Phase-2 hoist (moving this call ahead of the
-    // EasyPost purchase + making refusal leave no residue) lands in a follow-up phase.
-    const headroom = assertReturnRefundHeadroom({
-      netRefundCents,
-      refundableCents: refundLedger.refundableCents,
-      orderNumber: params.orderNumber,
-    });
-    if (!headroom.ok) {
-      return { success: false, error: headroom.error };
-    }
 
     // Update our DB with EasyPost details + the refund commitment.
     // Status advances to label_created independently of
