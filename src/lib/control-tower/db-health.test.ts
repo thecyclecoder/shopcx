@@ -549,6 +549,63 @@ test("analyzeSlowQuery — cumulative-over-floor + Δcalls/hr STILL over flag �
   assert.equal(finding!.cause, "high_call_volume");
 });
 
+test("analyzeSlowQuery — cheap-but-chatty: 10,822 calls/hr × 1,600 ms/hr → SELF-CLEARS (db-health-cheap-chatty-query-must-be-able-to-self-clear Phase 1 regression)", () => {
+  // The live 2026-08-28 reading cited in the spec: `get_spec_with_phases` (queryid -1756037457588317045)
+  // ran at 10,822 calls/hr while costing only 1,600 ms/hr — a twentieth of SLOW_QUERY_MIN_TOTAL_MS_PER_HR
+  // (30_000 ms/hr). The OLD AND predicate kept firing because the call rate was over 3,600/hr, so a
+  // genuinely-cheap query could never clear the finding on its own. DB time is the objective; the call
+  // rate is a proxy. Under the new rule the DB-time rate alone clears the finding when it sits under
+  // the time flag, no matter how often the query is called.
+  const row = slowRow({
+    queryid: "-1756037457588317045",
+    query: "select spec, phases from public.get_spec_with_phases($1::uuid, $2::text)",
+    calls: 6_693_136,
+    total_exec_time: 1_003_970, // ~mean 0.15 × 6.7M calls — well over the cumulative floor
+    mean_exec_time: 0,
+    stddev_exec_time: 0,
+    rows: 4_500_000,
+  });
+  const priorRow = slowRow({
+    queryid: "-1756037457588317045",
+    query: row.query,
+    calls: 6_682_314, // Δcalls = 10,822 in the last hour — OVER the 3,600/hr call flag
+    total_exec_time: 1_002_370, // Δtotal_ms = 1,600 in the last hour — 1/20th of the 30,000/hr time flag
+    mean_exec_time: 0,
+    stddev_exec_time: 0,
+    rows: 4_492_800,
+  });
+  const cleared = analyzeSlowQuery(row, null, priorRow, 1);
+  assert.equal(
+    cleared,
+    null,
+    "a query costing 1.6s of DB time per hour must clear the finding on its own — a hammered-but-cheap query is not a database problem",
+  );
+});
+
+test("analyzeSlowQuery — genuinely expensive query at ~30s/hr DB time still fires (cheap-but-chatty narrowing must not mute real load)", () => {
+  // The complement of the cheap-but-chatty case: a query that sits AT the DB-time flag (30 s/hr, the
+  // cumulative floor projected over one hour) must NOT be silenced by the new rule. Narrowing the
+  // self-clear predicate to totalMsPerHr must not mute a genuinely-expensive signature.
+  const row = slowRow({
+    queryid: "-expensive",
+    query: "select * from big_table where c = $1",
+    calls: 10_000,
+    total_exec_time: 500_000,
+    mean_exec_time: 0, // volume branch
+    stddev_exec_time: 0,
+  });
+  const priorRow = slowRow({
+    queryid: "-expensive",
+    query: row.query,
+    calls: 8_000, // Δcalls = 2_000/hr (under the calls flag)
+    total_exec_time: 470_000, // Δtotal_ms = 30_000/hr — AT the time flag
+    mean_exec_time: 0,
+    stddev_exec_time: 0,
+  });
+  const finding = analyzeSlowQuery(row, null, priorRow, 1);
+  assert.ok(finding, "a query spending ~30s/hr of DB time must still fire — DB time is the objective the flag protects");
+});
+
 test("analyzeSlowQuery — counter reset between passes (row.calls < priorRow.calls) → fall back to cumulative", () => {
   // pg_stat_statements CAN be reset (a superuser / pg_stat_statements_reset(queryid) call). When the
   // current row is BELOW the prior, the delta is meaningless — don't over-apply the rate branch, just
@@ -680,6 +737,144 @@ test("Phase 2 panel — an enqueued instance proposal shows up in getDbHealthPan
   assert.ok(match, `expected the enqueued instance finding to appear in panel.proposals; got ${JSON.stringify(panel.proposals)}`);
   assert.equal(match!.cause, "rollback_error_rate");
   assert.equal(match!.category, "instance");
+});
+
+// ── db-health-cheap-chatty-query-must-be-able-to-self-clear Phase 2 (already-shipped branch) ──
+
+test("Phase 2 already-shipped — proposal targeting a shipped/folded spec surfaces a detector-review card (NEVER a Build re-open)", async () => {
+  // Regression against the 2026-08-28 declined proposal: `dbhealth:slowq:-1756037457588317045`
+  // pointed at spec `db-reduce-calls-q-1756037457588317045`, which had been FOLDED with both phases
+  // shipped since 2026-08-03 — offering it as a fresh Build asked the founder to re-open finished
+  // work. The enqueue path now looks up the target spec via the specs-table SDK (getSpec) and, when
+  // shipped/folded, swaps the `db_health_build` action for a `db_health_detector_review` action + a
+  // rewritten spec_body that says the fix already ran and the DETECTOR may be wrong.
+  const { _setSpecLookupForTests } = await import("./db-health");
+  const foldedRow = {
+    id: "s1",
+    workspace_id: WORKSPACE_ID,
+    slug: "db-reduce-calls-q-1756037457588317045",
+    title: "Reduce calls to q -1756037457588317045",
+    summary: null,
+    owner: "platform",
+    parent: "platform",
+    blocked_by: [],
+    priority: null,
+    deferred: false,
+    intended_status: null,
+    status: "folded" as const,
+    intended_status_set_by: null,
+    repair_signature: null,
+    regression_of_slug: null,
+    regression_signature: null,
+    related_spec: null,
+    auto_build: false,
+    vale_pass: null,
+    vale_review_passed_at: null,
+    ada_disposition: null,
+    vale_disposition: null,
+    vale_disposition_reason: null,
+    milestone_id: null,
+    merged_pr: 2600,
+    last_merge_sha: "abcd1234",
+    goal_branch_sha: null,
+    why: null,
+    what: null,
+    parent_kind: null,
+    parent_ref: null,
+    human_review: null,
+    created_at: "2026-08-01T00:00:00.000Z",
+    updated_at: "2026-08-03T12:00:00.000Z",
+    phases: [
+      {
+        id: "p1", spec_id: "s1", position: 1, title: "Phase 1", body: "…", status: "shipped" as const,
+        pr: 2600, merge_sha: "abcd", build_sha: null, verification: null, why: null, what: null,
+        kind: "phase", origin_check_keys: [], metadata: {},
+        created_at: "2026-08-01T00:00:00.000Z", updated_at: "2026-08-03T12:00:00.000Z",
+      },
+      {
+        id: "p2", spec_id: "s1", position: 2, title: "Phase 2", body: "…", status: "shipped" as const,
+        pr: 2601, merge_sha: "efgh", build_sha: null, verification: null, why: null, what: null,
+        kind: "phase", origin_check_keys: [], metadata: {},
+        created_at: "2026-08-01T00:00:00.000Z", updated_at: "2026-08-03T12:00:00.000Z",
+      },
+    ],
+  };
+  _setSpecLookupForTests(async (_ws, slug) => (slug === foldedRow.slug ? (foldedRow as never) : null));
+  try {
+    const finding: DbHealthFinding = {
+      signature: "dbhealth:slowq:-1756037457588317045",
+      category: "slow_query",
+      cause: "high_call_volume",
+      fixKind: "reduce_calls",
+      table: "get_spec_with_phases",
+      title: "reduce calls to get_spec_with_phases",
+      impact: "0.15ms mean × 10,822 calls/hr = 1.6s/hr",
+      specSlug: foldedRow.slug,
+      specTitle: "Reduce calls to q -1756037457588317045",
+      evidence: "pg_stat_statements: 10,822 calls/hr @ 1,600 ms/hr",
+    } as DbHealthFinding;
+
+    const admin = seedAdmin();
+    const res = await enqueueDbHealthProposal(admin, finding);
+    assert.equal(res.enqueued, true, `enqueue must still fire so the founder sees a card, got ${JSON.stringify(res)}`);
+    assert.match(res.reason ?? "", /already shipped|detector-may-be-wrong/i, `reason must mention the already-shipped branch, got ${JSON.stringify(res)}`);
+
+    const panel = await getDbHealthPanel(admin, WORKSPACE_ID);
+    const match = panel.proposals.find((p) => p.signature === "dbhealth:slowq:-1756037457588317045");
+    assert.ok(match, `expected the finding to appear in panel.proposals; got ${JSON.stringify(panel.proposals)}`);
+
+    const { data: jobs } = await admin
+      .from("agent_jobs")
+      .select("id, instructions, pending_actions, log_tail")
+      .eq("kind", "db_health")
+      .eq("spec_slug", finding.signature)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    const row = Array.isArray(jobs) ? (jobs[0] as Record<string, unknown> | undefined) : undefined;
+    assert.ok(row, "expected an inserted db_health job row");
+    const instr = JSON.parse(String(row!.instructions));
+    assert.equal(instr.already_shipped, true, "instructions must flag the already-shipped branch");
+    assert.equal(instr.target_spec_status, "folded");
+    assert.match(String(row!.log_tail ?? ""), /detector may be misfiring|already/i, "log_tail must warn the founder the fix already shipped");
+    const actions = row!.pending_actions as Array<Record<string, unknown>>;
+    assert.ok(actions && actions.length === 1);
+    assert.equal(actions[0].type, "db_health_detector_review", "action type must NOT be db_health_build — the Build route must not be able to re-open a folded spec");
+    assert.equal(actions[0].already_shipped, true);
+    const specBody = String(actions[0].spec_body);
+    assert.match(specBody, /detector may be misfiring|already shipped/i, "the card body must explain the fix already shipped");
+    assert.doesNotMatch(specBody, /## Phase 1 — reduce_calls/, "the card MUST NOT re-emit the standard build spec (a folded spec is not a fresh build)");
+  } finally {
+    _setSpecLookupForTests(null);
+  }
+});
+
+test("Phase 2 already-shipped — lookup failure degrades to the normal fresh-build flow (never blocks the escalation)", async () => {
+  // A throw / null from the specs-table SDK (missing creds, unknown slug, transient error) must not
+  // suppress a real finding — the enqueue path continues with the standard db_health_build action.
+  const { _setSpecLookupForTests } = await import("./db-health");
+  _setSpecLookupForTests(async () => { throw new Error("boom"); });
+  try {
+    const findings = analyzeInstanceHealth(incidentInput());
+    const rollback = findings.find((f) => f.cause === "rollback_error_rate");
+    assert.ok(rollback);
+    const admin = seedAdmin();
+    const res = await enqueueDbHealthProposal(admin, rollback!);
+    assert.equal(res.enqueued, true, "a lookup throw must not suppress the escalation");
+    const { data: jobs } = await admin
+      .from("agent_jobs")
+      .select("pending_actions, instructions")
+      .eq("kind", "db_health")
+      .eq("spec_slug", rollback!.signature)
+      .limit(1);
+    const row = Array.isArray(jobs) ? (jobs[0] as Record<string, unknown> | undefined) : undefined;
+    assert.ok(row);
+    const actions = row!.pending_actions as Array<Record<string, unknown>>;
+    assert.equal(actions[0].type, "db_health_build", "on lookup failure the fresh-build action is preserved");
+    const instr = JSON.parse(String(row!.instructions));
+    assert.equal(instr.already_shipped, false, "instructions must not falsely claim the target shipped when the lookup failed");
+  } finally {
+    _setSpecLookupForTests(null);
+  }
 });
 
 // ── db-health-request-volume + temp-spill-attribution (2026-07-08 Devi re-tool) ──

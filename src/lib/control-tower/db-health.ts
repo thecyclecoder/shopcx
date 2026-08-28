@@ -22,6 +22,7 @@ import {
   DB_HEALTH_INSTANCE_LOOP_ID,
 } from "@/lib/control-tower/registry";
 import { isAllowlisted } from "@/lib/control-tower/migration-drift";
+import { getSpec, type SpecRow, type SpecStatus } from "@/lib/specs-table";
 
 export { DB_HEALTH_SLOWQ_LOOP_ID, DB_HEALTH_SIZE_LOOP_ID, DB_HEALTH_INSTANCE_LOOP_ID };
 
@@ -255,12 +256,14 @@ export const SLOW_QUERY_MIN_TOTAL_MS = 30_000; // 30s cumulative in the stats wi
  * never clear the finding, so [[../specs/db-reduce-calls-q-1756037457588317045]] Phase 1 shipped, the
  * pass ran, and the signature was STILL flagged with the identical `high_call_volume` impact.
  *
- * When a prior pass row + reading age are available, the analyzer prefers the RATE (Δcalls / Δhours,
- * Δtotal_ms / Δhours) and BOTH must be under the flag for the finding to self-clear. Absent (first
- * pass / stats-reset between passes / unreadable prior) ⇒ fall back to the cumulative flag (preserves
- * acute-incident detection on a fresh instance). Sized so a genuinely-hammered hot query still fires
- * (a poll at ~1 call/second sustained sits right on the calls flag; ~30s/hr matches the cumulative
- * SLOW_QUERY_MIN_TOTAL_MS floor projected over one hour).
+ * When a prior pass row + reading age are available, the analyzer prefers the RATE
+ * (Δtotal_ms / Δhours) and self-clears the finding when the DB-time rate is under
+ * `SLOW_QUERY_MIN_TOTAL_MS_PER_HR`. The call-rate constant is kept exported for dashboards / docs
+ * that cite it as a proxy for hot-endpoint pressure, but it does NOT gate the self-clear
+ * predicate (see the cheap-but-chatty comment in `analyzeSlowQuery`). Absent (first pass /
+ * stats-reset between passes / unreadable prior) ⇒ fall back to the cumulative flag (preserves
+ * acute-incident detection on a fresh instance). `SLOW_QUERY_MIN_TOTAL_MS_PER_HR` is sized to match
+ * the cumulative `SLOW_QUERY_MIN_TOTAL_MS` floor projected over one hour.
  */
 export const SLOW_QUERY_MIN_CALLS_PER_HR = 3_600;
 export const SLOW_QUERY_MIN_TOTAL_MS_PER_HR = 30_000;
@@ -604,19 +607,29 @@ export function analyzeSlowQuery(
   // db-reduce-calls-q-1756037457588317045 Fix 1 — RATE self-clearing branch. `calls` / `total_exec_time`
   // are cumulative since the last stats reset; a cache/batch fix reduces the RATE going forward but the
   // cumulative counter can only rise (Supabase's postgres role can't call `pg_stat_reset()`). So when a
-  // priorRow + positive reading age are available, prefer the DELTA against the rate flag: if BOTH the
-  // per-hr call rate AND the per-hr total-exec-time rate are under the flag, the finding self-clears
-  // (the same shape analyzeInstanceHealth uses for `tempBytesPrev` / `tempReadingAgeHours`). A counter
-  // reset (`row.calls < priorRow.calls`) yields a negative delta — we DON'T self-clear on that (the
-  // rate branch is silent and the cumulative flag stays authoritative). Absent priorRow / non-positive
-  // reading age ⇒ fall back to cumulative (first pass on a fresh box preserves acute-incident detection).
+  // priorRow + positive reading age are available, prefer the DELTA against the rate flag.
+  //
+  // db-health-cheap-chatty-query-must-be-able-to-self-clear Phase 1 (cheap-but-chatty) — the self-clear
+  // predicate is NOT a bare AND over both rates. DB time is the objective; call count is a proxy. The
+  // 2026-08-28 live reading for get_spec_with_phases — 10,822 calls/hr but only 1,600 ms/hr, a
+  // twentieth of the time flag — stayed lit under the old AND, so a genuinely-cheap query could never
+  // clear the finding on its own and the escalation re-fired forever. New rule: the finding self-clears
+  // when the DB-time rate is well under `SLOW_QUERY_MIN_TOTAL_MS_PER_HR`, independent of the call
+  // rate — a query that costs a rounding-error of DB time per hour is not a database problem, no
+  // matter how often it runs. `SLOW_QUERY_MIN_CALLS_PER_HR` is kept exported (dashboards + docs still
+  // cite it as a proxy of hot-endpoint pressure), but it no longer gates the self-clear predicate —
+  // widening the threshold instead would just hide the same class at a different number. A
+  // genuinely-expensive query (either per-call cost or aggregate DB time) still fires as before via
+  // the cumulative floor + per-call branches below. A counter reset (`row.calls < priorRow.calls`)
+  // yields a negative delta — we DON'T self-clear on that (the rate branch is silent and the
+  // cumulative flag stays authoritative). Absent priorRow / non-positive reading age ⇒ fall back to
+  // cumulative (first pass on a fresh box preserves acute-incident detection).
   if (priorRow && readingAgeHours !== undefined && readingAgeHours > 0) {
     const dCalls = row.calls - priorRow.calls;
     const dTotalMs = row.total_exec_time - priorRow.total_exec_time;
     if (dCalls >= 0 && dTotalMs >= 0) {
-      const callsPerHr = dCalls / readingAgeHours;
       const totalMsPerHr = dTotalMs / readingAgeHours;
-      if (callsPerHr < SLOW_QUERY_MIN_CALLS_PER_HR && totalMsPerHr < SLOW_QUERY_MIN_TOTAL_MS_PER_HR) {
+      if (totalMsPerHr < SLOW_QUERY_MIN_TOTAL_MS_PER_HR) {
         return null;
       }
     }
@@ -1503,6 +1516,92 @@ async function resolveDbHealthWorkspace(admin: Admin): Promise<string | null> {
  * OR a non-dismissed proposal for it was created within DB_HEALTH_REPROPOSE_WINDOW_MS (its fix is
  * in-flight/deploying — don't flap while the condition resolves).
  */
+/**
+ * db-health-cheap-chatty-query-must-be-able-to-self-clear Phase 2 — the already-shipped branch.
+ *
+ * A shipped/folded state on the TARGET spec means the fix already ran; offering it as a fresh build
+ * would invite the founder to re-open finished work AND hide the more useful fact — that the
+ * signature is STILL flagged, so the DETECTOR is the thing to question, not the fix. Same
+ * supervisable-autonomy shape as the rest of the control tower: the agent may surface a finding, but
+ * it must not present already-completed work as new work (see docs/brain/operational-rules.md
+ * § North star). Reads the target spec via the specs-table SDK ([[../specs-table]] getSpec — never
+ * a raw `.from('specs')` read, per CLAUDE.md); returns null on any lookup failure so the enqueue
+ * path degrades to the normal "fresh build" flow. `shippedAt` prefers the latest phase merge
+ * timestamp (the actual ship moment); it falls back to the spec row `updated_at`.
+ */
+type SpecLookupFn = (workspaceId: string, slug: string) => Promise<SpecRow | null>;
+
+let specLookupImpl: SpecLookupFn = (workspaceId, slug) => getSpec(workspaceId, slug);
+
+/** Test-only seam: swap the lookup used by `lookupTargetSpecShippingState`. Pass null to restore the
+ *  live specs-table SDK path. Keeps the analyzer testable without spinning up a real Supabase. */
+export function _setSpecLookupForTests(fn: SpecLookupFn | null): void {
+  specLookupImpl = fn ?? ((workspaceId, slug) => getSpec(workspaceId, slug));
+}
+
+export async function lookupTargetSpecShippingState(
+  workspaceId: string,
+  slug: string,
+): Promise<{ status: SpecStatus; shippedAt: string | null } | null> {
+  try {
+    const row = await specLookupImpl(workspaceId, slug);
+    if (!row) return null;
+    const rowStatus: SpecStatus | null = row.status;
+    // Derived-shipped: a spec whose phases have all landed rolls up to shipped even without the
+    // stored `folded` override (see `deriveSpecCardStatus`). Detect both authoritatively here so we
+    // don't miss a spec that shipped but hasn't been folded yet.
+    const allPhasesShipped =
+      Array.isArray(row.phases) && row.phases.length > 0 && row.phases.every((p) => p.status === "shipped");
+    const looksShipped: SpecStatus | null = rowStatus === "folded"
+      ? "folded"
+      : rowStatus === "shipped"
+        ? "shipped"
+        : allPhasesShipped
+          ? "shipped"
+          : null;
+    if (!looksShipped) return null;
+    const shippedAt = latestPhaseMergeTimestamp(row) ?? row.updated_at ?? null;
+    return { status: looksShipped, shippedAt };
+  } catch (err) {
+    console.warn("[db-health] lookupTargetSpecShippingState threw:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+function latestPhaseMergeTimestamp(row: SpecRow): string | null {
+  const phases = Array.isArray(row.phases) ? row.phases : [];
+  const merged = phases.filter((p) => p.merge_sha && p.updated_at).map((p) => p.updated_at);
+  if (merged.length === 0) return null;
+  merged.sort();
+  return merged[merged.length - 1];
+}
+
+/**
+ * The "already shipped" card body — the founder is told the fix already ran and the signature is
+ * still flagged, so the DETECTOR may be wrong (never the reverse framing that re-opens finished work).
+ */
+export function buildAlreadyShippedCardBody(finding: DbHealthFinding, shippedAt: string | null, status: SpecStatus): string {
+  const shippedLine = shippedAt
+    ? `The fix spec **\`${finding.specSlug}\`** (${status}) already shipped on **${shippedAt.slice(0, 10)}**.`
+    : `The fix spec **\`${finding.specSlug}\`** is already in a **${status}** state.`;
+  return [
+    `# The detector may be misfiring — the fix for this signature already shipped`,
+    ``,
+    `${shippedLine} The DB Health Agent's slow-query pass STILL flagged signature \`${finding.signature}\` on its most recent run — impact **${finding.impact}** — so the question for the owner is whether the DETECTOR is wrong (e.g. its self-clear predicate can't see the reduced load), not whether to re-build the fix.`,
+    ``,
+    `**Owner:** [[../functions/platform]] · **Parent:** [[../functions/platform]] — "Infra & DevOps / reliability" mandate (a monitoring flag that cannot be satisfied trains the owner to ignore the inbox it writes to).`,
+    `**DBHealth-signature:** \`${finding.signature}\``,
+    `**Diagnosed cause:** \`${finding.cause}\` (${finding.category} pass) — [[../libraries/db-health|DB Health Agent]] · ([[db-health-agent]]) surface-don't-apply.`,
+    ``,
+    `## What to do`,
+    `- **Dismiss** this card to acknowledge — the target spec is done, and the enqueue path won't re-propose a shipped/folded slug (see \`lookupTargetSpecShippingState\` in [[../libraries/db-health]]).`,
+    `- If the signature keeps re-flagging on the same numbers after Dismiss, that's the DETECTOR failing to self-clear — a follow-up fix to the analyzer's predicate is what the founder should build, NOT re-opening the already-shipped fix spec.`,
+    ``,
+    `> Surfaced by the DB Health Agent (signature \`${finding.signature}\`, cause \`${finding.cause}\`). The target spec is already ${status}; the "Build" affordance is intentionally NOT offered — a re-open would waste engineering time on work that already landed.`,
+    ``,
+  ].join("\n");
+}
+
 export async function enqueueDbHealthProposal(admin: Admin, finding: DbHealthFinding): Promise<{ enqueued: boolean; reason?: string }> {
   try {
     const { data: recent } = await admin
@@ -1525,14 +1624,60 @@ export async function enqueueDbHealthProposal(admin: Admin, finding: DbHealthFin
     const workspaceId = await resolveDbHealthWorkspace(admin);
     if (!workspaceId) return { enqueued: false, reason: "no workspace to attach the proposal to" };
 
+    // db-health-cheap-chatty-query-must-be-able-to-self-clear Phase 2 — check the target fix spec's
+    // shipping state via the specs-table SDK BEFORE offering the proposal as a fresh build. When the
+    // spec is shipped/folded, the card is rewritten to say the fix already ran + the detector may be
+    // wrong (no Build affordance is offered — re-opening finished work is the failure mode we're
+    // fixing). Lookup failures degrade to the normal fresh-build flow.
+    const targetSpecState = finding.specSlug
+      ? await lookupTargetSpecShippingState(workspaceId, finding.specSlug)
+      : null;
+
     const actionId = `dbh-${finding.signature.replace(/[^a-z0-9]+/gi, "-")}`.slice(0, 80);
-    const specBody = buildFixSpecMarkdown(finding);
+    const alreadyShipped = targetSpecState !== null;
+    const specBody = alreadyShipped
+      ? buildAlreadyShippedCardBody(finding, targetSpecState.shippedAt, targetSpecState.status)
+      : buildFixSpecMarkdown(finding);
+    const logTail = alreadyShipped
+      ? `${finding.title} · ${finding.impact} · ⚠ target spec ${finding.specSlug} already ${targetSpecState.status}${targetSpecState.shippedAt ? " on " + targetSpecState.shippedAt.slice(0, 10) : ""} — detector may be misfiring`.slice(-2000)
+      : `${finding.title} · ${finding.impact}`.slice(-2000);
+    const pendingActions = alreadyShipped
+      ? [
+          {
+            id: actionId,
+            // Distinct type: the Build route only approves `db_health_build`, so an already-shipped
+            // card cannot accidentally re-open finished work via the standard owner tap — the
+            // Dismiss path still works (it flips the job to completed regardless of action type).
+            type: "db_health_detector_review",
+            status: "pending",
+            spec_slug: finding.specSlug,
+            spec_title: finding.specTitle,
+            spec_body: specBody,
+            finding,
+            already_shipped: true,
+            target_spec_status: targetSpecState.status,
+            target_shipped_at: targetSpecState.shippedAt,
+          },
+        ]
+      : [
+          {
+            id: actionId,
+            type: "db_health_build",
+            status: "pending",
+            spec_slug: finding.specSlug,
+            spec_title: finding.specTitle,
+            // Un-clobberable diagnostic: the pre-rendered fix spec + the structured finding it re-renders
+            // from if `spec_body` is ever empty. Never author an empty spec (db-health-spec-body-robust).
+            spec_body: specBody,
+            finding,
+          },
+        ];
     const { error } = await admin.from("agent_jobs").insert({
       workspace_id: workspaceId,
       spec_slug: finding.signature,
       kind: "db_health",
       status: "needs_approval",
-      log_tail: `${finding.title} · ${finding.impact}`.slice(-2000),
+      log_tail: logTail,
       // Panel-only metadata (title/impact/cause/…): a manual approval that overwrites this free-text field
       // only degrades the panel, never the build. The BUILD-CRITICAL diagnostic (`spec_body` + structured
       // `finding`) now lives on the un-clobberable `db_health_build` action below (which approve mutates by
@@ -1548,23 +1693,14 @@ export async function enqueueDbHealthProposal(admin: Admin, finding: DbHealthFin
         impact: finding.impact,
         spec_slug: finding.specSlug,
         spec_title: finding.specTitle,
+        already_shipped: alreadyShipped,
+        target_spec_status: alreadyShipped ? targetSpecState.status : null,
+        target_shipped_at: alreadyShipped ? targetSpecState.shippedAt : null,
       }),
-      pending_actions: [
-        {
-          id: actionId,
-          type: "db_health_build",
-          status: "pending",
-          spec_slug: finding.specSlug,
-          spec_title: finding.specTitle,
-          // Un-clobberable diagnostic: the pre-rendered fix spec + the structured finding it re-renders
-          // from if `spec_body` is ever empty. Never author an empty spec (db-health-spec-body-robust).
-          spec_body: specBody,
-          finding,
-        },
-      ],
+      pending_actions: pendingActions,
     });
     if (error) return { enqueued: false, reason: error.message };
-    return { enqueued: true };
+    return { enqueued: true, reason: alreadyShipped ? "target spec already shipped/folded — card surfaces detector-may-be-wrong instead of Build" : undefined };
   } catch (err) {
     console.warn("[db-health] enqueueDbHealthProposal threw:", err instanceof Error ? err.message : err);
     return { enqueued: false, reason: "threw" };
