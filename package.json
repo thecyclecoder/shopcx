@@ -258,6 +258,7 @@
     "test:meta-ads-create": "tsx --test src/lib/meta-ads.create.test.ts",
     "test:swallowed-escalation-sample": "tsx --test src/lib/agents/platform-director.swallowed-sample.test.ts",
     "test:ticket-delivery-placeholder-guard": "tsx --test src/lib/ticket-delivery.placeholder-guard.test.ts",
+    "test:tickets-mutate": "tsx --test src/lib/tickets-mutate.test.ts",
     "test:graph-retry-app-owner-action-required": "tsx --test src/lib/meta/graph-retry.app-owner-action-required.test.ts",
     "test:qb-close-guard": "tsx --test src/lib/qb-close/close-guard.test.ts",
     "test:qb-close-gateway-split": "tsx --test src/lib/qb-close/journal-entry.gateway-split.test.ts",
