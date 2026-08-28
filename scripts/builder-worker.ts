@@ -12653,6 +12653,10 @@ async function runTicketHandleJob(job: Job) {
       // return incident) is BLOCKED — the customer never sees it, and a human re-drafts via
       // Improve. In-policy explanations that name the alternative (pause / skip / cancel / etc.)
       // pass the guard; the block is only for baited promises.
+      // Ticket 0c9f11a7 (2026-08-28): Sol offered a flavour the 3PL had zero of. The products SDK
+      // now reports per-variant ship truth; this makes the obligation explicit, and the
+      // stock-promise guard below enforces it deterministically.
+      `STOCK IS A HARD CONSTRAINT — NEVER OFFER WHAT CANNOT SHIP. The PRODUCTS block (and \`npx tsx scripts/cx-agent-sdk-tool.ts products ${ticketId}\`) now tags every variant with 3PL SHIP TRUTH: a unit count, "⛔ OUT OF STOCK", or "⚠️ stock unknown". "active" is a merchandising flag, NOT a promise it can ship. Before you name, offer, reorder, or substitute ANY flavour, check it there. Never offer a variant marked OUT OF STOCK or stock unknown — not in a reorder, not as a swap, not as a make-good. If what the customer wants is out of stock, SAY SO plainly and offer an in-stock alternative; naming the flavour as unavailable is correct and expected. Your DRAFT reply is machine-gated on this: a reply that names an out-of-stock variant WITHOUT saying it is unavailable is BLOCKED, the customer never sees it, and the ticket escalates to June.`,
       `MACHINE GATE ON YOUR DRAFT REPLY: the worker validates first_reply before sending. If your context_summary declares the ask "out-of-policy" but your first_reply still promises a remedy ("I'll issue a refund", "we'll set up a return", "here's your prepaid label"…), the send is BLOCKED — the customer never sees the reply and the ticket escalates to June. Any reply that offers TWO returns/refunds/labels in one turn is BLOCKED unconditionally (the returns policy caps at one MBG return per customer for life). When the ask is out-of-policy, your reply names the disallowed outcome AS DISALLOWED and offers the sanctioned alternative — never bait, never promise the disallowed remedy.`,
       // Phase 3 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
       // Sol MUST resolve a concrete existing playbook_slug when chosen_path='playbook' — the
@@ -13050,6 +13054,29 @@ async function runTicketHandleJob(job: Job) {
           firstReply,
           hasActiveSubscription,
         });
+        // ── Sol must never OFFER a flavour the 3PL cannot ship (ticket 0c9f11a7, 2026-08-28) ──
+        // Sol offered a customer Strawberry Lemonade that had been 3PL-zero since 2026-07-30 under
+        // an ACTIVE crisis_events row; the order couldn't include it and she was billed anyway.
+        // The SDK now carries per-variant ship truth (cx-agent-sdk getCxProducts), but a
+        // prompt-visible fact is advisory — same reason the policy-bait guard exists. Naming the
+        // flavour AS unavailable passes; a bare offer blocks. Fail-open on any lookup error.
+        let stockGuard: { blocked: boolean; offendingVariants: string[]; reason: string | null } = {
+          blocked: false, offendingVariants: [], reason: null,
+        };
+        try {
+          const { getCxProducts } = await import("../src/lib/cx-agent-sdk");
+          const { assessSolStockPromiseRisk } = await import("../src/lib/sol-stock-promise-guard");
+          const products = await getCxProducts(db, workspaceId);
+          const outOfStock = products.flatMap((pr) =>
+            pr.variants
+              .filter((v) => v.in_stock === false)
+              .map((v) => ({ product: pr.title, variant: v.title })),
+          );
+          stockGuard = assessSolStockPromiseRisk({ firstReply, outOfStock });
+        } catch (e) {
+          console.warn(`${tag} stock-promise guard skipped (fail-open): ${errText(e)}`);
+        }
+
         if (bait.ok === false) {
           const blockLine = `Sol reply BLOCKED by policy-bait guard [${bait.kind}]: ${bait.reason}. Matched phrase: ${JSON.stringify(bait.matched_phrase)}. Direction authored; escalated to June (the CS final call).`;
           honorBlockLine = blockLine; // unify: a blocked reply escalates to June below, never a silent complete
@@ -13059,6 +13086,13 @@ async function runTicketHandleJob(job: Job) {
           });
         } else if (moveGuard.ok === false) {
           const blockLine = `Sol reply BLOCKED by move-dead-end guard [${moveGuard.kind}]: ${moveGuard.reason}. Matched phrase: ${JSON.stringify(moveGuard.matched_phrase)}. Direction authored; escalated to June (the CS final call).`;
+          honorBlockLine = blockLine; // unify: a blocked reply escalates to June below, never a silent complete
+          console.warn(`${tag} ${blockLine}`);
+          await update(job.id, {
+            log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+          });
+        } else if (stockGuard.blocked) {
+          const blockLine = `Sol reply BLOCKED by stock-promise guard: ${stockGuard.reason}. Direction authored; escalated to June (the CS final call).`;
           honorBlockLine = blockLine; // unify: a blocked reply escalates to June below, never a silent complete
           console.warn(`${tag} ${blockLine}`);
           await update(job.id, {
