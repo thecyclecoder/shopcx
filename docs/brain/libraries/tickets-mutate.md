@@ -8,6 +8,16 @@ Mutate the `tickets` row itself. Used by deterministic flows (outreach auto-clos
 
 `closeTicket` · `reopenTicket` · `setTicketStatus` · `escalateTicket` · `assignTicket` · `addTag` / `removeTag` · `armPlaybook` / `advancePlaybookStep` / `clearPlaybook` · `setDoNotReply`. `TicketStatus = 'open'|'pending'|'closed'|'archived'`.
 
+### `closeTicket` — preserves the escalation triple by default
+
+Sets `status='closed'` + `closed_at` + `updated_at`. The escalation columns (`escalated_to`, `escalated_at`, `escalation_reason`) are PRESERVED — a closed ticket that was escalated stays visibly closed-over-an-active-escalation instead of looking identical to a ticket that was never escalated.
+
+Opt-ins:
+- `{ clearEscalation: true }` — deliberate founder close (the escalation was ruled on). Clears `escalated_to` + `escalated_at`; `escalation_reason` survives as the audit of WHY it was escalated.
+- `{ reason }` — explicitly overwrites `escalation_reason` (rare — only when the close records a different resolution summary than the original).
+
+**Why (Denise Richling, ticket 6b0cd91c, 2026-08-28):** the old `closeTicket` blanket-nulled the triple, so a founder escalation that got auto-closed on a positive customer reply became indistinguishable from a never-escalated ticket. Nine such cases accumulated silently in 21 days; hers had a confirmed system-side $102.33 duplicate charge unrefunded. See [[../specs/closing-a-ticket-must-not-destroy-an-active-escalation]] Phase 1. The paired guard sits at [[../inngest/unified-ticket-handler]] `setStatus` — a compare-and-set `.is("escalated_to", null)` on the auto-close write, so a positive-reply auto-close cannot fire on an actively-escalated ticket.
+
 ## (B) Commerce / journeys / workflows — the ONE executor front door
 
 NOT re-implemented here. Every subscription/order/loyalty/crisis/customer mutation + journeys/playbooks/workflows/macros/escalate lives behind `executeSonnetDecision` ([[action-executor]], 39 `directActionHandlers` + 8 `action_type`s). These thin wrappers are the single front door onto it — the SAME path the Improve tab uses — so a hand-fix or Sol's cheap-execution reaches all of it with zero drift + the selective-clarify gate + resolution-events ledger.
