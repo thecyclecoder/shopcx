@@ -263,6 +263,40 @@ export async function recordExploitHit(
  * without a spawn (e.g. an operator override or a follow-up spec's revert
  * path).
  */
+/**
+ * RETIRE a crown that no longer qualifies under the active policy.
+ *
+ * Distinct from {@link markExploitExhausted} on purpose (CEO 2026-08-28). Exhaustion means "cloning
+ * this winner stopped producing hits" — that winner may still deserve to graduate. Revocation means
+ * "this is no longer a winner at all", so it is not pending graduate work and must not raise a
+ * stall escalation.
+ *
+ * Conflating the two had a real cost: the 2026-08-25 policy change (crown bar 8→15 purchases plus a
+ * confidence-bounded CPA) retired all five crowns via `markExploitExhausted` because no other SDK
+ * existed, and three days later the graduate-stall heartbeat — which counted only
+ * `graduated_at IS NULL` — was still raising CEO cards for work that had already been retired.
+ *
+ * Idempotent: a compare-and-set on `revoked_at IS NULL`, so a re-run neither double-writes nor
+ * overwrites the original reason.
+ */
+export async function revokeCrownedWinner(
+  admin: Admin,
+  args: { workspaceId: string; testMetaAdsetId: string; reason: string; now?: Date },
+): Promise<boolean> {
+  const { data, error } = await admin
+    .from("media_buyer_crowned_winners")
+    .update({
+      revoked_at: (args.now ?? new Date()).toISOString(),
+      revoked_reason: args.reason,
+    })
+    .eq("workspace_id", args.workspaceId)
+    .eq("test_meta_adset_id", args.testMetaAdsetId)
+    .is("revoked_at", null)
+    .select("id");
+  if (error) throw new Error(`revokeCrownedWinner: ${error.message}`);
+  return Array.isArray(data) && data.length === 1;
+}
+
 export async function markExploitExhausted(
   admin: Admin,
   args: { workspaceId: string; testMetaAdsetId: string },

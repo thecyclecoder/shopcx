@@ -7,7 +7,7 @@
 import { createAdminClient } from "./_bootstrap";
 
 const WS = process.env.WORKSPACE_ID ?? "fdc11e10-b89f-4989-8b73-ed6526c4d906";
-const FROM = "2026-07-25", TO = "2026-08-24";
+const FROM = process.env.FROM ?? "2026-07-25", TO = process.env.TO ?? "2026-08-27";
 
 const dayOf = (iso: string) => new Date(new Date(iso).getTime() - 5 * 3600_000).toISOString().slice(0, 10);
 
