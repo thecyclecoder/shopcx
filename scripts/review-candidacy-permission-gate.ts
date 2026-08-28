@@ -112,21 +112,21 @@ function isAllowedBashCommand(
   const cmd = command.trim();
   if (!cmd) return false;
 
-  // Read-only CX SDK / improve-box-tools CLIs bound to the claimed ticket id.
-  if (ticketId) {
-    const boundToTicket = (script: string) => {
-      const re = new RegExp(
-        String.raw`^npx\s+tsx\s+scripts/${script}(\s+[^\s]+)?\s+${escapeRegex(ticketId)}(\s|$)`,
-      );
-      return re.test(cmd);
-    };
-    if (boundToTicket("cx-agent-sdk-tool\\.ts")) return true;
-    if (boundToTicket("improve-box-tools\\.ts")) return true;
-  }
-
-  // Chain-of-commands never allowed — a single-half safe token can't
-  // launder the other half.
+  // Chain-of-commands never allowed — must run BEFORE the ticket-bound SDK
+  // allow, so an otherwise-valid SDK invocation trailed by `; cat .env`
+  // (or `&&`, `|`) can't launder a second command past the shortcut.
   if (/[;&|]/.test(cmd)) return false;
+
+  // Read-only CX SDK / improve-box-tools CLIs bound to the claimed ticket
+  // id — the argv shape is EXACTLY five whitespace-separated tokens:
+  //   `npx tsx scripts/<script> <op> <ticketId>`
+  // A stricter argv-shape check replaces the earlier regex, whose
+  // `(\s+[^\s]+)?\s+<ticket>(\s|$)` tail accepted trailing tokens after the
+  // ticket id and let a shell metacharacter / extra flag ride along.
+  if (ticketId) {
+    if (isSdkArgvShape(cmd, ticketId, "cx-agent-sdk-tool.ts")) return true;
+    if (isSdkArgvShape(cmd, ticketId, "improve-box-tools.ts")) return true;
+  }
 
   // File-reader built-ins (cat/head/tail/grep) — parse operands and
   // require every path to be repo-scoped.
@@ -149,6 +149,27 @@ function isAllowedBashCommand(
   if (safeHead.test(cmd)) return true;
 
   return false;
+}
+
+/**
+ * Strict argv-shape check for the two read-only SDK CLIs. Accepts EXACTLY
+ * five whitespace-separated tokens:
+ *   `npx tsx scripts/<script> <op> <ticketId>`
+ * — no leading options, no trailing tokens, and the `<op>` token constrained
+ * to a plain identifier so a shell metacharacter (`$(…)`, backticks, `--flag`)
+ * can't smuggle in a second command. Split on runs of whitespace only; any
+ * quoting/globbing/redirection metacharacter is rejected outright.
+ */
+function isSdkArgvShape(cmd: string, ticketId: string, script: string): boolean {
+  if (/[`"'*?<>()$\\]/.test(cmd)) return false;
+  const parts = cmd.split(/\s+/);
+  if (parts.length !== 5) return false;
+  if (parts[0] !== "npx") return false;
+  if (parts[1] !== "tsx") return false;
+  if (parts[2] !== `scripts/${script}`) return false;
+  if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(parts[3])) return false;
+  if (parts[4] !== ticketId) return false;
+  return true;
 }
 
 /**
@@ -216,17 +237,53 @@ export function extractFileReaderPaths(cmd: string, reader: BashFileReader): str
     const tok = args[i];
     if (tok === "--") continue; // argv separator; subsequent tokens still route through the same logic
     if (tok.startsWith("-")) {
+      // 1) --long=value form. Split on the first `=` so `--file=/outside/path`
+      //    routes the value through the same path-vs-pattern classifier as
+      //    the separated `--file /outside/path` form. Any `--include=X` /
+      //    `--max-count=5` etc. falls through as "known non-path flag".
+      if (tok.startsWith("--") && tok.includes("=")) {
+        const eq = tok.indexOf("=");
+        const flag = tok.slice(0, eq);
+        const value = tok.slice(eq + 1);
+        if (reader === "grep" && GREP_FLAGS_WITH_PATH_VALUE.has(flag)) {
+          paths.push(value); // grep --file=<file> — <file> is a path operand
+          patternSatisfied = true; // --file also supplies the pattern source
+        } else if (reader === "grep" && GREP_FLAGS_WITH_PATTERN_VALUE.has(flag)) {
+          patternSatisfied = true; // pattern came via --regexp=<pat>
+        }
+        continue;
+      }
+      // 2) Attached short-flag form for grep: `-fVALUE`, `-eVALUE`. Route the
+      //    embedded value through the same classifier as `-f VALUE` /
+      //    `-e VALUE` so a customer-message-crafted `-f/outside/path` can't
+      //    smuggle a pattern-file read past `isRepoScopedReadPath`.
+      if (reader === "grep" && tok.length > 2 && !tok.startsWith("--")) {
+        const shortFlag = tok.slice(0, 2); // e.g., "-f", "-e"
+        const value = tok.slice(2);
+        if (GREP_FLAGS_WITH_PATH_VALUE.has(shortFlag)) {
+          paths.push(value); // grep -f<file>
+          patternSatisfied = true; // -f also supplies the pattern source
+          continue;
+        }
+        if (GREP_FLAGS_WITH_PATTERN_VALUE.has(shortFlag)) {
+          patternSatisfied = true; // grep -e<pat>
+          continue;
+        }
+      }
+      // 3) Separated form: `-f VALUE` / `--file VALUE`.
       if (valueFlags.has(tok)) {
         const value = args[++i];
         if (value === undefined) continue;
         if (reader === "grep" && GREP_FLAGS_WITH_PATH_VALUE.has(tok)) {
           paths.push(value); // grep -f <file> — <file> is a path operand
+          patternSatisfied = true; // -f/--file supplies the pattern source
         } else if (reader === "grep" && GREP_FLAGS_WITH_PATTERN_VALUE.has(tok)) {
           patternSatisfied = true; // pattern came via -e / --regexp
         }
         // else: numeric/context arg (-n 5, -c 100, -A 3, --max-count 1, --include=X)
+        continue;
       }
-      // combined form (-n5, -5, --long=val) has no separate value token
+      // combined form (-n5, -5) or unknown short flag — nothing to extract.
       continue;
     }
     if (!patternSatisfied) {
@@ -236,11 +293,6 @@ export function extractFileReaderPaths(cmd: string, reader: BashFileReader): str
     paths.push(tok);
   }
   return paths;
-}
-
-/** Escape a string for use inside a regex literal (dot, dashes, etc.). */
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
