@@ -110,8 +110,20 @@ export async function readRecentGraduateActivityByCohort(
 /**
  * Count the eligible crowned winners under each cohort's scope
  * `(workspace, meta_ad_account, product)`. An "eligible" winner is a crown row
- * with a null `graduated_at` — the crown fact was captured but no graduate
- * flow has landed it in the scaler. Returns a map keyed by cohort id.
+ * with a null `graduated_at` AND a null `revoked_at` — the crown fact was captured, no graduate
+ * flow has landed it in the scaler, AND it still qualifies under the active policy.
+ *
+ * ⭐ The `revoked_at` half was missing (CEO 2026-08-28). Counting only `graduated_at IS NULL`
+ * treats a RETIRED crown as pending work: on 2026-08-25 all five crowns were revoked (the
+ * crown bar moved 8→15 purchases plus a confidence bound, so none still qualified), and three
+ * days later this counter was still raising CEO cards claiming Superfood Tabs had "3 crowned
+ * winners but no graduate" and Zen Relax "2". Genuine pending work in both: ZERO. A stall card
+ * for work that does not exist trains the reader to ignore stall cards, which is worse than
+ * having none — the whole point of the escalation is that it means something.
+ *
+ * Note `revoked_at` is deliberately NOT `exploit_exhausted`: an exhausted winner is one whose
+ * CLONES stopped producing hits, and it may still deserve to graduate. Only revocation means
+ * "this is no longer a winner". Returns a map keyed by cohort id.
  */
 export async function countEligibleCrownedWinnersByCohort(
   admin: Admin,
@@ -121,13 +133,15 @@ export async function countEligibleCrownedWinnersByCohort(
   if (!args.cohortScopes.length) return out;
   const { data } = await admin
     .from("media_buyer_crowned_winners")
-    .select("meta_ad_account_id, product_id, graduated_at")
+    .select("meta_ad_account_id, product_id, graduated_at, revoked_at")
     .eq("workspace_id", args.workspaceId)
-    .is("graduated_at", null);
+    .is("graduated_at", null)
+    .is("revoked_at", null);
   const rows = (data ?? []) as Array<{
     meta_ad_account_id: string | null;
     product_id: string | null;
     graduated_at: string | null;
+    revoked_at: string | null;
   }>;
   for (const scope of args.cohortScopes) {
     const count = rows.filter(
