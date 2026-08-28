@@ -11,6 +11,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { syncCustomers, syncOrders } from "@/lib/inngest/sync-shopify";
 import { ticketCsatCron } from "@/lib/inngest/ticket-csat";
+import { reviewCandidacyDetectorCron } from "@/lib/inngest/review-candidacy-detector-cron";
 import {
   importFileUpload,
   importFileSplit,
@@ -177,6 +178,7 @@ export const registeredInngestFunctions = [
   syncCustomers,
   syncOrders,
   ticketCsatCron,
+  reviewCandidacyDetectorCron,
   importFileUpload,
   importFileSplit,
   importChunkProcess,

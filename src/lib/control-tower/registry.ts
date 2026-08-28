@@ -687,6 +687,13 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ─ Every-15-min crons (window ~45 min) ─
   { id: "portal-action-healer", kind: "cron", owner: "retention", label: "Portal action healer", description: "Re-attempts failed portal actions (heal queue).", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
   { id: "ticket-csat-cron", kind: "cron", owner: "cs", label: "Ticket CSAT survey", description: "Sends CSAT surveys for eligible recently-closed tickets.", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
+  // Review-candidacy detector cron (review-request-sol-session Phase 1). Every 30
+  // min sweeps for tickets quiet 24h since the last EXTERNAL message + we spoke
+  // last, and enqueues one `review-candidacy` box job per qualifying ticket for
+  // Sol's read-only session. Owner cs (Sol reports to June). newcron-grace ⇒
+  // registeredAt starts the first-tick window so the tile doesn't RED on cut-over.
+  // The 45m livenessWindow gives ≥ 1.2× the 30m cadence per assertRegistryInvariants.
+  { id: "review-candidacy-detector-cron", kind: "cron", owner: "cs", label: "Review candidacy detector", description: "Every 30 min sweep: find tickets quiet 24h since the last external message (we spoke last) + enqueue a `review-candidacy` Sol box session per qualifying ticket. Sol reads the thread + recent orders read-only and returns a typed { ask, product_id, angle, include_coupon, reasoning } verdict; the worker (not Sol) is the only mutator.", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 45 * MIN, registeredAt: "2026-08-28T00:00:00Z" },
   // amplifier-import-reliability-rail Phase 2 — the reconcile sweep for paid orders the 3PL never
   // received. Re-submits any paid order past a 10-minute grace whose amplifier_order_id is still
   // null, under the retry cap, and not held by a non-dismissed fraud_cases row. 30-min window
@@ -1227,6 +1234,12 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // into this one Sol card (byPersona) instead of a standalone "Agent — ticket improve".
   { id: "agent:ticket-handle", kind: "agent-kind", owner: "cs", agentKind: "ticket-handle", personaKind: "ticket-handle", label: "Sol — Ticket Handler", description: "First-touch ticket Direction + reply (Sol).", expectedCadence: "on an inbound ticket", stuckThresholdMs: 30 * MIN, registeredAt: "2026-07-08T00:00:00Z" },
   { id: "agent:ticket-improve", kind: "agent-kind", owner: "cs", agentKind: "ticket-improve", personaKind: "ticket-handle", label: "Agent — ticket improve", description: "CX ticket-improve turns (Sol).", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
+  // Sol's review-candidacy box session (review-request-sol-session Phase 1). Enqueued
+  // by review-candidacy-detector-cron above; drained by scripts/builder-worker.ts →
+  // runReviewCandidacyJob as a top-level Max `claude -p` session. Same owner=cs as
+  // ticket-handle + personaKind='ticket-handle' so it merges under Sol's one card on
+  // the org chart (byPersona), not a standalone worker.
+  { id: "agent:review-candidacy", kind: "agent-kind", owner: "cs", agentKind: "review-candidacy", personaKind: "ticket-handle", label: "Sol — Review candidacy", description: "Sol's read-only review-candidacy session per quiet ticket (review-request-sol-session Phase 1). Returns a typed { ask, product_id, angle, include_coupon, reasoning } verdict; the worker (not Sol) is the only mutator.", expectedCadence: "on a review-candidacy-detector enqueue", stuckThresholdMs: 30 * MIN, registeredAt: "2026-08-28T00:00:00Z" },
   // Per-ticket QC-grader box lane (ticket-analyzer-becomes-box-agent-under-june Phase 1) — the
   // supervised agent under 💬 June (CS Director) that replaced the analyzer's direct fetch to
   // api.anthropic.com. Enqueued by ticket-analysis-cron; drained by scripts/builder-worker.ts →
