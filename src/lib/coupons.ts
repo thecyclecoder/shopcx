@@ -771,6 +771,41 @@ export function couponDiscountCents(
 }
 
 /**
+ * True iff `code` matches the exact canonical shape minted by
+ * `redeem_points` / `apply_loyalty_coupon`'s regen path —
+ * `LOYALTY-<value>-<6-char-random>`. Case-insensitive on letters.
+ *
+ * Refuses PostgreSQL LIKE wildcards (`%`, `_`), backslashes, hyphens
+ * outside the two positions above, and any other punctuation — the primary
+ * defense the materializer relies on to refuse pattern-injection lookups
+ * like `LOYALTY-%` that would otherwise match another customer's
+ * redemption via `.ilike("discount_code", code)` and materialize a
+ * discount the caller did not earn.
+ *
+ * Spec: loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value
+ * § Phase 2 Fix 1 (sec:real-vuln finding on src/lib/coupons.ts:816/:847).
+ * Exported for unit tests.
+ */
+export function isCanonicalLoyaltyCode(code: unknown): boolean {
+  if (typeof code !== "string") return false;
+  return /^LOYALTY-\d{1,3}-[A-Za-z0-9]{6}$/i.test(code);
+}
+
+/**
+ * Escape PostgreSQL LIKE wildcards (`%`, `_`) and the backslash so an
+ * `.ilike("col", escapeIlikeWildcards(input))` behaves as literal
+ * case-insensitive equality on the untrusted input — regardless of whether
+ * the caller already validated the shape upstream. Belt-and-braces layer
+ * behind `isCanonicalLoyaltyCode` for `ensureInternalLoyaltyCouponRow`.
+ *
+ * Order matters: backslash MUST be replaced first so subsequent replacements
+ * of `%` / `_` don't double-escape themselves. Exported for unit tests.
+ */
+export function escapeIlikeWildcards(input: string): string {
+  return input.replace(/\\/g, "\\\\").replace(/[%_]/g, "\\$&");
+}
+
+/**
  * Materialize a LOYALTY-* code as an internal `coupons` row scoped to the
  * contract-owning customer. Idempotent — a coupons row already keyed by the
  * `(workspace_id, lower(code))` unique index is returned as-is with no
@@ -806,14 +841,28 @@ export async function ensureInternalLoyaltyCouponRow(
   code: string,
   contractOwnerCustomerId: string,
 ): Promise<ResolvedCoupon | null> {
+  // Phase-2 Fix-1 (spec:
+  // loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value)
+  // — refuse ANY non-canonical LOYALTY code upfront so a caller submitting
+  // `LOYALTY-%` (a PostgREST/Supabase LIKE wildcard) can never reach the
+  // `.ilike("discount_code", code)` lookup below. `subscriptionApplyCoupon`
+  // is expected to gate on `isCanonicalLoyaltyCode` too — this is
+  // defense-in-depth for any future caller that forgets.
+  if (!isCanonicalLoyaltyCode(code)) return null;
+
   const admin = createAdminClient();
+  // Second layer: escape LIKE wildcards on the .ilike input even after the
+  // shape check. A canonical code has no `%` / `_` / `\` in it, so this is a
+  // no-op on the happy path — but leaves the queries safe if the caller
+  // gate ever drifts.
+  const safeCode = escapeIlikeWildcards(code);
 
   const readExisting = async (): Promise<ResolvedCoupon | null> => {
     const { data: rows } = await admin
       .from("coupons")
       .select("id, code, type, value, recurring_cycle_limit, customer_id, single_use, used_at, is_master")
       .eq("workspace_id", workspaceId)
-      .ilike("code", code)
+      .ilike("code", safeCode)
       .limit(1);
     const row = rows?.[0];
     if (!row || row.is_master) return null;
@@ -839,12 +888,15 @@ export async function ensureInternalLoyaltyCouponRow(
 
   // 2. Look up the loyalty_redemptions row for this code — the source of
   //    truth for `discount_value`. Refuses to invent a coupon out of thin
-  //    air for a code that never went through redeem_points.
+  //    air for a code that never went through redeem_points. `safeCode` +
+  //    the upfront `isCanonicalLoyaltyCode` guard together neutralize the
+  //    original sec:real-vuln attack (`.ilike("discount_code", "LOYALTY-%")`
+  //    matching another customer's redemption).
   const { data: red } = await admin
     .from("loyalty_redemptions")
     .select("id, discount_value")
     .eq("workspace_id", workspaceId)
-    .ilike("discount_code", code)
+    .ilike("discount_code", safeCode)
     .limit(1)
     .maybeSingle();
   if (!red) return null;

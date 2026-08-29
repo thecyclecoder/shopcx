@@ -17,7 +17,11 @@ import {
   internalSubApplyDiscount,
   internalSubRemoveDiscount,
 } from "@/lib/internal-subscription";
-import { resolveCoupon, ensureInternalLoyaltyCouponRow } from "@/lib/coupons";
+import {
+  resolveCoupon,
+  ensureInternalLoyaltyCouponRow,
+  isCanonicalLoyaltyCode,
+} from "@/lib/coupons";
 import { applyDiscountWithReplace, removeExistingDiscounts } from "@/lib/appstle-discount";
 
 /**
@@ -1415,7 +1419,17 @@ export async function subscriptionApplyCoupon(
     // spent at redeem time; `ensureInternalLoyaltyCouponRow` never calls
     // spendPoints). Rails preserved: single-use + one loyalty coupon per
     // renewal ceiling.
-    if (/^LOYALTY-/i.test(code) && sub?.customer_id) {
+    // Gate the materializer on the STRICT canonical LOYALTY-* shape (not
+    // the loose `/^LOYALTY-/i` prefix that first matched Phase-1). A
+    // caller-supplied `LOYALTY-%` matches the prefix regex but is a
+    // PostgreSQL LIKE wildcard — the pre-Fix-1 materializer's
+    // `.ilike("discount_code", code)` would then match ANOTHER customer's
+    // redemption in the workspace and mint a coupon for the caller's own
+    // contract using the other customer's discount_value. `isCanonicalLoyaltyCode`
+    // refuses `%`, `_`, and every other non-canonical shape upstream so
+    // the materializer never runs on an injection payload.
+    // Spec: loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value § Phase 2 Fix 1.
+    if (isCanonicalLoyaltyCode(code) && sub?.customer_id) {
       await ensureInternalLoyaltyCouponRow(
         workspaceId,
         code,
