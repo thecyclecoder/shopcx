@@ -770,6 +770,117 @@ export function couponDiscountCents(
   return Math.max(0, Math.min(d, subtotalCents));
 }
 
+/**
+ * Materialize a LOYALTY-* code as an internal `coupons` row scoped to the
+ * contract-owning customer. Idempotent — a coupons row already keyed by the
+ * `(workspace_id, lower(code))` unique index is returned as-is with no
+ * re-write.
+ *
+ * NET-ZERO on points — this reads the existing loyalty_redemptions row for
+ * `discount_value` ONLY. `spendPoints` was already called at redeem time;
+ * we never re-charge.
+ *
+ * Why (spec:
+ * loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value,
+ * ticket 46a7aa75): LOYALTY-* codes are minted in Shopify by `redeem_points`
+ * so `resolveCoupon` at renewal time reaches step 3 (real-time Shopify
+ * lookup) to re-hydrate them. A deleted / dying Shopify code returns null →
+ * `resolveRenewalDiscount` drops the entry → the internal renewal charges
+ * full price on a discount the customer earned. Materializing the redemption
+ * as an internal coupons row moves the resolution to step 1 (internal wins),
+ * which survives Shopify deleting the code.
+ *
+ * Rails preserved: `single_use=true` + `recurring_cycle_limit=1` = one
+ * charge, one loyalty coupon per order/renewal ceiling — same rails as the
+ * Shopify-side `usageLimit=1` + `appliesOncePerCustomer=true` mint at
+ * `redeem_points`.
+ *
+ * Returns the ResolvedCoupon shape for the row (existing or new). Returns
+ * `null` when no `loyalty_redemptions` row exists for this code (we can't
+ * infer the discount value from thin air) OR when an existing row is scoped
+ * to a different customer (we won't silently rebind — that would open the
+ * code to a stranger).
+ */
+export async function ensureInternalLoyaltyCouponRow(
+  workspaceId: string,
+  code: string,
+  contractOwnerCustomerId: string,
+): Promise<ResolvedCoupon | null> {
+  const admin = createAdminClient();
+
+  const readExisting = async (): Promise<ResolvedCoupon | null> => {
+    const { data: rows } = await admin
+      .from("coupons")
+      .select("id, code, type, value, recurring_cycle_limit, customer_id, single_use, used_at, is_master")
+      .eq("workspace_id", workspaceId)
+      .ilike("code", code)
+      .limit(1);
+    const row = rows?.[0];
+    if (!row || row.is_master) return null;
+    // Enforce customer binding: don't silently rebind a code to a different
+    // customer. If the existing internal row belongs to someone else, refuse
+    // — the caller falls through to the Shopify step (which will still work
+    // if the Shopify code exists) or fails cleanly.
+    if (row.customer_id && String(row.customer_id) !== String(contractOwnerCustomerId)) return null;
+    if (row.single_use && row.used_at) return null;
+    return {
+      code: row.code as string,
+      type: row.type as CouponType,
+      value: row.value as number,
+      recurring_cycle_limit: row.recurring_cycle_limit as number | null,
+      source: "internal",
+      coupon_id: row.id as string,
+    };
+  };
+
+  // 1. Already an internal row for this code? Use it.
+  const cached = await readExisting();
+  if (cached) return cached;
+
+  // 2. Look up the loyalty_redemptions row for this code — the source of
+  //    truth for `discount_value`. Refuses to invent a coupon out of thin
+  //    air for a code that never went through redeem_points.
+  const { data: red } = await admin
+    .from("loyalty_redemptions")
+    .select("id, discount_value")
+    .eq("workspace_id", workspaceId)
+    .ilike("discount_code", code)
+    .limit(1)
+    .maybeSingle();
+  if (!red) return null;
+  const valueCents = Math.round(Number(red.discount_value) * 100);
+  if (!Number.isFinite(valueCents) || valueCents <= 0) return null;
+
+  // 3. Insert — the `(workspace_id, lower(code))` unique index guarantees at
+  //    most one row. On a lost race we re-read and return the winner.
+  const { data: inserted, error } = await admin
+    .from("coupons")
+    .insert({
+      workspace_id: workspaceId,
+      code,
+      type: "fixed_amount",
+      value: valueCents,
+      scope: "order",
+      recurring_cycle_limit: 1,
+      customer_id: contractOwnerCustomerId,
+      single_use: true,
+    })
+    .select("id")
+    .single();
+  if (error || !inserted) {
+    // Unique-index conflict → the winning inserter's row is ours.
+    return await readExisting();
+  }
+  return {
+    code,
+    type: "fixed_amount",
+    value: valueCents,
+    recurring_cycle_limit: 1,
+    source: "internal",
+    coupon_id: inserted.id as string,
+  };
+}
+
 /** Mint a customer-scoped, single-use coupon (used by the smart popup). */
 export async function mintCustomerCoupon(
   workspaceId: string,

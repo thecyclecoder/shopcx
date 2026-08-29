@@ -607,24 +607,150 @@ export async function internalSubUpdateLineItemPrice(
 // already reads from this column.
 // ────────────────────────────────────────────────────────────────────
 
+/**
+ * A resolved-coupon shape (subset of `ResolvedCoupon` in `src/lib/coupons.ts`
+ * — kept local to break the import cycle). Only the fields
+ * `internalSubApplyDiscount` needs to write a fully-shaped applied_discounts
+ * entry that `resolveRenewalDiscount` / `computeAppliedDiscountCents` can
+ * consume WITHOUT a live re-resolve.
+ */
+export interface AppliedDiscountResolved {
+  code: string;
+  type: "percentage" | "fixed_amount";
+  value: number;
+  recurring_cycle_limit: number | null;
+  source: "internal" | "shopify";
+}
+
+/**
+ * Pure: build the applied_discounts entry that gets appended to a sub's JSONB.
+ *
+ * When we have a full ResolvedCoupon, write the full shape
+ * `{ code, type, value, recurring_cycle_limit, remaining_cycles, source }` —
+ * the same shape `applyCouponToSub` writes (src/lib/coupons.ts:518) so a
+ * renewal can compute the discount from the entry alone via
+ * `computeAppliedDiscountCents` without a live Shopify re-lookup. When we
+ * don't (legacy fallback for callers that never resolved), we still write
+ * the bare `{title: CODE}` — the historical behavior — so a caller that
+ * relied on the stub keeps working.
+ *
+ * Why this matters (spec:
+ * loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value,
+ * ticket 46a7aa75): the pre-fix `internalSubApplyDiscount` wrote ONLY the
+ * `{title}` stub for LOYALTY-* codes, so renewal-time `resolveCoupon` had
+ * to reach live Shopify to re-hydrate the discount. A deleted / dying
+ * Shopify code returned null → the discount silently dropped on the
+ * internal renewal. Writing the full shape makes the entry
+ * self-sufficient, and materializing the code as an internal `coupons` row
+ * upstream ensures step-1 (internal wins) can re-resolve it too.
+ *
+ * Exported for unit tests.
+ */
+export function buildAppliedDiscountEntry(
+  resolved: AppliedDiscountResolved | null | undefined,
+  fallbackCode: string,
+): Record<string, unknown> {
+  if (!resolved) return { title: fallbackCode };
+  return {
+    code: resolved.code,
+    type: resolved.type,
+    value: resolved.value,
+    recurring_cycle_limit: resolved.recurring_cycle_limit,
+    remaining_cycles: resolved.recurring_cycle_limit,
+    source: resolved.source,
+  };
+}
+
+/**
+ * True when an applied_discounts entry carries enough shape for
+ * `computeAppliedDiscountCents` to derive a real dollar/percent value at
+ * renewal time WITHOUT a live re-resolve. A bare `{title}` stub fails this
+ * check — computeAppliedDiscountCents skips it as "legacy/code-only" and
+ * the renewal ends up charging full price if the live re-resolve also
+ * fails. Load-bearing for the post-write verify in `internalSubApplyDiscount`.
+ *
+ * Exported for unit tests.
+ */
+export function appliedEntryHasRealValue(entry: unknown): boolean {
+  if (!entry || typeof entry !== "object") return false;
+  const rec = entry as {
+    type?: unknown;
+    value?: unknown;
+    remaining_cycles?: unknown;
+  };
+  if (rec.type !== "percentage" && rec.type !== "fixed_amount") return false;
+  if (typeof rec.value !== "number" || !Number.isFinite(rec.value) || rec.value <= 0) return false;
+  // remaining_cycles null = forever → OK; number → must be > 0.
+  if (rec.remaining_cycles != null) {
+    if (typeof rec.remaining_cycles !== "number" || rec.remaining_cycles <= 0) return false;
+  }
+  return true;
+}
+
 export async function internalSubApplyDiscount(
   workspaceId: string,
   contractId: string,
   discountCode: string,
+  opts?: {
+    /** When provided, write a full-shape applied_discounts entry (not a
+     * `{title}` stub) so the renewal can compute the discount without a
+     * live re-resolve. See `buildAppliedDiscountEntry`. */
+    resolved?: AppliedDiscountResolved | null;
+    /** Contract-owning customer_id — used by the post-write verify step
+     * that re-resolves the applied code via `resolveCoupon`. Falls back
+     * to the sub's own customer_id when not passed. */
+    customerId?: string | null;
+    /** When true, skip the post-write real-value verify. Preserves
+     * pre-fix behavior for the small set of legacy callers (e.g.
+     * appstle-discount's internal fast-path) that don't route through
+     * `subscriptionApplyCoupon`. Default false — verify by default. */
+    skipRealValueVerify?: boolean;
+  },
 ): Promise<ActionResult> {
   const admin = createAdminClient();
   const sub = await loadInternalSub(workspaceId, contractId);
   if (!sub) return { success: false, error: "Internal subscription not found" };
 
-  const existing = (sub.applied_discounts as Array<{ title?: string }>) || [];
-  if (existing.some((d) => d.title === discountCode)) {
-    return { success: true }; // already applied — idempotent
+  const existing = (sub.applied_discounts as Array<Record<string, unknown>>) || [];
+  const targetUpper = discountCode.toUpperCase();
+  const alreadyPresent = existing.some((d) => {
+    const title = typeof d?.title === "string" ? d.title : "";
+    const code = typeof d?.code === "string" ? d.code : "";
+    return title.toUpperCase() === targetUpper || code.toUpperCase() === targetUpper;
+  });
+
+  if (!alreadyPresent) {
+    const entry = buildAppliedDiscountEntry(opts?.resolved ?? null, discountCode);
+    const nextDiscounts = [...existing, entry];
+    await admin
+      .from("subscriptions")
+      .update({ applied_discounts: nextDiscounts, updated_at: new Date().toISOString() })
+      .eq("id", sub.id);
   }
-  const nextDiscounts = [...existing, { title: discountCode }];
-  await admin
-    .from("subscriptions")
-    .update({ applied_discounts: nextDiscounts, updated_at: new Date().toISOString() })
-    .eq("id", sub.id);
+
+  // Post-write verify: confirm the applied code resolves to real discount
+  // value BEFORE reporting success back to the caller. A dead Shopify code
+  // that resolveCoupon can't re-resolve silently drops the discount at
+  // renewal (ticket 46a7aa75) — fail here so `apply_loyalty_coupon` fires
+  // the regen self-heal instead of leaving an inert entry on the sub.
+  //
+  // Two acceptance paths so we don't false-fail:
+  //   (1) `opts.resolved` gave us a full-shape ResolvedCoupon → the entry
+  //       we just wrote is self-sufficient (its type+value carry through
+  //       computeAppliedDiscountCents) and we trust that.
+  //   (2) A live re-resolve via `resolveCoupon` returns a non-null
+  //       ResolvedCoupon → the internal step-1 (or Shopify step-3) can
+  //       still hydrate it at renewal time.
+  // Both paths failing = the applied entry is inert; caller must regen.
+  if (opts?.skipRealValueVerify) return { success: true };
+  if (opts?.resolved && opts.resolved.value > 0) return { success: true };
+
+  const verifyCustomerId = opts?.customerId ?? sub.customer_id ?? null;
+  const { resolveCoupon } = await import("@/lib/coupons");
+  const live = await resolveCoupon(workspaceId, discountCode, verifyCustomerId);
+  if (!live || !(live.value > 0)) {
+    return { success: false, error: "applied_code_resolves_to_zero_value" };
+  }
   return { success: true };
 }
 

@@ -113,7 +113,57 @@ async function internalSubUpdateLineItemPrice(workspaceId: string, contractId: s
 ### `internalSubApplyDiscount` — function
 
 ```ts
-async function internalSubApplyDiscount(workspaceId: string, contractId: string, discountCode: string,) : Promise<ActionResult>
+async function internalSubApplyDiscount(
+  workspaceId: string,
+  contractId: string,
+  discountCode: string,
+  opts?: {
+    resolved?: AppliedDiscountResolved | null;
+    customerId?: string | null;
+    skipRealValueVerify?: boolean;
+  },
+) : Promise<ActionResult>
+```
+
+Two behaviors changed by [[../specs/loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value]] (ticket `46a7aa75-9a09-4fbe-8aa5-fb58440f3f09`):
+
+1. **Write the FULL resolved shape when we have one.** With `opts.resolved`, the entry is `{code, type, value, recurring_cycle_limit, remaining_cycles, source}` (matches `applyCouponToSub` at `src/lib/coupons.ts:518`) so `computeAppliedDiscountCents` can derive the renewal discount from the entry alone without a live re-resolve. Without `opts.resolved` (legacy callers), the historical `{title: CODE}` stub is preserved for back-compat via `buildAppliedDiscountEntry(null, code)`.
+2. **Post-write verify — refuse a false success.** After the write (or an idempotent no-write on an already-present code), re-checks that the applied code resolves to real value: EITHER `opts.resolved.value > 0` OR a live `resolveCoupon(workspaceId, code, customerId)` returns a coupon with `value > 0`. When BOTH fail the entry is inert (a dead Shopify code will discount $0 at renewal) and the caller gets `{success:false, error:"applied_code_resolves_to_zero_value"}` so `apply_loyalty_coupon`'s regen self-heal can fire instead of leaving a stub on the sub. Set `opts.skipRealValueVerify=true` to preserve pre-fix behavior on legacy paths that never resolve.
+
+Pure helpers extracted for unit tests (`src/lib/internal-subscription.applyDiscount.test.ts`):
+
+- `buildAppliedDiscountEntry(resolved, fallbackCode)` — the write-shape decider.
+- `appliedEntryHasRealValue(entry)` — true iff the entry itself carries a computable discount (`type` + numeric `value>0` + non-exhausted `remaining_cycles`); also used by `verifyLoyaltyCouponAppliedToContract` to short-circuit the live re-resolve when the entry is self-sufficient.
+
+Loyalty-* routing: `subscriptionApplyCoupon`'s internal branch calls `ensureInternalLoyaltyCouponRow` in [[coupons]] before resolving a `LOYALTY-*` code — materializes the `loyalty_redemptions` row as an internal `coupons` row scoped to the contract owner (NET-ZERO on points; the row is durable across a Shopify delete of the original discount code, so renewal-time `resolveCoupon` step-1 wins).
+
+### `AppliedDiscountResolved` — interface
+
+```ts
+interface AppliedDiscountResolved {
+  code: string;
+  type: "percentage" | "fixed_amount";
+  value: number;
+  recurring_cycle_limit: number | null;
+  source: "internal" | "shopify";
+}
+```
+
+Local subset of `ResolvedCoupon` in [[coupons]] — kept local to avoid an import cycle between `internal-subscription.ts` and `coupons.ts`.
+
+### `buildAppliedDiscountEntry` — function (pure)
+
+```ts
+function buildAppliedDiscountEntry(
+  resolved: AppliedDiscountResolved | null | undefined,
+  fallbackCode: string,
+) : Record<string, unknown>
+```
+
+### `appliedEntryHasRealValue` — function (pure)
+
+```ts
+function appliedEntryHasRealValue(entry: unknown) : boolean
 ```
 
 ### `internalSubRemoveDiscount` — function
