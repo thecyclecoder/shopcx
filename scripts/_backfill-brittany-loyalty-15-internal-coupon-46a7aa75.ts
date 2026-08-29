@@ -47,7 +47,7 @@ import {
   appliedEntryHasRealValue,
   type AppliedDiscountResolved,
 } from "../src/lib/internal-subscription";
-import { ensureInternalLoyaltyCouponRow } from "../src/lib/coupons";
+import { insertInternalLoyaltyCouponRowUnchecked } from "../src/lib/coupons";
 
 const APPLY = process.argv.includes("--apply") || process.env.APPLY === "1";
 
@@ -111,23 +111,56 @@ async function pickExactlyOne<T>(
   );
 
   // 3. Ensure the internal coupons row (idempotent; NET-ZERO on points).
-  if (!APPLY) {
+  //
+  //    Uses the UNCHECKED insert helper (not `ensureInternalLoyaltyCouponRow`)
+  //    per spec § Phase 3 Fix 2: "Keep any ship-time one-customer remediation
+  //    explicit and separate if it must handle a previously-applied
+  //    historical row." Brittany's redemption may not still be
+  //    `status='active'` / `used_at IS NULL` by the time this runs, so we
+  //    bypass the online-path state guard — safe here because:
+  //      (a) we resolved a SPECIFIC redemption by id-prefix + code +
+  //          member-prefix above (any single-column mismatch fails-closed
+  //          via `pickExactlyOne`);
+  //      (b) the sub's customer_id is Brittany's — the CS-Director spec
+  //          write-up ties (redemption 09cbe830 → member 9a5e3857 →
+  //          contract 0c093842); AND
+  //      (c) idempotency: read-first below so a re-run after the first
+  //          insert is a no-op, and the internal coupons row's unique
+  //          `(workspace_id, lower(code))` index prevents a second insert
+  //          under any race.
+  //
+  //    Read-first idempotency (unique index would raise otherwise).
+  const { data: existingCoupon } = await admin
+    .from("coupons")
+    .select("id, value")
+    .eq("workspace_id", red.workspace_id)
+    .ilike("code", CODE.replace(/\\/g, "\\\\").replace(/[%_]/g, "\\$&"))
+    .maybeSingle();
+
+  if (existingCoupon) {
     console.log(
-      `  would-ensure internal coupons row: code=${CODE} customer=${sub.customer_id} value=$${red.discount_value} single_use=true recurring_cycle_limit=1`,
+      `  coupons row already exists id=${existingCoupon.id} value=${existingCoupon.value} cents — skip insert (idempotent)`,
+    );
+  } else if (!APPLY) {
+    console.log(
+      `  would-insert internal coupons row: code=${CODE} customer=${sub.customer_id} value=$${red.discount_value} single_use=true recurring_cycle_limit=1`,
     );
   } else {
-    const materialized = await ensureInternalLoyaltyCouponRow(
+    const valueCents = Math.round(Number(red.discount_value) * 100);
+    const materialized = await insertInternalLoyaltyCouponRowUnchecked(
+      admin,
       red.workspace_id as string,
       CODE,
       sub.customer_id as string,
+      valueCents,
     );
     if (!materialized) {
       throw new Error(
-        `ensureInternalLoyaltyCouponRow returned null — is loyalty_redemptions.discount_value zero or an existing coupons row bound to a different customer?`,
+        `insertInternalLoyaltyCouponRowUnchecked returned null — likely lost a race to a concurrent inserter; re-run to observe the winner via the read-first path`,
       );
     }
     console.log(
-      `  ensured  internal coupons row: id=${materialized.coupon_id} code=${materialized.code} value=${materialized.value} cents source=${materialized.source}`,
+      `  inserted internal coupons row: id=${materialized.coupon_id} code=${materialized.code} value=${materialized.value} cents source=${materialized.source}`,
     );
   }
 
