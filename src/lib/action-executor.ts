@@ -676,25 +676,49 @@ export async function verifyLoyaltyCouponAppliedToContract(
 ): Promise<boolean> {
   const { data } = await admin
     .from("subscriptions")
-    .select("applied_discounts")
+    .select("applied_discounts, customer_id")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", contractId)
     .maybeSingle();
-  const arr = (data as { applied_discounts?: unknown } | null)?.applied_discounts;
+  const rec = data as { applied_discounts?: unknown; customer_id?: string | null } | null;
+  const arr = rec?.applied_discounts;
   if (!Array.isArray(arr)) return false;
   const target = code.toUpperCase();
+  let matchedEntry: Record<string, unknown> | string | null = null;
   for (const entry of arr) {
     let label: string | null = null;
     if (typeof entry === "string") label = entry;
     else if (entry && typeof entry === "object") {
-      const rec = entry as { title?: unknown; code?: unknown };
-      if (typeof rec.code === "string") label = rec.code;
-      else if (typeof rec.title === "string") label = rec.title;
+      const r = entry as { title?: unknown; code?: unknown };
+      if (typeof r.code === "string") label = r.code;
+      else if (typeof r.title === "string") label = r.title;
     }
     if (!label) continue;
-    if (label.toUpperCase().includes(target)) return true;
+    if (label.toUpperCase().includes(target)) {
+      matchedEntry = entry as Record<string, unknown> | string;
+      break;
+    }
   }
-  return false;
+  if (matchedEntry == null) return false;
+
+  // Real-value check (spec:
+  // loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value,
+  // ticket 46a7aa75). String-presence alone is not landed — a bare
+  // `{title:CODE}` stub written for a Shopify code that's been deleted
+  // resolves to $0 at renewal (`computeAppliedDiscountCents` skips it as
+  // "legacy/code-only"). Two acceptance paths:
+  //   (1) The applied entry itself carries a real value shape
+  //       (`type` + numeric `value > 0`), so `computeAppliedDiscountCents`
+  //       can compute the discount directly with no live re-resolve.
+  //   (2) A live `resolveCoupon` re-resolves the code to a non-null
+  //       coupon with `value > 0` — internal step-1 or Shopify step-3
+  //       can still hydrate it at renewal.
+  const { appliedEntryHasRealValue } = await import("@/lib/internal-subscription");
+  if (appliedEntryHasRealValue(matchedEntry)) return true;
+
+  const { resolveCoupon } = await import("@/lib/coupons");
+  const live = await resolveCoupon(workspaceId, code, rec?.customer_id ?? null);
+  return !!(live && live.value > 0);
 }
 
 /**

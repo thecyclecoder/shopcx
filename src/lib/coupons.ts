@@ -770,6 +770,292 @@ export function couponDiscountCents(
   return Math.max(0, Math.min(d, subtotalCents));
 }
 
+/**
+ * True iff `code` matches the exact canonical shape minted by
+ * `redeem_points` / `apply_loyalty_coupon`'s regen path —
+ * `LOYALTY-<value>-<6-char-random>`. Case-insensitive on letters.
+ *
+ * Refuses PostgreSQL LIKE wildcards (`%`, `_`), backslashes, hyphens
+ * outside the two positions above, and any other punctuation — the primary
+ * defense the materializer relies on to refuse pattern-injection lookups
+ * like `LOYALTY-%` that would otherwise match another customer's
+ * redemption via `.ilike("discount_code", code)` and materialize a
+ * discount the caller did not earn.
+ *
+ * Spec: loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value
+ * § Phase 2 Fix 1 (sec:real-vuln finding on src/lib/coupons.ts:816/:847).
+ * Exported for unit tests.
+ */
+export function isCanonicalLoyaltyCode(code: unknown): boolean {
+  if (typeof code !== "string") return false;
+  return /^LOYALTY-\d{1,3}-[A-Za-z0-9]{6}$/i.test(code);
+}
+
+/**
+ * Escape PostgreSQL LIKE wildcards (`%`, `_`) and the backslash so an
+ * `.ilike("col", escapeIlikeWildcards(input))` behaves as literal
+ * case-insensitive equality on the untrusted input — regardless of whether
+ * the caller already validated the shape upstream. Belt-and-braces layer
+ * behind `isCanonicalLoyaltyCode` for `ensureInternalLoyaltyCouponRow`.
+ *
+ * Order matters: backslash MUST be replaced first so subsequent replacements
+ * of `%` / `_` don't double-escape themselves. Exported for unit tests.
+ */
+export function escapeIlikeWildcards(input: string): string {
+  return input.replace(/\\/g, "\\\\").replace(/[%_]/g, "\\$&");
+}
+
+/**
+ * Pure: true iff a `loyalty_redemptions` row is currently apply-eligible
+ * — the state gate `ensureInternalLoyaltyCouponRow` uses to refuse
+ * materializing a stale / consumed / expired redemption as a fresh
+ * internal `coupons` row (coupon-replay attack; spec:
+ * loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value
+ * § Phase 3 Fix 2).
+ *
+ * Eligible iff `status='active'`, `used_at IS NULL`, and (`expires_at IS
+ * NULL` or `expires_at > now`). Any other status ('used' / 'expired' /
+ * 'rolled_back' / 'redeemed_as_refund' / …) is refused — fail-closed by
+ * design. `expires_at` exactly equal to `now` is treated as EXPIRED so a
+ * race at the boundary doesn't hand out a coupon that would immediately be
+ * void.
+ *
+ * Exported for unit tests. `now` defaults to the real clock; pass an
+ * explicit `Date` in tests for reproducibility.
+ */
+export function isRedemptionStateApplyEligible(
+  redemption: {
+    status: string;
+    used_at: string | null;
+    expires_at: string | null;
+  },
+  now: Date = new Date(),
+): boolean {
+  if (redemption.status !== "active") return false;
+  if (redemption.used_at != null) return false;
+  if (redemption.expires_at != null) {
+    const exp = new Date(redemption.expires_at).getTime();
+    if (!Number.isFinite(exp)) return false;
+    if (exp <= now.getTime()) return false;
+  }
+  return true;
+}
+
+/**
+ * Materialize a LOYALTY-* code as an internal `coupons` row scoped to the
+ * contract-owning customer. Idempotent — a coupons row already keyed by the
+ * `(workspace_id, lower(code))` unique index is returned as-is with no
+ * re-write.
+ *
+ * NET-ZERO on points — this reads the existing loyalty_redemptions row for
+ * `discount_value` ONLY. `spendPoints` was already called at redeem time;
+ * we never re-charge.
+ *
+ * Why (spec:
+ * loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value,
+ * ticket 46a7aa75): LOYALTY-* codes are minted in Shopify by `redeem_points`
+ * so `resolveCoupon` at renewal time reaches step 3 (real-time Shopify
+ * lookup) to re-hydrate them. A deleted / dying Shopify code returns null →
+ * `resolveRenewalDiscount` drops the entry → the internal renewal charges
+ * full price on a discount the customer earned. Materializing the redemption
+ * as an internal coupons row moves the resolution to step 1 (internal wins),
+ * which survives Shopify deleting the code.
+ *
+ * Rails preserved: `single_use=true` + `recurring_cycle_limit=1` = one
+ * charge, one loyalty coupon per order/renewal ceiling — same rails as the
+ * Shopify-side `usageLimit=1` + `appliesOncePerCustomer=true` mint at
+ * `redeem_points`.
+ *
+ * Returns the ResolvedCoupon shape for the row (existing or new). Returns
+ * `null` when no `loyalty_redemptions` row exists for this code (we can't
+ * infer the discount value from thin air) OR when an existing row is scoped
+ * to a different customer (we won't silently rebind — that would open the
+ * code to a stranger).
+ */
+export async function ensureInternalLoyaltyCouponRow(
+  workspaceId: string,
+  code: string,
+  contractOwnerCustomerId: string,
+): Promise<ResolvedCoupon | null> {
+  // Phase-2 Fix-1 (spec:
+  // loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value)
+  // — refuse ANY non-canonical LOYALTY code upfront so a caller submitting
+  // `LOYALTY-%` (a PostgREST/Supabase LIKE wildcard) can never reach the
+  // `.ilike("discount_code", code)` lookup below. `subscriptionApplyCoupon`
+  // is expected to gate on `isCanonicalLoyaltyCode` too — this is
+  // defense-in-depth for any future caller that forgets.
+  if (!isCanonicalLoyaltyCode(code)) return null;
+
+  const admin = createAdminClient();
+  // Second layer: escape LIKE wildcards on the .ilike input even after the
+  // shape check. A canonical code has no `%` / `_` / `\` in it, so this is a
+  // no-op on the happy path — but leaves the queries safe if the caller
+  // gate ever drifts.
+  const safeCode = escapeIlikeWildcards(code);
+
+  const readExisting = async (): Promise<ResolvedCoupon | null> => {
+    const { data: rows } = await admin
+      .from("coupons")
+      .select("id, code, type, value, recurring_cycle_limit, customer_id, single_use, used_at, is_master")
+      .eq("workspace_id", workspaceId)
+      .ilike("code", safeCode)
+      .limit(1);
+    const row = rows?.[0];
+    if (!row || row.is_master) return null;
+    // Enforce customer binding: don't silently rebind a code to a different
+    // customer. If the existing internal row belongs to someone else, refuse
+    // — the caller falls through to the Shopify step (which will still work
+    // if the Shopify code exists) or fails cleanly.
+    if (row.customer_id && String(row.customer_id) !== String(contractOwnerCustomerId)) return null;
+    if (row.single_use && row.used_at) return null;
+    return {
+      code: row.code as string,
+      type: row.type as CouponType,
+      value: row.value as number,
+      recurring_cycle_limit: row.recurring_cycle_limit as number | null,
+      source: "internal",
+      coupon_id: row.id as string,
+    };
+  };
+
+  // 1. Already an internal row for this code? Use it.
+  const cached = await readExisting();
+  if (cached) return cached;
+
+  // 2. Look up the loyalty_redemptions row for this code — the source of
+  //    truth for `discount_value` AND for the ownership + state guards
+  //    added in Phase-3 Fix-2 (sec:real-vuln coupon-replay finding on
+  //    `src/lib/subscription-items.ts:1432` / `src/lib/coupons.ts:895-918`).
+  //    Pre-fix the lookup filtered on `(workspace_id, discount_code)` ONLY
+  //    and inserted a fresh single-use coupon regardless of whether the
+  //    redemption was another customer's, already consumed, or expired.
+  //    Fix requires member ownership match + apply-eligible state.
+  const { data: red } = await admin
+    .from("loyalty_redemptions")
+    .select("id, member_id, discount_value, status, used_at, expires_at")
+    .eq("workspace_id", workspaceId)
+    .ilike("discount_code", safeCode)
+    .limit(1)
+    .maybeSingle();
+  if (!red) return null;
+
+  // 2a. STATE guard — the redemption must be currently apply-eligible.
+  //     Refuses status != 'active', used_at != null, or a past expires_at.
+  //     Fail-closed at the boundary so a stale / consumed / expired code
+  //     cannot be revived as a fresh internal single-use coupon on ANY
+  //     customer's contract.
+  if (
+    !isRedemptionStateApplyEligible({
+      status: (red as { status?: string }).status ?? "",
+      used_at: (red as { used_at?: string | null }).used_at ?? null,
+      expires_at: (red as { expires_at?: string | null }).expires_at ?? null,
+    })
+  ) {
+    return null;
+  }
+
+  // 2b. OWNERSHIP guard — the redemption's `loyalty_members` row MUST
+  //     resolve to the same native `customer_id` as `contractOwnerCustomerId`.
+  //     Fallback: when the member has no native `customer_id`, compare
+  //     the member's `shopify_customer_id` to the contract owner's
+  //     `shopify_customer_id` (a single customers lookup). No link-group
+  //     expansion — a coupon minted for a sibling profile does NOT
+  //     transfer to another profile's contract (matches the Shopify-side
+  //     customer binding the pre-fix path relied on for authorisation).
+  const memberId = (red as { member_id?: string }).member_id;
+  if (!memberId) return null;
+  const { data: member } = await admin
+    .from("loyalty_members")
+    .select("id, customer_id, shopify_customer_id")
+    .eq("id", memberId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+  if (!member) return null;
+  const memberNativeCustomerId = (member as { customer_id?: string | null }).customer_id;
+  if (memberNativeCustomerId != null && memberNativeCustomerId !== "") {
+    if (String(memberNativeCustomerId) !== String(contractOwnerCustomerId)) return null;
+  } else {
+    const memberShopifyId = (member as { shopify_customer_id?: string | null }).shopify_customer_id;
+    if (!memberShopifyId) return null;
+    const { data: owner } = await admin
+      .from("customers")
+      .select("shopify_customer_id")
+      .eq("id", contractOwnerCustomerId)
+      .eq("workspace_id", workspaceId)
+      .maybeSingle();
+    const ownerShopifyId = (owner as { shopify_customer_id?: string | null } | null)?.shopify_customer_id;
+    if (!ownerShopifyId || String(ownerShopifyId) !== String(memberShopifyId)) return null;
+  }
+
+  const valueCents = Math.round(Number(red.discount_value) * 100);
+  if (!Number.isFinite(valueCents) || valueCents <= 0) return null;
+
+  // 3. Insert via the shared low-level helper.
+  const insertedResolved = await insertInternalLoyaltyCouponRowUnchecked(
+    admin,
+    workspaceId,
+    code,
+    contractOwnerCustomerId,
+    valueCents,
+  );
+  if (insertedResolved) return insertedResolved;
+  // Unique-index conflict → the winning inserter's row is ours.
+  return await readExisting();
+}
+
+/**
+ * LOW-LEVEL insert for the internal loyalty coupon row — writes directly to
+ * `public.coupons` with `single_use=true`, `recurring_cycle_limit=1`,
+ * `type='fixed_amount'`, `customer_id=contractOwnerCustomerId`.
+ *
+ * ⚠️  UNCHECKED. Bypasses the canonical-shape / owner-match / state
+ * eligibility guards that `ensureInternalLoyaltyCouponRow` uses to defend
+ * the online `subscriptionApplyCoupon` path (Phase-2 Fix-1 + Phase-3 Fix-2).
+ * ONLY callable from:
+ *   (a) `ensureInternalLoyaltyCouponRow` itself (which pre-verifies), and
+ *   (b) a NAMED, one-customer ship-time remediation script that has
+ *       already resolved a specific historical redemption + verified the
+ *       contract owner OUT-OF-BAND against a CS-Director spec write-up.
+ *
+ * Do NOT expose to any request-time / agent-driven caller. Returns null on
+ * unique-index conflict; caller re-reads the row.
+ *
+ * Spec: loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value
+ * § Phase 3 Fix 2 — "Keep any ship-time one-customer remediation explicit
+ * and separate if it must handle a previously-applied historical row."
+ */
+export async function insertInternalLoyaltyCouponRowUnchecked(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  code: string,
+  contractOwnerCustomerId: string,
+  valueCents: number,
+): Promise<ResolvedCoupon | null> {
+  const { data: inserted, error } = await admin
+    .from("coupons")
+    .insert({
+      workspace_id: workspaceId,
+      code,
+      type: "fixed_amount",
+      value: valueCents,
+      scope: "order",
+      recurring_cycle_limit: 1,
+      customer_id: contractOwnerCustomerId,
+      single_use: true,
+    })
+    .select("id")
+    .single();
+  if (error || !inserted) return null;
+  return {
+    code,
+    type: "fixed_amount",
+    value: valueCents,
+    recurring_cycle_limit: 1,
+    source: "internal",
+    coupon_id: inserted.id as string,
+  };
+}
+
 /** Mint a customer-scoped, single-use coupon (used by the smart popup). */
 export async function mintCustomerCoupon(
   workspaceId: string,
