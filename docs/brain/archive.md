@@ -12,11 +12,19 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Ads supervisor: product Amazing Coffee K-Cups — Bianca missed a kill on adset quote headline coffee burst trust bar** · verified 2026-08-28 · → [[../libraries/media-buyer-agent]]
+- **Close review-candidacy newline Bash chain bypass** · verified 2026-08-28 · → [[../libraries/review-candidacy-permission-gate]]
 - **Closing a ticket must not destroy an active founder escalation** · verified 2026-08-28 · → [[../lifecycles/ticket-lifecycle]]
 - **Stop fraud detector false alerts from coalesced heartbeat window edges** · verified 2026-08-28 · → [[lifecycles/control-tower]]
+- **Cheap-but-chatty queries self-clear on database time, not call count** · verified 2026-08-28 · → [[libraries/db-health]]
+- **Close review-candidacy Bash command parser bypasses** · verified 2026-08-28 · → [[../libraries/review-candidacy-permission-gate]]
+- **Fix review-candidacy Bash file-read path gate** · verified 2026-08-28 · → [[../libraries/review-candidacy-permission-gate]]
 - **Immediate-charge renewal paths need per-subscription idempotency** · verified 2026-08-28 · → [[../lifecycles/subscription-billing]]
 - **Internal (SHOPCX*) orders can now get a return — headroom guard verifies locally then refuses before spending money** · verified 2026-08-28 · → [[../lifecycles/return-pipeline]]
+- **Migration audit's immediate_charge check races the retry it is auditing — Phase 1 settled-state rule + Phase 2 code_gap verdict** · verified 2026-08-28 · → [[../lifecycles/subscription-billing]] · [[../libraries/migration-audit]] · [[../libraries/migration-fix]]
+- **Stop review-candidacy detector from overfilling the single Sol lane** · verified 2026-08-28 · → [[../inngest/review-candidacy-detector-cron]]
 - **Review collection — journey, coupon, and schema foundations** · verified 2026-08-28 · → [[journeys/product-review]]
+- **Review requests — Sol's post-resolution session, rubric-gated message, delivery + one nudge** · verified 2026-08-28 · → [[../lifecycles/ticket-lifecycle]]
 - **A price complaint must be answered from the customer's own established rate, not the standard rate card** · verified 2026-08-27 · → [[lifecycles/subscription-billing]]
 - **Ads supervisor: product `Amazing Coffee K-Cups` — Dahlia's ready-to-test bin is thin (0/4)** · verified 2026-08-27 · → [[../libraries/ads-supervisor]]
 - **Stop Bianca replenish jobs from reusing stale Advantage+ age targeting** · verified 2026-08-27 · → [[../lifecycles/media-buyer-arming]]
