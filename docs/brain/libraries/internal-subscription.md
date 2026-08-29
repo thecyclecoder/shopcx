@@ -135,7 +135,7 @@ Pure helpers extracted for unit tests (`src/lib/internal-subscription.applyDisco
 - `buildAppliedDiscountEntry(resolved, fallbackCode)` — the write-shape decider.
 - `appliedEntryHasRealValue(entry)` — true iff the entry itself carries a computable discount (`type` + numeric `value>0` + non-exhausted `remaining_cycles`); also used by `verifyLoyaltyCouponAppliedToContract` to short-circuit the live re-resolve when the entry is self-sufficient.
 
-Loyalty-* routing: `subscriptionApplyCoupon`'s internal branch calls `ensureInternalLoyaltyCouponRow` in [[coupons]] before resolving a `LOYALTY-*` code — materializes the `loyalty_redemptions` row as an internal `coupons` row scoped to the contract owner (NET-ZERO on points; the row is durable across a Shopify delete of the original discount code, so renewal-time `resolveCoupon` step-1 wins).
+Loyalty-* routing: `subscriptionApplyCoupon`'s internal branch calls [[coupons]] `ensureInternalLoyaltyCouponRow` before resolving a `LOYALTY-*` code — materializes the `loyalty_redemptions` row as an internal `coupons` row scoped to the contract owner (NET-ZERO on points; the row is durable across a Shopify delete of the original discount code, so renewal-time `resolveCoupon` step-1 wins). See [[coupons]] "Loyalty-coupon materialization" for the ownership + state guards (Phase 2–3 of [[../specs/loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value]]).
 
 ### `AppliedDiscountResolved` — interface
 
