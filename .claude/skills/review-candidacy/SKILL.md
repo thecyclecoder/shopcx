@@ -15,7 +15,8 @@ You are on **Max** (no `ANTHROPIC_API_KEY`, web search on) with full brain / `sr
 
 - **You never mutate.** No DB writes, no PRs, no `git push`, no drafting the message itself. You investigate read-only and emit ONE JSON object.
 - **Cite what you saw.** Every verdict's `reasoning` must reference REAL evidence — the ticket's resolution, the customer's tenure/order count, per-product coverage, the ladder state — not hand-waved intuition.
-- **Skipping is ALWAYS correct.** Nobody is waiting for this message. If ANY signal is off — the resolution is unclear, the customer already reviewed the product you'd pick, the coverage tilts the wrong way, the tenure is short, the tone of the thread is off — return `{"ask": false}`. A skipped-in-doubt customer costs nothing; a bad ask hurts sender reputation AND the customer relationship.
+- **Skipping is ALWAYS correct.** Nobody is waiting for this message. If ANY signal is off — the resolution is unclear, the customer already reviewed the product you'd pick, the tenure is short, the tone of the thread is off — return `{"ask": false}`. A skipped-in-doubt customer costs nothing; a bad ask hurts sender reputation AND the customer relationship.
+- **Coverage is NEVER one of those signals.** It is a tiebreaker between two eligible products and nothing more — see "Coverage is a tiebreaker, NOT a veto" below. A high-coverage product is still a perfectly good ask.
 
 ## What you're given
 
@@ -39,8 +40,22 @@ Ask ONLY when EVERY item below is true — otherwise skip:
 - The customer has bought a **REVIEWABLE** product recently. Filter `products.reviewable = true`. Shipping Protection, Mystery Item, `(Free Gift)` duplicates, and other add-ons are NOT reviewable.
 - The customer has NOT already reviewed the product you'd pick. Check `product_reviews` for their customer_id + the candidate product_id.
 - The ladder (`review_requests`) hasn't already asked THIS customer about this product. A repeat ask is bait.
-- Per-product review coverage tilts toward the product WE NEED MOST. When two products are both fair game, prefer the one with the fewer reviews — e.g. Sleep Gummies with 42 reviews over Superfood Tabs with 3,158.
+- Per-product review coverage tilts toward the product WE NEED MOST — but ONLY as a tiebreaker between two otherwise-eligible products, never as a reason to decline. See "Coverage is a tiebreaker, NOT a veto" below.
 - The customer is a repeat buyer (goodwill compounds — the CX SDK snapshot shows tenure + order count).
+
+## Coverage is a tiebreaker, NOT a veto
+
+**Two eligible products?** Prefer the one with fewer reviews — Sleep Gummies at 42 over Superfood Tabs at 3,158.
+
+**One eligible product?** Ask about it, whatever its coverage. High coverage is never a reason to decline.
+
+This is the most important correction in this skill, because getting it wrong silently kills the program. Across the first 117 sessions, **52 declines (44%) cited coverage as the disqualifier** — nearly all Superfood Tabs, the flagship, and the ONLY product most customers ever buy. A tiebreaker written for the rare multi-product case was eliminating the largest cohort we have. The verdicts read like:
+
+> *"The only reviewable product this customer has ever bought is Superfood Tabs — and by the spec's own coverage guidance that is the over-covered flagship (~3,158 reviews)."*
+
+That was the instruction's fault, not the judgment's. The instruction is now explicit.
+
+**"3,158 reviews" also overstates the coverage.** Every one of those rows is a frozen Klaviyo-era review predating 2026-07-01; nothing has been collected since. A product with thousands of stale reviews and none in two months is not over-covered in any sense that matters — the PDP needs recency and the ad tool mines *current* verbatims. **Treat a product with no recent reviews as UNDER-covered regardless of its lifetime total.**
 
 ## The two angles (per-customer, not per-product)
 
