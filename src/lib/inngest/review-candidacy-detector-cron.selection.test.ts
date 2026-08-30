@@ -59,6 +59,15 @@ function makeLatestExternal(
   return map;
 }
 
+/**
+ * Every pre-existing test in this file predates the two-sided gate and assumes
+ * its rows ARE real conversations. This mirrors that assumption explicitly so
+ * those tests keep testing what they were written to test.
+ */
+function allTwoSided(rows: ReviewCandidacyBatchRow[]): Set<string> {
+  return new Set(rows.map((r) => r.id));
+}
+
 test("skip: a ticket with a recent COMPLETED review-candidacy verdict is not re-enqueued", () => {
   // The named failing state: the detector reconsidered the same quiet ticket
   // every 30 min because Phase 1 does not write a review_requests row for
@@ -73,6 +82,7 @@ test("skip: a ticket with a recent COMPLETED review-candidacy verdict is not re-
     latestExternal: makeLatestExternal(rows),
     inflightSlugs: new Set(),
     recentlyAskedCustomers: new Set(),
+    twoSidedTicketIds: allTwoSided(rows),
     recentVerdictSlugs: new Set(["ticket-1"]),
     now: NOW,
     enqueueCap: REVIEW_CANDIDACY_ENQUEUE_CAP,
@@ -93,6 +103,7 @@ test("skip: FAILED and NEEDS_ATTENTION verdicts are treated as terminal fingerpr
     latestExternal: makeLatestExternal(rows),
     inflightSlugs: new Set(),
     recentlyAskedCustomers: new Set(),
+    twoSidedTicketIds: allTwoSided(rows),
     recentVerdictSlugs: new Set(["ticket-1", "ticket-2"]),
     now: NOW,
     enqueueCap: REVIEW_CANDIDACY_ENQUEUE_CAP,
@@ -111,6 +122,7 @@ test("pass: a ticket with no recent verdict on file is enqueued as normal", () =
     latestExternal: makeLatestExternal(rows),
     inflightSlugs: new Set(),
     recentlyAskedCustomers: new Set(),
+    twoSidedTicketIds: allTwoSided(rows),
     recentVerdictSlugs: new Set(),
     now: NOW,
     enqueueCap: REVIEW_CANDIDACY_ENQUEUE_CAP,
@@ -134,6 +146,7 @@ test("cap: enqueue is bounded to REVIEW_CANDIDACY_ENQUEUE_CAP even when more are
     latestExternal: makeLatestExternal(rows),
     inflightSlugs: new Set(),
     recentlyAskedCustomers: new Set(),
+    twoSidedTicketIds: allTwoSided(rows),
     recentVerdictSlugs: new Set(),
     now: NOW,
     enqueueCap: REVIEW_CANDIDACY_ENQUEUE_CAP,
@@ -176,6 +189,7 @@ test("skip: the cooldown check does NOT double-count a verdict-skipped ticket in
     latestExternal: makeLatestExternal(rows),
     inflightSlugs: new Set(),
     recentlyAskedCustomers: new Set(),
+    twoSidedTicketIds: allTwoSided(rows),
     recentVerdictSlugs: new Set(["ticket-1"]),
     now: NOW,
     enqueueCap: REVIEW_CANDIDACY_ENQUEUE_CAP,
@@ -197,10 +211,87 @@ test("skip: inflight status still takes precedence over the verdict cooldown cou
     latestExternal: makeLatestExternal(rows),
     inflightSlugs: new Set(["ticket-1"]),
     recentlyAskedCustomers: new Set(),
+    twoSidedTicketIds: allTwoSided(rows),
     recentVerdictSlugs: new Set(["ticket-1"]),
     now: NOW,
     enqueueCap: REVIEW_CANDIDACY_ENQUEUE_CAP,
   });
   assert.equal(result.eligible.length, 0);
+  assert.equal(result.skipped_recent_verdict, 0);
+});
+
+
+test("skip: a one-sided ticket (outbound only — the dunning shape) never reaches Sol", () => {
+  // The live defect this gate closes. An automated payment-recovery ticket has
+  // one outbound notice and zero customer replies, so "we spoke last" passes
+  // trivially and the ticket burned a full Sol session. Her own verdict on it:
+  // "with AI turns=0 she hasn't even responded, so there is no finished
+  // conversation". A ticket the customer never wrote in is not a conversation.
+  const rows = [makeRow(1)];
+  const result = selectReviewCandidacyBatch({
+    rows,
+    latestExternal: makeLatestExternal(rows),
+    inflightSlugs: new Set(),
+    twoSidedTicketIds: new Set(), // no inbound → not two-sided
+    recentlyAskedCustomers: new Set(),
+    recentVerdictSlugs: new Set(),
+    now: NOW,
+    enqueueCap: REVIEW_CANDIDACY_ENQUEUE_CAP,
+  });
+  assert.equal(result.eligible.length, 0);
+  assert.equal(result.capped.length, 0);
+  assert.equal(result.skipped_one_sided, 1);
+});
+
+test("keep: a genuine two-sided conversation still qualifies", () => {
+  // The gate must not swallow the actual cohort. Same row, same window, only
+  // difference is that both sides spoke.
+  const rows = [makeRow(1)];
+  const result = selectReviewCandidacyBatch({
+    rows,
+    latestExternal: makeLatestExternal(rows),
+    inflightSlugs: new Set(),
+    twoSidedTicketIds: allTwoSided(rows),
+    recentlyAskedCustomers: new Set(),
+    recentVerdictSlugs: new Set(),
+    now: NOW,
+    enqueueCap: REVIEW_CANDIDACY_ENQUEUE_CAP,
+  });
+  assert.equal(result.eligible.length, 1);
+  assert.equal(result.skipped_one_sided, 0);
+});
+
+test("mixed batch: one-sided rows are dropped, two-sided rows survive", () => {
+  const rows = [makeRow(1), makeRow(2), makeRow(3)];
+  const result = selectReviewCandidacyBatch({
+    rows,
+    latestExternal: makeLatestExternal(rows),
+    inflightSlugs: new Set(),
+    twoSidedTicketIds: new Set(["ticket-2"]),
+    recentlyAskedCustomers: new Set(),
+    recentVerdictSlugs: new Set(),
+    now: NOW,
+    enqueueCap: REVIEW_CANDIDACY_ENQUEUE_CAP,
+  });
+  assert.deepEqual(result.eligible.map((r) => r.id), ["ticket-2"]);
+  assert.equal(result.skipped_one_sided, 2);
+});
+
+test("the one-sided gate runs BEFORE the verdict-cooldown counter", () => {
+  // Ordering matters for the counters: a one-sided ticket that also has a
+  // recent verdict should be attributed to skipped_one_sided, not double
+  // counted, so the heartbeat's numbers stay readable.
+  const rows = [makeRow(1)];
+  const result = selectReviewCandidacyBatch({
+    rows,
+    latestExternal: makeLatestExternal(rows),
+    inflightSlugs: new Set(),
+    twoSidedTicketIds: new Set(),
+    recentlyAskedCustomers: new Set(),
+    recentVerdictSlugs: new Set(["ticket-1"]),
+    now: NOW,
+    enqueueCap: REVIEW_CANDIDACY_ENQUEUE_CAP,
+  });
+  assert.equal(result.skipped_one_sided, 1);
   assert.equal(result.skipped_recent_verdict, 0);
 });

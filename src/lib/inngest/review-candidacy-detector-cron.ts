@@ -140,6 +140,24 @@ export function selectReviewCandidacyBatch(input: {
   inflightSlugs: Set<string>;
   recentlyAskedCustomers: Set<string>;
   recentVerdictSlugs: Set<string>;
+  /**
+   * Tickets that carry BOTH an external inbound (the customer wrote) and an
+   * external outbound (we answered). A ticket missing either side is not a
+   * conversation and must never reach Sol.
+   *
+   * Without this, an automated dunning ticket — one outbound payment-recovery
+   * notice, zero customer replies — passes the "we spoke last" window check
+   * and burns a full Sol session to conclude there was nothing to conclude.
+   * Observed live: Sol's own verdict read "with AI turns=0 she hasn't even
+   * responded, so there is no finished conversation". Same class as the CSAT
+   * cron's "only survey tickets we actually answered" guard, applied to both
+   * directions instead of one.
+   *
+   * This is deliberately a general rule rather than a dunning-specific tag
+   * match — it also excludes auto-replies, shipping notices, OOF bounces, and
+   * any future one-sided ticket type nobody thought to enumerate.
+   */
+  twoSidedTicketIds: Set<string>;
   now: number;
   enqueueCap: number;
 }): {
@@ -147,10 +165,18 @@ export function selectReviewCandidacyBatch(input: {
   capped: ReviewCandidacyBatchRow[];
   deferred: number;
   skipped_recent_verdict: number;
+  skipped_one_sided: number;
 } {
   let skipped_recent_verdict = 0;
+  let skipped_one_sided = 0;
   const eligible = input.rows.filter((t) => {
     if (input.inflightSlugs.has(t.id)) return false;
+    // Both sides must have spoken. Cheapest discriminator available, and it
+    // runs before the window check so one-sided tickets cost nothing.
+    if (!input.twoSidedTicketIds.has(t.id)) {
+      skipped_one_sided++;
+      return false;
+    }
     if (t.customer_id && input.recentlyAskedCustomers.has(t.customer_id))
       return false;
     const last = input.latestExternal.get(t.id);
@@ -173,6 +199,7 @@ export function selectReviewCandidacyBatch(input: {
     capped,
     deferred: Math.max(0, eligible.length - capped.length),
     skipped_recent_verdict,
+    skipped_one_sided,
   };
 }
 
@@ -262,6 +289,36 @@ export const reviewCandidacyDetectorCron = inngest.createFunction(
         latestExternal.set(m.ticket_id, { at: m.created_at, direction: dir });
       }
 
+      // A ticket only qualifies if BOTH sides actually spoke. `latestExternal`
+      // above answers "who spoke LAST", which a one-sided automated ticket
+      // (dunning notice, auto-reply, shipping update) passes trivially — it
+      // has an outbound and nothing else. Read the two directions separately
+      // rather than reusing the 3-most-recent-per-ticket window above, which
+      // could miss an inbound behind three recent outbounds.
+      const twoSidedTicketIds = new Set<string>();
+      {
+        const [{ data: inboundRows }, { data: outboundRows }] = await Promise.all([
+          admin
+            .from("ticket_messages")
+            .select("ticket_id")
+            .in("ticket_id", ticketIds)
+            .neq("visibility", "internal")
+            .eq("direction", "inbound"),
+          admin
+            .from("ticket_messages")
+            .select("ticket_id")
+            .in("ticket_id", ticketIds)
+            .neq("visibility", "internal")
+            .eq("direction", "outbound"),
+        ]);
+        const withInbound = new Set(
+          ((inboundRows || []) as Array<{ ticket_id: string }>).map((m) => m.ticket_id),
+        );
+        for (const m of (outboundRows || []) as Array<{ ticket_id: string }>) {
+          if (withInbound.has(m.ticket_id)) twoSidedTicketIds.add(m.ticket_id);
+        }
+      }
+
       // Dedupe against any prior review_requests row for this customer — a
       // customer who has ALREADY been asked in the current window should not
       // be asked again. Cheap coarse guard: if there's ANY row for this
@@ -330,16 +387,22 @@ export const reviewCandidacyDetectorCron = inngest.createFunction(
         (recentVerdicts || []).map((j) => j.spec_slug as string),
       );
 
-      const { eligible, capped, deferred, skipped_recent_verdict } =
-        selectReviewCandidacyBatch({
-          rows,
-          latestExternal,
-          inflightSlugs,
-          recentlyAskedCustomers,
-          recentVerdictSlugs,
-          now,
-          enqueueCap: REVIEW_CANDIDACY_ENQUEUE_CAP,
-        });
+      const {
+        eligible,
+        capped,
+        deferred,
+        skipped_recent_verdict,
+        skipped_one_sided,
+      } = selectReviewCandidacyBatch({
+        rows,
+        latestExternal,
+        inflightSlugs,
+        recentlyAskedCustomers,
+        recentVerdictSlugs,
+        twoSidedTicketIds,
+        now,
+        enqueueCap: REVIEW_CANDIDACY_ENQUEUE_CAP,
+      });
 
       let enqueued = 0;
       for (const t of capped) {
