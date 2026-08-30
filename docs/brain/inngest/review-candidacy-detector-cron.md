@@ -52,3 +52,11 @@ A ticket only reaches Sol if it carries **both** an external inbound (the custom
 Deliberately a general rule, not a `dunning` tag match: it also excludes auto-replies, shipping notices, OOF bounces, and whatever one-sided ticket type nobody has thought of yet. Same class as the CSAT cron's "only survey tickets we actually answered" guard ([[../lifecycles/csat]] § 3a), applied to both directions instead of one.
 
 Counted separately as `skipped_one_sided` in the heartbeat, and evaluated **before** the verdict-cooldown check so the two counters never double-attribute the same ticket.
+
+## Coverage is a tiebreaker, not a veto
+
+Sol's brief ranks candidate products by review coverage so a thin product wins over a thick one. That is a **tiebreaker between two eligible products only**.
+
+The first 117 sessions produced **zero asks**, and **52 of the declines (44%)** cited coverage as a disqualifier — nearly all Superfood Tabs, the flagship and the only product most customers ever buy. The skill had listed "the coverage tilts the wrong way" among the reasons to skip, alongside "skipping is ALWAYS correct", so a tiebreaker meant for the rare multi-product case was vetoing the largest cohort. Corrected in `.claude/skills/review-candidacy/SKILL.md`.
+
+Second-order point worth keeping: Superfood Tabs' ~3,158 reviews are **all frozen Klaviyo-era rows predating 2026-07-01**. Lifetime totals are the wrong measure of coverage when nothing has been collected in months — a PDP needs recency and the ad tool mines current verbatims. A product with no recent reviews is UNDER-covered regardless of its total.
