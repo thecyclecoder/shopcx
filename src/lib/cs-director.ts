@@ -61,7 +61,7 @@ import { errText } from "@/lib/error-text";
 import type { ActionContext, ActionParams, SonnetDecision } from "@/lib/action-executor";
 import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
 import type { CxOrderRemedyState, CxOrderRemedyStateRef } from "@/lib/cx-agent-sdk";
-import { MONEY_ACTION_TYPES } from "@/lib/june-remedy-approval";
+import { MONEY_ACTION_TYPES, isNonOrderScopedLoyaltyAction } from "@/lib/june-remedy-approval";
 import { getAgentPolicyPackage, formatAgentPolicyPackage } from "@/lib/policies";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -654,6 +654,13 @@ export function verifyPlanAgainstRemedyStates(
   for (let i = 0; i < actions.length; i++) {
     const step = actions[i];
     if (!MONEY_ACTION_TYPES.has(step.actionType)) continue;
+    // spec: june-loyalty-coupon-to-subscription-exempt-from-order-scoped-remedy-state-rail —
+    // a loyalty coupon on a subscription contract (or the paired coupon mint) cannot
+    // double-pay any order, so the order-scoped rails do not apply. The loyalty $15 ceiling
+    // (`planNeedsLoyaltyRefusal`) + the executor's one-coupon-per-sub check remain the sole
+    // rails on this shape. `redeem_points_as_refund` is NOT in the exemption — it draws down
+    // a real order and stays inside this rail.
+    if (isNonOrderScopedLoyaltyAction(step.actionType, step.actionParams)) continue;
     const ref = extractRemedyOrderRefFromStep(step.actionParams);
     if (!ref) {
       return {
@@ -757,6 +764,7 @@ export function verifyPlanAgainstRemedyStates(
       for (let i = 0; i < actions.length; i++) {
         const step = actions[i];
         if (!MONEY_ACTION_TYPES.has(step.actionType)) continue;
+        if (isNonOrderScopedLoyaltyAction(step.actionType, step.actionParams)) continue;
         const ref = extractRemedyOrderRefFromStep(step.actionParams);
         if (ref?.key === key) {
           violatingIndex = i;
@@ -794,6 +802,9 @@ export async function loadRemedyStatesForPlan(
   const refs = new Map<string, RemedyOrderRef>();
   for (const step of actions) {
     if (!MONEY_ACTION_TYPES.has(step.actionType)) continue;
+    // Same exemption as `verifyPlanAgainstRemedyStates` — a subscription-scoped loyalty coupon
+    // (or the paired mint) names no order to prefetch state for.
+    if (isNonOrderScopedLoyaltyAction(step.actionType, step.actionParams)) continue;
     const ref = extractRemedyOrderRefFromStep(step.actionParams);
     if (ref && !refs.has(ref.key)) refs.set(ref.key, ref);
   }
