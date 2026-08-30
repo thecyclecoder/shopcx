@@ -556,7 +556,15 @@ test("Phase 1 slow-kill — skeptic v3 $226 near-miss ($678 spend, 3 purchases, 
   assert.equal(isDecisionTreeKill(skepticV3, P2_THRESHOLDS, true), false);
 });
 
-test("computeMediaBuyerPlan — never_pause_object_ids blocks the kill", () => {
+test("computeMediaBuyerPlan — never_pause_object_ids blocks the kill AND surfaces it on plan.killDeferred (no silent skip)", () => {
+  // ads-supervisor-fix-fdc11e10-bianca-kill-120253384730390184 — the pre-fix planner
+  // bare-`continue`d on a never-pause loser, so a CEO-protected dud left no ledger trace
+  // AND no supervisor coverage — the every-3h ads-supervisor's `bianca_missed_kill`
+  // finding fired 3h too late on every pass. Post-fix the drop lands on `killDeferred`
+  // with rail='never_pause_list' + the source citations so the runner can write a
+  // `media_buyer_kill_rail_deferred` row (armed mode) that IS the coverage. The pin
+  // asserts BOTH halves — plan.kill stays empty (guardrail intact) AND plan.killDeferred
+  // carries the trace (no-false-promises: cited never silent).
   const l = loser({ targetObjectId: "protected-adset" });
   const plan = computeMediaBuyerPlan(
     baseInputs({
@@ -564,7 +572,33 @@ test("computeMediaBuyerPlan — never_pause_object_ids blocks the kill", () => {
       policy: policy({ never_pause_object_ids: ["protected-adset"] }),
     }),
   );
-  assert.equal(plan.kill.length, 0);
+  assert.equal(plan.kill.length, 0, "the CEO's never-pause guardrail is preserved — no kill emitted");
+  assert.equal(plan.killDeferred.length, 1, "the drop MUST surface on plan.killDeferred — a silent bare continue is the exact class this fix retires");
+  const kd = plan.killDeferred[0];
+  assert.equal(kd.rail, "never_pause_list");
+  assert.equal(kd.targetObjectId, "protected-adset");
+  assert.equal(kd.targetLevel, l.targetLevel);
+  assert.equal(kd.sourceMetaAdId, l.sourceMetaAdId);
+  assert.equal(kd.roas, l.roas);
+  assert.equal(kd.spendCents, l.spendCents);
+  assert.ok(kd.rationale.includes("never_pause_object_ids"), "rationale MUST cite the policy field so the CEO card explains WHY the dud was held");
+  // Summary reflects the kill-rail deferral so the pass audit trail shows the suppression.
+  assert.ok(
+    plan.summary.includes("kill-rails deferred=1"),
+    "summary MUST include the kill-rail counter so #director-growth-max sees the suppression instead of a silently-empty plan",
+  );
+});
+
+test("computeMediaBuyerPlan — non-protected loser still emits a kill AND leaves killDeferred empty", () => {
+  const l = loser({ targetObjectId: "not-protected" });
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      losers: [l],
+      policy: policy({ never_pause_object_ids: ["some-other-adset"] }),
+    }),
+  );
+  assert.equal(plan.kill.length, 1);
+  assert.equal(plan.killDeferred.length, 0);
 });
 
 test("computeMediaBuyerPlan — winner with no parent adset resolved is skipped (safe)", () => {

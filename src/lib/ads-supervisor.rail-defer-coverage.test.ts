@@ -14,7 +14,11 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readRecentScaleRailDeferralsForAdsets, RAIL_DEFERRAL_LOOKBACK_MS } from "./ads-supervisor";
+import {
+  readRecentScaleRailDeferralsForAdsets,
+  readRecentKillRailDeferralsForAdsets,
+  RAIL_DEFERRAL_LOOKBACK_MS,
+} from "./ads-supervisor";
 
 type Row = {
   workspace_id: string;
@@ -149,6 +153,76 @@ test("a defer row with null metadata OR a non-string target_object_id is skipped
   assert.deepEqual([...deferred], ["adset-legit"]);
 });
 
+// ── kill-rail coverage (ads-supervisor-fix-fdc11e10-bianca-kill-120253384730390184) ──
+//
+// Kill-side twin of the scale-rail coverage pins above. A `media_buyer_kill_rail_deferred`
+// row in the freshness window on the dud IS the coverage — Bianca DID evaluate the loser
+// and chose to defer per `policy.never_pause_object_ids`. Without this read the supervisor
+// authors a fresh `bianca_missed_kill` fix-spec every 3h on a CEO-protected dud, flooding
+// the digest with false positives on a legitimate policy hold.
+
+test("kill: a recent kill_rail_deferred row on the adset counts as coverage; older-than-24h does NOT", async () => {
+  const nowMs = Date.parse("2026-08-30T18:00:00Z");
+  const withinIso = new Date(nowMs - 3 * 3600_000).toISOString(); // 3h ago
+  const staleIso = new Date(nowMs - 26 * 3600_000).toISOString(); // 26h ago — outside cap
+  const { admin, capture } = makeFakeAdmin([
+    { workspace_id: "ws-1", action_kind: "media_buyer_kill_rail_deferred", created_at: withinIso, metadata: { target_object_id: "adset-dud-protected", rail: "never_pause_list" } },
+    { workspace_id: "ws-1", action_kind: "media_buyer_kill_rail_deferred", created_at: staleIso, metadata: { target_object_id: "adset-dud-stale", rail: "never_pause_list" } },
+    { workspace_id: "ws-other", action_kind: "media_buyer_kill_rail_deferred", created_at: withinIso, metadata: { target_object_id: "adset-dud-protected", rail: "never_pause_list" } },
+    // wrong action_kind — the scale-rail defer MUST NOT accidentally satisfy the kill coverage read.
+    { workspace_id: "ws-1", action_kind: "media_buyer_scale_rail_deferred", created_at: withinIso, metadata: { target_object_id: "adset-dud-protected", rail: "per_object_cooldown" } },
+  ]);
+  const deferred = await readRecentKillRailDeferralsForAdsets(
+    admin,
+    "ws-1",
+    ["adset-dud-protected", "adset-dud-stale"],
+    nowMs,
+  );
+
+  assert.deepEqual(
+    capture.eqs.map((e) => [e.col, e.val]),
+    [["workspace_id", "ws-1"], ["action_kind", "media_buyer_kill_rail_deferred"]],
+    "readRecentKillRailDeferralsForAdsets MUST filter by workspace + action_kind='media_buyer_kill_rail_deferred' — a stray edit that widens the filter would let a scale-rail defer silently count as kill coverage",
+  );
+  assert.equal(capture.gtes.length, 1, "the freshness gate (.gte created_at) MUST be present on the kill-side read too");
+  assert.equal(capture.gtes[0].col, "created_at");
+  const sinceMsFromArgv = Date.parse(String(capture.gtes[0].val));
+  assert.equal(sinceMsFromArgv, nowMs - RAIL_DEFERRAL_LOOKBACK_MS, "sinceIso MUST equal nowMs - RAIL_DEFERRAL_LOOKBACK_MS (24h)");
+
+  assert.ok(deferred.has("adset-dud-protected"), "a fresh never_pause_list defer on the protected dud covers the kill — Bianca evaluated the loser and held per policy");
+  assert.ok(!deferred.has("adset-dud-stale"), "a defer older than RAIL_DEFERRAL_LOOKBACK_MS MUST NOT count — a CEO removing the adset from never_pause_object_ids MUST see a fresh miss on the next tick");
+});
+
+test("kill: only adsets in the input list flow into the result — a kill-defer on an unlisted adset is ignored", async () => {
+  const nowMs = Date.parse("2026-08-30T18:00:00Z");
+  const withinIso = new Date(nowMs - 3600_000).toISOString();
+  const { admin } = makeFakeAdmin([
+    { workspace_id: "ws-1", action_kind: "media_buyer_kill_rail_deferred", created_at: withinIso, metadata: { target_object_id: "adset-listed", rail: "never_pause_list" } },
+    { workspace_id: "ws-1", action_kind: "media_buyer_kill_rail_deferred", created_at: withinIso, metadata: { target_object_id: "adset-unlisted", rail: "never_pause_list" } },
+  ]);
+  const deferred = await readRecentKillRailDeferralsForAdsets(admin, "ws-1", ["adset-listed"], nowMs);
+  assert.deepEqual([...deferred], ["adset-listed"]);
+});
+
+test("kill: empty adsetIds → empty set, no DB read attempted (short-circuit)", async () => {
+  const { admin, capture } = makeFakeAdmin([]);
+  const deferred = await readRecentKillRailDeferralsForAdsets(admin, "ws-1", [], Date.parse("2026-08-30T18:00:00Z"));
+  assert.equal(deferred.size, 0);
+  assert.equal(capture.table, "");
+});
+
+test("kill: a defer row with null metadata OR a non-string target_object_id is skipped, not thrown", async () => {
+  const nowMs = Date.parse("2026-08-30T18:00:00Z");
+  const withinIso = new Date(nowMs - 3600_000).toISOString();
+  const { admin } = makeFakeAdmin([
+    { workspace_id: "ws-1", action_kind: "media_buyer_kill_rail_deferred", created_at: withinIso, metadata: null },
+    { workspace_id: "ws-1", action_kind: "media_buyer_kill_rail_deferred", created_at: withinIso, metadata: { target_object_id: 98765 } },
+    { workspace_id: "ws-1", action_kind: "media_buyer_kill_rail_deferred", created_at: withinIso, metadata: { target_object_id: "adset-legit" } },
+  ]);
+  const deferred = await readRecentKillRailDeferralsForAdsets(admin, "ws-1", ["adset-legit"], nowMs);
+  assert.deepEqual([...deferred], ["adset-legit"]);
+});
+
 // Structural pin — grep guard so a stray edit that removes the freshness gate regresses THIS
 // test at merge, not in prod when a year-old defer row is silently counted as covering a crown.
 test("ads-supervisor.ts — readRecentScaleRailDeferralsForAdsets literal filters include .eq(\"action_kind\", \"media_buyer_scale_rail_deferred\") + .gte(\"created_at\", …) (grep guard)", async () => {
@@ -161,5 +235,14 @@ test("ads-supervisor.ts — readRecentScaleRailDeferralsForAdsets literal filter
   assert.ok(
     /\.gte\(\s*["']created_at["']\s*,\s*sinceIso\s*\)/.test(src),
     "the freshness gate .gte(\"created_at\", sinceIso) MUST be present — a missing gate silently ages the coverage into a year-long free pass",
+  );
+});
+
+test("ads-supervisor.ts — readRecentKillRailDeferralsForAdsets literal filters include .eq(\"action_kind\", \"media_buyer_kill_rail_deferred\") (grep guard)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("./ads-supervisor.ts", import.meta.url), "utf8");
+  assert.ok(
+    /\.eq\(\s*["']action_kind["']\s*,\s*["']media_buyer_kill_rail_deferred["']\s*\)/.test(src),
+    "ads-supervisor.ts must call .eq(\"action_kind\", \"media_buyer_kill_rail_deferred\") on the kill-side coverage read — a missing filter would silently count every director_activity row as coverage",
   );
 });
