@@ -42,3 +42,13 @@ _None._ The cron writes directly to `agent_jobs`; the box worker's `review-candi
 ---
 
 [[../README]] · [[../../CLAUDE]] · [[../tables/review_requests]] · [[ticket-csat]]
+
+## Eligibility: both sides must have spoken
+
+A ticket only reaches Sol if it carries **both** an external inbound (the customer wrote) and an external outbound (we answered). Checked with two direction-scoped reads rather than the 3-most-recent-per-ticket window used for `latestExternal`, which could miss an inbound sitting behind three recent outbounds.
+
+**Why:** `latestExternal` answers *who spoke last*, and a one-sided automated ticket passes that trivially — it has an outbound and nothing else. Live evidence: an automated dunning ticket burned a full Sol session, and her own verdict read *"with AI turns=0 she hasn't even responded, so there is no finished conversation."* Measured across the first 79 sessions, **23 (29%) were one-sided** — pure waste in a lane that runs one session at a time.
+
+Deliberately a general rule, not a `dunning` tag match: it also excludes auto-replies, shipping notices, OOF bounces, and whatever one-sided ticket type nobody has thought of yet. Same class as the CSAT cron's "only survey tickets we actually answered" guard ([[../lifecycles/csat]] § 3a), applied to both directions instead of one.
+
+Counted separately as `skipped_one_sided` in the heartbeat, and evaluated **before** the verdict-cooldown check so the two counters never double-attribute the same ticket.
