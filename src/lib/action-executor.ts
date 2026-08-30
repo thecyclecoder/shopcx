@@ -5031,7 +5031,7 @@ async function handlePlaybook(
   const target = norm(pbName);
   const { data: allPlaybooks } = await ctx.admin
     .from("playbooks")
-    .select("id, name, trigger_intents")
+    .select("id, name, slug, trigger_intents")
     .eq("workspace_id", ctx.workspaceId)
     .eq("is_active", true);
   const playbook = (allPlaybooks || []).find(p =>
@@ -5138,7 +5138,68 @@ async function handlePlaybook(
       .order("created_at", { ascending: false }).limit(1).single();
     const customerMsg = lastMsg?.data?.body_clean || lastMsg?.data?.body || "";
 
-    await startPlaybook(ctx.admin, ctx.ticketId, playbook.id);
+    // ── Live-orchestrator assisted-purchase routing boundary ──
+    // Spec: docs/brain/specs/live-orchestrator-assisted-purchase-carries-picked-item.md
+    //
+    // Mirror the Sol Direction boundary
+    // (src/lib/ticket-directions.ts `resolvePlaybookForDirection`): when the
+    // orchestrator routes into one of the two assisted-purchase playbook
+    // slugs, resolve the customer's confirmed variant reference to its
+    // internal UUID and seed `ctx.assisted_purchase_params` on
+    // `playbook_context` BEFORE the terminal `create_order` /
+    // `create_subscription` step runs. Without this, the sibling
+    // `assistedCreateMissingItemsGuard` refuses to dispatch every turn and
+    // the orchestrator loops on its canned "which product and flavor..."
+    // reply (ticket 083201b5 — Maria D James, confirmed 3× Cocoa French
+    // Roast on a vaulted card, looped ~4 times before escalating
+    // `no_progress_context_cap`).
+    //
+    // Sec:real-vuln trust boundary (same as the Direction resolver):
+    // `unit_cents` and `vendor` are DELIBERATELY not sourced from the
+    // decision — price flows from the resolved `product_variants.price_cents`
+    // and vendor from the playbook step's `config.vendor` default. See
+    // `resolveAssistedPurchaseIntentToParams` + `RawAssistedPurchaseIntent`.
+    let assistedSeedContext: Record<string, unknown> | undefined;
+    if (
+      playbook.slug === "assisted-order-purchase" ||
+      playbook.slug === "assisted-subscription-purchase"
+    ) {
+      const { extractAssistedPurchaseIntentFromDecision, resolveAssistedPurchaseIntentToParams } =
+        await import("@/lib/playbook-executor");
+      const intent = extractAssistedPurchaseIntentFromDecision(decision, playbook.slug);
+      const params = intent
+        ? await resolveAssistedPurchaseIntentToParams(ctx.admin, ctx.workspaceId, intent)
+        : null;
+      if (params) {
+        assistedSeedContext = { assisted_purchase_params: params };
+      } else {
+        // Fail at the routing boundary rather than start the playbook with
+        // empty params — the terminal step's empty-order guard would refuse
+        // every turn and the orchestrator would loop on the canned
+        // clarification reply. Escalate so the ticket-handle worker hands
+        // this back to Sol, whose Direction boundary re-runs the resolver
+        // with a fresh DB-backed lookup (or re-asks the customer for the
+        // specific variant when the reference genuinely cannot be resolved).
+        const why = intent
+          ? "variant_id could not be resolved to an internal product_variant"
+          : "no create_order/create_subscription action with a variant_id on the decision";
+        await sysNote(
+          `[Playbook] ${playbook.slug} — refusing to start with empty assisted_purchase_params (${why}); escalating so Sol's Direction boundary re-runs the resolver.`,
+        );
+        await escalateTicket(
+          ctx,
+          `assisted_purchase_orchestrator_missing_intent:${playbook.slug}`,
+        );
+        return;
+      }
+    }
+
+    await startPlaybook(
+      ctx.admin,
+      ctx.ticketId,
+      playbook.id,
+      assistedSeedContext ? { seed_context: assistedSeedContext } : undefined,
+    );
 
     let result = await executePlaybookStep(
       ctx.workspaceId, ctx.ticketId, customerMsg, personality,
