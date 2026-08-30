@@ -15476,14 +15476,21 @@ interface CsDirectorVerdict {
 // runner that can't parse the verdict must NEVER silently upgrade to auto-approve/auto-author. Same
 // rule the deploy-review runner uses for its unparseable-verdict fallback.
 /**
- * Return true when the CS Director verdict proposes at least one MONEY action — the fail-closed
- * predicate for the `remedy_state` mandatory-precondition rail (Phase 1 of
+ * Return true when the CS Director verdict proposes at least one ORDER-SCOPED money action — the
+ * fail-closed predicate for the `remedy_state` mandatory-precondition rail (Phase 1 of
  * a-money-remedy-must-read-the-live-remedy-state-first § bullet 2). Reads BOTH `remedy` (the
  * auto-execute plan on approve_remedy / the in-leash partial on escalate_founder) and
  * `recommended_remedy` (the CEO-approves-on-tap plan on escalate_founder) — either can carry a
  * money type that requires the state read. Mirrors the MONEY_ACTION_TYPES set in
  * src/lib/june-remedy-approval.ts (kept literal here to avoid a runtime import from the box
  * runner's top-of-file surface).
+ *
+ * A step whose action type is a loyalty coupon operation (`apply_loyalty_coupon` /
+ * `redeem_points`) targeting a subscription contract with NO resolvable order ref is EXEMPT —
+ * it cannot double-pay any order, so the remedy_state precondition does not apply. Same
+ * predicate the executor guard (`verifyPlanAgainstRemedyStates`) uses, kept in lockstep via
+ * `isNonOrderScopedLoyaltyAction` in src/lib/june-remedy-approval.ts (spec:
+ * june-loyalty-coupon-to-subscription-exempt-from-order-scoped-remedy-state-rail).
  */
 function verdictProposesMoneyAction(verdict: CsDirectorVerdict): boolean {
   const MONEY = new Set([
@@ -15494,18 +15501,42 @@ function verdictProposesMoneyAction(verdict: CsDirectorVerdict): boolean {
     "apply_loyalty_coupon",
     "redeem_points",
   ]);
+  // Inlined: mirrors `isNonOrderScopedLoyaltyAction` in src/lib/june-remedy-approval.ts. Kept
+  // literal here for the same reason MONEY is — avoiding a runtime import on the runner's
+  // top-of-file surface. Any change here MUST change the shared predicate too (both rails have
+  // to agree on which shape is exempt).
+  const isLoyaltyContractScoped = (
+    stepType: string,
+    payload: Record<string, unknown>,
+  ): boolean => {
+    if (stepType !== "apply_loyalty_coupon" && stepType !== "redeem_points") return false;
+    const hasStr = (k: string): boolean => {
+      const raw = payload[k];
+      return typeof raw === "string" && raw.trim().length > 0;
+    };
+    if (hasStr("shopify_order_id") || hasStr("order_number") || hasStr("order_id")) return false;
+    if (stepType === "apply_loyalty_coupon") return hasStr("contract_id");
+    return true;
+  };
+  const readPayload = (raw: unknown): Record<string, unknown> => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    return raw as Record<string, unknown>;
+  };
   const bags: Array<Record<string, unknown> | undefined> = [verdict.remedy, verdict.recommended_remedy];
   for (const bag of bags) {
     if (!bag || typeof bag !== "object" || Array.isArray(bag)) continue;
     const topType = typeof bag.action_type === "string" ? bag.action_type : "";
-    if (topType && MONEY.has(topType)) return true;
+    if (topType && MONEY.has(topType) && !isLoyaltyContractScoped(topType, readPayload(bag.payload))) {
+      return true;
+    }
     const actions = Array.isArray(bag.actions) ? (bag.actions as unknown[]) : [];
     for (const step of actions) {
       if (!step || typeof step !== "object" || Array.isArray(step)) continue;
-      const stepType = typeof (step as Record<string, unknown>).action_type === "string"
-        ? String((step as Record<string, unknown>).action_type)
-        : "";
-      if (stepType && MONEY.has(stepType)) return true;
+      const stepObj = step as Record<string, unknown>;
+      const stepType = typeof stepObj.action_type === "string" ? String(stepObj.action_type) : "";
+      if (stepType && MONEY.has(stepType) && !isLoyaltyContractScoped(stepType, readPayload(stepObj.payload))) {
+        return true;
+      }
     }
   }
   return false;

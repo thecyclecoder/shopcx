@@ -15,6 +15,7 @@ import {
   buildJuneApprovalPreview,
   DEFAULT_REFUND_APPROVAL_THRESHOLD_CENTS,
   executeApprovedJuneRemedies,
+  isNonOrderScopedLoyaltyAction,
 } from "./june-remedy-approval";
 
 test("remedyMoneyAmountCents reads amount_cents on a money action", () => {
@@ -484,4 +485,100 @@ test("executeApprovedJuneRemedies: a card whose tool_input.executed_at is alread
   assert.equal(counts.executed, 0);
   assert.equal(counts.denied, 0);
   assert.equal(updateCalls.length, 0, "stampExecuted must NOT re-fire on an already-stamped card");
+});
+
+// ── isNonOrderScopedLoyaltyAction (spec: june-loyalty-coupon-to-subscription-exempt-from-order-scoped-remedy-state-rail) ──
+//
+// Derived-from ticket 2ce25d56 (Beth Dunn): apply_loyalty_coupon carrying a contract_id and no
+// order reference cannot double-pay any order, so the order-scoped remedy_state rails must NOT
+// fire on it. redeem_points_as_refund still draws down a real order and remains order-scoped.
+
+test("isNonOrderScopedLoyaltyAction — apply_loyalty_coupon with contract_id and no order ref is EXEMPT", () => {
+  assert.equal(
+    isNonOrderScopedLoyaltyAction("apply_loyalty_coupon", {
+      contract_id: "gid://shopify/SubscriptionContract/123",
+      code: "LOYALTY-15-ABCDEF",
+    }),
+    true,
+  );
+});
+
+test("isNonOrderScopedLoyaltyAction — apply_loyalty_coupon without contract_id is NOT exempt (executor rejects; must not silently pass rail)", () => {
+  assert.equal(
+    isNonOrderScopedLoyaltyAction("apply_loyalty_coupon", { code: "LOYALTY-15-ABCDEF" }),
+    false,
+  );
+});
+
+test("isNonOrderScopedLoyaltyAction — apply_loyalty_coupon that ALSO names an order ref stays inside the order-scoped rail", () => {
+  assert.equal(
+    isNonOrderScopedLoyaltyAction("apply_loyalty_coupon", {
+      contract_id: "gid://shopify/SubscriptionContract/123",
+      shopify_order_id: "SC135494",
+      code: "LOYALTY-15-ABCDEF",
+    }),
+    false,
+  );
+  assert.equal(
+    isNonOrderScopedLoyaltyAction("apply_loyalty_coupon", {
+      contract_id: "gid://shopify/SubscriptionContract/123",
+      order_number: "SC135494",
+      code: "LOYALTY-15-ABCDEF",
+    }),
+    false,
+  );
+  assert.equal(
+    isNonOrderScopedLoyaltyAction("apply_loyalty_coupon", {
+      contract_id: "gid://shopify/SubscriptionContract/123",
+      order_id: "order-uuid",
+      code: "LOYALTY-15-ABCDEF",
+    }),
+    false,
+  );
+});
+
+test("isNonOrderScopedLoyaltyAction — redeem_points (pure mint, no order ref) is EXEMPT", () => {
+  assert.equal(isNonOrderScopedLoyaltyAction("redeem_points", { tier_index: 0 }), true);
+});
+
+test("isNonOrderScopedLoyaltyAction — redeem_points_as_refund is NEVER exempt (draws down a real order)", () => {
+  assert.equal(
+    isNonOrderScopedLoyaltyAction("redeem_points_as_refund", {
+      shopify_order_id: "SC135494",
+      tier_index: 0,
+    }),
+    false,
+  );
+  // Even without an order ref, the mint-and-refund path is not the mint-and-apply path — leave
+  // this rail alone and let the executor's own missing-order error surface.
+  assert.equal(isNonOrderScopedLoyaltyAction("redeem_points_as_refund", { tier_index: 0 }), false);
+});
+
+test("isNonOrderScopedLoyaltyAction — every non-loyalty money action is never exempt", () => {
+  for (const t of ["partial_refund", "create_replacement_order", "dollar_replacement", "change_next_date", "resume"]) {
+    assert.equal(
+      isNonOrderScopedLoyaltyAction(t, { contract_id: "c" }),
+      false,
+      `${t} must never be exempted from the order-scoped rail`,
+    );
+  }
+});
+
+test("isNonOrderScopedLoyaltyAction — empty-string / whitespace-only fields do NOT count as present", () => {
+  // contract_id="" or "   " means the executor would reject the call — the exemption cannot
+  // fire, otherwise a malformed step could skate past the rail.
+  assert.equal(
+    isNonOrderScopedLoyaltyAction("apply_loyalty_coupon", { contract_id: "   ", code: "LOYALTY-15-ABCDEF" }),
+    false,
+  );
+  // shopify_order_id="   " does NOT count as an order ref, so a coupon apply with only whitespace
+  // in the (nonsensical) order slot but a real contract_id remains exempt.
+  assert.equal(
+    isNonOrderScopedLoyaltyAction("apply_loyalty_coupon", {
+      contract_id: "gid://c/1",
+      shopify_order_id: "   ",
+      code: "LOYALTY-15-ABCDEF",
+    }),
+    true,
+  );
 });
