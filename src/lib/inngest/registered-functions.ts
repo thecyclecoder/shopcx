@@ -154,6 +154,10 @@ import {
   sensorTrustProbeSweep,
 } from "@/lib/inngest/sensor-trust-probe-cadence";
 import {
+  coldScalerCacLtvCron,
+  coldScalerCacLtvSweep,
+} from "@/lib/inngest/cold-scaler-cac-ltv-cadence";
+import {
   mediaBuyerSelfCorrectingCron,
   mediaBuyerSelfCorrectingSweep,
 } from "@/lib/inngest/media-buyer-self-correcting";
@@ -345,6 +349,8 @@ export const registeredInngestFunctions = [
   mediaBuyerGradeSweep,
   sensorTrustProbeCron,
   sensorTrustProbeSweep,
+  coldScalerCacLtvCron,
+  coldScalerCacLtvSweep,
   mediaBuyerSelfCorrectingCron,
   mediaBuyerSelfCorrectingSweep,
   inngestFailureCapture,

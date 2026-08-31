@@ -522,6 +522,11 @@ const MAX_MEDIA_BUYER_GRADE = Number(process.env.AGENT_TODO_MAX_MEDIA_BUYER_GRAD
 // probe. Deterministic-Node (pure banding + a couple of table reads + one upsert)
 // — one pass per workspace at a time is plenty at a daily cadence.
 const MAX_SENSOR_TRUST_PROBE = Number(process.env.AGENT_TODO_MAX_SENSOR_TRUST_PROBE || 1);
+// cold-scaler-arming-decides-on-evidence-not-absence Phase 2: concurrency-1 lane for the
+// cold-scaler CAC:LTV sensor. Deterministic-Node (a few table reads + a compare-and-set
+// upsert into media_buyer_cold_scaler_cac_ltv_snapshots) — one pass per workspace at a
+// time is plenty at the weekly cadence.
+const MAX_COLD_SCALER_CAC_LTV = Number(process.env.AGENT_TODO_MAX_COLD_SCALER_CAC_LTV || 1);
 // media-buyer-per-cohort-iteration-policy-calibration Phase 2: deterministic-Node lane
 // that authors a pending iteration_policies row from cohort-scoped ROAS + spend samples.
 // Concurrency-1 mirrors sensor-trust-probe — one calibration proposal per (workspace,
@@ -782,7 +787,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "review-candidacy" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ad-review-feedback" | "ads-supervisor" | "imitation-quality-review" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario" | "creative-scout";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "review-candidacy" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "cold-scaler-cac-ltv" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ad-review-feedback" | "ads-supervisor" | "imitation-quality-review" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario" | "creative-scout";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -858,6 +863,7 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "media-buyer",
   "media-buyer-grade",
   "sensor-trust-probe",
+  "cold-scaler-cac-ltv",
   "calibrate-media-buyer-policy",
   "ad-creative",
   "ad-creative-copy-author",
@@ -24065,6 +24071,127 @@ async function runSensorTrustProbeJob(job: Job) {
 }
 
 /**
+ * cold-scaler-cac-ltv lane (cold-scaler-arming-decides-on-evidence-not-absence Phase 2).
+ * Deterministic-Node lane that runs runColdScalerCacLtvSensor once per active cold-scaler
+ * cohort for the workspace, upserting one row per (workspace, cohort, iso_week) in
+ * media_buyer_cold_scaler_cac_ltv_snapshots — the CAC:LTV evidence feed the cold-scaler
+ * arming gate reads.
+ *
+ * Instructions JSON (optional):
+ *   { cohort_id?, iso_week?, meta_ad_account_id? }
+ * When cohort_id is omitted the lane enumerates every active
+ * media_buyer_cold_scaler_cohorts row for the workspace (optionally scoped to
+ * meta_ad_account_id) and runs the sensor for each. When iso_week is omitted
+ * the lane derives the current ISO week (`YYYY-Www`) — the sensor's grain.
+ */
+async function runColdScalerCacLtvJob(job: Job) {
+  const tag = `[cold-scaler-cac-ltv:${job.id.slice(0, 8)}]`;
+  const a = await admin();
+  let instr: {
+    cohort_id?: string;
+    iso_week?: string;
+    meta_ad_account_id?: string | null;
+  } = {};
+  try {
+    instr = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* not JSON — degrade */
+  }
+
+  const { runColdScalerCacLtvSensor } = await import(
+    "../src/lib/media-buyer/cold-scaler-cac-ltv-sensor"
+  );
+  const { listActiveColdScalerCohorts, getMediaBuyerColdScalerCohortById } = await import(
+    "../src/lib/media-buyer/cold-scaler-cohort"
+  );
+
+  // Resolve the cohort set to sense. Explicit cohort_id in instructions wins
+  // (single-cohort run); otherwise enumerate active cohorts for the workspace
+  // (optionally filtered to a meta_ad_account_id scope).
+  let cohortIds: string[];
+  if (instr.cohort_id) {
+    const cohort = await getMediaBuyerColdScalerCohortById(a, {
+      workspaceId: job.workspace_id,
+      id: instr.cohort_id,
+    });
+    cohortIds = cohort ? [cohort.id] : [];
+  } else if (instr.meta_ad_account_id !== undefined) {
+    const cohorts = await listActiveColdScalerCohorts(a, {
+      workspaceId: job.workspace_id,
+      metaAdAccountId: instr.meta_ad_account_id ?? null,
+    });
+    cohortIds = cohorts.map((c) => c.id);
+  } else {
+    // No account scope specified — fan out over every active cohort for the
+    // workspace regardless of the account bucket.
+    const { data: rows, error } = await a
+      .from("media_buyer_cold_scaler_cohorts")
+      .select("id")
+      .eq("workspace_id", job.workspace_id)
+      .eq("is_active", true);
+    if (error) {
+      await update(job.id, {
+        status: "failed",
+        log_tail: `read failed: ${error.message}`.slice(-4000),
+      });
+      console.error(`${tag} cohort read failed: ${error.message}`);
+      return;
+    }
+    cohortIds = ((rows || []) as Array<{ id: string }>).map((r) => r.id);
+  }
+
+  if (!cohortIds.length) {
+    await update(job.id, {
+      status: "completed",
+      log_tail: "no active cold-scaler cohorts — nothing to sense",
+    });
+    console.log(`${tag} no active cold-scaler cohorts — nothing to sense`);
+    return;
+  }
+
+  const isoWeek = instr.iso_week ?? currentIsoWeekLabel(new Date());
+  const perCohort: Array<{ cohort: string; result?: unknown; error?: string }> = [];
+  for (const cohortId of cohortIds) {
+    try {
+      const result = await runColdScalerCacLtvSensor(a, {
+        workspaceId: job.workspace_id,
+        coldScalerCohortId: cohortId,
+        isoWeek,
+      });
+      perCohort.push({ cohort: cohortId.slice(0, 8), result });
+      console.log(
+        `${tag} cohort=${cohortId.slice(0, 8)} iso_week=${isoWeek} → band=${result.band} ratio=${result.cacLtvRatio ?? "null"} snapshot=${result.snapshotId ?? "n/a"}`,
+      );
+    } catch (err) {
+      const msg = errText(err);
+      perCohort.push({ cohort: cohortId.slice(0, 8), error: msg });
+      console.error(`${tag} cohort=${cohortId.slice(0, 8)} threw: ${msg}`);
+    }
+  }
+  const anySucceeded = perCohort.some((r) => !r.error);
+  await update(job.id, {
+    status: anySucceeded ? "completed" : "failed",
+    log_tail: JSON.stringify({ iso_week: isoWeek, perCohort }).slice(-4000),
+  });
+}
+
+/**
+ * ISO-8601 week label (`YYYY-Www`) for a Date — the week containing the
+ * Thursday of `d`'s ISO week. Mirrors the parser in
+ * `src/lib/media-buyer/cold-scaler-cac-ltv-sensor.ts` `isoWeekWindow` so a
+ * label emitted here round-trips to the correct Mon..Sun window inside the
+ * sensor.
+ */
+function currentIsoWeekLabel(d: Date): string {
+  const utc = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dayNum = utc.getUTCDay() || 7;
+  utc.setUTCDate(utc.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(utc.getUTCFullYear(), 0, 1));
+  const weekNum = Math.ceil(((utc.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7);
+  return `${utc.getUTCFullYear()}-W${String(weekNum).padStart(2, "0")}`;
+}
+
+/**
  * calibrate-media-buyer-policy lane (media-buyer-per-cohort-iteration-policy-calibration
  * Phase 2). Deterministic-Node lane that proposes a pending iteration_policies version
  * from the cohort's realized ROAS + spend distribution — replaces the hardcoded
@@ -27673,6 +27800,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "ad-review-feedback") return runAdReviewFeedbackJob(job);
   if (job.kind === "media-buyer-grade") return runMediaBuyerGradeJob(job);
   if (job.kind === "sensor-trust-probe") return runSensorTrustProbeJob(job);
+  if (job.kind === "cold-scaler-cac-ltv") return runColdScalerCacLtvJob(job);
   if (job.kind === "calibrate-media-buyer-policy") return runCalibrateMediaBuyerPolicyJob(job);
   if (job.kind === "ads-supervisor") return runAdsSupervisorJob(job);
   if (job.kind === "imitation-quality-review") return runImitationQualityReviewJob(job);
@@ -29794,7 +29922,7 @@ async function main() {
     `ticket-improve:${MAX_TICKET_IMPROVE}, triage-escalations:${MAX_TRIAGE}, spec-test:${MAX_SPEC_TEST}, ` +
     `migration-fix:${MAX_MIGRATION_FIX}, deploy-review:${MAX_DEPLOY_REVIEW}, mario:${MAX_MARIO}, cs-director-call:${MAX_CS_DIRECTOR_CALL}, playbook-compile:${MAX_PLAYBOOK_COMPILE}, ticket-analyze:${MAX_TICKET_ANALYZE}, dev-ask:${MAX_DEV_ASK}, ` +
     `director-coach:${MAX_DIRECTOR_COACH}, pr-resolve:${MAX_PR_RESOLVE}, repair:${MAX_REPAIR}, ` +
-    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, ad-creative:${MAX_AD_CREATIVE}, ad-creative-copy-author:${MAX_AD_CREATIVE_COPY_AUTHOR}, ad-creative-copy-qc:${MAX_AD_CREATIVE_COPY_QC}, ad-review-feedback:${MAX_AD_REVIEW_FEEDBACK}, sensor-trust-probe:${MAX_SENSOR_TRUST_PROBE}, calibrate-media-buyer-policy:${MAX_CALIBRATE_MEDIA_BUYER_POLICY}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
+    `regression:${MAX_REGRESSION}, security-review:${MAX_SECURITY_REVIEW}, agent-grade:${MAX_AGENT_GRADE}, agent-coach:${MAX_AGENT_COACH}, director-grade:${MAX_DIRECTOR_GRADE}, campaign-grade:${MAX_CAMPAIGN_GRADE}, gap-grade:${MAX_GAP_GRADE}, research:${MAX_RESEARCH}, dr-content:${MAX_DR_CONTENT}, media-buyer:${MAX_MEDIA_BUYER}, media-buyer-grade:${MAX_MEDIA_BUYER_GRADE}, ad-creative:${MAX_AD_CREATIVE}, ad-creative-copy-author:${MAX_AD_CREATIVE_COPY_AUTHOR}, ad-creative-copy-qc:${MAX_AD_CREATIVE_COPY_QC}, ad-review-feedback:${MAX_AD_REVIEW_FEEDBACK}, sensor-trust-probe:${MAX_SENSOR_TRUST_PROBE}, cold-scaler-cac-ltv:${MAX_COLD_SCALER_CAC_LTV}, calibrate-media-buyer-policy:${MAX_CALIBRATE_MEDIA_BUYER_POLICY}, storefront-optimizer:${MAX_STOREFRONT_OPTIMIZER}, ` +
     `db_health:${MAX_DB_HEALTH}, coverage-register/audit-spec-shipped-state:${MAX_COVERAGE_REGISTER}, ` +
     `platform-director/director-bounce-back:${MAX_PLATFORM_DIRECTOR}, proposed-goal:${MAX_PROPOSED_GOAL}, ` +
     `proposed-model-tier:${MAX_PROPOSED_MODEL_TIER} }`,
@@ -29945,6 +30073,7 @@ async function main() {
   const countAdCreativeCopyQc = () => [...active.values()].filter((v) => v.kind === "ad-creative-copy-qc").length;
   const countAdReviewFeedback = () => [...active.values()].filter((v) => v.kind === "ad-review-feedback").length;
   const countSensorTrustProbe = () => [...active.values()].filter((v) => v.kind === "sensor-trust-probe").length;
+  const countColdScalerCacLtv = () => [...active.values()].filter((v) => v.kind === "cold-scaler-cac-ltv").length;
   const countCalibrateMediaBuyerPolicy = () => [...active.values()].filter((v) => v.kind === "calibrate-media-buyer-policy").length;
   const countAdsSupervisor = () => [...active.values()].filter((v) => v.kind === "ads-supervisor").length;
   const countImitationQualityReview = () => [...active.values()].filter((v) => v.kind === "imitation-quality-review").length;
@@ -30584,6 +30713,19 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed sensor-trust-probe ${job.id.slice(0, 8)} → ${countSensorTrustProbe() + 1}/${MAX_SENSOR_TRUST_PROBE} sensor-trust-probe lane`);
+        launch(job);
+      }
+      // Fill the cold-scaler-cac-ltv lane (cold-scaler-arming-decides-on-evidence-not-absence
+      // Phase 2): deterministic-Node lane that runs runColdScalerCacLtvSensor once per
+      // active cold-scaler cohort for the workspace, upserting one row per
+      // (workspace, cohort, iso_week) in media_buyer_cold_scaler_cac_ltv_snapshots.
+      // Concurrency-1 mirrors sensor-trust-probe — one pass per workspace at a time
+      // is plenty at the weekly cadence.
+      while (laneHasQueued(queuedKinds, ["cold-scaler-cac-ltv"]) && countColdScalerCacLtv() < MAX_COLD_SCALER_CAC_LTV) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["cold-scaler-cac-ltv"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed cold-scaler-cac-ltv ${job.id.slice(0, 8)} → ${countColdScalerCacLtv() + 1}/${MAX_COLD_SCALER_CAC_LTV} cold-scaler-cac-ltv lane`);
         launch(job);
       }
       // Fill the calibrate-media-buyer-policy lane (media-buyer-per-cohort-iteration-policy-calibration
