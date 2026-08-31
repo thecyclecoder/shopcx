@@ -705,6 +705,18 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // summarizing the review-request drafts on canary hold, so the founder can cancel/edit
   // a wrong ask before it ships (per-ticket pending_send_at has no list view). Owner cs.
   { id: "review-request-canary-digest-cron", kind: "cron", owner: "cs", label: "Review request canary digest", description: "Daily digest that raises ONE dashboard_notifications card per workspace-day summarizing the review-request drafts on canary hold (12-24h pending_send_at). The founder cancels or edits any wrong ask before the outbox ships it. Ships ON per the spec (canary flag is a config, not a rewrite).", expectedCadence: "daily (0 8 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-08-28T00:00:00Z" },
+  // Post-order review-ask detector cron (review-request-post-order-ask Phase 1).
+  // Hourly — sweeps orders whose ORDER DATE has just crossed the per-product 10d
+  // (repeat-buyer) or 21d (first-time-for-this-product) window, joins
+  // orders.line_items[].product_id through products.shopify_product_id (never a
+  // uuid cast — the spec's ⚠️), applies the ladder skip predicates (not
+  // reviewable / already reviewed / already asked / neither channel reachable),
+  // and fires one review/post-order.ask-due Inngest event per qualifying
+  // candidate that Phase 2 will consume through the shared draft/validate/send
+  // path. Owner cmo (Iris's review-collection mandate — the ticket cohort reaches
+  // ~340/mo; this is the path to the other ~1,500 customers who never write in).
+  // 90m livenessWindow gives ≥ 1.2× the 60m cadence per assertRegistryInvariants.
+  { id: "post-order-review-ask-detector-cron", kind: "cron", owner: "cmo", label: "Post-order review-ask detector", description: "Hourly sweep for first-purchase-of-a-reviewable-product events. Joins orders.line_items[].product_id through products.shopify_product_id (never a uuid cast), splits per-product 10d repeat vs 21d first-time on ORDER DATE, applies the shared ladder skip predicates, and fires review/post-order.ask-due events Phase 2 will consume. Forward-only — no historical backfill.", expectedCadence: "every hour (0 * * * *)", livenessWindowMs: 90 * MIN, registeredAt: "2026-08-31T00:00:00Z" },
   // amplifier-import-reliability-rail Phase 2 — the reconcile sweep for paid orders the 3PL never
   // received. Re-submits any paid order past a 10-minute grace whose amplifier_order_id is still
   // null, under the retry cap, and not held by a non-dismissed fraud_cases row. 30-min window
