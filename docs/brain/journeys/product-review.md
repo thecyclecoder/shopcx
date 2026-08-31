@@ -50,3 +50,9 @@ The **public** route is now the real path. **The token is the credential**: 96 s
 Same posture as the CSAT flow already in production (`src/app/api/csat/[ticketId]/route.ts`), and strictly stronger — CSAT's token is a deterministic HMAC of the ticket id.
 
 The portal surface is kept for logged-in customers and retains its extra linked-account binding. Both call `review-journey-core`, so the review write, low-star routing, reward mint, and single-use claim are defined once.
+
+## The route must be in PUBLIC_ROUTES
+
+`/review` and `/api/review` are listed in `PUBLIC_ROUTES` (`src/lib/supabase/middleware.ts`), beside `/csat` and `/api/csat` — the same token-authorized, no-login shape.
+
+Without that entry the middleware 307s the magic link to `/login`, which is the login wall the public route exists to remove, just one layer higher. It was caught by curling the deployed route rather than trusting the merge: `csat api → 401` (reaches the handler, refuses on token) vs `review api → 307 → /login` (never reaches the handler at all).
