@@ -154,3 +154,37 @@ export function classifyPredeployViolationScope(input: {
 
   return { owned, inherited, allInherited, paths };
 }
+
+/**
+ * Predeploy Fix 1 — the caller-side safe wrapper for [[classifyPredeployViolationScope]].
+ *
+ * Returns `null` — i.e. "do NOT enter the inherited-skip branch; caller falls through to today's
+ * repair-it behavior" — whenever the caller cannot honestly answer "did this branch touch that file?":
+ *
+ *   1. `changedPathsResult.ok === false` — the `git diff --name-only` command FAILED. We refuse to
+ *      classify against an empty stand-in list, because that list would silently route EVERY extracted
+ *      violation into `inherited` and trigger a false skip.
+ *   2. `changedPathsResult.paths.length === 0` — the diff succeeded but reported zero changed files. On
+ *      a real build branch this is degenerate: if we call the classifier with `changedPaths=[]`, every
+ *      extracted path lands in `inherited`, and `allInherited` flips to true — the exact same silent
+ *      skip. The safe-wrapper refuses.
+ *
+ * Otherwise it delegates to `classifyPredeployViolationScope`. The wrapper exists so the worker's
+ * `predeploy:static` repair loop can call it once per iteration, AFTER re-running the branch diff, and
+ * so the "did the diff work?" and "is the branch actually populated?" checks live in ONE place with a
+ * type-level guarantee (returning `null` beats the caller forgetting to check `ok`).
+ *
+ * Called by [[../../scripts/builder-worker]] `runBuildJob` predeploy:static block ONLY. Kept in this
+ * pure module so a unit test can prove the fail-closed default without booting the worker.
+ */
+export function classifyPredeployViolationScopeIfSafe(input: {
+  out: string;
+  changedPathsResult: { ok: boolean; paths: string[] };
+}): { owned: string[]; inherited: string[]; allInherited: boolean; paths: string[] } | null {
+  if (!input.changedPathsResult.ok) return null;
+  if (input.changedPathsResult.paths.length === 0) return null;
+  return classifyPredeployViolationScope({
+    out: input.out,
+    changedPaths: input.changedPathsResult.paths,
+  });
+}

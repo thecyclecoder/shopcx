@@ -31,9 +31,9 @@ import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the dir
 import { errText } from "../src/lib/error-text";
 import { RERUNNABLE_JOB_KINDS } from "../src/lib/agents/park-retry"; // shared with the needs-attention re-drive rung — one list, no drift
 import {
-  classifyPredeployViolationScope,
+  classifyPredeployViolationScopeIfSafe,
   extractFailedPredeployGuards,
-} from "../src/lib/predeploy-guard-extract"; // predeploy-gate-repairs-in-session — names the failing guard(s); predeploy-repair-only-what-the-branch-owns Phase 2 — splits a violation into owned vs inherited so a branch never races the same fix on files it did not touch. (pure module: importing builder-worker.ts boots the worker, so both live here)
+} from "../src/lib/predeploy-guard-extract"; // predeploy-gate-repairs-in-session — names the failing guard(s); predeploy-repair-only-what-the-branch-owns Phase 2 + Fix 1 — splits a violation into owned vs inherited so a branch never races the same fix on files it did not touch, and the caller-side safe wrapper refuses to skip when the diff cannot honestly answer "did this branch touch that file?". (pure module: importing builder-worker.ts boots the worker, so both live here)
 // pia-decomposition-emits-plain-slug-blocked-by Phase 1 — normalize Pia's blocked_by entries to the plain
 // member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
 import { normalizePlannerBlockedByList } from "../src/lib/agents/goal-proposals";
@@ -29343,23 +29343,27 @@ async function dispatchJob(job: Job) {
     {
       let predeploySession: string | null = session ?? null;
       let predeployRepairs = 0;
-      // predeploy-repair-only-what-the-branch-owns Phase 2 — enumerate the branch's changed files ONCE
-      // so the owned-vs-inherited classifier can compare each guard failure against them. Sourced from
-      // the same `git diff --name-only <merge-base>...HEAD` the lane's ancestry gate uses elsewhere
-      // (:20716 / :20729 / :20829), not a new source of truth. On any failure we leave `changedPaths`
-      // empty and the classifier's fail-closed default (allInherited=false on empty extraction OR
-      // empty changed-list — every owned bucket is empty, so every extracted path lands in inherited;
-      // but if paths ARE extractable and the diff step failed, we can't safely claim they're inherited,
-      // so the empty-owned-set default routes back to today's repair-it behavior via the try/catch on
-      // the diff step below). NB: the classifier is called per-repair-pass so an in-session repair that
-      // introduces a NEW violation on a NEW file still classifies correctly.
-      let changedPaths: string[] = [];
-      try {
-        const diff = sh("git", ["diff", "--name-only", "origin/main...HEAD"], { cwd: wt });
-        if (diff.code === 0) {
-          changedPaths = diff.out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+      // predeploy-repair-only-what-the-branch-owns Fix 1 — enumerate the branch's changed files RIGHT
+      // BEFORE the classifier on every repair pass, not once up front. The prior compute-once shape was
+      // a false-skip vector: a repair pass that touched a NEW file could introduce a violation on it,
+      // and the NEXT pass would compare that violation's path against the STALE list, land it in
+      // `inherited`, and silently skip a branch-caused violation as if the gate had passed.
+      // Sourced from the same `git diff --name-only origin/main...HEAD` the lane's ancestry gate uses
+      // elsewhere (:20716 / :20729 / :20829), not a new source of truth. The typed return
+      // `{ ok, paths }` makes diff failure EXPLICIT: `ok=false` (git failed) OR `paths=[]` (empty diff)
+      // are both fed to `classifyPredeployViolationScopeIfSafe`, which returns `null` and forces the
+      // caller to fall through to today's repair-it behavior — an unhonest classification (silent skip
+      // from an unknown diff) can never happen.
+      const readChangedPathsFromBranch = (): { ok: boolean; paths: string[] } => {
+        try {
+          const diff = sh("git", ["diff", "--name-only", "origin/main...HEAD"], { cwd: wt });
+          if (diff.code !== 0) return { ok: false, paths: [] };
+          const paths = diff.out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+          return { ok: true, paths };
+        } catch {
+          return { ok: false, paths: [] };
         }
-      } catch { /* leave empty; classifier fails closed via the caller's default branch */ }
+      };
       for (let repairPass = 0; repairPass <= PREDEPLOY_REPAIR_MAX; repairPass++) {
         const staticCheck = await shAsync(
           "npm",
@@ -29390,18 +29394,27 @@ async function dispatchJob(job: Job) {
         const out = `${staticCheck.out}\n${staticCheck.err}`;
         const guards = extractFailedPredeployGuards(out);
         const failed = guards.length ? guards.join(", ") : "unattributable guard (see log_tail)";
-        // ⭐ predeploy-repair-only-what-the-branch-owns Phase 2 — is EVERY violation on a file this
-        // branch did not touch? If so, this branch is being asked to repair someone else's mess, and
-        // when N concurrent builds do that they race the same fix on files no one owns (the 2026-08-31
-        // park: two unrelated builds sat 6 days on the same three `_kcups` files because each had
-        // independently made the same repair while a separate PR landed that identical fix on main).
-        // Instead: step aside, record the fact, enqueue ONE deduped fix spec keyed on the failing
-        // guard, and let this commit proceed as if the gate had passed. Mixed / owned / unparseable
-        // fall through to today's behavior — the classifier's fail-closed default (allInherited=false
-        // whenever paths.length===0 or owned.length>0) guarantees no real violation is silently
-        // skipped. See [[../src/lib/predeploy-guard-extract]] `classifyPredeployViolationScope`.
-        const scope = classifyPredeployViolationScope({ out, changedPaths });
-        if (scope.allInherited) {
+        // ⭐ predeploy-repair-only-what-the-branch-owns Phase 2 + Fix 1 — is EVERY violation on a file
+        // this branch did not touch? If so, this branch is being asked to repair someone else's mess,
+        // and when N concurrent builds do that they race the same fix on files no one owns (the
+        // 2026-08-31 park: two unrelated builds sat 6 days on the same three `_kcups` files because
+        // each had independently made the same repair while a separate PR landed that identical fix on
+        // main). Instead: step aside, record the fact, enqueue ONE deduped fix spec keyed on the
+        // failing guard, and let this commit proceed as if the gate had passed. Mixed / owned /
+        // unparseable fall through to today's behavior.
+        //
+        // Fix 1: the diff read + safe-wrapper together are the load-bearing guard against a false
+        // skip.
+        //   (a) `readChangedPathsFromBranch()` runs EVERY iteration — so an in-session repair that
+        //       introduced a NEW violation on a NEW file has that file in the diff now, and the
+        //       classifier reports it as owned instead of inherited.
+        //   (b) `classifyPredeployViolationScopeIfSafe` returns `null` on `ok=false` (git failed) OR
+        //       `paths=[]` (empty diff). Both branches route the caller past this whole block into
+        //       today's repair-it behavior — no silent skip from an unknown or degenerate diff.
+        // See [[../src/lib/predeploy-guard-extract]] `classifyPredeployViolationScopeIfSafe`.
+        const changedPathsResult = readChangedPathsFromBranch();
+        const scope = classifyPredeployViolationScopeIfSafe({ out, changedPathsResult });
+        if (scope && scope.allInherited) {
           console.log(
             `${tag} build-lane predeploy:static SKIP-INHERITED (${failed}) — ${scope.inherited.length} file(s) not in this branch's diff; NOT repairing, routing ONE dedup fix spec`,
           );

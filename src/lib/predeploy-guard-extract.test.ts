@@ -13,6 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   classifyPredeployViolationScope,
+  classifyPredeployViolationScopeIfSafe,
   extractFailedPredeployGuards,
   extractPredeployViolationPaths,
 } from "./predeploy-guard-extract";
@@ -288,4 +289,65 @@ test("classifyPredeployViolationScope — normalization: leading `./` and backsl
   assert.deepEqual(r.owned, ["src/lib/x.ts"]);
   assert.deepEqual(r.inherited, []);
   assert.equal(r.allInherited, false);
+});
+
+// ── classifyPredeployViolationScopeIfSafe — Fix 1 safe-wrapper (predeploy-repair-only-what-the-branch-owns) ──
+
+test("classifyPredeployViolationScopeIfSafe — diff failure returns null so the caller cannot skip", () => {
+  // Load-bearing invariant: when `git diff --name-only` fails, we do NOT know what the branch touched,
+  // so we MUST NOT let the classifier's `changedPaths=[]` default silently classify every extracted
+  // violation as inherited. The safe wrapper returns null and the caller falls through to repair-it.
+  const out = `❌ check-competitors-sdk-compliance — 3 raw competitors-table writes outside the SDK:\n  • scripts/_kcups-blockers.ts:44  →  raw competitors-table select outside the SDK\n`;
+  const r = classifyPredeployViolationScopeIfSafe({
+    out,
+    changedPathsResult: { ok: false, paths: [] },
+  });
+  assert.equal(r, null);
+});
+
+test("classifyPredeployViolationScopeIfSafe — empty diff (ok=true, paths=[]) also returns null", () => {
+  // Same failure mode: the diff succeeded but reported zero changed files. Passing paths=[] straight
+  // into the classifier would route every extracted path into `inherited` and flip allInherited=true —
+  // a false skip. A real build branch always has at least the phase's own edits; an empty list is
+  // degenerate and the safe wrapper refuses.
+  const out = `❌ check-competitors-sdk-compliance\n  • scripts/_kcups-blockers.ts:44  →  raw competitors-table select outside the SDK\n`;
+  const r = classifyPredeployViolationScopeIfSafe({
+    out,
+    changedPathsResult: { ok: true, paths: [] },
+  });
+  assert.equal(r, null);
+});
+
+test("classifyPredeployViolationScopeIfSafe — populated diff delegates to classifyPredeployViolationScope", () => {
+  const out = `❌ check-competitors-sdk-compliance\n  • scripts/_kcups-blockers.ts:44  →  raw competitors-table select outside the SDK\n`;
+  const r = classifyPredeployViolationScopeIfSafe({
+    out,
+    changedPathsResult: { ok: true, paths: ["src/lib/cold-scaler.ts"] },
+  });
+  assert.notEqual(r, null);
+  assert.equal(r!.allInherited, true);
+  assert.deepEqual(r!.inherited, ["scripts/_kcups-blockers.ts"]);
+});
+
+test("classifyPredeployViolationScopeIfSafe — stale-list refresh: a repair-introduced violation on a NEW file is owned once the recomputed diff includes it", () => {
+  // The exact security-review scenario: pass 1 runs against `changedPaths=[A]`, a repair edit adds a
+  // NEW violation on file B, pass 2's classifier — if it used the STALE `[A]` — would misclassify B as
+  // inherited and silently skip. The correct behavior is that the worker RECOMPUTES `changedPaths`
+  // right before the classifier call, and B now appears in the diff, so B classifies as owned. This
+  // test is the pinned regression that proves the recompute solves the case; the worker's per-iter
+  // wiring is what actually delivers it.
+  const outWithNewViolation = `❌ check-pm-sdk-compliance\n  • src/lib/new-file.ts:22  →  raw PM-table update outside the SDK\n`;
+  // Pass 1's stale list — worker would misclassify with this. Included here to show the CONTRAST.
+  const stale = classifyPredeployViolationScopeIfSafe({
+    out: outWithNewViolation,
+    changedPathsResult: { ok: true, paths: ["src/lib/existing-file.ts"] },
+  });
+  assert.equal(stale!.allInherited, true, "stale list would falsely skip — this is the bug the recompute prevents");
+  // Pass 2's FRESH list after the in-session repair — the new file is now in the diff.
+  const fresh = classifyPredeployViolationScopeIfSafe({
+    out: outWithNewViolation,
+    changedPathsResult: { ok: true, paths: ["src/lib/existing-file.ts", "src/lib/new-file.ts"] },
+  });
+  assert.equal(fresh!.allInherited, false);
+  assert.deepEqual(fresh!.owned, ["src/lib/new-file.ts"]);
 });
