@@ -40,6 +40,7 @@ Synced from Appstle. items JSONB, billing interval, next billing date. Will beco
 | `comp` | `bool` | — | default: `false`. **Comp sub** — ships free on schedule (base $0, no PM, no charge). Pairs with item `price_override_cents=0` + `is_internal=true`. Renewal ships free only when the customer is comp-allowlisted ([[customers]].`comp_role`); else fails closed. |
 | `comp_note` | `text` | ✓ | Free-text reason on the comp sub ("employee"). |
 | `pricing_offer_id` | `uuid` | ✓ | → [[pricing_rule_offers]].id, `ON DELETE SET NULL`. The **persist-to-renewal offer** this sub was acquired under — a *reference, not a baked price*. The renewal engine ([[../libraries/pricing]]) applies the offer's delta while it is `active` + in-window; expiring/removing the offer reverts to base pricing automatically. Set by the deferred activation lever (owner-approval-gated). |
+| `cancelled_at` | `timestamptz` | ✓ | Stamped on the same write that sets `status='cancelled'` by both cancel writers ([[../integrations/appstle]] webhook + [[../libraries/appstle]] `appstleSubscriptionAction`), via [[../libraries/subscription-cancel-truth]] `applyCancelTruth`. **Invariant:** a row with `status='cancelled'` must have a non-null `cancelled_at` AND `next_billing_date IS NULL` — a cancelled row cannot advertise a future charge date. Preserved on Appstle re-sends (the first cancel is the historical record). Never cleared on resume/reactivate — it is the historical record of the last cancel. Historically-cancelled rows were backfilled by `scripts/_backfill-cancelled-sub-truth.ts` (Phase 2 of [[../specs/cancelled-subs-stop-reporting-a-future-billing-date]]), sourcing the timestamp from the most-recent [[billing_forecast_events]] `event_type='cancellation'` row for the sub's `shopify_contract_id` (falling back to the sub's `updated_at` when the forecast ledger predates the sub — the run summary counts fallbacks separately so a guess is never invisibly presented as the cancel moment). |
 
 ## RPC aggregations
 
@@ -105,21 +106,23 @@ const { data } = await admin.from("subscriptions")
   .lte("next_billing_date", soon);
 ```
 
-### When was this sub cancelled? (event log, NOT a column)
+### When was this sub cancelled? (read `cancelled_at` on the row)
 ```ts
-const { data } = await admin.from("customer_events")
-  .select("created_at, properties")
-  .eq("event_type", "subscription.cancelled")
-  .contains("properties", { subscription_id: subId })
-  .order("created_at", { ascending: false }).limit(1).maybeSingle();
+const { data } = await admin.from("subscriptions")
+  .select("cancelled_at, status, next_billing_date")
+  .eq("id", subId)
+  .maybeSingle();
+// Invariant: status='cancelled' ⇒ cancelled_at IS NOT NULL AND next_billing_date IS NULL.
+// The event log ([[customer_events]] / [[billing_forecast_events]]) is the audit trail
+// but the row is the answer.
 ```
 
 ## Gotchas
 
 - `status` is **lowercase**: `"active"`, `"paused"`, `"cancelled"`. `.eq("status", "ACTIVE")` returns zero rows.
 - **`shipping_address` is a fallback, not authoritative.** Order-creating actions must NOT read it directly to resolve a shipment destination — they must use [[../libraries/customer-shipping-address]] `resolveCustomerShippingAddress()`, which prefers `customers.default_address` (the canonical current address) and uses the subscription address only when the customer's default and all cited orders are empty. Same priority applies to orders — a cited order's snapshot is the last resort, not the default.
-- No `cancelled_at` / `paused_at` columns — the timestamp lives in `customer_events`. To know *when* a sub was cancelled, query the event log.
-- **A cancelled sub carries `next_billing_date = NULL`.** Every writer that flips `status → 'cancelled'` also nulls `next_billing_date` in the same update: `internalSubscriptionAction` ([[../libraries/internal-subscription]]), `appstleSubscriptionAction` ([[../libraries/appstle]]), `exhaustInternalDunning` ([[../inngest/internal-dunning]]), the journey-outcomes cancel fallback ([[../inngest/journey-outcomes]]), and the Appstle webhook when `mapStatus(status) === 'cancelled'` ([[../inngest/appstle-subscription-handler]]). Rationale: the column is the source of truth every reader (CS director brief, founder escalation card, portal detail, agent context panel) renders as "next charge" — leaving a stale future date on a cancelled row produced a wrong founder money call (ticket `8af43dd1`, 2026-08-24). Fix at the write, not the readers. A reactivation (`cancelled → active`) re-sets the date **before** the flip per the "modify first, activate LAST" invariant in [[../lifecycles/subscription-billing]]. Historically-stale rows are cleared by the idempotent ship-time backfill `scripts/_backfill-cancelled-subscription-next-billing-date.ts` (dry-run by default; `--apply` to write) — auto-ledgered on merge by [[../libraries/ship-time-backfill-detector]] and drained on the box by [[../libraries/ship-time-backfill-executor]].
+- **`cancelled_at` on the row is authoritative for the cancel moment**, stamped by both writers via [[../libraries/subscription-cancel-truth]] `applyCancelTruth`. Ticket f773b8ec (bonnie marlette, 2026-08-21) is the ground-truth case: a cancelled row that still advertised `next_billing_date=2026-09-11` made the CS Director misreport billing history to the founder. No `paused_at` column — the pause moment still lives in `customer_events`.
+- **A cancelled sub carries `next_billing_date = NULL`.** Every writer that flips `status → 'cancelled'` also nulls `next_billing_date` in the same update: `internalSubscriptionAction` ([[../libraries/internal-subscription]]), `appstleSubscriptionAction` ([[../libraries/appstle]]), `exhaustInternalDunning` ([[../inngest/internal-dunning]]), the journey-outcomes cancel fallback ([[../inngest/journey-outcomes]]), and the Appstle webhook when `mapStatus(status) === 'cancelled'` ([[../inngest/appstle-subscription-handler]]). The two Appstle writers route through `applyCancelTruth`, so they stamp `cancelled_at` in that same write. Rationale: the column is the source of truth every reader (CS director brief, founder escalation card, portal detail, agent context panel) renders as "next charge" — leaving a stale future date on a cancelled row produced a wrong founder money call (ticket `8af43dd1`, 2026-08-24). Fix at the write, not the readers. A reactivation (`cancelled → active`) re-sets the date **before** the flip per the "modify first, activate LAST" invariant in [[../lifecycles/subscription-billing]]. Historically-stale rows are cleared by two idempotent ship-time backfills (dry-run by default; `--apply` to write): `scripts/_backfill-cancelled-subscription-next-billing-date.ts` (the date) and `scripts/_backfill-cancelled-sub-truth.ts` (date + `cancelled_at`) — auto-ledgered on merge by [[../libraries/ship-time-backfill-detector]] and drained on the box by [[../libraries/ship-time-backfill-executor]].
 - **Internal joins ALWAYS use the UUID.** `id` (UUID) joins to `dunning_cycles.subscription_id`, `payment_failures.subscription_id`, `orders.subscription_id`, etc. `shopify_contract_id` + `shopify_customer_id` are Shopify-boundary fields ONLY — webhook ingest, Shopify API calls. Never use them as join keys between internal tables. They'll be deprecated once we sunset Shopify.
 - Always include linked customers — use `linkedIds(customerId)` helper, then `.in("customer_id", ids)`.
 - `items` is JSONB — variant ids live inside, not on a join table. Use `items->0->>'variantId'`. A **GIN index `idx_subscriptions_items_gin (items jsonb_path_ops)`** (migration `20260708120000`) backs `@>` containment on `items` — e.g. "subs carrying product X" via `items @> '[{"product_id":"…"}]'`. All rows store `items` as an array whose elements carry `product_id` (verified 2026-07-08), so containment is exact + complete.

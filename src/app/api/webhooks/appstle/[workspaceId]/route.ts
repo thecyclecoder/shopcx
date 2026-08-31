@@ -19,6 +19,7 @@ import {
   forecastItemsChanged,
   getPendingForecast,
 } from "@/lib/billing-forecast";
+import { applyCancelTruth } from "@/lib/subscription-cancel-truth";
 
 function mapStatus(status: string): "active" | "paused" | "cancelled" | "expired" | "failed" {
   switch (status?.toUpperCase()) {
@@ -304,11 +305,21 @@ async function handleSubscriptionEvent(
       upsertData.next_billing_date = nextBillingDate;
     }
 
-    // A cancelled sub has no next charge to advertise — force-null even if
-    // Appstle's payload still carries a date. Fix at the writer, not each
-    // reader (CS director brief, founder card, portal, agent context).
-    if (mapStatus(status) === "cancelled") {
-      upsertData.next_billing_date = null;
+    // Cancel-truth: a cancelled contract cannot advertise a future charge date and
+    // is never in dunning. Force-clear next_billing_date and stamp cancelled_at in
+    // the same write as status='cancelled'. Preserve an existing cancelled_at across
+    // Appstle re-sends — the first cancel is the historical record.
+    // See [[cancelled-subs-stop-reporting-a-future-billing-date]] Phase 1.
+    if (upsertData.status === "cancelled") {
+      const { data: existing } = await admin
+        .from("subscriptions")
+        .select("cancelled_at")
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_contract_id", contractId)
+        .maybeSingle();
+      applyCancelTruth(upsertData, "cancelled", {
+        existingCancelledAt: (existing?.cancelled_at as string | null | undefined) ?? null,
+      });
     }
 
     await admin.from("subscriptions").upsert(upsertData, { onConflict: "workspace_id,shopify_contract_id" });
