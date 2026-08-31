@@ -17,7 +17,11 @@ import {
   internalSubApplyDiscount,
   internalSubRemoveDiscount,
 } from "@/lib/internal-subscription";
-import { resolveCoupon } from "@/lib/coupons";
+import {
+  resolveCoupon,
+  ensureInternalLoyaltyCouponRow,
+  isCanonicalLoyaltyCode,
+} from "@/lib/coupons";
 import { applyDiscountWithReplace, removeExistingDiscounts } from "@/lib/appstle-discount";
 
 /**
@@ -1404,9 +1408,50 @@ export async function subscriptionApplyCoupon(
   }
 
   if (await isInternalSubscription(workspaceId, contractId)) {
+    // LOYALTY-* codes must be internal-native on internal subs so
+    // renewal-time `resolveCoupon` step 1 (internal wins) can durably
+    // re-resolve them — independent of the Shopify discount lifetime, which
+    // is what `redeem_points` mints but which a delete/expiry in Shopify
+    // silently zeroes on the internal renewal (ticket 46a7aa75; spec:
+    // loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value).
+    // Materialize the `loyalty_redemptions` row as an internal `coupons` row
+    // scoped to the contract owner — NET-ZERO on points (points already
+    // spent at redeem time; `ensureInternalLoyaltyCouponRow` never calls
+    // spendPoints). Rails preserved: single-use + one loyalty coupon per
+    // renewal ceiling.
+    // Gate the materializer on the STRICT canonical LOYALTY-* shape (not
+    // the loose `/^LOYALTY-/i` prefix that first matched Phase-1). A
+    // caller-supplied `LOYALTY-%` matches the prefix regex but is a
+    // PostgreSQL LIKE wildcard — the pre-Fix-1 materializer's
+    // `.ilike("discount_code", code)` would then match ANOTHER customer's
+    // redemption in the workspace and mint a coupon for the caller's own
+    // contract using the other customer's discount_value. `isCanonicalLoyaltyCode`
+    // refuses `%`, `_`, and every other non-canonical shape upstream so
+    // the materializer never runs on an injection payload.
+    // Spec: loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value § Phase 2 Fix 1.
+    if (isCanonicalLoyaltyCode(code) && sub?.customer_id) {
+      await ensureInternalLoyaltyCouponRow(
+        workspaceId,
+        code,
+        sub.customer_id as string,
+      );
+    }
     const resolved = await resolveCoupon(workspaceId, code, sub?.customer_id as string | null);
     if (!resolved) return { success: false, error: "coupon_not_found" };
-    return internalSubApplyDiscount(workspaceId, contractId, resolved.code);
+    // Hand `internalSubApplyDiscount` the FULL resolved coupon so it writes
+    // a self-sufficient applied_discounts entry (type + value + source), and
+    // pass the contract owner so the post-write real-value verify uses the
+    // same customerId `resolveRenewalDiscount` will pass at renewal.
+    return internalSubApplyDiscount(workspaceId, contractId, resolved.code, {
+      resolved: {
+        code: resolved.code,
+        type: resolved.type,
+        value: resolved.value,
+        recurring_cycle_limit: resolved.recurring_cycle_limit,
+        source: resolved.source,
+      },
+      customerId: sub?.customer_id as string | null,
+    });
   }
 
   await healOnTouch(workspaceId, contractId);

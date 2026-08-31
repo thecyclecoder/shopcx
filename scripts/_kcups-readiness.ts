@@ -73,11 +73,10 @@ async function main() {
   console.log(`  ${ok(ka.length > 0)} K-Cups ${ka.length} angle(s) · Tabs ${ta.length} angle(s)`);
   for (const a of ka.slice(0, 12)) console.log(`      ${String(a.hook_slug ?? "").padEnd(20)} ${String(a.meta_headline ?? "").slice(0, 52)}  [${a.status ?? "—"}${a.is_active ? "" : ", INACTIVE"}]`);
 
-  // 5. competitors — route through the SDK chokepoint
-  // (`src/lib/competitors.ts` -> listCompetitors). The retired hand-rolled
-  // query selected `brand_name,is_active` which don't exist on the row (real
-  // columns: `brand`, `status`), so the diagnostic silently reported empty.
-  // That is exactly the bug the SDK gate exists to prevent.
+  // 5. competitors — routed through the SDK chokepoint (raw table reads are blocked by
+  // scripts/_check-competitors-sdk-compliance.ts). The prior probe hand-rolled `brand_name` /
+  // `is_active` — neither column exists (the real shape is `brand` + `status`), so the typed SDK
+  // shape is safer for a scoping probe like this.
   const comps = await listCompetitors({ workspaceId: WS, limit: 10000 });
   const kcomp = comps.filter((c) => String(c.product_id) === KCUPS);
   const ccomp = comps.filter((c) => String(c.product_id) === COFFEE);

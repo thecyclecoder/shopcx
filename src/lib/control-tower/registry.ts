@@ -687,6 +687,24 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ─ Every-15-min crons (window ~45 min) ─
   { id: "portal-action-healer", kind: "cron", owner: "retention", label: "Portal action healer", description: "Re-attempts failed portal actions (heal queue).", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
   { id: "ticket-csat-cron", kind: "cron", owner: "cs", label: "Ticket CSAT survey", description: "Sends CSAT surveys for eligible recently-closed tickets.", expectedCadence: "every 15 min (*/15 * * * *)", livenessWindowMs: 45 * MIN },
+  // Review-candidacy detector cron (review-request-sol-session Phase 1). Every 30
+  // min sweeps for tickets quiet 24h since the last EXTERNAL message + we spoke
+  // last, and enqueues one `review-candidacy` box job per qualifying ticket for
+  // Sol's read-only session. Owner cs (Sol reports to June). newcron-grace ⇒
+  // registeredAt starts the first-tick window so the tile doesn't RED on cut-over.
+  // The 45m livenessWindow gives ≥ 1.2× the 30m cadence per assertRegistryInvariants.
+  { id: "review-candidacy-detector-cron", kind: "cron", owner: "cs", label: "Review candidacy detector", description: "Every 30 min sweep: find tickets quiet 24h since the last external message (we spoke last) + enqueue a `review-candidacy` Sol box session per qualifying ticket. Sol reads the thread + recent orders read-only and returns a typed { ask, product_id, angle, include_coupon, reasoning } verdict; the worker (not Sol) is the only mutator.", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 45 * MIN, registeredAt: "2026-08-28T00:00:00Z" },
+  // Review-request nudge cron (review-request-sol-session Phase 3). Every 30 min
+  // sweeps for review_requests where the first-touch went out ≥ 3 days ago and no
+  // nudge has fired; suppresses on the spec's list (submitted / clicked / replied /
+  // unsubscribed / already nudged) and queues ONE email via the deliver-pending-sends
+  // outbox (so the ticket UI's cancel-in-flight behaviour applies for free). Owner cs.
+  { id: "review-request-nudge-cron", kind: "cron", owner: "cs", label: "Review request nudge", description: "Every 30 min sweep: for review_requests sent ≥ 3d ago with no nudge and no positive outcome, compare-and-set `nudged_at` + queue ONE email as a pending ticket_message that deliver-pending-sends ships. Single-nudge maximum per ask; the spec's suppression conditions (submitted / clicked / customer-replied / unsubscribed) are enforced by shouldSuppressReviewRequestNudge.", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 45 * MIN, registeredAt: "2026-08-28T00:00:00Z" },
+  // Review-request canary CEO-inbox digest cron (review-request-sol-session Phase 3).
+  // Daily at 08:00 UTC — raises ONE `dashboard_notifications` card per workspace-day
+  // summarizing the review-request drafts on canary hold, so the founder can cancel/edit
+  // a wrong ask before it ships (per-ticket pending_send_at has no list view). Owner cs.
+  { id: "review-request-canary-digest-cron", kind: "cron", owner: "cs", label: "Review request canary digest", description: "Daily digest that raises ONE dashboard_notifications card per workspace-day summarizing the review-request drafts on canary hold (12-24h pending_send_at). The founder cancels or edits any wrong ask before the outbox ships it. Ships ON per the spec (canary flag is a config, not a rewrite).", expectedCadence: "daily (0 8 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-08-28T00:00:00Z" },
   // amplifier-import-reliability-rail Phase 2 — the reconcile sweep for paid orders the 3PL never
   // received. Re-submits any paid order past a 10-minute grace whose amplifier_order_id is still
   // null, under the retry cap, and not held by a non-dismissed fraud_cases row. 30-min window
@@ -918,6 +936,11 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // the M4 "Graded + self-correcting" milestone's revert consumer. registeredAt graces
   // the first-tick window (newcron-grace).
   { id: "media-buyer-self-correcting-cron", kind: "cron", owner: "growth", label: "Media buyer self-correcting revert", description: "Daily sweep: auto-flips armed Media Buyer cohorts back to `shadow` on a sustained 7-day <5 grade regression (+ CEO escalation).", expectedCadence: "daily (30 14 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-07-09T14:30:00Z" },
+  // notification-hygiene: informational notifications had no terminal state a human did not have
+  // to reach, so 2,237 undismissed rows accrued against 13 real decisions — while 98-100% of the
+  // pile was already READ. Daily sweep retires expired recaps + SETTLED chargeback alerts; a live
+  // dispute is deliberately kept.
+  { id: "notification-hygiene-cron", kind: "cron", owner: "platform", label: "Notification hygiene sweep", description: "Daily: retires expired agent_daily_summary recaps (7d TTL) and chargeback_alert rows whose chargeback_events dispute has settled (won/lost/finalized). Never sweeps an unsettled dispute or a fraud alert.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-08-28T21:00:00Z" },
   { id: "meta-daily-sync", kind: "cron", owner: "growth", label: "Meta daily spend sync", description: "Daily Meta account spend rollup sync.", expectedCadence: "daily (0 11 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "storefront-experiments-refresh-cron", kind: "cron", owner: "growth", label: "Storefront experiments refresh", description: "Every-5-min fan-out: recomputes attribution + bandit posteriors for running storefront experiments (near-live test stats). No-ops when no running experiments.", expectedCadence: "every 5 min (*/5 * * * *)", livenessWindowMs: 15 * MIN, registeredAt: "2026-06-22T17:45:00Z" },
   { id: "storefront-lever-decay-cron", kind: "cron", owner: "growth", label: "Storefront lever decay", description: "Daily fan-out: decays lever-importance posteriors toward their prior (re-probe stale levers).", expectedCadence: "daily (0 13 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-06-22T19:07:00Z" },
@@ -1235,6 +1258,12 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // into this one Sol card (byPersona) instead of a standalone "Agent — ticket improve".
   { id: "agent:ticket-handle", kind: "agent-kind", owner: "cs", agentKind: "ticket-handle", personaKind: "ticket-handle", label: "Sol — Ticket Handler", description: "First-touch ticket Direction + reply (Sol).", expectedCadence: "on an inbound ticket", stuckThresholdMs: 30 * MIN, registeredAt: "2026-07-08T00:00:00Z" },
   { id: "agent:ticket-improve", kind: "agent-kind", owner: "cs", agentKind: "ticket-improve", personaKind: "ticket-handle", label: "Agent — ticket improve", description: "CX ticket-improve turns (Sol).", expectedCadence: "on demand", stuckThresholdMs: 30 * MIN },
+  // Sol's review-candidacy box session (review-request-sol-session Phase 1). Enqueued
+  // by review-candidacy-detector-cron above; drained by scripts/builder-worker.ts →
+  // runReviewCandidacyJob as a top-level Max `claude -p` session. Same owner=cs as
+  // ticket-handle + personaKind='ticket-handle' so it merges under Sol's one card on
+  // the org chart (byPersona), not a standalone worker.
+  { id: "agent:review-candidacy", kind: "agent-kind", owner: "cs", agentKind: "review-candidacy", personaKind: "ticket-handle", label: "Sol — Review candidacy", description: "Sol's read-only review-candidacy session per quiet ticket (review-request-sol-session Phase 1). Returns a typed { ask, product_id, angle, include_coupon, reasoning } verdict; the worker (not Sol) is the only mutator.", expectedCadence: "on a review-candidacy-detector enqueue", stuckThresholdMs: 30 * MIN, registeredAt: "2026-08-28T00:00:00Z" },
   // Per-ticket QC-grader box lane (ticket-analyzer-becomes-box-agent-under-june Phase 1) — the
   // supervised agent under 💬 June (CS Director) that replaced the analyzer's direct fetch to
   // api.anthropic.com. Enqueued by ticket-analysis-cron; drained by scripts/builder-worker.ts →

@@ -41,7 +41,36 @@ Auth: HTTP basic `Authorization: Basic base64(account_id:license_key)`.
 
 ## Gotchas
 
-- **Tax codes per product variant**, not per product. Avalara expects `taxCode` on each line item — we fall back to `avalara_default_tax_code` when missing.
+- **⚠️ An invalid tax code is NOT rejected — it is silently downgraded.** Send a `taxCode` Avalara
+  doesn't recognise and it returns **200 OK**, quietly substituting `P0000000` (Tangible Personal
+  Property, fully taxable). Nothing errors; you just overcharge every customer in every state that
+  exempts the real category. The only tell is the `taxCode` echoed back on each response line.
+  `createTransaction` now compares sent-vs-echoed per line, sets `degradedTaxCodes` on the result,
+  and `console.error`s a loud `[avalara] TAX CODE REJECTED` — see [[../../../src/lib/avalara]].
+  **Never add a tax code from memory. Verify it against `GET /api/v2/definitions/taxcodes` first.**
+- **Verified codes we use** (checked against the definitions endpoint 2026-08-31):
+
+  | Code | Avalara description | Ours |
+  |---|---|---|
+  | `PF050700` | Food And Food Ingredients-dietary supplements (supplement facts on label) | Superfood Tabs, Creatine Prime+, Ashwavana Zen Relax / Guru Focus, ACV Gummies, Sleep Gummies |
+  | `PF050002` | Food And Food Ingredients - Food for Home Consumption or Basic Groceries | Amazing Coffee, K-Cups, Amazing Creamer |
+  | `P0000000` | Tangible Personal Property | mugs, tumblers, mixers — and the workspace default |
+  | `OS010100` | Shipping insurance / protection | Shipping Protection |
+  | `FR020000` | Freight | the shipping line |
+
+  `PF050700` is exempt in NY/TX and taxable in CA — correct per-jurisdiction behaviour, not a
+  blanket exemption. That variation is how you tell a real code from a convenient one.
+- **The workspace default is deliberately `P0000000` (fully taxable).** An unclassified product must
+  fall back to taxable, never inherit an exemption it may not be entitled to.
+- **2026-08-31 incident.** We shipped `PF050144` for every supplement (does not exist → degraded to
+  `P0000000`) and `PC040100` for coffee (that code is **Clothing And Related Products**, so coffee was
+  taking a clothing exemption). Supplements were overcharged sales tax in every exempting state for
+  months. It surfaced only because Laura Light (ticket `295cc934`) insisted three times that NY
+  doesn't tax supplements — two AI turns and a CS Director escalation all failed to check the code
+  itself. Fixed in [[../../../src/lib/avalara-tax-codes]] + a data correction on `products`.
+- **Tax codes resolve per line**, preferring `product_variants.shopify_tax_code`, then
+  `products.avalara_tax_code`, then `workspaces.avalara_default_tax_code` — assembled in
+  [[../../../src/lib/avalara-cart]] `buildAvalaraLines`, which every caller goes through.
 - **Origin address must be valid** — Avalara validates against USPS. A bad `avalara_origin_address` poisons every quote.
 - **Quote ≠ commit.** Quotes don't appear on Avalara's filing reports. Tax filers care about committed transactions only. Don't accidentally commit a quote.
 - **Void on refund.** Don't just refund money in Braintree without voiding the Avalara transaction — otherwise you over-remit tax. `voidReason` should be `DocVoided` for full refunds.

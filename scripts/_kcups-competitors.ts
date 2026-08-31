@@ -8,6 +8,8 @@ async function main() {
   const { data: p } = await a.from("products").select("id,title").eq("workspace_id", WS);
   const t = new Map((p ?? []).map((x) => [String(x.id), String(x.title)]));
 
+  // Read `public.competitors` through the SDK chokepoint (raw table reads are blocked by
+  // scripts/_check-competitors-sdk-compliance.ts).
   const c = await listCompetitors({ workspaceId: WS, limit: 10000 });
   const by: Record<string, number> = {};
   for (const r of c ?? []) {

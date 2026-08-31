@@ -1,0 +1,1 @@
+- **Live-orchestrator assisted-purchase routing must carry the customer's picked item into assisted_purchase_params** · verified 2026-08-30 · → [[../libraries/playbook-executor]]

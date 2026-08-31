@@ -1,0 +1,1 @@
+- **Loyalty coupon reissue/apply must be internal-sub-native and verify real discount value** · verified 2026-08-29 · → [[../libraries/coupons]] · [[../libraries/internal-subscription]] · [[../tables/loyalty_redemptions]]

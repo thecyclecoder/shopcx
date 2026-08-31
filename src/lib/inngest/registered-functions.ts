@@ -11,6 +11,9 @@
 import { inngest } from "@/lib/inngest/client";
 import { syncCustomers, syncOrders } from "@/lib/inngest/sync-shopify";
 import { ticketCsatCron } from "@/lib/inngest/ticket-csat";
+import { reviewCandidacyDetectorCron } from "@/lib/inngest/review-candidacy-detector-cron";
+import { reviewRequestNudgeCron } from "@/lib/inngest/review-request-nudge-cron";
+import { reviewRequestCanaryDigestCron } from "@/lib/inngest/review-request-canary-digest-cron";
 import {
   importFileUpload,
   importFileSplit,
@@ -145,6 +148,7 @@ import { adCreativeCadenceCron, adCreativeCadenceSweep } from "@/lib/inngest/ad-
 import { adsSupervisorCadenceCron, adsSupervisorCadenceSweep } from "@/lib/inngest/ads-supervisor-cadence";
 import { budgetWatchCron } from "@/lib/inngest/budget-watch";
 import { mediaBuyerGradeCron, mediaBuyerGradeSweep } from "@/lib/inngest/media-buyer-grade";
+import { notificationHygieneCron } from "@/lib/inngest/notification-hygiene";
 import {
   sensorTrustProbeCron,
   sensorTrustProbeSweep,
@@ -181,6 +185,9 @@ export const registeredInngestFunctions = [
   syncCustomers,
   syncOrders,
   ticketCsatCron,
+  reviewCandidacyDetectorCron,
+  reviewRequestNudgeCron,
+  reviewRequestCanaryDigestCron,
   importFileUpload,
   importFileSplit,
   importChunkProcess,
@@ -334,6 +341,7 @@ export const registeredInngestFunctions = [
   adsSupervisorCadenceSweep,
   budgetWatchCron,
   mediaBuyerGradeCron,
+  notificationHygieneCron,
   mediaBuyerGradeSweep,
   sensorTrustProbeCron,
   sensorTrustProbeSweep,

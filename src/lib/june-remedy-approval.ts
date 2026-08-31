@@ -61,6 +61,45 @@ export const LOYALTY_ACTION_TYPES = new Set<string>([
   "redeem_points_as_refund",
 ]);
 
+/**
+ * True when a MONEY-typed step is a loyalty coupon operation that names NO order — i.e. it targets
+ * a subscription contract (`apply_loyalty_coupon` with `contract_id`) or mints a coupon code with
+ * no order to draw down (`redeem_points`, the mint half of a mint-and-apply pair). Such a step
+ * cannot double-pay any order, so the order-scoped rails (`verifyPlanAgainstRemedyStates`'s
+ * `missing_order_reference` reject + the runner's `remedy_state` mandatory precondition) do not
+ * apply — the loyalty $15 ceiling (`planNeedsLoyaltyRefusal`) + the one-coupon-per-sub
+ * executor check remain the sole rails on this shape.
+ *
+ * `redeem_points_as_refund` is DELIBERATELY excluded — it draws refund headroom off a real order
+ * and MUST stay inside the order-scoped rail (that's why the executor requires `shopify_order_id`
+ * on it).
+ *
+ * Derived-from ticket `2ce25d56` (Beth Dunn — subscription-targeted loyalty coupon deadlocked in
+ * the missing_order_reference loop for a customer with no reference order); spec:
+ * june-loyalty-coupon-to-subscription-exempt-from-order-scoped-remedy-state-rail. Pure.
+ */
+export function isNonOrderScopedLoyaltyAction(
+  actionType: string,
+  actionParams: Record<string, unknown>,
+): boolean {
+  if (actionType !== "apply_loyalty_coupon" && actionType !== "redeem_points") return false;
+  const hasStringField = (key: string): boolean => {
+    const raw = actionParams[key];
+    return typeof raw === "string" && raw.trim().length > 0;
+  };
+  // Any resolvable order ref → treat as order-scoped (route through the normal rail). The three
+  // keys mirror `extractRemedyOrderRefFromStep` in src/lib/cs-director.ts.
+  if (hasStringField("shopify_order_id")) return false;
+  if (hasStringField("order_number")) return false;
+  if (hasStringField("order_id")) return false;
+  // apply_loyalty_coupon must name the subscription contract (the executor rejects without it —
+  // action-executor.ts:1919). redeem_points is a pure mint, no contract_id required.
+  if (actionType === "apply_loyalty_coupon") {
+    return hasStringField("contract_id");
+  }
+  return true;
+}
+
 /** The `tool_name` on the god_mode_approvals card that carries a parked June remedy. */
 export const JUNE_REMEDY_TOOL = "june_remedy";
 /** The decision category (drives standing "don't ask again" grants). */

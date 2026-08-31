@@ -1,0 +1,1 @@
+- **Migration audit's immediate_charge check races the retry it is auditing — Phase 1 settled-state rule + Phase 2 code_gap verdict** · verified 2026-08-28 · → [[../lifecycles/subscription-billing]] · [[../libraries/migration-audit]] · [[../libraries/migration-fix]]

@@ -1,0 +1,1 @@
+- **Review collection — journey, coupon, and schema foundations** · verified 2026-08-28 · → [[journeys/product-review]]

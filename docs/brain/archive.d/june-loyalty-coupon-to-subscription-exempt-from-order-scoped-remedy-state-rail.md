@@ -1,0 +1,1 @@
+- **June can't apply a loyalty coupon to a subscription renewal — the order-scoped money-remedy rail hard-rejects it** · verified 2026-08-30 · → [[lifecycles/ticket-lifecycle]]

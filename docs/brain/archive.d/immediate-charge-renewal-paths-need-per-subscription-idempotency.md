@@ -1,0 +1,1 @@
+- **Immediate-charge renewal paths need per-subscription idempotency** · verified 2026-08-28 · → [[../lifecycles/subscription-billing]]

@@ -1,0 +1,1 @@
+- **Ads supervisor: product `Amazing Coffee K-Cups` — Bianca missed a kill on adset `split ingredient stack versus one pod`** · verified 2026-08-30 · → [[lifecycles/ad-creative]] + [[libraries/ads-supervisor]] + [[libraries/media-buyer-agent]]

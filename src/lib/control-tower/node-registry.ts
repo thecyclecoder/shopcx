@@ -84,6 +84,7 @@ export const BUILDER_WORKER_KINDS = [
   "spec-chat",
   "ticket-improve",
   "ticket-handle",
+  "review-candidacy",
   "triage-escalations",
   "spec-test",
   "migration-fix",

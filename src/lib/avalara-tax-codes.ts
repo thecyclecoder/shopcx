@@ -2,20 +2,33 @@
  * Maps Shopify Standard Product Taxonomy category names → Avalara
  * AvaTax product codes.
  *
- * Code reference (Avalara public taxonomy):
- *   PF050144  Dietary supplements (Vitamins & Supplements branch)
- *   PC040100  Food and food ingredients for human consumption — used
- *             for unprepared coffee, creamer, K-cups, etc. Most US
- *             states tax groceries at a reduced rate or exempt them.
+ * Code reference — every code below was verified against Avalara's own
+ * /definitions/taxcodes endpoint on 2026-08-31. Do NOT add a code from memory:
+ * an unrecognised code is not rejected, it is SILENTLY degraded to P0000000
+ * (fully taxable) and the mistake only shows up as customer overcharges.
+ *
+ *   PF050700  Food And Food Ingredients-dietary supplements (supplement facts
+ *             on label). Exempt in NY/TX, taxable in CA — Avalara applies the
+ *             per-jurisdiction rule.
+ *   PF050002  Food And Food Ingredients - Food for Home Consumption or Basic
+ *             Groceries — unprepared coffee, creamer, K-cups.
  *   P0000000  Tangible personal property — fully taxable generic
  *             merchandise (mugs, tumblers, drink mixers).
  *   OS010100  Shipping insurance / shipping protection. Many states
  *             do not tax this; Avalara handles the jurisdictional
  *             rules when this code is set.
  *
- * Returning `null` means "let Avalara default-classify it" — we use
- * that for the workspace default (PF050144 in our seed) plus any
- * truly unclassifiable item (e.g. internal "Mystery Item" SKU).
+ * Returning `null` means "let Avalara default-classify it" — we use that for
+ * any truly unclassifiable item (e.g. the internal "Mystery Item" SKU). The
+ * workspace default is P0000000: an unclassified product must fall back to
+ * fully taxable, never inherit an exemption it may not be entitled to.
+ *
+ * ⚠️ 2026-08-31 incident. This file previously mapped supplements to PF050144
+ * and food to PC040100. PF050144 does not exist in Avalara's taxonomy at all,
+ * so every supplement was taxed as general merchandise; PC040100 is
+ * "Clothing And Related Products", so coffee was taking a clothing exemption.
+ * Found via Laura Light's ticket (295cc934) after she was charged $8.44 of NY
+ * sales tax on a dietary supplement three times running.
  *
  * Order of resolution at transaction time:
  *   1. product_variants.shopify_tax_code (Shopify Plus / Avalara field)
@@ -46,17 +59,17 @@ export function classifyByShopifyCategory(category: string | null | undefined, t
 
   // Vitamins & Supplements (incl. Herbal, Creatine sub-branches)
   if (/Vitamins\s*&\s*Supplements/i.test(cat)) {
-    return { taxCode: "PF050144", bucket: "supplement", reason: "Vitamins & Supplements category" };
+    return { taxCode: "PF050700", bucket: "supplement", reason: "Vitamins & Supplements category" };
   }
 
   // Coffee / creamer / pods — groceries
   if (/Beverages\s*>\s*Coffee/i.test(cat) || /Dairy Products\s*>\s*Coffee Creamer/i.test(cat) || /Coffee\s*Pods/i.test(cat)) {
-    return { taxCode: "PC040100", bucket: "food", reason: "Coffee/creamer/pods → food & food ingredients" };
+    return { taxCode: "PF050002", bucket: "food", reason: "Coffee/creamer/pods → food for home consumption" };
   }
 
   // Other Food, Beverages & Tobacco (excluding alcohol/tobacco branches we don't carry)
   if (/^Food,\s*Beverages\s*&\s*Tobacco/i.test(cat)) {
-    return { taxCode: "PC040100", bucket: "food", reason: "Food, Beverages & Tobacco → food & food ingredients" };
+    return { taxCode: "PF050002", bucket: "food", reason: "Food, Beverages & Tobacco → food for home consumption" };
   }
 
   // Home & Garden kitchen/drinkware — tangible personal property

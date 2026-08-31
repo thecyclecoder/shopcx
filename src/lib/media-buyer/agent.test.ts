@@ -25,6 +25,7 @@ import {
   DEFAULT_TEST_COHORT_TARGET,
   EXPLOIT_SLOT_COUNT,
   EXPLORE_TARGET_WITH_WINNER,
+  escalateMediaBuyerExecuteFailure,
   evaluateSensorTrustSnapshot,
   executeDecidedActionAgainstMeta,
   FATIGUE_REPLENISH_THRESHOLD,
@@ -33,6 +34,7 @@ import {
   readCurrentTestCohortSize,
   readLiveCohortConceptTags,
   resolveReplenishAdCopy,
+  normalizeLegacyAdvantageAudienceTargeting,
   SENSOR_TRUST_MAX_AGE_MS,
   type MediaBuyerLoser,
   type MediaBuyerMetaExecutor,
@@ -554,7 +556,15 @@ test("Phase 1 slow-kill — skeptic v3 $226 near-miss ($678 spend, 3 purchases, 
   assert.equal(isDecisionTreeKill(skepticV3, P2_THRESHOLDS, true), false);
 });
 
-test("computeMediaBuyerPlan — never_pause_object_ids blocks the kill", () => {
+test("computeMediaBuyerPlan — never_pause_object_ids blocks the kill AND surfaces it on plan.killDeferred (no silent skip)", () => {
+  // ads-supervisor-fix-fdc11e10-bianca-kill-120253384730390184 — the pre-fix planner
+  // bare-`continue`d on a never-pause loser, so a CEO-protected dud left no ledger trace
+  // AND no supervisor coverage — the every-3h ads-supervisor's `bianca_missed_kill`
+  // finding fired 3h too late on every pass. Post-fix the drop lands on `killDeferred`
+  // with rail='never_pause_list' + the source citations so the runner can write a
+  // `media_buyer_kill_rail_deferred` row (armed mode) that IS the coverage. The pin
+  // asserts BOTH halves — plan.kill stays empty (guardrail intact) AND plan.killDeferred
+  // carries the trace (no-false-promises: cited never silent).
   const l = loser({ targetObjectId: "protected-adset" });
   const plan = computeMediaBuyerPlan(
     baseInputs({
@@ -562,7 +572,33 @@ test("computeMediaBuyerPlan — never_pause_object_ids blocks the kill", () => {
       policy: policy({ never_pause_object_ids: ["protected-adset"] }),
     }),
   );
-  assert.equal(plan.kill.length, 0);
+  assert.equal(plan.kill.length, 0, "the CEO's never-pause guardrail is preserved — no kill emitted");
+  assert.equal(plan.killDeferred.length, 1, "the drop MUST surface on plan.killDeferred — a silent bare continue is the exact class this fix retires");
+  const kd = plan.killDeferred[0];
+  assert.equal(kd.rail, "never_pause_list");
+  assert.equal(kd.targetObjectId, "protected-adset");
+  assert.equal(kd.targetLevel, l.targetLevel);
+  assert.equal(kd.sourceMetaAdId, l.sourceMetaAdId);
+  assert.equal(kd.roas, l.roas);
+  assert.equal(kd.spendCents, l.spendCents);
+  assert.ok(kd.rationale.includes("never_pause_object_ids"), "rationale MUST cite the policy field so the CEO card explains WHY the dud was held");
+  // Summary reflects the kill-rail deferral so the pass audit trail shows the suppression.
+  assert.ok(
+    plan.summary.includes("kill-rails deferred=1"),
+    "summary MUST include the kill-rail counter so #director-growth-max sees the suppression instead of a silently-empty plan",
+  );
+});
+
+test("computeMediaBuyerPlan — non-protected loser still emits a kill AND leaves killDeferred empty", () => {
+  const l = loser({ targetObjectId: "not-protected" });
+  const plan = computeMediaBuyerPlan(
+    baseInputs({
+      losers: [l],
+      policy: policy({ never_pause_object_ids: ["some-other-adset"] }),
+    }),
+  );
+  assert.equal(plan.kill.length, 1);
+  assert.equal(plan.killDeferred.length, 0);
 });
 
 test("computeMediaBuyerPlan — winner with no parent adset resolved is skipped (safe)", () => {
@@ -2019,6 +2055,145 @@ test("Phase 2 — legacy shared-adset cohort (adsetPerTest=false) preserves the 
   assert.equal(built.insert.create_adset_spec, null);
 });
 
+// ── media-buyer-replenish-sanitizes-legacy-advantage-age-targeting Phase 1 ──
+// A stale cohort row can still carry the legacy F50-65 hard demographic controls with
+// `targeting_automation.advantage_audience:1` — Meta rejects that combination. The replenish
+// builder must strip `age_min` / `age_max` / `genders` on the way into `create_adset_spec` while
+// preserving `geo_locations`, `excluded_custom_audiences`, and everything else on `targeting`.
+
+test("Phase 1 — normalizeLegacyAdvantageAudienceTargeting: stale F50-65 Advantage+ shape is stripped to broad; geo + exclusions preserved", () => {
+  const legacy: Record<string, unknown> = {
+    age_min: 50,
+    age_max: 65,
+    genders: [2],
+    geo_locations: { countries: ["US"], location_types: ["home", "recent"] },
+    targeting_automation: { advantage_audience: 1 },
+    excluded_custom_audiences: [{ id: "aud-purchaser" }, { id: "aud-all-customers" }],
+  };
+  const out = normalizeLegacyAdvantageAudienceTargeting(legacy);
+  assert.equal((out as Record<string, unknown>).age_min, undefined, "age_min must be stripped so Meta accepts the broad Advantage+ shape");
+  assert.equal((out as Record<string, unknown>).age_max, undefined, "age_max must be stripped so Meta accepts the broad Advantage+ shape");
+  assert.equal((out as Record<string, unknown>).genders, undefined, "genders must be stripped so Meta accepts the broad Advantage+ shape");
+  assert.deepEqual(
+    (out as Record<string, unknown>).geo_locations,
+    { countries: ["US"], location_types: ["home", "recent"] },
+    "geo_locations must survive the sanitizer verbatim",
+  );
+  assert.deepEqual(
+    (out as Record<string, unknown>).targeting_automation,
+    { advantage_audience: 1 },
+    "targeting_automation.advantage_audience:1 must survive — the broad-audience contract stays on",
+  );
+  assert.deepEqual(
+    (out as Record<string, unknown>).excluded_custom_audiences,
+    [{ id: "aud-purchaser" }, { id: "aud-all-customers" }],
+    "excluded_custom_audiences must survive the sanitizer verbatim — the purchaser + all-customer exclusions are untouched",
+  );
+});
+
+test("Phase 1 — normalizeLegacyAdvantageAudienceTargeting: NO Advantage+ (no targeting_automation) → returned unchanged (legacy non-Advantage+ shape stays intact)", () => {
+  const legacyNonAdvantage: Record<string, unknown> = {
+    age_min: 50,
+    age_max: 65,
+    genders: [2],
+    geo_locations: { countries: ["US"] },
+  };
+  const out = normalizeLegacyAdvantageAudienceTargeting(legacyNonAdvantage);
+  assert.equal(out, legacyNonAdvantage, "no advantage_audience:1 → same reference (nothing to normalize)");
+  assert.equal((out as Record<string, unknown>).age_min, 50);
+  assert.equal((out as Record<string, unknown>).age_max, 65);
+});
+
+test("Phase 1 — normalizeLegacyAdvantageAudienceTargeting: Advantage+ ON with age_min ≤ 25 → returned unchanged (already Meta-valid)", () => {
+  const validAdvantage: Record<string, unknown> = {
+    age_min: 18,
+    geo_locations: { countries: ["US"] },
+    targeting_automation: { advantage_audience: 1 },
+  };
+  const out = normalizeLegacyAdvantageAudienceTargeting(validAdvantage);
+  assert.equal(out, validAdvantage, "Advantage+ with age_min at/under the ceiling is already valid — no rewrite");
+});
+
+test("Phase 1 — buildReplenishJobInsert: legacy F50-65 Advantage+ cohort template is SANITIZED before publish job insertion; purchaser + all-customer exclusions still compose", () => {
+  const staleTemplate: AdsetTemplateShape = {
+    optimizationGoal: "OFFSITE_CONVERSIONS",
+    billingEvent: "IMPRESSIONS",
+    bidStrategy: "LOWEST_COST_WITHOUT_CAP",
+    pixelId: "px-1",
+    customEventType: "PURCHASE",
+    targeting: {
+      age_min: 50,
+      age_max: 65,
+      genders: [2],
+      geo_locations: { countries: ["US"], location_types: ["home", "recent"] },
+      targeting_automation: { advantage_audience: 1 },
+    },
+  };
+  const stale = cohort({
+    adsetPerTest: true,
+    testMetaAdsetId: null,
+    testMetaCampaignId: "camp-1",
+    perTestDailyBudgetCents: 15_000,
+    dailyTestCeilingCents: 60_000,
+    adsetTemplate: staleTemplate,
+    excludedPurchaserAudienceId: "aud-purchaser",
+    excludedAllCustomersAudienceId: "aud-all-customers",
+    defaultMetaInstagramUserId: "ig-1",
+  });
+  const built = buildReplenishJobInsert({
+    workspaceId: WS,
+    cohort: stale,
+    action: {
+      kind: "replenish",
+      adCampaignId: "cmp-legacy",
+      testMetaAdsetId: null,
+      adsetPerTest: true,
+      dailyTestCeilingCents: stale.dailyTestCeilingCents,
+      rationale: "test",
+    },
+    accountId: "act-1",
+    publishIdentity: { pageId: "page-1", instagramUserId: "ig-1" },
+    videoId: "vid-1",
+    adName: "Legacy Advantage+ regression",
+    destination: "https://x/regression",
+    headlines: ["h"],
+    primaryTexts: ["p"],
+    descriptions: [],
+  });
+  assert.equal(built.ok, true, "the builder must still succeed — a legacy stale template is sanitized, not rejected");
+  if (!built.ok) return;
+  const targeting = built.createAdsetSpec!.targeting as Record<string, unknown>;
+  // The three Meta-rejected keys MUST be gone — that's the whole point of the sanitizer.
+  assert.equal(targeting.age_min, undefined, "age_min:50 must be stripped before publish job insertion");
+  assert.equal(targeting.age_max, undefined, "age_max:65 must be stripped before publish job insertion");
+  assert.equal(targeting.genders, undefined, "genders:[2] must be stripped before publish job insertion");
+  // The broad Advantage+ contract stays on.
+  assert.deepEqual(
+    targeting.targeting_automation,
+    { advantage_audience: 1 },
+    "targeting_automation.advantage_audience:1 must remain — Advantage+ Audience stays on",
+  );
+  assert.deepEqual(
+    targeting.geo_locations,
+    { countries: ["US"], location_types: ["home", "recent"] },
+    "geo_locations must survive verbatim — US home+recent is preserved",
+  );
+  // Both exclusion audiences still compose onto the sanitized targeting (purchaser + all-customer).
+  const exclusions = targeting.excluded_custom_audiences as Array<{ id: string }>;
+  assert.ok(Array.isArray(exclusions), "excluded_custom_audiences must remain an array");
+  const ids = exclusions.map((e) => e.id).sort();
+  assert.deepEqual(
+    ids,
+    ["aud-all-customers", "aud-purchaser"],
+    "BOTH purchaser + all-customer exclusion audiences must compose onto the sanitized targeting — the sanitizer must not drop them",
+  );
+  // The inserted row's create_adset_spec.targeting reflects the same sanitized shape end-to-end.
+  const insertTargeting = built.insert.create_adset_spec!.targeting as Record<string, unknown>;
+  assert.equal(insertTargeting.age_min, undefined);
+  assert.equal(insertTargeting.age_max, undefined);
+  assert.equal(insertTargeting.genders, undefined);
+});
+
 // ── media-buyer-decided-kills-must-execute-on-meta-not-just-be-recorded Phase 1 ──
 // The runner's inline Meta execute path — a decided kill MUST call updateObjectStatus and
 // flip the row decided→executed on success; a Graph failure MUST leave the row un-executed
@@ -2242,6 +2417,121 @@ test("agent.ts — runMediaBuyerLoop wires the inline Meta execute path (imports
     /escalateMediaBuyerExecuteFailure\(/.test(src),
     "runMediaBuyerLoop must call escalateMediaBuyerExecuteFailure on any Graph failure — a decided-but-unfired kill must surface, not vanish",
   );
+  // ads-supervisor-fix-fdc11e10-bianca-kill-120253353767090184 —
+  // the sibling silent-skip class: when the iteration_actions upsert errored (or partial-
+  // succeeded so a specific action's rowId was dropped from the returned set) the execute
+  // loop used to `continue` silently — Bianca DECIDED the pause but the Meta call never
+  // fired, no CEO card surfaced, and the dud burned spend for hours until the every-3h
+  // ads-supervisor pass authored a bianca_missed_kill fix-spec. Post-fix each of the three
+  // execute loops MUST escalate via `media_buyer_{kill,promote,reactivate}_persist_failed`
+  // on missing rowId, not silently `continue;`. The pin below fails at merge if the pattern
+  // regresses to the bare skip.
+  assert.ok(
+    /media_buyer_kill_persist_failed/.test(src),
+    "runMediaBuyerLoop must escalate on a missing rowId for a decided kill (not silently continue) — media_buyer_kill_persist_failed",
+  );
+  assert.ok(
+    /media_buyer_promote_persist_failed/.test(src),
+    "runMediaBuyerLoop must escalate on a missing rowId for a decided promote — media_buyer_promote_persist_failed",
+  );
+  assert.ok(
+    /media_buyer_reactivate_persist_failed/.test(src),
+    "runMediaBuyerLoop must escalate on a missing rowId for a decided reactivate — media_buyer_reactivate_persist_failed",
+  );
+  // Guard: no bare `if (!rowId) continue;` inside the execute loops. Every missing rowId
+  // MUST land in the escalation branch, otherwise a decided pause silently disappears again.
+  assert.equal(
+    src.match(/if\s*\(!rowId\)\s*continue;/g),
+    null,
+    "runMediaBuyerLoop's execute loops must not bare-skip on missing rowId — replace with a `media_buyer_*_persist_failed` escalation",
+  );
+});
+
+/**
+ * Fake `dashboard_notifications` admin scoped to the escalation function's two chains:
+ * 1) `.from("dashboard_notifications").select("id").eq(...).eq(...).eq(...).limit(1)` (dedupe pre-check)
+ * 2) `.from("dashboard_notifications").insert(row)` (the CEO card write)
+ *
+ * Returns `{data: [], error: null}` for the dedupe read so the insert always fires; captures
+ * the insert body for the assertion. Kept intentionally minimal — the escalation function is
+ * a leaf, so the fake only supports the exact chains it uses.
+ */
+function makeFakeAdminForEscalation() {
+  const inserts: Array<Record<string, unknown>> = [];
+  const admin = {
+    from(table: string) {
+      if (table !== "dashboard_notifications") {
+        throw new Error(`unexpected table ${table} — the escalation function only writes dashboard_notifications`);
+      }
+      return {
+        select() {
+          const chain: {
+            eq: (col: string, val: unknown) => typeof chain;
+            limit: (n: number) => Promise<{ data: Array<{ id: string }>; error: null }>;
+          } = {
+            eq: (_col: string, _val: unknown) => chain,
+            limit: async (_n: number) => ({ data: [], error: null }),
+          };
+          return chain;
+        },
+        insert(row: Record<string, unknown>) {
+          inserts.push(row);
+          return Promise.resolve({ error: null });
+        },
+      };
+    },
+  } as unknown as Parameters<typeof escalateMediaBuyerExecuteFailure>[0];
+  return { admin, inserts };
+}
+
+test("ads-supervisor-fix-fdc11e10 — escalateMediaBuyerExecuteFailure(media_buyer_kill_persist_failed) fires a distinct 'not persisted to ledger' card (differentiated from a Meta-call failure)", async () => {
+  const { admin, inserts } = makeFakeAdminForEscalation();
+  const result = await escalateMediaBuyerExecuteFailure(admin, {
+    workspaceId: "ws-42",
+    actionKind: "media_buyer_kill_persist_failed",
+    targetLevel: "adset",
+    targetObjectId: "120253353767090184",
+    rationale: "Dud: $329.55 spend, 0 purchases, ROAS 0.00",
+    errorMessage: "iteration_actions upsert failed: RLS policy denied",
+    nowMs: Date.parse("2026-08-28T10:00:00.000Z"),
+  });
+  assert.equal(result.emitted, true, "the escalation must fire (dedupe read returned an empty prior set)");
+  assert.equal(inserts.length, 1, "exactly one dashboard_notifications insert per fresh escalation");
+  const card = inserts[0] as {
+    title: string;
+    body: string;
+    metadata: Record<string, unknown>;
+  };
+  // Title + body must be DIFFERENTIATED from the Meta-call-failed shape — the remediation
+  // is different (check the DB write path, not the Meta connection), so the CEO card must
+  // signal the class up front.
+  assert.match(card.title, /not persisted to ledger/, "persist_failed title must say 'not persisted to ledger', NOT 'failed on Meta'");
+  assert.match(card.body, /iteration_actions ledger upsert returned NO row id/, "persist_failed body must cite the ledger-drop cause, not the Meta connection");
+  assert.match(card.body, /Ledger error:/, "persist_failed body must surface the Supabase error verbatim under a 'Ledger error:' heading");
+  assert.match(card.body, /RLS policy denied/, "persist_failed body must include the upstream error message verbatim");
+  assert.equal(
+    (card.metadata as { escalation_kind: string }).escalation_kind,
+    "media_buyer_kill_persist_failed",
+    "escalation_kind must round-trip on the card so the inbox filter can group persist_failed separately from execute_failed",
+  );
+});
+
+test("ads-supervisor-fix-fdc11e10 — escalateMediaBuyerExecuteFailure keeps the Meta-call-failed card shape unchanged (regression pin: the persist_failed branch must not leak into the execute_failed body)", async () => {
+  const { admin, inserts } = makeFakeAdminForEscalation();
+  await escalateMediaBuyerExecuteFailure(admin, {
+    workspaceId: "ws-42",
+    actionKind: "media_buyer_kill_execute_failed",
+    targetLevel: "adset",
+    targetObjectId: "120253353767090184",
+    rationale: "Dud: $329.55 spend, 0 purchases",
+    errorMessage: "meta_400: Object 120253353767090184 does not exist",
+    nowMs: Date.parse("2026-08-28T10:00:00.000Z"),
+  });
+  const card = inserts[0] as { title: string; body: string };
+  assert.match(card.title, /failed on Meta/, "execute_failed title must say 'failed on Meta' (unchanged)");
+  assert.match(card.body, /the Meta call FAILED/, "execute_failed body must retain the original 'the Meta call FAILED' copy");
+  assert.doesNotMatch(card.body, /not persisted to ledger/, "execute_failed body must NOT leak the persist_failed copy");
+  assert.doesNotMatch(card.body, /Ledger error:/, "execute_failed body must NOT use the persist_failed 'Ledger error:' heading");
 });
 
 // ── media-buyer-explore-exploit-split-on-crown Phase 2 — winner-aware split ──

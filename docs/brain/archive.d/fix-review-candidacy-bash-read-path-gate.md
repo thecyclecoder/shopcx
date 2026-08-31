@@ -1,0 +1,1 @@
+- **Fix review-candidacy Bash file-read path gate** · verified 2026-08-28 · → [[../libraries/review-candidacy-permission-gate]]

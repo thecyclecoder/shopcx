@@ -64,7 +64,7 @@ import {
   resolvePublishIdentity,
   type PublishIdentity,
 } from "@/lib/media-buyer/publish-identity";
-import { maxConcurrentTests } from "@/lib/media-buyer/provision-cohort";
+import { maxConcurrentTests, META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN } from "@/lib/media-buyer/provision-cohort";
 import {
   getAdSetTargetingAndPixel,
   getMetaUserToken,
@@ -180,12 +180,29 @@ const MEDIA_BUYER_EXECUTE_FAILED_DEEP_LINK = "/dashboard/marketing/ads";
  *
  * Dedupe: at most once per (workspace, object_id, actionKind) per UTC day, so the 2h media-buyer
  * pass cadence never spams the inbox but a persistent Meta failure surfaces daily until fixed.
+ *
+ * `*_persist_failed` variants cover the sibling silent-skip class the [[../ads-supervisor]]
+ * `bianca_missed_kill` finding catches after 3h of burned spend: the `iteration_actions` upsert
+ * errored (or partial-succeeded — the returned row set didn't include an id for this action),
+ * so the inline executor had no `rowId` to compare-and-set on. Before this variant existed the
+ * runner's execute loops silently `continue`d on a missing rowId — Bianca DECIDED the pause
+ * but no CEO card fired and no Meta call happened; the dud burned spend until the every-3h
+ * ads-supervisor pass authored a fix-spec. The variant flips that class from
+ * a silent skip into an immediate per-adset CEO card, on the same cadence as the token/Meta
+ * failure variants.
  */
 export async function escalateMediaBuyerExecuteFailure(
   admin: Admin,
   args: {
     workspaceId: string;
-    actionKind: "media_buyer_kill_execute_failed" | "media_buyer_promote_execute_failed" | "media_buyer_reactivate_execute_failed" | "media_buyer_no_meta_token";
+    actionKind:
+      | "media_buyer_kill_execute_failed"
+      | "media_buyer_promote_execute_failed"
+      | "media_buyer_reactivate_execute_failed"
+      | "media_buyer_no_meta_token"
+      | "media_buyer_kill_persist_failed"
+      | "media_buyer_promote_persist_failed"
+      | "media_buyer_reactivate_persist_failed";
     targetLevel: "adset" | "campaign" | null;
     targetObjectId: string;
     rationale: string;
@@ -207,22 +224,40 @@ export async function escalateMediaBuyerExecuteFailure(
   if ((prior ?? []).length > 0) return { emitted: false };
 
   const verb =
-    args.actionKind === "media_buyer_kill_execute_failed"
+    args.actionKind === "media_buyer_kill_execute_failed" || args.actionKind === "media_buyer_kill_persist_failed"
       ? "kill"
-      : args.actionKind === "media_buyer_promote_execute_failed"
+      : args.actionKind === "media_buyer_promote_execute_failed" || args.actionKind === "media_buyer_promote_persist_failed"
         ? "promote"
-        : args.actionKind === "media_buyer_reactivate_execute_failed"
+        : args.actionKind === "media_buyer_reactivate_execute_failed" || args.actionKind === "media_buyer_reactivate_persist_failed"
           ? "reactivate"
           : "execute";
-  const title = `Media Buyer: ${verb} failed on Meta — ${args.targetObjectId}`;
-  const body =
-    `🛠️ Bianca (Media Buyer, Growth) DECIDED to ${verb} ${args.targetLevel ?? "object"} ${args.targetObjectId} ` +
-    `but the Meta call FAILED. The iteration_actions row is NOT stamped executed — the audit trail ` +
-    `will not claim an action that didn't happen (no-false-promises).\n\n` +
-    `Decision rationale: ${args.rationale}\n\n` +
-    `Meta error: ${args.errorMessage}\n\n` +
-    `Investigate the Meta connection (token scope, object still exists, account rate limit) and either ` +
-    `re-run the pass to retry OR act by hand.`;
+  const persistFailed =
+    args.actionKind === "media_buyer_kill_persist_failed" ||
+    args.actionKind === "media_buyer_promote_persist_failed" ||
+    args.actionKind === "media_buyer_reactivate_persist_failed";
+  const title = persistFailed
+    ? `Media Buyer: ${verb} not persisted to ledger — ${args.targetObjectId}`
+    : `Media Buyer: ${verb} failed on Meta — ${args.targetObjectId}`;
+  const body = persistFailed
+    ? (
+        `🛠️ Bianca (Media Buyer, Growth) DECIDED to ${verb} ${args.targetLevel ?? "object"} ${args.targetObjectId} ` +
+        `but the iteration_actions ledger upsert returned NO row id for this action — the Meta call was never ` +
+        `attempted (no rowId to compare-and-set on). Nothing landed on Meta; the ledger drop hid the decision.\n\n` +
+        `Decision rationale: ${args.rationale}\n\n` +
+        `Ledger error: ${args.errorMessage}\n\n` +
+        `Investigate the iteration_actions write path (Supabase error, RLS filter dropping the returned row, ` +
+        `unique-constraint collision on (workspace_id, meta_ad_account_id, object_id, action_type, snapshot_date)) ` +
+        `and either re-run the pass to retry OR act by hand.`
+      )
+    : (
+        `🛠️ Bianca (Media Buyer, Growth) DECIDED to ${verb} ${args.targetLevel ?? "object"} ${args.targetObjectId} ` +
+        `but the Meta call FAILED. The iteration_actions row is NOT stamped executed — the audit trail ` +
+        `will not claim an action that didn't happen (no-false-promises).\n\n` +
+        `Decision rationale: ${args.rationale}\n\n` +
+        `Meta error: ${args.errorMessage}\n\n` +
+        `Investigate the Meta connection (token scope, object still exists, account rate limit) and either ` +
+        `re-run the pass to retry OR act by hand.`
+      );
 
   const { error } = await admin.from("dashboard_notifications").insert({
     workspace_id: args.workspaceId,
@@ -606,6 +641,7 @@ function buildSensorTrustDormantPlan(
     splitInfo: emptySplitInfo(cohortTargetCount),
     replenishDiagnostic: null,
     deferred: [],
+    killDeferred: [],
     summary: `Dormant: sensor-trust denied — ${denial.reason}`,
   };
 }
@@ -698,6 +734,31 @@ export interface MediaBuyerDeferredAction {
   cumulativeSoFar?: number;
   /** Populated when rail='per_account_daily_budget_delta_ceiling'. The policy's per-account daily delta ceiling in cents. */
   ceiling?: number;
+}
+
+/**
+ * ads-supervisor-fix-fdc11e10-bianca-kill-120253384730390184 —
+ * one entry per KILL the pure plan-computer DROPPED because a kill-side rail fired.
+ * Today the only rail is `never_pause_list`: the loser's `targetObjectId` matches
+ * `policy.never_pause_object_ids` (CEO-set protected list), so the plan MUST NOT
+ * emit a `pause`. Before this shape, the planner bare-`continue`d — leaving no
+ * iteration_actions row, no director_activity trace, and no supervisor coverage,
+ * so the every-3h ads-supervisor's `bianca_missed_kill` finding fired 3h too late
+ * on every protected dud. Same "cited never silent" contract `deferred` carries
+ * for the promote side. The runner writes ONE `media_buyer_kill_rail_deferred`
+ * `director_activity` row per entry (armed mode only — the shadow branch's
+ * `<verb>_shadow` rows already carry the plan verbatim) so #director-growth-max
+ * sees WHY the dud kept burning instead of a silent gap.
+ */
+export interface MediaBuyerKillDeferredAction {
+  rail: "never_pause_list";
+  targetLevel: "adset" | "campaign";
+  targetObjectId: string;
+  sourceMetaAdId: string;
+  policyVersionId: string;
+  roas: number;
+  spendCents: number;
+  rationale: string;
 }
 
 /**
@@ -810,6 +871,14 @@ export interface MediaBuyerPlan {
    * cited answer instead of silence.
    */
   deferred: MediaBuyerDeferredAction[];
+  /**
+   * ads-supervisor-fix-fdc11e10-bianca-kill-120253384730390184 — kills the pure plan
+   * dropped because a kill-side rail fired (today: `never_pause_list`). The runner iterates
+   * and writes ONE `media_buyer_kill_rail_deferred` `director_activity` row per entry so the
+   * every-3h ads-supervisor's coverage read sees a legitimate defer instead of a silent gap
+   * on a CEO-protected dud.
+   */
+  killDeferred: MediaBuyerKillDeferredAction[];
   summary: string;
 }
 
@@ -1084,6 +1153,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
       splitInfo: emptySplitInfo(cohortTargetCount),
       replenishDiagnostic: null,
       deferred: [],
+    killDeferred: [],
       summary:
         "Dormant: no active iteration_policies row — Media Buyer never scales/kills without a supervised policy. Author + activate a conservative policy to activate the loop.",
     };
@@ -1188,9 +1258,28 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
   // (`detectMetaCpaLosers`), which already applies the crown/hold/deadline + leading-signal
   // rules with the converter guard. The pure function no longer re-gates on `roas_floor`
   // or `pause_min_spend_cents` — every non-never-paused loser becomes a kill.
+  //
+  // ads-supervisor-fix-fdc11e10-bianca-kill-120253384730390184: the never-pause branch
+  // no longer bare-`continue`s — a dropped kill lands on `killDeferred` so the runner emits
+  // a `media_buyer_kill_rail_deferred` director_activity row and the every-3h ads-supervisor's
+  // coverage read stops firing `bianca_missed_kill` on a CEO-protected dud (a legitimate
+  // policy hold IS coverage, not a silent skip).
   const kill: MediaBuyerKillAction[] = [];
+  const killDeferred: MediaBuyerKillDeferredAction[] = [];
   for (const l of input.losers) {
-    if (policy.never_pause_object_ids.includes(l.targetObjectId)) continue;
+    if (policy.never_pause_object_ids.includes(l.targetObjectId)) {
+      killDeferred.push({
+        rail: "never_pause_list",
+        targetLevel: l.targetLevel,
+        targetObjectId: l.targetObjectId,
+        sourceMetaAdId: l.sourceMetaAdId,
+        policyVersionId: policy.id,
+        roas: l.roas,
+        spendCents: l.spendCents,
+        rationale: `Deferred kill: ${l.targetLevel} ${l.targetObjectId} on policy.never_pause_object_ids (CEO-protected); loser ad ${l.sourceMetaAdId} ROAS ${l.roas.toFixed(2)} on $${(l.spendCents / 100).toFixed(2)} spend.`,
+      });
+      continue;
+    }
     kill.push({
       kind: "kill",
       sourceMetaAdId: l.sourceMetaAdId,
@@ -1360,6 +1449,10 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
       `scale-edit rails deferred=${deferred.length} (cooldown=${cooled}, delta-ceiling=${capped})`,
     );
   }
+  if (killDeferred.length > 0) {
+    const neverPause = killDeferred.filter((k) => k.rail === "never_pause_list").length;
+    summaryParts.push(`kill-rails deferred=${killDeferred.length} (never_pause_list=${neverPause})`);
+  }
 
   summaryParts.unshift(
     `promote=${promote.length} kill=${kill.length} replenish=${replenish.length} exploit_spawn=${exploitSpawn.length} fatigue_replenish=${fatigueReplenish.length} split=${liveExploreCount}/${exploreTarget}+${clampedLiveExploit}/${exploitSlotCountThisPass} (policy v${policy.version})`,
@@ -1379,6 +1472,7 @@ export function computeMediaBuyerPlan(input: MediaBuyerPlanInputs): MediaBuyerPl
     splitInfo,
     replenishDiagnostic,
     deferred,
+    killDeferred,
     summary: summaryParts.join(" · "),
   };
 }
@@ -2750,6 +2844,37 @@ export async function runMediaBuyerLoop(
     if (rec.recorded) writes.directorActivityRows += 1;
   }
 
+  // ── Kill-rail suppressions are CITED, never silent ────────────────────────
+  // ads-supervisor-fix-fdc11e10-bianca-kill-120253384730390184 — one
+  // `media_buyer_kill_rail_deferred` row per kill the pure plan-computer dropped
+  // because a kill-side rail fired (today: `never_pause_list`). Without this the
+  // pass looked "quiet" and the every-3h ads-supervisor's `bianca_missed_kill`
+  // finding fired 3h too late on a CEO-protected dud — a legitimate policy hold
+  // that Bianca DID evaluate. The row's `metadata.target_object_id` is what the
+  // supervisor's `readRecentKillRailDeferralsForAdsets` reads to CREDIT this as
+  // coverage on the next cadence tick. Same shape as the scale-rail loop above.
+  for (const k of plan.killDeferred) {
+    const rec = await recordDirectorActivity(admin, {
+      workspaceId: opts.workspaceId,
+      directorFunction: GROWTH_DIRECTOR_FUNCTION,
+      actionKind: "media_buyer_kill_rail_deferred",
+      specSlug: null,
+      reason: `Pause on ${k.targetLevel} ${k.targetObjectId} deferred — ${k.rail}. ${k.rationale}`,
+      metadata: {
+        rail: k.rail,
+        target_level: k.targetLevel,
+        target_object_id: k.targetObjectId,
+        source_meta_ad_id: k.sourceMetaAdId,
+        policy_version_id: k.policyVersionId,
+        roas: k.roas,
+        spend_cents: k.spendCents,
+        meta_ad_account_id: opts.metaAdAccountId,
+        autonomous: true,
+      },
+    });
+    if (rec.recorded) writes.directorActivityRows += 1;
+  }
+
   // iteration_actions rows for promote (scale_up) + kill (pause). Same shape the
   // decision-engine persistActions writes — the executor picks these up on next pass.
   const iterationRows: Array<Record<string, unknown>> = [];
@@ -2814,6 +2939,11 @@ export async function runMediaBuyerLoop(
   // after a successful execute (no-false-promises).
   const rowIdByKey = new Map<string, string>();
   const keyFor = (objectId: string, actionType: "pause" | "unpause" | "scale_up") => `${objectId}:${actionType}`;
+  // Preserved so the per-adset persist_failed escalation below can cite the DB error verbatim
+  // instead of a generic "rowId missing" (the CEO card needs the actual Supabase error to
+  // diagnose the ledger drop). Null when the upsert succeeded but the returned row set didn't
+  // carry an id for a specific action (RLS filter, partial success).
+  let upsertError: string | null = null;
   if (iterationRows.length) {
     const { data: upsertedRows, error } = await admin
       .from("iteration_actions")
@@ -2822,7 +2952,9 @@ export async function runMediaBuyerLoop(
         ignoreDuplicates: false,
       })
       .select("id, object_id, action_type");
-    if (!error) {
+    if (error) {
+      upsertError = error.message;
+    } else {
       writes.iterationActionsInserted = iterationRows.length;
       for (const r of (upsertedRows ?? []) as Array<{ id: string; object_id: string; action_type: string }>) {
         if (r.action_type === "pause" || r.action_type === "unpause" || r.action_type === "scale_up") {
@@ -2855,10 +2987,31 @@ export async function runMediaBuyerLoop(
     });
   } else if (token) {
     const executor = opts.metaExecutor ?? DEFAULT_META_EXECUTOR;
+    // Missing rowId means either the whole upsert errored (see `upsertError`) or the returned
+    // row set dropped this specific action (RLS filter / partial success). Bianca DECIDED the
+    // action but the ledger has no row to compare-and-set on — the Meta call MUST NOT fire (we
+    // have nothing to stamp), and the failure MUST NOT be silent (the pre-fix `continue` was
+    // the exact class the ads-supervisor's `bianca_missed_kill` finding surfaces 3h too late,
+    // after the dud has burned another few hundred dollars). Escalate per-adset instead.
+    const persistFailureMessage = (): string =>
+      upsertError
+        ? `iteration_actions upsert failed: ${upsertError}`
+        : `iteration_actions upsert returned no row id for this action — the ledger drop hid the decision`;
     for (const a of plan.kill) {
       const key = keyFor(a.targetObjectId, "pause");
       const rowId = rowIdByKey.get(key);
-      if (!rowId) continue; // upsert failed for this row — skip; no false claim
+      if (!rowId) {
+        await escalateMediaBuyerExecuteFailure(admin, {
+          workspaceId: opts.workspaceId,
+          actionKind: "media_buyer_kill_persist_failed",
+          targetLevel: a.targetLevel,
+          targetObjectId: a.targetObjectId,
+          rationale: a.rationale,
+          errorMessage: persistFailureMessage(),
+          nowMs,
+        });
+        continue;
+      }
       const result = await executeDecidedActionAgainstMeta({
         admin, token, nowMs,
         action: { rowId, actionType: "pause", targetLevel: a.targetLevel, targetObjectId: a.targetObjectId },
@@ -2878,7 +3031,18 @@ export async function runMediaBuyerLoop(
     for (const a of plan.promote) {
       const key = keyFor(a.targetObjectId, "scale_up");
       const rowId = rowIdByKey.get(key);
-      if (!rowId) continue;
+      if (!rowId) {
+        await escalateMediaBuyerExecuteFailure(admin, {
+          workspaceId: opts.workspaceId,
+          actionKind: "media_buyer_promote_persist_failed",
+          targetLevel: a.targetLevel,
+          targetObjectId: a.targetObjectId,
+          rationale: a.rationale,
+          errorMessage: persistFailureMessage(),
+          nowMs,
+        });
+        continue;
+      }
       const result = await executeDecidedActionAgainstMeta({
         admin, token, nowMs,
         action: { rowId, actionType: "scale_up", targetLevel: a.targetLevel, targetObjectId: a.targetObjectId, afterBudgetCents: a.afterBudgetCents },
@@ -2898,7 +3062,19 @@ export async function runMediaBuyerLoop(
     for (const a of reactivations) {
       const key = keyFor(a.targetObjectId, "unpause");
       const rowId = rowIdByKey.get(key);
-      if (!rowId) continue;
+      const reactivateRationale = `Reactivate adset ${a.targetObjectId}: late attribution recovered CPP $${(a.cppCents / 100).toFixed(0)} ≤ crown.`;
+      if (!rowId) {
+        await escalateMediaBuyerExecuteFailure(admin, {
+          workspaceId: opts.workspaceId,
+          actionKind: "media_buyer_reactivate_persist_failed",
+          targetLevel: "adset",
+          targetObjectId: a.targetObjectId,
+          rationale: reactivateRationale,
+          errorMessage: persistFailureMessage(),
+          nowMs,
+        });
+        continue;
+      }
       const result = await executeDecidedActionAgainstMeta({
         admin, token, nowMs,
         action: { rowId, actionType: "unpause", targetLevel: "adset", targetObjectId: a.targetObjectId },
@@ -2910,7 +3086,7 @@ export async function runMediaBuyerLoop(
         actionKind: "media_buyer_reactivate_execute_failed",
         targetLevel: "adset",
         targetObjectId: a.targetObjectId,
-        rationale: `Reactivate adset ${a.targetObjectId}: late attribution recovered CPP $${(a.cppCents / 100).toFixed(0)} ≤ crown.`,
+        rationale: reactivateRationale,
         errorMessage: result.error ?? "unknown_meta_error",
         nowMs,
       });
@@ -3418,6 +3594,7 @@ export async function runMediaBuyerLoopForAccount(
             splitInfo: emptySplitInfo(opts.cohortTargetCount ?? DEFAULT_TEST_COHORT_TARGET),
             replenishDiagnostic: null,
             deferred: [],
+            killDeferred: [],
             summary: `Media Buyer pass threw: ${msg.slice(0, 200)}`,
           },
           writes: {
@@ -3681,6 +3858,38 @@ export function ensureExcludedAudiences(
   return { ...targeting, excluded_custom_audiences: existing };
 }
 
+/**
+ * PURE — media-buyer-replenish-sanitizes-legacy-advantage-age-targeting Phase 1.
+ *
+ * The provision-cohort default template is now the Meta-valid broad Advantage+ shape
+ * (see `DEFAULT_TEST_TARGETING` and `META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN` in
+ * [[./provision-cohort]]), but an ALREADY-PERSISTED cohort row can still carry the
+ * legacy F50-65 hard demographic controls copied into `media_buyer_test_cohorts.adset_template`
+ * before the default flipped (or a hand-edited row). This normalizer runs at the money boundary
+ * — the replenish builder — and strips `age_min`/`age_max`/`genders` when
+ * `targeting_automation.advantage_audience === 1` AND `age_min > META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN`
+ * (Meta's contradiction — the shape that trips a 400). Everything else on `targeting` is preserved
+ * verbatim (`geo_locations`, `excluded_custom_audiences`, custom-audience includes, other
+ * `targeting_automation` keys), so purchaser + all-customer exclusion invariants are unaffected.
+ *
+ * NON-mutating: returns the same reference when nothing needs to change (advantage_audience !== 1
+ * OR age_min missing / already ≤ ceiling); returns a fresh copy otherwise so callers can safely
+ * treat it as new state.
+ */
+export function normalizeLegacyAdvantageAudienceTargeting(
+  targeting: Record<string, unknown>,
+): Record<string, unknown> {
+  const auto = targeting.targeting_automation;
+  const advantageOn =
+    !!auto && typeof auto === "object" && (auto as Record<string, unknown>).advantage_audience === 1;
+  if (!advantageOn) return targeting;
+  const ageMin = targeting.age_min;
+  if (typeof ageMin !== "number" || ageMin <= META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN) return targeting;
+  const { age_min: _am, age_max: _ax, genders: _g, ...rest } = targeting;
+  void _am; void _ax; void _g;
+  return rest;
+}
+
 export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): BuildReplenishJobInsertResult {
   const { workspaceId, cohort, action, accountId, publishIdentity, videoId, adName, destination, headlines, primaryTexts, descriptions } = input;
 
@@ -3724,10 +3933,17 @@ export function buildReplenishJobInsert(input: BuildReplenishJobInsertInput): Bu
     // `missing_purchaser_exclusion` AND `missing_customer_exclusion` on any per-test publish
     // whose spec doesn't. A cohort with only one id set (e.g. legacy pre-Fix-1 row) forwards
     // the template with just that id; a cohort with neither id set forwards the template unchanged.
-    const targeting = ensureExcludedAudiences(tmpl.targeting, [
-      cohort.excludedPurchaserAudienceId,
-      cohort.excludedAllCustomersAudienceId,
-    ]);
+    // media-buyer-replenish-sanitizes-legacy-advantage-age-targeting Phase 1 — apply the
+    // legacy Advantage+ age-min normalizer at THIS boundary (before the create_adset_spec is
+    // assembled) so a stale cohort row carrying `age_min:50 / age_max:65 / genders:[2]` +
+    // `targeting_automation.advantage_audience:1` never reaches Meta. Exclusions layered on
+    // above are preserved (the sanitizer only touches age_min/age_max/genders).
+    const targeting = normalizeLegacyAdvantageAudienceTargeting(
+      ensureExcludedAudiences(tmpl.targeting, [
+        cohort.excludedPurchaserAudienceId,
+        cohort.excludedAllCustomersAudienceId,
+      ]),
+    );
     createAdsetSpec = {
       campaign_id: campaignId,
       name: adName,

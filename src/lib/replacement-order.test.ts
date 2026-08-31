@@ -13,6 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildReplacementDraftOrderInput,
+  decideOverCap,
   findVariantOverCap,
   normalizeReplacementReasonTag,
   REPLACEMENT_MAX_UNITS_PER_VARIANT,
@@ -211,4 +212,65 @@ test("findVariantOverCap: variant without a title still refuses with a usable id
   assert.equal(over!.variantId, "vX");
   assert.equal(over!.title, null);
   assert.equal(over!.requested, 12);
+});
+
+// ── The per-variant cap and its founder grant (decideOverCap) ────────────────
+//
+// Ground truth: Jen Parker (ticket b199e5ba). 14 paid orders since 2024, $3,386 lifetime, and every
+// order she has placed is 5-6 units. Her whole 5-unit bulk order of Superfood Tabs arrived expired.
+// June escalated it as "a real over-cap authorization only the founder can grant" — and before
+// 2026-08-28 there was nothing to grant it WITH: the cap refused every caller, including the CEO.
+// She waited 23 days. The grant exists so a supervisor can approve an exception; the tool still can't.
+
+test("within the cap — allowed, and not marked as a granted exception", () => {
+  const d = decideOverCap([{ variantId: "v1", quantity: 4 }]);
+  assert.equal(d.allow, true);
+  assert.equal(d.granted, false);
+});
+
+test("over the cap with NO authorizer — refused, as it is for every autonomous caller", () => {
+  const d = decideOverCap([{ variantId: "v1", quantity: 5, title: "Mixed Berry" }]);
+  assert.equal(d.allow, false);
+  if (d.allow) return;
+  assert.match(d.refusal, /exceeds the per-variant cap of 4/);
+  assert.match(d.refusal, /Mixed Berry/);
+  assert.equal(d.over.requested, 5);
+});
+
+test("over the cap WITH a named authorizer — allowed, flagged granted, authorizer preserved", () => {
+  const who = "Dylan Ralston (founder) 2026-08-28 — CEO approvals ruling on ticket b199e5ba";
+  const d = decideOverCap([{ variantId: "42614433448109", quantity: 5, title: "Mixed Berry" }], who);
+  assert.equal(d.allow, true);
+  assert.equal(d.granted, true);
+  if (!d.granted) return;
+  assert.equal(d.authorizedBy, who);
+  assert.equal(d.over.requested, 5);
+  assert.equal(d.over.cap, REPLACEMENT_MAX_UNITS_PER_VARIANT);
+});
+
+test("a blank authorizer is NOT a grant — the exception must name a human", () => {
+  for (const blank of ["", "   ", undefined, null]) {
+    const d = decideOverCap([{ variantId: "v1", quantity: 9 }], blank as string | null | undefined);
+    assert.equal(d.allow, false, `blank authorizer ${JSON.stringify(blank)} must not grant`);
+  }
+});
+
+test("the grant is per-request, not a global cap raise — an un-granted call still refuses after a granted one", () => {
+  const granted = decideOverCap([{ variantId: "v1", quantity: 5 }], "founder");
+  assert.equal(granted.allow, true);
+  const next = decideOverCap([{ variantId: "v1", quantity: 5 }]);
+  assert.equal(next.allow, false);
+});
+
+test("quantities still sum per variant before the cap is applied — 3+3 of one variant is over", () => {
+  const d = decideOverCap([{ variantId: "v1", quantity: 3 }, { variantId: "v1", quantity: 3 }]);
+  assert.equal(d.allow, false);
+  if (d.allow) return;
+  assert.equal(d.over.requested, 6);
+});
+
+test("a multi-flavour 4+4 is still fine — the cap is per variant, not per order", () => {
+  const d = decideOverCap([{ variantId: "v1", quantity: 4 }, { variantId: "v2", quantity: 4 }]);
+  assert.equal(d.allow, true);
+  assert.equal(d.granted, false);
 });

@@ -6,8 +6,12 @@
  * was misclassified `permanent`). Those rows have no creative, no vision, and their `dedup_key`
  * would make `splitNewExisting` skip the same ads on every future sweep — poisoning them forever.
  *
- * Scope is deliberately narrow: source='meta_ad_library' AND status='failed' AND thumb_path IS NULL
- * AND hook IS NULL. A genuinely-analyzed Meta row can never match.
+ * Scope: source='meta_ad_library' AND status='failed' AND hook IS NULL — i.e. a row that carries no
+ * usable analysis, whatever the reason (a render that never ran, or a render that SUCCEEDED but whose
+ * vision failed with no_anthropic_key on the box). thumb_path is deliberately NOT part of the filter:
+ * a row can hold a real creative and still be useless without its skeleton, and leaving it in place
+ * makes splitNewExisting skip that ad on every future sweep. A genuinely-analyzed row has a hook and
+ * can never match.
  */
 import { createAdminClient } from "./_bootstrap";
 
@@ -20,7 +24,6 @@ async function main() {
     .select("id, advertiser, dedup_key, status, thumb_path, hook")
     .eq("source", "meta_ad_library")
     .eq("status", "failed")
-    .is("thumb_path", null)
     .is("hook", null);
   if (error) throw error;
   const rows = (data ?? []) as Array<{ id: string; advertiser: string | null; dedup_key: string }>;

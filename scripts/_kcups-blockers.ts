@@ -42,15 +42,13 @@ async function main() {
     for (const r of data ?? []) console.log(`   sample: ${JSON.stringify(r).slice(0, 200)}`);
   }
 
-  // Competitors — how are they scoped? Route through the SDK chokepoint
-  // (`src/lib/competitors.ts` -> listCompetitors). A hand-rolled query would
-  // silently read as empty if a column name drifts (an 82-row workspace once
-  // read as 0 because a raw probe selected a non-existent column).
-  const compAll = await listCompetitors({ workspaceId: WS, limit: 10000 });
-  const compSample = compAll.slice(0, 3);
+  // Competitors — how are they scoped? Routed through the SDK chokepoint (raw table reads are
+  // blocked by scripts/_check-competitors-sdk-compliance.ts).
+  const comp = await listCompetitors({ workspaceId: WS, limit: 3 });
+  const all = await listCompetitors({ workspaceId: WS, limit: 10000 });
   console.log(`\n=== competitors ===`);
-  console.log(`  columns: ${Object.keys(compSample[0] ?? {}).join(", ")}`);
-  console.log(`  total ${compAll.length}`);
+  console.log(`  columns: ${Object.keys(comp[0] ?? {}).join(", ")}`);
+  console.log(`  total ${all.length}`);
 }
 main().then(() => process.exit(0)).catch((e) => {
   console.error(e instanceof Error ? e.message : JSON.stringify(e));
