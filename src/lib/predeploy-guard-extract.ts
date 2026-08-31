@@ -62,3 +62,129 @@ export function extractFailedPredeployGuards(out: string): string[] {
   for (const m of out.matchAll(/scripts\/_?(check-[a-z0-9-]+)\.ts/gi)) push(m[1]);
   return found;
 }
+
+/**
+ * Pull the repo-relative source paths a predeploy guard named as violating, out of the chain's combined
+ * stdout+stderr. Covers the two shapes our guards actually emit — the `• {file}:{line}  →  {snippet}` line
+ * and the `[VIOLATION] {file}:{line}  {snippet}` line (see `scripts/_check-competitors-sdk-compliance.ts`
+ * lines 113 / 121 for canonical examples).
+ *
+ * Anchors on paths that start with `src/`, `scripts/`, `supabase/`, or `docs/` and dedupes in first-seen
+ * order. Deliberately IGNORES the `> shopcx-init@… check:foo` / `> tsx scripts/_check-foo.ts` npm
+ * lifecycle frame so the chain header can never be mistaken for a violation — the same defensive
+ * property `extractFailedPredeployGuards`' `lastEcho` rule already carries.
+ *
+ * Pure, no I/O. Empty return means "no path attributable" — the caller must fall back to the existing
+ * repair-it behavior, never silently skip. That fail-closed default is the load-bearing rule of the
+ * owned-vs-inherited split ([[classifyPredeployViolationScope]]).
+ */
+export function extractPredeployViolationPaths(out: string): string[] {
+  const found: string[] = [];
+  const push = (raw: string) => {
+    const p = raw.trim();
+    if (!p) return;
+    if (!found.includes(p)) found.push(p);
+  };
+
+  // Consider the output LINE BY LINE so we can drop npm lifecycle frames without them consuming a real
+  // violation on the following line.
+  for (const rawLine of out.split(/\r?\n/)) {
+    const line = rawLine;
+    // Skip npm lifecycle frames — `> shopcx-init@0.1.0 check:foo` and the guard's own
+    // `> tsx scripts/_check-foo.ts` runner echo. Either would inject `scripts/…` into the extraction.
+    if (/^\s*>\s+\S/.test(line)) continue;
+
+    // Shape (a): `  • {file}:{line}  →  {snippet}`
+    for (const m of line.matchAll(
+      /(?:^|\s)•\s+((?:src|scripts|supabase|docs)\/[^\s:]+):\d+/g,
+    )) {
+      push(m[1]);
+    }
+    // Shape (b): `  [VIOLATION] {file}:{line}  {snippet}`
+    for (const m of line.matchAll(
+      /\[VIOLATION\]\s+((?:src|scripts|supabase|docs)\/[^\s:]+):\d+/g,
+    )) {
+      push(m[1]);
+    }
+  }
+
+  return found;
+}
+
+/**
+ * Split the violation paths named in a predeploy failure into ones the branch OWNS (its diff touched them)
+ * and ones the branch INHERITED from main (the file was already broken before this commit). Enables the
+ * build lane to repair only what it caused instead of racing N concurrent branches to the same fix on a
+ * pre-existing violation — the failure mode measured 2026-08-31 that parked the cold-scaler and
+ * creative-scout builds on the same three _kcups files for six days.
+ *
+ * Both sides are normalized before comparison: leading `./` stripped, backslashes replaced with `/`.
+ *
+ * `allInherited` is TRUE only when at least one path was extracted AND none of them appears in
+ * `changedPaths`. An EMPTY extraction (guard output we could not parse) yields `allInherited: false` so the
+ * caller falls back to the current repair-it behavior rather than silently skipping a real violation —
+ * fail-closed by design.
+ *
+ * Pure, no I/O.
+ */
+export function classifyPredeployViolationScope(input: {
+  out: string;
+  changedPaths: string[];
+}): { owned: string[]; inherited: string[]; allInherited: boolean; paths: string[] } {
+  const normalize = (p: string): string => {
+    let s = String(p || "").trim();
+    s = s.replace(/\\/g, "/");
+    while (s.startsWith("./")) s = s.slice(2);
+    return s;
+  };
+
+  const paths = extractPredeployViolationPaths(input.out).map(normalize);
+  const changed = new Set(input.changedPaths.map(normalize));
+
+  const owned: string[] = [];
+  const inherited: string[] = [];
+  for (const p of paths) {
+    if (changed.has(p)) owned.push(p);
+    else inherited.push(p);
+  }
+
+  // Fail-closed: no paths extracted → NOT all-inherited (caller repairs). Load-bearing: an unparseable
+  // guard output must never masquerade as "nothing this branch owns".
+  const allInherited = paths.length > 0 && owned.length === 0;
+
+  return { owned, inherited, allInherited, paths };
+}
+
+/**
+ * Predeploy Fix 1 — the caller-side safe wrapper for [[classifyPredeployViolationScope]].
+ *
+ * Returns `null` — i.e. "do NOT enter the inherited-skip branch; caller falls through to today's
+ * repair-it behavior" — whenever the caller cannot honestly answer "did this branch touch that file?":
+ *
+ *   1. `changedPathsResult.ok === false` — the `git diff --name-only` command FAILED. We refuse to
+ *      classify against an empty stand-in list, because that list would silently route EVERY extracted
+ *      violation into `inherited` and trigger a false skip.
+ *   2. `changedPathsResult.paths.length === 0` — the diff succeeded but reported zero changed files. On
+ *      a real build branch this is degenerate: if we call the classifier with `changedPaths=[]`, every
+ *      extracted path lands in `inherited`, and `allInherited` flips to true — the exact same silent
+ *      skip. The safe-wrapper refuses.
+ *
+ * Otherwise it delegates to `classifyPredeployViolationScope`. The wrapper exists so the worker's
+ * `predeploy:static` repair loop can call it once per iteration, AFTER re-running the branch diff, and
+ * so the "did the diff work?" and "is the branch actually populated?" checks live in ONE place with a
+ * type-level guarantee (returning `null` beats the caller forgetting to check `ok`).
+ *
+ * Called by [[../../scripts/builder-worker]] `runBuildJob` predeploy:static block ONLY. Kept in this
+ * pure module so a unit test can prove the fail-closed default without booting the worker.
+ */
+export function classifyPredeployViolationScopeIfSafe(input: {
+  out: string;
+  changedPathsResult: { ok: boolean; paths: string[] };
+}): { owned: string[]; inherited: string[]; allInherited: boolean; paths: string[] } | null {
+  if (!input.changedPathsResult.ok) return null;
+  if (input.changedPathsResult.paths.length === 0) return null;
+  return classifyPredeployViolationScope({
+    out: input.out,
+    changedPaths: input.changedPathsResult.paths,
+  });
+}

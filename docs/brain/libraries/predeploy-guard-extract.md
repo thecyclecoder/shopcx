@@ -13,6 +13,22 @@ The predecessor was a single regex, `/❌\s*(check-[^\s—]+)/`, run against the
 ## Exports
 
 - `extractFailedPredeployGuards(out: string): string[]` — every distinct guard named anywhere in the output, deduped, in first-seen order.
+- `extractPredeployViolationPaths(out: string): string[]` — the repo-relative source paths (starting `src/`, `scripts/`, `supabase/`, `docs/`) a guard named as violating, deduped in first-seen order. Covers the two shapes our guards actually emit — the `  • {file}:{line}  →  {snippet}` line and the `  [VIOLATION] {file}:{line}  {snippet}` line — and skips the `> shopcx-init@… check:foo` / `> tsx scripts/_check-*.ts` npm lifecycle frame so the chain header can never be mistaken for a violation (same defensive property `extractFailedPredeployGuards`' `lastEcho` rule carries).
+- `classifyPredeployViolationScope({ out, changedPaths }): { owned, inherited, allInherited, paths }` — splits the extracted paths into ones the branch OWNS (path is in its diff) and ones it INHERITED from main (path is not). Both sides normalized (leading `./` stripped, backslashes to `/`) before comparison. `allInherited` is TRUE **only** when at least one path was extracted AND none of them appears in `changedPaths` — an EMPTY extraction yields `allInherited: false` so the caller falls back to today's repair-it behavior rather than silently skip a real violation. **This fail-closed default is the load-bearing rule of the owned-vs-inherited split.**
+
+## Owned vs inherited — why the split exists
+
+The build lane runs the full predeploy chain repo-wide as a blocking pre-commit gate and, on failure, **resumes the build session to REPAIR the violation** — with no check on whether the offending file is one this build touched. A violation that already existed on main therefore gets repaired independently, in-session, by EVERY concurrent build. Each authors its own wording of the same fix in files its spec has no business editing, and whichever branch merges first turns all the others into reconcile conflicts the box refuses to auto-resolve (source files are excluded from the additive-only tier by design).
+
+Ground truth: **2026-08-31** — the `cold-scaler-arming-decides-on-evidence-not-absence` and `creative-scout-job-stamps-spec-slug` builds BOTH sat parked at `needs_attention` / `reconcile_conflict` for **6 days** on the SAME three files — `scripts/_kcups-blockers.ts`, `_kcups-competitors.ts`, `_kcups-readiness.ts` — because each had independently made the same repair to clear the competitors SDK compliance guard, while a separate PR landed that identical fix on main. Neither spec was about kcups. The classifier draws the exact line the repair loop was missing.
+
+**Fail-closed default (the load-bearing rule).** An unparseable guard output produces `paths=[]` → `allInherited=false` → the caller repairs as today. Silently skipping a real violation would be strictly worse than a redundant repair, so the classifier never claims "nothing this branch owns" from an empty extraction.
+
+**Mixed case.** When the extraction contains BOTH owned and inherited paths (e.g. the branch touched one violating file plus main introduced two more), the classifier returns `allInherited=false` and the repair proceeds — the branch genuinely owns part of it. The dedup-fix rail can only pick up FULLY inherited failures.
+
+## Caller
+
+The worker's `predeploy:static` repair loop (`scripts/builder-worker.ts`, guarded by `PREDEPLOY_REPAIR_MAX`) computes the branch's changed paths ONCE via `git diff --name-only origin/main...HEAD` and calls `classifyPredeployViolationScope` on every non-zero staticCheck. When `allInherited === true` the loop **breaks** (treats the gate as passed for this commit), records a `predeploy_inherited_violation_skipped` `director_activity` row (`directorFunction: 'platform'`, `metadata: { guards, inherited_paths, … }`), and enqueues ONE deduped fix spec via `authorSpecRowStructured` keyed on `predeploy-violation-{guard}` — so the second, third and Nth build that hits the same inherited violation re-author the SAME row idempotently ([[author-spec]] `reopenIfReauthoredAndChanged`) instead of opening N specs. See [[builder-worker]] § Predeploy static gate.
 
 Shape **(0)** is authoritative when present and **short-circuits**; otherwise shapes (a)/(b)/(c) are tried and their union returned:
 
