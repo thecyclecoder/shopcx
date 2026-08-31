@@ -13,15 +13,27 @@
 -- supply-size-vs-delivery-interval framing on any "bulk price at 90
 -- days" ask.
 --
--- Seed pattern mirrors 20260731140000 (assisted-purchase routing) and
--- 20260424020000 (post-renewal regret): fan-out across workspaces,
--- idempotent NOT EXISTS guard on title. derived_from_ticket_id is
--- resolved per-workspace via a scoped subquery so the ticket FK stays
--- workspace-local (NULL for workspaces that don't own the ticket).
+-- Tenant-boundary scope (Phase 2 spec-test regression fix — pre-merge
+-- security check flagged the original `SELECT w.id FROM workspaces w`
+-- fan-out as an authz/tenant-boundary regression: the prompt content
+-- itself is merchant-specific and workspace-scoped reads make it
+-- visible/active as another workspace's own rule). This migration now
+-- scopes the INSERT to ONLY the workspace that owns the source ticket
+-- — a CTE resolves `owner (workspace_id, ticket_id)` from
+-- `public.tickets` where `id = b28e7744-…`. When the ticket is absent
+-- (fresh env / other database), the CTE returns zero rows and the
+-- INSERT is a no-op — idempotent + safe. The `NOT EXISTS` guard
+-- likewise re-scopes to that workspace so a re-run doesn't duplicate.
 
+WITH owner AS (
+  SELECT t.workspace_id, t.id AS ticket_id
+  FROM public.tickets t
+  WHERE t.id = 'b28e7744-0451-46eb-a675-33836b96e491'::uuid
+  LIMIT 1
+)
 INSERT INTO sonnet_prompts (workspace_id, category, title, content, sort_order, derived_from_ticket_id)
 SELECT
-  w.id,
+  owner.workspace_id,
   'rule',
   'Amazing Coffee — storefront supply tiers vs flat subscription pricing (+ 8-week interval cap)',
   $$Amazing Coffee is sold two DIFFERENT ways with DIFFERENT pricing surfaces. Do not conflate them.
@@ -41,13 +53,10 @@ RULES:
 - If a returning customer asks to reactivate at "the bulk price", ask which they mean: the storefront one-time bulk price (do a one-time order) or a recurring subscription (quote the actual flat sub price + any coupon actually on the sub).
 $$,
   25,
-  (SELECT t.id FROM tickets t
-    WHERE t.workspace_id = w.id
-      AND t.id = 'b28e7744-0451-46eb-a675-33836b96e491'::uuid
-    LIMIT 1)
-FROM workspaces w
+  owner.ticket_id
+FROM owner
 WHERE NOT EXISTS (
   SELECT 1 FROM sonnet_prompts sp
-  WHERE sp.workspace_id = w.id
+  WHERE sp.workspace_id = owner.workspace_id
     AND sp.title = 'Amazing Coffee — storefront supply tiers vs flat subscription pricing (+ 8-week interval cap)'
 );
