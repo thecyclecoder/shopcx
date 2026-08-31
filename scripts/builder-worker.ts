@@ -15759,6 +15759,96 @@ async function loadCsDirectorCallBrief(
     parts.push(`LIVE REFUND LEDGERS: read failed — ${errText(e)}`);
   }
 
+  // Phase 1 of cs-director-must-timestamp-a-cancelled-but-charged-claim: build one chronological
+  // timeline per contract (subscriptions.cancelled_at + billing_forecast_events + orders) so the CS
+  // Director can compare charge_at vs cancelled_at in a single glance instead of joining them in her
+  // head. Ground truth is ticket f773b8ec (bonnie marlette, 2026-08-21) — contract 27806990509
+  // cancelled at 2026-07-17T08:39:51, thirty-six minutes AFTER the last renewal at 08:03:45, so
+  // "three post-cancellation renewals" was structurally impossible; the cancel moment lived in
+  // billing_forecast_events but was never surfaced to June. Best-effort — a load failure renders as a
+  // diagnostic line and never breaks the brief. `post-cancellation` charges is the counter the skill
+  // cites when it forbids escalating a cancelled-but-charged claim without both timestamps.
+  try {
+    const { data: ticketRow } = await db
+      .from("tickets")
+      .select("customer_id")
+      .eq("id", ticketId)
+      .maybeSingle();
+    if (ticketRow?.customer_id) {
+      const { data: subs } = await db
+        .from("subscriptions")
+        .select("id, shopify_contract_id, status, cancelled_at")
+        .eq("workspace_id", workspaceId)
+        .eq("customer_id", ticketRow.customer_id);
+      const subRows = subs ?? [];
+      const contractIds = subRows
+        .map((s) => s.shopify_contract_id)
+        .filter((v): v is string => typeof v === "string" && v.length > 0);
+      const subIds = subRows.map((s) => s.id as string);
+
+      let events: Array<{
+        shopify_contract_id: string | null;
+        event_type: string;
+        created_at: string;
+        forecast_date: string | null;
+        delta_cents: number | null;
+        description: string | null;
+      }> = [];
+      if (contractIds.length > 0) {
+        const { data: evts } = await db
+          .from("billing_forecast_events")
+          .select("shopify_contract_id, event_type, created_at, forecast_date, delta_cents, description")
+          .eq("workspace_id", workspaceId)
+          .in("shopify_contract_id", contractIds)
+          .order("created_at", { ascending: true });
+        events = (evts ?? []) as typeof events;
+      }
+
+      let orders: Array<{
+        order_number: string | null;
+        shopify_order_id: string | null;
+        created_at: string;
+        total_cents: number | null;
+        financial_status: string | null;
+        subscription_id: string | null;
+        shopify_contract_id: string | null;
+      }> = [];
+      if (subIds.length > 0 || contractIds.length > 0) {
+        const { data: ordRows } = await db
+          .from("orders")
+          .select(
+            "order_number, shopify_order_id, created_at, total_cents, financial_status, subscription_id, shopify_contract_id",
+          )
+          .eq("workspace_id", workspaceId)
+          .eq("customer_id", ticketRow.customer_id)
+          .order("created_at", { ascending: true });
+        orders = (ordRows ?? []) as typeof orders;
+      }
+
+      const { buildCancellationTimeline, formatCancellationTimelineForBrief } = await import(
+        "../src/lib/cs-director-cancellation-timeline"
+      );
+      const timelines = buildCancellationTimeline({
+        subscriptions: subRows.map((s) => ({
+          id: s.id as string,
+          shopify_contract_id: (s.shopify_contract_id as string | null) ?? null,
+          status: (s.status as string | null) ?? null,
+          cancelled_at: (s.cancelled_at as string | null) ?? null,
+        })),
+        events,
+        orders,
+      });
+      parts.push("");
+      parts.push(formatCancellationTimelineForBrief(timelines));
+      parts.push(
+        "MANDATORY (cs-director-must-timestamp-a-cancelled-but-charged-claim Phase 2): before asserting a subscription was charged AFTER it was cancelled, cite the cancel timestamp AND each charge timestamp from the timeline above and state the ordering. A claim that cannot show charge_at > cancelled_at is not escalatable as a cancelled-but-charged system error — it is an ordinary pre-cancel renewal, and the Refund playbook's normal ladder applies.",
+      );
+    }
+  } catch (e) {
+    parts.push("");
+    parts.push(`CANCELLATION TIMELINE: read failed — ${errText(e)}`);
+  }
+
   // Resolution-events ledger — the M1/M2 write-ahead history for every prior orchestrator turn on
   // this ticket. Cited so the CS Director sees what confidence + problem + verified_outcome each turn
   // landed on (surfaces a repeated 'unbacked' / 'drifted' pattern the triage quorum couldn't reach a
