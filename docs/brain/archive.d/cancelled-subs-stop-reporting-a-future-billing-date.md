@@ -1,0 +1,1 @@
+- **Cancelled subs must not report a future billing date** · verified 2026-08-31 · → [[../tables/subscriptions]]
