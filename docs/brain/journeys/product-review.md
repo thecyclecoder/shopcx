@@ -16,8 +16,10 @@ Landing page: product image, the same hand-picked fact the message used, then as
 
 Submit writes `product_reviews` (with `attribute_scores`), mints a customer-scoped reward via [[../libraries/coupons]] `createCustomerDiscount`, and:
 
-- **rating ≥ 4** → `status='published'`
-- **rating ≤ 3** → NOT published; opens a CS ticket instead. A detractor caught privately is a save opportunity.
+- **every review lands `status='pending'`** — nothing self-publishes. A team member publishes from [[../dashboard/reviews]].
+- **rating ≤ 3** additionally opens a CS ticket. A detractor caught privately is a save opportunity.
+
+**Why nothing auto-publishes.** This originally published anything rated 4+. That is the wrong default when reviews land on live PDPs, in the ad tool's proof anchors, and in Google rich snippets: a 5-star *rating* says nothing about whether the *body* is publishable — it can name a competitor, make a medical claim we cannot, carry personal information, or describe a different product entirely. The first real submission proved it: a sincere 5-star review of Superfood Tabs ("the stickpacks are so convenient") auto-published against Creatine Prime+, because that was the product the session named.
 
 The reward is minted **regardless of rating** — contingent-on-a-good-rating is paying for positive reviews.
 
@@ -70,3 +72,7 @@ Resolution order: **variant `review_hero` → product `review_hero` → `product
 **Generated** with Nano Banana Pro, each anchored on the variant's real packshot as a reference image with an exact-label-match instruction — invented packaging on a page asking for sincerity would be worse than no image. The prepared half is derived from how the product is actually consumed: a fizzing tablet in ice water for Tabs, a mid-pour ribbon for Creamer, crema and steam for Coffee, a glossy handful for Gummies. 16 variants, founder-approved before going live.
 
 **Accessories are never asked about** (`products.reviewable=false` for the Mixer, Mug, and Tumbler) — an accessory review is a wasted ask, and they have no prepared result to photograph anyway.
+
+## The ladder's ledger closes on submit
+
+`review_requests.outcome` advances `sent`/`clicked` → `submitted` (or `routed_to_cs` for 1–3★) when the session completes. The nudge cron reads that row to decide whether to chase a non-responder, so leaving it on `sent` means a customer who already reviewed gets "just floating this back up" three days later. Scoped by `(workspace, customer, product)` and only advances rows still open, so a re-run cannot rewrite history.

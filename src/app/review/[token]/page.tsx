@@ -102,7 +102,7 @@ function ReviewPageInner({ params }: { params: Promise<{ token: string }> }) {
         <p style={{ color: "#3a3a3a", lineHeight: 1.55 }}>
           {published
             ? "Your review is live on the site."
-            : "We've passed this to our team — someone will follow up with you."}
+            : "Our team reads every one of these before it goes up — thanks for taking the time."}
         </p>
         {reward && (
           <div style={{ marginTop: 22, padding: 18, background: "#f7f6f2", borderRadius: 14 }}>
