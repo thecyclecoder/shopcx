@@ -324,7 +324,22 @@ export async function submitReviewForSession(input: SubmitReviewInput): Promise<
     return { ok: false, error: "session_already_completed_or_processing", status: 409 };
   }
 
-  const status: "published" | "pending" = rating >= 4 ? "published" : "pending";
+  // EVERY review is held for a human. Nothing self-publishes to the storefront.
+  //
+  // This previously auto-published anything rated 4+ and only held 1-3 stars.
+  // That is the wrong default for a page whose reviews land on live PDPs, in
+  // the ad tool's proof anchors, and in Google rich snippets: a 5-star rating
+  // says nothing about whether the BODY is publishable — it can name a
+  // competitor, contain a medical claim we cannot make, describe the wrong
+  // product, or carry personal information. The first real submission proved
+  // the point: a sincere 5-star review of Superfood Tabs ("the stickpacks are
+  // so convenient") auto-published against Creatine Prime+, because that is
+  // the product the session named.
+  //
+  // A team member publishes from /dashboard/reviews, which already buckets
+  // pending / published / rejected / featured and whose moderation actions are
+  // local-only since the Klaviyo sunset.
+  const status: "pending" = "pending";
 
   const { data: reviewInsert, error: reviewErr } = await admin
     .from("product_reviews")
@@ -395,17 +410,37 @@ export async function submitReviewForSession(input: SubmitReviewInput): Promise<
     .update({
       status: "completed",
       completed_at: new Date().toISOString(),
-      outcome: rating >= 4 ? "review_published" : "review_routed_to_cs",
+      outcome: rating <= 3 ? "review_routed_to_cs" : "review_pending_moderation",
       responses: { rating, attribute_scores, comment },
     })
     .eq("id", session.id)
     .eq("workspace_id", session.workspace_id)
     .eq("status", "processing");
 
+  // Close the ladder's ledger. review_requests is what the nudge cron reads to
+  // decide whether to chase a non-responder; leaving it on 'sent' after a
+  // completed submit means the customer gets "just floating this back up"
+  // three days after they already reviewed. Scoped by (customer, product) and
+  // only advances rows still open, so a re-run cannot rewrite history.
+  {
+    const { error: ledgerErr } = await admin
+      .from("review_requests")
+      .update({ outcome: rating <= 3 ? "routed_to_cs" : "submitted" })
+      .eq("workspace_id", session.workspace_id)
+      .eq("customer_id", session.customer_id)
+      .eq("product_id", session.product_id)
+      .in("outcome", ["sent", "clicked"]);
+    if (ledgerErr) {
+      // The review is written and the reward is minted — a stale ledger row is
+      // a nudge-suppression problem, not a reason to fail the customer.
+      console.error("[review-journey] review_requests outcome update failed:", ledgerErr.message);
+    }
+  }
+
   return {
     ok: true,
     review_id: reviewInsert.id as string,
-    published: status === "published",
+    published: false, // always held — a human decides
     ticket_id: ticketId,
     reward_code: reward?.code || null,
     reward_source: reward?.source || null,
