@@ -1,0 +1,1 @@
+- **No pattern match on a UUID column** · verified 2026-08-31 · → [[../operational-rules]]
