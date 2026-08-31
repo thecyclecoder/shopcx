@@ -15,6 +15,7 @@ import { reviewCandidacyDetectorCron } from "@/lib/inngest/review-candidacy-dete
 import { reviewRequestNudgeCron } from "@/lib/inngest/review-request-nudge-cron";
 import { reviewRequestCanaryDigestCron } from "@/lib/inngest/review-request-canary-digest-cron";
 import { postOrderReviewAskDetectorCron } from "@/lib/inngest/post-order-review-ask-detector-cron";
+import { postOrderReviewAskSend } from "@/lib/inngest/post-order-review-ask-send";
 import {
   importFileUpload,
   importFileSplit,
@@ -195,6 +196,7 @@ export const registeredInngestFunctions = [
   reviewRequestNudgeCron,
   reviewRequestCanaryDigestCron,
   postOrderReviewAskDetectorCron,
+  postOrderReviewAskSend,
   importFileUpload,
   importFileSplit,
   importChunkProcess,

@@ -61,6 +61,7 @@
     "test:review-candidacy-permission-gate": "tsx --test src/lib/review-candidacy-permission-gate.test.ts",
     "test:review-candidacy-detector-cron-selection": "tsx --test src/lib/inngest/review-candidacy-detector-cron.selection.test.ts",
     "test:post-order-review-ask-detector-cron-selection": "tsx --test src/lib/inngest/post-order-review-ask-detector-cron.selection.test.ts",
+    "test:review-request-compose": "tsx --test src/lib/review-request-compose.test.ts",
     "test:grep-smart-case": "tsx --test src/lib/spec-check-runner.smart-case.test.ts",
     "test:broken-check-escalate": "tsx --test src/lib/roadmap-actions.broken-check-escalate.test.ts",
     "test:specs-table-resolve-branch-ref": "tsx --test src/lib/specs-table.resolve-branch-ref.test.ts",
