@@ -109,6 +109,7 @@ const { count } = await admin.from("sonnet_prompts")
 
 ## Gotchas
 
+- **RLS is workspace-scoped.** The `authenticated` SELECT policy checks `workspace_id IN (SELECT workspace_id FROM workspace_members WHERE user_id = auth.uid())` (migration `20261218120000_sonnet_prompts_workspace_scoped_select.sql`, replacing the original `USING (true)` gap that let any authenticated user read every workspace's prompt rules). The service_role policy is preserved unchanged, so the orchestrator + cx-agent SDK reads via `createAdminClient()` are unaffected. The `/api/workspaces/[id]/sonnet-prompts` route additionally gates on `workspace_members` before every service-role read/write, since the admin client bypasses RLS.
 - category: `rule` / `approach` / `knowledge` / `tool_hint` / `personality`.
 - Loaded at orchestrator init. Edits via Settings → AI → Prompts take effect on next message.
 - **Assisted-purchase routing (`Assisted purchase (prefer playbook over bare create)`, category='rule', sort_order 31)** — steers Sonnet to route purchase intents (buy / reorder / create_order / create_subscription / add_subscription / subscribe) through the assisted-purchase playbook rather than emitting a bare create direct_action. Belt-and-suspenders companion to the Phase-1 fail-closed guard on the direct create handlers. See [[playbook-executor]] Gotchas + [[../specs/assisted-purchase-playbook]] Phase 3.

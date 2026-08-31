@@ -2,10 +2,33 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 
+// Confirm the caller is a member of the requested workspace before any
+// service-role read/write to sonnet_prompts. The RLS policy on the table is
+// workspace-scoped, but the admin client bypasses RLS — so the route MUST
+// gate on workspace_members itself. Returns the member row (with role) on
+// success, or a NextResponse to return unchanged on failure.
+async function requireWorkspaceMember(
+  workspaceId: string,
+  userId: string,
+): Promise<{ role: string } | NextResponse> {
+  const admin = createAdminClient();
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (!member) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  return member as { role: string };
+}
+
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id: workspaceId } = await params;
   const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const gate = await requireWorkspaceMember(workspaceId, user.id);
+  if (gate instanceof NextResponse) return gate;
 
   const admin = createAdminClient();
   const { data: prompts } = await admin.from("sonnet_prompts")
@@ -21,6 +44,9 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const { id: workspaceId } = await params;
   const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const gate = await requireWorkspaceMember(workspaceId, user.id);
+  if (gate instanceof NextResponse) return gate;
 
   const body = await req.json();
   const { category, title, content } = body;
@@ -42,6 +68,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+  const gate = await requireWorkspaceMember(workspaceId, user.id);
+  if (gate instanceof NextResponse) return gate;
+
   const body = await req.json();
   const { id, ...updates } = body;
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
@@ -59,6 +88,9 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
   const { id: workspaceId } = await params;
   const { user } = await getAuthedUser();
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const gate = await requireWorkspaceMember(workspaceId, user.id);
+  if (gate instanceof NextResponse) return gate;
 
   const url = new URL(req.url);
   const promptId = url.searchParams.get("id");
