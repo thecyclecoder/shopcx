@@ -1,0 +1,1 @@
+- **A build repairs only the predeploy violations its own diff caused** · verified 2026-08-31 · → [[lifecycles/spec-build-pipeline]]
