@@ -260,13 +260,16 @@ test("selectAnglesForTemperature: COLD + only warm/hot (offer/discount/bundle) c
   });
   const ownBrand = makeOwnBrandAngle();
   const pool = selectAnglesForTemperature([holidayOffer, socialProof], [ownBrand], "cold");
-  // The offer ad + the social-proof ad are HARD-EXCLUDED — a scrolling cold stranger sees an
-  // own-brand cold angle instead.
-  assert.equal(pool.length, 1);
-  assert.equal(pool[0].source, "benefit");
-  assert.equal(pool[0].hook, "own-brand cold angle");
-  // Zero competitor angles survived the cold filter.
-  assert.ok(!pool.some((a) => a.source === "competitor"), "no competitor angle should survive the cold hard-exclude");
+  // PARTITION, not filter (CEO 2026-08-31). Deleting these starved the shelf (K-Cups 40 angles
+  // -> 1, Superfood Tabs 19 -> 0) and contradicted `imageOfferForAudience`, which blanks the offer
+  // for cold anyway. Everything stays usable; the real DISCOUNT sorts behind the merely-warm one.
+  assert.equal(pool.length, 3, "nothing is deleted on cold");
+  const hooks = pool.map((a) => a.hook);
+  assert.ok(
+    hooks.indexOf("15,000+ 5-star reviews") < hooks.findIndex((h) => /Holiday bundle/.test(h)),
+    "a discount-led ad ranks BEHIND a merely-warm one",
+  );
+  assert.equal(pool[pool.length - 1].source, "benefit", "own-brand still trails the competitor block");
 });
 
 test("selectAnglesForTemperature: COLD + a cold competitor angle (curiosity / problem_aware, no offer) → the cold competitor angle IS selected", () => {
@@ -281,11 +284,13 @@ test("selectAnglesForTemperature: COLD + a cold competitor angle (curiosity / pr
   });
   const ownBrand = makeOwnBrandAngle();
   const pool = selectAnglesForTemperature([coldCompetitor, warmCompetitor], [ownBrand], "cold");
-  // The cold-appropriate competitor angle survives (its focal is problem-aware curiosity —
-  // exactly the imitation base a cold test should lead with); the offer ad is dropped.
-  assert.ok(pool.some((a) => a.source === "competitor" && /nobody tells you/i.test(a.hook)));
-  assert.ok(!pool.some((a) => /40% off/i.test(a.hook)), "the offer competitor ad should be hard-excluded");
-  // The own-brand pool still fills the tail (never starve).
+  // The cold-appropriate base LEADS — that guarantee is unchanged, and it is what actually
+  // protects a cold test. What changed: the offer ad now sits available BEHIND it rather than
+  // being deleted, so a thin shelf degrades to "less ideal base" instead of "no ad at all".
+  assert.equal(pool[0].source, "competitor");
+  assert.ok(/nobody tells you/i.test(pool[0].hook), "the cold-focal competitor angle ranks first");
+  assert.ok(pool.some((a) => /40% off/i.test(a.hook)), "the offer ad is demoted, not hard-excluded");
+  assert.ok(pool.findIndex((a) => /40% off/i.test(a.hook)) > 0, "...and never leads");
   assert.ok(pool.some((a) => a.source === "benefit"));
 });
 
@@ -325,20 +330,32 @@ test("selectAnglesForTemperature: COLD + own-brand-only pool → returns own-bra
   assert.ok(pool.every((a) => a.source !== "competitor"));
 });
 
-test("selectAnglesForTemperature: COLD + Amazing Creamer regression fixture (GLP-1 holiday bundle from a DIFFERENT category) is HARD-EXCLUDED — the exact scenario the spec cites", () => {
-  // The 2026-07-17 Amazing Creamer regression: the selected competitor angle led with a
-  // holiday bundle from a SLIMMING PROBIOTIC (cross-category retargeting/offer ad). This
-  // fixture asserts the spec's hard-exclude at the exact real-world shape.
+test("selectAnglesForTemperature: COLD + Amazing Creamer regression fixture — demoted below any cold-appropriate base, no longer deleted", () => {
+  // The 2026-07-17 Amazing Creamer regression: the selected competitor angle led with a holiday
+  // bundle from a SLIMMING PROBIOTIC (cross-category retargeting/offer ad). The original fix
+  // hard-excluded it, which over-corrected into a starved shelf.
+  //
+  // The durable protection against THIS failure is shelf scoping (`creative_skeletons.product_id`
+  // — a creamer shelf should not hold probiotic ads at all) plus tier-3 demotion. Three rails
+  // still stop a cold offer from SHIPPING even if such an ad is used as a structural base:
+  // `imageOfferForAudience` blanks brief.offer, `hasColdOfferLeak` gates the pack, and Max's
+  // `no_cold_offer` hard gate blocks the copy.
   const regression = makeCompetitorAngle({
     hook: "Holiday bundle with GLP-1 Natural slimming probiotic plus bonus gifts",
     offer: "Holiday bundle 50% off + bonus gifts",
     acquisitionPower: 9,
   });
+  const coldAlternative = makeCompetitorAngle({
+    hook: "Nobody tells you why your afternoon crash happens",
+    offer: null,
+    conceptTags: { cialdini_lever: "liking", awareness_stage: "problem_aware", archetype: "curiosity", angle: "problem-agitate", why_it_works: null, format: null },
+  });
   const ownBrand = makeOwnBrandAngle({ hook: "Results-first: what real cream drinkers noticed" });
-  const pool = selectAnglesForTemperature([regression], [ownBrand], "cold");
-  assert.equal(pool.length, 1);
-  assert.equal(pool[0].source, "benefit");
-  assert.ok(!pool.some((a) => /holiday bundle|glp-1|slimming/i.test(a.hook)));
+  const pool = selectAnglesForTemperature([regression, coldAlternative], [ownBrand], "cold");
+  assert.ok(/afternoon crash/i.test(pool[0].hook), "the cold alternative is chosen over the bundle");
+  const bundleIdx = pool.findIndex((a) => /Holiday bundle/.test(a.hook));
+  const coldIdx = pool.findIndex((a) => /afternoon crash/i.test(a.hook));
+  assert.ok(bundleIdx > coldIdx, "the retargeting bundle never outranks a cold-appropriate base");
 });
 
 // ── buildCreativeBrief: Phase 2 RIFF — weave the lead benefit into a competitor brief ──────────
