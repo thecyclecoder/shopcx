@@ -1,6 +1,6 @@
 # creative_skeletons
 
-One row per analyzed competitor/category **winner** pulled from [[../integrations/adlibrary]]. Stores the reverse-engineered **structure** (hook → mechanism claim → proof → offer skeleton) + a **link** to the creative for analysis — never a lifted asset. The cross-brand-repetition signal over these rows is what the Phase 4 pattern matrix mines. See [[../lifecycles/creative-finder]] · [[../specs/winning-static-creative-finder]].
+One row per analyzed competitor **winner** pulled from [[../integrations/meta-ad-library]] (was [[../integrations/adlibrary]] before 2026-08-24; both `source` values coexist — see the `source` column). Stores the reverse-engineered **structure** (hook → mechanism claim → proof → offer skeleton) + a **link** to the creative for analysis — never a lifted asset. The cross-brand-repetition signal over these rows is what the Phase 4 pattern matrix mines. See [[../lifecycles/creative-finder]] · [[../specs/winning-static-creative-finder]].
 
 **Primary key:** `id`
 
@@ -10,12 +10,12 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 |---|---|---|---|
 | `id` | `uuid` | — | PK · default `gen_random_uuid()` |
 | `workspace_id` | `uuid` | — | → [[workspaces]].id · ON DELETE CASCADE |
-| `source` | `text` | — | default `'adlibrary'` |
-| `dedup_key` | `text` | — | AdLibrary `ad_key` — idempotency key; never re-vision/re-spend |
+| `source` | `text` | — | `meta_ad_library` on every row written since 2026-08-24; `adlibrary` on the 1,330 historical rows. NOT rewritten — the legacy value is provenance for rows carrying real `heat`/`impression`/`estimated_spend`, which no Meta row has. Writes use `COMPETITOR_AD_SOURCE`, reads use `COMPETITOR_AD_SOURCES` ([[../../../src/lib/competitor-ad-types.ts]]). |
+| `dedup_key` | `text` | — | Meta archive `id` (globally unique + stable) on new rows; AdLibrary `ad_key` on legacy. Idempotency key; never re-vision/re-spend |
 | `advertiser` | `text` | ✓ | the **brand** — the unit of "independent" for the matrix |
-| `title` | `text` | ✓ | AdLibrary `title` (often thin) |
-| `image_url` | `text` | ✓ | original AdLibrary creative link (analysis only; NOT the display source anymore — see `thumb_path`) |
-| `thumb_path` | `text` | ✓ | storage path in the private `creative-shots` bucket of OUR downscaled (2048px q88) analyzable copy — what the dashboard displays via a signed URL. NULL for legacy rows (they fall back to the proxy). Set by [[../libraries/creative-skeleton]] `ingestAd`; migration `20260807120000`. |
+| `title` | `text` | ✓ | Meta `ad_creative_link_titles[0]`. ⚠️ Often the OFFER, not the on-image headline — Erth's 95d winner has title "40% OFF + FREE Gifts Ends Soon! 🎁" while the creative reads "Same Ritual. Less Cortisol. More Calm." The real skeleton is in the IMAGE; vision stays mandatory. |
+| `image_url` | `text` | ✓ | Legacy: the AdLibrary creative link. **Meta rows store the `ad_snapshot_url`** — a JS-rendered page, NOT a fetchable image. Never `<img src>` this. Display always comes from `thumb_path`. |
+| `thumb_path` | `text` | ✓ | storage path in the private `creative-shots` bucket of OUR downscaled (2048px q88) analyzable copy — what the dashboard displays via a signed URL. **Never NULL as of 2026-08-24** — `scripts/_backfill-legacy-creative-thumbs.ts` gave all 71 remaining legacy rows a local copy (71/71, verified idempotent) before the AdLibrary cutover, and the live-proxy fallback route `/api/ads/creative-finder/media` was deleted. Set by [[../libraries/creative-skeleton]] `ingestAd`; migration `20260807120000`. |
 | `landing_page_url` | `text` | ✓ | the FULL ad destination WITH path (AdLibrary `landing_page_url`, present on ~half of ads) — e.g. `https://learn.erthlabs.co/women50`, the real advertorial. The [[../libraries/landing-page-scout]] `adDestinationsForBrand` bridge PREFERS this over the bare `destination_domain` (whose root often 404s). Migration `20260807130000`. |
 | `media_type` | `text` | — | default `'static'` · `static` \| `video` (routed at ingestion) |
 | `format` | `text` | ✓ | `ugc` \| `studio` \| `text-card` \| `before_after` \| `demo` \| … (vision) |
@@ -27,26 +27,26 @@ One row per analyzed competitor/category **winner** pulled from [[../integration
 | `elements` | `jsonb` | ✓ | **Agnostic wireframe** — array of `{zone: header\|hero\|body\|footer\|cta, role: hook\|mechanism\|proof\|offer\|risk_reversal\|social_proof\|price, prominence: 0..1}`. Scaffold-only; the raw substance stays in the four substance columns above. Shape-gated at the DB by `creative_skeletons_elements_shape_trigger` (BEFORE INSERT/UPDATE plpgsql trigger — replaces the invalid subquery-in-CHECK from migration `20261124120000`, which Postgres rejects). Written by `visionDeconstruct` / `visionDeconstructFrames` in [[../libraries/creative-skeleton]] on every ingest, then re-parsed against the same zone/role/prominence whitelist so an off-vocab element is DROPPED (never lands). Migrations `20261124120000` (columns) + `20261130120001` (trigger). See [[../specs/creative-skeleton-wireframe-extractor-and-backfill-actually-built]]. |
 | `product_presentation` | `text[]` | — | default `'{}'` · vision-emitted tags describing how the product is shown: `packshot` \| `lifestyle` \| `founder` \| `none`. Parser drops off-vocab tags so the column stays clean. Migrations `20261124120000` (column) + writer in [[../libraries/creative-skeleton]] `ingestAd`. |
 | `punchiness` | `text[]` | — | default `'{}'` · vision-emitted tags describing the copy cadence: `short_line` \| `pattern_interrupt` \| `number` \| `contrast`. Parser drops off-vocab tags. Migrations `20261124120000` (column) + writer in [[../libraries/creative-skeleton]] `ingestAd`. |
-| `days_running` | `int4` | ✓ | AdLibrary `days_count` — longevity = winner proxy |
-| `heat` | `numeric` | ✓ | AdLibrary `heat` / exposure score |
-| `first_seen` | `date` | ✓ | AdLibrary `first_seen` |
-| `last_seen` | `date` | ✓ | AdLibrary `last_seen` |
-| `resume_advertising` | `bool` | ✓ | AdLibrary `resume_advertising_flag` — "still running" |
-| `destination_domain` | `text` | ✓ | AdLibrary `ecom_advertiser_id` — the **store domain this ad drives to** (e.g. `shop.ryzesuperfoods.com`). The bridge to [[../specs/landing-page-scout]] |
-| `has_store_url` | `bool` | ✓ | AdLibrary `has_store_url` |
-| `call_to_action` | `text` | ✓ | AdLibrary `call_to_action` ("Shop Now" / "Learn More") |
-| `body` | `text` | ✓ | AdLibrary `body` — full ad copy (thin, but captured) |
-| `message` | `text` | ✓ | AdLibrary `message` — secondary copy line |
-| `estimated_spend` | `numeric` | ✓ | AdLibrary `estimated_spend` — spend/offer-pressure signal |
-| `all_exposure_value` | `numeric` | ✓ | AdLibrary `all_exposure_value` |
-| `impression` | `numeric` | ✓ | AdLibrary `impression` |
-| `like_count` | `int4` | ✓ | AdLibrary `like` |
-| `comment_count` | `int4` | ✓ | AdLibrary `comment` |
-| `share_count` | `int4` | ✓ | AdLibrary `share` |
-| `view_count` | `int8` | ✓ | AdLibrary `view` |
-| `platform` | `text` | ✓ | AdLibrary `platform` (facebook/instagram/…) |
-| `fb_merge_channel` | `text` | ✓ | AdLibrary `fb_merge_channel` |
-| `ads_type` | `int4` | ✓ | AdLibrary `ads_type` (1=image, 2=video) |
+| `days_running` | `int4` | ✓ | Days between Meta's `ad_delivery_start_time` and `ad_delivery_stop_time` (or now). **Measured**, not a vendor estimate — this is the winner proxy now that engagement is gone. |
+| `heat` | `numeric` | ✓ | AdLibrary `heat` / exposure score ⚠️ **NULL on all rows since 2026-08-24** — Meta publishes no engagement/scale data for US commercial ads. Longevity (`days_count`) is the ranking signal now. Historical `adlibrary` rows keep real values. |
+| `first_seen` | `date` | ✓ | Meta `ad_delivery_start_time` — a real delivery date. |
+| `last_seen` | `date` | ✓ | Meta `ad_delivery_stop_time`. **NULL ⇒ the ad is still running.** |
+| `resume_advertising` | `bool` | ✓ | "still running" — derived from the absence of `ad_delivery_stop_time`. |
+| `destination_domain` | `text` | ✓ | Host of Meta's `ad_creative_link_captions[0]` — the **domain this ad drives to** (e.g. `shop.ryzesuperfoods.com`). The bridge to [[../specs/landing-page-scout]] |
+| `has_store_url` | `bool` | ✓ | Whether the ad carries a link caption at all. |
+| `call_to_action` | `text` | ✓ | ⚠️ **NULL on all rows since 2026-08-24** — Meta's archive does not expose the CTA button label anywhere. |
+| `body` | `text` | ✓ | Meta `ad_creative_bodies[0]` — the primary text. Fuller than AdLibrary's `body` was, but still not the on-image copy. |
+| `message` | `text` | ✓ | Meta `ad_creative_link_descriptions[0]` — the secondary copy line. |
+| `estimated_spend` | `numeric` | ✓ | AdLibrary `estimated_spend` — spend/offer-pressure signal ⚠️ **NULL on all rows since 2026-08-24** — Meta publishes no engagement/scale data for US commercial ads. Longevity (`days_count`) is the ranking signal now. Historical `adlibrary` rows keep real values. |
+| `all_exposure_value` | `numeric` | ✓ | AdLibrary `all_exposure_value` ⚠️ **NULL on all rows since 2026-08-24** — Meta publishes no engagement/scale data for US commercial ads. Longevity (`days_count`) is the ranking signal now. Historical `adlibrary` rows keep real values. |
+| `impression` | `numeric` | ✓ | AdLibrary `impression` ⚠️ **NULL on all rows since 2026-08-24** — Meta publishes no engagement/scale data for US commercial ads. Longevity (`days_count`) is the ranking signal now. Historical `adlibrary` rows keep real values. |
+| `like_count` | `int4` | ✓ | AdLibrary `like` ⚠️ **NULL on all rows since 2026-08-24** — Meta publishes no engagement/scale data for US commercial ads. Longevity (`days_count`) is the ranking signal now. Historical `adlibrary` rows keep real values. |
+| `comment_count` | `int4` | ✓ | AdLibrary `comment` ⚠️ **NULL on all rows since 2026-08-24** — Meta publishes no engagement/scale data for US commercial ads. Longevity (`days_count`) is the ranking signal now. Historical `adlibrary` rows keep real values. |
+| `share_count` | `int4` | ✓ | AdLibrary `share` ⚠️ **NULL on all rows since 2026-08-24** — Meta publishes no engagement/scale data for US commercial ads. Longevity (`days_count`) is the ranking signal now. Historical `adlibrary` rows keep real values. |
+| `view_count` | `int8` | ✓ | AdLibrary `view` ⚠️ **NULL on all rows since 2026-08-24** — Meta publishes no engagement/scale data for US commercial ads. Longevity (`days_count`) is the ranking signal now. Historical `adlibrary` rows keep real values. |
+| `platform` | `text` | ✓ | First of Meta's `publisher_platforms` (facebook/instagram/audience_network/messenger/threads). |
+| `fb_merge_channel` | `text` | ✓ | ⚠️ **NULL on all rows since 2026-08-24** — no Meta equivalent. |
+| `ads_type` | `int4` | ✓ | 1=image, 2=video. Derived from Meta's `media_type` filter: IMAGE+MEME→1, VIDEO→2. ⚠️ MEME is what we call a static (founder 2026-08-24) — Erth runs 0 IMAGE / 26 MEME, so an IMAGE-only read reports a prolific advertiser as having no statics. |
 | `seed_keyword` | `text` | ✓ | the query that surfaced it |
 | `seed_kind` | `text` | ✓ | `category` \| `competitor` (`category` retired 2026-07-12 — new rows are all `competitor`) |
 | `competitor_id` | `uuid` | ✓ | → [[competitors]].id · ON DELETE SET NULL. The approved competitor this ad was scouted for. Stamped by [[../libraries/creative-skeleton]] `ingestAd` from the seed. Migration `20261020120000`. |

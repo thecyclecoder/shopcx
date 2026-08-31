@@ -1,0 +1,1 @@
+- **Overcharge detector: baseline must be a sustained demonstrated rate (not Math.min of one order) and must honor variant-swap lock resets** · verified 2026-08-25 · → [[../libraries/subscription-overcharge]]

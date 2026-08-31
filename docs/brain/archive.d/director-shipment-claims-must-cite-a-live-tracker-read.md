@@ -1,0 +1,1 @@
+- **A shipment claim in a director verdict must come from a live tracker read** · verified 2026-08-24 · → [[lifecycles/return-pipeline]]

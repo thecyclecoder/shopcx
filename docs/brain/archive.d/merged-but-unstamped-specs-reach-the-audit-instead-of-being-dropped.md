@@ -1,0 +1,1 @@
+- **A merged-but-unstamped spec must reach the audit lane instead of being silently dropped** · verified 2026-08-25 · → [[../libraries/agent-jobs]]

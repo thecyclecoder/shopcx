@@ -125,9 +125,14 @@ export async function appstleSubscriptionAction(
     // Update local subscription status
     const admin = createAdminClient();
     const localStatusMap: Record<string, string> = { pause: "paused", cancel: "cancelled", resume: "active" };
+    // A cancelled sub has no next charge to advertise. Nulling it here (not
+    // at each reader) keeps the CS director brief, founder escalation card,
+    // portal detail, and agent context panel from surfacing a stale date.
+    const patch: Record<string, unknown> = { status: localStatusMap[action], updated_at: new Date().toISOString() };
+    if (action === "cancel") patch.next_billing_date = null;
     const { data: sub } = await admin
       .from("subscriptions")
-      .update({ status: localStatusMap[action], updated_at: new Date().toISOString() })
+      .update(patch)
       .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId)
       .select("customer_id")

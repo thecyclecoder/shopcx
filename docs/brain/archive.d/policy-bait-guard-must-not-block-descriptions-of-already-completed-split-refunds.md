@@ -1,0 +1,1 @@
+- **Policy-bait guard must not block a reply that describes an already-completed split refund** · verified 2026-08-25 · → [[../libraries/sol-policy-bait-guard]]

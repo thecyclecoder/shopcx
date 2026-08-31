@@ -34,6 +34,28 @@ cleanly with Meta's computed `effective_status` / `meta_created_time`.
 
 **Unique:** `(workspace_id, meta_adset_id)` — idempotent upsert key.
 
+## ⭐ `clean_signal_since` — the contaminated-history floor (CEO 2026-08-25)
+
+`timestamptz?`, NULL by default. Insights **strictly after this day** count toward the adset's
+lifetime crown/kill metrics; everything on or before it is discarded by `activeAdsetLifetimeMetrics`
+([[../libraries/meta-cpa-signal]]) via the pure `insightCountsTowardSignal`.
+
+**Why.** Three test adsets (47-49d old) were minted before the existing-customer exclusion feature
+and ran with **no** `excluded_custom_audiences` — so existing customers could convert inside a
+"cold" test, inflating purchases and flattering CPA. That is the exact number the crown rests on,
+and `crownUpperBoundCpaCents` does nothing about it: the confidence bound guards a **small** sample,
+not a **contaminated** one. Repairing the targeting only cleans the signal going FORWARD while the
+crown reads LIFETIME totals, so a repaired adset would otherwise be judged on a mixed sample.
+
+The cutover **day itself is excluded** — it is partly pre-repair, and counting it would re-admit the
+contamination the floor exists to remove.
+
+Set by `scripts/_repair-adset-exclusions.ts`. Safe against the structure sync: `syncMetaStructure`'s
+upsert lists its columns explicitly, so `ON CONFLICT DO UPDATE` never clears this one. Migration
+`20261214130000_meta_adsets_clean_signal_since.sql`. Pinned in
+`src/lib/media-buyer/crown-and-rail.test.ts`.
+
+
 ## Foreign keys
 
 **Out (this → others):**

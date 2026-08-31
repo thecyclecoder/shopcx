@@ -10,7 +10,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { Seed } from "./adlibrary";
+import type { Seed } from "./competitor-ad-types";
 import { filterAdsByApprovedAdvertisers } from "./creative-skeleton";
 import { buildApprovedAdvertiserSet } from "./inngest/creative-scout";
 

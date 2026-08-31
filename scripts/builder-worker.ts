@@ -20,6 +20,7 @@ import { randomUUID } from "crypto";
 import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
 import type { TeardownRecipe } from "../src/lib/research-urls";
 import type { SpecPhaseCheckInput } from "../src/lib/spec-phase-checks-table"; // security-fix-autoauthor-machine-check — typed check payload for authorSecurityFixSpec
+import type { SpecAccumulationVerdict } from "../src/lib/specs-table"; // a-broken-verification-check-cannot-kill-a-build Phase 2 — carries the `unevaluablePhases` third-state list the defer path branches on
 import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the director's in-character voice for chat
 // lossless-error-diagnostics-no-object-object Phase 2 — the shared lossless error renderer every
 // diagnostic-persisting catch site funnels through. Kills `[object Object]` on a supabase-js
@@ -70,6 +71,11 @@ import { jobSelect } from "../src/lib/agent-jobs-columns";
 // an actionable `needs_attention` worker heartbeat instead of a silent poll-loop wedge.
 import { verifyClaimAgentJobCooldown, type ClaimCooldownVerification } from "../src/lib/claim-rpc-verify";
 import { runBoxTurnWithFreshFallback, pickNextSession, isMissingSessionError } from "../src/lib/box-session-resume"; // every resumable box-chat lane routes through the same fresh-fallback wrapper (Phase 2); isMissingSessionError powers the copy-author self-heal resume failsafe
+// migration-audit-immediate-charge-races-the-order-now-retry Phase 2 — the accepted terminal-verdict
+// vocabulary the migration-fix lane branches on. Sourced from src/lib/migration-fix.ts so a `code_gap`
+// (or any future) verdict is a RECOGNIZED terminal outcome carried forward with its diagnosis, not a
+// silent fallthrough into the "ended without propose/human_needed" park that discarded the finding.
+import { RECOGNIZED_MIGRATION_FIX_VERDICTS, isRecognisedMigrationFixVerdict } from "../src/lib/migration-fix";
 import type { CopyAuthorSessionDispatcher } from "../src/lib/ads/creative-agent"; // type-only — the impl is dynamic-imported; this pins the resume-aware dispatcher signature at compile time
 import type { CopyQcSessionDispatcher } from "../src/lib/ads/creative-qa"; // type-only — max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 1 dispatcher signature; the impl is dynamic-imported like the author/qa dispatchers
 
@@ -196,6 +202,16 @@ const MAX_TICKET_IMPROVE = 1;
 // Serialized so a first-touch session never races the self-update reset of REPO_DIR (it reads
 // brain/src in the main checkout, read-only).
 const MAX_TICKET_HANDLE = 1;
+// Review-candidacy sessions (review-request-sol-session Phase 1) run in their
+// OWN concurrency-1 lane: enqueued by the review-candidacy-detector-cron sweep
+// once a ticket has been quiet 24h since the last external message. Sol reads
+// the thread + recent orders READ-ONLY and returns a typed
+// { ask, product_id, angle, include_coupon, reasoning } verdict; the WORKER
+// (deterministic Node — later phases wire the message-authoring, rubric, and
+// send path) is the only mutator. Serialized because Sol's read-only pass is
+// cheap AND the downstream apply path lands in the same CS queue.
+const MAX_REVIEW_CANDIDACY = 1;
+const REVIEW_CANDIDACY_TIMEOUT_MS = 15 * 60 * 1000;
 // Escalation-triage sweeps (box-escalation-triage) run in their OWN concurrency-1 lane: one hourly
 // agent_jobs row per workspace, processed as a batch of solver→skeptic→quorum loops (each loop is 2–4
 // separate top-level Max `claude -p` sessions). Serialized so a long sweep never races other lanes.
@@ -519,6 +535,10 @@ const MAX_ADS_SUPERVISOR = Number(process.env.AGENT_TODO_MAX_ADS_SUPERVISOR || 1
 // mirrors ads-supervisor (own supervisory lane, single-workspace at a time so we don't run two Max
 // sessions against the same scout output).
 const MAX_IMITATION_QUALITY_REVIEW = Number(process.env.AGENT_TODO_MAX_IMITATION_QUALITY_REVIEW || 1);
+// creative-scout holds a chromium session open for a whole product sweep (Meta publishes no media
+// url — every static costs a rendered page-load). Concurrency-1 so two sweeps can never contend for
+// the box's memory with parallel browsers.
+const MAX_CREATIVE_SCOUT = Number(process.env.AGENT_TODO_MAX_CREATIVE_SCOUT || 1);
 const MAX_DB_HEALTH = Number(process.env.AGENT_TODO_MAX_DB_HEALTH || 1);
 const MAX_COVERAGE_REGISTER = Number(process.env.AGENT_TODO_MAX_COVERAGE_REGISTER || 1);
 const MAX_PLATFORM_DIRECTOR = Number(process.env.AGENT_TODO_MAX_PLATFORM_DIRECTOR || 1);
@@ -762,7 +782,7 @@ interface Job {
   workspace_id: string;
   spec_slug: string; // for kind='plan' this is the GOAL slug; for kind='fold' a 'fold-batch' sentinel
   spec_branch: string | null;
-  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ad-review-feedback" | "ads-supervisor" | "imitation-quality-review" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario";
+  kind: "build" | "plan" | "fold" | "goal-fold" | "product-seed" | "ticket-improve" | "ticket-handle" | "review-candidacy" | "spec-chat" | "triage-escalations" | "spec-test" | "migration-fix" | "dev-ask" | "god-mode" | "director-coach" | "pr-resolve" | "repair" | "regression" | "storefront-optimizer" | "db_health" | "coverage-register" | "platform-director" | "director-bounce-back" | "growth-director" | "proposed-goal" | "security-review" | "proposed-model-tier" | "audit-spec-shipped-state" | "agent-grade" | "agent-coach" | "director-grade" | "campaign-grade" | "gap-grade" | "research" | "ceo-authorized-out-of-leash" | "dr-content" | "deploy-review" | "cs-director-call" | "media-buyer" | "media-buyer-grade" | "sensor-trust-probe" | "calibrate-media-buyer-policy" | "ad-creative" | "ad-creative-copy-author" | "ad-creative-copy-qc" | "ad-review-feedback" | "ads-supervisor" | "imitation-quality-review" | "ticket-analyze" | "prompt-review" | "playbook-compile" | "mario" | "creative-scout";
   status: JobStatus;
   claude_session_id: string | null;
   // The CLAUDE_CONFIG_DIR (Max account) that CREATED claude_session_id. A resume MUST pin to it — a
@@ -796,6 +816,7 @@ interface Job {
 // missing an entry here has one visible failure mode (the coarse busy/behind<25 self-update defer
 // no longer force-overrides for that kind), never a wrong claim, so the mirror is safe.
 const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
+  "creative-scout",
   "build",
   "plan",
   "fold",
@@ -803,6 +824,7 @@ const KNOWN_JOB_KINDS: ReadonlySet<Job["kind"]> = new Set<Job["kind"]>([
   "product-seed",
   "ticket-improve",
   "ticket-handle",
+  "review-candidacy",
   "spec-chat",
   "triage-escalations",
   "spec-test",
@@ -3936,7 +3958,11 @@ async function deriveWaitingOn(
 
 /**
  * planner-gates-build-queue-on-authored-specs Phase 2 — true when an error thrown by `materializeSpec`
- * was specifically "no specs row for (workspace, slug)" (the author lane silently failed upstream),
+ * was specifically "no specs row for (workspace, slug)". NOTE the cause is NOT implied: the row may
+ * never have been authored, OR it may exist and be folded/archived (boardable = `status IS NULL OR
+ * status <> 'folded'`). The claim-gate distinguishes the two before wording its park reason — see
+ * the `spec_row_missing` branch — because asserting an authoring failure that did not happen aims
+ * the reader at the wrong system (CEO card, 2026-08-28).
  * not a transient DB/connection failure or a different materializer bug. The materializer throws a
  * stable, prefix-matched message — see src/lib/build-spec-materializer.ts `materializeSpec`. Used at
  * every dispatch-time materializeSpec call site to route the "row missing" subset to a soft park
@@ -4493,8 +4519,8 @@ const LANE_GROUPS = {
     kinds: ["build", "plan"] as const,
   },
   customer_service: {
-    cap: MAX_TICKET_HANDLE + MAX_TICKET_ANALYZE + MAX_CS_DIRECTOR_CALL,
-    kinds: ["ticket-handle", "ticket-analyze", "cs-director-call"] as const,
+    cap: MAX_TICKET_HANDLE + MAX_TICKET_ANALYZE + MAX_CS_DIRECTOR_CALL + MAX_REVIEW_CANDIDACY,
+    kinds: ["ticket-handle", "ticket-analyze", "cs-director-call", "review-candidacy"] as const,
   },
   director: {
     cap: MAX_PLATFORM_DIRECTOR + MAX_DIRECTOR_COACH,
@@ -4519,7 +4545,7 @@ const LANE_GROUPS = {
       "migration-fix", "deploy-review", "mario", "playbook-compile", "prompt-review", "dev-ask", "god-mode",
       "pr-resolve", "repair", "regression", "security-review", "agent-grade", "agent-coach",
       "director-grade", "campaign-grade", "gap-grade", "research", "dr-content", "media-buyer",
-      "media-buyer-grade", "ad-creative", "ad-creative-copy-author", "ad-creative-copy-qc", "ad-review-feedback", "imitation-quality-review", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
+      "media-buyer-grade", "ad-creative", "ad-creative-copy-author", "ad-creative-copy-qc", "ad-review-feedback", "imitation-quality-review", "creative-scout", "storefront-optimizer", "db_health", "coverage-register", "proposed-goal",
       "proposed-model-tier", "audit-spec-shipped-state", "ceo-authorized-out-of-leash",
     ] as const,
   },
@@ -7359,11 +7385,39 @@ async function evaluateClaimTimeBuildGate(job: Job, tag: string): Promise<ClaimG
   // is still authored, so require a row, not phases≥1 — the empty-body guard downstream rejects a truly
   // empty materialized spec.
   if (!card) {
+    // ⭐ Say what we OBSERVED, then check the obvious alternative before naming a cause.
+    // "no boardable row" has at least two causes and the gate only ever knew the effect:
+    //   (a) the row was never authored — the author lane genuinely failed
+    //   (b) the row EXISTS but is folded/archived — boardable means `status IS NULL OR <> 'folded'`
+    // It used to assert (a) unconditionally. On 2026-08-28 that produced a CEO card reading
+    // "the fix spec never landed in public.specs; author lane silently failed upstream" for a spec
+    // that had been authored, built, merged AND folded the previous day — sending the reader to
+    // debug an authoring lane that was working perfectly. An escalation that states an unverified
+    // cause as fact is worse than one that states only the effect: it aims the investigation.
+    let existsNonBoardable: { status: string | null } | null = null;
+    try {
+      const { createAdminClient } = await import("../src/lib/supabase/admin");
+      const { data } = await createAdminClient()
+        .from("specs")
+        .select("status")
+        .eq("workspace_id", job.workspace_id)
+        .eq("slug", slug)
+        .maybeSingle();
+      existsNonBoardable = (data as { status: string | null } | null) ?? null;
+    } catch {
+      /* best-effort — a failed probe must not change the park verdict, only the wording */
+    }
+    const reason = existsNonBoardable
+      ? `public.specs has a row for ${slug} but it is NOT boardable (status='${existsNonBoardable.status ?? "null"}') — ` +
+        `the spec was authored and then retired, so this build was queued for work that is already closed. ` +
+        `Do not build; re-open the spec if the work is genuinely still wanted.`
+      : `public.specs has no row at all for ${slug} — nothing was ever authored under this slug. ` +
+        `Do not build until the row is authored.`;
     return {
       ok: false,
       disposition: "park",
       parkClass: "spec_row_missing",
-      reason: `public.specs has no boardable row for ${slug} — author lane silently failed upstream; do not build until the row is authored`,
+      reason,
     };
   }
 
@@ -12648,6 +12702,10 @@ async function runTicketHandleJob(job: Job) {
       // return incident) is BLOCKED — the customer never sees it, and a human re-drafts via
       // Improve. In-policy explanations that name the alternative (pause / skip / cancel / etc.)
       // pass the guard; the block is only for baited promises.
+      // Ticket 0c9f11a7 (2026-08-28): Sol offered a flavour the 3PL had zero of. The products SDK
+      // now reports per-variant ship truth; this makes the obligation explicit, and the
+      // stock-promise guard below enforces it deterministically.
+      `STOCK IS A HARD CONSTRAINT — NEVER OFFER WHAT CANNOT SHIP. The PRODUCTS block (and \`npx tsx scripts/cx-agent-sdk-tool.ts products ${ticketId}\`) now tags every variant with 3PL SHIP TRUTH: a unit count, "⛔ OUT OF STOCK", or "⚠️ stock unknown". "active" is a merchandising flag, NOT a promise it can ship. Before you name, offer, reorder, or substitute ANY flavour, check it there. Never offer a variant marked OUT OF STOCK or stock unknown — not in a reorder, not as a swap, not as a make-good. If what the customer wants is out of stock, SAY SO plainly and offer an in-stock alternative; naming the flavour as unavailable is correct and expected. Your DRAFT reply is machine-gated on this: a reply that names an out-of-stock variant WITHOUT saying it is unavailable is BLOCKED, the customer never sees it, and the ticket escalates to June.`,
       `MACHINE GATE ON YOUR DRAFT REPLY: the worker validates first_reply before sending. If your context_summary declares the ask "out-of-policy" but your first_reply still promises a remedy ("I'll issue a refund", "we'll set up a return", "here's your prepaid label"…), the send is BLOCKED — the customer never sees the reply and the ticket escalates to June. Any reply that offers TWO returns/refunds/labels in one turn is BLOCKED unconditionally (the returns policy caps at one MBG return per customer for life). When the ask is out-of-policy, your reply names the disallowed outcome AS DISALLOWED and offers the sanctioned alternative — never bait, never promise the disallowed remedy.`,
       // Phase 3 of sol-reviews-policies-and-never-bais-an-out-of-policy-outcome-full-research-session:
       // Sol MUST resolve a concrete existing playbook_slug when chosen_path='playbook' — the
@@ -13045,6 +13103,29 @@ async function runTicketHandleJob(job: Job) {
           firstReply,
           hasActiveSubscription,
         });
+        // ── Sol must never OFFER a flavour the 3PL cannot ship (ticket 0c9f11a7, 2026-08-28) ──
+        // Sol offered a customer Strawberry Lemonade that had been 3PL-zero since 2026-07-30 under
+        // an ACTIVE crisis_events row; the order couldn't include it and she was billed anyway.
+        // The SDK now carries per-variant ship truth (cx-agent-sdk getCxProducts), but a
+        // prompt-visible fact is advisory — same reason the policy-bait guard exists. Naming the
+        // flavour AS unavailable passes; a bare offer blocks. Fail-open on any lookup error.
+        let stockGuard: { blocked: boolean; offendingVariants: string[]; reason: string | null } = {
+          blocked: false, offendingVariants: [], reason: null,
+        };
+        try {
+          const { getCxProducts } = await import("../src/lib/cx-agent-sdk");
+          const { assessSolStockPromiseRisk } = await import("../src/lib/sol-stock-promise-guard");
+          const products = await getCxProducts(db, workspaceId);
+          const outOfStock = products.flatMap((pr) =>
+            pr.variants
+              .filter((v) => v.in_stock === false)
+              .map((v) => ({ product: pr.title, variant: v.title })),
+          );
+          stockGuard = assessSolStockPromiseRisk({ firstReply, outOfStock });
+        } catch (e) {
+          console.warn(`${tag} stock-promise guard skipped (fail-open): ${errText(e)}`);
+        }
+
         if (bait.ok === false) {
           const blockLine = `Sol reply BLOCKED by policy-bait guard [${bait.kind}]: ${bait.reason}. Matched phrase: ${JSON.stringify(bait.matched_phrase)}. Direction authored; escalated to June (the CS final call).`;
           honorBlockLine = blockLine; // unify: a blocked reply escalates to June below, never a silent complete
@@ -13054,6 +13135,13 @@ async function runTicketHandleJob(job: Job) {
           });
         } else if (moveGuard.ok === false) {
           const blockLine = `Sol reply BLOCKED by move-dead-end guard [${moveGuard.kind}]: ${moveGuard.reason}. Matched phrase: ${JSON.stringify(moveGuard.matched_phrase)}. Direction authored; escalated to June (the CS final call).`;
+          honorBlockLine = blockLine; // unify: a blocked reply escalates to June below, never a silent complete
+          console.warn(`${tag} ${blockLine}`);
+          await update(job.id, {
+            log_tail: `${blockLine}\nDRAFT reply (blocked, not delivered):\n${firstReply.slice(0, 800)}\n---\n${raw.slice(-1200)}`.slice(-2000),
+          });
+        } else if (stockGuard.blocked) {
+          const blockLine = `Sol reply BLOCKED by stock-promise guard: ${stockGuard.reason}. Direction authored; escalated to June (the CS final call).`;
           honorBlockLine = blockLine; // unify: a blocked reply escalates to June below, never a silent complete
           console.warn(`${tag} ${blockLine}`);
           await update(job.id, {
@@ -13548,6 +13636,234 @@ function triageRevisePrompt(critique: string, concerns: string[]): string {
     concerns.length ? `Concerns: ${concerns.map((c) => `- ${c}`).join("\n")}` : ``,
     `Incorporate this and emit a corrected SolverProposal — the SAME JSON shape and the same rules as before. If you now believe no safe fix exists, switch decision to "no_action" with an honest reasoning.`,
   ].filter(Boolean).join("\n");
+}
+
+// ── Box-hosted Sol review-candidacy session (review-request-sol-session Phase 1) ──
+// A kind='review-candidacy' job is Sol's read-only review-candidacy pass over ONE
+// quiet ticket enqueued by review-candidacy-detector-cron. Same shape as Sol's
+// ticket-handle first-touch session: a top-level Max `claude -p` (review-candidacy
+// skill) with web search + read-only DB access via the improve-box-tools.ts CLI,
+// no ANTHROPIC_API_KEY set → $0 marginal cost. Sol emits a typed JSON verdict
+// { ask, product_id, angle, include_coupon, reasoning } and NEVER sends; the
+// worker (this file) is the only mutator. Phase 1 stores the verdict on the
+// agent_jobs row so Phase 2's rubric + validator + Phase 3's send path can
+// consume it — the deferred-apply pattern applyBoxMario / applyBoxDeployReview
+// already use elsewhere.
+async function runReviewCandidacyClaude(
+  prompt: string,
+  sessionId: string | null,
+  cwd: string,
+  configDir: string | undefined,
+  jobId: string | null,
+  ticketId: string,
+) {
+  // review-request-sol-session Phase 4 § Fix 1 — least-privilege PreToolUse
+  // gate the lane runs under. Loading customer-controlled ticket messages
+  // INTO the prompt is a prompt-injection surface; without a gate the box
+  // falls back to --dangerously-skip-permissions and a malicious message
+  // could reach env / cred files / arbitrary shell. The gate hard-denies
+  // env inspection / credential-file reads / network mutation / git writes
+  // / DB mutation / arbitrary shell; it allows only Read/Grep/Glob/WebSearch
+  // + the two read-only CX SDK CLIs BOUND to the claimed ticket id. Ticket
+  // id also passed as REVIEW_CANDIDACY_TICKET_ID so the gate refuses a
+  // command that targets a DIFFERENT ticket.
+  return runBoxSession(prompt, sessionId, cwd, {
+    configDir,
+    jobId,
+    kind: "review-candidacy",
+    sandbox: "max",
+    timeout: REVIEW_CANDIDACY_TIMEOUT_MS,
+    permissionGate: {
+      hookCommand: `npx tsx ${join(REPO_DIR, "scripts", "review-candidacy-permission-gate.ts")}`,
+    },
+    extraEnv: { REVIEW_CANDIDACY_TICKET_ID: ticketId },
+  });
+}
+
+interface ReviewCandidacyVerdict {
+  ask: boolean;
+  product_id: string | null;
+  angle: string | null;
+  include_coupon: boolean;
+  reasoning: string;
+}
+
+// Normalize the box's JSON verdict → ReviewCandidacyVerdict. Never throws;
+// returns null on an unparseable/malformed verdict so the runner surfaces
+// needs_attention (matching the cs-director-call runner's fail-safe — a
+// missing / unparseable verdict must NEVER be silently upgraded to an ask).
+// The conservative default is `ask=false` — skipping is always correct.
+function normalizeReviewCandidacyVerdict(raw: unknown): ReviewCandidacyVerdict | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.ask !== "boolean") return null;
+  const productId =
+    typeof r.product_id === "string" && r.product_id.trim().length > 0
+      ? r.product_id.trim()
+      : null;
+  const angle =
+    typeof r.angle === "string" && r.angle.trim().length > 0
+      ? r.angle.trim()
+      : null;
+  const includeCoupon = r.include_coupon === true;
+  const reasoning = typeof r.reasoning === "string" ? r.reasoning : "";
+  // Guard the ASK-shape: when ask=true, the caller must have named a product +
+  // an angle. Silently degrade a shape-broken ask to a skip (ask=false) — the
+  // downstream Phase-2 validator would reject it anyway, and skipping is
+  // always correct when in doubt.
+  const ask = r.ask === true && !!productId && !!angle;
+  return { ask, product_id: productId, angle, include_coupon: includeCoupon, reasoning };
+}
+
+async function runReviewCandidacyJob(job: Job) {
+  const tag = `[review-candidacy:${job.id.slice(0, 8)}]`;
+  let params: { ticket_id?: string; workspace_id?: string; customer_id?: string | null } = {};
+  try {
+    params = job.instructions ? JSON.parse(job.instructions) : {};
+  } catch {
+    /* fall through to the missing-params guard */
+  }
+  const ticketId = params.ticket_id;
+  const workspaceId = job.workspace_id || params.workspace_id || null;
+  if (!ticketId || !workspaceId) {
+    await update(job.id, {
+      status: "failed",
+      error: "review-candidacy job missing ticket_id/workspace_id",
+    });
+    return;
+  }
+
+  // review-request-sol-session Phase 4 § Fix 1 — validate the CLAIMED ticket
+  // BELONGS to job.workspace_id BEFORE we ever load the prompt or spawn the
+  // agent. A spec-authored / rogue-detector agent_jobs row could otherwise
+  // instruct the box to load ticket messages from an unrelated workspace
+  // into the prompt (cross-workspace read + prompt-injection surface). Also
+  // re-assert the params.customer_id ↔ tickets.customer_id when both are
+  // set — a mismatched pair is the same class of untrusted-field bug.
+  // Fail-without-launching on any mismatch.
+  {
+    const { data: ticketRow, error: ticketErr } = await db
+      .from("tickets")
+      .select("id, workspace_id, customer_id")
+      .eq("id", ticketId)
+      .maybeSingle();
+    if (ticketErr) {
+      await update(job.id, {
+        status: "failed",
+        error: `review-candidacy: ticket lookup failed — ${errText(ticketErr)}`,
+      });
+      return;
+    }
+    if (!ticketRow) {
+      await update(job.id, {
+        status: "failed",
+        error: "review-candidacy: ticket not found for claimed ticket_id",
+      });
+      return;
+    }
+    if (ticketRow.workspace_id !== workspaceId) {
+      console.warn(
+        `${tag} refusing to launch — ticket workspace mismatch (job=${workspaceId.slice(0, 8)} · ticket=${String(ticketRow.workspace_id).slice(0, 8)})`,
+      );
+      await update(job.id, {
+        status: "failed",
+        error: "review-candidacy: ticket workspace mismatch — refusing to launch",
+      });
+      return;
+    }
+    if (
+      params.customer_id &&
+      ticketRow.customer_id &&
+      params.customer_id !== ticketRow.customer_id
+    ) {
+      console.warn(
+        `${tag} refusing to launch — customer_id mismatch (params=${String(params.customer_id).slice(0, 8)} · ticket=${String(ticketRow.customer_id).slice(0, 8)})`,
+      );
+      await update(job.id, {
+        status: "failed",
+        error: "review-candidacy: customer_id mismatch — refusing to launch",
+      });
+      return;
+    }
+  }
+
+  try {
+    // Sol sees the SAME base brief the ticket-handle lane builds — the ticket +
+    // customer + last analysis + CX SDK snapshot + mechanisms catalog — because
+    // her per-ticket judgement is the same read-only surface. The rubric,
+    // validator, and send path land in Phase 2 / Phase 3.
+    const brief = await loadTicketHandleBrief(ticketId);
+    const prompt = [
+      `Use the review-candidacy skill (cwd is the repo root). You are Sol (June's Ticket Handler agent), running a READ-ONLY REVIEW-CANDIDACY pass on Max — web search on, no API key.`,
+      ``,
+      `TICKET id ${ticketId} · workspace ${workspaceId} — full context loaded for you:`,
+      brief,
+      ``,
+      `For deterministic READ-ONLY CX data (customer + merged identity, subscriptions w/ realized pricing + discounts, orders w/ per-unit computed, active products), CALL THE SDK, NEVER improvise SQL:`,
+      `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · bundle)`,
+      `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
+      ``,
+      `YOUR ONE JOB: decide whether we should ask this customer for a review right now, and if so, about WHICH product. You NEVER send. The worker is the only mutator; your verdict is applied later by the Phase-2 rubric + validator + Phase-3 delivery path.`,
+      ``,
+      `Skipping is ALWAYS correct when in doubt — nobody is waiting for this message. Ask ONLY when:`,
+      `  • the conversation is genuinely finished (you already see the goodwill in the thread);`,
+      `  • the customer has bought a REVIEWABLE product recently (filter products.reviewable = true — Shipping Protection, Mystery Item, and free-gift lines are not reviewable);`,
+      `  • the customer has NOT already reviewed the product you'd pick, and the ladder (review_requests) hasn't already asked this customer about it;`,
+      `  • per-product review coverage tilts toward the product WE NEED MOST (e.g. Sleep Gummies with 42 reviews over Superfood Tabs with 3,158) when two are both fair game;`,
+      `  • the customer is a repeat buyer (goodwill compounds — you can see the tenure + order count in the CX SDK snapshot).`,
+      ``,
+      `ANGLES (2, per the spec) — assigned per CUSTOMER, not per PRODUCT:`,
+      `  • angle='defend'         — a real detractor's claim, the customer is invited to answer it. Use for a high-tenure customer whose real experience refutes a common complaint we've seen in support.`,
+      `  • angle='fence-sitter'   — a real question from a real support ticket, the customer's tenure is the credential. Use for the customer whose voice would move an on-the-fence buyer.`,
+      ``,
+      `Final message = ONLY one JSON object matching this exact shape:`,
+      `  {"ask": true|false, "product_id": "<uuid>" | null, "angle": "defend"|"fence-sitter" | null, "include_coupon": true|false, "reasoning": "2-4 sentences citing WHAT you found — the product coverage, the tenure, the ticket's resolution, and why THIS customer + THIS product is the right ask (or why not)."}`,
+      `  When ask=false, product_id and angle should be null and include_coupon should be false.`,
+      `  Include NO other keys, NO prose outside the JSON object.`,
+    ].join("\n");
+
+    const { session, resultText, isError, usage, model, configDir: rcDir } = await runBoxLane(
+      (cfg, sid) => runReviewCandidacyClaude(prompt, sid, REPO_DIR, cfg, job.id, ticketId),
+    );
+    await meterAgentJob(job, rcDir ?? undefined, usage, model);
+    if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: rcDir });
+
+    const parsed = extractJson<Record<string, unknown>>(resultText);
+    const verdict = normalizeReviewCandidacyVerdict(parsed);
+    console.log(`${tag} claude finished — verdict: ${verdict ? (verdict.ask ? `ask product=${verdict.product_id?.slice(0, 8) ?? "?"} angle=${verdict.angle}` : "skip") : "(unparseable)"} · isError=${isError}`);
+
+    if (!verdict) {
+      // review-request-sol-session Phase 4 § Fix 1 — do NOT persist raw
+      // session output to log_tail. The raw transcript can carry tool
+      // output that includes secrets (e.g. env leaks the customer message
+      // tried to exfiltrate before the gate caught it, or a stack trace
+      // containing service-role config) — persisting it back to the DB is
+      // the second half of the exfiltration path. Store a bounded
+      // sanitized error naming ONLY the class of failure ("unparseable
+      // verdict") plus a tag so the CX log tail can locate the session.
+      await update(job.id, {
+        status: "needs_attention",
+        error: "review-candidacy returned no parseable verdict",
+        log_tail: `review-candidacy: session ${String(session ?? "").slice(0, 12)} produced no parseable verdict (raw output withheld — see security note)`,
+      });
+      return;
+    }
+
+    // Phase 1 stores the raw verdict on the job's log_tail for the Phase-2
+    // rubric + validator + Phase-3 delivery path to consume. No downstream
+    // apply happens here — the WORKER is the only mutator, but the mutation
+    // (drafting + validating + sending) is Phase 2 + Phase 3's contract.
+    await update(job.id, {
+      status: "completed",
+      log_tail: JSON.stringify(verdict).slice(-2000),
+    });
+  } catch (e) {
+    console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
+    await update(job.id, {
+      status: "failed",
+      error: `review-candidacy runner threw: ${errText(e)}`,
+    });
+  }
 }
 
 async function runEscalationTriageJob(job: Job) {
@@ -14544,8 +14860,27 @@ async function runMigrationFixJob(job: Job) {
       await update(job.id, { status: "failed", error: "migration-fix run errored", log_tail: raw.slice(-2000) });
       return;
     }
-    // No recognizable status — surface rather than assume fixed.
-    await update(job.id, { status: "needs_attention", error: "migration-fix ended without propose/human_needed", log_tail: raw.slice(-2000) });
+    // Guard-before-mutation (coaching #11 / #12 / #14): only park as needs_attention when the
+    // session's status is genuinely NOT in the accepted vocabulary. Deriving the vocabulary from
+    // src/lib/migration-fix.ts (RECOGNIZED_MIGRATION_FIX_VERDICTS + isRecognisedMigrationFixVerdict)
+    // keeps the fallback in lock-step with the library — the anti-pattern being removed is a
+    // well-formed `code_gap` verdict falling through this branch and its diagnosis being discarded
+    // as "ended without propose/human_needed" (the 2026-08-18 Denise Butler park).
+    if (isRecognisedMigrationFixVerdict(parsed?.status)) {
+      // Every recognised verdict has a handler above; reaching here means a handler was skipped.
+      // Fail loudly rather than silently parking so the missed branch is diagnosed, not hidden.
+      await update(job.id, {
+        status: "needs_attention",
+        error: `migration-fix recognised verdict "${parsed?.status}" fell through — no handler ran`,
+        log_tail: raw.slice(-2000),
+      });
+      return;
+    }
+    await update(job.id, {
+      status: "needs_attention",
+      error: `migration-fix ended without a recognised terminal verdict (${RECOGNIZED_MIGRATION_FIX_VERDICTS.join(" | ")})`,
+      log_tail: raw.slice(-2000),
+    });
   } catch (e) {
     await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
@@ -15141,14 +15476,21 @@ interface CsDirectorVerdict {
 // runner that can't parse the verdict must NEVER silently upgrade to auto-approve/auto-author. Same
 // rule the deploy-review runner uses for its unparseable-verdict fallback.
 /**
- * Return true when the CS Director verdict proposes at least one MONEY action — the fail-closed
- * predicate for the `remedy_state` mandatory-precondition rail (Phase 1 of
+ * Return true when the CS Director verdict proposes at least one ORDER-SCOPED money action — the
+ * fail-closed predicate for the `remedy_state` mandatory-precondition rail (Phase 1 of
  * a-money-remedy-must-read-the-live-remedy-state-first § bullet 2). Reads BOTH `remedy` (the
  * auto-execute plan on approve_remedy / the in-leash partial on escalate_founder) and
  * `recommended_remedy` (the CEO-approves-on-tap plan on escalate_founder) — either can carry a
  * money type that requires the state read. Mirrors the MONEY_ACTION_TYPES set in
  * src/lib/june-remedy-approval.ts (kept literal here to avoid a runtime import from the box
  * runner's top-of-file surface).
+ *
+ * A step whose action type is a loyalty coupon operation (`apply_loyalty_coupon` /
+ * `redeem_points`) targeting a subscription contract with NO resolvable order ref is EXEMPT —
+ * it cannot double-pay any order, so the remedy_state precondition does not apply. Same
+ * predicate the executor guard (`verifyPlanAgainstRemedyStates`) uses, kept in lockstep via
+ * `isNonOrderScopedLoyaltyAction` in src/lib/june-remedy-approval.ts (spec:
+ * june-loyalty-coupon-to-subscription-exempt-from-order-scoped-remedy-state-rail).
  */
 function verdictProposesMoneyAction(verdict: CsDirectorVerdict): boolean {
   const MONEY = new Set([
@@ -15159,18 +15501,42 @@ function verdictProposesMoneyAction(verdict: CsDirectorVerdict): boolean {
     "apply_loyalty_coupon",
     "redeem_points",
   ]);
+  // Inlined: mirrors `isNonOrderScopedLoyaltyAction` in src/lib/june-remedy-approval.ts. Kept
+  // literal here for the same reason MONEY is — avoiding a runtime import on the runner's
+  // top-of-file surface. Any change here MUST change the shared predicate too (both rails have
+  // to agree on which shape is exempt).
+  const isLoyaltyContractScoped = (
+    stepType: string,
+    payload: Record<string, unknown>,
+  ): boolean => {
+    if (stepType !== "apply_loyalty_coupon" && stepType !== "redeem_points") return false;
+    const hasStr = (k: string): boolean => {
+      const raw = payload[k];
+      return typeof raw === "string" && raw.trim().length > 0;
+    };
+    if (hasStr("shopify_order_id") || hasStr("order_number") || hasStr("order_id")) return false;
+    if (stepType === "apply_loyalty_coupon") return hasStr("contract_id");
+    return true;
+  };
+  const readPayload = (raw: unknown): Record<string, unknown> => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    return raw as Record<string, unknown>;
+  };
   const bags: Array<Record<string, unknown> | undefined> = [verdict.remedy, verdict.recommended_remedy];
   for (const bag of bags) {
     if (!bag || typeof bag !== "object" || Array.isArray(bag)) continue;
     const topType = typeof bag.action_type === "string" ? bag.action_type : "";
-    if (topType && MONEY.has(topType)) return true;
+    if (topType && MONEY.has(topType) && !isLoyaltyContractScoped(topType, readPayload(bag.payload))) {
+      return true;
+    }
     const actions = Array.isArray(bag.actions) ? (bag.actions as unknown[]) : [];
     for (const step of actions) {
       if (!step || typeof step !== "object" || Array.isArray(step)) continue;
-      const stepType = typeof (step as Record<string, unknown>).action_type === "string"
-        ? String((step as Record<string, unknown>).action_type)
-        : "";
-      if (stepType && MONEY.has(stepType)) return true;
+      const stepObj = step as Record<string, unknown>;
+      const stepType = typeof stepObj.action_type === "string" ? String(stepObj.action_type) : "";
+      if (stepType && MONEY.has(stepType) && !isLoyaltyContractScoped(stepType, readPayload(stepObj.payload))) {
+        return true;
+      }
     }
   }
   return false;
@@ -15213,6 +15579,48 @@ async function loadCsDirectorCallBrief(
   const { loadTriageBrief } = await import("../src/lib/agent-todos/triage");
   const parts: string[] = [];
   parts.push(await loadTriageBrief(db, workspaceId, ticketId));
+
+  // Phase 2 of a-price-complaint-is-answered-from-the-customers-established-rate — surface the
+  // OVERCHARGE FINDING for the ticket's customer in its OWN prominent section, calling
+  // `formatOverchargeForAgent` so the wording matches Sol's context exactly instead of being
+  // paraphrased into a second dialect. Ground truth: ticket 426e00e9 (2026-08-25) escalated to
+  // June with the exact finding word-for-word in Sol's context (`OVERCHARGE DETECTED on sub
+  // 27840741549 (Appstle): renewal #SC136243 charged $59.96, expected $39.98, delta $19.98`) —
+  // June's brief referenced `formatOverchargeForAgent` ZERO times, so she escalated on the
+  // shipping charge instead of the pricing question and asked the founder to rule on something
+  // the system had already answered. Best-effort read (mirrors the non-fatal try/catch shape the
+  // orchestrator uses on the same call) — a detector failure must never block a review.
+  // The Phase 1 precedence sentence rides along so the reviewer inherits the same rule as Sol.
+  try {
+    const { data: ticketRow } = await db
+      .from("tickets")
+      .select("customer_id")
+      .eq("id", ticketId)
+      .maybeSingle();
+    if (ticketRow?.customer_id) {
+      const { detectOverchargesForCustomer, formatOverchargeForAgent } = await import(
+        "../src/lib/subscription-overcharge"
+      );
+      const overcharges = await detectOverchargesForCustomer(workspaceId, ticketRow.customer_id);
+      parts.push("");
+      if (overcharges.length) {
+        parts.push(
+          "OVERCHARGE FINDING (a-price-complaint-is-answered-from-the-customers-established-rate Phase 2) — Sol saw this exact block in her context; you get the same wording so the two of you reason from one set of facts:",
+        );
+        parts.push(overcharges.map(formatOverchargeForAgent).join("\n"));
+        parts.push(
+          "PRECEDENCE: this customer's established rate (the sustained per-unit they were reliably paying) is AUTHORITATIVE for pricing questions. The standard sub price (MSRP × 0.75) MUST NOT be used to justify a charge above the established rate — a renewal that lines up with the standard rate is still an overcharge when it exceeds what this customer had locked. Answer a pricing complaint from the finding, not from the standard rate card.",
+        );
+      } else {
+        parts.push(
+          "OVERCHARGE FINDING (a-price-complaint-is-answered-from-the-customers-established-rate Phase 2): the detector reports no overcharge for this customer. The standard rate card remains the correct comparison here — 'no overcharge' is a valid, well-grounded answer.",
+        );
+      }
+    }
+  } catch (e) {
+    parts.push("");
+    parts.push(`OVERCHARGE FINDING: read failed (non-fatal) — ${errText(e)}`);
+  }
 
   // Phase 1 of cx-box-agents-sol-cora-june-deterministic-sdk-toolset-and-brain-access-no-raw-sql:
   // append the deterministic CX SDK snapshot so June's verdict is grounded in the same shape Sol
@@ -15379,6 +15787,96 @@ async function loadCsDirectorCallBrief(
     parts.push(`RESOLUTION EVENTS LEDGER: read failed — ${errText(e)}`);
   }
 
+  // Phase 1 of director-shipment-claims-must-cite-a-live-tracker-read: for every recent order on the
+  // ticket's customer that carries a tracking_number, cite a LIVE tracker read (via lookupTracking)
+  // with the derived days-since-last-scan, so June never rules on a stall duration inferred from a
+  // cached column that carries no per-scan timestamp. Motivating case: ticket 8e2c87d6 (Suzanne Ross,
+  // 2026-08-24) — the cached row said in_transit at a Nevada facility and the orchestrator told the
+  // customer to wait a few more days, when the last real scan was eleven days old. The reader dedupes
+  // by tracking number so we make ONE metered call per distinct shipment per brief.
+  try {
+    const { data: ticketRow } = await db
+      .from("tickets")
+      .select("customer_id")
+      .eq("id", ticketId)
+      .maybeSingle();
+    if (ticketRow?.customer_id) {
+      const { data: shipOrders } = await db
+        .from("orders")
+        .select(
+          "id, order_number, fulfillments, amplifier_tracking_number, amplifier_carrier, easypost_status, easypost_detail, easypost_location, easypost_checked_at",
+        )
+        .eq("workspace_id", workspaceId)
+        .eq("customer_id", ticketRow.customer_id)
+        .order("created_at", { ascending: false })
+        .limit(5);
+      const targets: Array<{
+        order_number: string;
+        tracking_number: string | null;
+        carrier: string | null;
+        cached: {
+          status: string | null;
+          detail: string | null;
+          location: string | null;
+          checked_at: string | null;
+        };
+      }> = [];
+      for (const o of shipOrders ?? []) {
+        const fulfillments = (o.fulfillments as
+          | Array<{
+              trackingInfo?: Array<{ number?: string | null; company?: string | null }>;
+            }>
+          | null) ?? [];
+        const shopifyTracking = fulfillments[0]?.trackingInfo?.[0] ?? null;
+        const trackingNumber =
+          (shopifyTracking?.number ?? null) ||
+          ((o.amplifier_tracking_number as string | null) ?? null) ||
+          null;
+        const carrier =
+          (shopifyTracking?.company ?? null) ||
+          ((o.amplifier_carrier as string | null) ?? null) ||
+          null;
+        if (!trackingNumber) continue;
+        targets.push({
+          order_number: (o.order_number as string) ?? "(unknown)",
+          tracking_number: trackingNumber,
+          carrier,
+          cached: {
+            status: (o.easypost_status as string | null) ?? null,
+            detail: (o.easypost_detail as string | null) ?? null,
+            location: (o.easypost_location as string | null) ?? null,
+            checked_at: (o.easypost_checked_at as string | null) ?? null,
+          },
+        });
+      }
+      if (targets.length > 0) {
+        const { createShipmentFactPackReader, formatShipmentFactForBrief } = await import(
+          "../src/lib/shipment-facts"
+        );
+        const reader = createShipmentFactPackReader(workspaceId);
+        parts.push("");
+        parts.push(
+          `LIVE SHIPMENT FACT PACKS (source: lookupTracking against EasyPost; the cached orders.easypost_* columns are a fallback ONLY when the live call fails, and are labeled with the last-poll age so they are never presented as a current scan time — NEVER infer a stall duration from amplifier_shipped_at, that is the handoff date, not the last carrier scan):`,
+        );
+        for (const t of targets) {
+          try {
+            const pack = await reader.read({
+              tracking_number: t.tracking_number,
+              carrier: t.carrier,
+              cached: t.cached,
+            });
+            parts.push(formatShipmentFactForBrief(`order #${t.order_number}`, pack));
+          } catch (e) {
+            parts.push(`  - order #${t.order_number}: shipment fact pack read failed — ${errText(e)}`);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    parts.push("");
+    parts.push(`LIVE SHIPMENT FACT PACKS: read failed — ${errText(e)}`);
+  }
+
   // Triage_runs row — the solver→skeptic transcripts + no-quorum outcome that produced this call.
   // Optional (the runner accepts a null triage_run_id so Phase 1 synthetic tests can dispatch without
   // one), but when present it anchors the CS Director's brief on WHY the quorum missed.
@@ -15428,6 +15926,7 @@ function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): st
     `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> <ticket_id> [json_input]   (verbs: customer · orders · subscriptions · products · policies · bundle · remedy_state)`,
     ``,
     `LIVE REMEDY STATE IS MANDATORY BEFORE ANY MONEY REMEDY (a-money-remedy-must-read-the-live-remedy-state-first Phase 1): if your verdict carries a money action — partial_refund, redeem_points_as_refund, create_replacement_order, or dollar_replacement — you are REQUIRED, for EACH target order, to run \`npx tsx scripts/cx-agent-sdk-tool.ts remedy_state <ticket_id> '{"order_number":"…"}'\` (or shopify_order_id) and reason AGAINST what it returns. The tool surfaces the order's succeeded refunds, remaining refundable value, and any LIVE open return whose refund fires on receipt. Your \`reasoning\` MUST name the remaining refundable value + acknowledge any live open return, and your money amount MUST fit inside remaining refundable AND MUST NOT be proposed on an order with a live open return. A verdict with a money remedy from a session that never called remedy_state on the target order is BLOCKED and escalated to needs_attention — the executor's hard-reject will refuse it deterministically regardless, but a proposal that ignores the state fails the audit trail too. This mirrors the mandatory-precondition shape get_policies already uses for Sol's non-money asks.`,
+    `THE OVERCHARGE FINDING IS MANDATORY BEFORE ESCALATING A PRICING/BILLING COMPLAINT (a-price-complaint-is-answered-from-the-customers-established-rate Phase 3): if this ticket's Direction intent is a pricing or billing complaint (\`pricing_complaint_subscription\` or similar), your \`reasoning\` MUST name what the OVERCHARGE FINDING section of your brief said before you may \`escalate_founder\`. A NULL finding is a VALID and useful answer — 'the detector reports no overcharge, so the standard rate applies' satisfies the requirement. The rule is about consulting the fact, never about forcing a refund. A pricing/billing verdict that escalates to the founder without checking the overcharge finding is BLOCKED and routed to needs_attention rather than passed upward — this mirrors the mandatory-precondition shape the money-remedy \`remedy_state\` rail above uses.`,
     `Investigate read-only (the cx-agent-sdk + improve-box-tools.ts + brain + src + WebSearch) as much as you need, then decide ONE verdict.`,
     `Final message = ONLY one JSON object matching this exact shape:`,
     `  {"decision":"approve_remedy"|"author_spec"|"escalate_founder"|"close_no_action","reasoning":"2-4 sentences citing what you found","remedy":{...RemedyPlan when decision=approve_remedy...},"spec_seed":{"slug":"","title":"","intent":"","problem":""} when decision=author_spec,"recommended_remedy":{"kind":"...","summary":"..."} when decision=escalate_founder and a concrete action is nameable}`,
@@ -15519,6 +16018,60 @@ async function runCsDirectorCallJob(job: Job) {
         log_tail: raw.slice(-2000),
       });
       return;
+    }
+
+    // Phase 3 of a-price-complaint-is-answered-from-the-customers-established-rate — MANDATORY
+    // PRECONDITION on a pricing/billing verdict escalation. A verdict that classifies as a pricing
+    // or billing complaint AND resolves to `escalate_founder` must have consulted the overcharge
+    // finding (or its absence) before it can pass upward. Same mandatory-precondition shape as the
+    // money-remedy `remedy_state` rail above — the executor's downstream check does not exist here,
+    // so this rail is the sole enforcement. Scope is deliberate: pricing/billing intent only, so an
+    // unrelated escalation is never blocked (which would push more work to the founder, the opposite
+    // of the goal). A NULL finding satisfies the requirement — "the detector reports no overcharge"
+    // is itself a valid answer and the brief's Phase-2 section still emits the word 'overcharge' in
+    // that case, so June's reasoning naming it clears the gate. Ground truth: ticket 426e00e9
+    // (2026-08-25) escalated to the founder on a shipping-charge diagnosis while the actual
+    // pricing question — which the overcharge detector had already answered — went unmentioned.
+    try {
+      if (verdict.decision === "escalate_founder") {
+        const { data: latestDirection } = await db
+          .from("ticket_directions")
+          .select("intent")
+          .eq("ticket_id", ticketId)
+          .order("authored_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        const intent = String(latestDirection?.intent ?? "").toLowerCase();
+        const isPricingOrBilling = /pric|billing|overcharge/.test(intent);
+        if (isPricingOrBilling) {
+          // The finding was baked into the brief above via formatOverchargeForAgent (Phase 2) — a
+          // reasoning that actually consulted it will name it. Both branches of the Phase-2 emitter
+          // print the token 'overcharge' (finding-present emits the ⚠️ OVERCHARGE DETECTED block +
+          // the PRECEDENCE sentence; null-finding emits 'the detector reports no overcharge'), so a
+          // raw transcript that never says the word never consulted the fact.
+          const overchargeWasConsulted =
+            /overcharge/i.test(raw) || /overcharge/i.test(verdict.reasoning || "");
+          if (!overchargeWasConsulted) {
+            const skipReason =
+              "cs-director-call escalated a pricing/billing verdict to the founder without checking the overcharge finding (a-price-complaint-is-answered-from-the-customers-established-rate Phase 3) — needs_attention. The finding (or its absence) must be named in the reasoning before a pricing/billing complaint escalates upward.";
+            console.warn(`${tag} ${skipReason}`);
+            await stampAgentSessionNote(
+              ticketId,
+              `June's session ${sessShort}: pricing/billing verdict escalated without consulting the overcharge finding — routed to needs_attention for CX review.`,
+            );
+            await update(job.id, {
+              status: "needs_attention",
+              error: skipReason,
+              log_tail: raw.slice(-2000),
+            });
+            return;
+          }
+        }
+      }
+    } catch (e) {
+      // Best-effort Direction read — a lookup failure must never block a verdict (would push work
+      // to the founder). Log and let the verdict through; the audit trail still captures the raw.
+      console.warn(`${tag} pricing-verdict overcharge-consulted gate best-effort read failed — ${errText(e)}`);
     }
 
     // Phase 1 of cs-director-third-rung-hard-calls-above-triage-quorum: record the verdict to
@@ -17843,19 +18396,23 @@ async function applyRequestAuditActionInline(
   if (!owner) return logInvalid("spec has no declared Owner — out-of-leash for a director auto-apply");
   if (owner !== directorFunction) return logInvalid(`spec owner is ${owner}, not ${directorFunction} — out-of-leash`);
 
-  // Dedupe: if there's already an unfinished audit job for this slug, don't queue a second — the
-  // verdict from the in-flight one will surface to the activity feed anyway. ACTIVE statuses match
-  // the agent_jobs lifecycle's non-terminal states.
-  const { data: existing } = await db
-    .from("agent_jobs")
-    .select("id, status")
-    .eq("workspace_id", workspaceId)
-    .eq("spec_slug", slug)
-    .eq("kind", "audit-spec-shipped-state")
-    .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input", "needs_approval", "blocked_on_usage"])
-    .limit(1)
-    .maybeSingle();
-  if (existing) {
+  // Dedupe + insert go through the shared helper (merged-but-unstamped-specs-reach-the-audit-instead-of-
+  // being-dropped Phase 1) so this director-initiated path and the automatic reconciler hand-off
+  // (`reconcileMergedSpecPhases`) cannot drift on the insert shape or the dedupe window. The helper
+  // covers OPEN (any active status) AND RECENT TERMINAL (within AUDIT_SPEC_SHIPPED_STATE_TERMINAL_DEDUPE_MS)
+  // audits — a spec the runner already tried recently won't be re-queued on every director turn.
+  let enqueueRes: Awaited<ReturnType<typeof import("../src/lib/agent-jobs").enqueueAuditSpecShippedStateIfDue>>;
+  try {
+    const { enqueueAuditSpecShippedStateIfDue } = await import("../src/lib/agent-jobs");
+    enqueueRes = await enqueueAuditSpecShippedStateIfDue(workspaceId, slug, {
+      requestedBy: `director:${directorFunction}`,
+      reason,
+      adminClient: db,
+    });
+  } catch (e) {
+    return logInvalid(`enqueue failed: ${errText(e)}`);
+  }
+  if (!enqueueRes.enqueued) {
     try {
       const { recordDirectorActivity } = await import("../src/lib/director-activity");
       await recordDirectorActivity(db, {
@@ -17864,26 +18421,12 @@ async function applyRequestAuditActionInline(
         actionKind: "requested_audit",
         specSlug: slug,
         reason,
-        metadata: { dedup: true, existing_job_id: (existing as { id: string }).id, autonomous: true },
+        metadata: { dedup: true, dedup_reason: enqueueRes.dedup, existing_job_id: enqueueRes.existingJobId, autonomous: true },
       });
     } catch { /* audit best-effort */ }
-    return { summary: `request-audit for ${slug} already queued (${(existing as { id: string }).id.slice(0, 8)}) — reason logged` };
+    return { summary: `request-audit for ${slug} already ${enqueueRes.dedup === "open" ? "queued" : "ran recently"} (${enqueueRes.existingJobId.slice(0, 8)}) — reason logged` };
   }
-
-  const { data: inserted, error } = await db
-    .from("agent_jobs")
-    .insert({
-      workspace_id: workspaceId,
-      spec_slug: slug,
-      kind: "audit-spec-shipped-state",
-      status: "queued",
-      instructions: JSON.stringify({ requested_by: `director:${directorFunction}`, reason }),
-      created_by: null,
-    })
-    .select("id")
-    .single();
-  if (error || !inserted) return logInvalid(`enqueue failed: ${error?.message ?? "no row"}`);
-  const jobId = (inserted as { id: string }).id;
+  const jobId = enqueueRes.jobId;
 
   try {
     const { recordDirectorActivity } = await import("../src/lib/director-activity");
@@ -23659,6 +24202,102 @@ async function runImitationQualityReviewClaude(prompt: string, sessionId: string
   return runBoxSession(prompt, sessionId, cwd, { configDir, jobId, kind: "imitation-quality-review", sandbox: "max", timeout: IMITATION_QUALITY_REVIEW_TIMEOUT_MS });
 }
 
+/**
+ * creative-scout — collect a product's competitor ads off the Meta Ad Library, render the statics,
+ * vision them, and persist skeletons.
+ *
+ * WHY THIS LANE EXISTS ON THE BOX: Meta's archive publishes no media url. The only handle to a
+ * creative is `ad_snapshot_url`, a JS-rendered page, so producing bytes needs Playwright — which
+ * lives here, not on Vercel. The Inngest cron (`creative-scout-weekly-cron`) decides WHAT to scout
+ * and enqueues this job; this lane does collect → render → vision → persist as one unit so a
+ * skeleton row is never half-built. See docs/brain/integrations/meta-ad-library.md.
+ */
+async function runCreativeScoutJob(job: Job) {
+  const tag = `[creative-scout:${job.id.slice(0, 8)}]`;
+  const { emitAgentHeartbeat } = await import("../src/lib/control-tower/heartbeat");
+  const startedAt = Date.now();
+  let ok = true;
+  let detail = "";
+  try {
+    let instr: { productId?: unknown; force?: unknown } = {};
+    try { instr = job.instructions ? JSON.parse(job.instructions) : {}; } catch { /* not JSON — degrade */ }
+    const productId = typeof instr.productId === "string" && instr.productId ? instr.productId : null;
+    const force = instr.force === true;
+
+    const { runCreativeScoutSweep } = await import("../src/lib/ads/creative-scout-runner");
+    console.log(`${tag} sweeping workspace ${job.workspace_id.slice(0, 8)}${productId ? ` product ${productId.slice(0, 8)}` : " (all products)"}${force ? " [forced]" : ""}`);
+
+    // ── vision dispatcher ────────────────────────────────────────────────────────────────
+    // This worker has NO ANTHROPIC_API_KEY (stripped by design so Max sessions can't burn API
+    // credits), so the direct Opus vision call inside ingestAd throws `no_anthropic_key` on every
+    // ad — the first real box sweep rendered creatives successfully and then failed all of them
+    // exactly there. Vision therefore runs as a top-level `claude -p` on Max, mirroring the proven
+    // ad-creative-qc dispatcher: least-privilege sandbox, a PreToolUse gate that permits Read on
+    // the ONE temp image and denies everything else.
+    let visionCounter = 0;
+    const visionPermissionHookCommand = `npx tsx ${join(REPO_DIR, "scripts", "ad-creative-qc-permission-gate.ts")}`;
+    const visionDispatch = async (
+      prompt: string,
+      allowedImagePath: string,
+    ): Promise<{ resultText: string; isError: boolean }> => {
+      visionCounter++;
+      const vTag = `${tag}[vision#${visionCounter}]`;
+      try {
+        const run = await runBoxLane((cfg, sid) =>
+          runBoxSession(prompt, sid, REPO_DIR, {
+            configDir: cfg,
+            kind: "creative-scout",
+            // Strip every non-base-OS var: no ANTHROPIC_API_KEY, no SUPABASE_*, no GITHUB_TOKEN,
+            // no META_*/OPENAI_*. The session only needs to Read one jpeg and emit JSON.
+            sandbox: "qc",
+            timeout: AD_CREATIVE_QC_TIMEOUT_MS,
+            idleTimeout: AD_CREATIVE_QC_IDLE_MS,
+            permissionGate: { hookCommand: visionPermissionHookCommand },
+            // The gate reads the allowed path from this env var; the sandbox omits it, so extraEnv
+            // (applied AFTER the sandbox) is the only source.
+            extraEnv: { AD_CREATIVE_QC_ALLOWED_IMAGE: allowedImagePath },
+          }),
+        );
+        if (run.isError) console.warn(`${vTag} vision session errored — ad stays eligible next sweep`);
+        return { resultText: run.resultText || "", isError: run.isError };
+      } catch (err) {
+        console.error(`${vTag} vision dispatch threw: ${errText(err)}`);
+        return { resultText: "", isError: true };
+      }
+    };
+
+    const r = await runCreativeScoutSweep({
+      workspaceId: job.workspace_id,
+      productId,
+      force,
+      visionDispatch,
+    });
+
+    // NOTE `inserted` counts ROWS WRITTEN, which includes rows persisted as status='failed' (an ad
+    // whose creative could not be turned into a skeleton). The first box sweep logged "2 new ·
+    // 0 failed" while both rows were failures — so surface the analyzed/failed split explicitly
+    // rather than letting a broken sweep read as a healthy one.
+    detail =
+      `${r.products} product(s) · ${r.competitors} competitor(s) · ${r.searched} ad(s) seen · ` +
+      `${r.inserted} row(s) written · ${r.reobserved} re-observed · ${r.failed} sweep error(s)` +
+      (r.unresolved.length ? ` · unresolved: ${r.unresolved.slice(0, 5).join(", ")}` : "") +
+      (r.imitationReviewEnqueued ? " · imitation-review queued" : "");
+    await update(job.id, { status: "completed", log_tail: detail });
+    console.log(`${tag} ${detail}`);
+  } catch (err) {
+    ok = false;
+    detail = errText(err);
+    await update(job.id, { status: "failed", log_tail: detail.slice(0, 2000) });
+    console.error(`${tag} failed:`, detail);
+  } finally {
+    await emitAgentHeartbeat("creative-scout", {
+      ok,
+      detail: detail.slice(0, 300),
+      durationMs: Date.now() - startedAt,
+    }).catch(() => {});
+  }
+}
+
 async function runImitationQualityReviewJob(job: Job) {
   const tag = `[imitation-quality-review:${job.id.slice(0, 8)}]`;
   const { emitAgentHeartbeat } = await import("../src/lib/control-tower/heartbeat");
@@ -26993,6 +27632,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "spec-chat") return runSpecChatJob(job);
   if (job.kind === "ticket-improve") return runTicketImproveJob(job);
   if (job.kind === "ticket-handle") return runTicketHandleJob(job);
+  if (job.kind === "review-candidacy") return runReviewCandidacyJob(job);
   if (job.kind === "triage-escalations") return runEscalationTriageJob(job);
   if (job.kind === "spec-test") return runSpecTestJob(job);
   if (job.kind === "migration-fix") return runMigrationFixJob(job);
@@ -27036,6 +27676,7 @@ async function dispatchJob(job: Job) {
   if (job.kind === "calibrate-media-buyer-policy") return runCalibrateMediaBuyerPolicyJob(job);
   if (job.kind === "ads-supervisor") return runAdsSupervisorJob(job);
   if (job.kind === "imitation-quality-review") return runImitationQualityReviewJob(job);
+  if (job.kind === "creative-scout") return runCreativeScoutJob(job);
   // dispatcher-fallthrough: kind === "build" — the build flow below is the implicit default.
   // (Mirrored in scripts/_check-worker-lanes.ts's DISPATCH_BY_FALLTHROUGH so the static check passes
   // without forcing a 400-line refactor of dispatchJob into an `if (job.kind === "build") { ... }` block.)
@@ -27959,7 +28600,10 @@ async function dispatchJob(job: Job) {
         }
       }
       // ACCUMULATION — the stamp above is now persisted, so this read reflects the just-built phase. Fails OPEN.
-      let acc: { complete: boolean; reason: string };
+      // a-broken-verification-check-cannot-kill-a-build Phase 2 — the annotation is the full
+      // `SpecAccumulationVerdict` (not the pre-Phase-2 `{complete, reason}` shape) so `acc.unevaluablePhases`
+      // is visible to the defer branch below without an unsafe cast. The catch-arm rebuilds the same shape.
+      let acc: SpecAccumulationVerdict;
       try {
         const { isSpecAccumulationComplete } = await import("../src/lib/specs-table");
         acc = await isSpecAccumulationComplete(job.workspace_id, slug);
@@ -28102,6 +28746,33 @@ async function dispatchJob(job: Job) {
         // instead of looping). De-duped internally: if the `chain()` above just queued a phase (or any
         // other build is in-flight), the redrive skips. Never throws.
         try {
+          // a-broken-verification-check-cannot-kill-a-build Phase 2 — if the accumulation gate
+          // failed because a check could not be evaluated (git grep refused the pattern, or the
+          // branch ref could not be resolved), route to the broken-check escalation lane INSTEAD
+          // of the redrive-or-escalate path. That lane does NOT write a `redrive_deferred_build`
+          // director_activity row, so `readDeferredRedriveMax`'s count over the last 24h is
+          // preserved for genuine code gaps — a fault in the verification layer is never charged
+          // against the code it was checking. The build stays DEFERRED (accumulation still reads
+          // !complete), the PR stays closed, the ship is blocked — but a repair lane / human is
+          // paged to fix the check, and the spec's history isn't consumed by the infra fault.
+          const unevaluable = acc.unevaluablePhases ?? [];
+          if (unevaluable.length) {
+            const { escalateBrokenCheckWithoutRedriveCount } = await import("../src/lib/roadmap-actions");
+            const outcome = await escalateBrokenCheckWithoutRedriveCount(
+              job.workspace_id,
+              slug,
+              unevaluable.map((u) => ({
+                phasePosition: u.phasePosition,
+                kind: u.kind,
+                checkDescription: u.checkDescription,
+                pattern: u.pattern,
+                reason: u.reason,
+              })),
+              job.id,
+            );
+            console.log(`${tag} broken-check-escalate: ${outcome.action} — ${outcome.reason}`);
+            return;
+          }
           const { redriveDeferredBuildOrEscalate } = await import("../src/lib/roadmap-actions");
           // Phase 2 — carry the un-reconcilable list into the redrive reason so a cap-reached defer
           // escalates to the CEO with the ACTUAL failing check descriptions, not the coarse "not
@@ -28275,19 +28946,29 @@ async function dispatchJob(job: Job) {
           // P2/P3 never get stamped (accumulation wedges at "positions 2,3 not built"). Title-scoped instructions
           // (no "Phase N") always fall to this branch, so the omission silently broke every multi-phase spec.
           const idx = phases.findIndex((p) => p.status !== "shipped" && p.status !== "rejected" && !p.build_sha);
-          if (idx >= 0 && phases.length > 1) {
+          if (idx >= 0) {
+            // Derive the phase position for EVERY spec — single-phase included. A one-phase spec is
+            // unambiguously at position 1, so `phasePosition` must be set so `finalizeBuiltPhase` can call
+            // `stampPhaseBuilt` and the commit carries its `Phase: N` trailer backup signal. This used to
+            // be gated on `phases.length > 1`, which left a single-phase spec's `phasePosition = null`
+            // whenever the phase TITLE didn't literally contain "Phase N" — so a phase titled
+            // "P1 — implement the fix" recorded no `build_sha` and was permanently unshippable once the
+            // 2026-08-17 merge step began requiring build evidence.
             phasePosition = idx + 1; // M1 provenance: stamp the next-planned phase's position on the commit
-            // Only scope when there's MORE than one phase — a single-phase spec IS the whole thing in one PR,
-            // and a 0-phase one-shot has nothing to scope. The merge hook falls back to this same "first
-            // not-yet-shipped phase" when the instructions name none, so the phase the agent builds and the
-            // phase the hook stamps are identical by construction (no drift).
-            const phase = phases[idx];
-            const phaseLabel = /^\s*Phase\s+\d+\b/i.test(phase.title) ? phase.title : `Phase ${idx + 1} — ${phase.title}`;
-            nextPhaseScope =
-              `⭐ ONE-PHASE-PER-SESSION (mandate — overrides any "build the whole spec" reading of the scope below): implement ONLY ${phaseLabel}, and its verification. ` +
-              `This spec has ${phases.length} phases; you build EXACTLY this single next-planned phase this session — explicitly do NOT implement any subsequent phase, even if the triggering instruction reads generically ("build {spec}" / "authored by the goal planner"). ` +
-              `After this phase merges, the worker auto-queues the next phase's build; your job is this one phase only. If this phase is already entirely on main, make no edits and return the no_changes_reason form.`;
-            console.log(`${tag} scoped build to next planned phase: ${phaseLabel} (of ${phases.length})`);
+            if (phases.length > 1) {
+              // Instruction-scoping (as opposed to position derivation) is legitimately multi-phase-only:
+              // a single-phase spec IS the whole thing in one PR, and a 0-phase one-shot has nothing to
+              // scope. The merge hook falls back to this same "first not-yet-shipped phase" when the
+              // instructions name none, so the phase the agent builds and the phase the hook stamps are
+              // identical by construction (no drift).
+              const phase = phases[idx];
+              const phaseLabel = /^\s*Phase\s+\d+\b/i.test(phase.title) ? phase.title : `Phase ${idx + 1} — ${phase.title}`;
+              nextPhaseScope =
+                `⭐ ONE-PHASE-PER-SESSION (mandate — overrides any "build the whole spec" reading of the scope below): implement ONLY ${phaseLabel}, and its verification. ` +
+                `This spec has ${phases.length} phases; you build EXACTLY this single next-planned phase this session — explicitly do NOT implement any subsequent phase, even if the triggering instruction reads generically ("build {spec}" / "authored by the goal planner"). ` +
+                `After this phase merges, the worker auto-queues the next phase's build; your job is this one phase only. If this phase is already entirely on main, make no edits and return the no_changes_reason form.`;
+              console.log(`${tag} scoped build to next planned phase: ${phaseLabel} (of ${phases.length})`);
+            }
           }
         } catch (e) {
           console.error(`${tag} next-planned-phase derivation failed (proceeding unscoped — pre-flight still applies):`, e instanceof Error ? e.message : e);
@@ -29234,6 +29915,7 @@ async function main() {
   const countSpecChat = () => [...active.values()].filter((v) => v.kind === "spec-chat").length;
   const countImprove = () => [...active.values()].filter((v) => v.kind === "ticket-improve").length;
   const countTicketHandle = () => [...active.values()].filter((v) => v.kind === "ticket-handle").length;
+  const countReviewCandidacy = () => [...active.values()].filter((v) => v.kind === "review-candidacy").length;
   const countTriage = () => [...active.values()].filter((v) => v.kind === "triage-escalations").length;
   const countSpecTest = () => [...active.values()].filter((v) => v.kind === "spec-test").length;
   const countMigrationFix = () => [...active.values()].filter((v) => v.kind === "migration-fix").length;
@@ -29266,6 +29948,7 @@ async function main() {
   const countCalibrateMediaBuyerPolicy = () => [...active.values()].filter((v) => v.kind === "calibrate-media-buyer-policy").length;
   const countAdsSupervisor = () => [...active.values()].filter((v) => v.kind === "ads-supervisor").length;
   const countImitationQualityReview = () => [...active.values()].filter((v) => v.kind === "imitation-quality-review").length;
+  const countCreativeScout = () => [...active.values()].filter((v) => v.kind === "creative-scout").length;
   const countAgentCoach = () => [...active.values()].filter((v) => v.kind === "agent-coach").length;
   const countStorefrontOptimizer = () => [...active.values()].filter((v) => v.kind === "storefront-optimizer").length;
   const countDbHealth = () => [...active.values()].filter((v) => v.kind === "db_health").length;
@@ -29533,6 +30216,16 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed ticket-handle ${job.id.slice(0, 8)} → ${countTicketHandle() + 1}/${MAX_TICKET_HANDLE} ticket-handle lane`);
+        launch(job);
+      }
+      // Fill the review-candidacy lane (review-request-sol-session Phase 1): Sol's
+      // read-only session per quiet ticket, concurrency-1. Serialized so a session
+      // never races the REPO_DIR self-update reset (mirrors the ticket-handle lane).
+      while (laneHasQueued(queuedKinds, ["review-candidacy"]) && countReviewCandidacy() < MAX_REVIEW_CANDIDACY) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["review-candidacy"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed review-candidacy ${job.id.slice(0, 8)} → ${countReviewCandidacy() + 1}/${MAX_REVIEW_CANDIDACY} review-candidacy lane`);
         launch(job);
       }
       // Fill the ticket-improve lane (box-ticket-improve): interactive Max turns, concurrency-1.
@@ -29928,6 +30621,17 @@ async function main() {
         const job = (Array.isArray(data) ? data[0] : data) as Job | null;
         if (!job || !job.id) break;
         console.log(`claimed imitation-quality-review ${job.id.slice(0, 8)} → ${countImitationQualityReview() + 1}/${MAX_IMITATION_QUALITY_REVIEW} imitation-quality-review lane`);
+        launch(job);
+      }
+      // Fill the creative-scout lane (meta-ad-library migration): collect a product's competitor
+      // ads off Meta's Ad Library, render the statics with Playwright (Meta exposes no media url —
+      // only a JS-rendered ad_snapshot_url), vision them into creative_skeletons. Enqueued
+      // per-product by the creative-scout-weekly-cron Inngest fn. Concurrency-1 — see MAX_CREATIVE_SCOUT.
+      while (laneHasQueued(queuedKinds, ["creative-scout"]) && countCreativeScout() < MAX_CREATIVE_SCOUT) {
+        const { data } = await db.rpc("claim_agent_job", { p_kinds: ["creative-scout"] });
+        const job = (Array.isArray(data) ? data[0] : data) as Job | null;
+        if (!job || !job.id) break;
+        console.log(`claimed creative-scout ${job.id.slice(0, 8)} → ${countCreativeScout() + 1}/${MAX_CREATIVE_SCOUT} creative-scout lane`);
         launch(job);
       }
       // Fill the db_health lane (db-health-agent): owner Build resume on a surfaced proposal —

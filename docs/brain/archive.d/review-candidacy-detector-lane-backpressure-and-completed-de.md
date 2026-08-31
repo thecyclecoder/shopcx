@@ -1,0 +1,1 @@
+- **Stop review-candidacy detector from overfilling the single Sol lane** · verified 2026-08-28 · → [[../inngest/review-candidacy-detector-cron]]

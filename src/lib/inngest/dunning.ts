@@ -416,7 +416,18 @@ export const dunningNewCardRecovery = inngest.createFunction(
   {
     id: "dunning-new-card-recovery",
     retries: 2,
-    concurrency: [{ limit: 3, key: "event.data.workspace_id" }],
+    // Per-customer serialization: two `dunning/new-card-recovery` events for the SAME customer
+    // (two rapid card updates, portal payment-method-update racing with a webhook, etc.) MUST
+    // NOT run at the same time — the handler reactivates subs and drives the recovery charge,
+    // and two concurrent runs on one customer produced the 4.2-min-apart double-charge on internal
+    // sub fd857ad9 (SHOPCX273 + SHOPCX274 both $102.33 on 2026-08-28). The workspace-scoped cap
+    // (limit 3) stays in place as the tenant-noise ceiling; the per-customer cap (limit 1) is
+    // the actual idempotency invariant. See
+    // docs/brain/specs/immediate-charge-renewal-paths-need-per-subscription-idempotency.md.
+    concurrency: [
+      { limit: 3, key: "event.data.workspace_id" },
+      { limit: 1, key: "event.data.customer_id" },
+    ],
     triggers: [{ event: "dunning/new-card-recovery" }],
   },
   async ({ event, step }) => {

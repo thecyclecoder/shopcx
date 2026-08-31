@@ -76,7 +76,6 @@ export default function ReviewsPage() {
   const [stats, setStats] = useState<Stats>({ total: 0, published: 0, unpublished: 0, pending: 0, featured: 0, rejected: 0 });
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
-  const [syncing, setSyncing] = useState(false);
   const [message, setMessage] = useState("");
 
   // Filters
@@ -132,21 +131,6 @@ export default function ReviewsPage() {
       .catch(() => {});
   }, [workspace.id]);
 
-  const handleSync = async () => {
-    setSyncing(true);
-    setMessage("");
-    const res = await fetch(`/api/workspaces/${workspace.id}/sync-reviews`, { method: "POST" });
-    if (res.ok) {
-      const data = await res.json();
-      setMessage(data.message || "Sync started");
-      // Poll for completion after a delay
-      setTimeout(() => fetchReviews(), 5000);
-    } else {
-      setMessage("Sync failed");
-    }
-    setSyncing(false);
-  };
-
   const handleAction = async (reviewId: string, action: "publish" | "reject" | "feature" | "unfeature", extraBody?: Record<string, unknown>) => {
     setActionLoading(reviewId);
     const res = await fetch(`/api/workspaces/${workspace.id}/reviews/${reviewId}`, {
@@ -168,17 +152,11 @@ export default function ReviewsPage() {
       <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Reviews</h1>
-          <p className="mt-1 text-sm text-zinc-500">Manage product and site reviews synced from Klaviyo.</p>
+          <p className="mt-1 text-sm text-zinc-500">Manage product and site reviews.</p>
         </div>
-        {canEdit && stats.total < 2000 && (
-          <button
-            onClick={handleSync}
-            disabled={syncing}
-            className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:opacity-50"
-          >
-            {syncing ? "Syncing..." : "Sync Reviews"}
-          </button>
-        )}
+        {/* The "Sync Reviews" button pulled from Klaviyo. That vendor is retired
+            (see src/lib/klaviyo-retired.ts) and nothing imports reviews today —
+            the in-house collection program replaces it. */}
       </div>
 
       {message && (
@@ -290,7 +268,7 @@ export default function ReviewsPage() {
         <div className="py-12 text-center">
           <p className="text-sm text-zinc-500">No reviews found.</p>
           {stats.total === 0 && (
-            <p className="mt-2 text-sm text-zinc-400">Connect Klaviyo in Settings → Integrations, then click Sync Reviews.</p>
+            <p className="mt-2 text-sm text-zinc-400">Reviews collected from customers will appear here.</p>
           )}
         </div>
       ) : (

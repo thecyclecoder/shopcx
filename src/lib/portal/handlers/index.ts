@@ -22,6 +22,7 @@ export { coupon } from "./coupon";
 export { frequency } from "./frequency";
 export { featuredReviews } from "./reviews";
 export { cancelJourney } from "./cancel-journey";
+export { reviewJourney } from "./review-journey";
 export { dunningStatus } from "./dunning-status";
 export { changeDate } from "./change-date";
 export { orderNow } from "./order-now";
@@ -48,6 +49,7 @@ import { coupon } from "./coupon";
 import { frequency } from "./frequency";
 import { featuredReviews } from "./reviews";
 import { cancelJourney } from "./cancel-journey";
+import { reviewJourney } from "./review-journey";
 import { dunningStatus } from "./dunning-status";
 import { changeDate } from "./change-date";
 import { orderNow } from "./order-now";
@@ -111,6 +113,9 @@ export const routeMap: Record<string, RouteHandler> = {
   canceljourney: cancelJourney,
   cancelJourney,
   cancel_journey: cancelJourney,
+  reviewjourney: reviewJourney,
+  reviewJourney,
+  review_journey: reviewJourney,
   dunningstatus: dunningStatus,
   dunningStatus,
   dunning_status: dunningStatus,

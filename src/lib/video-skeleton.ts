@@ -28,7 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ffmpegStatic from "ffmpeg-static";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { fetchCreative } from "@/lib/adlibrary";
+
 import {
   transcribeBuffer,
   whisperCostCents,
@@ -117,6 +117,40 @@ export interface VideoDeconstructResult {
 }
 
 /**
+ * Fetch a LEGACY AdLibrary-hosted video resource.
+ *
+ * ⚠️ TERMINAL PATH — and, as measured, an EMPTY one. It exists to drain `video_pending` rows left
+ * by the AdLibrary era, whose `image_url` is a Bearer-keyed adlibrary.com resource. Verified
+ * 2026-08-25 (`scripts/_verify-video-rows-safe.ts`): all 64 legacy video rows are already
+ * `status='analyzed'` with a local `thumb_path`, and there are ZERO `video_pending` rows — so this
+ * function currently has nothing to fetch. Kept as a safety net in case an old row is ever re-opened.
+ * Deliberately self-contained so it survived the deletion of `src/lib/adlibrary.ts`.
+ *
+ * No NEW rows can arrive here: the Meta scout collects `staticsOnly` (founder: we research static
+ * creative), and a Meta video row's only creative handle would be a snapshot url needing a browser
+ * render, which this Vercel-side pipeline cannot do. When `ADLIBRARY_API_KEY` is finally removed the
+ * remaining legacy rows become undrainable — that is expected and accepted, not a regression to fix
+ * here. See [[../../docs/brain/integrations/meta-ad-library.md]] § what the migration drops.
+ */
+async function fetchLegacyAdLibraryVideo(
+  url: string,
+): Promise<{ buffer: Buffer; contentType: string }> {
+  const key = process.env.ADLIBRARY_API_KEY;
+  if (!key) {
+    throw new Error(
+      "legacy AdLibrary video fetch unavailable: ADLIBRARY_API_KEY is unset. This row predates the " +
+        "Meta Ad Library migration and its creative exists only on adlibrary.com.",
+    );
+  }
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${key}` } });
+  if (!res.ok) throw new Error(`legacy AdLibrary video fetch failed: HTTP ${res.status}`);
+  return {
+    buffer: Buffer.from(await res.arrayBuffer()),
+    contentType: res.headers.get("content-type") ?? "video/mp4",
+  };
+}
+
+/**
  * Download → keyframes + transcript → four-slot skeleton for ONE video creative.
  * `creativeUrl` is the Bearer-keyed AdLibrary video resource url (stored as the
  * row's `image_url`). Transcription is best-effort — a silent / oversized / failing
@@ -126,7 +160,7 @@ export async function deconstructVideo(
   workspaceId: string,
   creativeUrl: string,
 ): Promise<VideoDeconstructResult> {
-  const { buffer, contentType } = await fetchCreative(creativeUrl);
+  const { buffer, contentType } = await fetchLegacyAdLibraryVideo(creativeUrl);
   const bytes = buffer.byteLength;
 
   let transcript = "";

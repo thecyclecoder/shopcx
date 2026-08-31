@@ -1,0 +1,1 @@
+- **Internal (SHOPCX*) orders can now get a return — headroom guard verifies locally then refuses before spending money** · verified 2026-08-28 · → [[../lifecycles/return-pipeline]]

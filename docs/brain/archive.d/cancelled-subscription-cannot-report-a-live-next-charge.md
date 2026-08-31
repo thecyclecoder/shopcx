@@ -1,0 +1,1 @@
+- **A cancelled subscription must not report a live next-billing date** · verified 2026-08-24 · → [[lifecycles/subscription-billing]]

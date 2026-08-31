@@ -60,6 +60,12 @@ export interface CreateTransactionResult {
   totalAmountCents?: number;     // pre-tax subtotal
   totalCents?: number;            // subtotal + tax
   lines?: Array<{ lineNumber: string; tax: number; taxableAmount: number }>;
+  /**
+   * Set when Avalara silently swapped a taxCode we sent for a different one —
+   * i.e. the code we sent is not valid in our account, and the line was taxed
+   * under the wrong classification. Absent on a clean transaction.
+   */
+  degradedTaxCodes?: string[];
   raw?: unknown;                 // full Avalara response for diagnostics
 }
 
@@ -161,14 +167,46 @@ export async function createTransaction(
     body: JSON.stringify({ createTransactionModel: body }),
   });
 
-  const data = await res.json().catch(() => null) as { totalTax?: number; totalAmount?: number; code?: string; lines?: Array<{ lineNumber: string; tax: number; taxableAmount: number }>; error?: { message: string; details?: Array<{ message: string }> } } | null;
+  const data = await res.json().catch(() => null) as { totalTax?: number; totalAmount?: number; code?: string; lines?: Array<{ lineNumber: string; tax: number; taxableAmount: number; taxCode?: string }>; error?: { message: string; details?: Array<{ message: string }> } } | null;
   if (!res.ok) {
     const msg = data?.error?.message || data?.error?.details?.[0]?.message || `HTTP ${res.status}`;
     return { success: false, error: msg, raw: data };
   }
 
+  // Tax-code degradation guard (2026-08-31 incident).
+  // Avalara does NOT reject an unrecognised taxCode. It silently substitutes
+  // P0000000 (Tangible Personal Property, fully taxable) and returns 200 OK.
+  // We sent PF050144 for every supplement for months; that code does not exist
+  // in Avalara's taxonomy, so supplements were taxed as general merchandise and
+  // customers were overcharged in every state that exempts them. It surfaced
+  // only because one customer (Laura Light, ticket 295cc934) insisted three times.
+  //
+  // So: compare what we ASKED for against what Avalara ECHOED per line, and say
+  // so loudly when they differ. Never silent — but never fatal either, since
+  // failing a live checkout over a classification problem is the worse outcome.
+  const requestedByLine = new Map(
+    params.lines.map((l) => [String(l.number), l.taxCode || creds.defaultTaxCode || null]),
+  );
+  const degraded: string[] = [];
+  for (const line of data?.lines ?? []) {
+    const want = requestedByLine.get(String(line.lineNumber));
+    const got = line.taxCode;
+    if (want && got && want !== got) {
+      degraded.push(`line ${line.lineNumber}: sent ${want}, Avalara used ${got}`);
+    }
+  }
+  if (degraded.length) {
+    console.error(
+      `[avalara] TAX CODE REJECTED — Avalara silently substituted a different code, so this `
+      + `transaction was taxed under the WRONG classification. ${degraded.join("; ")}. `
+      + `Verify the code against /definitions/taxcodes; an unrecognised code degrades to `
+      + `P0000000 (fully taxable) with a 200 OK.`,
+    );
+  }
+
   return {
     success: true,
+    degradedTaxCodes: degraded.length ? degraded : undefined,
     transactionCode: data?.code,
     totalTaxCents: data?.totalTax != null ? Math.round(data.totalTax * 100) : undefined,
     totalAmountCents: data?.totalAmount != null ? Math.round(data.totalAmount * 100) : undefined,

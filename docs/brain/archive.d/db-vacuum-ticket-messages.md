@@ -1,0 +1,1 @@
+- **Vacuum / autovacuum-tune ticket_messages (rising bloat trend)** · verified 2026-08-29 · → [[../recipes/db-vacuum-tune-ticket_messages]]

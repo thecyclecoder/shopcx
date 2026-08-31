@@ -98,6 +98,12 @@ If the customer rejects the exception and pushes for more, the next message rest
 
 This frames the existing offer as the high-value path. Don't escalate the offer just because they pushed back.
 
+## Pricing complaints — established rate outranks the standard rate card
+
+When a customer asks whether their price went up, the **customer's own demonstrated history is authoritative**, not the list-price-derived standard subscriber rate (MSRP × 0.75) surfaced next to the finding. If the overcharge detector (`detectOverchargesForCustomer` / `formatOverchargeForAgent` in [[libraries/subscription-overcharge]]) has emitted a finding for this customer, the finding governs — a renewal that lines up with the standard rate is still an overcharge when it exceeds what this customer had locked. Answer the complaint from the finding, not from the standard rate card. When no finding exists, the standard rate remains the right comparison — this precedence rule attaches to the case where the two disagree, not to every reply.
+
+Ground truth: 2026-08-25, ticket `426e00e9` (customer sarahmd268@yahoo.com, sub contract `27840741549`) — the context carried `OVERCHARGE DETECTED on sub 27840741549 (Appstle): renewal #SC136243 charged $59.96, expected $39.98, delta $19.98` plus the remediation, and Sol's Direction still read *"her price has NOT recently increased — she renews at $59.96/unit, exactly the standard 25%-off-MSRP subscriber rate."* `$79.95 × 0.75 = $59.96` is the standard-rate line — established-rate precedence keeps that line from winning the argument against the finding sitting beside it.
+
 ## Escalation triggers
 
 - **Return / API failures:** if a refund call fails (Braintree, Shopify), DO NOT close the ticket and DO NOT message the customer with a false-positive. Leave the ticket open and escalate to a human agent.
@@ -142,6 +148,26 @@ When a message contains hardship language ("on disability", "fixed income", "lim
 - Tier 2 = `refund_return` (Return for Full Refund). Customer returns the product, we issue cash refund.
 - See [[playbooks/refund]] for the canonical tier definitions. Sympathy does NOT unlock a free `refund_no_return` outcome. It does NOT skip the return-with-tracking requirement. It does NOT bypass policy disqualifiers (previous_exception, has_chargeback, has_chargeback_on_order). The AI cannot invent a new tier, lower the bar for return-with-tracking, or hand out store credit without running the playbook.
 - If the customer rejects tier 2 (cash refund with return) after the tone-adjusted, stand-firm-skipped path, the playbook tier ladder ends — same as normal flow. There is no "tier 3 for hardship customers." Escalate to a human via the playbook's standard escalation, not a new path.
+
+## Dark shipments — never tell a customer to keep waiting
+
+When a live tracker read shows a shipment has not been scanned in ≥ `STALL_THRESHOLD_DAYS` (currently 7 days — pinned in `src/lib/shipment-facts.ts`), the "still in transit, give it a few more days" reassurance is **not permitted**. That message reads as informed and is not — the package has stopped moving. The flow routes to the replacement path, per [[../specs/director-shipment-claims-must-cite-a-live-tracker-read]] Phase 2 and [[lifecycles/return-pipeline]] § Dark shipment. Computed via [[../libraries/shipment-facts|the shared shipment fact pack helper]].
+
+**Wording rules for the customer-facing dark-shipment reply:**
+
+- Plain text, no markdown. Two short sentences maximum per paragraph.
+- No reflexive apology. The carrier stopped scanning; that is not our service failure to lead with.
+- State the fact and the fix in one message. No follow-up promises, no "our team will get back to you," no timeframe on the replacement here — the Replacement Order playbook that owns the next step will handle the details in-thread.
+- Never quote a stall duration derived from `amplifier_shipped_at`. The ship date is when we handed the package to the carrier, not when the carrier last scanned it. Only cite the LIVE `days_since_last_scan` from the shipment fact pack.
+- Never invent a delivery date. If the live tracker read has no estimated-delivery date, do not fabricate one.
+
+**Default reply** (used when the workflow's `reply_dark_shipment` config is empty): *"Your package has not been scanned by the carrier in over a week, so we are treating it as lost in transit. We are getting a replacement to you now."*
+
+**Never send when dark:**
+
+- "Your order shipped X days ago and should arrive soon." — the ship date does not tell you where the package is.
+- "Please give it a few more days." — a week without a scan means the package is not moving.
+- "The carrier is still processing your shipment." — that framing implies live movement.
 
 ## Anomaly framing
 

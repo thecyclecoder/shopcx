@@ -112,7 +112,7 @@ export default function SettingsPage() {
         </SettingsSection>
 
         <SettingsSection title="General">
-          <SettingsCard href="/dashboard/settings/integrations" title="Integrations" desc="Connect Shopify, Resend, Appstle, Klaviyo, and more" />
+          <SettingsCard href="/dashboard/settings/integrations" title="Integrations" desc="Connect Shopify, Resend, Appstle, and more" />
           <SettingsCard href="/dashboard/team" title="Team" desc="Members, roles, and invitations" />
           <SettingsCard href="/dashboard/settings/import" title="Import Data" desc="Upload CSV files for subscriptions" />
         </SettingsSection>

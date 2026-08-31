@@ -29,6 +29,14 @@ export interface WorkflowContext {
     easypost_status: string | null; // pre_transit, in_transit, out_for_delivery, delivered, return_to_sender, failure, unknown
     easypost_detail: string | null; // last event message e.g. "Refused", "Delivered to Front Door"
     easypost_location: string | null; // city, state of last event
+    // Fields sourced from the LIVE lookupTracking call via the shared shipment fact pack helper
+    // (Phase 1 of director-shipment-claims-must-cite-a-live-tracker-read). Populated ONLY when the
+    // live call succeeded — a null on `live_source` after a lookup attempt means the reader fell
+    // back to the cached easypost_* columns (labeled as cached in the internal note).
+    live_source: "live" | "cached_fallback" | "unavailable" | null;
+    live_days_since_last_scan: number | null; // whole days between the LATEST tracker event and now
+    live_last_scan_at: string | null; // ISO datetime of the LATEST tracker event
+    live_has_estimated_delivery: boolean | null;
   } | null;
   subscription: Record<string, unknown> | null;
   workflowSandbox?: boolean;
@@ -147,6 +155,10 @@ export async function buildContext(admin: Admin, workspaceId: string, ticketId: 
         easypost_status: null,
         easypost_detail: null,
         easypost_location: null,
+        live_source: null,
+        live_days_since_last_scan: null,
+        live_last_scan_at: null,
+        live_has_estimated_delivery: null,
       };
 
       // Try to get real-time Shopify fulfillment status with carrier events
@@ -453,42 +465,76 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
   );
 
   if (needsEasyPost) {
-    try {
-      const { lookupTracking } = await import("@/lib/easypost");
-      const tracking = await lookupTracking(
-        ctx.workspaceId,
-        ctx.fulfillment.tracking_number,
-        ctx.fulfillment.carrier || undefined,
-      );
-      ctx.fulfillment.easypost_status = tracking.status;
+    // Phase 1 of director-shipment-claims-must-cite-a-live-tracker-read: route through the shared
+    // shipment fact pack helper so this workflow renders shipment state from a LIVE lookupTracking
+    // read (with a real datetime per event + derived days-since-last-scan), not from the cached
+    // easypost_* columns which carry no per-scan timestamp. On live failure the helper labels the
+    // cached fallback with its `easypost_checked_at` age so the internal note never presents cached
+    // data as current.
+    const { createShipmentFactPackReader } = await import("@/lib/shipment-facts");
+    const reader = createShipmentFactPackReader(ctx.workspaceId);
+    const cachedShipmentColumns = ctx.order ? {
+      status: (ctx.order.easypost_status as string | null) ?? null,
+      detail: (ctx.order.easypost_detail as string | null) ?? null,
+      location: (ctx.order.easypost_location as string | null) ?? null,
+      checked_at: (ctx.order.easypost_checked_at as string | null) ?? null,
+    } : undefined;
+    const pack = await reader.read({
+      tracking_number: ctx.fulfillment.tracking_number,
+      carrier: ctx.fulfillment.carrier,
+      cached: cachedShipmentColumns,
+    });
+    ctx.fulfillment.live_source = pack.source;
+    if (pack.source === "live") {
+      ctx.fulfillment.easypost_status = pack.status;
+      ctx.fulfillment.live_days_since_last_scan = pack.days_since_last_scan;
+      ctx.fulfillment.live_last_scan_at = pack.last_scan_at;
+      ctx.fulfillment.live_has_estimated_delivery = pack.has_estimated_delivery;
       // For return_to_sender, grab the first event with that status (the reason: "Refused", "Unclaimed", etc.)
-      // For other statuses, grab the last event (most recent update)
-      const reasonEvent = tracking.status === "return_to_sender"
-        ? tracking.events.find(e => e.status === "return_to_sender")
+      // For other statuses, grab the last event (most recent update).
+      const reasonEvent = pack.status === "return_to_sender"
+        ? pack.events.find(e => e.status === "return_to_sender")
         : null;
-      const lastEvent = tracking.events[tracking.events.length - 1];
+      const lastEvent = pack.events.length > 0 ? pack.events[pack.events.length - 1] : null;
       const detailEvent = reasonEvent || lastEvent;
       if (detailEvent) {
         ctx.fulfillment.easypost_detail = detailEvent.message;
-        ctx.fulfillment.easypost_location = [detailEvent.city, detailEvent.state].filter(Boolean).join(", ");
+        ctx.fulfillment.easypost_location = detailEvent.location ?? "";
       }
-
-      // Sync EasyPost data back to order + post note on Shopify order
+      // Sync live EasyPost data back to order + post note on Shopify order.
       if (ctx.order?.id) {
         const { syncEasyPostToOrder } = await import("@/lib/easypost-order-sync");
         await syncEasyPostToOrder({
           workspaceId: ctx.workspaceId,
           orderId: ctx.order.id as string,
           shopifyOrderId: ctx.order.shopify_order_id as string | null,
-          trackingResult: tracking,
+          trackingResult: {
+            status: pack.status,
+            estimatedDelivery: pack.estimated_delivery,
+            events: pack.events.map(e => ({
+              status: e.status,
+              message: e.message,
+              datetime: e.datetime,
+              city: undefined,
+              state: undefined,
+              zip: undefined,
+            })),
+          },
         });
       }
-
-      // Add internal note with EasyPost findings
-      await addNote(admin, ctx, `EasyPost tracking lookup: status "${tracking.status}"${lastEvent ? ` — "${lastEvent.message}" at ${ctx.fulfillment.easypost_location || "unknown location"}` : ""}. Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.`);
-    } catch (err) {
-      // EasyPost lookup failed (no funds, config issue) — fall back to Shopify data
-      console.error("[workflow] EasyPost lookup failed, falling back to Shopify:", err);
+      const scanTimeStr = pack.last_scan_at ? ` (last scan ${String(pack.last_scan_at).slice(0, 19)} UTC, ${pack.days_since_last_scan ?? "?"}d ago)` : "";
+      const eddStr = pack.has_estimated_delivery ? " · EDD present" : " · no EDD";
+      await addNote(admin, ctx, `Live tracker read: status "${pack.status}"${scanTimeStr}${eddStr}${lastEvent ? ` — "${lastEvent.message}" at ${ctx.fulfillment.easypost_location || "unknown location"}` : ""}. Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.`);
+    } else if (pack.source === "cached_fallback") {
+      // Live call failed — populate ctx from the cached columns AND label them cached (never
+      // as current) in the internal note.
+      ctx.fulfillment.easypost_status = pack.cached_status;
+      ctx.fulfillment.easypost_detail = pack.cached_detail;
+      ctx.fulfillment.easypost_location = pack.cached_location;
+      const ageStr = pack.cached_age_days != null ? `${pack.cached_age_days}d ago` : "unknown age";
+      const checked = pack.checked_at ? String(pack.checked_at).slice(0, 19) : "never";
+      console.error("[workflow] EasyPost lookup failed, falling back to cached columns:", pack.reason);
+      await addNote(admin, ctx, `Live tracker read FAILED (${pack.reason}) — showing CACHED easypost columns (last polled ${checked} UTC, ${ageStr}); this is when we last asked, NOT when the carrier last scanned. Carrier: ${ctx.fulfillment.carrier}. Tracking: ${ctx.fulfillment.tracking_number}.`);
     }
   }
 
@@ -659,12 +705,107 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
     return;
   }
 
+  // Phase 2 of director-shipment-claims-must-cite-a-live-tracker-read: BEFORE any "still in
+  // transit, give it a few more days" reassurance, gate on the LIVE days-since-last-scan from
+  // Phase 1's fact pack. A shipment past the stall threshold routes to the replacement path
+  // (the Returns Policy's remedy for a carrier-lost / never-received shipment) instead of a
+  // wait-and-see reply. Suzanne's shipment (ticket 8e2c87d6, 2026-08-24) was 11 days dark
+  // when the orchestrator told her to wait a few more days — that reassurance reads as
+  // informed and is not.
+  const { isShipmentDark, STALL_THRESHOLD_DAYS } = await import("@/lib/shipment-facts");
+  if (
+    ctx.fulfillment.live_source === "live" &&
+    isShipmentDark(ctx.fulfillment.live_days_since_last_scan)
+  ) {
+    await routeDarkShipmentToReplacement(admin, config, ctx, ctx.fulfillment.live_days_since_last_scan ?? STALL_THRESHOLD_DAYS);
+    return;
+  }
+
   // In transit, within threshold
   const locationInfo = (ctx.fulfillment.easypost_location || ctx.fulfillment.latest_location)
     ? ` It was last seen in ${ctx.fulfillment.easypost_location || ctx.fulfillment.latest_location}.`
     : "";
   const estimateInfo = ctx.fulfillment.estimated_delivery ? ` Estimated delivery: {{fulfillment.estimated_delivery}}.` : "";
   await sendReply(admin, ctx, (config.reply_in_transit as string) || `Your order {{order.order_number}} shipped on {{fulfillment.date}} via {{fulfillment.carrier}}.${locationInfo}${estimateInfo} Track it here: {{fulfillment.url}}`, config.reply_in_transit_status as string);
+}
+
+/**
+ * Phase 2 of director-shipment-claims-must-cite-a-live-tracker-read — the dark-shipment
+ * routing that replaces a "wait a few more days" reassurance. Mirrors the "other return-
+ * to-sender" path in `executeOrderTracking`: stamps the order as returned, tags the ticket,
+ * assigns the Replacement Order playbook, and sends a plain-text, no-apology,
+ * two-sentence-max reply per [[docs/brain/customer-voice.md]] § Dark shipments.
+ */
+async function routeDarkShipmentToReplacement(
+  admin: Admin,
+  config: Record<string, unknown>,
+  ctx: WorkflowContext,
+  daysSinceLastScan: number,
+): Promise<void> {
+  if (!ctx.order) return;
+  const detail = `dark ${daysSinceLastScan}d since last scan`;
+  await addNote(
+    admin,
+    ctx,
+    `Order ${ctx.order.order_number} treated as DARK — live tracker read shows ${daysSinceLastScan}d since last scan (threshold ${(await import("@/lib/shipment-facts")).STALL_THRESHOLD_DAYS}d). Suppressing "wait a few more days" reassurance and routing to the Replacement Order playbook. Carrier: ${ctx.fulfillment?.carrier}. Tracking: ${ctx.fulfillment?.tracking_number}.`,
+  );
+
+  const tagSlug = "dark-shipment";
+  await admin.from("orders").update({
+    delivery_status: "returned",
+    sync_resolved_at: new Date().toISOString(),
+    sync_resolved_note: detail,
+  }).eq("id", ctx.order.id);
+
+  if (ctx.order.shopify_order_id) {
+    const { addOrderTags } = await import("@/lib/shopify-order-tags");
+    await addOrderTags(ctx.workspaceId, ctx.order.shopify_order_id as string, [`delivery:${tagSlug}`]);
+  }
+
+  const { addTicketTag } = await import("@/lib/ticket-tags");
+  await addTicketTag(ctx.ticketId, "dark-shipment");
+
+  const { data: replacementPlaybook } = await admin.from("playbooks")
+    .select("id")
+    .eq("workspace_id", ctx.workspaceId)
+    .eq("name", "Replacement Order")
+    .eq("is_active", true)
+    .limit(1).single();
+
+  const playbookUpdates: Record<string, unknown> = {
+    status: "open",
+    updated_at: new Date().toISOString(),
+  };
+  if (replacementPlaybook) {
+    playbookUpdates.active_playbook_id = replacementPlaybook.id;
+    playbookUpdates.playbook_step = 0;
+    playbookUpdates.playbook_context = {
+      easypost_status: ctx.fulfillment?.easypost_status,
+      easypost_detail: detail,
+      easypost_location: ctx.fulfillment?.easypost_location,
+      replacement_reason: "dark_shipment",
+      dark_days_since_last_scan: daysSinceLastScan,
+      dark_last_scan_at: ctx.fulfillment?.live_last_scan_at ?? null,
+      identified_order_id: ctx.order?.id,
+      identified_order: ctx.order?.order_number,
+      tracking_number: ctx.fulfillment?.tracking_number,
+      carrier: ctx.fulfillment?.carrier,
+    };
+  }
+
+  await admin.from("tickets").update(playbookUpdates).eq("id", ctx.ticketId);
+
+  // Customer-voice: plain text, no markdown, at most two sentences per paragraph, no reflexive
+  // apology (see docs/brain/customer-voice.md § Dark shipments). Two short sentences: state the
+  // fact and the fix. NEVER quote a stall duration derived from amplifier_shipped_at (the ship
+  // date is when we handed it over, not when the carrier last touched it — see Phase 1 rule).
+  const defaultReply = "Your package has not been scanned by the carrier in over a week, so we are treating it as lost in transit. We are getting a replacement to you now.";
+  await sendReply(
+    admin,
+    ctx,
+    (config.reply_dark_shipment as string) || defaultReply,
+    (config.reply_dark_shipment_status as string) || "open",
+  );
 }
 
 async function executeCancelRequest(admin: Admin, config: Record<string, unknown>, ctx: WorkflowContext): Promise<void> {

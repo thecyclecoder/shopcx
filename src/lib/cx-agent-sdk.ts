@@ -31,7 +31,9 @@
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { linkGroupIds } from "@/lib/customer-links";
+import { getAmplifierOnHandBySku } from "@/lib/inventory/read";
 import { suggestEmailCorrection } from "@/lib/email-typo";
+import { getOrderRefundLedger, type OrderRefundLedger } from "@/lib/refund-ledger";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -116,6 +118,21 @@ export interface CxProductVariant {
   id: string;
   title: string | null;
   price_cents: number | null;
+  /** 3PL SKU this variant ships as — the join key for ship truth. */
+  sku: string | null;
+  /**
+   * ⭐ SHIP TRUTH — units the 3PL physically holds for this variant's SKU, from canonical
+   * `inventory_levels` (location='amplifier_3pl'). NULL means we have no 3PL row for the SKU and
+   * therefore cannot vouch for it — treat NULL as unknown, never as "in stock".
+   *
+   * This exists because the SDK previously reported every active variant with a price and NO stock
+   * signal at all, so an agent reading it could not tell a shippable flavor from a dead one. On
+   * 2026-08-28 Sol promised a customer Strawberry Lemonade off this list while the 3PL held zero
+   * (ticket 0c9f11a7); the order could not include it and she was billed anyway.
+   */
+  on_hand: number | null;
+  /** Convenience: `on_hand > 0`. NULL when on_hand is unknown — callers must not coerce it to true. */
+  in_stock: boolean | null;
 }
 
 export interface CxProduct {
@@ -265,16 +282,49 @@ export interface CxOrderRemedyState {
   financial_status: string | null;
   total_cents: number;
   /**
-   * Sum of `order_refunds.amount_cents` where `status IN ('succeeded','settled')`. The
-   * "already succeeded" number the remaining-refundable computation subtracts from `total_cents`.
+   * Total refunds actually settled on the order. When `headroom_confidence='live'` this is the
+   * Shopify-transaction ledger's `refundedCents` (mirrored + out-of-band). When the live ledger
+   * can't be read (`headroom_confidence='degraded'`) it falls back to the sum of
+   * `order_refunds.amount_cents` where `status IN ('succeeded','settled')` — accurate for our own
+   * refunds but blind to money moved directly in the Shopify admin.
    */
   refunds_succeeded_cents: number;
   /**
-   * `total_cents - refunds_succeeded_cents` (floored at 0). The CEILING for any NEW money remedy
-   * on this order — a partial_refund whose `amount_cents` exceeds this is a double-pay.
+   * The CEILING for any NEW money remedy on this order — a partial_refund whose `amount_cents`
+   * exceeds this is a double-pay. When `headroom_confidence='live'` this is the ledger's
+   * `refundableCents` (`max(0, sale - refunded - pending)`, so an out-of-band refund lowers it
+   * correctly). When `headroom_confidence='degraded'` this is the mirror fallback
+   * `total_cents - refunds_succeeded_cents` (floored at 0) — the caller MUST refuse a money
+   * decision rather than trust the number, per the spec's "refund guard that cannot verify
+   * headroom must refuse" rule.
    */
   remaining_refundable_cents: number;
-  /** Every succeeded/settled refund mirror row, most-recent-first. */
+  /**
+   * Sum of settled Shopify refunds NOT reconciled to a row in `public.order_refunds` — money
+   * moved outside ShopCX (a manual refund in the Shopify admin, an Appstle-side refund, etc.).
+   * `> 0` explains WHY `remaining_refundable_cents` is lower than the mirror-only math implies;
+   * this is the exact signal that would have prevented the SC126000 double-refund proposal on
+   * ticket dac9f0c7 (yvette jong, 2026-08-24). Zero when the live ledger reads clean OR when the
+   * ledger call failed and we're in `headroom_confidence='degraded'` fallback (we don't invent an
+   * out-of-band figure we couldn't read).
+   */
+  out_of_band_refunds_cents: number;
+  /**
+   * How much to trust `refunds_succeeded_cents` + `remaining_refundable_cents`:
+   *  - `"live"`   — computed from the Shopify transactions ledger (`getOrderRefundLedger`); the
+   *                 numbers include out-of-band refunds and are the true headroom right now.
+   *  - `"degraded"` — the ledger call failed (Shopify down, non-Shopify order, missing
+   *                   shopify_order_id) OR no order was resolved. The numbers reflect only what
+   *                   `public.order_refunds` mirrors, so an out-of-band refund is invisible and
+   *                   headroom is potentially OVERSTATED. A refund guard that cannot verify
+   *                   headroom must REFUSE, never assume — this is the marker to check first.
+   */
+  headroom_confidence: "live" | "degraded";
+  /**
+   * The `order_refunds` mirror rows kept for provenance. When `headroom_confidence='live'` these
+   * are no longer the source of the totals (the ledger is) — they explain WHICH of the settled
+   * refunds ShopCX itself issued, so `refunded_so_far - sum(succeeded_refunds) === out_of_band`.
+   */
   succeeded_refunds: CxRemedyRefundRow[];
   /** Every non-cancelled return on the order, most-recent-first. */
   returns: CxRemedyReturnRow[];
@@ -309,10 +359,21 @@ const REMEDY_STATE_LIVE_RETURN_EXCLUDED_STATUSES = new Set(["cancelled"]);
  * up-front) can pass `orderId` and skip a second lookup. Read-only; safe to call from a Sonnet
  * tool or the box CX SDK.
  */
+export interface GetOrderRemedyStateOpts {
+  /**
+   * Injectable Shopify-ledger reader — defaults to [[refund-ledger]] `getOrderRefundLedger`.
+   * Overridable so the unit test can pin the live-vs-degraded branching without hitting
+   * Shopify. The real path passes the workspaceId + resolved internal order UUID, matching
+   * `getOrderRefundLedger`'s CLAUDE.md hard-rule contract (internal joins use UUIDs).
+   */
+  getLedger?: (workspaceId: string, orderId: string) => Promise<OrderRefundLedger>;
+}
+
 export async function getOrderRemedyState(
   admin: Admin,
   workspaceId: string,
   ref: CxOrderRemedyStateRef,
+  opts?: GetOrderRemedyStateOpts,
 ): Promise<CxOrderRemedyState> {
   const empty: CxOrderRemedyState = {
     found: false,
@@ -324,6 +385,10 @@ export async function getOrderRemedyState(
     total_cents: 0,
     refunds_succeeded_cents: 0,
     remaining_refundable_cents: 0,
+    out_of_band_refunds_cents: 0,
+    // No order → no ledger read → cannot claim a trustworthy headroom. `degraded` so a caller
+    // treats the zero as "unknown", not "clean".
+    headroom_confidence: "degraded",
     succeeded_refunds: [],
     returns: [],
     open_returns: [],
@@ -417,7 +482,19 @@ export async function getOrderRemedyState(
   );
 
   const totalCents = order.total_cents ?? 0;
-  const remaining = Math.max(0, totalCents - refunds_succeeded_cents);
+  // Mirror-only fallback numbers — used ONLY when the live ledger call fails, so a caller sees the
+  // (potentially overstated) mirror figure with `headroom_confidence='degraded'` and can refuse the
+  // money decision rather than trust it. See CxOrderRemedyState.headroom_confidence.
+  const mirrorRefundedCents = refunds_succeeded_cents;
+  const mirrorRemainingCents = Math.max(0, totalCents - mirrorRefundedCents);
+
+  const getLedger = opts?.getLedger ?? getOrderRefundLedger;
+  const ledger = await getLedger(workspaceId, order.id);
+
+  const liveRefundedCents = ledger.ok ? ledger.refundedCents : mirrorRefundedCents;
+  const liveRemainingCents = ledger.ok ? ledger.refundableCents : mirrorRemainingCents;
+  const outOfBandCents = ledger.ok ? ledger.outOfBandCents : 0;
+  const headroomConfidence: CxOrderRemedyState["headroom_confidence"] = ledger.ok ? "live" : "degraded";
 
   return {
     found: true,
@@ -427,8 +504,10 @@ export async function getOrderRemedyState(
     shopify_order_id: order.shopify_order_id ?? null,
     financial_status: order.financial_status ?? null,
     total_cents: totalCents,
-    refunds_succeeded_cents,
-    remaining_refundable_cents: remaining,
+    refunds_succeeded_cents: liveRefundedCents,
+    remaining_refundable_cents: liveRemainingCents,
+    out_of_band_refunds_cents: outOfBandCents,
+    headroom_confidence: headroomConfidence,
     succeeded_refunds,
     returns,
     open_returns,
@@ -455,8 +534,14 @@ export function formatOrderRemedyState(state: CxOrderRemedyState): string {
     parts.push(`ORDER REMEDY STATE for ${label}: (order not found in this workspace)`);
     return parts.join("\n");
   }
+  const oob = state.out_of_band_refunds_cents > 0
+    ? ` · out_of_band ${DOLLARS(state.out_of_band_refunds_cents)}`
+    : "";
+  const confidence = state.headroom_confidence === "degraded"
+    ? " · ⚠ HEADROOM DEGRADED (live ledger unreadable — mirror-only figures; a refund guard must REFUSE, not trust)"
+    : "";
   parts.push(
-    `ORDER REMEDY STATE for ${label}: total ${DOLLARS(state.total_cents)} · financial_status=${state.financial_status ?? "?"} · refunded_so_far ${DOLLARS(state.refunds_succeeded_cents)} · REMAINING REFUNDABLE ${DOLLARS(state.remaining_refundable_cents)}`,
+    `ORDER REMEDY STATE for ${label}: total ${DOLLARS(state.total_cents)} · financial_status=${state.financial_status ?? "?"} · refunded_so_far ${DOLLARS(state.refunds_succeeded_cents)}${oob} · REMAINING REFUNDABLE ${DOLLARS(state.remaining_refundable_cents)}${confidence}`,
   );
   if (state.succeeded_refunds.length === 0) {
     parts.push("  refunds: (none)");
@@ -746,6 +831,23 @@ export async function getCxProducts(admin: Admin, workspaceId: string): Promise<
     .eq("workspace_id", workspaceId)
     .eq("status", "active");
   if (!products?.length) return [];
+
+  // ── ship truth ──────────────────────────────────────────────────────────────────────
+  // The 3PL is the ONLY authority for what can actually ship (founder 2026-08-28: "the 3PL is the
+  // only true source of inventory, not Shopify"). Amplifier rows key on SKU and carry no variant
+  // id, so we bridge shopify variant id → sku through `product_variants`, then sku → on-hand.
+  const [{ data: pvRows }, amplifier] = await Promise.all([
+    admin
+      .from("product_variants")
+      .select("shopify_variant_id, sku")
+      .eq("workspace_id", workspaceId),
+    getAmplifierOnHandBySku(admin, workspaceId),
+  ]);
+  const skuByVariant = new Map<string, string>();
+  for (const r of (pvRows ?? []) as Array<{ shopify_variant_id: unknown; sku: unknown }>) {
+    if (r.shopify_variant_id != null && r.sku) skuByVariant.set(String(r.shopify_variant_id), String(r.sku));
+  }
+
   return products.map((p) => {
     const vs = (p.variants as Array<{ id?: string; title?: string; price_cents?: number | null }> | null) ?? [];
     return {
@@ -755,11 +857,19 @@ export async function getCxProducts(admin: Admin, workspaceId: string): Promise<
       status: (p.status as string | null) ?? null,
       variants: vs
         .filter((v) => !!v.id)
-        .map((v) => ({
-          id: String(v.id),
-          title: (v.title as string | null) ?? null,
-          price_cents: (v.price_cents as number | null) ?? null,
-        })),
+        .map((v) => {
+          const sku = skuByVariant.get(String(v.id)) ?? null;
+          // `undefined` (no 3PL row for this SKU) stays NULL — unknown is not "in stock".
+          const onHand = sku ? amplifier.get(sku) : undefined;
+          return {
+            id: String(v.id),
+            title: (v.title as string | null) ?? null,
+            price_cents: (v.price_cents as number | null) ?? null,
+            sku,
+            on_hand: onHand ?? null,
+            in_stock: onHand === undefined ? null : onHand > 0,
+          };
+        }),
     };
   });
 }
@@ -1036,14 +1146,39 @@ export function formatCxSubscriptions(subs: CxSubscription[]): string {
   return lines.join("\n");
 }
 
+/**
+ * Plain-text product catalog for an agent brief — WITH ship truth per variant.
+ *
+ * "active" is a merchandising flag, not a promise that anything can ship. Every variant is now
+ * tagged from the 3PL: `OUT OF STOCK` (0 on hand), `stock unknown` (no 3PL row), or a unit count.
+ * Rendering these identically is what let Sol offer a customer a flavor the warehouse could not
+ * ship (ticket 0c9f11a7, 2026-08-28).
+ */
 export function formatCxProducts(products: CxProduct[]): string {
   if (!products.length) return "PRODUCTS: (no active products)";
-  const lines: string[] = ["PRODUCTS (active — variants + MSRP):"];
+  const oos: string[] = [];
+  const lines: string[] = [
+    "PRODUCTS (active — variants + MSRP + SHIP TRUTH from the 3PL):",
+    "  ⚠️ NEVER offer, promise, or reorder a variant marked OUT OF STOCK or stock unknown — 'active' is a",
+    "     merchandising flag, not a guarantee it can ship. Check this list before naming a flavor.",
+  ];
   for (const p of products) {
     const variants = p.variants
-      .map((v) => `${v.title ?? "(default)"} [${v.id}] @ ${DOLLARS(v.price_cents)}`)
+      .map((v) => {
+        const stock =
+          v.in_stock === null
+            ? "⚠️ stock unknown"
+            : v.in_stock
+              ? `${v.on_hand} on hand`
+              : "⛔ OUT OF STOCK";
+        if (v.in_stock === false) oos.push(`${p.title ?? "(untitled)"} / ${v.title ?? "(default)"}`);
+        return `${v.title ?? "(default)"} [${v.id}] @ ${DOLLARS(v.price_cents)} — ${stock}`;
+      })
       .join(", ");
     lines.push(`  - ${p.title ?? "(untitled)"} · ${variants || "(no variants)"}`);
+  }
+  if (oos.length) {
+    lines.push(`  ⛔ CANNOT SHIP RIGHT NOW (${oos.length}): ${oos.join(" · ")}`);
   }
   return lines.join("\n");
 }

@@ -80,6 +80,16 @@ const { data } = await admin.from("ticket_messages")
   .not("resend_email_id", "is", null);
 ```
 
+## Autovacuum tuning
+
+Per-table `reloptions` are tightened on `public.ticket_messages` — the cluster default `autovacuum_vacuum_scale_factor = 0.20` is too loose for the message-lifecycle churn on this table (every inbound message insert + AI-draft rewrite + `pending_send_at` / `sent_at` / `email_status` / `send_cancelled` outbound updates), so the DB Health Agent's [[../libraries/db-health|bloat pass]] flagged `dbhealth:bloat:ticket_messages` on the trend variant (5% → 9% → 14% dead ratio across 20.5d while `last_autovacuum` didn't advance; 214 MB table). Fix (owner-approval-only, `20261215160000_ticket_messages_autovacuum_scale_factor.sql` + `scripts/apply-ticket_messages-autovacuum-migration.ts` — full write-up in [[../recipes/db-vacuum-tune-ticket_messages]]):
+
+  - `autovacuum_vacuum_scale_factor = 0.05` (fire at 5% dead, not 20%)
+  - `autovacuum_analyze_scale_factor = 0.02` (refresh stats at 2% churn)
+  - `autovacuum_vacuum_threshold = 1000` (floor)
+
+**No data is deleted** by the fix — `VACUUM` reclaims dead-tuple space + refreshes planner stats; live rows are untouched.
+
 ## Gotchas
 
 - Not workspace-scoped — keyed by `ticket_id`. Workspace comes via the parent ticket.

@@ -1,0 +1,1 @@
+- **Remedy state + return ceiling must count out-of-band Shopify refunds** · verified 2026-08-24 · → [[../lifecycles/return-pipeline]]

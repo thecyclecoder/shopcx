@@ -168,10 +168,13 @@ export async function listReadyToTest(
     .eq("workspace_id", workspaceId)
     .in("id", candidateCampaignIds)
     .not("landing_url", "is", null)
-    // Retiring a campaign (removing its landing URL) sets status='archived'; excluding these keeps
-    // Dahlia's deficit truthful, /director-training's depth honest, and stops the media-buyer's
-    // replenish from ever picking a retired creative.
-    .neq("status", "archived");
+    // ready-to-test-bin-excludes-draft-campaigns Phase 1 — status allowlist, not denylist.
+    // The prior `.neq('status','archived')` let a `draft` (unfinished, no angle, no copy) leak into
+    // Bianca's postable bin: replenish picked one, publish refused it for "no copy source", and
+    // Bianca raised a fresh under-provisioned-cohort CEO card every calendar day (8 cards over ~6
+    // days for Creatine Prime+ on 2026-08-25). Fail-closed: only explicitly-postable `ready` rows
+    // land here. A future non-postable status stays out until someone deliberately admits it.
+    .eq("status", "ready");
   // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 (with
   // bianca-posts-only-at-9of10 Phase 2 CEO override) — the always-bin flow means every finished
   // creative lands in `ad_campaigns`, but only Max-eligible ones (or legacy / deterministic /
@@ -217,7 +220,11 @@ export async function listReadyToTest(
   for (const c of campaigns) {
     if (blocked.has(c.id)) continue;
     if (!c.landing_url) continue;
-    if (c.status === "archived") continue;
+    // ready-to-test-bin-excludes-draft-campaigns Phase 1 — JS-side allowlist mirror of the DB
+    // predicate. A chain-mock (test) / schema drift can bypass `.eq('status','ready')` at the
+    // wire; this loop is the belt-and-suspenders that still fails-closed. `draft` and any future
+    // non-postable status are rejected here, not the other way around.
+    if (c.status !== "ready") continue;
     // max-qc-always-bins-ad-7of10-gates-only-bianca-postability Phase 2 (with
     // bianca-posts-only-at-9of10 Phase 2 CEO override) — JS-side belt-and-suspenders mirror of
     // the DB predicate above. A binned-but-ineligible row (Max ran and rejected,

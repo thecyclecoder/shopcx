@@ -1536,6 +1536,78 @@ export async function resolveAssistedPurchaseIntentToParams(
 }
 
 /**
+ * Live-orchestrator assisted-purchase routing boundary — derives a
+ * [[RawAssistedPurchaseIntent]] from the SonnetDecision the orchestrator emits
+ * when it routes `action_type:'playbook'` at one of the two assisted-purchase
+ * playbook slugs (`assisted-order-purchase` / `assisted-subscription-purchase`).
+ *
+ * Why this exists: the Direction boundary
+ * ([[../lib/ticket-directions.ts]] `resolvePlaybookForDirection`) already
+ * populates `plan.playbook_seed_context.assisted_purchase_params` from Sol's
+ * confirmed `purchase_intent`. The live Sonnet orchestrator has NO such wiring
+ * — it can pick `pb:assisted_subscription_purchase` directly and calls
+ * [[../lib/action-executor.ts]] `handlePlaybook`, which used to call
+ * `startPlaybook` with NO seed context. `handleAssistedCreate` then read an
+ * empty `ctx.assisted_purchase_params` and `assistedCreateMissingItemsGuard`
+ * refused every turn ("items missing in resolved params — Phase-1
+ * empty-order invariant"), causing the orchestrator to loop on its canned
+ * "which product and flavor would you like me to order?" reply (ticket
+ * `083201b5` — Maria D James, confirmed 3× Cocoa French Roast on a vaulted
+ * card, looped ~4 times before escalating `no_progress_context_cap`).
+ *
+ * Pure — no DB, no network. The caller (`handlePlaybook`) hands the returned
+ * shape to [[resolveAssistedPurchaseIntentToParams]] which does the DB-backed
+ * variant → internal-UUID resolution before writing `assisted_purchase_params`.
+ *
+ * Variant reference is passed straight through to the resolver's `variantId`
+ * slot; the resolver's `findVariant` gracefully accepts either an internal
+ * UUID or a Shopify numeric id in that slot (see `src/lib/product-variants.ts`
+ * lines 74-87 — the "present-but-unresolvable id" fallback), so we do not
+ * pre-classify here. `unit_cents` and `vendor` are DELIBERATELY NOT read
+ * from the decision (same sec:real-vuln trust boundary as the Direction
+ * resolver — a prompt-injected customer must not be able to steer per-item
+ * pricing or the vendor branch; price flows from the resolved
+ * `product_variants.price_cents`, vendor from the playbook step config default).
+ */
+export function extractAssistedPurchaseIntentFromDecision(
+  decision: {
+    actions?: Array<{
+      type?: string;
+      variant_id?: string;
+      quantity?: number;
+      interval?: string;
+      interval_count?: number;
+      date?: string;
+    }>;
+  },
+  slug: "assisted-order-purchase" | "assisted-subscription-purchase",
+): RawAssistedPurchaseIntent | null {
+  const actionType: "create_order" | "create_subscription" =
+    slug === "assisted-subscription-purchase" ? "create_subscription" : "create_order";
+  const actions = Array.isArray(decision.actions) ? decision.actions : [];
+  // Prefer the exact matching action_type, then any action carrying a
+  // variant_id (the orchestrator sometimes attaches the create in a
+  // supplementary action alongside the playbook route).
+  const a =
+    actions.find((x) => x?.type === actionType && !!x?.variant_id) ??
+    actions.find((x) => !!x?.variant_id) ??
+    null;
+  if (!a?.variant_id || typeof a.variant_id !== "string") return null;
+  const interval = a.interval as "day" | "week" | "month" | "year" | undefined;
+  return {
+    actionType,
+    variantId: a.variant_id,
+    shopifyVariantId: null,
+    sku: null,
+    title: null,
+    quantity: typeof a.quantity === "number" ? a.quantity : null,
+    interval: interval ?? null,
+    intervalCount: typeof a.interval_count === "number" ? a.interval_count : null,
+    nextBillingDate: typeof a.date === "string" ? a.date : null,
+  };
+}
+
+/**
  * Pure result→response mapper for the assisted-purchase terminal step. Extracted
  * from [[handleAssistedCreate]] so Phase 4 of
  * [[../../docs/brain/specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol]]

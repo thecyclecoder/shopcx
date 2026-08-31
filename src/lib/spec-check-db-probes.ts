@@ -99,6 +99,64 @@ export const DB_PROBES: Record<string, DbProbeDefinition> = {
   },
 
   /**
+   * Count of tickets in a workspace that carry an escalation-note trace in ticket_messages but
+   * sit `status='closed'` with `escalated_to IS NULL` — the closed-while-escalated regression
+   * from [[../../docs/brain/specs/closing-a-ticket-must-not-destroy-an-active-escalation]] Phase 2.
+   * Delegates to [[closed-while-escalated-detector]] `closedWhileEscalated`; a count-only signal
+   * so a verification bullet or a Control Tower tile can assert "count ≤ N" after the Phase-1
+   * guards land.
+   */
+  tickets_closed_while_escalated_count: {
+    description: "count of tickets closed while an escalation-note trace exists (tenant-scoped)",
+    requiredArgs: ["workspace_id"],
+    requiresWorkspaceId: true,
+    run: async (admin, args) => {
+      const workspaceId = String(args.workspace_id);
+      const { closedWhileEscalated } = await import("./closed-while-escalated-detector");
+      const report = await closedWhileEscalated(admin, { workspaceId, sampleLimit: 0 });
+      return {
+        value: report.count,
+        evidence: `probe tickets_closed_while_escalated_count(workspace_id=${workspaceId}) → count=${report.count}`,
+      };
+    },
+  },
+
+  /**
+   * True iff an ACTIVE journey_definitions row exists for (workspace_id, slug).
+   *
+   * Exists because review-collection-foundations Phase 3 shipped a journey HANDLER whose
+   * `journey_definitions` row was never created — its checks grepped for the handler file and
+   * passed, so the phase read `shipped` while the journey was unreachable code. Journeys are
+   * DB-driven (CLAUDE.md), so "the code exists" and "the journey works" are different claims and
+   * only a probe can tell them apart.
+   *
+   * Reads `id` + `is_active` — no secret columns, workspace-bound. Shaped to a boolean so the
+   * evidence string never carries row data.
+   */
+  journey_definition_active_by_slug: {
+    description: "true iff an active journey_definitions row exists for (workspace_id, slug)",
+    requiredArgs: ["workspace_id", "slug"],
+    requiresWorkspaceId: true,
+    run: async (admin, args) => {
+      const workspaceId = String(args.workspace_id);
+      const slug = String(args.slug);
+      const { data, error } = await admin
+        .from("journey_definitions")
+        .select("id, is_active")
+        .eq("workspace_id", workspaceId)
+        .eq("slug", slug)
+        .eq("is_active", true)
+        .limit(1);
+      if (error) throw new Error(error.message);
+      const value = Array.isArray(data) && data.length > 0;
+      return {
+        value,
+        evidence: `probe journey_definition_active_by_slug(slug=${slug}) → ${value}`,
+      };
+    },
+  },
+
+  /**
    * Count of `spec_phase_checks` rows for a spec. Reads a single column (`id`) with a
    * `count: exact` head request — the response body is a count, never a row. Useful for
    * asserting "every phase carries ≥N checks".

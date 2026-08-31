@@ -6,9 +6,12 @@
  *
  * WHY: in steady state every OPEN ticket should be escalated to the CEO — the autonomous
  * lanes close what they can resolve, so an open ticket is by definition one nothing
- * automated could finish. An open ticket that is NOT escalated (and is past the
- * just-created grace) is therefore a DEFECT, not a queue item: something dropped it.
- * `list` flags that explicitly rather than letting it sit and look normal.
+ * automated could finish. An open ticket that is NOT escalated, is NOT assigned to a
+ * human agent, and is past the just-created grace is therefore a DEFECT, not a queue
+ * item: something dropped it. A ticket a human has taken (assigned_to is set) is
+ * legitimately open and legitimately unescalated — the human IS the owner, so it
+ * renders as owned rather than as a defect. `list` flags real defects explicitly
+ * rather than letting them sit and look normal.
  *
  * Reads go through [[../src/lib/tickets-read]] (`investigateTicket`) per CLAUDE.md — never
  * raw `.from("tickets")` for the ticket/messages/Direction picture. The two extra reads this
@@ -94,8 +97,19 @@ async function list() {
     const cust = c ? `${(c as { first_name?: string }).first_name ?? ""} ${(c as { last_name?: string }).last_name ?? ""}`.trim() : "—";
 
     // Escalation health — the whole point of the queue view.
+    // An assigned ticket is legitimately open + unescalated: a human agent OWNS it. Not a defect.
     let health: string;
     if (t.escalated_to) health = "escalated → CEO";
+    else if (t.assigned_to) {
+      const { data: m } = await admin
+        .from("workspace_members")
+        .select("display_name")
+        .eq("workspace_id", WS)
+        .eq("user_id", t.assigned_to)
+        .maybeSingle();
+      const who = (m as { display_name?: string } | null)?.display_name ?? "a human agent";
+      health = `owned by ${who} — human-worked`;
+    }
     else if (age <= JUST_CREATED_GRACE_MIN) health = `new (${human(age)}) — still in flow`;
     else { health = `⚠️ DEFECT — open ${human(age)}, NOT escalated`; defects++; }
 
@@ -112,10 +126,10 @@ async function list() {
   }
 
   if (defects) {
-    console.log(`⚠️  ${defects} open ticket(s) are NOT escalated and past the ${JUST_CREATED_GRACE_MIN}m grace.`);
-    console.log(`    In steady state every open ticket should be escalated — these were dropped, not queued.\n`);
+    console.log(`⚠️  ${defects} open ticket(s) are NOT escalated, NOT assigned, and past the ${JUST_CREATED_GRACE_MIN}m grace.`);
+    console.log(`    In steady state every open ticket should be escalated or owned by a human — these were dropped, not queued.\n`);
   } else if (rows.length) {
-    console.log(`✅ every open ticket is escalated (or newer than ${JUST_CREATED_GRACE_MIN}m).\n`);
+    console.log(`✅ every open ticket is escalated, owned by a human, or newer than ${JUST_CREATED_GRACE_MIN}m.\n`);
   }
 }
 

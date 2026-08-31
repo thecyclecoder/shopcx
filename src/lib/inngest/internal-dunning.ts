@@ -244,8 +244,10 @@ async function exhaustInternalDunning(
   workspaceId: string, subscriptionId: string, customerId: string | null, internalContractId: string, cycleId: string,
 ): Promise<void> {
   const admin = createAdminClient();
+  // A cancelled sub has no next charge to advertise (recovery re-sets the
+  // date when the customer updates their card and dunning reactivates).
   await admin.from("subscriptions")
-    .update({ status: "cancelled", updated_at: new Date().toISOString() })
+    .update({ status: "cancelled", next_billing_date: null, updated_at: new Date().toISOString() })
     .eq("id", subscriptionId);
   await updateDunningCycle(cycleId, { status: "exhausted", paused_at: new Date().toISOString() });
   await tagOpenTickets(workspaceId, customerId, "dunning:cancelled");

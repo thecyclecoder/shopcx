@@ -25,6 +25,7 @@ Per-customer journey invocation. token (for `/journey/{token}`), responses, stat
 | `started_at` | `timestamptz` | ✓ |  |
 | `completed_at` | `timestamptz` | ✓ |  |
 | `created_at` | `timestamptz` | — | default: `now()` |
+| `product_id` | `uuid` | ✓ | → [[products]].id · Product this session asks about. Set only by the product-review journey; the other twelve journeys leave it null. Nullable because the column is universal (every journey shares this table) but the semantics are journey-specific. Migration `20261215120000_review_collection_foundations.sql`. |
 
 ## Foreign keys
 
@@ -34,11 +35,13 @@ Per-customer journey invocation. token (for `/journey/{token}`), responses, stat
 - `journey_id` → [[journey_definitions]].`id`
 - `subscription_id` → [[subscriptions]].`id`
 - `ticket_id` → [[tickets]].`id`
+- `product_id` → [[products]].`id`
 - `workspace_id` → [[workspaces]].`id`
 
 **In (others → this):**
 
 - [[journey_step_events]].`session_id`
+- [[review_requests]].`journey_session_id`
 
 ## Common queries
 

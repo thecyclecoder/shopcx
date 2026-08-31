@@ -1004,6 +1004,8 @@ test("Phase 2 — a 2-action batch runs both actions in ORDER, then delivers the
             total_cents: 20000,
             refunds_succeeded_cents: 0,
             remaining_refundable_cents: 20000,
+            out_of_band_refunds_cents: 0,
+            headroom_confidence: "live",
             succeeded_refunds: [],
             returns: [],
             open_returns: [],
@@ -1128,6 +1130,8 @@ test("Phase 2 — a 2-action batch whose 2nd action fails: NO customer message, 
             total_cents: 20000,
             refunds_succeeded_cents: 0,
             remaining_refundable_cents: 20000,
+            out_of_band_refunds_cents: 0,
+            headroom_confidence: "live",
             succeeded_refunds: [],
             returns: [],
             open_returns: [],
@@ -1684,6 +1688,8 @@ function cleanState(): CxOrderRemedyState {
     total_cents: 20000,
     refunds_succeeded_cents: 0,
     remaining_refundable_cents: 20000,
+    out_of_band_refunds_cents: 0,
+    headroom_confidence: "live",
     succeeded_refunds: [],
     returns: [],
     open_returns: [],
@@ -1800,6 +1806,195 @@ test("verifyPlanAgainstRemedyStates — a money step with no resolvable order re
   assert.equal(verdict.ok, false);
   if (verdict.ok) throw new Error("unreachable");
   assert.equal(verdict.violation.reason, "missing_order_reference");
+});
+
+test("verifyPlanAgainstRemedyStates — REJECTS a partial_refund BELOW mirror remaining_refundable when headroom_confidence='degraded' (out-of-band Shopify refund could double-pay)", () => {
+  // The fail-open gap the remedy-state-must-see-out-of-band-refunds diff introduced: the mirror
+  // says remaining_refundable is $200 but the live Shopify ledger call FAILED (degraded fallback),
+  // so the mirror cannot see an out-of-band Shopify refund that already drew down the same money.
+  // A refund BELOW mirror remaining_refundable that would otherwise slip through must be REJECTED.
+  const state: CxOrderRemedyState = {
+    ...cleanState(),
+    total_cents: 20000,
+    refunds_succeeded_cents: 0,
+    remaining_refundable_cents: 20000,
+    headroom_confidence: "degraded",
+    out_of_band_refunds_cents: 0,
+  };
+  const ref = extractRemedyOrderRefFromStep({ shopify_order_id: "SC135494" })!;
+  const plan: RemedyActionStep[] = [
+    { actionType: "partial_refund", actionParams: { shopify_order_id: "SC135494", amount_cents: 5000, reason: "shipping" } },
+  ];
+  const states = new Map<string, CxOrderRemedyState>();
+  states.set(ref.key, state);
+  const verdict = verifyPlanAgainstRemedyStates(plan, states);
+  assert.equal(verdict.ok, false);
+  if (verdict.ok) throw new Error("unreachable");
+  assert.equal(verdict.violation.reason, "headroom_degraded");
+  assert.equal(verdict.violation.actionType, "partial_refund");
+  // Detail names the order key and that live Shopify headroom is unreadable.
+  assert.match(verdict.violation.detail, /SC135494/);
+  assert.match(verdict.violation.detail, /headroom_confidence=degraded/);
+  assert.match(verdict.violation.detail, /unreadable/i);
+});
+
+test("verifyPlanAgainstRemedyStates — headroom_confidence='live' with no open returns and amount ≤ remaining still PASSES (baseline unaffected)", () => {
+  const state = cleanState();
+  const ref = extractRemedyOrderRefFromStep({ shopify_order_id: "SC135494" })!;
+  const plan: RemedyActionStep[] = [
+    { actionType: "partial_refund", actionParams: { shopify_order_id: "SC135494", amount_cents: 5000, reason: "shipping" } },
+  ];
+  const states = new Map<string, CxOrderRemedyState>();
+  states.set(ref.key, state);
+  const verdict = verifyPlanAgainstRemedyStates(plan, states);
+  assert.equal(verdict.ok, true);
+});
+
+// ── Subscription-scoped loyalty coupon exemption (spec: june-loyalty-coupon-to-subscription-exempt-from-order-scoped-remedy-state-rail) ──
+//
+// Derived-from ticket 2ce25d56 (Beth Dunn): an apply_loyalty_coupon carrying a contract_id and NO
+// order reference used to hit `missing_order_reference` because it's a member of
+// MONEY_ACTION_TYPES — deadlocking the ticket forever. A loyalty coupon on a future renewal cannot
+// double-pay any order, so it must pass the order-scoped rail. redeem_points_as_refund still draws
+// down a real order and stays inside the rail.
+
+test("verifyPlanAgainstRemedyStates — apply_loyalty_coupon{contract_id, no order} PASSES (subscription-scoped loyalty exemption)", () => {
+  const plan: RemedyActionStep[] = [
+    {
+      actionType: "apply_loyalty_coupon",
+      actionParams: {
+        contract_id: "gid://shopify/SubscriptionContract/123",
+        code: "LOYALTY-15-ABCDEF",
+      },
+    },
+  ];
+  // No remedy states prefetched — the point of the exemption is that this shape names no order to
+  // read state for. Old behavior: missing_order_reference. New behavior: passes cleanly.
+  const verdict = verifyPlanAgainstRemedyStates(plan, new Map());
+  assert.equal(verdict.ok, true);
+});
+
+test("verifyPlanAgainstRemedyStates — a mint-and-apply pair {redeem_points, apply_loyalty_coupon{contract_id}} PASSES with no order states", () => {
+  const plan: RemedyActionStep[] = [
+    { actionType: "redeem_points", actionParams: { tier_index: 0 } },
+    {
+      actionType: "apply_loyalty_coupon",
+      actionParams: {
+        contract_id: "gid://shopify/SubscriptionContract/123",
+        code: "LOYALTY-15-ABCDEF",
+      },
+    },
+  ];
+  const verdict = verifyPlanAgainstRemedyStates(plan, new Map());
+  assert.equal(verdict.ok, true);
+});
+
+test("verifyPlanAgainstRemedyStates — apply_loyalty_coupon WITHOUT contract_id still fails missing_order_reference (executor would reject too)", () => {
+  const plan: RemedyActionStep[] = [
+    { actionType: "apply_loyalty_coupon", actionParams: { code: "LOYALTY-15-ABCDEF" } },
+  ];
+  const verdict = verifyPlanAgainstRemedyStates(plan, new Map());
+  assert.equal(verdict.ok, false);
+  if (verdict.ok) throw new Error("unreachable");
+  assert.equal(verdict.violation.reason, "missing_order_reference");
+});
+
+test("verifyPlanAgainstRemedyStates — apply_loyalty_coupon that ALSO names an order ref stays inside the order-scoped rail (would-double-pay branch)", () => {
+  // An apply_loyalty_coupon that also names an order (unusual but possible) must NOT be exempted
+  // — a coupon that binds to a specific order could theoretically compound with a refund on that
+  // same order, so keep it inside the guard. Here we simulate an order with a live open return
+  // covering the whole thing → live_return_would_double_pay must fire regardless of type.
+  const state: CxOrderRemedyState = {
+    ...cleanState(),
+    total_cents: 18295,
+    open_returns: [
+      {
+        id: "ret-1",
+        status: "label_created",
+        resolution_type: "refund_return",
+        net_refund_cents: 18295,
+        label_cost_cents: 700,
+        refunded_at: null,
+        delivered_at: null,
+        shipped_at: null,
+        created_at: "2026-07-27T20:32:00Z",
+        refund_id: null,
+        tracking_number: null,
+      },
+    ],
+  };
+  const ref = extractRemedyOrderRefFromStep({ shopify_order_id: "SC135494" })!;
+  const plan: RemedyActionStep[] = [
+    {
+      actionType: "apply_loyalty_coupon",
+      actionParams: {
+        contract_id: "gid://shopify/SubscriptionContract/123",
+        shopify_order_id: "SC135494",
+        code: "LOYALTY-15-ABCDEF",
+      },
+    },
+  ];
+  const states = new Map<string, CxOrderRemedyState>();
+  states.set(ref.key, state);
+  const verdict = verifyPlanAgainstRemedyStates(plan, states);
+  // Order ref present → order-scoped rail still applies → the live open return double-pay rail
+  // trips as it would for a partial_refund.
+  assert.equal(verdict.ok, false);
+  if (verdict.ok) throw new Error("unreachable");
+  assert.equal(verdict.violation.reason, "live_return_would_double_pay");
+});
+
+test("verifyPlanAgainstRemedyStates — redeem_points_as_refund is NEVER exempt (draws down a real order, keeps order-scoped rail)", () => {
+  const plan: RemedyActionStep[] = [
+    { actionType: "redeem_points_as_refund", actionParams: { tier_index: 0 } },
+  ];
+  const verdict = verifyPlanAgainstRemedyStates(plan, new Map());
+  assert.equal(verdict.ok, false);
+  if (verdict.ok) throw new Error("unreachable");
+  assert.equal(verdict.violation.reason, "missing_order_reference");
+});
+
+test("verifyPlanAgainstRemedyStates — mixed batch: subscription loyalty coupon + a partial_refund that violates → violation still names the partial_refund", () => {
+  // A batch mixing the exempt loyalty coupon with a real partial_refund on an order with a live
+  // return: the loyalty step is skipped by the exemption, but the partial_refund step still
+  // trips the double-pay rail. The violation must correctly name the partial_refund's index.
+  const state: CxOrderRemedyState = {
+    ...cleanState(),
+    open_returns: [
+      {
+        id: "ret-1",
+        status: "label_created",
+        resolution_type: "refund_return",
+        net_refund_cents: 5000,
+        label_cost_cents: 700,
+        refunded_at: null,
+        delivered_at: null,
+        shipped_at: null,
+        created_at: "2026-07-27T20:32:00Z",
+        refund_id: null,
+        tracking_number: null,
+      },
+    ],
+  };
+  const ref = extractRemedyOrderRefFromStep({ shopify_order_id: "SC135494" })!;
+  const plan: RemedyActionStep[] = [
+    {
+      actionType: "apply_loyalty_coupon",
+      actionParams: { contract_id: "gid://c/1", code: "LOYALTY-15-ABCDEF" },
+    },
+    {
+      actionType: "partial_refund",
+      actionParams: { shopify_order_id: "SC135494", amount_cents: 5000, reason: "shipping" },
+    },
+  ];
+  const states = new Map<string, CxOrderRemedyState>();
+  states.set(ref.key, state);
+  const verdict = verifyPlanAgainstRemedyStates(plan, states);
+  assert.equal(verdict.ok, false);
+  if (verdict.ok) throw new Error("unreachable");
+  assert.equal(verdict.violation.reason, "live_return_would_double_pay");
+  assert.equal(verdict.violation.actionType, "partial_refund");
+  assert.equal(verdict.violation.actionIndex, 1);
 });
 
 test("extractRemedyOrderRefFromStep — canonicalizes an order_number smuggled into shopify_order_id", () => {
