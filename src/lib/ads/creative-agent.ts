@@ -1156,6 +1156,31 @@ export function markPureCompetitorMinoritySlot<T extends { angle: Pick<ScoredAng
   return plan;
 }
 
+/**
+ * Split unproven angles into the ones an EXPLORE slot may use and the ones the rail withholds.
+ *
+ * CEO 2026-08-31: "Dahlia should never make an ad for discover (not exploit) if she doesn't have a
+ * competitor pin — she shouldn't just freestyle a discover ad."
+ *
+ * An explore slot exists to imitate something a rival is already paying to scale. An unproven
+ * own-brand concept is a guess, not a discovery bet, so it is NEVER explore-eligible. Own-brand
+ * angles stay fully eligible for EXPLOIT slots — a crowned own-brand winner is proven, and doubling
+ * down on it is not freestyling.
+ *
+ * Returns `withheld` (rather than dropping it) so the caller can report what the rail refused; a
+ * starved shelf must be visible, never silent.
+ *
+ * PURE — unit-tested without a DB.
+ */
+export function partitionExplorePool<T extends Pick<ScoredAngle, "source">>(
+  unproven: readonly T[],
+): { explorable: T[]; withheld: T[] } {
+  const explorable: T[] = [];
+  const withheld: T[] = [];
+  for (const a of unproven) (a.source === "competitor" ? explorable : withheld).push(a);
+  return { explorable, withheld };
+}
+
 // ── dahlia-copy-author-box-session Phase 3 — author-mode pure helpers ────────────────────────────
 
 /** Deterministic audience-temperature resolver Dahlia's caller uses to tag EACH creative before
@@ -3428,14 +3453,24 @@ async function stockProduct(
   const isWon = (a: ScoredAngle) => (learning.byAngle.get(angleKey(a.hook))?.won ?? 0) > 0;
   const exploitPool = eligible.filter(isWon)
     .sort((a, b) => (learning.byAngle.get(angleKey(b.hook))?.won ?? 0) - (learning.byAngle.get(angleKey(a.hook))?.won ?? 0));
-  const explorePool = eligible.filter((a) => !isWon(a))
+  // IMITATE-ONLY (CEO 2026-08-31): "Dahlia should NEVER make an ad for discover (not exploit) if she
+  // doesn't have a competitor pin — she shouldn't just freestyle a discover ad."
+  //
+  // This was IMITATE-FIRST: own-brand angles stayed eligible for explore slots and merely sorted
+  // behind competitor ones. In practice the cold temperature filter drained the competitor pool
+  // (40 shared K-Cups angles → 1 survivor) and own-brand silently backfilled every remaining slot,
+  // so 10 of 11 K-Cups explores and 12 of 18 Superfood Tabs explores shipped with
+  // `provenance.competitor_hook = null` — freestyled, not imitated. The 2026-08-26 K-Cups
+  // weight-loss ad (campaign 3743b942) came out of exactly that gap.
+  //
+  // An EXPLORE slot is now competitor-source ONLY. An unproven own-brand concept is not a discovery
+  // bet, it is a guess: the whole point of explore is to imitate something a rival is already paying
+  // to scale. A starved pool must yield FEWER ads, never a freestyled one. Own-brand angles remain
+  // fully eligible for EXPLOIT slots (a crowned own-brand winner is proven — that is not freestyling).
+  const { explorable, withheld: withheldOwnBrand } = partitionExplorePool(eligible.filter((a) => !isWon(a)));
+  const explorePool = explorable
     .sort((a, b) =>
-      // IMITATE-FIRST (CEO 2026-07-12): explores draw from the product's scouted COMPETITOR angles
-      // BEFORE our own unproven concepts — Dylan's flow: "she goes to the scouted ads for that
-      // competitor list and finds great examples to explore." A competitor angle is market-validated
-      // (a rival is profitably scaling it), so it's the strongest unproven bet. Own angles fill the rest.
-      ((a.source === "competitor" ? 0 : 1) - (b.source === "competitor" ? 0 : 1))
-      || ((learning.byAngle.get(angleKey(a.hook))?.tried ?? 0) - (learning.byAngle.get(angleKey(b.hook))?.tried ?? 0))
+      ((learning.byAngle.get(angleKey(a.hook))?.tried ?? 0) - (learning.byAngle.get(angleKey(b.hook))?.tried ?? 0))
       || (b.acquisitionPower - a.acquisitionPower));
 
   // Build the slot plan: aim for half exploit / half explore, then backfill from whichever pool has more.
@@ -3445,7 +3480,46 @@ async function stockProduct(
   for (let n = 0; n < wantExploit; n++) plan.push({ angle: exploitPool[ei++], intent: "exploit" });
   while (plan.length < count && xi < explorePool.length) plan.push({ angle: explorePool[xi++], intent: "explore" });
   while (plan.length < count && ei < exploitPool.length) plan.push({ angle: exploitPool[ei++], intent: "exploit" });
-  if (!plan.length) for (const a of (eligible.length ? eligible : ranked).slice(0, count)) plan.push({ angle: a, intent: "explore" });
+  // Last-resort backstop. This used to fill EVERY remaining slot from `eligible`/`ranked` at
+  // intent:"explore" — the freestyle path the CEO 2026-08-31 rail forbids, since `eligible`
+  // includes unproven own-brand angles. It now backfills ONLY from proven (won) concepts; if there
+  // is no crown and no competitor angle, the correct output is NO AD.
+  if (!plan.length) {
+    for (const a of exploitPool.slice(0, count)) plan.push({ angle: a, intent: "exploit" });
+  }
+
+  // A starved explore shelf must be VISIBLE, not silent — the same principle as
+  // `dahlia_deeply_proven_fallback` next door in creative-sourcing. Before this rail the shortfall
+  // was invisible: own-brand angles quietly filled the slots and the run looked healthy.
+  const exploreSlots = plan.filter((p) => p.intent === "explore").length;
+  const exploreShortfall = Math.max(0, count - exploitPool.length) - exploreSlots;
+  if (exploreShortfall > 0) {
+    await recordDirectorActivity(admin, {
+      workspaceId,
+      directorFunction: "growth",
+      actionKind: "dahlia_explore_shelf_starved",
+      specSlug: "dahlia-explore-requires-competitor-base",
+      reason:
+        `Explore needed ${exploreShortfall} more slot${exploreShortfall === 1 ? "" : "s"} for product ${productId} but the `
+        + `competitor pool is empty at temperature "${researchIntent.audience_temperature}" — made ${plan.length} of ${count} `
+        + `ad${count === 1 ? "" : "s"} instead of freestyling own-brand. `
+        + `${withheldOwnBrand.length} unproven own-brand angle${withheldOwnBrand.length === 1 ? " was" : "s were"} withheld by the rail. `
+        + `Fix the shelf (scout more competitor ads for this product), don't relax the rail.`,
+      metadata: {
+        product_id: productId,
+        audience_temperature: researchIntent.audience_temperature,
+        requested_count: count,
+        planned_count: plan.length,
+        explore_slots_filled: exploreSlots,
+        explore_shortfall: exploreShortfall,
+        competitor_angles_after_temperature_filter: explorePool.length,
+        own_brand_angles_withheld: withheldOwnBrand.length,
+        autonomous: true,
+      },
+    }).catch((e) => {
+      console.warn("dahlia_explore_shelf_starved_activity_failed", { workspaceId, productId, err: errText(e) });
+    });
+  }
 
   // dahlia-hooks-riff-competitor-angle-and-weave-in-lead-benefit Phase 2 — RIFF is the STRONG
   // DEFAULT for every competitor slot (buildCreativeBrief weaves the product's role='lead'

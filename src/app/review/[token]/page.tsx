@@ -8,7 +8,7 @@
  */
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { use as usePromise } from "react";
 
 type Question = {
@@ -20,7 +20,19 @@ type Question = {
   labels?: string[];
 };
 
+// cacheComponents is ON (for the storefront's fast cached PDPs). This client page reads
+// use(params), which is dynamic — under Cache Components that MUST sit inside a <Suspense>
+// boundary or the prerender fails ("encountered uncached or runtime data during prerendering").
+// The default export wraps the real page. Same shape as src/app/csat/[ticketId]/page.tsx.
 export default function ReviewPage({ params }: { params: Promise<{ token: string }> }) {
+  return (
+    <Suspense fallback={null}>
+      <ReviewPageInner params={params} />
+    </Suspense>
+  );
+}
+
+function ReviewPageInner({ params }: { params: Promise<{ token: string }> }) {
   const { token } = usePromise(params);
   const [state, setState] = useState<"loading" | "form" | "done" | "error">("loading");
   const [error, setError] = useState<string>("");
