@@ -21,7 +21,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
 import { throwForAnthropicNetworkError, throwForAnthropicStatus } from "@/lib/anthropic-retry";
-import type { Seed } from "@/lib/adlibrary";
+import { COMPETITOR_AD_SOURCES, type Seed } from "@/lib/competitor-ad-types";
 
 export type CompetitorSource = "llm" | "category_sweep" | "manual" | "whitelisted";
 export type CompetitorStatus = "proposed" | "approved" | "rejected";
@@ -341,7 +341,7 @@ export async function loadApprovedCompetitorsForProduct(
   const admin = createAdminClient();
   const { data } = await admin
     .from("competitors")
-    .select("id, brand, search_keyword, evidence, category, domain, resolved_advertiser")
+    .select("id, brand, search_keyword, evidence, category, domain, resolved_advertiser, meta_page_id")
     .eq("workspace_id", workspaceId)
     .eq("product_id", productId)
     .eq("status", "approved")
@@ -358,6 +358,10 @@ export async function loadApprovedCompetitorsForProduct(
       // competitor's own domain, so a noisy brand-keyword search can't pollute the shelf with wrong-brand ads.
       expectedDomain: (r.domain as string | null) ?? undefined,
       expectedAdvertiser: (r.resolved_advertiser as string | null) ?? (r.brand as string) ?? undefined,
+      // The already-resolved Meta Page ID. Collection short-circuits resolution entirely when this
+      // is present — a stored page id is authoritative, and Meta has no advertiser-name search to
+      // fall back on, so re-resolving every sweep both wastes calls and risks a fresh miss.
+      metaPageId: (r.meta_page_id as string | null) ?? null,
     }));
 }
 
@@ -691,7 +695,7 @@ export async function promoteWhitelistedPages(
     .from("creative_skeletons")
     .select("advertiser, destination_domain, seed_keyword")
     .eq("workspace_id", workspaceId)
-    .eq("source", "adlibrary")
+    .in("source", COMPETITOR_AD_SOURCES)
     .not("advertiser", "is", null)
     .not("destination_domain", "is", null)
     .limit(5000);

@@ -54,6 +54,25 @@ const LIFETIME_LOOKBACK_DAYS = 180;
  * verdict floor reached over the test's life), never a rolling 7-day window that a low-budget adset caps
  * out below.
  */
+/**
+ * Does an insight row count toward an adset's lifetime crown/kill metrics?
+ *
+ * `cleanSignalSince` marks when an adset's signal became trustworthy — set when its audience is
+ * repaired mid-flight (e.g. adding the existing-customer exclusions a legacy adset was minted
+ * without). Everything on or before that DAY is discarded: the cutover day is itself partly
+ * pre-repair, so counting it would re-admit the contamination we are excluding.
+ *
+ * NULL floor ⇒ every row counts, which is the behaviour for every adset that was never repaired.
+ *
+ * Pure + exported: this is the rule that decides whether a contaminated purchase can still reach a
+ * crown, so it is pinned by tests rather than trusted by inspection.
+ */
+export function insightCountsTowardSignal(snapshotDate: string, cleanSignalSince: string | null | undefined): boolean {
+  if (!cleanSignalSince) return true;
+  const floorDay = String(cleanSignalSince).slice(0, 10);
+  return String(snapshotDate).slice(0, 10) > floorDay;
+}
+
 async function activeAdsetLifetimeMetrics(admin: Admin, workspaceId: string, metaAdAccountId: string): Promise<AdsetScorecard[]> {
   const { data: latest } = await admin
     .from("iteration_scorecards_daily")
@@ -84,9 +103,25 @@ async function activeAdsetLifetimeMetrics(admin: Admin, workspaceId: string, met
   // Cumulative lifetime totals per active adset from the insights history.
   const sinceIso = new Date(Date.now() - LIFETIME_LOOKBACK_DAYS * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const adsetIds = active.map((a) => a.object_id);
+  // Per-adset "signal is trustworthy from here" floors. An adset repaired mid-flight (e.g. given the
+  // existing-customer exclusions it was minted without) must not be crowned on the purchases it
+  // banked while contaminated — the confidence bound guards small samples, not dirty ones.
+  const { data: floorRows, error: floorErr } = await admin
+    .from("meta_adsets")
+    .select("meta_adset_id, clean_signal_since")
+    .eq("workspace_id", workspaceId)
+    .in("meta_adset_id", adsetIds);
+  // Fail SAFE-BY-DISCARD is wrong here (it would silently starve every crown); fail open to the
+  // pre-existing behaviour instead, but say so loudly — a missing floor only over-counts history.
+  if (floorErr) console.warn(`[meta-cpa-signal] clean_signal_since read failed (${floorErr.message}) — counting full history`);
+  const cleanFloor = new Map<string, string | null>();
+  for (const r of (floorRows ?? []) as Array<{ meta_adset_id: string; clean_signal_since: string | null }>) {
+    cleanFloor.set(String(r.meta_adset_id), r.clean_signal_since);
+  }
+
   const { data: ins } = await admin
     .from("meta_insights_daily")
-    .select("meta_object_id, spend_cents, purchases, revenue_cents, impressions, clicks, add_to_cart")
+    .select("meta_object_id, snapshot_date, spend_cents, purchases, revenue_cents, impressions, clicks, add_to_cart")
     .eq("workspace_id", workspaceId)
     .eq("meta_ad_account_id", metaAdAccountId)
     .eq("level", "adset")
@@ -95,6 +130,7 @@ async function activeAdsetLifetimeMetrics(admin: Admin, workspaceId: string, met
   const life = new Map<string, { spend: number; purch: number; rev: number; imp: number; clk: number; atc: number }>();
   for (const r of (ins ?? []) as Array<Record<string, unknown>>) {
     const k = String(r.meta_object_id);
+    if (!insightCountsTowardSignal(String(r.snapshot_date), cleanFloor.get(k))) continue;
     const cur = life.get(k) ?? { spend: 0, purch: 0, rev: 0, imp: 0, clk: 0, atc: 0 };
     cur.spend += Number(r.spend_cents ?? 0);
     cur.purch += Number(r.purchases ?? 0);
@@ -258,6 +294,38 @@ export async function resolveWinnerSource(
   return { metaAdId, campaign, angle };
 }
 
+/**
+ * One-sided z for the crown confidence bound. 1.28 ≈ 90% one-sided — a business-grade
+ * "we are confident the TRUE CPA is under the crown line", not a research-grade 95%.
+ * CEO 2026-08-25.
+ */
+export const CROWN_CONFIDENCE_Z = 1.28;
+
+/**
+ * The PESSIMISTIC end of the CPA estimate, in cents.
+ *
+ * Why this exists (CEO 2026-08-25): crowning on the POINT estimate at `crown_min_purchases=8`
+ * crowned the luckiest adset, not the best one. Purchases are Poisson, so the relative standard
+ * error of a CPA measured on `n` purchases is 1/sqrt(n) — at n=8 that is 35%, and the 95% interval
+ * on a measured $220 CPA spans $110–$440. A $220 "winner" could not be told apart from a $400 dud.
+ * Measured consequence: pooled post-crown CPA came in at 1.89x pre-crown across all 5 crowned
+ * winners (scaled IN PLACE — no scale campaign involved), which is textbook regression to the mean.
+ *
+ * So a crown now requires the UPPER bound to clear the crown line, not the midpoint:
+ *
+ *     upper = cpa * exp(z / sqrt(purchases))
+ *
+ * The log-scale form keeps the bound strictly positive and is the standard Poisson-rate
+ * approximation. Fewer purchases ⇒ a wider penalty ⇒ a small-sample fluke cannot crown.
+ *
+ * Pure + exported so the rule is unit-testable without a DB.
+ */
+export function crownUpperBoundCpaCents(cpaCents: number, purchases: number, z: number = CROWN_CONFIDENCE_Z): number {
+  if (!Number.isFinite(cpaCents) || cpaCents <= 0) return Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(purchases) || purchases <= 0) return Number.POSITIVE_INFINITY;
+  return cpaCents * Math.exp(z / Math.sqrt(purchases));
+}
+
 export interface MetaCpaWinnerOptions {
   workspaceId: string;
   metaAdAccountId: string;
@@ -266,6 +334,12 @@ export interface MetaCpaWinnerOptions {
   /** A crown ALSO requires this many purchases — not just CPA ≤ crown at ≥ crown_min_spend. ~3 purchases
    *  ($450 at a $150 CPA) is statistical noise; ~8 at target is real signal before scaling. CEO 2026-07-12. */
   crownMinPurchases: number;
+  /**
+   * One-sided z for the crown confidence bound (default {@link CROWN_CONFIDENCE_Z}). Pass 0 to
+   * fall back to the pre-2026-08-25 point-estimate rule — kept as an escape hatch so the bound
+   * can be disabled from config without a deploy.
+   */
+  crownConfidenceZ?: number;
   topK?: number;
 }
 
@@ -274,8 +348,17 @@ export interface MetaCpaWinnerOptions {
  *  DetectedWinner shape the plan/amplifier consume. */
 export async function detectMetaCpaWinners(admin: Admin, opts: MetaCpaWinnerOptions): Promise<DetectedWinner[]> {
   const rows = await activeAdsetLifetimeMetrics(admin, opts.workspaceId, opts.metaAdAccountId);
+  // CEO 2026-08-25 — crown on the PESSIMISTIC end of the CPA estimate, not the midpoint.
+  // `crownUpperBoundCpaCents` widens the measured CPA by the Poisson small-sample penalty, so an
+  // adset that merely drifted under the crown line on a handful of purchases no longer qualifies.
+  const z = opts.crownConfidenceZ ?? CROWN_CONFIDENCE_Z;
   const qualifying = rows
-    .filter((r) => r.purchases >= opts.crownMinPurchases && r.spend_cents >= opts.crownMinSpendCents && r.spend_cents / r.purchases <= opts.crownMaxCpaCents)
+    .filter((r) => {
+      if (r.purchases < opts.crownMinPurchases) return false;
+      if (r.spend_cents < opts.crownMinSpendCents) return false;
+      const cpa = r.spend_cents / r.purchases;
+      return crownUpperBoundCpaCents(cpa, r.purchases, z) <= opts.crownMaxCpaCents;
+    })
     .sort((a, b) => a.spend_cents / a.purchases - b.spend_cents / b.purchases)
     .slice(0, opts.topK ?? 3);
 

@@ -51,9 +51,21 @@ Inbound tracking webhook → handler verifies `easypost_webhook_secret` → matc
 - **Test mode keys** can buy labels against the USPS sandbox — but the labels are NOT usable. Production cutover requires flipping `easypost_test_mode = false`.
 - **Webhook log-level for tracker statuses.** The webhook handler logs `return_to_sender`, `failure`, `error`, and `cancelled` tracker statuses at `console.warn` (not error), because these are normal business signals (USPS bouncing a package back, delivery failures due to address issues, etc.), not code faults. Logging at warn avoids creating false Control Tower error incidents for fully-handled business events; the workspace still receives the dashboard notification and the webhook returns 200 OK. See src/app/api/webhooks/easypost/route.ts lines 186–205.
 
+## Shipment fact packs — the read-side rail for every agent-facing stall claim
+
+Any agent-facing surface that claims where a shipment is or how long it has been stalled goes through the shared **shipment fact pack** helper ([[../libraries/shipment-facts]] · `src/lib/shipment-facts.ts`), which computes a live pack from a `lookupTracking` call (`src/lib/easypost.ts:452`): the ordered event list with each event's real `datetime`, the last-scan timestamp, the derived days-since-last-scan, the live status, and whether an `est_delivery_date` is present. The cached `orders.easypost_*` columns are a fallback ONLY when the live call fails, and in that case the pack labels the values as cached with their `easypost_checked_at` age rather than presenting them as current — the cached row carries NO per-scan timestamp (`easypost_checked_at` is when WE last asked, not when the carrier last scanned). Callers MUST NOT infer a stall duration from `amplifier_shipped_at`; the ship date is when we handed the package over, not when the carrier last touched it (on Suzanne's order those differed by three days). One live call per distinct tracking number per session, deduped by `createShipmentFactPackReader`.
+
+Consumers today:
+
+- **CS Director brief** (`scripts/builder-worker.ts` `loadCsDirectorCallBrief`) — one line per recent tracked shipment, in the "LIVE SHIPMENT FACT PACKS" section.
+- **Order-tracking workflow** (`src/lib/workflow-executor.ts` `executeOrderTracking`) — replaces the inline `lookupTracking` call; internal notes cite the live scan age, and a live-call failure logs a CACHED-labeled note (checked-at + age) rather than a bare status line that reads as current.
+
+Derived-from ticket 8e2c87d6 (Suzanne Ross, 2026-08-24): cached row said `in_transit` at a Nevada facility; the live read showed the last scan was eleven days old with no estimated delivery.
+
 ## Files
 
 - `src/lib/easypost.ts` — SDK wrapper, address validation, rate selection
+- `src/lib/shipment-facts.ts` — [[../libraries/shipment-facts|shipment fact pack helper]] (live tracker read + derived days-since-last-scan)
 - `src/lib/shopify-returns.ts` — `createFullReturn()` (Shopify return + EasyPost label + stored refund amount)
 - `src/lib/easypost-order-sync.ts` — Per-order shipment + tracker creation
 - `src/lib/easypost-email.ts` — Return label email send

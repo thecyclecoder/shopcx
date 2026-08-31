@@ -125,3 +125,59 @@ test("omitting customerIdentified preserves existing behaviour (defaults to iden
   });
   assert.equal(v.ok, true, "existing callers must not start blocking");
 });
+
+// ── split-refund reconciliation exemption (ticket f2d898c9, mary arditi SC134282) ────────────
+// The order was fully refunded via a split: a $5.01 partial then a $49.33 completion,
+// totaling the single $54.34 return refund. When Sol drafted the correct explanation of that
+// split, MULTIPLE_REMEDY_PATTERNS[0] matched the phrase "two refunds" and false-blocked the
+// ledger-explanation as a bait, forcing a human escalation on a correctly-handled ticket.
+// The exemption teaches the count check to distinguish a description of already-posted
+// refunds for ONE order from an offer of two NEW returns/refunds/labels across two orders.
+
+test("split-refund reconciliation on ONE order → PASSES (derived-from-ticket f2d898c9)", () => {
+  const res = assessSolReplyBaitRisk({
+    contextSummary:
+      "Order SC134282 was fully refunded via a split: $5.01 partial then $49.33 completion, totaling the single $54.34 return refund.",
+    firstReply:
+      "Your order was fully refunded via two refunds — a $5.01 partial and a $49.33 completion, which together total the $54.34 return refund. Both postings should be visible on your statement now.",
+  });
+  assert.equal(res.ok, true, "a description of an already-posted split refund on one order must not be blocked");
+});
+
+test("split-refund reconciliation exemption applies even without dollar arithmetic — past-tense refund verbs are enough", () => {
+  const res = assessSolReplyBaitRisk({
+    contextSummary: "The order was fully refunded — one MBG return, posted as a split.",
+    firstReply:
+      "Your return refund was posted in two parts — a partial and the completion — but together they add up to your full return refund. The two postings will show as separate lines on your statement.",
+  });
+  assert.equal(res.ok, true);
+});
+
+test("forward-looking two-refunds offer that happens to sum-reconcile is STILL blocked (exemption requires no future promise)", () => {
+  const res = assessSolReplyBaitRisk({
+    contextSummary: "Customer wants a refund.",
+    firstReply: "I'll issue two refunds for you — $5.00 and $10.00 totaling $15.00 — you should see them soon.",
+  });
+  assert.equal(res.ok, false, "future-tense 'I'll issue' must not qualify for the split-refund exemption");
+  if (res.ok === false) assert.equal(res.kind, "multiple_remedies_offered");
+});
+
+test("two-order refund offer that sneaks in past-tense wording is STILL blocked (exemption requires no multi-order marker)", () => {
+  const res = assessSolReplyBaitRisk({
+    contextSummary: "Two orders in play.",
+    firstReply:
+      "Your prior order was refunded already, and I'm setting up two refunds for both orders now — one for each order.",
+  });
+  assert.equal(res.ok, false, "a multi-order shape must not qualify for the split-refund exemption");
+  if (res.ok === false) assert.equal(res.kind, "multiple_remedies_offered");
+});
+
+test("the other MULTIPLE_REMEDY_PATTERNS (multi-order shapes) never qualify for the exemption, even with past-tense wording", () => {
+  const res = assessSolReplyBaitRisk({
+    contextSummary: "In-policy.",
+    firstReply:
+      "The first was refunded already, and there will be a return for each order going forward.",
+  });
+  assert.equal(res.ok, false);
+  if (res.ok === false) assert.equal(res.kind, "multiple_remedies_offered");
+});

@@ -63,3 +63,35 @@ Mirrors [[media_buyer_cold_scaler_cohorts]] policies.
 - [[media_buyer_cold_scaler_cohorts]] — the SCALER-rail campaign configuration (target for graduation). `scaler_meta_campaign_id` on THIS table points to the specific scaler campaign the winner graduated INTO once the graduate flow runs.
 - [[../libraries/crowned-winners]] — the SDK chokepoint.
 - [[../specs/media-buyer-persist-crowned-winners-and-guard-reactivation]] — the introducing spec (Phase 1 = this table + SDK + write; Phase 2 = reactivation guard).
+
+## ⭐ `revoked_at` — retirement is NOT exhaustion (CEO 2026-08-28)
+
+Two different facts, one flag, and a real cost when they were conflated:
+
+| field | means | still pending graduate work? |
+|---|---|---|
+| `exploit_exhausted` | cloning this winner stopped producing hits (4 strikes, 0 hits) | **yes** — the winner itself may still deserve to graduate |
+| `revoked_at` | this crown no longer qualifies under the ACTIVE policy | **no** — it is a retired record |
+
+On 2026-08-25 all five crowns were retired (`crown_min_purchases` 8→15 plus the confidence-bounded
+CPA in [[../libraries/meta-cpa-signal]]) using `markExploitExhausted`, the only SDK that existed.
+[[../libraries/media-buyer-cold-scaler-graduate-heartbeat]] `countEligibleCrownedWinnersByCohort`
+counted "eligible" as `graduated_at IS NULL` and nothing else — so three days later it was still
+raising CEO cards claiming **Superfood Tabs had "3 crowned winners but no graduate"** and Zen Relax
+**"2"**. Genuine pending work in both cohorts: **ZERO**. The cards were also older than the cohorts
+they named (created 2026-08-25) against a 7-day window.
+
+*A stall card for work that does not exist trains the reader to ignore stall cards, which is worse
+than having none — the whole point of an escalation is that it means something.*
+
+Same failure shape as `readCurrentLiveCrownedCount` before it learned to filter: two readers over
+one table disagreeing about what still counts as a winner.
+
+**Write through the SDK:** [[../libraries/crowned-winners]] `revokeCrownedWinner(admin, {workspaceId,
+testMetaAdsetId, reason})` — a compare-and-set on `revoked_at IS NULL`, so a re-run neither
+double-writes nor overwrites the original reason. Never hand-roll the update; the whole point is
+that revocation and exhaustion stay distinguishable.
+
+Migration `20261214140000_crowned_winners_revoked_at.sql` (adds both columns and backfills the
+2026-08-25 revocations). Pinned in `src/lib/media-buyer/crown-revocation.test.ts`.
+

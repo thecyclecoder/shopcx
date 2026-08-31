@@ -24,17 +24,18 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage } from "@/lib/ai-usage";
 import {
-  searchAds,
-  fetchCreative,
   isWinner,
   winnerScore,
   adMatchesCompetitor,
-  isRetryableCreativeFetchError,
-  normalizeAd,
+  isTransientRenderError,
+  CreativeRenderError,
+  COMPETITOR_AD_SOURCE,
+  COMPETITOR_AD_SOURCES,
   type NormalizedAd,
   type Seed,
-} from "@/lib/adlibrary";
-import { resolveAdvertiser, scanWinners } from "@/lib/adlibrary-winners";
+} from "@/lib/competitor-ad-types";
+import { collectAdsByPage, isRetryableGraphError } from "@/lib/meta-ad-library";
+import { resolveAdvertiser } from "@/lib/meta-ad-library-resolve";
 import { normalizeBrand } from "@/lib/competitors";
 import { errText } from "@/lib/error-text";
 
@@ -253,6 +254,85 @@ export async function visionDeconstruct(
   }
   const text: string = (json?.content?.[0]?.text || "").trim();
   return parseSkeleton(text);
+}
+
+// ── box-session vision (meta-ad-library migration, 2026-08-25) ───────────────────────────────
+// Same skeleton contract as `visionDeconstruct`, but the vision pass is a top-level `claude -p` on
+// Max instead of a direct Opus API call — so the lane works on the BOX, which deliberately has no
+// ANTHROPIC_API_KEY (Max sessions must not burn API credits).
+//
+// WHY THIS EXISTS: the creative-scout sweep moved to the box because Meta creative bytes require a
+// Playwright render. The first real box run then failed every ad with `Error: no_anthropic_key` —
+// the render succeeded and the creative was stored, but the skeleton could never be extracted. This
+// mirrors the proven `qaCreativeViaBoxSession` pattern ([[./ads/creative-qa]]): src/ ships the pure
+// logic, scripts/builder-worker.ts owns the process boundary and injects `dispatch`.
+
+/** Injected by the caller: run ONE `claude -p` box session on Max against the image at
+ *  `allowedImagePath` (an ABSOLUTE path) and return its raw result text + an error flag. The caller
+ *  plumbs the path into the PreToolUse gate so the session may Read that exact file and nothing
+ *  else. Implementations MUST strip every non-base-OS env var and MUST be fail-safe — a spawn
+ *  error / cap / timeout surfaces as `isError:true`, which this function turns into a null skeleton
+ *  (a TRANSIENT outcome — see the throw contract below). */
+export type VisionSessionDispatcher = (
+  prompt: string,
+  allowedImagePath: string,
+) => Promise<{ resultText: string; isError: boolean }>;
+
+/** The instruction handed to the box session. Carries the SAME system contract as the API path so
+ *  both produce an identical JSON shape for `parseSkeleton`. */
+export function buildSkeletonVisionPrompt(imagePath: string): string {
+  return `${VISION_SYSTEM}
+
+Read the ad creative image at this exact path and extract its skeleton:
+  ${imagePath}
+
+Return ONLY the JSON object described above — no prose, no preamble, no explanation.`;
+}
+
+/**
+ * Vision-deconstruct one static creative via a `claude -p` box session on Max.
+ *
+ * Contract differences from the API path, both deliberate:
+ *   • An undecodable image returns `null` (permanent — the bytes are not an image).
+ *   • A dispatch error / unparseable verdict THROWS a transient CreativeRenderError, so `ingestAd`
+ *     rethrows and the ad stays eligible next sweep rather than being written `status='failed'`.
+ *     A session that merely times out must never poison an ad's dedup_key forever.
+ */
+export async function visionDeconstructViaBoxSession(
+  imageBuffer: Buffer,
+  dispatch: VisionSessionDispatcher,
+): Promise<CreativeSkeleton | null> {
+  const { writeFile, unlink, mkdtemp } = await import("node:fs/promises");
+  const { join: joinPath } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+
+  let normalized: Buffer;
+  try {
+    normalized = await normalizeForVision(imageBuffer);
+  } catch (err) {
+    // Not an image we can decode — permanent, same as the API path.
+    console.error(`[creative-finder] image normalize failed:`, err);
+    return null;
+  }
+
+  const dir = await mkdtemp(joinPath(tmpdir(), "skeleton-vision-"));
+  const imagePath = joinPath(dir, "creative.jpg");
+  try {
+    await writeFile(imagePath, normalized);
+    const { resultText, isError } = await dispatch(buildSkeletonVisionPrompt(imagePath), imagePath);
+    if (isError) {
+      throw new CreativeRenderError("vision box session errored", false);
+    }
+    const skeleton = parseSkeleton(resultText || "");
+    if (!skeleton) {
+      // The session ran but produced nothing parseable — treat as transient, not as "this ad has no
+      // skeleton". A permanent `failed` row here would retire a perfectly good creative.
+      throw new CreativeRenderError("vision box session returned no parseable skeleton", false);
+    }
+    return skeleton;
+  } finally {
+    await unlink(imagePath).catch(() => {});
+  }
 }
 
 const VIDEO_VISION_SYSTEM = `${VISION_SYSTEM}
@@ -519,120 +599,6 @@ export async function filterSeedsByFreshness(
   return { kept, skipped };
 }
 
-/**
- * Search ONE seed and ingest its long-runners into creative_skeletons.
- * Statics are visioned now (status='analyzed'); videos are routed aside
- * (status='video_pending') for the heavier Phase 6 pipeline. Dedup by `ad_key`.
- */
-export async function sweepSeed(
-  workspaceId: string,
-  seed: Seed,
-  opts: {
-    minDays?: number;
-    minImpressions?: number;
-    minSpend?: number;
-    /** Max STATICS to vision this seed (bounds Opus spend). Ranked by winnerScore — keeps the best. */
-    visionCap?: number;
-    /** Max VIDEOS to capture as metadata (video_pending; deconstructed later by the video pipeline). */
-    videoCap?: number;
-    daysBack?: number;
-    pageSize?: number;
-  } = {},
-): Promise<IngestResult> {
-  const admin = createAdminClient();
-  const result = EMPTY_RESULT();
-
-  const ads = await searchAds({
-    keyword: seed.keyword,
-    // IMAGE-ONLY (adsType "1") — we research STATIC creative, not video (founder 2026-07-17: "we aren't
-    // doing video stuff"). Wider window + full page: daysBack 90 (matches the AdLibrary UI default) and
-    // pageSize 50 (the API max) so a competitor's static set isn't truncated to the newest 30.
-    adsType: ["1"],
-    // META ONLY — exclude Google/AdMob text ads (founder 2026-07-17: "we don't want google"; those have
-    // no real creative image). The winners flow is Meta-native by construction; this keeps the keyword
-    // stopgap consistent.
-    platform: ["facebook", "instagram"],
-    daysBack: opts.daysBack ?? 90,
-    pageSize: opts.pageSize ?? 50,
-  });
-  result.searched = ads.length;
-
-  // Freshness ledger — best-effort. Phase 2's filterSeedsByFreshness reads this table
-  // to skip seeds searched within the window; here we just stamp the fact of the search.
-  // A write failure MUST NOT fail the sweep (this is telemetry, not the load path).
-  try {
-    const { error: freshnessErr } = await admin
-      .from("adlibrary_searches")
-      .upsert(
-        {
-          workspace_id: workspaceId,
-          keyword: seed.keyword,
-          last_searched_at: new Date().toISOString(),
-          last_result_count: ads.length,
-        },
-        { onConflict: "workspace_id,keyword" },
-      );
-    if (freshnessErr) {
-      console.error(`[creative-finder] adlibrary_searches upsert error for ${seed.keyword}:`, freshnessErr.message);
-    }
-  } catch (err) {
-    console.error(`[creative-finder] adlibrary_searches upsert threw for ${seed.keyword}:`, err);
-  }
-
-  // Winner signal = reach/spend OR longevity (not longevity alone). See adlibrary.isWinner.
-  let winners = ads.filter((a) =>
-    a.ad_key && isWinner(a, { minDays: opts.minDays, minImpressions: opts.minImpressions, minSpend: opts.minSpend }),
-  );
-
-  // RELEVANCE FILTER (CEO 2026-07-12): brand-keyword search on AdLibrary is noisy — searching "Bulletproof"
-  // returns "Bulletproof Automotive" (car wheels), "Four Sigmatic" returns "Neubrain"/affiliate content-
-  // matches. When the seed carries the competitor's own domain, keep ONLY ads that actually drive to it
-  // (or, for ads with an opaque destination, whose advertiser name exactly matches). Without this the
-  // imitate shelf gets polluted with wrong-brand ads. No-op for legacy seeds without expectedDomain.
-  if (seed.expectedDomain || seed.expectedAdvertiser) {
-    const before = winners.length;
-    winners = winners.filter((a) =>
-      adMatchesCompetitor(a, { domain: seed.expectedDomain, advertiser: seed.expectedAdvertiser }),
-    );
-    const dropped = before - winners.length;
-    if (dropped > 0) console.log(`[creative-scout] relevance-filtered ${dropped}/${before} off-brand ads for "${seed.keyword}" (expected ${seed.expectedDomain ?? seed.expectedAdvertiser})`);
-  }
-
-  result.longRunners = winners.length; // (field name kept for back-compat; now = winner count)
-  if (!winners.length) return result;
-
-  // Dedup: which ad_keys do we already have for this workspace+source?
-  const keys = winners.map((a) => a.ad_key);
-  const { data: existing } = await admin
-    .from("creative_skeletons")
-    .select("dedup_key")
-    .eq("workspace_id", workspaceId)
-    .eq("source", "adlibrary")
-    .in("dedup_key", keys);
-  const seen = new Set((existing || []).map((r) => r.dedup_key as string));
-
-  const fresh = winners.filter((a) => !seen.has(a.ad_key));
-  result.skippedExisting = winners.length - fresh.length;
-
-  // Rank by winner score, then cap statics (vision cost) and videos (metadata) independently — always
-  // keeping the highest-signal creatives, not whatever order the API returned.
-  const ranked = [...fresh].sort((a, b) => winnerScore(b) - winnerScore(a));
-  const statics = ranked.filter((a) => a.media_type === "static").slice(0, opts.visionCap ?? 12);
-  const videos = ranked.filter((a) => a.media_type === "video").slice(0, opts.videoCap ?? 40);
-
-  for (const ad of [...statics, ...videos]) {
-    try {
-      await ingestAd(workspaceId, ad, seed);
-      if (ad.media_type === "video") result.videos++;
-      else result.inserted++;
-    } catch (err) {
-      console.error(`[creative-finder] ingest failed for ${ad.ad_key}:`, err);
-      result.failed++;
-    }
-  }
-  return result;
-}
-
 /** OUR persistence tier from observed longevity (winners-flow longitudinal). Not AdLibrary's opaque tier —
  *  the signal is how long WE'VE watched the competitor keep the ad live. `active=false` ⇒ they killed it. */
 export function deriveWinnerTier(persistenceDays: number, active: boolean): string {
@@ -644,14 +610,29 @@ export function deriveWinnerTier(persistenceDays: number, active: boolean): stri
 const daysBetween = (aIso: string, bIso: string): number =>
   Math.max(0, Math.round((Date.parse(bIso) - Date.parse(aIso)) / 86_400_000));
 
+/**
+ * Obtain the creative bytes for one ad.
+ *
+ * INJECTED rather than imported because the Meta source has no fetchable media url — the bytes come
+ * from rendering `ad_snapshot_url` in a real browser, which only the box can do. Keeping this a
+ * parameter is what stops Playwright from reaching the Vercel bundle. The box supplies
+ * `renderCreativeFetcher` ([[./meta-ad-library-render]]); Vercel supplies none and therefore never
+ * ingests statics. See [[../../docs/brain/integrations/meta-ad-library.md]] § where it runs.
+ */
+export type CreativeFetcher = (
+  ad: NormalizedAd,
+) => Promise<{ buffer: Buffer; contentType: string } | null>;
+
 /** Vision-deconstruct (statics) and persist one FRESH ad as a creative_skeletons row (its FIRST observation).
  *  Sets the longitudinal clock (our_first_seen = now, observed_sweeps = 1, still_active = true). Re-observations
- *  of an already-stored ad go through `reobserveAd` (cheap, no re-vision). AdLibrary's tier/score are NOT used —
- *  our winner signal is persistence across sweeps ([[docs/brain/inngest/creative-scout]]). */
+ *  of an already-stored ad go through `reobserveAd` (cheap, no re-vision). The upstream's own tier/score are NOT
+ *  used — our winner signal is persistence across sweeps ([[docs/brain/inngest/creative-scout]]). */
 export async function ingestAd(
   workspaceId: string,
   ad: NormalizedAd,
   seed: Seed,
+  fetchCreative?: CreativeFetcher,
+  visionDispatch?: VisionSessionDispatcher,
 ): Promise<void> {
   const admin = createAdminClient();
   const nowIso = new Date().toISOString();
@@ -661,20 +642,22 @@ export async function ingestAd(
   let visionedAt: string | null = null;
   let thumbPath: string | null = null;
 
-  if (ad.media_type === "static" && ad.creative_url) {
-    // Split fetchCreative from the vision path: a RETRYABLE AdLibrary fetch failure (503/502/504/
-    // 429/408/500 or a `fetch` network hiccup — see `isRetryableCreativeFetchError`) must NOT
-    // persist a `creative_skeletons.status='failed'` row — that would let a single transient
-    // AdLibrary outage permanently poison a promising competitor ad (its dedup_key would then be
-    // filtered by `splitNewExisting` on every future sweep). Rethrow so `collectAndTrack` counts
-    // it as an attempted per-ad failure with a bounded warning, and the same ad_key stays eligible
-    // for the next sweep. Terminal fetch errors (401/403/404/400) and vision failures still fall
-    // through to the existing `status='failed'` write — those signals ARE per-ad, not sweep-transient.
+  if (ad.media_type === "static" && ad.creative_url && fetchCreative) {
+    // Split the creative fetch from the vision path: a RETRYABLE upstream failure (a Graph
+    // rate-limit / 5xx, or a transient render fault) must NOT persist a
+    // `creative_skeletons.status='failed'` row — that would let one transient outage permanently
+    // poison a promising competitor ad (its dedup_key would then be filtered by `splitNewExisting`
+    // on every future sweep). Rethrow so `collectAndTrack` counts it as an attempted per-ad failure
+    // with a bounded warning, and the same ad_key stays eligible next sweep.
+    //
+    // A PERMANENT render failure is different and IS recorded: when Meta takes an ad down it STRIPS
+    // the creative from the archive, so that snapshot renders copy + a 60px avatar forever. Those
+    // get `status='failed'` so we stop spending page-loads rediscovering the same nothing.
     let creative: { buffer: Buffer; contentType: string } | null = null;
     try {
-      creative = await fetchCreative(ad.creative_url);
+      creative = await fetchCreative(ad);
     } catch (err) {
-      if (isRetryableCreativeFetchError(err)) throw err;
+      if (isRetryableGraphError(err) || isTransientRenderError(err)) throw err;
       console.error(`[creative-finder] creative fetch failed for ${ad.ad_key}:`, err);
       status = "failed";
     }
@@ -689,10 +672,19 @@ export async function ingestAd(
         } catch (e) {
           console.error(`[creative-finder] thumb upload failed for ${ad.ad_key}:`, e);
         }
-        skeleton = await visionDeconstruct(workspaceId, creative.buffer, creative.contentType);
+        // On the BOX there is no ANTHROPIC_API_KEY (Max sessions must not burn API credits), so the
+        // caller injects a `claude -p` dispatcher and vision runs on Max. Everywhere else (Vercel,
+        // a local script) the direct Opus API path is used unchanged.
+        skeleton = visionDispatch
+          ? await visionDeconstructViaBoxSession(creative.buffer, visionDispatch)
+          : await visionDeconstruct(workspaceId, creative.buffer, creative.contentType);
         visionedAt = new Date().toISOString();
         if (!skeleton) status = "failed";
       } catch (err) {
+        // A TRANSIENT vision failure (box session timed out / capped / returned junk) must be
+        // rethrown, not recorded — writing status='failed' would make splitNewExisting skip this
+        // ad on every future sweep over a temporary blip.
+        if (isTransientRenderError(err)) throw err;
         console.error(`[creative-finder] vision failed for ${ad.ad_key}:`, err);
         status = "failed";
       }
@@ -701,7 +693,7 @@ export async function ingestAd(
 
   const row = {
     workspace_id: workspaceId,
-    source: "adlibrary",
+    source: COMPETITOR_AD_SOURCE,
     dedup_key: ad.ad_key,
     advertiser: ad.advertiser,
     title: ad.title,
@@ -797,7 +789,7 @@ export async function reobserveAd(
     .from("creative_skeletons")
     .select("id, our_first_seen, observed_sweeps")
     .eq("workspace_id", workspaceId)
-    .eq("source", "adlibrary")
+    .in("source", COMPETITOR_AD_SOURCES)
     .eq("dedup_key", dedupKey)
     .single();
   if (!existing) return 0;
@@ -897,7 +889,7 @@ export async function markDisappearedAds(
     .from("creative_skeletons")
     .select("id, dedup_key")
     .eq("workspace_id", workspaceId)
-    .eq("source", "adlibrary")
+    .in("source", COMPETITOR_AD_SOURCES)
     .eq("competitor_id", competitorId)
     .eq("still_active", true);
   const seen = new Set(seenKeys);
@@ -925,7 +917,10 @@ export async function markDisappearedAds(
 // winner (they keep paying because it converts) — the strongest signal, fully ours.
 
 export interface LaneResult extends IngestResult {
-  lane: "winners" | "domain" | null;
+  /** How the competitor's Meta page id was RESOLVED — not how ads were collected. Collection is a
+   *  single `search_page_ids` call regardless of lane. `name` = a page name strictly matched the
+   *  brand; `domain` = its ads overwhelmingly drive to the brand's domain. */
+  lane: "name" | "domain" | null;
   pageId: string | null;
   resolvedName: string | null;
   /** Longitudinal: existing ads re-observed (persistence bumped, no re-vision) + ads retired (vanished). */
@@ -957,7 +952,9 @@ export interface LaneResult extends IngestResult {
    * The scout logs this per competitor so the operator can see which brands rely on the fallback
    * because their winners scan is empty (spec 2026-07-19 — Obvi/NativePath/Vital Proteins).
    */
-  source: "winners" | "keyword" | "domain" | null;
+  /** Which collection path produced the ads. `page` is the only real one under Meta (the full
+   *  library by page id); `domain` records that the page id itself came from the domain lane. */
+  source: "page" | "domain" | null;
 }
 
 /**
@@ -1009,7 +1006,7 @@ async function splitNewExisting(
       .from("creative_skeletons")
       .select("dedup_key")
       .eq("workspace_id", workspaceId)
-      .eq("source", "adlibrary")
+      .in("source", COMPETITOR_AD_SOURCES)
       .in("dedup_key", keys.slice(i, i + 200));
     for (const r of data || []) seen.add(r.dedup_key as string);
   }
@@ -1033,6 +1030,8 @@ async function collectAndTrack(
   statics: NormalizedAd[],
   cap: number,
   result: LaneResult,
+  fetchCreative?: CreativeFetcher,
+  visionDispatch?: VisionSessionDispatcher,
 ): Promise<void> {
   const { fresh, existing } = await splitNewExisting(admin, workspaceId, statics);
   result.skippedExisting = existing.length;
@@ -1041,11 +1040,11 @@ async function collectAndTrack(
   // NEW ads → full ingest + vision, capped (Opus spend). Highest-signal first (caller pre-ranks).
   for (const ad of fresh.slice(0, cap)) {
     try {
-      await ingestAd(workspaceId, ad, seed);
+      await ingestAd(workspaceId, ad, seed, fetchCreative, visionDispatch);
       result.inserted++;
     } catch (err) {
-      if (isRetryableCreativeFetchError(err)) {
-        // Transient AdLibrary creative-fetch outage (503, timeout, …) — `ingestAd` rethrew
+      if (isRetryableGraphError(err) || isTransientRenderError(err)) {
+        // Transient upstream fault (Graph rate-limit/5xx, or a flaky render) — `ingestAd` rethrew
         // BEFORE any DB write, so no poisoned failed row exists and the same ad_key stays
         // eligible for the next sweep. Log a bounded warning (not console.error) so the
         // Vercel error feed doesn't page on a routine external hiccup. Still counted as a
@@ -1092,34 +1091,44 @@ async function collectAndTrack(
  *  product — the persist-time guard drops any pulled ad whose advertiser isn't in the set (spec's
  *  non-mapped-leakage fix; "Healthy Habits" / "A Path to Better Health" on Creamer). Pass `undefined`
  *  or an empty set to opt out (no guard). */
-/** The threshold below which LANE A's winners scan is treated as "empty" and we fall back to
- *  the keyword/domain static searchAds path (spec 2026-07-19). A tiny nonzero threshold is a
- *  future extension point (thin scans currently pass at 1+); the initial spec ships strict 0. */
-const WINNERS_FALLBACK_THRESHOLD = 1;
-
-/** Pull statics from the keyword/domain search fallback. Shared by LANE A's winners-empty branch
- *  and by LANE B. Returns the ranked, static-only, non-empty pull — or [] on API empty. */
-async function pullStaticSearchAds(
-  by: { keyword?: string; domain?: string },
-): Promise<NormalizedAd[]> {
-  const ads = await searchAds({
-    ...(by.keyword ? { keyword: by.keyword } : {}),
-    ...(by.domain ? { domain: by.domain } : {}),
-    adsType: ["1"], // image-only
-    platform: ["facebook", "instagram"], // Meta-only (no Google)
-    geo: ["USA"],
-    pageSize: 50,
-  });
-  return ads
-    .filter((a) => a.ad_key && a.media_type === "static" && a.creative_url)
-    // Vision the highest-reach/longevity NEW ones first (search-based pull carries no winners score).
-    .sort((a, b) => winnerScore(b) - winnerScore(a));
-}
-
+/**
+ * Sweep ONE competitor's ads off the Meta Ad Library and ingest the statics.
+ *
+ * ── WHY THIS IS ONE CALL NOW ─────────────────────────────────────────────────────────────
+ * The AdLibrary era needed a three-rung fallback ladder here — a paid `winners` scan, then a
+ * keyword search, then a domain search — because no single AdLibrary endpoint reliably returned a
+ * brand's real library (`/api/search` only ever returned ads first-seen in the last ~8 days, so the
+ * long-runners we actually want were invisible to it).
+ *
+ * Meta has no such problem: `search_page_ids` returns the advertiser's FULL library with real
+ * per-ad delivery dates, so longevity is MEASURED rather than bought, and one call replaces the
+ * ladder. Verified live 2026-08-24 — Erth Labs returned 79 ads spanning 2026-01-29 → 07-13 with a
+ * 95-day top runner.
+ *
+ * Lanes still exist, but only for RESOLUTION (brand → page id), not collection:
+ *   • `via:'name'`   — a page name strictly matched the brand.
+ *   • `via:'domain'` — no name match, but a page's ads overwhelmingly drive to the brand's domain.
+ *   • `via:null`     — a reliable bad seed. We do NOT guess.
+ *
+ * `seed.metaPageId` short-circuits resolution entirely — `competitors.meta_page_id` is already
+ * populated for most rows, and a stored id is authoritative.
+ */
 export async function sweepCompetitorLanes(
   workspaceId: string,
   seed: Seed,
-  opts: { domain?: string | null; visionCap?: number; approvedAdvertisers?: Set<string> } = {},
+  opts: {
+    domain?: string | null;
+    visionCap?: number;
+    approvedAdvertisers?: Set<string>;
+    /** Minimum days an ad must have been delivering to be worth visioning. Default 7. */
+    minWinnerDays?: number;
+    /** Supplied by the BOX. Without it statics are collected + tracked but never rendered/visioned,
+     *  because obtaining Meta creative bytes needs a browser. See [[./meta-ad-library-render]]. */
+    fetchCreative?: CreativeFetcher;
+    /** Supplied by the BOX. Routes vision through a `claude -p` Max session, because the worker has
+     *  no ANTHROPIC_API_KEY. Omitted elsewhere ⇒ the direct Opus API path. */
+    visionDispatch?: VisionSessionDispatcher;
+  } = {},
 ): Promise<LaneResult> {
   const admin = createAdminClient();
   const result: LaneResult = {
@@ -1136,79 +1145,71 @@ export async function sweepCompetitorLanes(
   const cap = opts.visionCap ?? 12;
   const approved = opts.approvedAdvertisers ?? new Set<string>();
 
-  const resolution = await resolveAdvertiser(seed.keyword, { domain: opts.domain });
-  result.pageId = resolution.pageId;
-  result.resolvedName = resolution.name;
+  // Prefer the stored page id; only pay for resolution when we don't have one.
+  let pageId = seed.metaPageId ?? null;
+  let via: "name" | "domain" | null = pageId ? "name" : null;
+  if (!pageId) {
+    const resolution = await resolveAdvertiser(workspaceId, seed.keyword, { domain: opts.domain });
+    pageId = resolution.pageId;
+    via = resolution.via;
+    result.resolvedName = resolution.name;
+  }
+  result.pageId = pageId;
+  result.lane = via;
 
-  // ── LANE A — winners scan (the brand's FULL library, not recent-only) ───────
-  if (resolution.via === "name" && resolution.pageId) {
-    result.lane = "winners";
-    const concepts = await scanWinners(resolution.pageId);
-    // Normalize each concept's ad → static, keyed. AdLibrary's composite is only used to ORDER which NEW ads
-    // we vision first (bounded spend) — it is NOT stored (our winner signal is persistence, tracked below).
-    const pulled = concepts
-      .map((c) => ({ concept: c, ad: normalizeAd(c.ad) }))
-      .filter((n) => n.ad.ad_key && n.ad.media_type === "static" && n.ad.creative_url)
-      .sort((a, b) => (b.concept.composite ?? 0) - (a.concept.composite ?? 0))
-      .map((n) => n.ad);
-    if (pulled.length >= WINNERS_FALLBACK_THRESHOLD) {
-      result.source = "winners";
-      result.searched = pulled.length;
-      const guarded = filterAdsByApprovedAdvertisers(pulled, approved);
-      result.nonMappedDropped = guarded.dropped;
-      await collectAndTrack(admin, workspaceId, seed, guarded.kept, cap, result);
-      return result;
-    }
-    // Winners-empty fallback (spec 2026-07-19 — Obvi/NativePath/Vital Proteins): the winners
-    // endpoint returns 0 for most competitors while the plain keyword/domain search returns 30-60
-    // live statics. Fall back to searchAds so the skeleton library still populates for the brands
-    // that advertise the most. Preserve the approved-advertiser guard, static-only, and existing
-    // dedup path (collectAndTrack + splitNewExisting) — the same persist boundary as the winners lane.
-    const keywordPulled = seed.keyword ? await pullStaticSearchAds({ keyword: seed.keyword }) : [];
-    if (keywordPulled.length >= WINNERS_FALLBACK_THRESHOLD) {
-      result.source = "keyword";
-      result.searched = keywordPulled.length;
-      const guarded = filterAdsByApprovedAdvertisers(keywordPulled, approved);
-      result.nonMappedDropped = guarded.dropped;
-      await collectAndTrack(admin, workspaceId, seed, guarded.kept, cap, result);
-      return result;
-    }
-    // Second-level fallback — keyword empty AND we know the brand's domain → try a domain pull.
-    if (opts.domain) {
-      const domainPulled = await pullStaticSearchAds({ domain: opts.domain });
-      if (domainPulled.length >= WINNERS_FALLBACK_THRESHOLD) {
-        result.source = "domain";
-        result.searched = domainPulled.length;
-        const guarded = filterAdsByApprovedAdvertisers(domainPulled, approved);
-        result.nonMappedDropped = guarded.dropped;
-        await collectAndTrack(admin, workspaceId, seed, guarded.kept, cap, result);
-        return result;
-      }
-    }
-    // Winners empty AND both keyword+domain fallbacks empty — likely a transient AdLibrary dip
-    // or a cached-blank body. NEVER retire existing skeletons on a single empty run.
+  // Neither lane resolved — a reliable bad seed. The caller surfaces it; we don't guess a page id,
+  // because a confidently-wrong one silently fills the library with another brand's creative.
+  if (!pageId) return result;
+
+  const pulled = await collectAdsByPage(workspaceId, pageId, {
+    // We research statics; video routes to its own pipeline. IMAGE + MEME both count as static —
+    // founder 2026-08-24 — and that distinction is load-bearing: Erth runs ZERO plain IMAGE ads, so
+    // filtering on IMAGE alone would report a prolific advertiser as having no statics at all.
+    staticsOnly: true,
+    // Ads Meta took down have no creative to render, so they can never become a skeleton.
+    excludeRemoved: true,
+  });
+
+  result.searched = pulled.length;
+  if (pulled.length === 0) {
+    // An empty pull could be a Graph dip or a genuinely paused advertiser. NEVER retire existing
+    // skeletons on a single empty run — that would churn the library on one bad request.
     result.transientEmptyPull = true;
     return result;
   }
 
-  // ── LANE B — domain search (advertiser un-resolvable by name) ───────────────
-  if (resolution.via === "domain" && opts.domain) {
-    result.lane = "domain";
-    const pulled = await pullStaticSearchAds({ domain: opts.domain });
-    result.searched = pulled.length;
-    if (pulled.length === 0) {
-      // Transient empty pull — a domain search that returns 0 could be an API dip; do NOT retire.
-      result.transientEmptyPull = true;
-      return result;
-    }
-    result.source = "domain";
-    const guarded = filterAdsByApprovedAdvertisers(pulled, approved);
-    result.nonMappedDropped = guarded.dropped;
-    await collectAndTrack(admin, workspaceId, seed, guarded.kept, cap, result);
+  // ── LONGEVITY FLOOR ──────────────────────────────────────────────────────────────────
+  // Under AdLibrary this gate lived in the (paid) winners endpoint, which pre-filtered for us.
+  // Collecting the FULL library ourselves means nothing filters by default, and a first live sweep
+  // ingested MUD\\WTR ads that had been running 1 and 5 days — vision spend on creative that may not
+  // survive the week. Meta gives REAL delivery dates, so we can gate on measured traction rather
+  // than waiting to observe persistence ourselves: an ad Meta says started 96 days ago is proven on
+  // the first sweep that sees it.
+  const winners = pulled.filter((a) => isWinner(a, { minDays: opts.minWinnerDays }));
+  if (winners.length === 0) {
+    // The advertiser IS running ads, none long enough to qualify yet. Distinct from an empty pull:
+    // nothing is wrong upstream, so don't flag it transient — but don't retire existing skeletons
+    // either, since the competitor is clearly still active.
+    console.log(
+      `[creative-scout] "${seed.keyword}": ${pulled.length} static(s) pulled, 0 met the ${opts.minWinnerDays ?? 7}-day floor`,
+    );
     return result;
   }
 
-  // via:null — neither lane resolved. A reliable bad seed (caller surfaces it).
+  result.source = via === "domain" ? "domain" : "page";
+  const ranked = [...winners].sort((a, b) => winnerScore(b) - winnerScore(a));
+  const guarded = filterAdsByApprovedAdvertisers(ranked, approved);
+  result.nonMappedDropped = guarded.dropped;
+  await collectAndTrack(
+    admin,
+    workspaceId,
+    seed,
+    guarded.kept,
+    cap,
+    result,
+    opts.fetchCreative,
+    opts.visionDispatch,
+  );
   return result;
 }
 

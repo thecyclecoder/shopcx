@@ -182,7 +182,11 @@ test("createCampaign — baseline test-campaign call omits new-customer knobs en
   }
 });
 
-test("getOrCreateColdScalerCampaign — mints PAUSED CBO OUTCOME_SALES with NO bid limit and NO ASC knobs, idempotent on second call", async () => {
+test("getOrCreateColdScalerCampaign — mints PAUSED **ABO** OUTCOME_SALES with NO campaign budget, no bid limit, no ASC knobs, idempotent on second call", async () => {
+  // ⭐ CEO 2026-08-25: the scaler is ABO, not CBO. A CBO/Advantage+ scaler hands ALLOCATION to
+  // Meta — crowned winners graduated into one and Meta put ~95% of spend behind a single ad, so
+  // the portfolio never got funded. Per-adset budgets keep allocation ours. `dailyCeilingCents`
+  // must therefore NOT reach the wire as a campaign budget; it stays a cohort-row governance cap.
   const cohortId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   const expectedName = coldScalerCampaignName(cohortId);
   assert.equal(expectedName, "MB — Cold Scaler (aaaaaaaa)");
@@ -215,11 +219,15 @@ test("getOrCreateColdScalerCampaign — mints PAUSED CBO OUTCOME_SALES with NO b
     assert.equal(post.body.get("name"), expectedName);
     assert.equal(post.body.get("objective"), "OUTCOME_SALES");
     assert.equal(post.body.get("status"), "PAUSED");
-    assert.equal(post.body.get("daily_budget"), "20000");
-    // ABO flag MUST NOT be set (CBO campaign).
-    assert.equal(post.body.get("is_adset_budget_sharing_enabled"), null);
-    // No bid limit — CBO ad sets inherit this, so it has to be right at mint time.
-    assert.equal(post.body.get("bid_strategy"), "LOWEST_COST_WITHOUT_CAP");
+    // ⭐ the wedge: no campaign-level budget on an ABO scaler.
+    assert.equal(post.body.get("daily_budget"), null, "ABO scaler must carry NO campaign budget");
+    assert.equal(post.body.get("lifetime_budget"), null, "ABO scaler must carry NO campaign budget");
+    // Meta REQUIRES this to be false on a campaign with no campaign-level budget.
+    assert.equal(post.body.get("is_adset_budget_sharing_enabled"), "false");
+    // On ABO, bid strategy lives on the AD SET, not the campaign — Meta rejects a campaign-level
+    // strategy with no campaign budget. The no-bid-cap guarantee is upheld by `createAdSet`'s
+    // LOWEST_COST_WITHOUT_CAP default on every ad set the graduate mints.
+    assert.equal(post.body.get("bid_strategy"), null, "ABO campaigns must not carry a bid strategy");
     // ASC is DEAD on Graph v24.0+ — minting one throws (#100/2490568) and blocked every
     // graduate. These two knobs must never go on the wire again.
     assert.equal(post.body.get("smart_promotion_type"), null, "ASC is rejected by Graph v24.0+");
@@ -227,6 +235,17 @@ test("getOrCreateColdScalerCampaign — mints PAUSED CBO OUTCOME_SALES with NO b
   } finally {
     stub.restore();
   }
+});
+
+test("coldScalerCampaignName — product-titled, pairing with the testing campaign", () => {
+  assert.equal(
+    coldScalerCampaignName("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "Superfood Tabs"),
+    "MB — Superfood Tabs Scaler (ABO)",
+    "must pair with 'MB — Superfood Tabs Testing (ABO)' so a human can see the pair in Ads Manager",
+  );
+  // Falls back to the cohort-id form when the product cannot be resolved.
+  assert.equal(coldScalerCampaignName("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"), "MB — Cold Scaler (aaaaaaaa)");
+  assert.equal(coldScalerCampaignName("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "   "), "MB — Cold Scaler (aaaaaaaa)");
 });
 
 test("getOrCreateTestingCampaign — idempotent by name across two calls", async () => {

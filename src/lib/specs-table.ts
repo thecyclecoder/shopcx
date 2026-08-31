@@ -1393,12 +1393,40 @@ export async function setPhaseMetadata(
  * the M4/M2 auto-merge accumulation gate, AND one of the three [[isSpecPromoteEligible]] inputs — all three
  * read the SAME predicate so they can never disagree on "is the spec fully built on its branch?".
  */
+/**
+ * a-broken-verification-check-cannot-kill-a-build Phase 2 — one entry per phase whose
+ * `verifyPhaseAccumulatedOnBranch` returned `accumulated:false` because the check could not be
+ * evaluated (branch unresolvable / git grep refused the pattern). The re-drive path in
+ * `scripts/builder-worker.ts` reads this to distinguish an infrastructure fault from a code gap:
+ * a code gap redrives-and-consumes-the-cap; an infrastructure fault escalates as a broken check
+ * naming the phase + pattern verbatim, and does NOT consume `BUILDER_DEFERRED_REDRIVE_MAX`.
+ */
+export interface UnevaluablePhaseDetail {
+  phasePosition: number;
+  kind: "grep-error" | "unresolvable";
+  checkDescription: string;
+  pattern?: string;
+  reason: string;
+}
+
+export interface SpecAccumulationVerdict {
+  complete: boolean;
+  reason: string;
+  /**
+   * a-broken-verification-check-cannot-kill-a-build Phase 2 — the subset of `!complete` phases
+   * whose failure was an unevaluable check (not a genuine code gap). Non-empty ⇒ escalate as a
+   * broken check; the redrive counter MUST NOT tick. Empty (or undefined) ⇒ the existing
+   * redrive-or-escalate flow applies.
+   */
+  unevaluablePhases?: UnevaluablePhaseDetail[];
+}
+
 export async function isSpecAccumulationComplete(
   workspaceId: string | null,
   slug: string | null,
   branchRef?: string | null,
   deps: VerifyPhaseDeps = defaultVerifyPhaseDeps,
-): Promise<{ complete: boolean; reason: string }> {
+): Promise<SpecAccumulationVerdict> {
   if (!workspaceId || !slug) return { complete: true, reason: "no spec context — fail open" };
   try {
     const spec = await getSpec(workspaceId, slug);
@@ -1421,12 +1449,27 @@ export async function isSpecAccumulationComplete(
     if (notAccumulated.length === 0) {
       return { complete: true, reason: `all ${phases.length} phases verified on ${branch}` };
     }
+    // a-broken-verification-check-cannot-kill-a-build Phase 2 — surface the unevaluable subset so
+    // the re-drive path in `scripts/builder-worker.ts` can route this build as a broken-check
+    // escalation (no redrive counter tick) rather than a code-gap redrive. Unevaluable phases are
+    // STILL not-accumulated (they still block the merge — never phantom-ship) and appear in
+    // `notAccumulated`; the discriminator is `verdict.unevaluable` set by `verifyPhaseAccumulatedOnBranch`.
+    const unevaluablePhases: UnevaluablePhaseDetail[] = notAccumulated
+      .filter((x) => x.v.unevaluable)
+      .map((x) => ({
+        phasePosition: x.p.position,
+        kind: x.v.unevaluable!.kind,
+        checkDescription: x.v.unevaluable!.checkDescription,
+        pattern: x.v.unevaluable!.pattern,
+        reason: x.v.reason,
+      }));
     const detail = notAccumulated
       .map((x) => `pos ${x.p.position} (${x.v.reason})`)
       .join("; ");
     return {
       complete: false,
       reason: `${notAccumulated.length}/${phases.length} phase(s) not verified on ${branch}: ${detail}`,
+      unevaluablePhases,
     };
   } catch (e) {
     // merge-gate-verifies-real-phase-checks P1 — fail CLOSED. The old fail-open path was one of the three
@@ -1461,6 +1504,21 @@ export async function isSpecAccumulationComplete(
 export interface PhaseAccumulationVerdict {
   accumulated: boolean;
   reason: string;
+  /**
+   * a-broken-verification-check-cannot-kill-a-build Phase 2 — third-state discriminator. Set when the
+   * phase read as `accumulated:false` because a check could NOT be evaluated (git grep refused the
+   * pattern, or the branch ref could not be resolved) — an infrastructure fault, NOT a code gap.
+   * The re-drive path treats this as "block the ship AND spare the build" (does NOT consume a
+   * `BUILDER_DEFERRED_REDRIVE_MAX` slot; escalates as a broken check naming the phase + pattern).
+   * Absent when `accumulated:true` OR when the failure was a genuine no-match. Never overrides
+   * `accumulated:false` — an unevaluable phase still blocks the merge, per the spec's phantom-ship
+   * hazard: "Do NOT make an unevaluable check count as a PASS."
+   */
+  unevaluable?: {
+    kind: "grep-error" | "unresolvable";
+    checkDescription: string;
+    pattern?: string;
+  };
 }
 
 export interface PhaseFlagsForVerify {
@@ -1901,12 +1959,30 @@ export async function verifyPhaseAccumulatedOnBranch(
           return {
             accumulated: false,
             reason: `phase ${phasePosition} check "${check.description}" — BRANCH UNRESOLVABLE for '${branchRef}' (infrastructure fault, NOT a code gap): ${r.gitError ?? r.evidence}`,
+            // a-broken-verification-check-cannot-kill-a-build Phase 2 — tag the third state so the
+            // re-drive path can route this as a broken check (escalate) rather than a code gap
+            // (redrive-and-count-against-the-cap). NEVER upgrades to accumulated:true — an unread
+            // artifact still blocks the merge; the spec's phantom-ship hazard says so explicitly.
+            unevaluable: {
+              kind: "unresolvable",
+              checkDescription: check.description,
+              pattern: check.params.pattern,
+            },
           };
         }
         if (r.outcome === "grep-error") {
           return {
             accumulated: false,
             reason: `phase ${phasePosition} check "${check.description}" — GIT ERROR on ${wherRef} (infrastructure fault, NOT a code gap): ${r.gitError ?? r.evidence}`,
+            // a-broken-verification-check-cannot-kill-a-build Phase 2 — see above; a git-grep
+            // compile/spawn failure (the exact class a `(?i)` PCRE construct triggered in the
+            // cancelled-subs-stop-reporting-a-future-billing-date + playbook-drift-classifier
+            // incidents) is unevaluable, not phantom code missing.
+            unevaluable: {
+              kind: "grep-error",
+              checkDescription: check.description,
+              pattern: check.params.pattern,
+            },
           };
         }
         // 'no-match' (the pre-Phase-2 default, and the shape a legacy shim that omits `outcome`

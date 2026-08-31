@@ -13,20 +13,34 @@
  * See docs/brain/libraries/provision-cohort.md · docs/brain/tables/media_buyer_test_cohorts.md.
  */
 import type { createAdminClient } from "@/lib/supabase/admin";
-import { getMetaUserToken, getOrCreateTestingCampaign } from "@/lib/meta-ads";
+import { getMetaUserToken, getOrCreateTestingCampaign, ADVANTAGE_AUDIENCE_MAX_AGE_MIN } from "@/lib/meta-ads";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
+/**
+ * Meta rejects an Advantage+ Audience ad set when `targeting.age_min > META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN`
+ * (25). Advantage+ Audience treats every hard demographic control as a HINT and Meta refuses to publish
+ * an ad set whose hint contradicts the "broad audience" contract — a hard 50-65 combined with
+ * `targeting_automation.advantage_audience=1` is exactly that contradiction. The fingerprint is exported
+ * so any future edit that reintroduces an above-25 age minimum on the default template trips a named
+ * regression instead of silently republishing a 400-rejected payload. Reference: Meta Marketing API
+ * Advantage+ Audience rules, [[../../../docs/brain/reference/meta-scaling-methodology.md]] § "Test audience
+ * held constant = broad, no age cap".
+ */
+// Re-exported from [[../meta-ads]], which owns this Meta API fact and applies it as the last rail
+// before the wire in `createAdSet`. Defining `25` twice is how a platform limit drifts.
+export const META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN = ADVANTAGE_AUDIENCE_MAX_AGE_MIN;
+
 /** The proven cold-test converter cohort (docs/brain/reference/meta-scaling-methodology.md § "Test audience
- *  held constant = our proven converter (US women 50-65, matches the cold-50+ creative)"): US women 50-65,
- *  home+recent, Advantage+ Audience on. Aligning the cold-test default to F50-65 makes every per-creative
- *  CPA read a clean signal against the customer the ad is actually meant to sell — a per-test cohort
- *  minted against 18-65 confounds the crown/kill call the Media Buyer downstream is trying to make.
- *  Callers override per product/account as needed. */
+ *  held constant = broad, no age cap (defaults to 18+), no detailed targeting — let Meta's algorithm find
+ *  the buyer inside the broad audience"): US home+recent, Advantage+ Audience on, NO hard age or gender
+ *  gate. The old `age_min:50 / age_max:65 / genders:[2]` shape was rejected by Meta at publish time
+ *  ("Advantage+ Audience requires age_min ≤ 25") — see `META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN` above.
+ *  Omitting `age_min` lets the platform default (18) apply, which sits at/under the fingerprint's ceiling;
+ *  omitting `age_max` and `genders` keeps the audience broad so Advantage+ can expand freely. Callers can
+ *  still override per product/account, but the DEFAULT must publish. Existing-customer exclusions layer
+ *  on via `excluded_custom_audiences` and are unaffected by this shape. */
 export const DEFAULT_TEST_TARGETING: Record<string, unknown> = {
-  age_min: 50,
-  age_max: 65,
-  genders: [2],
   geo_locations: { countries: ["US"], location_types: ["home", "recent"] },
   targeting_automation: { advantage_audience: 1 },
 };
@@ -129,6 +143,11 @@ export function assertCohortReplenishable(cohort: CohortReplenishabilityInput): 
 export interface ProvisionCohortOptions {
   workspaceId: string;
   productId: string;
+  /**
+   * Product title, used ONLY to name the testing campaign
+   * `MB — {Product} Testing (ABO)`. Omit to keep the legacy generic name.
+   */
+  productTitle?: string | null;
   /** `meta_ad_accounts.id` (our UUID) — the cohort's account FK. */
   metaAdAccountUuid: string;
   /** The Meta act id string (e.g. "2352876514967984") — where the campaign/adsets live + budget is charged. */
@@ -142,6 +161,21 @@ export interface ProvisionCohortOptions {
   dailyTestCeilingCents?: number; // $600 default
   perTestDailyBudgetCents?: number; // $150 default
   notes?: string;
+
+  /**
+   * Existing-customer exclusion audiences (bare Meta customaudience ids, same ad
+   * account). BOTH the columns and the template's `excluded_custom_audiences`
+   * are stamped from these.
+   *
+   * ⚠️ Provisioning previously accepted neither, so a fresh cohort landed with
+   * NULL exclusion columns and no `excluded_custom_audiences` in its template.
+   * The publish gate only enforces the exclusion when the COLUMN is set, so a
+   * fresh cohort silently advertised the cold test at existing customers —
+   * inflating its apparent CPA and wasting spend on people who already buy.
+   * Pass both unless the account genuinely has no exclusion audiences.
+   */
+  excludedPurchaserAudienceId?: string | null;
+  excludedAllCustomersAudienceId?: string | null;
 }
 
 export interface ProvisionCohortResult {
@@ -159,10 +193,23 @@ export async function provisionProductTestCohort(admin: Admin, opts: ProvisionCo
   const token = await getMetaUserToken(opts.workspaceId);
   if (!token) throw new Error("no_meta_token");
 
-  const campaignId = await getOrCreateTestingCampaign(token, opts.metaAccountActId);
+  // Product-scoped campaign name so Ads Manager reads `MB — {Product} Testing (ABO)`
+  // alongside the other per-product testing campaigns, instead of an anonymous
+  // `MB — Testing (ABO)` nobody can attribute. Omitting `productTitle` keeps the
+  // legacy generic name (other callers are unaffected).
+  const campaignId = await getOrCreateTestingCampaign(token, opts.metaAccountActId, opts.productTitle);
   const ceiling = opts.dailyTestCeilingCents ?? 60000;
   const perTest = opts.perTestDailyBudgetCents ?? 15000;
-  const template = buildAdsetTemplate({ pixelId: opts.pixelId, targeting: opts.targeting });
+  // Layer the existing-customer exclusions into the template AND stamp the columns —
+  // the publish gate keys off the columns, the ad set keys off the template, and the
+  // two must agree or the gate refuses with `missing_purchaser_exclusion`.
+  const excludedCustomAudienceIds = [opts.excludedPurchaserAudienceId, opts.excludedAllCustomersAudienceId]
+    .filter((v): v is string => typeof v === "string" && v.length > 0);
+  const template = buildAdsetTemplate({
+    pixelId: opts.pixelId,
+    targeting: opts.targeting,
+    excludedCustomAudienceIds,
+  });
 
   // Insert-time invariant: a per-test cohort MUST carry a testing campaign + template with pixelId, or
   // Bianca's replenish fails closed and the product freezes at whatever slot count it had (the exact
@@ -181,6 +228,8 @@ export async function provisionProductTestCohort(admin: Admin, opts: ProvisionCo
     default_meta_account_id: opts.metaAccountActId,
     default_meta_page_id: opts.pageId,
     default_meta_instagram_user_id: opts.instagramUserId ?? null,
+    excluded_purchaser_audience_id: opts.excludedPurchaserAudienceId ?? null,
+    excluded_all_customers_audience_id: opts.excludedAllCustomersAudienceId ?? null,
     is_active: true,
     notes: opts.notes ?? `per-test-adset cohort — ${(ceiling / 100).toFixed(0)}/day, ${(perTest / 100).toFixed(0)}/test. CEO 2026-07-12.`,
   };

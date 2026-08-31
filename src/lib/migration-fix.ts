@@ -29,6 +29,47 @@ const ACTIVE_JOB_STATUSES = ["queued", "claimed", "building", "needs_input", "ne
 /** The judgment fixes the mechanical auto-heal punts (see [[migration-audit]] `autoHealMigration`). */
 export type MigrationFixKind = "price_reconcile" | "variant_backfill" | "appstle_cancel" | "shipping_protection_convert" | "remove_line";
 
+/**
+ * The vocabulary a migration-fix box session may terminate with — the shape the worker
+ * consumes to decide what to do with the parked `agent_jobs` row. A correct diagnosis
+ * IS a terminal outcome; the lane must not treat a well-formed `code_gap` verdict as
+ * "ended without propose/human_needed" and park a needs_attention row that discards
+ * the session's actual finding (the 2026-08-18 anti-pattern this pins down).
+ *
+ *  - `propose`      — the box computed one or more typed fix actions the owner can
+ *                     approve on /dashboard/migrations; the worker persists them as
+ *                     pending_actions and re-runs `verifyMigration` on approval.
+ *  - `needs_input`  — the box needs the owner to answer ONE plain-language judgment
+ *                     question inline; the answer resumes the session.
+ *  - `human_needed` — the failure needs a human (e.g. no billable card) and the box
+ *                     has written the diagnosis; the row stays `failed` and the
+ *                     diagnosis is reported.
+ *  - `code_gap`     — the failure needs CODE (not data): a RECURRING code/data gap
+ *                     the box has recognized. The box authors a permanent fix spec
+ *                     (public.specs + public.spec_phases via the author-spec SDK,
+ *                     surfaced on Roadmap). This sub still needs a hand for now, so
+ *                     the row stays `failed` with the diagnosis + the authored spec
+ *                     slug — but the diagnosis is REPORTED, not stranded.
+ */
+export type MigrationFixVerdict = "propose" | "needs_input" | "human_needed" | "code_gap";
+
+/** Every recognized terminal verdict. Consumed by [[../../scripts/builder-worker]] `runMigrationFixJob`
+ *  so a well-formed `code_gap` cannot fall through the recognized-status branches and be labelled
+ *  "migration-fix ended without propose/human_needed" — the anti-pattern this spec removes. */
+export const RECOGNIZED_MIGRATION_FIX_VERDICTS: readonly MigrationFixVerdict[] = [
+  "propose",
+  "needs_input",
+  "human_needed",
+  "code_gap",
+] as const;
+
+/** True iff `status` is one of the four recognized terminal verdicts above. Used by the worker's
+ *  fallback branch to name the exact vocabulary in the "ended without ..." error, so a future gap
+ *  in that list fails loudly instead of silently parking the job as needs_attention. */
+export function isRecognisedMigrationFixVerdict(status: unknown): status is MigrationFixVerdict {
+  return typeof status === "string" && (RECOGNIZED_MIGRATION_FIX_VERDICTS as readonly string[]).includes(status);
+}
+
 /** Per-fix payloads — the box computes the concrete values read-only; the worker applies them verbatim. */
 export interface PriceReconcilePayload {
   /** Each grandfathered line's reconciled base, keyed by the catalog variant UUID on the sub item. */

@@ -7,6 +7,7 @@ import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { inngest } from "@/lib/inngest/client";
 import { enrichItemTitles } from "@/lib/subscription-items";
+import { linkOriginatingOrder } from "@/lib/subscription-order-link";
 import { logPaymentFailure, trackErrorCode, isTerminalErrorCode, getCustomerPaymentMethods, deduplicatePaymentMethods, cancelForTerminalNoBackup } from "@/lib/dunning";
 import {
   createForecast,
@@ -322,6 +323,28 @@ async function handleSubscriptionEvent(
     }
 
     await admin.from("subscriptions").upsert(upsertData, { onConflict: "workspace_id,shopify_contract_id" });
+
+    // Link the subscription's ORIGINATING checkout order (orders.subscription_id).
+    // This is the primary linkage point: a first order arrives as source_name="web"
+    // with a "first subscription" tag, and the subscriptions row is created AFTER it
+    // (1013/1013 measured, 1010 within 5 min) — so the order webhook loses the race.
+    // Here both sides provably exist. Idempotent: only fills a NULL link.
+    // See src/lib/subscription-order-link.ts.
+    const { data: subRow } = await admin
+      .from("subscriptions")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    if (subRow?.id) {
+      await linkOriginatingOrder(admin, {
+        workspaceId,
+        subscriptionId: String(subRow.id),
+        shopifyCustomerId,
+        subItems: items as Array<{ sku?: string | null }>,
+        anchorIso: (data.createdAt as string) || null,
+      });
+    }
 
     // Self-heal: if multiple CODE_DISCOUNT coupons detected, remove extras
     // AUTOMATIC_DISCOUNT types (Buy 2, Free Shipping) are managed by Shopify — don't touch

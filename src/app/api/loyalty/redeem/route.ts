@@ -7,24 +7,7 @@ import {
   validateRedemption,
   spendPoints,
 } from "@/lib/loyalty";
-import { getShopifyCredentials } from "@/lib/shopify-sync";
-import { SHOPIFY_API_VERSION } from "@/lib/shopify";
-
-function generateCode(value: number): string {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let random = "";
-  for (let i = 0; i < 6; i++) random += chars[Math.floor(Math.random() * chars.length)];
-  return `LOYALTY-${value}-${random}`;
-}
-
-const DISCOUNT_CREATE_MUTATION = `
-  mutation discountCodeBasicCreate($basicCodeDiscount: DiscountCodeBasicInput!) {
-    discountCodeBasicCreate(basicCodeDiscount: $basicCodeDiscount) {
-      codeDiscountNode { id codeDiscount { ... on DiscountCodeBasic { codes(first: 1) { nodes { code } } } } }
-      userErrors { field message }
-    }
-  }
-`;
+import { createCustomerDiscount } from "@/lib/coupons";
 
 export async function POST(request: Request) {
   // Support both authenticated dashboard users and portal requests
@@ -98,105 +81,108 @@ export async function POST(request: Request) {
 
   const firstName = customer?.first_name || "Customer";
   const lastInitial = customer?.last_name ? customer.last_name[0] : "";
-  const code = generateCode(tier.discount_value);
-  const title = `Loyalty $${tier.discount_value} - ${firstName} ${lastInitial} (${code})`.trim();
 
-  // Compute expiry date
+  // Delegate to the shared chokepoint. It resolves linked shopify customer ids
+  // internally (via getLinkedShopifyCustomerIds), builds the same
+  // customerSelection + combinesWith + customerGets payload the inline path
+  // used, and falls back to the internal mintCustomerCoupon if the linked
+  // group has no shopify_customer_id — behavior-preserving refactor per
+  // docs/brain/specs/review-collection-foundations.md Phase 2 (the loyalty
+  // route was the "one hand-rolled copy" the chokepoint rule forbids).
+  const disc = await createCustomerDiscount(workspace_id, member.customer_id, {
+    amount: tier.discount_value,
+    codePrefix: "LOYALTY",
+    expiryDays: settings.coupon_expiry_days,
+    title: `Loyalty $${tier.discount_value} - ${firstName} ${lastInitial}`.trim(),
+    appliesOnOneTimePurchase: settings.coupon_applies_to !== "subscription",
+    appliesOnSubscription: settings.coupon_applies_to !== "one_time",
+    combinesWith: {
+      productDiscounts: settings.coupon_combines_product,
+      shippingDiscounts: settings.coupon_combines_shipping,
+      orderDiscounts: settings.coupon_combines_order,
+    },
+    // Preserve the pre-refactor edge case where the member row carries a
+    // shopify_customer_id but member.customer_id doesn't (yet) map through
+    // getLinkedShopifyCustomerIds — include it explicitly so nothing drops.
+    additionalShopifyCustomerIds: member.shopify_customer_id
+      ? [String(member.shopify_customer_id)]
+      : [],
+  });
+
+  if (!disc) {
+    return NextResponse.json({ error: "Failed to mint discount" }, { status: 500 });
+  }
+
+  // Compute expiry date for the loyalty_redemptions ledger
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + settings.coupon_expiry_days);
 
-  try {
-    const { shop, accessToken } = await getShopifyCredentials(workspace_id);
-
-    const res = await fetch(
-      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          "X-Shopify-Access-Token": accessToken,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          query: DISCOUNT_CREATE_MUTATION,
-          variables: {
-            basicCodeDiscount: {
-              title,
-              code,
-              startsAt: new Date().toISOString(),
-              endsAt: expiresAt.toISOString(),
-              usageLimit: 1,
-              appliesOncePerCustomer: true,
-              customerSelection: {
-                customers: {
-                  add: [`gid://shopify/Customer/${member.shopify_customer_id}`],
-                },
-              },
-              combinesWith: {
-                productDiscounts: settings.coupon_combines_product,
-                shippingDiscounts: settings.coupon_combines_shipping,
-                orderDiscounts: settings.coupon_combines_order,
-              },
-              customerGets: {
-                appliesOnOneTimePurchase: settings.coupon_applies_to !== "subscription",
-                appliesOnSubscription: settings.coupon_applies_to !== "one_time",
-                items: { all: true },
-                value: {
-                  discountAmount: {
-                    amount: tier.discount_value,
-                    appliesOnEachItem: false,
-                  },
-                },
-              },
-            },
-          },
-        }),
-      },
+  // `source: 'internal'` means createCustomerDiscount found no Shopify customer
+  // id anywhere in the linked group and fell back to mintCustomerCoupon. That
+  // code is real and the points are genuinely spent — but it resolves ONLY on
+  // the in-house storefront (src/lib/coupons.ts resolveCoupon), NOT at Shopify
+  // checkout, which is still where most traffic goes. Pre-refactor this path
+  // threw and the member kept their points; silently spending them on a code
+  // that fails at the register they actually use is the worse trade. Surface it
+  // on the response so the portal can say where the code works, and warn so it
+  // is visible in logs rather than only as a null shopify_discount_id.
+  if (disc.source === "internal") {
+    console.warn(
+      `[loyalty] internal-coupon fallback for member=${member.id} customer=${member.customer_id} ` +
+        `code=${disc.code} — no linked shopify_customer_id; this code redeems on the in-house ` +
+        `storefront only, not at Shopify checkout.`,
     );
+  }
 
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Shopify API error: ${res.status} ${text}`);
-    }
-
-    const gqlResult = await res.json();
-    const userErrors = gqlResult?.data?.discountCodeBasicCreate?.userErrors;
-    if (userErrors?.length > 0) {
-      return NextResponse.json(
-        { error: userErrors.map((e: { message: string }) => e.message).join(", ") },
-        { status: 400 },
-      );
-    }
-
-    const discountNodeId = gqlResult?.data?.discountCodeBasicCreate?.codeDiscountNode?.id || null;
-
+  // spendPoints + the ledger insert are wrapped: a throw between them leaves a
+  // minted Shopify discount with no loyalty_redemptions row (or spent points
+  // with no record). Pre-refactor both sat inside the route's try/catch; the
+  // extraction dropped that, so restore it rather than surface an unhandled 500.
+  try {
     // Deduct points
-    await spendPoints(member, tier.points_cost, `Redeemed ${tier.label}`, discountNodeId);
+    await spendPoints(member, tier.points_cost, `Redeemed ${tier.label}`, disc.shopifyDiscountNodeId);
 
     // Record redemption
-    await admin.from("loyalty_redemptions").insert({
+    const { error: ledgerError } = await admin.from("loyalty_redemptions").insert({
       workspace_id,
       member_id: member.id,
       reward_tier: tier.label,
       points_spent: tier.points_cost,
-      discount_code: code,
-      shopify_discount_id: discountNodeId,
+      discount_code: disc.code,
+      shopify_discount_id: disc.shopifyDiscountNodeId,
       discount_value: tier.discount_value,
       status: "active",
       expires_at: expiresAt.toISOString(),
     });
-
-    return NextResponse.json({
-      ok: true,
-      code,
-      discount_value: tier.discount_value,
-      expires_at: expiresAt.toISOString(),
-      new_balance: member.points_balance - tier.points_cost,
-    });
+    if (ledgerError) {
+      // The discount exists and the points are spent — a missing ledger row is
+      // a reconciliation problem, not a reason to fail the member's redemption.
+      console.error(
+        `[loyalty] redemption ledger insert failed for member=${member.id} code=${disc.code}: ${ledgerError.message}`,
+      );
+    }
   } catch (err) {
-    console.error("Loyalty redemption failed:", err);
+    console.error(
+      `[loyalty] post-mint bookkeeping failed for member=${member.id} code=${disc.code}:`,
+      err instanceof Error ? err.message : err,
+    );
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Redemption failed" },
+      { error: "Redemption could not be completed. Support has been notified." },
       { status: 500 },
     );
   }
+
+  return NextResponse.json({
+    ok: true,
+    code: disc.code,
+    discount_value: tier.discount_value,
+    expires_at: expiresAt.toISOString(),
+    new_balance: member.points_balance - tier.points_cost,
+    // 'shopify' → redeemable at Shopify checkout AND the in-house storefront
+    // (resolveCoupon's real-time Shopify lookup). 'internal' → in-house
+    // storefront ONLY. The portal needs this to tell the member where their
+    // code works; without it an internal-fallback code looks identical to a
+    // Shopify one right up until it is rejected at checkout.
+    source: disc.source,
+  });
 }

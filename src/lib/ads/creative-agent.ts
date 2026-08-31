@@ -193,6 +193,43 @@ export const COMPOSITION_NAME_MAX_LEN = 80;
  *  reflecting a regex from the source. */
 export const AD_NAME_BANNED_PHRASES: readonly string[] = ["weight loss", "weightloss", "competitor"];
 
+/**
+ * Third-party trademarks that must never be rendered on our creative — brands a COMPETITOR named
+ * in their hook, which our imitation would otherwise carry over verbatim.
+ *
+ * Distinct from the competitor-brand check: those tokens come from `competitorAdvertisers` (who ran
+ * the ad). These are brands the competitor *referenced* — a drug, a retailer, another product —
+ * which never appear in that list and so slipped straight through to the renderer.
+ *
+ * Ground truth: Erth Labs' skeleton hook is "Meet Nature's Ozempic". Ozempic is a Novo Nordisk
+ * prescription trademark. RAIL 0 in the image prompt already tells the model to substitute the
+ * noun, but a prompt instruction is advice, not a gate — the model rendered "Ozempic" three times
+ * running and QC (correctly) rejected all three. Jobs 58138929 and 23308ec5 both died this way,
+ * burning `MAX_QA_ATTEMPTS` image generations each to rediscover a fact we already knew.
+ */
+export const THIRD_PARTY_TRADEMARKS: readonly string[] = [
+  // GLP-1 / weight-loss pharma — the recurring case in this category's competitor ads.
+  "ozempic", "wegovy", "mounjaro", "zepbound", "saxenda", "trulicity", "semaglutide", "tirzepatide",
+  // Adjacent consumer brands a competitor hook might lean on.
+  "adderall", "botox", "viagra",
+];
+
+/**
+ * Find a third-party trademark in free text (a hook, headline, or angle name). PURE.
+ *
+ * Word-boundary matched, NOT substring: "semaglutide" inside a longer clinical word is still the
+ * trademark, but a substring match would fire on innocuous text containing e.g. "bot" in "botox".
+ * Returns the offending token so the caller can name it in an escalation.
+ */
+export function findThirdPartyTrademark(text: string | null | undefined): string | null {
+  if (!text) return null;
+  const normalized = String(text).toLowerCase();
+  for (const tm of THIRD_PARTY_TRADEMARKS) {
+    if (new RegExp(`\\b${tm}\\b`, "i").test(normalized)) return tm;
+  }
+  return null;
+}
+
 /** dahlia-names-each-ad-by-its-static-composition-unique-no-weight-loss-no-competitor-name
  *  Phase 1 — pure token derivation used ONLY by the ad-name validator. Mirrors the copy-side
  *  `competitorTokensFor` (in [[./copy-validator]]) rule: split the advertiser on whitespace,
@@ -3441,6 +3478,8 @@ async function stockProduct(
   // angles emits at most ONE escalation per invocation (never N identical warnings for the same
   // missing packshot). Set holds product ids that already escalated in THIS call.
   const escalatedForPackshot = new Set<string>();
+  /** One trademark escalation per product per pass — the same skeleton hits every angle otherwise. */
+  const escalatedForTrademark = new Set<string>();
 
   for (const { angle, intent, treatment, pureCompetitor } of planned) {
     const ak = angleKey(angle.hook);
@@ -3467,6 +3506,30 @@ async function stockProduct(
         // fabricates one from the brand name alone (a per-generation invention, not a compositing bug).
         // So skip the generation entirely for this angle, escalate ONCE per product that the packshot
         // is missing, and never silently fall through to a competitor-only image set.
+        // ⭐ PRE-FLIGHT TRADEMARK GATE (CEO 2026-08-24). RAIL 0 in the image prompt tells the model
+        // to substitute a third-party trademark out of an imitated hook, but a prompt is advice, not
+        // a gate — on jobs 58138929 and 23308ec5 the model rendered "Ozempic" on every attempt and
+        // QC (correctly) killed all three. The hook is FIXED input, so retrying re-renders the same
+        // banned word: the outcome was deterministic and cost MAX_QA_ATTEMPTS image generations to
+        // rediscover. Check the text BEFORE spending a render, and escalate with the fix.
+        const trademark = findThirdPartyTrademark(angle.hook);
+        // An owner note naming the trademark is an explicit "I know, use this instead" — the note
+        // outranks the hook, so let it through rather than blocking the CEO's own instruction.
+        if (trademark && !findThirdPartyTrademark(authorNotes)) {
+          if (!escalatedForTrademark.has(productId)) {
+            escalatedForTrademark.add(productId);
+            await escalateTrademarkInHook(admin, workspaceId, productId, productTitle, angle.hook, trademark).catch((e) => {
+              console.warn("dahlia_trademark_escalation_failed", { workspaceId, productId, err: errText(e) });
+            });
+          }
+          out.push({
+            productId, angleHook: angle.hook, campaignId: null, ok: false,
+            reason: `third_party_trademark("${trademark}")`,
+          });
+          skipped = true; // deterministic — retrying cannot change a fixed hook
+          break;
+        }
+
         const plan = planCompositionTransfer(angle, brief);
         if (plan.kind === "skip") {
           if (!escalatedForPackshot.has(productId)) {
@@ -3536,8 +3599,11 @@ async function stockProduct(
         // predicate as the Phase-1 gate: a role:'packshot' ref with a fetchable URL. Undefined
         // signals to the QA to SKIP the check (own-brand no-packshot path — Phase 1 already
         // refused to composition-transfer in that case).
-        const packshotRef = brief.imageRefs.find((r) => r.role === "packshot" && typeof r.url === "string" && /^(https?:|data:)/.test(r.url));
-        const packshotUrl = packshotRef?.url;
+        const packshotRefs = brief.imageRefs.filter((r) => r.role === "packshot" && typeof r.url === "string" && /^(https?:|data:)/.test(r.url));
+        const packshotUrl = packshotRefs[0]?.url;
+        // ALL variant packshots — QC accepts a match against any real flavour (see creative-qa
+        // `packshotUrls`). Passing only [0] false-failed correct renders on multi-flavour products.
+        const packshotUrls = packshotRefs.map((r) => r.url as string);
         // Phase 2 of ad-creative-only-our-real-offer-discount-shown-never-a-competitors — thread
         // our REAL store offer to the QA vision compare so offerConsistent can reject a creative
         // whose rendered discount doesn't match the real offer (a "50% OFF" leaked from a
@@ -3550,7 +3616,7 @@ async function stockProduct(
         // expects a before/after IMAGE only when the render actually emits one (gated on
         // `renderBeforeAfter`). A transformation object attached only for text-proof purposes
         // (flag=false) must not make QA falsely expect a two-photo layout.
-        const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation?.renderBeforeAfter, packshotUrl, realOffer };
+        const qaInput = { buffer: gen.buffer, expectedCopy: gen.expectedCopy, hasTransformation: !!brief.transformation?.renderBeforeAfter, packshotUrl, packshotUrls, realOffer };
         progress("Checking the image quality…");
         const verdict = qcDispatcher
           ? await qaCreativeViaBoxSession(qaInput, qcDispatcher)
@@ -4508,6 +4574,63 @@ async function stockProduct(
  * the same event on the growth ledger so the every-3h audit can see it. Called at most ONCE per
  * stockProduct invocation via the `escalatedForPackshot` set.
  */
+/**
+ * Escalate a competitor hook carrying a third-party trademark — the pre-flight gate's exit.
+ *
+ * Surfaces the ONE thing the CEO can act on: the exact owner note that unblocks it. OWNER_DIRECTIONS
+ * outranks both the competitor hook and RAIL 0, so a pinned headline is a guaranteed fix — whereas
+ * re-running unchanged is a guaranteed repeat.
+ */
+async function escalateTrademarkInHook(
+  admin: Admin,
+  workspaceId: string,
+  productId: string,
+  productTitle: string,
+  hook: string,
+  trademark: string,
+): Promise<void> {
+  const shortWs = workspaceId.slice(0, 8);
+  const dedupeKey = `dahlia-trademark-hook-${shortWs}-${productId}-${trademark}`;
+  const title = `Dahlia blocked: "${productTitle}" imitation hook carries a trademark ("${trademark}")`;
+  const diagnosis = [
+    `Dahlia refused to generate a ${productTitle} ad BEFORE spending a render: the competitor hook`,
+    `"${hook}" contains "${trademark}", a third-party trademark that can never appear on our creative.`,
+    ``,
+    `This is deterministic, not flaky — the hook is fixed input, so every regeneration renders the`,
+    `same banned word and the QC gate rejects all of them. Previously this burned every QA attempt`,
+    `before failing (jobs 58138929, 23308ec5).`,
+    ``,
+    `TO UNBLOCK — re-run the generation with an owner note that pins a replacement headline, e.g.:`,
+    `  Use this EXACT headline: "<your line>". Do NOT use the word ${trademark}.`,
+    ``,
+    `Owner directions outrank both the competitor hook and the image prompt's trademark rail, so a`,
+    `pinned headline is guaranteed to take. Keep the competitor's rhetorical DEVICE and substitute`,
+    `only the trademarked noun — collapsing it into a flat benefit restatement throws away the exact`,
+    `thing worth imitating.`,
+  ].join("\n");
+  const escalation = await escalateDiagnosisToCeo(admin, {
+    workspaceId,
+    specSlug: null,
+    title,
+    diagnosis,
+    dedupeKey,
+    deepLink: `/dashboard/products/${productId}`,
+    escalationKind: "dahlia_trademark_in_hook",
+    metadata: { product_id: productId, product_title: productTitle, hook, trademark },
+  });
+  if (!escalation.emitted) return;
+  await recordDirectorActivity(admin, {
+    workspaceId,
+    directorFunction: "growth",
+    actionKind: "escalated_dahlia_trademark_in_hook",
+    specSlug: null,
+    reason: diagnosis,
+    metadata: { product_id: productId, product_title: productTitle, hook, trademark, dedupe_key: dedupeKey, autonomous: true },
+  }).catch((e) => {
+    console.warn("dahlia_trademark_activity_write_failed", { workspaceId, productId, err: errText(e) });
+  });
+}
+
 async function escalatePackshotMissing(
   admin: Admin,
   workspaceId: string,

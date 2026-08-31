@@ -46,11 +46,6 @@ export default function ResearchAdDetailPage() {
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
 
-  const proxy = useCallback(
-    (u: string | null): string | null =>
-      u ? `/api/ads/creative-finder/media?workspaceId=${workspace.id}&u=${encodeURIComponent(u)}` : null,
-    [workspace.id],
-  );
 
   // Load the single ad + the hero-product dropdown source.
   useEffect(() => {
@@ -136,7 +131,7 @@ export default function ResearchAdDetailPage() {
     [ad, skeletonId, workspace.id],
   );
 
-  const src = ad ? ad.thumb_url ?? proxy(ad.image_url) : null;
+  const src = ad ? ad.thumb_url : null;
 
   if (workspace.role !== "owner") {
     return (

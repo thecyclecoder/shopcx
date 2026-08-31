@@ -59,3 +59,11 @@ Every new probe is a security decision: a code review of `src/lib/spec-check-db-
 ## Related
 
 [[spec-check-runner]] · [[spec-phase-checks-table]] · [[spec-phase-checks-executable]] · [[../specs/machine-declared-verification-and-deterministic-spec-test-runner]]
+
+## `journey_definition_active_by_slug`
+
+True iff an ACTIVE `journey_definitions` row exists for `(workspace_id, slug)`.
+
+Added because `review-collection-foundations` Phase 3 shipped a journey **handler** whose `journey_definitions` row was never created. Its checks grepped for the handler file and passed, so the phase read `shipped` while the journey was unreachable code. Journeys are DB-driven, so *"the code exists"* and *"the journey works"* are different claims — only a probe can tell them apart.
+
+Reads `id` + `is_active`, workspace-bound, shaped to a boolean so evidence never carries row data.

@@ -4,6 +4,7 @@ import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { errText } from "@/lib/error-text";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getOrderRefundLedger } from "@/lib/refund-ledger";
 
 // ── GraphQL helper ──
 
@@ -48,45 +49,179 @@ export const RETURN_REFUND_LEDGER_TERMINAL_STATUSES = new Set(["succeeded", "set
  * ([[../inngest/returns]] `returnsIssueRefund`) reads to know how much to refund on delivery.
  *
  * Phase 2 of [[../../docs/brain/specs/a-money-remedy-must-read-the-live-remedy-state-first]]:
- * BEFORE this helper existed, the return creator computed `orderTotalCents - labelCostCents` and
- * IGNORED any refund the customer had already received on the same order. Derived-from ticket
- * `86043da0` (Jan Bloom): a $182.95 order had a $15 refund fired 36 minutes before the return was
- * created, and the return stored `net_refund_cents = 18295` — the pipeline was one delivery away
- * from over-refunding by $15 silently (corrected by a human before it fired). The fix nets the
- * ledger's succeeded refunds into the ceiling: **`total - Σ succeeded refunds - label`**, floored
- * at 0. A `label` cost of 0 (crisis-return / `freeLabel: true`) leaves the label term unchanged;
- * the caller decides that policy and passes the resulting `labelCostCents`.
+ * BEFORE this helper existed, the return creator computed order-total minus label and IGNORED any
+ * refund the customer had already received on the same order. Derived-from ticket `86043da0` (Jan
+ * Bloom): a $182.95 order had a $15 refund fired 36 minutes before the return was created, and the
+ * return stored `net_refund_cents = 18295` — the pipeline was one delivery away from over-refunding
+ * by $15 silently (corrected by a human before it fired). The fix nets the ledger's succeeded
+ * refunds into the ceiling: **`subtotal - Σ succeeded refunds - label`**, floored at 0. A `label`
+ * cost of 0 (crisis-return / `freeLabel: true`) leaves the label term unchanged; the caller
+ * decides that policy and passes the resulting `labelCostCents`.
  *
- * Pure — the test suite pins the Jan Bloom shape explicitly ($182.95 - $15 - $0 = $167.95). The
- * inputs are pre-summed cents; the async ledger fetch lives at the caller (creator +
- * refund-time re-check) so this stays deterministic and cheap to test.
+ * Phase 3 of [[../../docs/brain/specs/remedy-state-must-see-out-of-band-refunds]]: the input is the
+ * order's SUBTOTAL (line items excluding Shipping Protection), not `total_cents`. The `returns`
+ * policy `returns.refund_formula` machine rule (see [[../tables/policies]] two-halves rule) reads
+ * `order_subtotal - label_cost` and explicitly excludes Shipping Protection, customer-paid shipping
+ * and the label cost — computing from the full total (which folds tax + shipping in) over-promises
+ * by exactly that amount. On yvette SC126000 (2026-08-24) it inflated the promise from $50.54 to
+ * $55.86; we told a customer a number our own policy does not sanction. The input field is
+ * `orderSubtotalCents` (renamed from the historical total-based name) so a caller cannot pass the
+ * wrong figure by habit.
+ *
+ * Pure — the test suite pins the Jan Bloom shape explicitly. Inputs are pre-summed cents; the
+ * async ledger fetch + the subtotal derivation both live at the caller (creator + refund-time
+ * re-check) so this stays deterministic and cheap to test.
  */
 export function computeReturnNetRefundCents(input: {
-  orderTotalCents: number;
+  orderSubtotalCents: number;
   labelCostCents: number;
   refundsSucceededCents: number;
 }): number {
-  const total = Number.isFinite(input.orderTotalCents) ? Math.max(0, Math.round(input.orderTotalCents)) : 0;
+  const subtotal = Number.isFinite(input.orderSubtotalCents) ? Math.max(0, Math.round(input.orderSubtotalCents)) : 0;
   const label = Number.isFinite(input.labelCostCents) ? Math.max(0, Math.round(input.labelCostCents)) : 0;
   const refunded = Number.isFinite(input.refundsSucceededCents) ? Math.max(0, Math.round(input.refundsSucceededCents)) : 0;
-  return Math.max(0, total - refunded - label);
+  return Math.max(0, subtotal - refunded - label);
 }
 
 /**
- * Sum every `order_refunds` mirror row for the given internal `orders.id` UUID that is in a
- * terminal state (`succeeded` or `settled` — the same set the CX SDK's `getOrderRemedyState`
- * counts). Scoped to the workspace on every read (learning #6). Returns 0 on any read error so a
- * transient Supabase blip cannot make the return over-refund — the alternative (throw) would
- * silently fall back to the buggier "ignore prior refunds" path.
+ * Derive an order's REFUNDABLE SUBTOTAL from its `line_items` — the sum of `price_cents * quantity`
+ * EXCLUDING any Shipping Protection line. Pinned in one exported helper so every downstream refund
+ * path (return-creation + any future refund path) agrees on which lines count.
  *
- * Not pure — depends on `admin`. The pure computation is `computeReturnNetRefundCents` above; this
- * is the async ledger reader the return-creation + refund-time paths both call.
+ * Phase 3 of [[../../docs/brain/specs/remedy-state-must-see-out-of-band-refunds]] — the `returns`
+ * policy row (see [[../tables/policies]]) reads: "Refund math: net_refund = order_subtotal -
+ * label_cost" and "Excluded from refund: Shipping Protection, customer-paid shipping costs, return
+ * label costs". `public.orders` has NO subtotal column (probed 2026-08-24 — the columns are
+ * total_cents, line_items, shipping_protection_amount_cents, avalara_total_tax_cents), so we sum
+ * the line items ourselves and match Shopify's Shipping Protection line by title. The same
+ * title match is what [[../libraries/avalara-tax-codes]] `classifyByShopifyCategory` uses to bucket
+ * a line as `shipping_protection` on the tax side, so a policy change to the SP title propagates in
+ * one place, not several. Pure + deterministic — no async, no dependencies beyond a lines array.
  */
-export async function sumSucceededOrderRefundsCents(
+export function deriveOrderSubtotalCentsFromLines(
+  lines: OrderLineItemLite[] | null | undefined,
+): number {
+  const arr = Array.isArray(lines) ? lines : [];
+  let subtotal = 0;
+  for (const l of arr) {
+    const title = String(l?.title ?? "");
+    if (/shipping\s*protection|upcart|shopwill/i.test(title)) continue;
+    const qty = Number.isFinite(l?.quantity) ? Math.max(0, Math.round(l!.quantity!)) : 0;
+    const price = Number.isFinite(l?.price_cents) ? Math.max(0, Math.round(l!.price_cents!)) : 0;
+    subtotal += qty * price;
+  }
+  return subtotal;
+}
+
+/**
+ * Pure derivation of the refund ceiling for an INTERNAL (non-Shopify) order — the order's own
+ * total minus the terminal refunds already recorded against it, floored at 0. Kept as an exported
+ * pure helper so the arithmetic is unit-testable and lives in one place; the only caller today is
+ * `readReturnCreationRefundLedger`'s no_shopify_order_id branch, which passes the DB-read
+ * `orders.total_cents` and the mirror sum over `RETURN_REFUND_LEDGER_TERMINAL_STATUSES`.
+ *
+ * Phase 1 of [[../../docs/brain/specs/internal-order-returns-blocked-by-refund-headroom-guard]] —
+ * `getOrderRefundLedger` cannot answer for an order that never existed in Shopify, and treating
+ * that as "unverifiable" refused 100% of internal-order returns (SHOPCX*). The ceiling IS knowable
+ * without Shopify: subtotal doesn't apply here because internal orders have no separate Shipping
+ * Protection line to strip — the total IS the customer-paid figure — so we net the mirror's
+ * terminal refunds directly against `orders.total_cents`.
+ */
+export function deriveInternalRefundCeilingCents(input: {
+  orderTotalCents: number;
+  refundedCents: number;
+}): number {
+  const total = Number.isFinite(input.orderTotalCents) ? Math.max(0, Math.round(input.orderTotalCents)) : 0;
+  const refunded = Number.isFinite(input.refundedCents) ? Math.max(0, Math.round(input.refundedCents)) : 0;
+  return Math.max(0, total - refunded);
+}
+
+/**
+ * Discriminated verdict for the creation-time refund-headroom check — the shape the extracted
+ * `assertReturnRefundHeadroom` returns. `ok:true` means the return is safe to create for the
+ * promised `net_refund_cents`; `ok:false` carries the caller-facing `error` string with the two
+ * numbers named. Split into its own type so the callsite reads as a single named check rather than
+ * an inline `if / return { success:false, error }` block that can drift out of place.
+ */
+export type ReturnRefundHeadroomVerdict =
+  | { ok: true }
+  | { ok: false; reason: "unreadable_ledger" | "exceeds_ceiling"; error: string };
+
+/**
+ * Pure headroom check for return creation — a return that promises MORE than the order can
+ * actually pay is worse than no return (the customer ships product back and then chases us).
+ * Extracted from the inline `if (netRefundCents > 0) { ... }` block in `createFullReturn` so the
+ * check's POSITION is expressed as one named call — the extraction is the anti-drift.
+ *
+ * Refuses when:
+ *  - the live ledger is unreadable (refundableCents == null) — a refund guard that cannot verify
+ *    headroom must refuse, never assume. Internal (SHOPCX*) orders bypass this via
+ *    `readReturnCreationRefundLedger`'s `no_shopify_order_id` branch (a local ceiling is
+ *    computed), so this branch fires only for a genuine Shopify outage.
+ *  - `netRefundCents > refundableCents` — the promised net exceeds the live ceiling; both numbers
+ *    are named in the error string.
+ *
+ * `netRefundCents <= 0` is a no-op (there is nothing to promise) and always passes.
+ */
+export function assertReturnRefundHeadroom(input: {
+  netRefundCents: number;
+  refundableCents: number | null;
+  orderNumber: string;
+}): ReturnRefundHeadroomVerdict {
+  const net = Number.isFinite(input.netRefundCents) ? Math.max(0, Math.round(input.netRefundCents)) : 0;
+  if (net <= 0) return { ok: true };
+  if (input.refundableCents == null) {
+    return {
+      ok: false,
+      reason: "unreadable_ledger",
+      error: `Refusing to create return: live refund ledger is unreadable so headroom cannot be verified. Promised net_refund $${(net / 100).toFixed(2)} against unknown live refundable ceiling — a refund guard that cannot verify headroom must refuse, never assume.`,
+    };
+  }
+  if (net > input.refundableCents) {
+    return {
+      ok: false,
+      reason: "exceeds_ceiling",
+      error: `Refusing to create return: net_refund $${(net / 100).toFixed(2)} exceeds live refundable ceiling $${(input.refundableCents / 100).toFixed(2)} on order ${input.orderNumber} (Shopify ledger — includes out-of-band refunds). A return that promises more than the order can pay strands the customer.`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * Live refund headroom for the return-creation + refund-time paths — routes through
+ * [[refund-ledger]] `getOrderRefundLedger` so out-of-band Shopify refunds count against the ceiling
+ * (Phase 2 of [[../../docs/brain/specs/remedy-state-must-see-out-of-band-refunds]]). Returns both
+ * numbers the return-creation path needs in ONE Shopify call:
+ *   `refundedCents`   — the ledger's total refunded (mirrored + out-of-band). This replaces
+ *                       `sumSucceededOrderRefundsCents`'s mirror-only sum as the input to
+ *                       `computeReturnNetRefundCents`.
+ *   `refundableCents` — the ledger's `max(0, sale - refunded - pending)` — the HARD CEILING for
+ *                       any new refund. `null` when the Shopify ledger itself is unreadable
+ *                       (Shopify down, order_not_found, invalid_input); a caller must NOT invent a
+ *                       ceiling from a missing signal. INTERNAL (non-Shopify) orders are the one
+ *                       exception — see the `no_shopify_order_id` branch below.
+ *   `ok`              — false when the ledger call itself failed; the mirror-only fallback for
+ *                       `refundedCents` is populated but the creation-time refusal cannot fire.
+ *
+ * The mirror-only fallback (workspace-scoped sum over `public.order_refunds` where
+ * `status IN ('succeeded','settled')`) is retained so a transient Shopify blip cannot make the
+ * return over-refund the mirror figure — but a caller that needs to REFUSE must key on
+ * `refundableCents == null` and treat headroom as unknown, not zero.
+ *
+ * Phase 1 of [[../../docs/brain/specs/internal-order-returns-blocked-by-refund-headroom-guard]]:
+ * `getOrderRefundLedger` returns `{ok:false, reason:'no_shopify_order_id'}` BEFORE any Shopify call
+ * for any order without a shopify_order_id — a structural fact, not a transient failure — so this
+ * function distinguishes THAT reason (compute a local ceiling from `orders.total_cents` via
+ * `deriveInternalRefundCeilingCents`, ok:true) from every OTHER reason (shopify_call_failed /
+ * order_not_found / invalid_input — keep refundableCents=null so the caller's refuse-never-assume
+ * branch still fires; a Shopify outage must not be downgraded into a local guess).
+ */
+export async function readReturnCreationRefundLedger(
   admin: ReturnType<typeof createAdminClient>,
   workspaceId: string,
   orderId: string,
-): Promise<number> {
+): Promise<{ refundedCents: number; refundableCents: number | null; ok: boolean }> {
+  let mirrorRefundedCents = 0;
   try {
     const { data } = await admin
       .from("order_refunds")
@@ -94,16 +229,75 @@ export async function sumSucceededOrderRefundsCents(
       .eq("workspace_id", workspaceId)
       .eq("order_id", orderId);
     const rows = (data ?? []) as Array<{ amount_cents: number | null; status: string }>;
-    let sum = 0;
     for (const r of rows) {
       if (RETURN_REFUND_LEDGER_TERMINAL_STATUSES.has(String(r.status))) {
-        sum += r.amount_cents ?? 0;
+        mirrorRefundedCents += r.amount_cents ?? 0;
       }
     }
-    return sum;
   } catch {
-    return 0;
+    mirrorRefundedCents = 0;
   }
+
+  const ledger = await getOrderRefundLedger(workspaceId, orderId);
+  if (ledger.ok) {
+    return {
+      refundedCents: ledger.refundedCents,
+      refundableCents: ledger.refundableCents,
+      ok: true,
+    };
+  }
+  if (ledger.reason === "no_shopify_order_id") {
+    // Internal (SHOPCX*) order — never existed in Shopify, so the Shopify ledger is structurally
+    // absent, not transiently unreadable. Compute the ceiling locally from orders.total_cents
+    // minus the mirror's terminal refunds. Any OTHER ledger failure reason falls through to the
+    // refuse-never-assume branch below.
+    let orderTotalCents = 0;
+    try {
+      const { data: order } = await admin
+        .from("orders")
+        .select("total_cents")
+        .eq("id", orderId)
+        .eq("workspace_id", workspaceId)
+        .maybeSingle();
+      orderTotalCents = (order?.total_cents as number | null | undefined) ?? 0;
+    } catch {
+      orderTotalCents = 0;
+    }
+    return {
+      refundedCents: mirrorRefundedCents,
+      refundableCents: deriveInternalRefundCeilingCents({
+        orderTotalCents,
+        refundedCents: mirrorRefundedCents,
+      }),
+      ok: true,
+    };
+  }
+  // Ledger unreadable for any other reason (Shopify down, order_not_found, invalid_input) — fall
+  // through with the mirror sum so the caller still has a number, but refundableCents=null signals
+  // "cannot verify the ceiling, must refuse on the creation-refusal check".
+  return { refundedCents: mirrorRefundedCents, refundableCents: null, ok: false };
+}
+
+/**
+ * Sum of terminal refunds ALREADY on the order — routes through [[refund-ledger]]
+ * `getOrderRefundLedger` so out-of-band Shopify refunds count (Phase 2 of
+ * [[../../docs/brain/specs/remedy-state-must-see-out-of-band-refunds]]). On a ledger failure
+ * (Shopify down, non-Shopify order) falls back to the local `public.order_refunds` mirror sum so a
+ * transient blip cannot make the return over-refund the mirror figure — but this is a strict
+ * refunded-so-far read, not a ceiling. The creation-time refusal branch reads
+ * `readReturnCreationRefundLedger` directly for the ledger's `refundableCents`.
+ *
+ * Kept as a thin wrapper for the [[../inngest/returns]] `returnsIssueRefund` refund-time re-check,
+ * which uses this as one of several cascading caps (local mirror → local ledger → gateway
+ * decideRefundReconcile).
+ */
+export async function sumSucceededOrderRefundsCents(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  orderId: string,
+): Promise<number> {
+  const { refundedCents } = await readReturnCreationRefundLedger(admin, workspaceId, orderId);
+  return refundedCents;
 }
 
 // ── Recoverable-error class ──
@@ -868,13 +1062,48 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
     // generalizes.
     const { data: order } = await admin
       .from("orders")
-      .select("line_items")
+      .select("line_items, total_cents")
       .eq("id", params.orderId)
       .maybeSingle();
-    const items = synthesizeReturnItemsFromLines(order?.line_items as OrderLineItemLite[] | null);
+    const orderLineItems = (order?.line_items as OrderLineItemLite[] | null) ?? null;
+    const items = synthesizeReturnItemsFromLines(orderLineItems);
     if (items.length === 0) {
       return { success: false, error: "No returnable line items on this order" };
     }
+
+    // Phase 2 § "refuse before spending money, and never leave a blocking stub" of
+    // [[../../docs/brain/specs/internal-order-returns-blocked-by-refund-headroom-guard]] — the
+    // refund-headroom guard runs HERE, BEFORE any irreversible step (returns row insert, EasyPost
+    // shipment create, EasyPost buy). All inputs are DB reads (order.total_cents + line_items +
+    // refund ledger) with NO dependency on the shipment, so the block moves cleanly.
+    //
+    // The pre-label net is a WORST-CASE: labelCostCents=0 gives the LARGEST possible net_refund
+    // (any real label deducted post-purchase only shrinks it), so a pass here is a pass after
+    // buy — one check upstream replaces the old post-buy check that could refuse only after burning
+    // a paid label. The final `net_refund_cents` stored on the row still uses the ACTUAL label
+    // (computed after buy, below), matching the [[../tables/policies|`returns` policy]] formula.
+    //
+    // "Leave no residue" choice: DEFER the returns INSERT until AFTER this check passes (rather
+    // than delete-on-refusal). A refusal creates no row at all, so the `.neq('status','cancelled')`
+    // one-return-per-ticket guard in `src/lib/action-executor.ts` cannot see a leftover open stub —
+    // the exact block that stranded ticket 6b0cd91c (Denise Richling, 2026-08-28) after PR #2557.
+    // Deferring is simpler and race-free vs a delete on the refusal path.
+    const orderSubtotalCents = deriveOrderSubtotalCentsFromLines(orderLineItems);
+    const refundLedger = await readReturnCreationRefundLedger(admin, params.workspaceId, params.orderId);
+    const preLabelNetRefundCents = computeReturnNetRefundCents({
+      orderSubtotalCents,
+      labelCostCents: 0,
+      refundsSucceededCents: refundLedger.refundedCents,
+    });
+    const headroom = assertReturnRefundHeadroom({
+      netRefundCents: preLabelNetRefundCents,
+      refundableCents: refundLedger.refundableCents,
+      orderNumber: params.orderNumber,
+    });
+    if (!headroom.ok) {
+      return { success: false, error: headroom.error };
+    }
+
     const { data: row, error: insErr } = await admin
       .from("returns")
       .insert({
@@ -991,39 +1220,19 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
       });
     }
 
-    // Compute the refund commitment NOW, while we have full context:
-    //   - items: what's being returned (from getReturnableItems)
-    //   - labelCostCents: what EasyPost actually charged us
-    //   - params.freeLabel: policy decision the caller made
-    //   - order.total_cents: what the customer paid
-    //   - order_refunds succeeded/settled: refunds ALREADY on this order
-    //
-    // The downstream pipeline reads net_refund_cents as the contract
-    // and never re-derives. Storing it here keeps the math local to
-    // the moment we have all the context.
-    const { data: orderRow } = await admin.from("orders")
-      .select("total_cents").eq("id", params.orderId).maybeSingle();
-    const orderTotalCents = orderRow?.total_cents || 0;
+    // Compute the FINAL net_refund_cents commitment now that EasyPost has told us the actual
+    // label cost. `orderSubtotalCents` + `refundLedger` were already resolved upstream for the
+    // pre-purchase headroom check (they're DB-only and cheap), so we reuse them here and only
+    // recompute with the actual label. Phase 3 of remedy-state-must-see-out-of-band-refunds — the
+    // `returns` policy says net_refund = order_subtotal - label_cost and explicitly excludes
+    // Shipping Protection; the DB still stores `order_total_cents` for audit (the customer-paid
+    // figure). The downstream pipeline reads net_refund_cents as the contract and never re-derives.
+    const orderTotalForAudit = (order?.total_cents as number | null | undefined) ?? 0;
     const finalLabelCostCents = params.freeLabel ? 0 : labelCostCents;
-    // Phase 2 of [[../../docs/brain/specs/a-money-remedy-must-read-the-live-remedy-state-first]] —
-    // net out refunds ALREADY succeeded on this order (`public.order_refunds` mirror). Before this
-    // shipped the ceiling was `orderTotal - label` and any prior refund silently over-paid on
-    // delivery (Jan Bloom / SC135494 / ticket 86043da0: $15 already refunded at 19:56, return
-    // created at 20:32 with `net_refund_cents = 18295` = full $182.95 — one delivery away from a
-    // silent $15 over-refund). Reading the local mirror here is symmetric with the money-remedy
-    // hard-reject in [[cs-director]] (Phase 1 of the same spec) and with the refund-time re-check
-    // in [[../inngest/returns]] `returnsIssueRefund` (Phase 2 § bullet 2).
-    const refundsSucceededCents = await sumSucceededOrderRefundsCents(admin, params.workspaceId, params.orderId);
-    // We synthesize the return from EVERY line on the order (see above), so this is by construction
-    // a FULL return — refund the full order total (tax + shipping included) minus our label cost
-    // minus refunds already succeeded on this order. The old `itemsSubtotal >= 95% of order total`
-    // heuristic mis-fired here: itemsSubtotal is the pre-tax line subtotal, so a ~6%-tax order
-    // (Kim SC134360: $125.92 lines / $133.80 total = 94%) read as a PARTIAL return and shorted
-    // the customer their $7.88 tax. All-lines → full order back, net of prior refunds.
     const netRefundCents = computeReturnNetRefundCents({
-      orderTotalCents,
+      orderSubtotalCents,
       labelCostCents: finalLabelCostCents,
-      refundsSucceededCents,
+      refundsSucceededCents: refundLedger.refundedCents,
     });
 
     // Update our DB with EasyPost details + the refund commitment.
@@ -1035,7 +1244,7 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
     await admin.from("returns").update({
       easypost_shipment_id: shipment.id,
       label_cost_cents: finalLabelCostCents,
-      order_total_cents: orderTotalCents,
+      order_total_cents: orderTotalForAudit,
       net_refund_cents: netRefundCents,
       tracking_number: trackingNumber || null,
       label_url: labelUrl || null,

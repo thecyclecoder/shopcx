@@ -126,21 +126,37 @@ export function shouldTripNoProgressCircuit(inboundStreak: number): boolean {
 
 /**
  * Fetch the recent message tail for a ticket, evaluate the streak, and
- * — if the circuit trips — write the observable escalation + system
- * note (compare-and-set guarded on ticket id + workspace) so the ticket
- * is surfaced to a human INSTEAD of the next Opus pass firing. Returns
- * `true` when the caller should skip the paid orchestrator call.
+ * — if the circuit trips — either (a) re-send a cancel journey when the
+ * loop is a routine cancel + the ticket has an active cancel journey
+ * available (in-leash tool that keeps the customer moving) OR (b) write
+ * the observable escalation + system note (compare-and-set guarded on
+ * ticket id + workspace) so the ticket is surfaced to a human. Returns
+ * `tripped: true` in either case so the caller skips the paid
+ * orchestrator call.
  *
  * Idempotent: if the escalation_reason is already `no_progress_context_cap`
  * the update matches zero rows (compare-and-set) and we still short-circuit
  * the call — no repeated system-note noise. This is the compare-and-set
  * discipline the director coaching calls out (see approval-inbox.ts guard).
+ *
+ * ⭐ Routine-cancel re-send (ticket 6c12a925). A stuck loop where the
+ * customer keeps asking "cancel my subscription" and the AI has no
+ * in-leash tool ([[action-executor]] `directActionHandlers` exposes no
+ * cancel action) dead-ends at human review — the customer is trapped
+ * even though the fix is a click on the cancel journey's confirm
+ * button. Instead: launch a fresh cancel journey. The launcher
+ * auto-detects a prior `saved_%` outcome on this ticket via
+ * [[cancel-journey-guard]] `hasRecentSavedRemedy` and routes past
+ * remedies straight to confirm-cancel — cancellation still completes
+ * only via the customer's own journey button, we just get them to
+ * that button. Escalation is skipped on a successful re-send (the
+ * ticket is progressing again).
  */
 export async function applyNoProgressCircuit(
   admin: Admin,
   workspaceId: string,
   ticketId: string,
-): Promise<{ tripped: boolean; streak: number }> {
+): Promise<{ tripped: boolean; streak: number; resent: boolean }> {
   // Look back at the recent chronological tail. 30 covers the streak
   // threshold plus the last reset point comfortably; older messages
   // don't affect the streak, so no need to fetch them.
@@ -154,7 +170,40 @@ export async function applyNoProgressCircuit(
   const streak = inboundStreakSinceLastResponse(chronological);
 
   if (!shouldTripNoProgressCircuit(streak)) {
-    return { tripped: false, streak };
+    return { tripped: false, streak, resent: false };
+  }
+
+  // ── Routine-cancel in-leash re-send (before escalation) ──
+  // Any of the recent inbound customer messages that formed the streak
+  // asking to cancel is enough — one clear "cancel my subscription"
+  // buried under two follow-ups still routes here.
+  const streakInbounds = chronological
+    .slice(-streak)
+    .filter((m) => m.direction === "inbound" && m.author_type === "customer");
+  const { looksLikeCancelIntent } = await import("@/lib/cancel-journey-guard");
+  const isRoutineCancel = streakInbounds.some((m) => looksLikeCancelIntent(m.body ?? null));
+
+  let resent = false;
+  if (isRoutineCancel) {
+    resent = await attemptCancelJourneyResend(admin, workspaceId, ticketId);
+    if (resent) {
+      // A re-sent journey IS the progress — do not escalate, do not
+      // pay for another Opus pass. The launcher already wrote its own
+      // delivery note + `j:cancel-subscription` tag; add one more note
+      // that explains the WHY so a human scanning the thread understands
+      // why the no_progress circuit didn't escalate.
+      await admin.from("ticket_messages").insert({
+        ticket_id: ticketId,
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body: `[System] No-progress circuit: ${streak} inbound in a row asking to cancel — re-sent a fresh cancel journey (routed past any prior saved remedy) instead of escalating to human review with no in-leash tool. See docs/brain/journeys/cancel.md § "Route past remedies on re-request".`,
+      });
+      return { tripped: true, streak, resent: true };
+    }
+    // Re-send failed (no active journey, no subscription, etc.) — fall
+    // through to the escalation path. A stuck loop with no in-leash
+    // tool still needs a human.
   }
 
   // Compare-and-set: only apply the circuit's escalation if THIS row is
@@ -188,5 +237,69 @@ export async function applyNoProgressCircuit(
     });
   }
 
-  return { tripped: true, streak };
+  return { tripped: true, streak, resent: false };
+}
+
+/**
+ * Look up the active cancel-journey definition for this workspace and
+ * launch it via [[journey-delivery]] `launchJourneyForTicket`. Returns
+ * `true` on a successful delivery. Kept separate from
+ * `applyNoProgressCircuit` so a caller could invoke it directly (Sol's
+ * cheap-execution path in the future) and so the escalation-side of
+ * the circuit stays uncoupled from the launcher.
+ *
+ * Reads all inputs from the DB — the ticket's channel, customer_id, and
+ * the workspace's active cancel journey. Returns `false` if any of them
+ * is missing (no active journey for the workspace, no customer, no
+ * channel) so the caller can fall through to escalation.
+ */
+export async function attemptCancelJourneyResend(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+): Promise<boolean> {
+  const { data: ticket } = await admin
+    .from("tickets")
+    .select("customer_id, channel")
+    .eq("id", ticketId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+  if (!ticket) return false;
+  const t = ticket as { customer_id: string | null; channel: string | null };
+  if (!t.customer_id || !t.channel) return false;
+
+  const { data: journey } = await admin
+    .from("journey_definitions")
+    .select("id, name, trigger_intent, slug")
+    .eq("workspace_id", workspaceId)
+    .eq("trigger_intent", "cancel_subscription")
+    .eq("is_active", true)
+    .maybeSingle();
+  if (!journey) return false;
+  const j = journey as { id: string; name: string; trigger_intent: string; slug: string };
+
+  const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
+  const launched = await launchJourneyForTicket({
+    workspaceId,
+    ticketId,
+    customerId: t.customer_id,
+    journeyId: j.id,
+    journeyName: j.name,
+    triggerIntent: j.trigger_intent,
+    channel: t.channel,
+    // Plain, un-branded lead-in — the no_progress circuit isn't Sol/Sonnet,
+    // there's no persona context here. The mini-site header carries the
+    // brand; the CTA text below carries the action.
+    leadIn:
+      "It sounds like you'd still like to cancel. The link below takes you straight to the confirmation — one click and it's done.",
+    ctaText: "Confirm cancellation",
+    // Redundant belt-and-suspenders — the launcher will auto-detect a
+    // prior saved_% outcome via [[cancel-journey-guard]] anyway, but a
+    // no_progress re-send is by definition "customer keeps re-asking,"
+    // so the terminal route is the right one even if there's no saved
+    // remedy row (customer just kept typing "cancel" over an orchestrator
+    // stall).
+    directToCancelTerminal: true,
+  });
+  return launched;
 }

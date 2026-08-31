@@ -12,6 +12,22 @@ The permanent owner of **the company's numbers** — revenue, margin, cash, CAC,
 - **North-star metrics:** net revenue + MRR growth, gross + contribution margin %, LTV:CAC, CAC payback period. These are the numbers the [[ceo]] scoreboard is *measured in* — the CFO is the authoritative source for each.
 - **Data we have:** [[../tables/orders]], [[../tables/subscriptions]], dunning ([[../lifecycles/dunning]]), Meta ad spend ([[../integrations/meta]] / [[../lifecycles/ad-render]]), refunds + returns ([[../lifecycles/return-pipeline]]), payments ([[../integrations/braintree]] / Shopify Payments), tax ([[../integrations/avalara]]). The raw material exists across the departments — the CFO's job is to reconcile it into one financial truth.
 
+## ⭐ [What drives profit](cfo/profit-drivers.md) — read this first
+
+**[cfo/profit-drivers.md](cfo/profit-drivers.md)** is the living, evidence-backed answer to *"what actually moves the north star?"*, measured against 25 closed months of QuickBooks P&L and 12 monthly customer cohorts. It is the CFO's standing analytical record — **add to its findings log, don't re-derive it.**
+
+The headline: **the business is currently UNDER-spending on acquisition, and today's 26% margin is the symptom, not the achievement.** At ~$41K/month of Meta spend it earns 26% on a *shrinking* base, and steady state on that path is ~$4K/month of profit.
+
+**The staged plan (CEO 2026-08-24):** **Phase 0 — restock FBA. Blocking.** Amazon is **66% of acquisition** and has **678 net units with nothing inbound** (~32 days), while the website 3PL holds 103K. **Phase 1** — step to **$55K/month** to match cancels, pointed at **website** conversion while Amazon is dark. **Phase 2** — **+15%/month** toward **~$100K**, paced by cash (Meta is on credit cards; a faster ramp digs a *deeper* hole for the same endpoint) and **gated on Phase 0**.
+
+Channel economics differ sharply and the blend hides it: **Website LTV $365 · Amazon LTV $127 · blended $209**. A website customer is worth nearly **3×** an Amazon one, so never judge a single channel against the blended break-even.
+
+**Stop rule: hold whenever blended CAC crosses $110. Never exceed $139** — break-even is `LTV $209 × 66.3% contribution`. The ceiling is set by the **marginal** customer, not a benchmark ratio; band averages hide a marginal CAC of $224 between $101K and $149K of spend.
+
+CAC means the **blended** number — total ad spend ÷ total new customers across website *and* Amazon ([[../dashboard/analytics__roas]]). Per CEO directive: *"hoping an organic customer shows up is not a lever."*
+
+It also records what has been **disproven** (churn rate is structural, not a lever; revenue volume alone; the "2nd sale" theory), the **corrections** to its own earlier conclusions — including that 2025 *was* profitable once the Dec-2024 inventory write-off is isolated — and which measurement surfaces are **known-broken**.
+
 ## Mandates (perpetual)
 
 ### Financial data & unit economics — the CEO north-star feed

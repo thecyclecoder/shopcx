@@ -1,5 +1,23 @@
 # `src/lib/creative-skeleton.ts` — vision deconstruction + pattern matrix
 
+> ## 🔄 CHANGED 2026-08-24 — creative bytes are INJECTED, and the lane ladder is gone
+>
+> Source moved to [[../integrations/meta-ad-library.md]].
+>
+> - `ingestAd(workspaceId, ad, seed, fetchCreative?)` takes a **`CreativeFetcher`**. It is a parameter,
+>   not an import, because Meta creative bytes come from a Playwright render — keeping it injected is
+>   what stops Playwright reaching the Vercel bundle. Without a fetcher, statics are collected and
+>   tracked but never rendered/visioned.
+> - `sweepCompetitorLanes` is **one call**, not a three-rung ladder. The old
+>   winners→keyword→domain fallback existed because no single AdLibrary endpoint returned a brand's
+>   real library; Meta's `search_page_ids` returns the FULL library with real dates. `lane` now means
+>   how the page id was RESOLVED (`name`|`domain`), not how ads were collected.
+> - `sweepSeed` is **deleted** (dead since the per-product scout replaced the workspace-wide sweep).
+> - Transient-vs-permanent: `isRetryableGraphError` / `isTransientRenderError` replaced
+>   `isRetryableCreativeFetchError`. A creative Meta STRIPPED is permanent (recorded `status='failed'`);
+>   a flaky render is transient (rethrown, ad stays eligible).
+
+
 Phases 3 + 4 of the winning-static-creative finder. Vision-deconstructs a winner's creative into the four-slot skeleton and persists it, then aggregates skeletons into the cross-brand pattern matrix (the deliverable). See [[../lifecycles/creative-finder]] · [[../specs/winning-static-creative-finder]].
 
 ## Exports

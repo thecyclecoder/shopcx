@@ -24,7 +24,7 @@ First-class variant rows (UUID PK). Source of truth for variants; `products.vari
 | `weight` | `numeric` | ✓ |  |
 | `weight_unit` | `text` | ✓ |  |
 | `position` | `int4` | — | default: `0` |
-| `inventory_quantity` | `int4` | ✓ |  |
+| `inventory_quantity` | `int4` | ✓ | ⛔ **RETIRED 2026-08-28 — always NULL. Do not read it, do not repopulate it.** It was a 2026-04-27 backfill snapshot with NO writer, while [[../inngest/sync-inventory]] touched the same rows hourly to fan `servings` down — stamping `updated_at: now()` and leaving the number frozen. A four-month-old value wearing a one-hour-old timestamp: checking freshness gave a false yes. Measured before nulling: 18 of 19 variants disagreed with the 3PL, and 2 read in-stock with zero shippable (`SC-TABS-SL-2` 3748 vs 0 — sold to a customer; `ST-PHONESOCKET-1` 164 vs 0). Mixed Berry still held `3746`, the exact figure behind incident `9a7f9481`. Nulled by `scripts/_backfill-null-stale-variant-inventory-scalar.ts` so a stale read is an obvious NULL, not a plausible lie. **Canonical on-hand is [[inventory_levels]] via `src/lib/inventory/read.ts`** — `getShopifyOnHandByVariant` = the storefront BUY GATE, `getAmplifierOnHandBySku` = the 3PL SHIP TRUTH (the authority; founder 2026-08-28: "the 3PL is the only true source of inventory, not Shopify"). |
 | `available` | `bool` | — | default: `true` |
 | `created_at` | `timestamptz` | — | default: `now()` |
 | `updated_at` | `timestamptz` | — | default: `now()` |

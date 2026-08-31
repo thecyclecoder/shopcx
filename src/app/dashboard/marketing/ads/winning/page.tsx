@@ -264,7 +264,7 @@ function BrowseView({
       {skeletons.map((s) => {
         // Prefer OUR stored downscaled copy (fast, served from storage); fall back to the live proxy
         // only for legacy rows that predate thumb_path.
-        const src = s.thumb_url ?? proxy(s.image_url);
+        const src = s.thumb_url;
         return (
           <div
             key={s.id}

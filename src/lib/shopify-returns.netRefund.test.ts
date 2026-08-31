@@ -21,7 +21,7 @@ import { computeReturnNetRefundCents } from "./shopify-returns";
 
 test("computeReturnNetRefundCents — Jan Bloom shape: $182.95 order, $15 already refunded, $0 label ⇒ $167.95 (NOT $182.95)", () => {
   const netRefundCents = computeReturnNetRefundCents({
-    orderTotalCents: 18295,
+    orderSubtotalCents: 18295,
     labelCostCents: 0,
     refundsSucceededCents: 1500,
   });
@@ -39,7 +39,7 @@ test("computeReturnNetRefundCents — Jan Bloom shape: $182.95 order, $15 alread
 
 test("computeReturnNetRefundCents — clean state (no prior refunds): $182.95 - $0 refunds - $8.50 label = $174.45", () => {
   const netRefundCents = computeReturnNetRefundCents({
-    orderTotalCents: 18295,
+    orderSubtotalCents: 18295,
     labelCostCents: 850,
     refundsSucceededCents: 0,
   });
@@ -48,7 +48,7 @@ test("computeReturnNetRefundCents — clean state (no prior refunds): $182.95 - 
 
 test("computeReturnNetRefundCents — free label + no prior refunds is a full-order refund: $182.95 - $0 - $0 = $182.95", () => {
   const netRefundCents = computeReturnNetRefundCents({
-    orderTotalCents: 18295,
+    orderSubtotalCents: 18295,
     labelCostCents: 0,
     refundsSucceededCents: 0,
   });
@@ -57,7 +57,7 @@ test("computeReturnNetRefundCents — free label + no prior refunds is a full-or
 
 test("computeReturnNetRefundCents — refunds already at/above total ⇒ floors at 0 (no negative refund; no `store_credit` payout for a zero balance)", () => {
   const netRefundCents = computeReturnNetRefundCents({
-    orderTotalCents: 10000,
+    orderSubtotalCents: 10000,
     labelCostCents: 500,
     refundsSucceededCents: 15000,
   });
@@ -66,7 +66,7 @@ test("computeReturnNetRefundCents — refunds already at/above total ⇒ floors 
 
 test("computeReturnNetRefundCents — a prior refund plus a label cost both subtract: $200 - $50 refunded - $10 label = $140", () => {
   const netRefundCents = computeReturnNetRefundCents({
-    orderTotalCents: 20000,
+    orderSubtotalCents: 20000,
     labelCostCents: 1000,
     refundsSucceededCents: 5000,
   });
@@ -75,7 +75,7 @@ test("computeReturnNetRefundCents — a prior refund plus a label cost both subt
 
 test("computeReturnNetRefundCents — non-finite inputs are treated as 0 (defensive against NaN from a null column) — never a NaN payout", () => {
   const netRefundCents = computeReturnNetRefundCents({
-    orderTotalCents: Number.NaN,
+    orderSubtotalCents: Number.NaN,
     labelCostCents: 500,
     refundsSucceededCents: 1500,
   });

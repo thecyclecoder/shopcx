@@ -76,6 +76,8 @@ export const todaySyncCron = inngest.createFunction(
           workspaceId: conn.workspace_id,
           connectionId: conn.id,
           reportTsv: tsv,
+          windowStart: today,
+          windowEnd: tomorrow.toISOString().slice(0, 10),
         });
 
         return { amazon: "synced", orders: result.orderCount };

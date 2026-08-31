@@ -145,13 +145,126 @@ const PROMISE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
  * returns policy caps at ONE MBG return per customer for life; a reply that stacks TWO
  * returns or refunds in one turn is a bait in itself. The 87ce35a1 coffee-return ticket
  * matched this even before the out-of-policy check — Sol offered two returns unprompted.
+ *
+ * ⭐ The FIRST pattern (`TWO_REFUNDS_COUNT_PATTERN`) is exempted when the reply is
+ * describing refunds ALREADY posted to the ledger for ONE order (a split partial +
+ * completion) — see `isDescribingCompletedSplitRefund` below. The other three patterns
+ * are inherently multi-order or forward-looking and never qualify for the exemption.
  */
+const TWO_REFUNDS_COUNT_PATTERN =
+  /\b(?:two|2)\s+(?:returns?|refunds?|prepaid labels?|store credits?|exchanges?|replacements?)\b/i;
 const MULTIPLE_REMEDY_PATTERNS: RegExp[] = [
-  /\b(?:two|2)\s+(?:returns?|refunds?|prepaid labels?|store credits?|exchanges?|replacements?)\b/i,
+  TWO_REFUNDS_COUNT_PATTERN,
   /\bboth\s+(?:returns?|refunds?|orders?)\s+(?:can be|will be|are eligible|are returnable|are refundable)/i,
   /\ba\s+return\s+for\s+each\s+order\b/i,
   /\bone\s+for\s+each\s+of\s+(?:the\s+)?(?:two|both)\s+(?:orders?|renewals?)\b/i,
 ];
+
+/**
+ * Past-tense refund verbs that mark a reply as DESCRIBING refunds already posted to the
+ * ledger (rather than OFFERING new ones). Deliberately narrow — the verb must clearly
+ * refer to a completed action; "will be refunded" / "I'll refund" don't match here.
+ */
+const COMPLETED_REFUND_MARKERS: RegExp[] = [
+  /\bwas\s+refunded\b/i,
+  /\bwere\s+refunded\b/i,
+  /\bhas\s+been\s+refunded\b/i,
+  /\bhave\s+been\s+refunded\b/i,
+  /\bhad\s+been\s+refunded\b/i,
+  /\balready\s+refunded\b/i,
+  /\bfully\s+refunded\b/i,
+  /\brefunded\s+in\s+(?:two|full)\b/i,
+  /\bwas\s+(?:issued|posted|processed)\b/i,
+  /\bwere\s+(?:issued|posted|processed)\b/i,
+  /\bhas\s+been\s+(?:issued|posted|processed)\b/i,
+  /\bhave\s+been\s+(?:issued|posted|processed)\b/i,
+  /\balready\s+(?:issued|posted|processed)\b/i,
+  /\bwe['’]?ve\s+refunded\b/i,
+  /\bI['’]?ve\s+refunded\b/i,
+  /\ba\s+partial\s+(?:refund\s+)?(?:plus|and)\s+(?:the\s+)?(?:completion|remainder)\b/i,
+  /\bpartial\s+and\s+(?:the\s+)?completion\b/i,
+  /\bsplit\s+(?:refund|into\s+two\s+(?:parts?|refunds?|postings?))\b/i,
+  /\bposted\s+in\s+two\s+(?:parts?|postings?)\b/i,
+  /\btwo\s+postings?\b/i,
+];
+
+/**
+ * Signals the reply is talking about MORE than one order — if any of these fire, the
+ * split-refund exemption is inapplicable regardless of tense (a split refund for a
+ * single order can't span two orders).
+ */
+const MULTI_ORDER_MARKERS: RegExp[] = [
+  /\b(?:each|both)\s+orders?\b/i,
+  /\btwo\s+orders?\b/i,
+  /\bthe\s+other\s+order\b/i,
+  /\ba\s+second\s+order\b/i,
+  /\ba\s+different\s+order\b/i,
+];
+
+/**
+ * Forward-looking refund verbs — if any of these fire, the reply is OFFERING a remedy
+ * (not just describing one), so the exemption never applies.
+ */
+const FUTURE_REFUND_VERBS: RegExp[] = [
+  /\bI['’]?(?:ll|\s?will)\s+(?:issue|process|refund|initiate|set\s?up|start|generate|arrange|send)\b/i,
+  /\bwe['’]?(?:ll|\s?will)\s+(?:issue|process|refund|initiate|set\s?up|start|generate|arrange|send)\b/i,
+  /\bwill\s+be\s+(?:refunded|issued|processed|initiated|generated|sent)\b/i,
+  /\bhappy\s+to\s+(?:issue|process|refund|initiate|set\s?up|generate|arrange|send)\b/i,
+  /\blet\s+me\s+(?:issue|process|refund|initiate|set\s?up|generate|arrange|send)\b/i,
+  /\bgoing\s+to\s+(?:issue|process|refund|initiate|set\s?up|generate|arrange|send)\b/i,
+];
+
+/**
+ * Detects an arithmetic reconciliation: two dollar amounts + a third that equals their
+ * sum, within a cent for float rounding. The ticket f2d898c9 canonical example:
+ * "the $5.01 plus the $49.33 is the complete $54.34". Any triple of `$X, $Y, $Z` where
+ * X + Y ≈ Z counts — the reconciliation shape is unmistakable in a refund reply.
+ */
+function containsSumReconciliation(reply: string): boolean {
+  const amountRe = /\$\s?(\d+(?:,\d{3})*(?:\.\d{1,2})?)/g;
+  const amounts: number[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = amountRe.exec(reply)) !== null) {
+    const n = parseFloat(m[1].replace(/,/g, ""));
+    if (Number.isFinite(n)) amounts.push(n);
+  }
+  if (amounts.length < 3) return false;
+  for (let i = 0; i < amounts.length; i++) {
+    for (let j = i + 1; j < amounts.length; j++) {
+      for (let k = 0; k < amounts.length; k++) {
+        if (k === i || k === j) continue;
+        if (Math.abs(amounts[i] + amounts[j] - amounts[k]) < 0.02) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * ⭐ Exemption for the "two refunds"-count match (ticket f2d898c9, mary arditi SC134282):
+ * a fully-refunded order was posted as a $5.01 partial + $49.33 completion totaling
+ * $54.34. When Sol drafted the correct explanation ("the $5.01 plus the $49.33 is the
+ * complete $54.34"), MULTIPLE_REMEDY_PATTERNS[0] matched "two refunds" and false-blocked
+ * the ledger-explanation as a bait. This detector recognises the DESCRIBING-not-OFFERING
+ * shape so the count match doesn't fire on it.
+ *
+ * Conservative by construction — three exclusions must ALL hold before the exemption
+ * applies:
+ *   1. NO multi-order marker (a split refund lives on one order)
+ *   2. NO forward-looking refund verb ("I'll issue", "we'll process", "happy to refund")
+ *   3. AT LEAST ONE completed-refund marker OR an arithmetic sum reconciliation
+ * A future-tense two-refund offer that happens to sum-reconcile ("I'll issue two
+ * refunds — $5 and $10 totaling $15") is still blocked because #2 fails; a two-order
+ * offer that sneaks in past-tense wording is still blocked because #1 fails.
+ */
+function isDescribingCompletedSplitRefund(reply: string): boolean {
+  if (MULTI_ORDER_MARKERS.some((r) => r.test(reply))) return false;
+  if (FUTURE_REFUND_VERBS.some((r) => r.test(reply))) return false;
+  return (
+    COMPLETED_REFUND_MARKERS.some((r) => r.test(reply)) ||
+    containsSumReconciliation(reply)
+  );
+}
 
 /**
  * The core assessor. Returns `{ ok: true }` when the reply is safe to send, or an
@@ -165,15 +278,20 @@ export function assessSolReplyBaitRisk(ctx: SolReplyBaitContext): SolReplyBaitAs
 
   for (const p of MULTIPLE_REMEDY_PATTERNS) {
     const m = reply.match(p);
-    if (m) {
-      return {
-        ok: false,
-        kind: "multiple_remedies_offered",
-        reason:
-          "reply stacks multiple remedies in one turn (the returns policy caps at one MBG return per customer for life — any offer of two returns/refunds/labels is a bait)",
-        matched_phrase: m[0],
-      };
-    }
+    if (!m) continue;
+    // Ticket f2d898c9 exemption: the "two refunds"-count match is skipped when the reply is
+    // reconciling a split refund already posted to the ledger for ONE order (past-tense verbs
+    // and/or an arithmetic sum, no multi-order marker, no forward-looking promise). The other
+    // three patterns in MULTIPLE_REMEDY_PATTERNS are inherently multi-order or forward-looking
+    // and never qualify.
+    if (p === TWO_REFUNDS_COUNT_PATTERN && isDescribingCompletedSplitRefund(reply)) continue;
+    return {
+      ok: false,
+      kind: "multiple_remedies_offered",
+      reason:
+        "reply stacks multiple remedies in one turn (the returns policy caps at one MBG return per customer for life — any offer of two returns/refunds/labels is a bait)",
+      matched_phrase: m[0],
+    };
   }
 
   // ⭐ PROMISE UNDER IGNORANCE. Fires regardless of verdict, like the structural check above: if we

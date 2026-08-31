@@ -250,18 +250,42 @@ export async function runAdsSupervisorPass(
     }
   }
   const actedByAdset = await readExecutedIterationActionsForAdsets(admin, workspaceId, [...productAdsetIds]);
+  // A promote correctly deferred by the media-buyer's per-object cooldown rail (armed 2026-08-24
+  // in commit 6a9902a9e7) or by the per-account daily budget delta ceiling writes a
+  // `media_buyer_scale_rail_deferred` director_activity row — NOT an iteration_actions row — so
+  // the executed-only coverage map alone would fire a false-positive `bianca_missed_crown`
+  // every 3h until the cooldown clears. Bianca DID evaluate the crown and chose to defer per
+  // policy — that is legitimate coverage on this cadence tick.
+  const railDeferredScaleUpAdsets = await readRecentScaleRailDeferralsForAdsets(
+    admin,
+    workspaceId,
+    [...productAdsetIds],
+    nowMs,
+  );
+  // ads-supervisor-fix-fdc11e10-bianca-kill-120253384730390184 — the same symmetric coverage
+  // for the kill side. A dud on `policy.never_pause_object_ids` writes a
+  // `media_buyer_kill_rail_deferred` director_activity row instead of an `iteration_actions`
+  // pause; without this read the executed-only coverage map fires a fresh `bianca_missed_kill`
+  // fix-spec every 3h on a CEO-protected dud. Bianca DID evaluate the loser and chose to defer
+  // per policy — that is legitimate coverage.
+  const railDeferredKillAdsets = await readRecentKillRailDeferralsForAdsets(
+    admin,
+    workspaceId,
+    [...productAdsetIds],
+    nowMs,
+  );
 
   for (const group of results.products) {
     for (const row of group.rows) {
       if (!row.active) continue;
       const acted = actedByAdset.get(row.adsetId);
       if (row.tier === "crown") {
-        if (!acted?.hasScaleUp) {
+        if (!acted?.hasScaleUp && !railDeferredScaleUpAdsets.has(row.adsetId)) {
           biancaMisses += 1;
           findings.push(makeBiancaCrownFinding(group, row));
         }
       } else if (row.tier === "dud") {
-        if (!acted?.hasPause) {
+        if (!acted?.hasPause && !railDeferredKillAdsets.has(row.adsetId)) {
           biancaMisses += 1;
           findings.push(makeBiancaKillFinding(group, row));
         }
@@ -447,6 +471,120 @@ export async function readExecutedIterationActionsForAdsets(
     if (row.action_type === "scale_up") cur.hasScaleUp = true;
     if (row.action_type === "pause") cur.hasPause = true;
     out.set(row.object_id, cur);
+  }
+  return out;
+}
+
+/**
+ * The lookback window `readRecentScaleRailDeferralsForAdsets` scans for a legitimate scale-rail
+ * deferral trace. Chosen to match the widest sane `iteration_policies.per_object_cooldown_hours`
+ * (24h today) — a deferral row older than the cooldown itself can't still be blocking a promote
+ * on this tick, so it MUST NOT count as coverage. Set to exactly 24h so the guard closes as the
+ * cooldown does; a stale-but-legitimate deferral falls off the coverage map and the supervisor
+ * fires the missed-crown finding again if Bianca still hasn't promoted.
+ */
+export const RAIL_DEFERRAL_LOOKBACK_MS = 24 * 3600_000;
+
+/**
+ * For each adsetId, did the media-buyer's most recent pass DEFER a promote on a
+ * scale rail (per-object cooldown or per-account daily budget delta ceiling) within
+ * the last `RAIL_DEFERRAL_LOOKBACK_MS`? Written by [[./media-buyer/agent]] as one
+ * `media_buyer_scale_rail_deferred` `director_activity` row per deferred promote,
+ * with `metadata.target_object_id=<adsetId>` and `metadata.rail∈{per_object_cooldown,
+ * per_account_daily_budget_delta_ceiling}`.
+ *
+ * A row in the window is PROOF that Bianca evaluated the crown and CHOSE to defer per
+ * policy — that is coverage on this tick, not a silent miss. Without this read the
+ * per-object cooldown rail (armed 2026-08-24) would generate a fresh
+ * `bianca_missed_crown` fix-spec every 3h for every crowned adset that promoted inside
+ * the last 24h, drowning the supervisor's #director-growth-max digest in false positives.
+ *
+ * Scoped by `metadata.target_object_id` in JS after the DB read (jsonb `metadata->>...`
+ * filters would work too but a small workspace-scoped scan keeps the query shape simple
+ * and the filter cheap). Best-effort — a read failure returns an EMPTY set, so on error
+ * the supervisor degrades to the pre-Phase-3 behavior (fires the finding) rather than
+ * silently swallowing a real miss.
+ *
+ * Exported so the pinned test can pin the argv-level filters + the map semantics.
+ */
+export async function readRecentScaleRailDeferralsForAdsets(
+  admin: Admin,
+  workspaceId: string,
+  adsetIds: string[],
+  nowMs: number,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (!adsetIds.length) return out;
+  const sinceIso = new Date(nowMs - RAIL_DEFERRAL_LOOKBACK_MS).toISOString();
+  const { data, error } = await admin
+    .from("director_activity")
+    .select("metadata, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("action_kind", "media_buyer_scale_rail_deferred")
+    .gte("created_at", sinceIso);
+  if (error) {
+    console.warn(`[ads-supervisor] director_activity read failed for scale-rail deferrals: ${error.message}`);
+    return out;
+  }
+  const adsetSet = new Set(adsetIds);
+  for (const row of (data ?? []) as Array<{ metadata: Record<string, unknown> | null }>) {
+    const target = row.metadata?.["target_object_id"];
+    if (typeof target === "string" && adsetSet.has(target)) {
+      out.add(target);
+    }
+  }
+  return out;
+}
+
+/**
+ * ads-supervisor-fix-fdc11e10-bianca-kill-120253384730390184 — kill-side twin of
+ * `readRecentScaleRailDeferralsForAdsets`. For each adsetId, did the media-buyer's most
+ * recent pass DEFER a pause on a kill-side rail (today: `never_pause_list`) within the
+ * last `RAIL_DEFERRAL_LOOKBACK_MS`? Written by [[./media-buyer/agent]] as one
+ * `media_buyer_kill_rail_deferred` `director_activity` row per deferred kill, with
+ * `metadata.target_object_id=<adsetId>` and `metadata.rail='never_pause_list'`.
+ *
+ * A row in the window is PROOF that Bianca evaluated the loser and CHOSE to defer per
+ * policy — that is coverage on this tick, not a silent miss. Without this read the
+ * every-3h supervisor would author a fresh `bianca_missed_kill` fix-spec on every
+ * protected dud, drowning #director-growth-max in false positives.
+ *
+ * Same freshness cap as the scale-rail reader: a defer older than
+ * `RAIL_DEFERRAL_LOOKBACK_MS` (24h) is dropped so a stale hold cannot silently mask a
+ * fresh miss if the CEO removes the adset from `never_pause_object_ids` and Bianca
+ * still fails to pause it on the next cadence.
+ *
+ * Best-effort — a read failure returns an EMPTY set, degrading to the pre-fix behavior
+ * (fires the finding) rather than silently swallowing a real miss.
+ *
+ * Exported so `ads-supervisor.rail-defer-coverage.test.ts` can pin the argv-level
+ * filters + the map semantics on synthetic rows without touching real Supabase.
+ */
+export async function readRecentKillRailDeferralsForAdsets(
+  admin: Admin,
+  workspaceId: string,
+  adsetIds: string[],
+  nowMs: number,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (!adsetIds.length) return out;
+  const sinceIso = new Date(nowMs - RAIL_DEFERRAL_LOOKBACK_MS).toISOString();
+  const { data, error } = await admin
+    .from("director_activity")
+    .select("metadata, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("action_kind", "media_buyer_kill_rail_deferred")
+    .gte("created_at", sinceIso);
+  if (error) {
+    console.warn(`[ads-supervisor] director_activity read failed for kill-rail deferrals: ${error.message}`);
+    return out;
+  }
+  const adsetSet = new Set(adsetIds);
+  for (const row of (data ?? []) as Array<{ metadata: Record<string, unknown> | null }>) {
+    const target = row.metadata?.["target_object_id"];
+    if (typeof target === "string" && adsetSet.has(target)) {
+      out.add(target);
+    }
   }
   return out;
 }

@@ -85,6 +85,14 @@ under the `-i` flag; NOT matching without it) is pinned.
 
 Grep checks treat `params.path` as a spec-authored capability boundary. `validateGrepPath` (co-exported, called by `validateExecutableCheck` for every grep check) rejects paths that are absolute, empty, NUL-embedded, traverse outside the repo with `..` segments, or start with `'-'` (would be parsed as an option/preprocessor by ripgrep). The runner also passes the value after an argv `--` separator (see [[spec-check-runner]] `defaultExecutors.grep`), but this validator is the primary gate: a rejected path never reaches spawn at all.
 
+### Grep POSIX-ERE reject: validateGrepPatternIsPosixEre
+
+[[../specs/a-broken-verification-check-cannot-kill-a-build]] Phase 1 — `validateExecutableCheck` rejects a `grep` whose `pattern` uses a PCRE-only construct that `git grep` (POSIX regex, the engine [[specs-table]] `defaultRunGitGrepOnBranch` shells out to at the merge gate) refuses to compile. Anchored to the exclusive marker `(?` after an unescaped `(` — the opener of every construct git grep POSIX rejects: `(?i)` / `(?:...)` / `(?=...)` / `(?!...)` / `(?<=...)` / `(?<!...)` / `(?<name>...)` / `(?P<name>...)` / `(?>...)`. An escaped `\(?` (literal paren + `?` quantifier) stays legal — the rule cannot false-reject a pattern that runs today, per the spec's "MUST NOT be so strict it rejects patterns that work today" clause. Uses the same refusal criterion the two runner lanes ultimately hit, so a check that passes authoring cannot then fail the merge gate on the same class.
+
+Message shape names the offending pattern, the specific `(?` construct, and points at the supported route: an all-lowercase pattern (the runner already adds `-i` via `shouldGrepCaseInsensitively`, so smart-case handles case-insensitivity) instead of an inline `(?i)` flag. Live-example pinned by the unit tests: `(?i)add column if not exists\s+cancelled_at` is refused (the exact pattern that dismissed `cancelled-subs-stop-reporting-a-future-billing-date` on 2026-08-21 after three re-drives, and `playbook-drift-classifier-sees-the-pending-question` on 2026-08-24); the same intent as `add column if not exists.*cancelled_at` accepts and matches identically at both gates.
+
+Before this gate a broken pattern was reported as an infrastructure fault at build time and then charged to the code being verified — `BUILDER_DEFERRED_REDRIVE_MAX=3` re-drives, then dismissal-as-unverified — so a one-character mistake in a check silently destroyed the whole build. Author-time is the cheapest place to close that class: the broken check never reaches a build at all.
+
 ## Author chokepoint gate
 
 Two gates fire in order BEFORE the DB write; both throw with the offending phase named so the author sees exactly what's un-testable:

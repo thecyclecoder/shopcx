@@ -1,6 +1,8 @@
 # product_reviews
 
-Klaviyo-synced product reviews with AI summaries. Used for cancel-journey social proof.
+Product reviews with AI summaries. Storefront PDPs, ad-tool proof anchors, product intelligence, cancel-journey social proof, review cards, storefront email.
+
+⚠️ **No longer synced — and nothing collects reviews today.** The Klaviyo sync upsert was the ONLY INSERT into this table anywhere in the codebase, and Klaviyo is retired ([[../integrations/klaviyo]]). The newest row is **2026-07-01**. The table itself is permanent and heavily read; it is the *write* side that needs the in-house reviews program.
 
 **Primary key:** `id`
 
@@ -34,6 +36,10 @@ Klaviyo-synced product reviews with AI summaries. Used for cancel-journey social
 | `product_id` | `uuid` | ✓ | → [[products]].id |
 | `body_locked_at` | `timestamptz` | ✓ |  |
 | `body_polished_at` | `timestamptz` | ✓ |  |
+| `rejection_reason` | `text` | ✓ | Why a moderator rejected it. NULL for pre-sunset rejections (that reason lived only in Klaviyo) |
+| `rejection_explanation` | `text` | ✓ | Free-text the moderator typed alongside the reason |
+| `moderated_at` | `timestamptz` | ✓ | Last human moderation action on the row |
+| `attribute_scores` | `jsonb` | ✓ | Slider answers from the product-review journey — e.g. `{"convenience":5,"effectiveness":4,"flavor":5,"expectation":"exceeded"}`. jsonb because the question set is per-product (Flavor is skipped for the Tumbler / Mixer / Mug — see `default set` in the journey definition). NULL for reviews collected before the in-house program (all pre-2026-07-01 rows). Migration `20261215120000_review_collection_foundations.sql`. |
 
 ## Foreign keys
 
@@ -82,8 +88,15 @@ const { count } = await admin.from("product_reviews")
 
 ## Gotchas
 
-- Synced from Klaviyo. AI-summarized (Haiku, max 15 words) for cancel-journey social proof.
-- Featured reviews (`smart_featured` from Klaviyo) prioritized, then highest-rated.
+- **Moderation is local-only** since the Klaviyo sunset. `/api/workspaces/[id]/reviews/[reviewId]` PATCH used to round-trip every publish/reject/feature to Klaviyo for any row with a `klaviyo_review_id` — all 10,745 of them — which would have hard-500'd the moment the key stopped authenticating. This table is now the sole system of record for moderation state. See [[../dashboard/reviews]].
+- `klaviyo_review_id` is **provenance only** now. Don't branch on it.
+- Historically imported from Klaviyo and AI-summarized (Haiku, max 15 words) for cancel-journey social proof. Featured reviews (`smart_featured` from Klaviyo) prioritized, then highest-rated — `featured` / `status='featured'` still drive that ordering, they're just set by hand now.
+- **`images` are Klaviyo-relative paths** (`{company_id}/{uuid}.jpg?updated_at=…`), not URLs — 95 rows. Nothing renders them; the assets live on Klaviyo's CDN and die with the account. `scripts/_backfill-review-images-to-storage.ts` mirrors them once the CDN base is supplied.
+- Status enum in use: `published` (9,344) · `rejected` (1,327) · `featured` (74). `pending` / `unpublished` are counted by the dashboard API but no rows carry them.
+
+## Aggregates → Shopify
+
+`reviews.rating` + `reviews.rating_count` on the Shopify product are computed from this table daily by [[../libraries/shopify-review-metafields]]. That aggregate counts **rating-only rows** (no body) — the widget list doesn't. Change one scope and you must change the other, or a PDP header contradicts its own product card.
 
 ## Ad tool
 

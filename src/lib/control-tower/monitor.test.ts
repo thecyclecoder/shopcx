@@ -18,22 +18,27 @@ import {
   countSegmentStaleTail,
   countStuckDunningCycles,
   SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE,
+  SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE,
   evalAgentKind,
   evalCron,
   evalInlineAgent,
+  evalOutputAssertion,
   evalWorker,
   extractCronExpr,
   extractSolHandleBypassTicketIds,
   SOL_HANDLE_BYPASS_REASONS,
   firstScheduledFiringMs,
+  FRAUD_DETECTOR_HEARTBEAT_COALESCE_GRACE_MS,
   INTERNAL_RENEWAL_ORDER_SOURCE_NAMES,
   isBoxEmittedCronLoop,
   isOrderAwaitingFraudScreen,
   isWorkerUnavailable,
+  orderIsInsideFraudCoalesceCoverage,
   jobStuckSince,
   nextFiringAtOrAfter,
   parseCronExpr,
   type ActiveJob,
+  type AssertionInputs,
   type InlineAgentState,
   type LoopHistoryRow,
   type WorkerRow,
@@ -909,6 +914,124 @@ test("evalInlineAgent still flips RED on a real Shopify/web order with no ai:fra
 
   const pastBeat: LoopHistoryRow = { ran_at: "2026-06-24T00:00:00Z", ok: true, produced: null, detail: null, duration_ms: null };
   const state: InlineAgentState = { work: 1, okCount: 0, errCount: 0, latest: pastBeat, history: [pastBeat] };
+  const result = evalInlineAgent(fraudLoop!, state);
+  assert.equal(result.color, "red");
+  assert.equal(result.violation?.reason, "idle_while_work");
+});
+
+// ─── ai:fraud-detector work probe — coalesce-coverage grace ───
+// control-tower-fraud-workprobe-coalesce-grace (signal loop:ai:fraud-detector,
+// verdict monitor-false-positive). Originating false page: a quiet edge minute
+// where an order arrived just before a successful ai:fraud-detector heartbeat
+// whose in-memory 60s coalesce (HEARTBEAT_COALESCE_MS in
+// src/lib/control-tower/heartbeat.ts) suppressed the order's own beat. When the
+// 6h liveness window later slid past that beat, the write rolled out but the
+// order stayed in — okCount=0 while work=1 → false idle_while_work on the tile.
+// The grace teaches the probe to skip orders inside the coalescing coverage
+// window of the latest successful beat, so the tile stays green on that shape.
+// Orders beyond the grace still count, so a genuine detector outage after a
+// stale beat still flips the tile red.
+
+test("FRAUD_DETECTOR_HEARTBEAT_COALESCE_GRACE_MS matches the heartbeat writer's coalesce budget", () => {
+  // Pinned so the probe's coverage window can't silently drift apart from the
+  // writer's suppression budget (HEARTBEAT_COALESCE_MS = 60_000 in
+  // src/lib/control-tower/heartbeat.ts). If the writer's budget changes, this
+  // test forces a same-PR update on both constants — anything else re-opens
+  // the exact edge-window false page this spec repairs.
+  assert.equal(FRAUD_DETECTOR_HEARTBEAT_COALESCE_GRACE_MS, 60_000);
+});
+
+test("orderIsInsideFraudCoalesceCoverage covers the exact edge of the coalesce window", () => {
+  // The boundary that reproduces the originating alert: an order created
+  // 30s AFTER the latest successful beat rides on that beat's coalesced run —
+  // its own beat would have been suppressed by HEARTBEAT_COALESCE_MS — so the
+  // probe must NOT count it as unscreened work. The exclusive edges (before T
+  // and past T + grace) fall outside the coverage window and DO count.
+  const beat = Date.parse("2026-08-27T18:00:00Z");
+  // Inside the window (inclusive of T, inclusive of T + grace):
+  assert.equal(orderIsInsideFraudCoalesceCoverage(beat, beat), true);
+  assert.equal(orderIsInsideFraudCoalesceCoverage(beat + 30_000, beat), true);
+  assert.equal(orderIsInsideFraudCoalesceCoverage(beat + 60_000, beat), true);
+  // Just outside the window on both edges — these are the orders that count:
+  assert.equal(orderIsInsideFraudCoalesceCoverage(beat - 1, beat), false);
+  assert.equal(orderIsInsideFraudCoalesceCoverage(beat + 60_001, beat), false);
+  // Null latest beat (never any successful run) — nothing to coalesce:
+  assert.equal(orderIsInsideFraudCoalesceCoverage(beat, null), false);
+});
+
+test("orderIsInsideFraudCoalesceCoverage covers the sliding-window edge shape from the alert", () => {
+  // Directly models the originating false page: the liveness window is
+  // `[now - 6h, now]`, the latest successful beat T fell 30s BEFORE the window
+  // opened (so it has now rolled OUT of the 6h liveness window and okCount=0
+  // in-window), yet its 60s coalescing coverage window extends 30s INTO the
+  // demand window. An order arriving in that overlap [windowStart, T + 60s]
+  // was handled by T's run but had its own beat suppressed by the coalesce —
+  // the exact edge that made work=1 / okCount=0 false-fire before this grace.
+  const now = Date.parse("2026-08-27T18:00:00Z");
+  const windowStart = now - 6 * 60 * 60 * 1000;
+  const beat = windowStart - 30_000; // 30s BEFORE window opens (rolled out of the liveness window)
+  // 5s AFTER windowStart = 35s AFTER beat → INSIDE both the demand window and
+  // the coalesce coverage window [beat, beat + 60s].
+  const orderInsideCoverage = windowStart + 5_000;
+  // 45s AFTER windowStart = 75s AFTER beat → INSIDE the demand window but
+  // BEYOND the coalesce coverage window (past beat + 60s).
+  const orderBeyondCoverage = windowStart + 45_000;
+  assert.equal(orderIsInsideFraudCoalesceCoverage(orderInsideCoverage, beat), true);
+  assert.equal(orderIsInsideFraudCoalesceCoverage(orderBeyondCoverage, beat), false);
+  // Window sanity: both orders are actually inside the 6h demand window (this
+  // is what made the pre-grace probe count both and false-fire on the
+  // coverage-covered one).
+  assert.ok(orderInsideCoverage >= windowStart && orderInsideCoverage <= now);
+  assert.ok(orderBeyondCoverage >= windowStart && orderBeyondCoverage <= now);
+});
+
+test("evalInlineAgent stays GREEN when the probe excludes coalesce-covered orders (edge-of-window boundary)", () => {
+  // Boundary case from the originating alert (loop:ai:fraud-detector,
+  // monitor-false-positive): once the probe applies the coalesce grace, the
+  // only in-window order was inside the coverage window of a beat that has
+  // since rolled off the 6h liveness window. So the probe returns work=0
+  // even though okCount=0 in-window (the beat is now outside the window), and
+  // evalInlineAgent falls through to genuinely-idle green — no idle_while_work
+  // violation, no false red tile for Platform.
+  const fraudLoop = MONITORED_LOOPS.find((l) => l.id === INLINE_AGENT_IDS.fraudDetector);
+  assert.ok(fraudLoop, "ai:fraud-detector loop must be registered");
+
+  const now = Date.parse("2026-08-27T18:00:00Z");
+  const windowStart = now - 6 * 60 * 60 * 1000;
+  const beatMs = windowStart - 30_000;
+  const orderMs = beatMs + 10_000;
+  assert.equal(
+    orderIsInsideFraudCoalesceCoverage(orderMs, beatMs),
+    true,
+    "the sole in-window order rides on the coalesced beat — probe must exclude it",
+  );
+  const rolledOutBeat: LoopHistoryRow = { ran_at: new Date(beatMs).toISOString(), ok: true, produced: null, detail: null, duration_ms: null };
+  const state: InlineAgentState = { work: 0, okCount: 0, errCount: 0, latest: rolledOutBeat, history: [rolledOutBeat] };
+  const result = evalInlineAgent(fraudLoop!, state);
+  assert.equal(result.color, "green");
+  assert.equal(result.violation, null);
+});
+
+test("evalInlineAgent still flips RED on an order that arrived AFTER the coalesce grace with no follow-up beat", () => {
+  // No-false-negative guard for the coalesce grace: an order created OUTSIDE
+  // the coalescing coverage window of the latest successful beat and with no
+  // subsequent successful beat is real unscreened work. The probe counts it
+  // (`orderIsInsideFraudCoalesceCoverage` returns false for beat + grace + 1),
+  // so idle_while_work still fires and Platform still pages on a real outage.
+  const fraudLoop = MONITORED_LOOPS.find((l) => l.id === INLINE_AGENT_IDS.fraudDetector);
+  assert.ok(fraudLoop, "ai:fraud-detector loop must be registered");
+
+  const now = Date.parse("2026-08-27T18:00:00Z");
+  const windowStart = now - 6 * 60 * 60 * 1000;
+  const beatMs = windowStart - 30_000;
+  const orderMs = beatMs + FRAUD_DETECTOR_HEARTBEAT_COALESCE_GRACE_MS + 1;
+  assert.equal(
+    orderIsInsideFraudCoalesceCoverage(orderMs, beatMs),
+    false,
+    "an order past the coalesce grace is NOT covered — probe must still count it",
+  );
+  const rolledOutBeat: LoopHistoryRow = { ran_at: new Date(beatMs).toISOString(), ok: true, produced: null, detail: null, duration_ms: null };
+  const state: InlineAgentState = { work: 1, okCount: 0, errCount: 0, latest: rolledOutBeat, history: [rolledOutBeat] };
   const result = evalInlineAgent(fraudLoop!, state);
   assert.equal(result.color, "red");
   assert.equal(result.violation?.reason, "idle_while_work");
@@ -1939,6 +2062,122 @@ test("SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE fingerprint is present in monitor.
       "so a grep locates the post-cron opt-in grace behavior",
   );
   assert.equal(SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE, "segment-coverage-ignore-post-cron-opt-ins");
+});
+
+// ── segment-coverage stale-tail run-in-progress grace (segment-coverage-stale-tail-run-grace) ──
+// During the daily refresh-customer-segments fan-out the monitor can sample the still-in-progress
+// boundary and read a subscriber as stale seconds before its fresh timestamp commits. The
+// assertion waits for the run grace to elapse from the loop's latest heartbeat before declaring
+// a stale tail; a missing heartbeat falls back to enforcing the rule so a never-firing cron
+// can't hide behind the grace.
+const SEGMENT_COVERAGE_LOOP = MONITORED_LOOPS.find((l) => l.id === "refresh-customer-segments-cron")!;
+assert.ok(SEGMENT_COVERAGE_LOOP, "refresh-customer-segments-cron must be a registered monitored loop");
+assert.equal(SEGMENT_COVERAGE_LOOP.outputAssertion, "segment-coverage");
+
+const ONE_HOUR_MS = 60 * 60_000;
+
+function baselineAssertionInputs(overrides: Partial<AssertionInputs>): AssertionInputs {
+  return {
+    escalatedWaiting: 0,
+    oldestEscalatedAt: null,
+    latestTriageJobAt: null,
+    latestSpecTestJobAt: null,
+    overdueInternalSubs: 0,
+    renewalCurrent: {
+      total: 0,
+      charged: 0,
+      skipped_no_payment_method: 0,
+      skipped_zero_total: 0,
+      declined_to_dunning: 0,
+      comp_shipped: 0,
+      comp_blocked: 0,
+      skipped_other: 0,
+    },
+    renewalBaseline: {
+      total: 0,
+      charged: 0,
+      skipped_no_payment_method: 0,
+      skipped_zero_total: 0,
+      declined_to_dunning: 0,
+      comp_shipped: 0,
+      comp_blocked: 0,
+      skipped_other: 0,
+    },
+    stuckDunningCycles: 0,
+    smsSubscribedTotal: 0,
+    smsSubscribedFresh26h: 0,
+    smsSubscribedStale48h: 0,
+    ...overrides,
+  };
+}
+
+function segmentCoverageLatest(ranAtIso: string): LoopHistoryRow {
+  return { ran_at: ranAtIso, ok: true, produced: null, detail: null, duration_ms: null };
+}
+
+test("evalOutputAssertion segment-coverage: does NOT alert on stale-tail while the refresh cron beat is still inside the run grace (false-alert during healthy fan-out)", () => {
+  // A healthy fan-out that started 5 minutes ago — the monitor sampled the still-in-progress
+  // boundary and sees 3 subscribers with a NULL/>48h segments_refreshed_at. That is the
+  // expected shape of an in-progress walk, not a break.
+  const ranAt = new Date(Date.now() - 5 * 60_000).toISOString();
+  const verdict = evalOutputAssertion(
+    "segment-coverage",
+    SEGMENT_COVERAGE_LOOP,
+    segmentCoverageLatest(ranAt),
+    baselineAssertionInputs({
+      smsSubscribedTotal: 500,
+      smsSubscribedFresh26h: 495,
+      smsSubscribedStale48h: 3,
+    }),
+  );
+  assert.equal(verdict, null);
+});
+
+test("evalOutputAssertion segment-coverage: alerts on stale-tail once the refresh cron beat is outside the run grace (real break stays flagged)", () => {
+  // Same stale subscribers, but the last beat was 7 hours ago — well past the 6h run grace.
+  // The cron ran but part of the book didn't refresh, and the tile must go red.
+  const ranAt = new Date(Date.now() - 7 * ONE_HOUR_MS).toISOString();
+  const verdict = evalOutputAssertion(
+    "segment-coverage",
+    SEGMENT_COVERAGE_LOOP,
+    segmentCoverageLatest(ranAt),
+    baselineAssertionInputs({
+      smsSubscribedTotal: 500,
+      smsSubscribedFresh26h: 495,
+      smsSubscribedStale48h: 3,
+    }),
+  );
+  assert.ok(verdict, "stale-tail must trip after the run grace elapses");
+  assert.equal(verdict!.violation.reason, "segment_coverage");
+  assert.ok(
+    /stale-tail/i.test(verdict!.violation.detail),
+    `violation detail should describe the stale-tail: ${verdict!.violation.detail}`,
+  );
+});
+
+test("evalOutputAssertion segment-coverage: missing heartbeat still trips stale-tail (fallback — a never-firing cron can't hide behind the run grace)", () => {
+  const verdict = evalOutputAssertion(
+    "segment-coverage",
+    SEGMENT_COVERAGE_LOOP,
+    null,
+    baselineAssertionInputs({
+      smsSubscribedTotal: 500,
+      smsSubscribedFresh26h: 495,
+      smsSubscribedStale48h: 3,
+    }),
+  );
+  assert.ok(verdict, "no heartbeat ⇒ no grace, stale-tail must still trip");
+  assert.equal(verdict!.violation.reason, "segment_coverage");
+});
+
+test("SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE fingerprint is present in monitor.ts (grep-able marker for the stale-tail run-in-progress grace)", () => {
+  const monitorSrc = readFileSync(resolve(__dirname, "./monitor.ts"), "utf8");
+  assert.ok(
+    monitorSrc.includes("SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE"),
+    "monitor.ts must carry the SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE fingerprint " +
+      "so a grep locates the stale-tail run-in-progress grace behavior",
+  );
+  assert.equal(SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE, "segment-coverage-stale-tail-run-grace");
 });
 
 // Fingerprint guard: the monitor query MUST carry the same internal-* exclusion the payday

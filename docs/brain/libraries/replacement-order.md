@@ -46,13 +46,26 @@ function findVariantOverCap(items: ReadonlyArray<{ variantId: string; quantity: 
 
 Pure predicate for the per-variant cap. Sums quantities by variantId across the items array (two line items for the same variant sum) and returns the first variant that exceeds `REPLACEMENT_MAX_UNITS_PER_VARIANT`, or null when every variant is within the cap. Exposed so callers can pre-check without invoking the full SDK.
 
+### `decideOverCap` — function
+
+```ts
+function decideOverCap(
+  items: ReadonlyArray<{ variantId: string; quantity: number; title?: string }>,
+  authorizedBy?: string | null,
+): { allow: true; granted: false }
+  | { allow: true; granted: true; authorizedBy: string; over: {...} }
+  | { allow: false; refusal: string; over: {...} }
+```
+
+Pure decision for the cap **and its founder grant** — the thing `createReplacementOrder` actually calls. Three outcomes: within cap → allowed and not granted; over cap with no named authorizer → refused (this is every autonomous caller); over cap with a named authorizer → allowed and flagged `granted`. A blank or whitespace-only authorizer is **not** a grant, so a caller cannot satisfy the rail with an empty string or a bare `true`. Kept pure so the rail is unit-testable without a DB or Shopify (`src/lib/replacement-order.test.ts`).
+
 ### `createReplacementOrder` — function
 
 ```ts
 async function createReplacementOrder(input: CreateReplacementInput) : Promise<CreateReplacementResult>
 ```
 
-Enforces the per-variant cap via `findVariantOverCap()` BEFORE inserting the row or calling Shopify. Returns a refusal with the standard failure shape (`success:false, replacementId:'', shopifyOrderName:null, error:...`) if any variant exceeds the cap.
+Enforces the per-variant cap via `decideOverCap()` BEFORE inserting the row or calling Shopify. Returns a refusal with the standard failure shape (`success:false, replacementId:'', shopifyOrderName:null, error:...`) if any variant exceeds the cap without a founder grant. When a grant IS present it `console.warn`s `replacement_over_cap_authorized` (workspace, customer, variant, requested, cap, authorizer) and persists `reason_detail = "over-cap N>4 authorized by: <who>"` on the `replacements` row — a granted exception is loud and attributable, never silent.
 
 ### `CreateReplacementInput` — interface
 
@@ -84,7 +97,9 @@ _No internal callers found via static scan._
 
 - **Tag vs note split — the reason has TWO homes.** Shopify tags cap at 40 chars per tag; a 62-char free-form reason failed a real replacement on 2026-08-02 with 'Title Tag exceeds the maximum length of 40 characters', which reads as nothing to do with tags. The SDK now emits `tags: ["replacement", normalizeReplacementReasonTag(input.reason)]` — a short stable slug that never rejects the whole order — while `input.shopifyNote` carries the human explanation in the ORDER NOTE (ticket URL auto-appended). Callers pass the free-form prose to `shopifyNote`; the SDK derives the safe tag slug. This closes the mislabelling gap: measured 2026-08-02, 84 of 87 replacements this workspace has ever issued were NOT crisis-related (goodwill bags, expired items, wrong variant, address corrections), yet every single one was recorded in Shopify with 'Replacement order — crisis swap compensation' because that string was hardcoded in `action-executor.ts` `create_replacement_order`. The hardcoded crisis note is gone; the caller's explanation is what Shopify records now.
 
-- **Per-variant replacement cap — 4 units enforced in the SDK.** CEO ruling 2026-08-02: never replace more than 4 units of a SINGLE variant on one order. The cap is PER VARIANT, not per order — a 4 + 4 multi-flavour replacement is fine; 8 of one flavour is not. Recorded in the `exchanges` policy's INTERNAL half as machine rule `exchanges.replacement_max_units_per_variant` (value: 4) via `scripts/_backfill-replacement-cap-policy.ts`, so Sol (via `getAgentPolicyPackage`) and June (via the CS-director brief loader) both state the ceiling consistently. Phase 2 surfaces it in `createReplacementOrder` as a named constant `REPLACEMENT_MAX_UNITS_PER_VARIANT` that refuses (does NOT silently truncate) any line above 4 units, returning an error naming the variant and requested quantity. ⏳ Phase 3 (not yet shipped) will escalate the refusal to the CEO approvals feed via a `dashboard_notifications` row of `type='agent_approval_request'` + `metadata.routed_to_function='ceo'`, so an over-cap request gets a decision instead of a wall.
+- **Per-variant replacement cap — 4 units enforced in the SDK.** CEO ruling 2026-08-02: never replace more than 4 units of a SINGLE variant on one order. The cap is PER VARIANT, not per order — a 4 + 4 multi-flavour replacement is fine; 8 of one flavour is not. Recorded in the `exchanges` policy's INTERNAL half as machine rule `exchanges.replacement_max_units_per_variant` (value: 4) via `scripts/_backfill-replacement-cap-policy.ts`, so Sol (via `getAgentPolicyPackage`) and June (via the CS-director brief loader) both state the ceiling consistently. Phase 2 surfaces it in `createReplacementOrder` as a named constant `REPLACEMENT_MAX_UNITS_PER_VARIANT` that refuses (does NOT silently truncate) any line above 4 units, returning an error naming the variant and requested quantity. Phase 3 — the escalation to the CEO approvals feed — shipped: June routes an over-cap case to the founder as a `dashboard_notifications` row (`type='agent_approval_request'`, `metadata.routed_to_function='ceo'`).
+
+- **The grant, not just the escalation (2026-08-28).** Phase 3 gave the founder a *decision* but nothing to execute it WITH: the cap refused every caller including the CEO, so an approved over-cap case still hit the wall. `CreateReplacementInput.overCapAuthorizedBy` closes that loop — a string naming WHO authorized the exception and why. An agent cannot set it, because an agent has no founder to name; the supervisor grants the exception, the tool still cannot (see [[../operational-rules]] § North star). **Ground truth:** Jen Parker (ticket b199e5ba) — 14 paid orders since 2024-03, $3,386 lifetime, and every order she has ever placed is 5-6 units. Her whole 5-unit bulk order of Superfood Tabs arrived expired in July 2026. June escalated it as "a real over-cap authorization only the founder can grant" and there was nothing to grant it with; the replacement row sat at `status='pending'` with every order id NULL for **23 days** across four tickets before the founder approved and it shipped as SC137624.
 
 ## Status / open work
 

@@ -61,7 +61,7 @@ import { errText } from "@/lib/error-text";
 import type { ActionContext, ActionParams, SonnetDecision } from "@/lib/action-executor";
 import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
 import type { CxOrderRemedyState, CxOrderRemedyStateRef } from "@/lib/cx-agent-sdk";
-import { MONEY_ACTION_TYPES } from "@/lib/june-remedy-approval";
+import { MONEY_ACTION_TYPES, isNonOrderScopedLoyaltyAction } from "@/lib/june-remedy-approval";
 import { getAgentPolicyPackage, formatAgentPolicyPackage } from "@/lib/policies";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -590,7 +590,8 @@ export interface RemedyStateViolation {
     | "order_not_found"
     | "live_return_would_double_pay"
     | "amount_exceeds_remaining_refundable"
-    | "missing_order_reference";
+    | "missing_order_reference"
+    | "headroom_degraded";
   detail: string;
 }
 
@@ -653,6 +654,13 @@ export function verifyPlanAgainstRemedyStates(
   for (let i = 0; i < actions.length; i++) {
     const step = actions[i];
     if (!MONEY_ACTION_TYPES.has(step.actionType)) continue;
+    // spec: june-loyalty-coupon-to-subscription-exempt-from-order-scoped-remedy-state-rail —
+    // a loyalty coupon on a subscription contract (or the paired coupon mint) cannot
+    // double-pay any order, so the order-scoped rails do not apply. The loyalty $15 ceiling
+    // (`planNeedsLoyaltyRefusal`) + the executor's one-coupon-per-sub check remain the sole
+    // rails on this shape. `redeem_points_as_refund` is NOT in the exemption — it draws down
+    // a real order and stays inside this rail.
+    if (isNonOrderScopedLoyaltyAction(step.actionType, step.actionParams)) continue;
     const ref = extractRemedyOrderRefFromStep(step.actionParams);
     if (!ref) {
       return {
@@ -691,6 +699,25 @@ export function verifyPlanAgainstRemedyStates(
           orderKey: ref.key,
           reason: "order_not_found",
           detail: `money action targets order ${ref.key} which does not exist in this workspace`,
+        },
+      };
+    }
+    // Live Shopify headroom is unreadable — the ledger call failed and we are on the mirror
+    // fallback (see [[../libraries/cx-agent-sdk]] `getOrderRemedyState`, headroom_confidence). A
+    // mirror-only remaining_refundable_cents is stale by definition: it CANNOT see an out-of-band
+    // Shopify refund that already drew down the same money. Authorizing a fresh money remedy off
+    // that fallback is precisely the double-pay the guard exists to block, so we FAIL CLOSED here
+    // (needs_attention → human) rather than trust the mirror. Closes the fail-open gap the
+    // remedy-state-must-see-out-of-band-refunds diff introduced.
+    if (state.headroom_confidence !== "live") {
+      return {
+        ok: false,
+        violation: {
+          actionIndex: i,
+          actionType: step.actionType,
+          orderKey: ref.key,
+          reason: "headroom_degraded",
+          detail: `live Shopify refund headroom is unreadable for order ${ref.key} (headroom_confidence=${state.headroom_confidence}) — refusing to authorize a money remedy off a mirror-only fallback that cannot see an out-of-band Shopify refund`,
         },
       };
     }
@@ -737,6 +764,7 @@ export function verifyPlanAgainstRemedyStates(
       for (let i = 0; i < actions.length; i++) {
         const step = actions[i];
         if (!MONEY_ACTION_TYPES.has(step.actionType)) continue;
+        if (isNonOrderScopedLoyaltyAction(step.actionType, step.actionParams)) continue;
         const ref = extractRemedyOrderRefFromStep(step.actionParams);
         if (ref?.key === key) {
           violatingIndex = i;
@@ -774,6 +802,9 @@ export async function loadRemedyStatesForPlan(
   const refs = new Map<string, RemedyOrderRef>();
   for (const step of actions) {
     if (!MONEY_ACTION_TYPES.has(step.actionType)) continue;
+    // Same exemption as `verifyPlanAgainstRemedyStates` — a subscription-scoped loyalty coupon
+    // (or the paired mint) names no order to prefetch state for.
+    if (isNonOrderScopedLoyaltyAction(step.actionType, step.actionParams)) continue;
     const ref = extractRemedyOrderRefFromStep(step.actionParams);
     if (ref && !refs.has(ref.key)) refs.set(ref.key, ref);
   }

@@ -676,25 +676,49 @@ export async function verifyLoyaltyCouponAppliedToContract(
 ): Promise<boolean> {
   const { data } = await admin
     .from("subscriptions")
-    .select("applied_discounts")
+    .select("applied_discounts, customer_id")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", contractId)
     .maybeSingle();
-  const arr = (data as { applied_discounts?: unknown } | null)?.applied_discounts;
+  const rec = data as { applied_discounts?: unknown; customer_id?: string | null } | null;
+  const arr = rec?.applied_discounts;
   if (!Array.isArray(arr)) return false;
   const target = code.toUpperCase();
+  let matchedEntry: Record<string, unknown> | string | null = null;
   for (const entry of arr) {
     let label: string | null = null;
     if (typeof entry === "string") label = entry;
     else if (entry && typeof entry === "object") {
-      const rec = entry as { title?: unknown; code?: unknown };
-      if (typeof rec.code === "string") label = rec.code;
-      else if (typeof rec.title === "string") label = rec.title;
+      const r = entry as { title?: unknown; code?: unknown };
+      if (typeof r.code === "string") label = r.code;
+      else if (typeof r.title === "string") label = r.title;
     }
     if (!label) continue;
-    if (label.toUpperCase().includes(target)) return true;
+    if (label.toUpperCase().includes(target)) {
+      matchedEntry = entry as Record<string, unknown> | string;
+      break;
+    }
   }
-  return false;
+  if (matchedEntry == null) return false;
+
+  // Real-value check (spec:
+  // loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value,
+  // ticket 46a7aa75). String-presence alone is not landed — a bare
+  // `{title:CODE}` stub written for a Shopify code that's been deleted
+  // resolves to $0 at renewal (`computeAppliedDiscountCents` skips it as
+  // "legacy/code-only"). Two acceptance paths:
+  //   (1) The applied entry itself carries a real value shape
+  //       (`type` + numeric `value > 0`), so `computeAppliedDiscountCents`
+  //       can compute the discount directly with no live re-resolve.
+  //   (2) A live `resolveCoupon` re-resolves the code to a non-null
+  //       coupon with `value > 0` — internal step-1 or Shopify step-3
+  //       can still hydrate it at renewal.
+  const { appliedEntryHasRealValue } = await import("@/lib/internal-subscription");
+  if (appliedEntryHasRealValue(matchedEntry)) return true;
+
+  const { resolveCoupon } = await import("@/lib/coupons");
+  const live = await resolveCoupon(workspaceId, code, rec?.customer_id ?? null);
+  return !!(live && live.value > 0);
 }
 
 /**
@@ -1757,7 +1781,14 @@ export const directActionHandlers: Record<
   },
 
   redeem_points: async (ctx, p) => {
-    const { getLoyaltySettings, getRedemptionTiers, validateRedemption, spendPoints } = await import("@/lib/loyalty");
+    const {
+      getLoyaltySettings,
+      getRedemptionTiers,
+      validateRedemption,
+      spendPoints,
+      getMemberByCustomerId,
+      getLinkedShopifyCustomerIds,
+    } = await import("@/lib/loyalty");
     const { getShopifyCredentials } = await import("@/lib/shopify-sync");
     const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
 
@@ -1766,12 +1797,15 @@ export const directActionHandlers: Record<
     const tier = tiers[p.tier_index!];
     if (!tier) return { success: false, error: "Invalid tier" };
 
-    const { data: member } = await ctx.admin
-      .from("loyalty_members")
-      .select("*")
-      .eq("customer_id", ctx.customerId)
-      .eq("workspace_id", ctx.workspaceId)
-      .single();
+    // Resolve the member across the customer_links group. The old
+    // `.eq('customer_id', ctx.customerId)` fast-path returned 'No loyalty
+    // member' whenever the loyalty_members row lived on a sibling profile
+    // (ticket e4d34bba — 16,147 points earned on itsjenrogers@yahoo.com
+    // but the member row lives on jmartwick@yahoo.com). Route through the
+    // link-group-aware chokepoint so points earned anywhere in the group
+    // are redeemable from any linked profile. Spec:
+    // loyalty-redeem-and-coupon-usability-span-linked-accounts Phase 1.
+    const member = await getMemberByCustomerId(ctx.workspaceId, ctx.customerId);
     if (!member) return { success: false, error: "No loyalty member" };
 
     const validation = validateRedemption(member, tier);
@@ -1786,6 +1820,21 @@ export const directActionHandlers: Record<
     const { shop, accessToken } = await getShopifyCredentials(ctx.workspaceId);
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + (settings.coupon_expiry_days || 90));
+
+    // Scope customerSelection to EVERY linked Shopify customer id, not just
+    // the aggregated member's id. Points combine across the link group but
+    // Shopify locks a discount to the customers it was minted for — a code
+    // minted only for the profile the member row lives on fails at checkout
+    // under any sibling profile ('discount code isn't available to you
+    // right now'). Falls back to the member's own shopify_customer_id when
+    // the group expansion turns up nothing (unlinked customer without a
+    // customers row hit on this workspace). Same spec.
+    const linkedShopifyIds = await getLinkedShopifyCustomerIds(ctx.workspaceId, ctx.customerId);
+    const gidSet = new Set<string>(linkedShopifyIds.map((id) => `gid://shopify/Customer/${id}`));
+    if (member.shopify_customer_id) {
+      gidSet.add(`gid://shopify/Customer/${member.shopify_customer_id}`);
+    }
+    const customerGids = [...gidSet];
 
     // Create Shopify discount via GraphQL
     const gqlRes = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
@@ -1810,9 +1859,7 @@ export const directActionHandlers: Record<
             usageLimit: 1,
             appliesOncePerCustomer: true,
             customerSelection: {
-              customers: {
-                add: [`gid://shopify/Customer/${member.shopify_customer_id}`],
-              },
+              customers: { add: customerGids },
             },
             combinesWith: {
               productDiscounts: settings.coupon_combines_product,
@@ -4984,7 +5031,7 @@ async function handlePlaybook(
   const target = norm(pbName);
   const { data: allPlaybooks } = await ctx.admin
     .from("playbooks")
-    .select("id, name, trigger_intents")
+    .select("id, name, slug, trigger_intents")
     .eq("workspace_id", ctx.workspaceId)
     .eq("is_active", true);
   const playbook = (allPlaybooks || []).find(p =>
@@ -5091,7 +5138,68 @@ async function handlePlaybook(
       .order("created_at", { ascending: false }).limit(1).single();
     const customerMsg = lastMsg?.data?.body_clean || lastMsg?.data?.body || "";
 
-    await startPlaybook(ctx.admin, ctx.ticketId, playbook.id);
+    // ── Live-orchestrator assisted-purchase routing boundary ──
+    // Spec: docs/brain/specs/live-orchestrator-assisted-purchase-carries-picked-item.md
+    //
+    // Mirror the Sol Direction boundary
+    // (src/lib/ticket-directions.ts `resolvePlaybookForDirection`): when the
+    // orchestrator routes into one of the two assisted-purchase playbook
+    // slugs, resolve the customer's confirmed variant reference to its
+    // internal UUID and seed `ctx.assisted_purchase_params` on
+    // `playbook_context` BEFORE the terminal `create_order` /
+    // `create_subscription` step runs. Without this, the sibling
+    // `assistedCreateMissingItemsGuard` refuses to dispatch every turn and
+    // the orchestrator loops on its canned "which product and flavor..."
+    // reply (ticket 083201b5 — Maria D James, confirmed 3× Cocoa French
+    // Roast on a vaulted card, looped ~4 times before escalating
+    // `no_progress_context_cap`).
+    //
+    // Sec:real-vuln trust boundary (same as the Direction resolver):
+    // `unit_cents` and `vendor` are DELIBERATELY not sourced from the
+    // decision — price flows from the resolved `product_variants.price_cents`
+    // and vendor from the playbook step's `config.vendor` default. See
+    // `resolveAssistedPurchaseIntentToParams` + `RawAssistedPurchaseIntent`.
+    let assistedSeedContext: Record<string, unknown> | undefined;
+    if (
+      playbook.slug === "assisted-order-purchase" ||
+      playbook.slug === "assisted-subscription-purchase"
+    ) {
+      const { extractAssistedPurchaseIntentFromDecision, resolveAssistedPurchaseIntentToParams } =
+        await import("@/lib/playbook-executor");
+      const intent = extractAssistedPurchaseIntentFromDecision(decision, playbook.slug);
+      const params = intent
+        ? await resolveAssistedPurchaseIntentToParams(ctx.admin, ctx.workspaceId, intent)
+        : null;
+      if (params) {
+        assistedSeedContext = { assisted_purchase_params: params };
+      } else {
+        // Fail at the routing boundary rather than start the playbook with
+        // empty params — the terminal step's empty-order guard would refuse
+        // every turn and the orchestrator would loop on the canned
+        // clarification reply. Escalate so the ticket-handle worker hands
+        // this back to Sol, whose Direction boundary re-runs the resolver
+        // with a fresh DB-backed lookup (or re-asks the customer for the
+        // specific variant when the reference genuinely cannot be resolved).
+        const why = intent
+          ? "variant_id could not be resolved to an internal product_variant"
+          : "no create_order/create_subscription action with a variant_id on the decision";
+        await sysNote(
+          `[Playbook] ${playbook.slug} — refusing to start with empty assisted_purchase_params (${why}); escalating so Sol's Direction boundary re-runs the resolver.`,
+        );
+        await escalateTicket(
+          ctx,
+          `assisted_purchase_orchestrator_missing_intent:${playbook.slug}`,
+        );
+        return;
+      }
+    }
+
+    await startPlaybook(
+      ctx.admin,
+      ctx.ticketId,
+      playbook.id,
+      assistedSeedContext ? { seed_context: assistedSeedContext } : undefined,
+    );
 
     let result = await executePlaybookStep(
       ctx.workspaceId, ctx.ticketId, customerMsg, personality,

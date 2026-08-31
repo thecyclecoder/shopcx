@@ -1,0 +1,1 @@
+- **Ads supervisor: product Amazing Coffee K-Cups — Bianca missed a kill on adset quote headline coffee burst trust bar** · verified 2026-08-28 · → [[../libraries/media-buyer-agent]]

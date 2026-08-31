@@ -17,8 +17,16 @@ import { graphFetchJson } from "@/lib/meta/graph-retry";
 const GRAPH_BASE = "https://graph.facebook.com/v21.0";
 
 export interface MetaAdAccount { id: string; name: string; account_status?: number; currency?: string }
-export interface MetaCampaign { id: string; name: string; status: string; objective?: string }
-export interface MetaAdSet { id: string; name: string; status: string; campaign_id?: string }
+export interface MetaCampaign {
+  id: string; name: string; status: string; objective?: string;
+  /** Budget fields are minor units (cents) as STRINGS — Graph returns them that way. Present only on CBO campaigns. */
+  daily_budget?: string; lifetime_budget?: string; effective_status?: string;
+}
+export interface MetaAdSet {
+  id: string; name: string; status: string; campaign_id?: string;
+  /** Budget fields are minor units (cents) as STRINGS. Absent when the parent campaign holds the budget (CBO). */
+  daily_budget?: string; lifetime_budget?: string; effective_status?: string; optimization_goal?: string; created_time?: string;
+}
 export interface MetaPage { id: string; name: string; instagram_user_id: string | null }
 
 /** The active per-workspace user token (ads_management). meta_connections first, workspace token as fallback. */
@@ -66,12 +74,12 @@ export async function listAdAccounts(token: string): Promise<MetaAdAccount[]> {
   return j.data || [];
 }
 export async function listCampaigns(token: string, accountId: string): Promise<MetaCampaign[]> {
-  const j = await metaGet(`${actId(accountId)}/campaigns?fields=id,name,status,objective&limit=300&effective_status=["ACTIVE","PAUSED"]`, token);
+  const j = await metaGet(`${actId(accountId)}/campaigns?fields=id,name,status,objective,daily_budget,lifetime_budget,effective_status&limit=300&effective_status=["ACTIVE","PAUSED"]`, token);
   return j.data || [];
 }
 export async function listAdSets(token: string, accountId: string, campaignId?: string): Promise<MetaAdSet[]> {
   const filtering = campaignId ? `&filtering=[{"field":"campaign.id","operator":"EQUAL","value":"${campaignId}"}]` : "";
-  const j = await metaGet(`${actId(accountId)}/adsets?fields=id,name,status,campaign_id&limit=300&effective_status=["ACTIVE","PAUSED"]${filtering}`, token);
+  const j = await metaGet(`${actId(accountId)}/adsets?fields=id,name,status,campaign_id,daily_budget,lifetime_budget,effective_status,optimization_goal,created_time&limit=300&effective_status=["ACTIVE","PAUSED"]${filtering}`, token);
   return j.data || [];
 }
 
@@ -675,8 +683,59 @@ export async function createAd(
 // they always create objects PAUSED so nothing goes live behind the human's
 // back (going-live is a separate governed step in recommendation-execute).
 
-/** Stable name for the shared ABO testing campaign the media-buyer loop reuses. */
+/**
+ * Legacy name for the ABO testing campaign, used when no product name is known.
+ *
+ * ⚠️ Product-blind — every product provisioned without a name collides on this
+ * one campaign, and in Ads Manager it reads as an anonymous "MB — Testing (ABO)"
+ * sitting beside the properly-named per-product campaigns. Prefer
+ * `mbTestingCampaignName(productTitle)`.
+ */
 export const MB_TESTING_CAMPAIGN_NAME = "MB — Testing (ABO)";
+
+/**
+ * Stable, product-scoped name for a media-buyer ABO testing campaign —
+ * `MB — {Product} Testing (ABO)`.
+ *
+ * Matches the convention already live in Ads Manager ("MB — Amazing Creamer
+ * Testing (ABO)", "MB — Amazing Coffee Testing (ABO)"), so a human scanning the
+ * account can tell which product a testing campaign belongs to. Falls back to
+ * the legacy generic name when no product title is supplied.
+ */
+export function mbTestingCampaignName(productTitle?: string | null): string {
+  const t = (productTitle ?? "").trim();
+  return t ? `MB — ${t} Testing (ABO)` : MB_TESTING_CAMPAIGN_NAME;
+}
+
+/**
+ * Replace an ad set's `targeting` spec — same `POST /{object_id}` shape as the status, budget and
+ * name setters. Graph expects the spec JSON-ENCODED in the body, not as a nested object.
+ *
+ * ⚠️ This is a REPLACE, not a merge: Meta overwrites the whole spec. Callers must read the current
+ * targeting first (`getAdSetTargetingAndPixel`) and spread it, or they will silently drop geo, age
+ * and audience exclusions. Introduced to repair legacy adsets minted before the existing-customer
+ * exclusions existed (CEO 2026-08-25); a mid-flight targeting edit also resets Meta's learning
+ * phase, which is a real cost on any account that had actually exited it.
+ */
+export async function updateAdSetTargeting(
+  token: string,
+  adsetId: string,
+  targeting: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return metaPost(`${adsetId}`, { targeting: JSON.stringify(targeting) }, token);
+}
+
+/**
+ * Rename a Meta object (campaign / adset / ad) — same `POST /{object_id}` shape
+ * as the status and budget setters. Returns Graph's `{ success: true }` body.
+ */
+export async function updateObjectName(
+  token: string,
+  objectId: string,
+  name: string,
+): Promise<Record<string, unknown>> {
+  return metaPost(`${objectId}`, { name }, token);
+}
 
 export interface CreateCampaignArgs {
   name: string;
@@ -782,11 +841,30 @@ export async function createCampaign(
  * media-buyer loop reuses one testing campaign per account so each concept
  * gets its own ad set under a stable parent. Idempotent by exact name match.
  */
-export async function getOrCreateTestingCampaign(token: string, accountId: string): Promise<string> {
+export async function getOrCreateTestingCampaign(
+  token: string,
+  accountId: string,
+  productTitle?: string | null,
+): Promise<string> {
+  const wanted = mbTestingCampaignName(productTitle);
   const existing = await listCampaigns(token, accountId);
-  const hit = existing.find((c) => c.name === MB_TESTING_CAMPAIGN_NAME);
+
+  const hit = existing.find((c) => c.name === wanted);
   if (hit) return hit.id;
-  return createCampaign(token, accountId, { name: MB_TESTING_CAMPAIGN_NAME, abo: true, status: "PAUSED" });
+
+  // Adopt-and-rename: an account provisioned before this was product-aware has an
+  // un-named `MB — Testing (ABO)` campaign. Reusing + renaming it keeps the cohort's
+  // existing `test_meta_campaign_id` valid and avoids stranding a duplicate empty
+  // campaign in Ads Manager. Only when a product title is actually supplied.
+  if (productTitle) {
+    const legacy = existing.find((c) => c.name === MB_TESTING_CAMPAIGN_NAME);
+    if (legacy) {
+      await updateObjectName(token, legacy.id, wanted);
+      return legacy.id;
+    }
+  }
+
+  return createCampaign(token, accountId, { name: wanted, abo: true, status: "PAUSED" });
 }
 
 /**
@@ -794,8 +872,12 @@ export async function getOrCreateTestingCampaign(token: string, accountId: strin
  * chars of the cohort UUID so the name is human-legible + short enough to fit
  * Meta's 400-char campaign name limit even alongside future suffixes.
  */
-export function coldScalerCampaignName(cohortId: string): string {
-  return `MB — Cold Scaler (${cohortId.slice(0, 8)})`;
+export function coldScalerCampaignName(cohortId: string, productTitle?: string | null): string {
+  const t = (productTitle ?? "").trim();
+  // Mirrors `mbTestingCampaignName` so a human scanning Ads Manager sees the pair:
+  //   "MB — Superfood Tabs Testing (ABO)" / "MB — Superfood Tabs Scaler (ABO)".
+  // The cohort-id form is the fallback for a cohort with no resolvable product.
+  return t ? `MB — ${t} Scaler (ABO)` : `MB — Cold Scaler (${cohortId.slice(0, 8)})`;
 }
 
 /**
@@ -806,7 +888,8 @@ export function coldScalerCampaignName(cohortId: string): string {
  * Shape (per docs/brain/reference/meta-scaling-methodology.md § Account structure
  * "SCALING campaign (CBO) ~85% of budget"):
  *  - `OUTCOME_SALES` objective
- *  - CBO (`abo=false`) — campaign-level `daily_budget` is the cohort's ceiling
+ *  - ABO (`abo=true`) — NO campaign-level budget; each graduated ad set carries its own
+ *    (CEO 2026-08-25 — a CBO scaler concentrated ~95% of spend on one ad)
  *  - `LOWEST_COST_WITHOUT_CAP` — auto-bid, NO bid limit (CEO 2026-07-27). Explicit,
  *    because CBO ad sets inherit the campaign strategy and the account default is
  *    `LOWEST_COST_WITH_BID_CAP` on at least one of our accounts.
@@ -831,18 +914,27 @@ export function coldScalerCampaignName(cohortId: string): string {
 export async function getOrCreateColdScalerCampaign(
   token: string,
   accountId: string,
-  opts: { cohortId: string; dailyCeilingCents: number; name?: string },
+  opts: { cohortId: string; dailyCeilingCents: number; name?: string; productTitle?: string | null },
 ): Promise<string> {
-  const name = opts.name || coldScalerCampaignName(opts.cohortId);
+  const name = opts.name || coldScalerCampaignName(opts.cohortId, opts.productTitle);
   const existing = await listCampaigns(token, accountId);
   const hit = existing.find((c) => c.name === name);
   if (hit) return hit.id;
   return createCampaign(token, accountId, {
     name,
     objective: "OUTCOME_SALES",
-    abo: false,
-    dailyBudgetCents: opts.dailyCeilingCents,
-    bidStrategy: "LOWEST_COST_WITHOUT_CAP", // no bid limit — CEO 2026-07-27
+    // ⭐ ABO, not CBO (CEO 2026-08-25). A CBO / Advantage+ scaler hands ALLOCATION to Meta: the
+    // CEO observed crowned winners moved into one and Meta putting ~95% of spend behind a single
+    // ad, so the portfolio of proven creatives you graduated never actually got funded and the one
+    // ad Meta picked saturated its best audience. Per-adset budgets keep allocation OURS — each
+    // graduated winner keeps its own funding. `dailyCeilingCents` therefore does NOT become a
+    // campaign budget; it stays on the cohort row as the governance cap the graduate sizes
+    // per-adset budgets against.
+    abo: true,
+    // NB: no `bidStrategy` here. On an ABO campaign Meta owns bid strategy at the AD SET level,
+    // and `createCampaign` deliberately omits it (sending it with no campaign budget is rejected).
+    // The "no bid limit" guarantee (CEO 2026-07-27) is preserved by `createAdSet`, which already
+    // defaults `bid_strategy=LOWEST_COST_WITHOUT_CAP` on every ad set the graduate mints.
     status: "PAUSED",
   });
 }
@@ -889,11 +981,67 @@ export interface CreateAdSetArgs {
  * publisher_platforms/positions unless the caller opts out), status PAUSED.
  * Returns the new ad-set id.
  */
+/**
+ * Meta's hard cap: with `targeting_automation.advantage_audience = 1`, `age_min` may not exceed 25.
+ * A higher floor is only accepted as a SUGGESTION, never as a control.
+ *
+ *   "With ad sets that use Advantage+ audience, the minimum age audience control can't be set to
+ *    higher than 25: You can add a higher minimum age as a suggestion instead."
+ */
+export const ADVANTAGE_AUDIENCE_MAX_AGE_MIN = 25;
+
+/**
+ * Alias kept because [[../media-buyer/provision-cohort]] published this name first (2026-08-26) and
+ * `agent.ts` + its tests import it. ONE definition, two names — a second literal `25` in another
+ * module is exactly how a platform limit drifts out of sync.
+ */
+export const META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN = ADVANTAGE_AUDIENCE_MAX_AGE_MIN;
+
+/**
+ * Clamp an ad-set targeting spec so Advantage+ audience cannot be paired with an illegal age floor.
+ *
+ * Why this exists (CEO 2026-08-28): the Amazing Coffee K-Cups cohort carried a legacy 50-65
+ * older-buyer profile alongside `advantage_audience=1`, and Meta refused EVERY mint — ten-plus
+ * attempts across Aug 26-27, each one a `meta_400` that left `meta_adset_id` null. K-Cups had been
+ * unblocked days earlier, a creative was ready and Bianca kept picking it up; the product looked
+ * correctly wired at every layer and still could not launch, because the failure was one call
+ * further down than anyone was looking.
+ *
+ * Clamping (rather than throwing) is the deliberate choice: the alternative is a replenish that
+ * dies on a legacy row, which is exactly the silent-stall behaviour we just spent a day removing.
+ * The caller is told what changed so the correction is auditable, never mute.
+ *
+ * PURE — returns a new spec, never mutates the input.
+ */
+export function sanitizeAdvantageAgeTargeting(
+  targeting: Record<string, unknown>,
+): { targeting: Record<string, unknown>; clamped: null | { from: number; to: number } } {
+  const auto = (targeting.targeting_automation ?? null) as Record<string, unknown> | null;
+  const advantageOn = Number(auto?.advantage_audience ?? 0) === 1;
+  const ageMin = Number(targeting.age_min);
+  if (!advantageOn || !Number.isFinite(ageMin) || ageMin <= ADVANTAGE_AUDIENCE_MAX_AGE_MIN) {
+    return { targeting, clamped: null };
+  }
+  return {
+    targeting: { ...targeting, age_min: ADVANTAGE_AUDIENCE_MAX_AGE_MIN },
+    clamped: { from: ageMin, to: ADVANTAGE_AUDIENCE_MAX_AGE_MIN },
+  };
+}
+
 export async function createAdSet(
   token: string,
   accountId: string,
   args: CreateAdSetArgs,
 ): Promise<string> {
+  // Last line of defence before the wire: a legacy age floor + Advantage+ is a guaranteed meta_400.
+  const { targeting: safeTargeting, clamped } = sanitizeAdvantageAgeTargeting(args.targeting);
+  if (clamped) {
+    console.warn(
+      `[meta-ads] createAdSet "${args.name}": age_min ${clamped.from} is illegal with advantage_audience=1 ` +
+        `(Meta caps it at ${ADVANTAGE_AUDIENCE_MAX_AGE_MIN}); clamped to ${clamped.to} so the mint can proceed. ` +
+        `Fix the source targeting — the clamp is a rail, not the intent.`,
+    );
+  }
   const body: Record<string, unknown> = {
     name: args.name,
     campaign_id: args.campaignId,
@@ -901,7 +1049,7 @@ export async function createAdSet(
     billing_event: args.billingEvent || "IMPRESSIONS",
     bid_strategy: args.bidStrategy || "LOWEST_COST_WITHOUT_CAP",
     promoted_object: { pixel_id: args.pixelId, custom_event_type: args.customEventType || "PURCHASE" },
-    targeting: args.targeting,
+    targeting: safeTargeting,
     status: args.status || "PAUSED",
   };
   if (args.dailyBudgetCents != null) body.daily_budget = Math.round(args.dailyBudgetCents);

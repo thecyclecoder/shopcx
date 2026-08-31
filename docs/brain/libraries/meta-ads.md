@@ -23,9 +23,10 @@ The WRITE half of the Meta integration (Graph **v21.0**): list targets + upload 
 | `createAd(token, accountId, {name,adsetId,creativeId,status})` | `act_{id}/ads` (default PAUSED) → ad_id |
 | `updateObjectStatus(token, objectId, status)` | **Iteration Engine 6a** — `POST /{object_id}` `status=ACTIVE\|PAUSED` (ad/adset/campaign); pause/unpause an existing live object |
 | `updateObjectBudget(token, objectId, {dailyBudgetCents?,lifetimeBudgetCents?})` | **Iteration Engine 6a** — `POST /{object_id}` `daily_budget`/`lifetime_budget` (cents → integer minor units); scale an adset/campaign on its existing budget field |
+| `updateAdSetTargeting(token, adsetId, targeting)` | **CEO 2026-08-25** — replace an ad set's `targeting` spec (`POST /{adsetId}`, spec JSON-ENCODED). ⚠️ **REPLACE, not merge** — Meta overwrites the whole spec, so callers MUST read the current targeting via `getAdSetTargetingAndPixel` and spread it, or they silently drop geo / age / audience exclusions. Added to repair legacy adsets minted before the existing-customer exclusions existed (see [[../tables/meta_adsets]] § `clean_signal_since`). A mid-flight targeting edit also resets Meta's learning phase — a non-issue here, since we are permanently learning-limited (2-8 conversions/adset/week vs the ~50 exit threshold). |
 | `createCampaign(token, accountId, {name, objective?, abo?, specialAdCategories?, buyingType?, status?, dailyBudgetCents?, lifetimeBudgetCents?, newCustomerBudgetPercentage?, smartPromotionType?})` | **Media-buyer loop** — `act_{id}/campaigns`. Defaults: PAUSED, `OUTCOME_SALES`, `AUCTION`, `special_ad_categories=[]`, ABO (`is_adset_budget_sharing_enabled=false`, no campaign budget — Meta REQUIRES this flag on a budget-less campaign, 2026-07-07). CBO branch (`abo=false`) sets `daily_budget`/`lifetime_budget` in minor units. **Advantage+ Sales knobs (Bianca M4 cold-scaler, 2026-07-17)**: `newCustomerBudgetPercentage=0` sends `existing_customer_budget_percentage=0` = new-customer-only; `smartPromotionType="AUTOMATED_SHOPPING_ADS"` sends `smart_promotion_type` for Advantage+ Sales. Both are pass-through nulls by default so existing test-campaign creation is unchanged → campaign_id |
 | `getOrCreateTestingCampaign(token, accountId)` | **Media-buyer loop** — find-or-create the shared `"MB — Testing (ABO)"` PAUSED ABO campaign by exact name (via `listCampaigns`). Idempotent — the loop parks every new test ad set under this one shared campaign. Exposes `MB_TESTING_CAMPAIGN_NAME` for callers → campaign_id |
-| `getOrCreateColdScalerCampaign(token, accountId, {cohortId, dailyCeilingCents, name?})` | **[[../specs/bianca-cold-scaler-graduate-crowned-winners-to-advantage-plus-new-customers]] Phase 1** — find-or-create the ONE consolidated cold-scaler CBO/Advantage+ Sales campaign per `media_buyer_cold_scaler_cohorts` row. Idempotent by exact name match (`coldScalerCampaignName(cohortId)` → `"MB — Cold Scaler (<cohortId 8 chars>)"`) via `listCampaigns`. Otherwise mints a PAUSED `OUTCOME_SALES` CBO campaign with `existing_customer_budget_percentage=0` (new-customer-only) + `smart_promotion_type="AUTOMATED_SHOPPING_ADS"` and the cohort's `dailyCeilingCents` as the campaign-level daily budget. Returns the bare Meta campaign id; the caller ([[media-buyer-cold-scaler-cohort]] `mintAndProvisionColdScalerCampaign`, in turn invoked from [[media-buyer-agent]] `runGraduateForCrownedWinners` per **[[../specs/bianca-actually-graduates-crowned-winners-and-a-dead-meta-verb-cannot-fail-silently]] Phase 1**) then compare-and-set-stamps it onto `media_buyer_cold_scaler_cohorts.scaler_meta_campaign_id` via `setColdScalerCampaignId` so a race can't double-mint → campaign_id |
+| `getOrCreateColdScalerCampaign(token, accountId, {cohortId, dailyCeilingCents, name?})` | **[[../specs/bianca-cold-scaler-graduate-crowned-winners-to-advantage-plus-new-customers]] Phase 1** — find-or-create the ONE consolidated cold-scaler CBO/Advantage+ Sales campaign per `media_buyer_cold_scaler_cohorts` row. Idempotent by exact name match (`coldScalerCampaignName(cohortId)` → `"MB — Cold Scaler (<cohortId 8 chars>)"`) via `listCampaigns`. Otherwise mints a PAUSED `OUTCOME_SALES` **ABO** campaign (**CEO 2026-08-25** — was CBO/Advantage+; a CBO scaler hands ALLOCATION to Meta and the CEO observed ~95% of spend going behind a single ad, so the portfolio of graduated winners never got funded. Per-adset budgets keep allocation ours). `dailyCeilingCents` is therefore **governance only** — it stays on the cohort row and does NOT become a campaign budget. No `bid_strategy` on the campaign either: on ABO Meta owns it at the ad-set level and `createAdSet` already defaults `LOWEST_COST_WITHOUT_CAP`. Returns the bare Meta campaign id; the caller ([[media-buyer-cold-scaler-cohort]] `mintAndProvisionColdScalerCampaign`, in turn invoked from [[media-buyer-agent]] `runGraduateForCrownedWinners` per **[[../specs/bianca-actually-graduates-crowned-winners-and-a-dead-meta-verb-cannot-fail-silently]] Phase 1**) then compare-and-set-stamps it onto `media_buyer_cold_scaler_cohorts.scaler_meta_campaign_id` via `setColdScalerCampaignId` so a race can't double-mint → campaign_id |
 | `coldScalerCampaignName(cohortId)` | Stable name builder for a cohort's cold-scaler campaign (`"MB — Cold Scaler (<first 8 chars of cohort UUID>)"`) — exported so callers can compute the expected name without drift. |
 | `createAdSet(token, accountId, {name, campaignId, dailyBudgetCents\|lifetimeBudgetCents, pixelId, targeting, optimizationGoal?, billingEvent?, bidStrategy?, bidAmountCents?, customEventType?, startTime?, endTime?, status?})` | **Media-buyer loop** — `act_{id}/adsets`. Purchase-optimized defaults (docs/brain/reference/meta-scaling-methodology.md): PAUSED, `optimization_goal=OFFSITE_CONVERSIONS`, `billing_event=IMPRESSIONS`, `bid_strategy=LOWEST_COST_WITHOUT_CAP`, `promoted_object={pixel_id, custom_event_type:"PURCHASE"}`. Placements are Advantage+ by default — the ad-set body does NOT force `publisher_platforms`/`*_positions`; pass them via `targeting` only to opt out of automatic placements → adset_id |
 | `MB_TESTING_CAMPAIGN_NAME` | Stable name (`"MB — Testing (ABO)"`) for the shared media-buyer testing campaign — export so downstream code doesn't drift on the string |
@@ -54,3 +55,110 @@ The WRITE half of the Meta integration (Graph **v21.0**): list targets + upload 
 ## Related
 
 [[../lifecycles/ad-publish]] · [[ads__placement-publish]] · [[ads__creative-pack-gate]] · [[../integrations/meta-marketing]] · [[../tables/ad_publish_jobs]] · [[crypto]] · [[meta__graph-retry]]
+
+---
+
+## ⭐ The cold scaler is ABO, not CBO (CEO 2026-08-25)
+
+`coldScalerCampaignName(cohortId, productTitle?)` → `MB — {Product} Scaler (ABO)`, pairing with
+`mbTestingCampaignName`'s `MB — {Product} Testing (ABO)` so a human scanning Ads Manager sees the
+pair. Falls back to `MB — Cold Scaler (<cohort 8>)` when the product cannot be resolved.
+
+**Why ABO.** A CBO / Advantage+ Sales scaler gives Meta control of allocation across the ads inside
+it. The CEO moved crowned winners into one and Meta put **~95% of spend behind a single ad** — the
+portfolio of proven creatives never got funded, and the one ad Meta picked saturated its best
+audience fast. That is a delivery-concentration problem, independent of (and additive to) the
+winner's-curse problem the crown bound fixes. Per-adset budgets keep allocation OURS: each graduated
+winner keeps its own funding.
+
+Consequences worth knowing:
+
+- `dailyCeilingCents` is **governance only** on ABO. It stays on
+  [[../tables/media_buyer_cold_scaler_cohorts]]`.daily_scaler_ceiling_cents` as the cap the graduate
+  sizes per-adset budgets against — it is NOT sent as a campaign budget.
+- **No `bid_strategy` on the campaign.** `createCampaign` deliberately omits it on ABO (Meta rejects
+  a campaign-level strategy with no campaign budget). The "no bid limit" guarantee (CEO 2026-07-27)
+  is preserved one level down by `createAdSet`'s `LOWEST_COST_WITHOUT_CAP` default.
+- Campaigns mint **PAUSED**, always.
+
+Live set (provisioned 2026-08-25 via `scripts/_provision-abo-scalers.ts`, one per product, each in
+the account resolved from that product's OWN test cohort — never inferred from the name):
+
+| product | account | campaign |
+|---|---|---|
+| Superfood Tabs | Superfood Tabs | `120251359520370326` |
+| Amazing Coffee K-Cups | Amazing Coffee & Creamer | `120253322361760184` |
+| Amazing Creamer | Amazing Coffee & Creamer | `120253322362100184` |
+| Amazing Coffee *(paused permanently — out of stock)* | Amazing Coffee & Creamer | `120253322362230184` |
+| Ashwavana Zen Relax | Ashwavana | `120250601021690682` |
+| Ashwavana Guru Focus | Ashwavana | `120250601022170682` |
+| Creatine Prime+ | creatineproduct | `120249761338970378` |
+
+The two legacy CBO scalers (`120249609991450682`, `120250620926360326`) are paused and left as
+history. The Zen Relax one had been **ACTIVE with a $300/day CBO budget and zero ad sets** — an empty
+campaign that would have started spending the moment anything landed in it.
+
+Pinned in `src/lib/meta-ads.create.test.ts` (no campaign budget, `is_adset_budget_sharing_enabled=false`,
+no `bid_strategy`, no ASC knobs, idempotent by name) and verifiable any time with
+`scripts/_verify-abo-scalers.ts`.
+
+
+---
+
+## ⭐ Advantage+ caps `age_min` at 25 — the K-Cups silent stall (CEO 2026-08-28)
+
+With `targeting_automation.advantage_audience = 1`, Meta REFUSES an ad set whose `age_min` exceeds
+**25**. Verbatim:
+
+> *"With ad sets that use Advantage+ audience, the minimum age audience control can't be set to
+> higher than 25: You can add a higher minimum age as a suggestion instead."*
+
+The Amazing Coffee K-Cups cohort carried a legacy **50-65** older-buyer profile (Amazing Coffee's
+audience skews 55-64) alongside `advantage_audience=1`. Meta refused **every** mint — ten-plus
+attempts across Aug 26-27, each a `meta_400` that left `meta_adset_id` null and the publish job
+`failed`. K-Cups had been unblocked on 08-25 (`is_advertised` + 12 angles), Dahlia produced a
+creative, Bianca kept picking it up on schedule — and it could never launch.
+
+**The lesson is where the failure hid.** The cohort read correct at every layer that got checked:
+active, campaign ACTIVE + ABO, pixel set, both exclusion audiences present, slots open, creative in
+the bin. The break was one call further down than anyone was looking, in a field nobody thought to
+compare across cohorts. K-Cups was the only one of six not on 18-65.
+
+`sanitizeAdvantageAgeTargeting(targeting)` (pure, exported) clamps the floor to
+`ADVANTAGE_AUDIENCE_MAX_AGE_MIN = 25` when Advantage+ is on, and `createAdSet` applies it as the last
+step before the wire. It **clamps rather than throws** on purpose: a throw reproduces the silent
+stall this rail exists to remove. The clamp `console.warn`s what it changed, so the correction is
+auditable and the source targeting still gets fixed.
+
+Deliberately does NOT clamp when `advantage_audience` is absent or 0 — a high floor is legitimate on
+a manually-targeted ad set, and clamping there would silently destroy a real older-demographic test.
+
+Pinned in `src/lib/advantage-age-targeting.test.ts`. Audit any time with
+`scripts/_age-targeting-probe.ts` (live adsets + every cohort template, side by side).
+
+### ⚠️ The system had already self-healed this — read the timeline before adding a fix
+
+The autonomous repair loop caught it first and shipped two fixes:
+
+| when | what |
+|---|---|
+| 2026-08-26 | `provision-cohort` drops hard age/gender defaults from `DEFAULT_TEST_TARGETING`, so NEW cohorts carry no age floor |
+| 2026-08-27 12:25 | `normalizeLegacyAdvantageAudienceTargeting` (`agent.ts:3702`) strips age/genders from `create_adset_spec` at replenish-enqueue |
+
+Measured: the last failed mint was **2026-08-27 12:00**; the very next replenish at **13:00 published
+successfully**. Zero failures since. *The loop diagnosed, specced, built, merged and verified its own
+fix in about a day.*
+
+What was still left, and why this rail exists anyway:
+
+1. **The stale cohort row.** The Aug-27 fix STRIPS age downstream; it does not correct the source. The
+   K-Cups template still read 50-65 — a row that lies about what we target. Fixed to 18-65 to match
+   the other five (CEO: *"it should be the same as the rest"*).
+2. **Paths that skip replenish-enqueue.** `normalizeLegacyAdvantageAudienceTargeting` guards ONE
+   call site. `sanitizeAdvantageAgeTargeting` sits in `createAdSet`, so a scaler mint from
+   `graduateCrownedWinnerToScaler` or a manual publish is covered too.
+
+`META_ADVANTAGE_AUDIENCE_MAX_AGE_MIN` (provision-cohort) is now an alias of
+`ADVANTAGE_AUDIENCE_MAX_AGE_MIN` here — one definition, two names. A second literal `25` in another
+module is precisely how a platform limit drifts out of sync.
+

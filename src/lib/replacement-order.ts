@@ -65,6 +65,37 @@ export function findVariantOverCap(
   return null;
 }
 
+/**
+ * Pure decision for the cap + its founder grant, kept next to [[findVariantOverCap]] so the rail is
+ * unit-testable without a DB or Shopify. Three outcomes:
+ *   - within cap                      → { allow: true, granted: false }
+ *   - over cap, no named authorizer   → { allow: false, refusal }   (every autonomous caller)
+ *   - over cap, named authorizer      → { allow: true, granted: true, authorizedBy }
+ *
+ * A blank/whitespace authorizer is NOT a grant — the exception must name a human, so a caller cannot
+ * satisfy the rail with an empty string or a bare `true`.
+ */
+export function decideOverCap(
+  items: ReadonlyArray<{ variantId: string; quantity: number; title?: string }>,
+  authorizedBy?: string | null,
+):
+  | { allow: true; granted: false }
+  | { allow: true; granted: true; authorizedBy: string; over: NonNullable<ReturnType<typeof findVariantOverCap>> }
+  | { allow: false; refusal: string; over: NonNullable<ReturnType<typeof findVariantOverCap>> } {
+  const over = findVariantOverCap(items);
+  if (!over) return { allow: true, granted: false };
+  const grant = authorizedBy?.trim();
+  if (!grant) {
+    const label = over.title ? `${over.title} (variant ${over.variantId})` : `variant ${over.variantId}`;
+    return {
+      allow: false,
+      over,
+      refusal: `Replacement refused: ${over.requested} units of ${label} exceeds the per-variant cap of ${over.cap}. A larger replacement needs approval.`,
+    };
+  }
+  return { allow: true, granted: true, authorizedBy: grant, over };
+}
+
 export interface CreateReplacementInput {
   workspaceId: string;
   customerId: string;
@@ -95,6 +126,22 @@ export interface CreateReplacementInput {
   initiatedBy?: "ai" | "agent" | "script" | "playbook";
   /** Optional display name of the human (when initiatedBy='agent'/'script'). */
   initiatedByName?: string;
+  /**
+   * FOUNDER GRANT for a replacement that exceeds [[REPLACEMENT_MAX_UNITS_PER_VARIANT]].
+   *
+   * The cap exists so no autonomous caller can self-serve a large replacement — that stays true:
+   * an agent cannot set this, because an agent has no founder to name. But until 2026-08-28 the
+   * cap was also un-grantable, so an over-cap case the CEO *had* decided to approve had no way to
+   * execute. Ground truth: Jen Parker (ticket b199e5ba, replacement cda7ee02) is a 14-order,
+   * $3,386 customer whose every order since 2024 has been 5-6 units; her whole 5-unit bulk order
+   * of SC-TABS-PM-2 arrived expired. June escalated it as "a real over-cap authorization only the
+   * founder can grant" — and then there was nothing to grant it WITH. She waited 23 days.
+   *
+   * Set this to a string naming WHO authorized it and WHY (it is persisted to the replacement's
+   * reason_detail and echoed into the Shopify note), never to a bare `true`. The supervisor grants
+   * the exception; the tool still cannot. See docs/brain/operational-rules.md § North star.
+   */
+  overCapAuthorizedBy?: string;
 }
 
 export interface CreateReplacementResult {
@@ -196,15 +243,26 @@ export async function createReplacementOrder(input: CreateReplacementInput): Pro
   // The CEO ceiling (REPLACEMENT_MAX_UNITS_PER_VARIANT) is enforced here
   // in the SDK so every caller inherits it. We do NOT silently truncate
   // — the caller decides whether to split, drop the excess, or escalate.
-  const over = findVariantOverCap(input.items);
-  if (over) {
-    const label = over.title ? `${over.title} (variant ${over.variantId})` : `variant ${over.variantId}`;
+  const capDecision = decideOverCap(input.items, input.overCapAuthorizedBy);
+  if (!capDecision.allow) {
     return {
       success: false,
       replacementId: "",
       shopifyOrderName: null,
-      error: `Replacement refused: ${over.requested} units of ${label} exceeds the per-variant cap of ${over.cap}. A larger replacement needs approval.`,
+      error: capDecision.refusal,
     };
+  }
+  if (capDecision.granted) {
+    // A granted exception is LOUD, never silent — the whole point of the cap is that an oversized
+    // replacement is visible. Logged here and persisted below in reason_detail + the Shopify note.
+    console.warn("replacement_over_cap_authorized", {
+      workspaceId: input.workspaceId,
+      customerId: input.customerId,
+      variantId: capDecision.over.variantId,
+      requested: capDecision.over.requested,
+      cap: capDecision.over.cap,
+      authorizedBy: capDecision.authorizedBy,
+    });
   }
 
   // ── 1. Insert the row FIRST (record-first guarantee) ────────────────
@@ -239,6 +297,11 @@ export async function createReplacementOrder(input: CreateReplacementInput): Pro
     subscription_id: input.subscriptionId || null,
     address_validated: false,
     validated_address: input.shippingAddress,
+    // A granted over-cap exception is recorded on the row itself, so the audit trail carries WHO
+    // approved it rather than leaving an unexplained oversized replacement.
+    ...(capDecision.granted
+      ? { reason_detail: `over-cap ${capDecision.over.requested}>${capDecision.over.cap} authorized by: ${capDecision.authorizedBy}` }
+      : {}),
   }).select("id").single();
 
   if (insertErr || !replacement) {

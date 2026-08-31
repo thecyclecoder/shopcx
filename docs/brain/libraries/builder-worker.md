@@ -150,6 +150,17 @@ The `KNOWN_JOB_KINDS` constant next to the `Job.kind` union enumerates every kin
 
 When a goal-bound spec's PR becomes DIRTY (its `baseRef` goal-branch advanced past the spec's branch — a rebase/rebuild is needed), the standing-pass reconciler ([[agent-jobs]] `reconcileDirtyGoalMemberPrs`) detects it and enqueues a `pr-resolve` job to rebase-or-rebuild. The `runPrResolveJob` handler now reads `pr.base.ref` dynamically ([[github-pr-resolve]] `getPr` extended) and merges into `origin/{baseRef}` (validated as `main` or `goal/*`; falls back to main) instead of hardcoded `origin/main`. This allows a single `pr-resolve` lane to handle both one-off (merge-to-main) and goal-bound (merge-to-goal-branch) PRs seamlessly.
 
+## Phase-position derivation — `phasePosition` runs for every spec, including single-phase ([[../specs/a-single-phase-spec-records-its-build-sha-regardless-of-phase-title]] Phase 1)
+
+At the top of `runBuildJob`, the worker resolves `phasePosition` (the 1-based index of the phase this session is building). It's the pin `finalizeBuiltPhase` uses to call `stampPhaseBuilt` (recording `build_sha` + flipping the phase to `in_progress`) and the value that becomes the commit's `Phase: N` trailer — the backup signal `finalizeBuiltPhase` scans branch commits for when the derived stamp is missing. If `phasePosition` is null, both routes fail together: no stamp is recorded and no trailer is emitted, so the merge step (which requires build evidence) can never mark the phase shipped.
+
+Derivation order (`scripts/builder-worker.ts` ~L28441):
+
+1. **Instructions-name-phase.** If `job.instructions` literally contains `Phase N`, that N wins (`/\bPhase\s+(\d+)\b/i`). This is the direct signal — a scoped multi-phase build or a spec-test rerun.
+2. **First-unbuilt-phase fallback** (fresh job, no `Phase N` in instructions). Load the spec's phases via [[brain-roadmap]] `getSpec` and pick `findIndex((p) => p.status !== 'shipped' && p.status !== 'rejected' && !p.build_sha)`. The `!p.build_sha` clause is REQUIRED — without it, once P1 is `in_progress` (built, unshipped) the findIndex returns P1 for every subsequent phase build, so multi-phase specs accumulate at "positions 2,3 not built" and never advance.
+
+**Single-phase specs derive too.** Position derivation runs on any `idx >= 0` — a one-phase spec resolves to position 1 unambiguously. Only the `nextPhaseScope` narrowing (the "⭐ ONE-PHASE-PER-SESSION" instruction injected into the build session) stays gated on `phases.length > 1`, because a single-phase spec IS the whole thing in one PR and has nothing to scope. Pre-fix, both were gated together on `phases.length > 1`, which left `phasePosition = null` for any single-phase spec whose title didn't literally contain "Phase N"; a phase titled "P1 — implement the fix" then recorded no `build_sha` and was permanently unshippable once the 2026-08-17 merge step began requiring build evidence.
+
 ## Ephemeral worktree recovery — `removeWorktreeForBranch` third arm (builder-worktree-self-heal-reclaims-ephemeral-branch-pinned-worktrees)
 
 The **branch-side** cleanup helper `removeWorktreeForBranch(branch)` is called before every `git worktree add -B <branch>` to free any stale worktree that's still pinning `<branch>`. It has three arms:
@@ -240,6 +251,20 @@ Layers with the surrounding protections in `runBuildJob`: the fresh + resume pat
 - Every reconciliation is logged (Phase 1 log tail); Phase 2 surfaces each repair on the build-card audit surface so the CEO sees what was auto-corrected — never silent.
 
 **North star.** The reconciler is a bounded proxy (make the pattern match reality); the deterministic grep still owns the objective (is the code actually present). Same shape as every other autonomous tool per [[../operational-rules]] § North star — the tool proposes, a deterministic check confirms.
+
+## Merge-gate grep outcome vocabulary — pass, fail, unevaluable ([[../specs/a-broken-verification-check-cannot-kill-a-build]])
+
+`isSpecAccumulationComplete` reads each phase's grep checks through [[specs-table]] `defaultRunGitGrepOnBranch`, which returns a typed `GrepOnBranchOutcome` on every call: `match` | `no-match` | `grep-error` | `unresolvable`. The two invariants that shape the re-drive path:
+
+- **`match` / `no-match` — a REAL verdict.** The pattern compiled, the ref resolved, git grep ran. `match` with `expect: 'present'` (or `no-match` with `expect: 'absent'`) is a **pass**; the inverse is a **fail** — real, phase-attributable, and the correct signal to consume a re-drive if the phase's code is genuinely missing.
+- **`grep-error` / `unresolvable` — UNEVALUABLE.** The check did not run: `git grep` refused to compile the pattern (a PCRE-only construct like `(?i)` — the exact class Phase 1 of this spec closes at authoring), or the remote-tracking ref could not be resolved (fetch / rev-parse failure). The verifier already renders these as `GIT ERROR ... (infrastructure fault, NOT a code gap)` / `BRANCH UNRESOLVABLE ... (infrastructure fault, NOT a code gap)` — the outcome tag exists specifically so callers can distinguish an infrastructure fault from a phantom code gap.
+
+### Which outcomes consume a re-drive
+
+- **fail** (a `no-match` on `expect:'present'`, or a `match` on `expect:'absent'`) CONSUMES a `BUILDER_DEFERRED_REDRIVE_MAX` slot via the existing `redriveDeferredBuildOrEscalate` path in [[../libraries/roadmap-actions]] — the redrive counter tick lets a genuinely-unbuildable spec escalate to Ada after N failures instead of looping. This is unchanged from the pre-Phase-2 behaviour.
+- **unevaluable** does NOT consume the redrive counter. `runBuildJob`'s defer branch reads `SpecAccumulationVerdict.unevaluablePhases` (a new field surfaced by `isSpecAccumulationComplete` when any phase's `PhaseAccumulationVerdict.unevaluable` is set) and, when the list is non-empty, routes to `escalateBrokenCheckWithoutRedriveCount` INSTEAD of `redriveDeferredBuildOrEscalate`. That escalate lane writes a `broken_check_escalated` `director_activity` row (distinct from `redrive_deferred_build`, so the counter query does not see it) plus a `needs_approval` `agent_jobs` build row whose instructions name every phase + offending pattern verbatim, so a human or repair lane fixes the check without the spec's code-gap history being consumed by an infrastructure fault. The build stays deferred (accumulation still reads `!complete`, the PR is not opened) — an unevaluable check NEVER counts as a PASS, per the spec's phantom-ship hazard.
+
+The ground-truth incidents this vocabulary exists to prevent: `cancelled-subs-stop-reporting-a-future-billing-date` (2026-08-21, 3 re-drives burned on a `(?i)` pattern `git grep` refused; nothing on main mentions `cancelled_at`) and `playbook-drift-classifier-sees-the-pending-question` (2026-08-24, same shape). Post-Phase-2, both would land on the broken-check escalation lane on the first defer — cap counter untouched, human paged with pattern + phase in the escalation summary.
 
 ## Proactive credentials-expiry sweep at account selection ([[../specs/box-session-retry-on-oauth-token-expired-401-sol-never-drops-ticket]] Phase 1)
 

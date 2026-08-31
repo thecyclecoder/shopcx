@@ -1,0 +1,1 @@
+- **Close review-candidacy Bash command parser bypasses** · verified 2026-08-28 · → [[../libraries/review-candidacy-permission-gate]]

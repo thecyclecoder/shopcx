@@ -1,5 +1,11 @@
 # `src/lib/adlibrary-winners.ts` — the WINNERS flow (advertiser resolution + winners scan)
 
+> ## ⛔ RETIRED 2026-08-24 — module deleted
+>
+> Superseded by [[meta-ad-library]] / [[meta-ad-library-resolve]] / [[meta-ad-library-render]].
+> Kept as provenance for historical `creative_skeletons` rows. See [[../integrations/meta-ad-library.md]].
+
+
 The keyword `searchAds` ([[adlibrary]]) only returns a brand's RECENT ads — never its proven long-running winners. Those live behind AdLibrary's **advertiser** endpoints. This module owns the two steps that unlock them, plus the STRICT matcher that keeps the resolver from confidently picking a wrong page. Consumed by [[creative-skeleton]] `sweepCompetitorLanes` (the live scout path — [[../inngest/creative-scout]]). See [[../integrations/adlibrary]].
 
 ## The flow

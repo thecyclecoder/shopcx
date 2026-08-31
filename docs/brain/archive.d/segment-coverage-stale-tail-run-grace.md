@@ -1,0 +1,1 @@
+- **Stop segment coverage stale-tail false alerts during refresh fan-out** · verified 2026-08-22 · → [[../libraries/control-tower]]

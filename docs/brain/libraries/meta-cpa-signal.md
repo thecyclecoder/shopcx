@@ -52,3 +52,64 @@ That set has a REDUCTION problem: a crown BY DEFINITION has CPA at or below the 
 
 ## Related
 [[media-buyer-agent]] · [[../ads/winning-creative-detect]] · [[meta/decision-engine|decision-engine]] (the `IterationPolicy` contract) · [[../tables/iteration_scorecards_daily]] · [[../tables/meta_insights_daily]] · [[crowned-winners]] (the reactivation-guard read chokepoint) · [[../tables/media_buyer_crowned_winners]] · [[../specs/media-buyer-persist-crowned-winners-and-guard-reactivation]] · [[media-buyer-agent]].
+
+---
+
+## ⭐ Crowning is on the PESSIMISTIC end of the CPA estimate (CEO 2026-08-25)
+
+`detectMetaCpaWinners` no longer crowns on the point estimate. A crown now requires the **upper
+bound** to clear `crown_max_cpa_cents`:
+
+```ts
+crownUpperBoundCpaCents(cpaCents, purchases, z) = cpaCents * Math.exp(z / Math.sqrt(purchases))
+// CROWN_CONFIDENCE_Z = 1.28  (~90% one-sided — business-grade, not research-grade)
+```
+
+**Why.** Purchases are Poisson, so a CPA measured on `n` purchases carries a relative SE of
+`1/sqrt(n)`. At the old `crown_min_purchases = 8` that is 35%, and the 95% interval on a measured
+$220 CPA spans **$110–$440** — a "winner" could not be told apart from a $400 dud. All five crowned
+winners were crowned at 7–13 purchases sitting just under the $240 line ($214 / $222 / $228), and
+pooled **post-crown CPA came in at 1.89× pre-crown** while scaled IN PLACE (no scale campaign
+involved). That is textbook regression to the mean: best-of-N selection on a small sample picks the
+LUCKIEST adset, and luck does not replicate anywhere you run it next.
+
+Paired config change: `crown_min_purchases` **8 → 15** (n=15 is where the interval first separates
+$220 from a $400 dud).
+
+**Calibration against a $240 crown** — the rule bites between $150 and $222 at n=8:
+
+| measured CPA | n=8 bound | crowns? |
+|---|---|---|
+| $99 | $155 | yes |
+| $150 | $236 | yes (just) |
+| $160 | $252 | no |
+| $222 | $349 | no |
+
+Pass `crownConfidenceZ: 0` to fall back to the old point-estimate rule without a deploy. Pinned in
+`src/lib/media-buyer/crown-and-rail.test.ts`.
+
+**Falsifiable prediction:** winner's-curse says adsets crowned at HIGHER purchase counts should
+degrade less. All five of ours were crowned at 7–13, too narrow a range to test. With the bar at 15
+this becomes checkable against our own data within about a month.
+
+
+### The crown also discounts CONTAMINATED history (CEO 2026-08-25)
+
+`activeAdsetLifetimeMetrics` now reads [[../tables/meta_adsets]]`.clean_signal_since` per adset and
+drops every insight row on or before that day, via the pure exported
+`insightCountsTowardSignal(snapshotDate, cleanSignalSince)`.
+
+Two independent ways a crown can be wrong, and they need different guards:
+
+| failure | guard |
+|---|---|
+| **small** sample — the luckiest adset wins on noise | `crownUpperBoundCpaCents` (confidence bound) |
+| **contaminated** sample — existing customers converting inside a "cold" test | `clean_signal_since` floor |
+
+The confidence bound does nothing about contamination: 10 purchases are 10 purchases whether or not
+they came from people who already bought. Three legacy adsets (incl. `MB Tabs — Test 02`, the best
+crown candidate at $186 CPA) were running with no existing-customer exclusion at all.
+
+A failed `clean_signal_since` read logs and falls back to counting the full history — failing the
+other way would silently starve every crown across the workspace.
+

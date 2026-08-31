@@ -11,6 +11,9 @@
 import { inngest } from "@/lib/inngest/client";
 import { syncCustomers, syncOrders } from "@/lib/inngest/sync-shopify";
 import { ticketCsatCron } from "@/lib/inngest/ticket-csat";
+import { reviewCandidacyDetectorCron } from "@/lib/inngest/review-candidacy-detector-cron";
+import { reviewRequestNudgeCron } from "@/lib/inngest/review-request-nudge-cron";
+import { reviewRequestCanaryDigestCron } from "@/lib/inngest/review-request-canary-digest-cron";
 import {
   importFileUpload,
   importFileSplit,
@@ -42,7 +45,6 @@ import {
   chargebackEvidenceReminder,
 } from "@/lib/inngest/chargeback-processing";
 import { ticketUnsnooze } from "@/lib/inngest/ticket-snooze";
-import { syncKlaviyoReviews } from "@/lib/inngest/sync-reviews";
 import {
   dunningPaymentFailed,
   dunningNewCardRecovery,
@@ -112,11 +114,7 @@ import { autoBlogGenerate } from "@/lib/inngest/auto-blog";
 import { featuredReviewCardsCron } from "@/lib/inngest/featured-review-cards";
 import { socialInsightsSync } from "@/lib/inngest/social-insights";
 import { socialPromoGraphics } from "@/lib/inngest/social-promo-graphics";
-import { klaviyoSmsImport } from "@/lib/inngest/klaviyo-sms-import";
-import { klaviyoEventsImport } from "@/lib/inngest/klaviyo-events-import";
-import { klaviyoAttributionCompute } from "@/lib/inngest/klaviyo-attribution-compute";
-import { klaviyoEngagementBackfill } from "@/lib/inngest/klaviyo-engagement-backfill";
-import { klaviyoEngagementSync } from "@/lib/inngest/klaviyo-engagement-sync";
+import { shopifyReviewMetafieldsSync } from "@/lib/inngest/shopify-review-metafields-sync";
 import { socialCommentModerate } from "@/lib/inngest/social-comment-moderate";
 import { metaHistoricalCommentsSync } from "@/lib/inngest/meta-historical-comments-sync";
 import { ticketResearchRequested, ticketHealRequested } from "@/lib/inngest/ticket-research";
@@ -150,6 +148,7 @@ import { adCreativeCadenceCron, adCreativeCadenceSweep } from "@/lib/inngest/ad-
 import { adsSupervisorCadenceCron, adsSupervisorCadenceSweep } from "@/lib/inngest/ads-supervisor-cadence";
 import { budgetWatchCron } from "@/lib/inngest/budget-watch";
 import { mediaBuyerGradeCron, mediaBuyerGradeSweep } from "@/lib/inngest/media-buyer-grade";
+import { notificationHygieneCron } from "@/lib/inngest/notification-hygiene";
 import {
   mediaBuyerSelfCorrectingCron,
   mediaBuyerSelfCorrectingSweep,
@@ -182,6 +181,9 @@ export const registeredInngestFunctions = [
   syncCustomers,
   syncOrders,
   ticketCsatCron,
+  reviewCandidacyDetectorCron,
+  reviewRequestNudgeCron,
+  reviewRequestCanaryDigestCron,
   importFileUpload,
   importFileSplit,
   importChunkProcess,
@@ -207,7 +209,6 @@ export const registeredInngestFunctions = [
   chargebackLost,
   chargebackEvidenceReminder,
   ticketUnsnooze,
-  syncKlaviyoReviews,
   dunningPaymentFailed,
   dunningNewCardRecovery,
   dunningBillingSuccess,
@@ -295,11 +296,7 @@ export const registeredInngestFunctions = [
   featuredReviewCardsCron,
   socialInsightsSync,
   socialPromoGraphics,
-  klaviyoSmsImport,
-  klaviyoEventsImport,
-  klaviyoAttributionCompute,
-  klaviyoEngagementBackfill,
-  klaviyoEngagementSync,
+  shopifyReviewMetafieldsSync,
   socialCommentModerate,
   metaHistoricalCommentsSync,
   ticketResearchRequested,
@@ -340,6 +337,7 @@ export const registeredInngestFunctions = [
   adsSupervisorCadenceSweep,
   budgetWatchCron,
   mediaBuyerGradeCron,
+  notificationHygieneCron,
   mediaBuyerGradeSweep,
   mediaBuyerSelfCorrectingCron,
   mediaBuyerSelfCorrectingSweep,

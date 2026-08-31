@@ -46,6 +46,18 @@ A bare master code (no suffix) is **never** directly usable — `resolveCoupon` 
 The resolver normalizes a coupon into an entry on [[subscriptions]].`applied_discounts`:
 `{ code, type, value, recurring_cycle_limit, remaining_cycles, source }`. The **internal renewal scheduler** ([[../inngest/internal-subscription-renewals]]) computes the entire-order discount from `applied_discounts`, applies it to the charge, decrements `remaining_cycles` per successful charge, and drops the entry at 0 (so "1 charge" auto-expires). See [[../libraries/coupons]].`computeAppliedDiscountCents`.
 
+## Internal loyalty-coupon materialization
+
+When a LOYALTY-* code is applied to an internal subscription, [[../libraries/coupons]] `ensureInternalLoyaltyCouponRow` materializes the corresponding `loyalty_redemptions` row as an internal `coupons` row in this table:
+- **Why:** LOYALTY-* codes are minted in Shopify; renewal-time resolution normally reaches Shopify (step 3 in `resolveCoupon`). If Shopify deletes the code, renewal charges full price. Materializing as an internal coupon moves step-1 resolution (internal wins) so Shopify deletion is survived.
+- **Type:** Always `fixed_amount` (the redemption's `discount_value`).
+- **Scope:** Always `order`.
+- **Customer-scoped:** `customer_id = contractOwnerCustomerId` (the subscription's owner).
+- **Single-use:** `single_use=true`, `recurring_cycle_limit=1` (one charge, one loyalty coupon per renewal ceiling, mirrors Shopify mint).
+- **NET-ZERO on points:** Never calls `spendPoints` — points were already spent at redeem time; this reads `loyalty_redemptions.discount_value` only.
+- **Idempotent:** A row keyed by `(workspace_id, lower(code))` unique index is returned as-is with no re-write.
+- **Guards (Phase 2–3 of [[../specs/loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value]]):** Before materializing, `ensureInternalLoyaltyCouponRow` verifies (1) canonical code shape (defense vs. wildcard injection), (2) redemption owner matches contract owner (Authz), and (3) redemption is in apply-eligible state (defense vs. coupon-replay: `status='active'`, `used_at IS NULL`, `expires_at` not past). See [[../libraries/coupons]] for guard details.
+
 ## Gotchas
 
 - **Coupons apply only to active subscriptions.** Both `subscriptionApplyCoupon` ([[../libraries/subscription-items]]) and `applyCouponToSub` ([[../libraries/coupons]]) check [[../tables/subscriptions]].`status` — refusing `'paused'`, `'cancelled'`, or null — via the `couponApplicableToSubStatus` guard. Discounts on non-active subs are structurally invalid: they silently discount a future renewal the customer didn't earn (ticket f9e28d57, SC135320 double-payout defect). The apply returns `{ success: false, error: 'subscription_not_active' }` on a non-active sub.

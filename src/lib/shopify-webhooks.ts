@@ -8,6 +8,7 @@ import { logCustomerEvent } from "@/lib/customer-events";
 import { evaluateRules } from "@/lib/rules-engine";
 import { normalizeShopifyShippingAddress, resolveOrderAddresses } from "@/lib/address-normalize";
 import { inngest } from "@/lib/inngest/client";
+import { isFirstSubscriptionOrder } from "@/lib/subscription-order-link";
 import { getMemberByCustomerId, deductPoints, getOrCreateMember, calculateEarningPoints, earnPoints, getLoyaltySettings, consumeRedemption } from "@/lib/loyalty";
 
 // ── HMAC verification ──
@@ -682,9 +683,28 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
     console.error("Order webhook upsert error:", orderError.message);
   }
 
-  // Link subscription orders to their contract
+  // Link subscription orders to their contract.
+  //
+  // `source_name` only contains "subscription" on RENEWALS. A subscription's
+  // FIRST order is an ordinary checkout (source_name="web") carrying a
+  // "first subscription" tag, so gating on source_name alone links every
+  // renewal (1833/1833 in July 2026) and no first order (0/169). Widened to
+  // accept the tag too.
+  //
+  // Scope note: this does NOT affect new-sub COUNTING — `bucketOrder` reads the
+  // tag, so every dashboard is already correct. The only consumer that needs
+  // the FK is a join, notably the portal's per-subscription order-history
+  // widget, which shows a new subscriber nothing until their first renewal.
+  //
+  // Best-effort here: the two rows come from two independent webhooks (Shopify
+  // sends the order, Appstle the subscription) with no guaranteed ordering, so
+  // the Appstle handler calls the same linker. Whichever lands second wins.
+  // See src/lib/subscription-order-link.ts.
   const sourceName = (payload.source_name as string) || "";
-  if (!orderError && shopifyCustomerId && sourceName.includes("subscription")) {
+  const looksLikeSubscriptionOrder =
+    sourceName.includes("subscription") ||
+    isFirstSubscriptionOrder({ tags: (payload.tags as string) || null, source_name: sourceName });
+  if (!orderError && shopifyCustomerId && looksLikeSubscriptionOrder) {
     try {
       let matched = false;
 

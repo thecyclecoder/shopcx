@@ -1,6 +1,8 @@
 # Dashboard · reviews
 
-Product reviews dashboard. Klaviyo-synced. AI summaries, featured tagging, per-product breakdown.
+Product reviews dashboard. AI summaries, featured tagging, per-product breakdown.
+
+⚠️ **Moderation is local-only and there is no Sync button.** Both changed in the Klaviyo sunset ([[../integrations/klaviyo]]): every approve/reject/feature used to PATCH Klaviyo, and the Sync button pulled from their `/reviews/` endpoint. Actions now write [[../tables/product_reviews]] directly and persist the moderator's `rejection_reason` + `rejection_explanation` (which previously lived only in Klaviyo). `/api/workspaces/:x/sync-reviews` returns `410 Gone`.
 
 **Route:** `/dashboard/reviews`
 
@@ -27,7 +29,7 @@ _None._
 - `/api/workspaces/:x/products`
 - `/api/workspaces/:x/reviews`
 - `/api/workspaces/:x/reviews/:x`
-- `/api/workspaces/:x/sync-reviews`
+- `/api/workspaces/:x/sync-reviews` — **410 Gone** (retired)
 
 ## Permissions
 

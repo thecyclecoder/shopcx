@@ -171,7 +171,7 @@ For `is_internal=false`:
 2. Read the **live Appstle contract**; translate lines → internal catalog **UUID** references via the smart pricing logic ([[appstle-pricing]] `inferAppstleLineBase`) — reads `pricingPolicy.basePrice` when present, else reverse-engineers `currentPrice/(1−sns)`; sets `price_override_cents` only when grandfathered **and strictly below catalog MSRP** (an at-or-above-MSRP base is never stored — it would feed the −25% S&S + quantity-break math from too high a start and inflate the charge; see the base ≤ MSRP invariant in [[migrate-to-internal]] + [[migration-fix]] `price_reconcile` clamp). This is **heal-by-migration** (the internal sub is born with correct pricing; no Appstle heal first). A **"Shipping Protection"** line is NOT translated into `items[]` — it's converted to the internal flag (`shipping_protection_added=true` + `shipping_protection_amount_cents`), which the engine bills separately on top of the product subtotal, and is **excluded** from the captured `pre_migration_charge_cents` baseline (so the audit's `pricing_preserved` compares product-subtotal ≈ product-subtotal). Customer total unchanged (subtotal + flag protection). See [[../specs/migration-shipping-protection]].
 3. Cancel the Appstle contract (reason **"migrated to shopcx"**).
 4. Flip the existing row **in place** → `is_internal=true`, native `internal-*` contract id, status preserved (active/paused/cancelled), reassigned to the billable member.
-5. **Verify** ([[migration-audit]]) — record a [[../tables/migration_audits]] row + run the 8-check checklist; the `/dashboard/migrations` monitor surfaces anything stuck, and the retry cron re-verifies pending rows.
+5. **Verify** ([[migration-audit]]) — record a [[../tables/migration_audits]] row + run the 8-check checklist; the `/dashboard/migrations` monitor surfaces anything stuck, and the retry cron re-verifies pending rows. **Recovery-only `immediate_charge` judges SETTLED state, not pre-retry state** — the check passes when the sub's `last_payment_status='succeeded'` OR a `paid`/`partially_refunded` order for this sub was created after the migration timestamp (`migration_audits.created_at`), so a successful deterministic order-now retry ([[order-now-verify]]) whose paid order lands ~5s after the audit row is created no longer reads as a failure. The `MAX_RETRIES=3` budget on the audit row carries the wait via [[../inngest/migration-audit-retry]]. Ground-truth: audit `ecf8e8fc` (Denise Butler, sub `549c234d`, 2026-08-18) — 10/10 measured failures on 2026-08-28 were false positives whose subs read `last_payment_status='succeeded'`.
 
 Cancelled subs migrate too (using the local row when Appstle is unreadable). The Appstle webhook handler ignores `is_internal` subs so a stale cancel can't clobber a migrated row.
 
@@ -189,6 +189,20 @@ Customer-facing mutations are unified:
 For internal subs these are pure DB updates. For Appstle subs we also call Appstle. The helpers in `src/lib/appstle.ts` check `is_internal` and dispatch.
 
 [[../inngest/portal-auto-resume]] runs every minute, picks up subs where `pause_resume_at <= now()`, calls `resume()`.
+
+## Cancelling — clear the next-billing date at the write
+
+**A cancelled sub must not report a live next charge.** Every writer that flips `subscriptions.status → 'cancelled'` also sets `next_billing_date = NULL` in the same update. Enforced at the five known writers so a downstream reader (CS director brief, founder escalation card, portal detail, agent context panel) can render `next_billing_date` verbatim without a per-caller `status === 'cancelled'` guard.
+
+- **`internalSubscriptionAction(ws, contractId, 'cancel')`** ([[../libraries/internal-subscription]]) — internal-sub canonical cancel; adds `next_billing_date: null` alongside `status: 'cancelled'`.
+- **`appstleSubscriptionAction(ws, contractId, 'cancel', …)`** ([[../libraries/appstle]]) — Appstle-sub canonical cancel; adds `next_billing_date: null` in the local mirror after the Appstle DELETE succeeds.
+- **`exhaustInternalDunning`** ([[../inngest/internal-dunning]]) — dunning-exhausted internal-sub cancel; adds `next_billing_date: null`. Recovery re-sets the date when the customer updates their card.
+- **Journey-outcomes cancel fallback** ([[../inngest/journey-outcomes]]) — the `outcome === 'cancelled'` branch's no-`shopify_contract_id` fallback DB write; adds `next_billing_date: null`.
+- **Appstle webhook** ([[../inngest/appstle-subscription-handler]]) — when `mapStatus(status) === 'cancelled'` the upsert force-nulls `next_billing_date`, even if Appstle's own payload still carries a date.
+
+**Do not guard at the readers.** The column is the source of truth; a reader-side guard leaves the stale value for the next consumer to trip over. Ground-truth incident: ticket `8af43dd1` (Bonnie Marlette, 2026-08-24) — the CS director escalated to the founder asserting a cancelled sub "still carries an active 8-week cadence with a live next-charge on 2026-09-11" and asked for a $209.13 refund. Every renewal had in fact billed while the subscription was still active; only the leftover `next_billing_date` column looked live. A sibling row on the same customer carried a `next_billing_date` ten months in the past — the same shape of stale column.
+
+**Reactivation.** `cancelled → active` is still supported (see below). Per the "modify first, activate LAST" rule, the caller sets `next_billing_date` BEFORE flipping status back to `active` — the null-on-cancel invariant does not interfere.
 
 ## Reactivating a cancelled subscription + manual price edits (money-safety)
 

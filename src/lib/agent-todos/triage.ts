@@ -305,12 +305,21 @@ export async function loadTriageBrief(admin: Admin, workspaceId: string, ticketI
     // Overcharge detection — surface the {charged, expected, delta, dropped_base}
     // signal + remediation plan so the solver CHECKS for an overcharge before
     // proposing create_return / cancel on a billing complaint.
+    //
+    // Precedence sentence — mirrors the orchestrator (sonnet-orchestrator-v2.ts
+    // around the same import) so the two contexts cannot diverge: when a
+    // finding exists, the customer's established rate is authoritative and the
+    // standard sub price (MSRP × 0.75) MUST NOT be used to justify a charge
+    // above it.
     try {
       const { detectOverchargesForCustomer, formatOverchargeForAgent } = await import("@/lib/subscription-overcharge");
       const overcharges = await detectOverchargesForCustomer(workspaceId, ticket.customer_id);
       if (overcharges.length) {
         lines.push("");
         lines.push(overcharges.map(formatOverchargeForAgent).join("\n"));
+        lines.push(
+          "PRECEDENCE: this customer has an OVERCHARGE DETECTED finding above. Their established rate (the sustained per-unit they were reliably paying) is AUTHORITATIVE for pricing questions. The standard sub price (MSRP × 0.75) MUST NOT be used to justify a charge above the established rate — a renewal that lines up with the standard rate is still an overcharge when it exceeds what this customer had locked. Answer a pricing complaint from the finding, not from the standard rate card.",
+        );
       }
     } catch (e) {
       console.error("[triage] overcharge detection failed (non-fatal):", e);
