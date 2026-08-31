@@ -28,8 +28,14 @@ The **ONE** targeted raw read is `specs.status` (the OVERRIDE-ONLY column the ca
 - **`StuckVerdict`** — `{ isStuck, severity, detector, reason, sinceMinutes, suggestedAction }`. Primary = the highest-severity matched detector; `deferred-parked`/`awaiting-human` (and any deferred spec) are never `isStuck`.
 - **`CLASSIFIERS`** — the ordered list of named anomaly classifiers (the extension point). See the [[../recipes/pipeline-doctor]] table for each detector's meaning + source signals: `stored-status-override-violation` (CRITICAL), `failed-gate`, `zombie-session`, `stuck-in-testing`, `built-not-stamped`, `in-testing-needs-human`, `awaiting-human`, `drift-suspect`, `not-claimed`, `deferred-parked`.
 - **`BUILT_NOT_STAMPED_STATUSES`** — the shared status set that gates `detectBuiltNotStamped` (`{ "planned", "in_progress" }`). **DO NOT narrow this to a single status** (see the reachability trap below). Pinned by `npm run test:built-not-stamped`.
-- **`detectBuiltNotStamped`** — exported so the pinning test can invoke it directly with a synthesized `SpecDiagnosis`, no DB.
-- **`Severity`** = `none｜info｜low｜medium｜high｜critical`; plus `DetectorResult`, `PhaseDiag`, `JobDiag`, `SpecTestDiag`, `DiagnoseOptions` types.
+- **`detectBuiltNotStamped`** / **`detectInTestingNeedsHuman`** — exported so the pinning tests can invoke them directly with a synthesized `SpecDiagnosis`, no DB.
+- **`Severity`** = `none｜info｜low｜medium｜high｜critical`; plus `DetectorResult`, `PhaseDiag`, `JobDiag`, `SpecTestDiag` (carries `cleanMachinePass: boolean` — see the greenness rule below), `DiagnoseOptions` types.
+
+## Greenness comes from `isCleanMachinePassRun` — human checks never make a spec stuck  *(pipeline-doctor-honors-human-checks-are-advisory Phase 1)*
+
+The doctor's "is spec-test green?" answer is DELEGATED to the SHARED [[spec-test-runs]] `isCleanMachinePassRun` predicate — the SAME gate the pre-merge promote rail ([[brain-roadmap]] Rail 1 at :998) and the post-ship fold rail ([[spec-test-runs]] `getAutoFoldEligibleSlugs` Rail 2) already use. `SpecTestDiag.cleanMachinePass` is computed at assembly time from `(run, humanResolutions, slug)` and the module-private `specTestGreen` reads that boolean; the classifier `detectInTestingNeedsHuman` returns null when it is true.
+
+**Human checks are ADVISORY.** A `needs_human` verdict with ≥1 check and 0 unresolved auto-`fail` is a clean machine pass and promotes on its own — the doctor MUST agree with the promote/fold rails, so it does not re-decide green from the raw verdict string. The classifier still fires for the case it was really for: a `needs_human` verdict that also carries an unresolved auto-`fail` (a real machine failure hiding inside an advisory verdict); its `suggestedAction` names the machine fail as the blocker, never the advisory human checks. Ground-truth incident: 2026-08-31 playbook-drift-classifier-sees-the-pending-question ran with three auto-passes, zero fails and two advisory human checks (a harness gap — no `gh` binary), and the doctor still reported it stuck; the two rails agreed it was clean. Pinned by `npm run test:doctor-human-advisory`.
 
 ## The `built-not-stamped` reachability trap  *(unstamped-phase-cannot-silently-strand-a-build Phase 1)*
 

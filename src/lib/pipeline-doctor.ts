@@ -20,7 +20,7 @@ import { getRoadmap, getSpec as getSpecCard } from "@/lib/brain-roadmap";
 import type { AgentJob } from "@/lib/agent-jobs";
 import { getLatestJobsBySlug, ACTIVE_STATUSES, resolveGoalSlugForSpec } from "@/lib/agent-jobs";
 import type { SpecTestRun, AgentVerdict, HumanCheckRow } from "@/lib/spec-test-runs";
-import { getLatestSpecTestRuns, getLiveSpecTestSlugs, getHumanCheckResolutions, normalizeRun, hasActiveSpecTestJob } from "@/lib/spec-test-runs";
+import { getLatestSpecTestRuns, getLiveSpecTestSlugs, getHumanCheckResolutions, normalizeRun, hasActiveSpecTestJob, isCleanMachinePassRun } from "@/lib/spec-test-runs";
 import type { SecurityStateBySlug } from "@/lib/security-agent";
 import { getSecurityStateBySlug, getSecurityStateForSlug } from "@/lib/security-agent";
 import { buildLifecycleContext, specTestHasOpenRegression } from "@/lib/build-lifecycle-context";
@@ -77,6 +77,10 @@ export interface SpecTestDiag {
   branch: string | null;
   hasOpenRegression: boolean;
   ageMinutes: number | null;
+  /** Whether the run is a clean machine pass per the SHARED [[isCleanMachinePassRun]] predicate — the SAME
+   *  gate the promote and fold rails use. A `needs_human` verdict with ≥1 check and 0 unresolved auto-fails
+   *  is a clean pass; human checks are ADVISORY. Do not re-decide greenness from the verdict string. */
+  cleanMachinePass: boolean;
 }
 
 export interface DetectorResult {
@@ -207,7 +211,7 @@ function anyPhaseBuilt(d: SpecDiagnosis): boolean {
   return d.phases.some((p) => !!p.build_sha || p.status === "shipped");
 }
 function specTestGreen(d: SpecDiagnosis): boolean {
-  return !!d.specTest && d.specTest.verdict === "approved" && !d.specTest.hasOpenRegression;
+  return !!d.specTest && d.specTest.cleanMachinePass;
 }
 function securityGreen(d: SpecDiagnosis): boolean {
   return !!d.security && d.security.completedClean && !d.security.surfaced && !d.security.live;
@@ -324,17 +328,23 @@ const detectStuckInTesting: Classifier = (d) => {
   };
 };
 
-/** MEDIUM — status=in_testing but the spec-test verdict is `needs_human` (advisory, not an auto-green pass),
- *  so the promote gate can't go green until a human resolves it. */
-const detectInTestingNeedsHuman: Classifier = (d) => {
+/** MEDIUM — status=in_testing with a spec-test verdict of `needs_human` that is NOT a clean machine pass
+ *  (i.e. it still carries an unresolved auto-`fail`). Human checks are ADVISORY per the shared
+ *  [[isCleanMachinePassRun]] predicate — a needs_human run with ≥1 check and 0 unresolved fails is a clean
+ *  pass and promotes on its own, so we skip when `cleanMachinePass` is true. The remaining case is a real
+ *  machine failure hiding inside a needs_human verdict; the blocker there is the unresolved fail, not the
+ *  advisory checks. */
+export const detectInTestingNeedsHuman: Classifier = (d) => {
   if (d.derivedStatus !== "in_testing") return null;
   if (!d.specTest || d.specTest.verdict !== "needs_human") return null;
+  if (d.specTest.cleanMachinePass) return null; // advisory-only run — a clean machine pass, not stuck
   if (d.security?.surfaced) return null; // failed-gate owns that
+  const fails = d.specTest.summary.auto_fail;
   return {
     name: "in-testing-needs-human",
     severity: "medium",
-    reason: `in_testing, but the spec-test verdict is 'needs_human' (${d.specTest.summary.needs_human} human check${d.specTest.summary.needs_human === 1 ? "" : "s"}) — an advisory verdict, not an auto-green machine pass, so the promote gate won't clear on its own.`,
-    suggestedAction: "Resolve the needs-human spec-test check(s) on Developer → Spec Tests (verify/fail/dismiss) so the gate can derive green or red.",
+    reason: `in_testing, spec-test verdict='needs_human' but the run is NOT a clean machine pass — ${fails ? `${fails} unresolved auto-fail check${fails === 1 ? "" : "s"}` : "an unresolved auto-fail regression"} is blocking the promote gate. Human checks (${d.specTest.summary.needs_human}) are advisory and don't gate.`,
+    suggestedAction: "Resolve the failing auto-check (verify/dismiss the regression, or author a fix spec) — the promote gate is blocked by the machine fail, not the advisory human checks.",
     sinceMinutes: d.specTest.ageMinutes,
   };
 };
@@ -487,6 +497,7 @@ function assembleSpec(
         branch: run.spec_branch,
         hasOpenRegression: specTestHasOpenRegression(card.slug, run, humanResolutions),
         ageMinutes: minutesSince(run.run_at, ctx.now),
+        cleanMachinePass: isCleanMachinePassRun(run, humanResolutions, card.slug),
       }
     : null;
 
