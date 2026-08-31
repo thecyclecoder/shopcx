@@ -153,6 +153,8 @@ export interface LoadedReviewProduct {
   title: string | null;
   image_url: string | null;
   product_type: string | null;
+  /** Legacy Klaviyo-era join key on product_reviews — still NOT NULL there. */
+  shopify_product_id: string | null;
 }
 
 /**
@@ -190,7 +192,7 @@ export async function loadReviewSessionByToken(
 
   const { data: product } = await admin
     .from("products")
-    .select("id, title, image_url, product_type, reviewable")
+    .select("id, title, image_url, product_type, reviewable, shopify_product_id")
     .eq("id", session.product_id)
     .eq("workspace_id", session.workspace_id)
     .maybeSingle();
@@ -268,6 +270,14 @@ export async function submitReviewForSession(input: SubmitReviewInput): Promise<
       workspace_id: session.workspace_id,
       customer_id: session.customer_id,
       product_id: session.product_id,
+      // `product_reviews.shopify_product_id` is a Klaviyo-era join key that
+      // predates `product_id` and is still NOT NULL. Omitting it made EVERY
+      // submit fail with a not-null violation → review_insert_failed → a 500
+      // the page rendered as "something went wrong". The companion migration
+      // relaxes the constraint (Shopify is sunsetting; an internal-only
+      // product would hit this again), but we populate it regardless so the
+      // legacy column stays consistent for anything still reading it.
+      shopify_product_id: product.shopify_product_id ?? "internal",
       rating,
       body: comment,
       attribute_scores,
