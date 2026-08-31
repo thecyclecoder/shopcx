@@ -63,13 +63,34 @@ test("rail: unfilled_mustache_in_subject — a surviving {{ ... }} in subject bl
   assert.ok(v.reasons.includes("unfilled_mustache_in_subject"));
 });
 
-test("rail: more_than_one_ask — a body with 2 question marks is blocked", () => {
+test("rail: more_than_one_ask — THREE or more questions is ask-stacking and blocks", () => {
   const v = validateReviewRequest({
     ...baseline,
-    body: "how are the Sleep Gummies working out? would you share a line about them?",
+    body: "how are the Sleep Gummies working out? would you share a line? and follow us on Instagram?",
   });
   assert.equal(v.allow, false);
   assert.ok(v.reasons.includes("more_than_one_ask"));
+});
+
+test("rail: a rhetorical setup paired with the ask is ALLOWED — it is one request", () => {
+  // The founder's proven Klaviyo copy: "Is Erica right? How are you liking X?"
+  // is ONE request phrased as two questions. Blocking it killed 17 of the first
+  // 50 real drafts.
+  const v = validateReviewRequest({
+    ...baseline,
+    body: "Is Erica right? How are you liking the Sleep Gummies?",
+  });
+  assert.ok(!v.reasons.includes("more_than_one_ask"));
+});
+
+test("rail: the compliance footer's question mark is not an ask", () => {
+  // Every CAN-SPAM-compliant email carries an opt-out line. Counting it meant
+  // EVERY email draft failed the one-ask rail.
+  const v = validateReviewRequest({
+    ...baseline,
+    body: "How are you liking the Sleep Gummies?\n\n--\nDon't want notes like this from me? Just reply and say so.",
+  });
+  assert.ok(!v.reasons.includes("more_than_one_ask"));
 });
 
 test("rail: tenure_degenerate_zero_days — 0-day tenure is blocked (broken merge)", () => {
