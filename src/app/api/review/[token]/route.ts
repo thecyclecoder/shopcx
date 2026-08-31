@@ -43,6 +43,7 @@ export async function GET(
       id: load.product.id,
       title: load.product.title,
       image_url: load.product.image_url,
+      variant_title: load.product.variant_title ?? null,
     },
     questions: load.questions,
     min_comment_length: 15,

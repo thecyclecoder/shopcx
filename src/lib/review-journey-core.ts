@@ -146,6 +146,7 @@ export interface LoadedReviewSession {
   product_id: string;
   status: string | null;
   config_snapshot: unknown;
+  variant_id: string | null;
 }
 
 export interface LoadedReviewProduct {
@@ -155,6 +156,8 @@ export interface LoadedReviewProduct {
   product_type: string | null;
   /** Legacy Klaviyo-era join key on product_reviews — still NOT NULL there. */
   shopify_product_id: string | null;
+  /** Variant name shown in the header when the session names a variant. */
+  variant_title?: string | null;
 }
 
 /**
@@ -175,7 +178,7 @@ export async function loadReviewSessionByToken(
 
   let q = admin
     .from("journey_sessions")
-    .select("id, workspace_id, customer_id, product_id, status, token_expires_at, responses, config_snapshot")
+    .select("id, workspace_id, customer_id, product_id, variant_id, status, token_expires_at, responses, config_snapshot")
     .eq("token", token);
   if (opts?.expectWorkspaceId) q = q.eq("workspace_id", opts.expectWorkspaceId);
   const { data: session } = await q.maybeSingle();
@@ -200,6 +203,51 @@ export async function loadReviewSessionByToken(
   if (product.reviewable === false) {
     return { ok: false, error: "product_not_reviewable", status: 409 };
   }
+
+  // Imagery: variant review_hero → product review_hero → products.image_url.
+  //
+  // products.image_url is the PDP hero — a packshot. It sells "what am I
+  // buying"; this page needs "remember why you love this", which is the
+  // prepared product looking craveable. And it has to be per-VARIANT, because
+  // flavours are different colours: Black Cherry is a deep red glass, Pina
+  // Colada a creamy tropical one, so one product-level shot is wrong for at
+  // least one of them by construction. When the session names the variant the
+  // customer actually bought, they see THEIR flavour.
+  let heroUrl: string | null = product.image_url;
+  let variantTitle: string | null = null;
+  {
+    if (session.variant_id) {
+      const { data: vm } = await admin
+        .from("product_media")
+        .select("url")
+        .eq("variant_id", session.variant_id)
+        .eq("slot", "review_hero")
+        .limit(1)
+        .maybeSingle();
+      if (vm?.url) heroUrl = vm.url as string;
+      const { data: v } = await admin
+        .from("product_variants")
+        .select("title")
+        .eq("id", session.variant_id)
+        .maybeSingle();
+      variantTitle = (v?.title as string) ?? null;
+    }
+    if (heroUrl === product.image_url) {
+      // No variant asset (or no variant on the session) — try the
+      // product-scoped review_hero before falling back to the packshot.
+      const { data: pm } = await admin
+        .from("product_media")
+        .select("url")
+        .eq("product_id", session.product_id)
+        .is("variant_id", null)
+        .eq("slot", "review_hero")
+        .limit(1)
+        .maybeSingle();
+      if (pm?.url) heroUrl = pm.url as string;
+    }
+  }
+  (product as LoadedReviewProduct).image_url = heroUrl;
+  (product as LoadedReviewProduct).variant_title = variantTitle;
 
   const frozen = session.config_snapshot as { questions?: typeof DEFAULT_QUESTIONS } | null;
   const questions =
