@@ -77,29 +77,47 @@ async function pickExactlyOne<T>(
   );
 
   // 1. Resolve the redemption — the source of truth for member, workspace,
-  //    and discount_value. We match by id prefix + code + member prefix so a
-  //    typo in ANY of them fails-closed rather than picking a look-alike.
+  //    and discount_value. We match by code at the DB (the discount_code
+  //    column is text) then narrow by id-prefix + member-prefix in memory,
+  //    because loyalty_redemptions.id and .member_id are UUID and Postgres
+  //    has no pattern-match operator for uuid (spec:
+  //    no-sql-pattern-match-on-a-uuid-column). The triangulation
+  //    fail-closed semantics are preserved — a typo in ANY of the three
+  //    still leaves zero matches and pickExactlyOne throws.
   const { data: redRows, error: redErr } = await admin
     .from("loyalty_redemptions")
     .select("id, workspace_id, member_id, discount_code, discount_value, points_spent, status")
-    .ilike("discount_code", CODE)
-    .like("id", `${REDEMPTION_ID_PREFIX}%`)
-    .like("member_id", `${MEMBER_ID_PREFIX}%`);
+    .ilike("discount_code", CODE);
   if (redErr) throw new Error(`loyalty_redemptions select failed: ${redErr.message}`);
-  const red = await pickExactlyOne("loyalty_redemptions", redRows);
+  const redNarrowed = (redRows ?? []).filter(
+    (r) =>
+      typeof r.id === "string" &&
+      typeof r.member_id === "string" &&
+      r.id.startsWith(REDEMPTION_ID_PREFIX) &&
+      r.member_id.startsWith(MEMBER_ID_PREFIX),
+  );
+  const red = await pickExactlyOne("loyalty_redemptions", redNarrowed);
   console.log(
     `  redemption id=${red.id} workspace=${red.workspace_id} member=${red.member_id} value=$${red.discount_value} status=${red.status} points_spent=${red.points_spent}`,
   );
 
   // 2. Resolve the sub — must be internal (spec rail) and belong to the
   //    same workspace as the redemption.
+  // subscriptions.id is UUID (no pattern-match operator in Postgres) — scope
+  // by workspace + is_internal at the DB and narrow by id-prefix in memory
+  // (spec: no-sql-pattern-match-on-a-uuid-column). The is_internal predicate
+  // here is a defence-in-depth read scope; the explicit is_internal check
+  // below preserves the original refuse-if-external semantics.
   const { data: subRows, error: subErr } = await admin
     .from("subscriptions")
     .select("id, workspace_id, customer_id, applied_discounts, is_internal, status, next_billing_date, shopify_contract_id")
     .eq("workspace_id", red.workspace_id)
-    .like("id", `${SUB_ID_PREFIX}%`);
+    .eq("is_internal", true);
   if (subErr) throw new Error(`subscriptions select failed: ${subErr.message}`);
-  const sub = await pickExactlyOne("subscriptions", subRows);
+  const subNarrowed = (subRows ?? []).filter(
+    (r) => typeof r.id === "string" && r.id.startsWith(SUB_ID_PREFIX),
+  );
+  const sub = await pickExactlyOne("subscriptions", subNarrowed);
   if (!sub.is_internal) {
     throw new Error(`sub ${sub.id} is not internal — refuse to backfill (spec: internal-sub-native)`);
   }
