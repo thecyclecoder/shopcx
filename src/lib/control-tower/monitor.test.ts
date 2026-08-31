@@ -401,6 +401,103 @@ test("evalAgentKind still flags queued stuck jobs when the worker is healthy (re
   }
 });
 
+// ─── queued-behind-active-drain grace
+// (control-tower-agent-kind-queued-behind-active-drain-grace Phase 1) ───
+
+test("evalAgentKind graces queued rows waiting behind a fresh active drain (review-candidacy)", () => {
+  // The originating false-page: review-candidacy is a concurrency-1 lane. A build has been
+  // running for 20 min (claimed_at 11:40) while an older queued job has sat behind it since
+  // 09:00 (3h before now — well past the 60-min threshold on raw age). The lane is visibly
+  // draining, so the queued row is NOT stuck; it's waiting its turn.
+  const reviewCandidacyLoop: MonitoredLoop = {
+    id: "agent:review-candidacy",
+    kind: "agent-kind",
+    owner: "growth",
+    label: "Review-candidacy agent",
+    description: "review-candidacy agent kind",
+    expectedCadence: "on demand",
+    agentKind: "review-candidacy",
+    stuckThresholdMs: 60 * 60_000,
+  };
+  const queuedAt = "2026-08-31T09:00:00Z"; // 3h before now.
+  const claimedAt = "2026-08-31T11:40:00Z"; // 20 min before now — well inside the 60-min threshold.
+  const jobs: ActiveJob[] = [
+    { id: "10000000-0000-0000-0000-000000000000", kind: "review-candidacy", status: "queued", created_at: queuedAt, claimed_at: null, updated_at: queuedAt },
+    { id: "20000000-0000-0000-0000-000000000000", kind: "review-candidacy", status: "building", created_at: claimedAt, claimed_at: claimedAt, updated_at: claimedAt },
+  ];
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-08-31T12:00:00Z");
+  try {
+    // Worker healthy, no blocked_off — the ONLY thing keeping the queued row out of red is the
+    // queued-behind-active-drain grace. workerStartedAt older than queuedAt so the restart clamp
+    // wouldn't lift the floor above the threshold on its own.
+    const result = evalAgentKind(reviewCandidacyLoop, null, jobs, "2026-08-31T07:00:00Z", false);
+    assert.equal(result.color, "green");
+    assert.equal(result.violation, null);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalAgentKind still pages a genuinely-wedged building job even when it looks like a drain", () => {
+  // A building row IS the active drain, but it has itself exceeded the threshold — that's a
+  // wedged in-flight build, not a healthy drain. The grace applies only to queued/queued_resume
+  // rows; building/claimed rows still get their normal stuck check.
+  const reviewCandidacyLoop: MonitoredLoop = {
+    id: "agent:review-candidacy",
+    kind: "agent-kind",
+    owner: "growth",
+    label: "Review-candidacy agent",
+    description: "review-candidacy agent kind",
+    expectedCadence: "on demand",
+    agentKind: "review-candidacy",
+    stuckThresholdMs: 60 * 60_000,
+  };
+  const claimedAt = "2026-08-31T09:00:00Z"; // 3h before now — the build is wedged.
+  const jobs: ActiveJob[] = [
+    { id: "30000000-0000-0000-0000-000000000000", kind: "review-candidacy", status: "building", created_at: claimedAt, claimed_at: claimedAt, updated_at: claimedAt },
+  ];
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-08-31T12:00:00Z");
+  try {
+    const result = evalAgentKind(reviewCandidacyLoop, null, jobs, "2026-08-31T07:00:00Z", false);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "stuck_jobs");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalAgentKind pages a queued row with no active drain and no recent successful beat", () => {
+  // The negative-case guard: a queued row past the threshold with NO fresh claimed/building job
+  // and NO recent successful beat is a truly idle-wedged queue. The grace must not turn into a
+  // silent free-pass for lanes that stopped claiming altogether.
+  const reviewCandidacyLoop: MonitoredLoop = {
+    id: "agent:review-candidacy",
+    kind: "agent-kind",
+    owner: "growth",
+    label: "Review-candidacy agent",
+    description: "review-candidacy agent kind",
+    expectedCadence: "on demand",
+    agentKind: "review-candidacy",
+    stuckThresholdMs: 60 * 60_000,
+  };
+  const queuedAt = "2026-08-31T09:00:00Z"; // 3h before now — well past the 60-min threshold.
+  const jobs: ActiveJob[] = [
+    { id: "40000000-0000-0000-0000-000000000000", kind: "review-candidacy", status: "queued", created_at: queuedAt, claimed_at: null, updated_at: queuedAt },
+  ];
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-08-31T12:00:00Z");
+  try {
+    // No claimed/building rows, no `latest` beat at all — the only signal is the queued row's age.
+    const result = evalAgentKind(reviewCandidacyLoop, null, jobs, "2026-08-31T07:00:00Z", false);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "stuck_jobs");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 // ─── Observed-first-seen anchor for registered_not_firing grace ───
 // (control-tower-registered-not-firing-observed-anchor-grace spec, Phase 1)
 

@@ -793,10 +793,25 @@ export function evalAgentKind(loop: MonitoredLoop, latest: LoopHistoryRow | null
   // red. Once the worker recovers (isWorkerUnavailable=false) every stuck threshold behaves as
   // before; the worker-restart clamp (workerStartedAt → jobStuckSince) then grants the fresh
   // uptime a fair drain window before any queued row can trip red.
-  const relevantForStuck = workerUnavailable
-    ? mine.filter((j) => j.status !== "queued" && j.status !== "queued_resume")
-    : mine;
+  //
+  // control-tower-agent-kind-queued-behind-active-drain-grace Phase 1 — a concurrency-1 agent
+  // lane (e.g. review-candidacy) can only run one build at a time; every additional job for
+  // that kind waits queued behind the active one. Once the active build finishes, the next
+  // queued row is claimed. If the queued row was enqueued long before the active row started,
+  // its raw age can easily exceed the stuck threshold even though the lane is visibly moving.
+  // The old rule paged red on that queued age and pointed the owner at the wrong root cause
+  // (a healthy serialized drain). The queued-behind-active-drain grace: when the SAME
+  // loop.agentKind has a fresh claimed/building job (its own stuck-since age ≤ threshold),
+  // suppress the queued/queued_resume rows from the stuck list. Building/claimed jobs still
+  // get their normal stuck check, so a genuinely-wedged in-flight job stays red; a queued
+  // lane with NO fresh active row (a beat alone isn't enough — a completion beat can fire
+  // while our queued row wedges behind nothing) also stays red, so wedged lanes are still
+  // detectable.
   const threshold = loop.stuckThresholdMs ?? 60 * 60_000;
+  const activeRows = mine.filter((j) => j.status === "claimed" || j.status === "building");
+  const hasFreshActiveDrain = activeRows.some((j) => ageMs(jobStuckSince(j, workerStartedAt)) <= threshold);
+  const suppressQueued = workerUnavailable || hasFreshActiveDrain;
+  const relevantForStuck = suppressQueued ? activeRows : mine;
   const stuck = relevantForStuck.filter((j) => ageMs(jobStuckSince(j, workerStartedAt)) > threshold);
   if (stuck.length) {
     const oldest = stuck.reduce((a, b) => (ageMs(jobStuckSince(a, workerStartedAt)) > ageMs(jobStuckSince(b, workerStartedAt)) ? a : b));
