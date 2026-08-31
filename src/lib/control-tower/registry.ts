@@ -921,6 +921,24 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // UNIQUE on director_activity_id collapses re-runs. registeredAt graces the first-tick
   // window (newcron-grace).
   { id: "media-buyer-grade-cron", kind: "cron", owner: "growth", label: "Media buyer grader daily", description: "Daily fan-out: enqueues one kind='media-buyer-grade' agent_jobs row per workspace with ≥1 ungraded settled (≥3d) Media Buyer director_activity row.", expectedCadence: "daily (0 14 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-07-09T14:00:00Z" },
+  // cold-scaler-arming-decides-on-evidence-not-absence spec, Phase 1: daily
+  // fan-out that enqueues one kind='sensor-trust-probe' agent_jobs row per
+  // workspace with ≥1 active media_buyer_test_cohorts row — the missing
+  // dispatcher for the sensor-trust arm of the cold-scaler arming gate.
+  // Idempotent within 24h — a same-day re-fire is a safe no-op. registeredAt
+  // graces the first-tick window (newcron-grace). Daily cron ⇒ 30h liveness
+  // window (24h × 1.2 = 28.8h clears the jitter grace per assertRegistryInvariants).
+  { id: "sensor-trust-probe-cron", kind: "cron", owner: "growth", label: "Sensor-trust probe daily", description: "Daily fan-out: enqueues one kind='sensor-trust-probe' agent_jobs row per workspace with ≥1 active media_buyer_test_cohorts row (idempotent within 24h).", expectedCadence: "daily (0 12 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-08-25T12:00:00Z" },
+  // cold-scaler-arming-decides-on-evidence-not-absence spec, Phase 2: weekly
+  // fan-out that enqueues one kind='cold-scaler-cac-ltv' agent_jobs row per
+  // workspace with ≥1 active media_buyer_cold_scaler_cohorts row — the missing
+  // dispatcher for the cold-scaler CAC:LTV arm of the arming gate. The sensor
+  // snapshot is ISO-week-keyed, so weekly matches the grain — same-week
+  // re-fires no-op via the 7d dispatch guard AND the sensor's compare-and-set
+  // upsert on (workspace, cohort, iso_week). registeredAt graces the
+  // first-tick window (newcron-grace). Weekly cron ⇒ 9d liveness window
+  // (7d × 1.28 ≈ 9d clears the jitter grace per assertRegistryInvariants).
+  { id: "cold-scaler-cac-ltv-cron", kind: "cron", owner: "growth", label: "Cold-scaler CAC:LTV weekly", description: "Weekly fan-out: enqueues one kind='cold-scaler-cac-ltv' agent_jobs row per workspace with ≥1 active media_buyer_cold_scaler_cohorts row (idempotent within 7d; sensor upserts by ISO week).", expectedCadence: "weekly (0 12 * * 1)", livenessWindowMs: 9 * DAY, registeredAt: "2026-08-31T12:00:00Z" },
   // media-buyer-self-correcting-mode-revert spec Phase 1: daily sweep that flips an
   // armed cohort back to `shadow` when its 14-day `media_buyer_action_grades` rolling
   // per-day average sits < 5 for a trailing streak of ≥ 7 days (≥2 graded actions/day).

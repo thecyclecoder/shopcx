@@ -1,20 +1,26 @@
 /**
  * Unit tests for the cold-scaler arming gate — Phase 2 verification
- * (bianca-cold-scaler-arming-gate-shadow-to-armed). Pins each denial
- * branch of the PURE `evaluateColdScalerArmingPure` on fixture inputs so
- * the guard predicates are locked before the DB-touching runner assembles
- * them, plus one round-trip through `readLatestColdScalerArmingAuthorization`
- * against an in-memory admin fake.
+ * (bianca-cold-scaler-arming-gate-shadow-to-armed) with Precondition #1
+ * rewritten by
+ * [[../../../docs/brain/specs/cold-scaler-arming-decides-on-evidence-not-absence.md]]
+ * Phase 3. Pins each denial branch of the PURE `evaluateColdScalerArmingPure`
+ * on fixture inputs so the guard predicates are locked before the DB-touching
+ * runner assembles them, plus one round-trip through
+ * `readLatestColdScalerArmingAuthorization` against an in-memory admin fake.
  *
  * The named branches the spec calls out:
- *   1. insufficient_sample — reviewed shadow actions < MIN_REVIEWED_SHADOW_ACTIONS.
- *   2. low_agreement — concur rate below MIN_AGREEMENT_RATE.
+ *   1. insufficient_graded_scale_actions — <MIN_GRADED_SCALE_ACTIONS graded
+ *      SCALE-vocabulary actions in the 14d window.
+ *   2. scale_grade_below_bar — pass-rate (overall_grade>=7) below MIN_SCALE_PASS_RATE.
  *   3. trust_no_snapshots — zero sensor-trust snapshots in the window.
  *   4. trust_streak_short — <MIN_CONSECUTIVE_GREEN_TRUST consecutive green snapshots.
  *   5. cac_ltv_below_target — cacLtvRatio present but < target.
  *   6. cac_ltv_unknown — cacLtvRatio null (no CAC / no LTV / no mapping).
  *
- * Plus the happy path (all three preconditions clear → allowed=true, reasons=[]).
+ * Plus the happy path (all three preconditions clear → allowed=true, reasons=[])
+ * AND the KILL-lift guard: a fixture of all-excellent `media_buyer_paused_loser`
+ * grades with poor promote grades still denies — the pure gate must not let a
+ * kill grade lift the scale verdict.
  *
  * Run:
  *   npx tsx --test src/lib/media-buyer/cold-scaler-arming-gate.test.ts
@@ -23,27 +29,42 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   evaluateColdScalerArmingPure,
+  filterGradesToCohortProduct,
+  extractGradeAdCampaignId,
   readLatestColdScalerArmingAuthorization,
   isoWeekLabel,
-  MIN_REVIEWED_SHADOW_ACTIONS,
-  MIN_AGREEMENT_RATE,
+  MIN_GRADED_SCALE_ACTIONS,
+  MIN_SCALE_PASS_RATE,
   MIN_CONSECUTIVE_GREEN_TRUST,
+  SCALE_GRADE_PASS_THRESHOLD,
   DEFAULT_COLD_SCALER_CAC_LTV_TARGET,
-  type ShadowReviewInput,
+  type GradedScaleActionInput,
   type TrustSnapshotInput,
   type CacLtvInput,
+  type ScaleActionKind,
+  type RawGradeRowForCohortFilter,
 } from "./cold-scaler-arming-gate";
 
 // ── Fixture builders ────────────────────────────────────────────────────────
 
-function makeReviews(concurred: number, dissented: number, undecided: number): ShadowReviewInput[] {
-  const rows: ShadowReviewInput[] = [];
+/**
+ * Build `n` graded SCALE-vocabulary rows, of which `passing` clear the
+ * 7/10 pass threshold. Alternates between the two SCALE kinds so the
+ * fixture exercises both entries in `SCALE_ACTION_KINDS`.
+ */
+function makeGrades(n: number, passing: number, actionKind?: ScaleActionKind): GradedScaleActionInput[] {
   const now = new Date("2026-07-08T12:00:00Z").getTime();
-  const push = (verdict: ShadowReviewInput["verdict"], i: number) =>
-    rows.push({ verdict, reviewedAt: new Date(now - i * 3_600_000).toISOString() });
-  for (let i = 0; i < concurred; i++) push("concur", i);
-  for (let i = 0; i < dissented; i++) push("dissent", concurred + i);
-  for (let i = 0; i < undecided; i++) push("undecided", concurred + dissented + i);
+  const rows: GradedScaleActionInput[] = [];
+  const kinds: ScaleActionKind[] = actionKind
+    ? [actionKind]
+    : ["media_buyer_promoted_winner", "media_buyer_replenished_test_cohort"];
+  for (let i = 0; i < n; i++) {
+    rows.push({
+      actionKind: kinds[i % kinds.length],
+      overallGrade: i < passing ? SCALE_GRADE_PASS_THRESHOLD + 1 : SCALE_GRADE_PASS_THRESHOLD - 3,
+      gradedAt: new Date(now - i * 3_600_000).toISOString(),
+    });
+  }
   return rows;
 }
 
@@ -84,55 +105,80 @@ function cac(cacLtvRatio: number | null, opts: Partial<CacLtvInput> = {}): CacLt
 // ── Happy path ──────────────────────────────────────────────────────────────
 
 test("evaluateColdScalerArmingPure — all three preconditions clear → allowed=true", () => {
-  const reviews = makeReviews(24, 1, 0);
+  const grades = makeGrades(MIN_GRADED_SCALE_ACTIONS, MIN_GRADED_SCALE_ACTIONS); // 100% pass
   const trust = makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1);
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: reviews,
+    gradedScaleActions: grades,
     trustSnapshots: trust,
     cacLtv: cac(3.5),
   });
   assert.equal(r.allowed, true);
   assert.equal(r.reasons.length, 0);
-  assert.equal(r.metrics.reviewedCount, 25);
-  assert.equal(r.metrics.concurredCount, 24);
+  assert.equal(r.metrics.gradedScaleActionCount, MIN_GRADED_SCALE_ACTIONS);
+  assert.equal(r.metrics.passingScaleActionCount, MIN_GRADED_SCALE_ACTIONS);
+  assert.equal(r.metrics.scalePassRate, 1);
   assert.equal(r.metrics.consecutiveGreenCount, MIN_CONSECUTIVE_GREEN_TRUST + 1);
   assert.equal(r.metrics.cacLtvRatio, 3.5);
   assert.equal(r.metrics.target, DEFAULT_COLD_SCALER_CAC_LTV_TARGET);
 });
 
-// ── Deny branch 1: insufficient_sample ──────────────────────────────────────
+// ── Deny branch 1: insufficient_graded_scale_actions ────────────────────────
 
-test("evaluateColdScalerArmingPure — fewer than MIN_REVIEWED_SHADOW_ACTIONS reviews → insufficient_sample", () => {
+test("evaluateColdScalerArmingPure — fewer than MIN_GRADED_SCALE_ACTIONS grades → insufficient_graded_scale_actions", () => {
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(4, 1, 0),
+    gradedScaleActions: makeGrades(4, 4),
     trustSnapshots: makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1),
     cacLtv: cac(3.5),
   });
   assert.equal(r.allowed, false);
   const codes = r.reasons.map((x) => x.code);
-  assert.ok(codes.includes("insufficient_sample"), `expected insufficient_sample, got ${codes.join(",")}`);
-  assert.equal(r.metrics.reviewedCount, 5);
+  assert.ok(
+    codes.includes("insufficient_graded_scale_actions"),
+    `expected insufficient_graded_scale_actions, got ${codes.join(",")}`,
+  );
+  assert.equal(r.metrics.gradedScaleActionCount, 4);
 });
 
-// ── Deny branch 2: low_agreement ────────────────────────────────────────────
+// ── Deny branch 2: scale_grade_below_bar ────────────────────────────────────
 
-test("evaluateColdScalerArmingPure — concur rate below MIN_AGREEMENT_RATE → low_agreement", () => {
+test("evaluateColdScalerArmingPure — pass rate below MIN_SCALE_PASS_RATE → scale_grade_below_bar", () => {
+  // 60% pass rate: 12 of 20 passing.
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(15, 8, 2), // 60% concur
+    gradedScaleActions: makeGrades(20, 12),
     trustSnapshots: makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1),
     cacLtv: cac(3.5),
   });
   assert.equal(r.allowed, false);
   const codes = r.reasons.map((x) => x.code);
-  assert.ok(codes.includes("low_agreement"), `expected low_agreement, got ${codes.join(",")}`);
-  assert.ok(r.metrics.agreementRate !== null && r.metrics.agreementRate < MIN_AGREEMENT_RATE);
+  assert.ok(
+    codes.includes("scale_grade_below_bar"),
+    `expected scale_grade_below_bar, got ${codes.join(",")}`,
+  );
+  assert.ok(r.metrics.scalePassRate !== null && r.metrics.scalePassRate < MIN_SCALE_PASS_RATE);
+});
+
+// ── Above the floor + above the bar → scale precondition clears ─────────────
+
+test("evaluateColdScalerArmingPure — ≥ floor at/above the bar → scale branch clears", () => {
+  // 90% pass rate at the sample floor.
+  const r = evaluateColdScalerArmingPure({
+    gradedScaleActions: makeGrades(20, 18),
+    trustSnapshots: makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1),
+    cacLtv: cac(3.5),
+  });
+  assert.equal(r.allowed, true);
+  const codes = r.reasons.map((x) => x.code);
+  assert.ok(
+    !codes.includes("insufficient_graded_scale_actions") && !codes.includes("scale_grade_below_bar"),
+    `scale branch should have cleared, got ${codes.join(",")}`,
+  );
 });
 
 // ── Deny branch 3: trust_no_snapshots ───────────────────────────────────────
 
 test("evaluateColdScalerArmingPure — zero sensor-trust snapshots → trust_no_snapshots", () => {
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(24, 1, 0),
+    gradedScaleActions: makeGrades(MIN_GRADED_SCALE_ACTIONS, MIN_GRADED_SCALE_ACTIONS),
     trustSnapshots: [],
     cacLtv: cac(3.5),
   });
@@ -146,7 +192,7 @@ test("evaluateColdScalerArmingPure — zero sensor-trust snapshots → trust_no_
 
 test("evaluateColdScalerArmingPure — <MIN_CONSECUTIVE_GREEN_TRUST consecutive greens → trust_streak_short", () => {
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(24, 1, 0),
+    gradedScaleActions: makeGrades(MIN_GRADED_SCALE_ACTIONS, MIN_GRADED_SCALE_ACTIONS),
     trustSnapshots: makeBrokenStreak(),
     cacLtv: cac(3.5),
   });
@@ -160,7 +206,7 @@ test("evaluateColdScalerArmingPure — <MIN_CONSECUTIVE_GREEN_TRUST consecutive 
 
 test("evaluateColdScalerArmingPure — CAC:LTV below target → cac_ltv_below_target", () => {
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(24, 1, 0),
+    gradedScaleActions: makeGrades(MIN_GRADED_SCALE_ACTIONS, MIN_GRADED_SCALE_ACTIONS),
     trustSnapshots: makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1),
     cacLtv: cac(1.5),
   });
@@ -173,7 +219,7 @@ test("evaluateColdScalerArmingPure — CAC:LTV below target → cac_ltv_below_ta
 
 test("evaluateColdScalerArmingPure — CAC:LTV null → cac_ltv_unknown", () => {
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(24, 1, 0),
+    gradedScaleActions: makeGrades(MIN_GRADED_SCALE_ACTIONS, MIN_GRADED_SCALE_ACTIONS),
     trustSnapshots: makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1),
     cacLtv: cac(null, { unknownFlags: ["no new customers in window"] }),
   });
@@ -182,17 +228,53 @@ test("evaluateColdScalerArmingPure — CAC:LTV null → cac_ltv_unknown", () => 
   assert.ok(codes.includes("cac_ltv_unknown"), `expected cac_ltv_unknown, got ${codes.join(",")}`);
 });
 
+// ── KILL-lift guard: a kill grade cannot lift the verdict ───────────────────
+
+test("evaluateColdScalerArmingPure — all-excellent KILL grades with poor promote grades still denies", () => {
+  // A caller that leaked KILL grades into `gradedScaleActions` must not be able
+  // to inflate the pass rate — the pure gate re-filters to SCALE kinds, so a
+  // fixture of 30 excellent `media_buyer_paused_loser` grades + 5 poor
+  // `media_buyer_promoted_winner` grades reads as 5 scale grades below the
+  // floor → `insufficient_graded_scale_actions`. Not `scale_grade_below_bar`
+  // (that fires ONLY when the sample is large enough to trust the ratio), and
+  // NEVER `allowed=true`. Bianca's 97%-sound kill skill cannot vouch for her
+  // 36%-sound promote skill.
+  const now = new Date("2026-07-08T12:00:00Z").getTime();
+  const killGrades: GradedScaleActionInput[] = Array.from({ length: 30 }, (_, i) => ({
+    // The type says ScaleActionKind, but the pure gate must defend against a
+    // caller that leaked a KILL row in — cast to unknown then to the type so
+    // we exercise the pure gate's own filter, not the DB loader's filter.
+    actionKind: "media_buyer_paused_loser" as unknown as ScaleActionKind,
+    overallGrade: 10,
+    gradedAt: new Date(now - i * 3_600_000).toISOString(),
+  }));
+  const poorPromoteGrades = makeGrades(5, 0, "media_buyer_promoted_winner");
+  const r = evaluateColdScalerArmingPure({
+    gradedScaleActions: [...killGrades, ...poorPromoteGrades],
+    trustSnapshots: makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1),
+    cacLtv: cac(3.5),
+  });
+  assert.equal(r.allowed, false);
+  const codes = r.reasons.map((x) => x.code);
+  assert.ok(
+    codes.includes("insufficient_graded_scale_actions"),
+    `KILL grades must not count toward the SCALE sample; expected insufficient_graded_scale_actions, got ${codes.join(",")}`,
+  );
+  assert.equal(r.metrics.gradedScaleActionCount, 5);
+  assert.equal(r.metrics.passingScaleActionCount, 0);
+});
+
 // ── Multiple denials compose ────────────────────────────────────────────────
 
 test("evaluateColdScalerArmingPure — multiple failing preconditions surface every reason", () => {
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(3, 1, 0),
+    gradedScaleActions: makeGrades(3, 1),
     trustSnapshots: [],
     cacLtv: cac(null),
   });
   assert.equal(r.allowed, false);
   const codes = r.reasons.map((x) => x.code).sort();
-  assert.deepEqual(codes, ["cac_ltv_unknown", "insufficient_sample", "trust_no_snapshots"]);
+  assert.deepEqual(codes, ["cac_ltv_unknown", "insufficient_graded_scale_actions", "trust_no_snapshots"]);
 });
 
 // ── ISO week label ──────────────────────────────────────────────────────────
@@ -354,4 +436,184 @@ test("readLatestColdScalerArmingAuthorization — no row for the trio → null",
     coldScalerCohortId: "cohort_missing",
   });
   assert.equal(row, null);
+});
+
+// ── Phase 4 — filterGradesToCohortProduct: cohort-scoped evidence ───────────
+
+/**
+ * Build `n` raw grade rows tagged to one `(metaAccountId, adCampaignId)` pair
+ * with a fixed pass/fail split. Used by the Phase-4 regression fixtures so
+ * the two-cohort scenario reads naturally.
+ */
+function makeRawGrades(
+  n: number,
+  passing: number,
+  opts: { metaAccountId: string | null; adCampaignId: string | null; actionKind?: ScaleActionKind },
+): RawGradeRowForCohortFilter[] {
+  const now = new Date("2026-07-08T12:00:00Z").getTime();
+  const rows: RawGradeRowForCohortFilter[] = [];
+  const kind: ScaleActionKind = opts.actionKind ?? "media_buyer_promoted_winner";
+  for (let i = 0; i < n; i++) {
+    rows.push({
+      actionKind: kind,
+      overallGrade: i < passing ? SCALE_GRADE_PASS_THRESHOLD + 1 : SCALE_GRADE_PASS_THRESHOLD - 3,
+      gradedAt: new Date(now - i * 3_600_000).toISOString(),
+      metaAccountId: opts.metaAccountId,
+      adCampaignId: opts.adCampaignId,
+    });
+  }
+  return rows;
+}
+
+test("filterGradesToCohortProduct — Phase 4 regression: two cohorts in one account, only the OTHER cohort's grades exist → target denies", () => {
+  // The exact scenario the pre-merge sec:real-vuln finding calls out.
+  // - Account `act_42` hosts two active scaler cohorts:
+  //     • cohort_coffee → product_coffee
+  //     • cohort_creamer → product_creamer
+  // - The last 14d have 30 passing SCALE grades for cohort_coffee's product
+  //   (linked to ad_campaigns row `ac_coffee_1` with product_id=product_coffee).
+  // - cohort_creamer has ZERO grades in the window.
+  // Before Phase 4, the loader only filtered by (workspace, account, window)
+  // and cohort_creamer would see all 30 passing grades and ALLOW. The pure
+  // filter now drops them (their product does not match) and cohort_creamer
+  // correctly denies with `insufficient_graded_scale_actions` upstream.
+  const coffeeGrades = makeRawGrades(30, 30, { metaAccountId: "act_42", adCampaignId: "ac_coffee_1" });
+  const adCampaignProductById = new Map<string, string | null>([
+    ["ac_coffee_1", "product_coffee"],
+  ]);
+
+  const forCreamer = filterGradesToCohortProduct({
+    rows: coffeeGrades,
+    cohortResolved: true,
+    cohortMetaAccountId: "act_42",
+    cohortProductId: "product_creamer",
+    adCampaignProductById,
+  });
+  assert.equal(
+    forCreamer.length,
+    0,
+    "cohort_creamer must NOT see cohort_coffee's grades — the authorization row is per-cohort",
+  );
+
+  const forCoffee = filterGradesToCohortProduct({
+    rows: coffeeGrades,
+    cohortResolved: true,
+    cohortMetaAccountId: "act_42",
+    cohortProductId: "product_coffee",
+    adCampaignProductById,
+  });
+  assert.equal(forCoffee.length, 30, "cohort_coffee's own grades pass the product filter");
+});
+
+test("filterGradesToCohortProduct — a grade with no adCampaignId is DROPPED for a per-product cohort", () => {
+  // An ungrounded grade (missing metadata.ad_campaign_id / source_ad_campaign_id)
+  // cannot ground a per-product cohort's arm. Dropping it is the safe answer
+  // under uncertainty for an autonomous-spend authorization.
+  const ungroundedGrades = makeRawGrades(20, 20, { metaAccountId: "act_42", adCampaignId: null });
+  const out = filterGradesToCohortProduct({
+    rows: ungroundedGrades,
+    cohortResolved: true,
+    cohortMetaAccountId: "act_42",
+    cohortProductId: "product_coffee",
+    adCampaignProductById: new Map(),
+  });
+  assert.equal(out.length, 0);
+});
+
+test("filterGradesToCohortProduct — a grade whose ad_campaign is unresolvable (no row) is DROPPED for a per-product cohort", () => {
+  // adCampaignId is set but ad_campaigns has no row → resolve() returns null.
+  const orphanedGrades = makeRawGrades(20, 20, { metaAccountId: "act_42", adCampaignId: "ac_missing" });
+  const out = filterGradesToCohortProduct({
+    rows: orphanedGrades,
+    cohortResolved: true,
+    cohortMetaAccountId: "act_42",
+    cohortProductId: "product_coffee",
+    adCampaignProductById: new Map(), // no entry for ac_missing
+  });
+  assert.equal(out.length, 0);
+});
+
+test("filterGradesToCohortProduct — workspace-wide (null-product) cohort accepts only null-product grades", () => {
+  // A workspace-wide / account-default cohort (`product_id=null`) has no
+  // narrower product to defend, so it accepts grades whose linked ad_campaign
+  // has `product_id=null` (or was retired/unlinked). It does NOT accept a
+  // grade whose ad_campaign has a concrete product — that grade belongs to
+  // the per-product cohort for that product.
+  const nullProduct = makeRawGrades(10, 10, { metaAccountId: null, adCampaignId: "ac_default" });
+  const productLinked = makeRawGrades(10, 10, { metaAccountId: null, adCampaignId: "ac_coffee_1" });
+  const adCampaignProductById = new Map<string, string | null>([
+    ["ac_default", null],
+    ["ac_coffee_1", "product_coffee"],
+  ]);
+  const out = filterGradesToCohortProduct({
+    rows: [...nullProduct, ...productLinked],
+    cohortResolved: true,
+    cohortMetaAccountId: null,
+    cohortProductId: null,
+    adCampaignProductById,
+  });
+  assert.equal(out.length, 10);
+});
+
+test("filterGradesToCohortProduct — cross-account grades are dropped", () => {
+  // A grade whose director_activity.metadata.meta_ad_account_id is a
+  // DIFFERENT account cannot count toward this cohort's per-account arm.
+  const otherAccountGrades = makeRawGrades(20, 20, {
+    metaAccountId: "act_other",
+    adCampaignId: "ac_coffee_1",
+  });
+  const adCampaignProductById = new Map<string, string | null>([
+    ["ac_coffee_1", "product_coffee"],
+  ]);
+  const out = filterGradesToCohortProduct({
+    rows: otherAccountGrades,
+    cohortResolved: true,
+    cohortMetaAccountId: "act_42",
+    cohortProductId: "product_coffee",
+    adCampaignProductById,
+  });
+  assert.equal(out.length, 0);
+});
+
+test("filterGradesToCohortProduct — an unresolvable cohort collapses the sample to []", () => {
+  // getMediaBuyerColdScalerCohortById returned null → cohortResolved=false.
+  // Even a rich sample must land [] — the pure gate will then deny with
+  // insufficient_graded_scale_actions, the correct dormant behaviour.
+  const richSample = makeRawGrades(50, 50, {
+    metaAccountId: "act_42",
+    adCampaignId: "ac_coffee_1",
+  });
+  const out = filterGradesToCohortProduct({
+    rows: richSample,
+    cohortResolved: false,
+    cohortMetaAccountId: "act_42",
+    cohortProductId: "product_coffee",
+    adCampaignProductById: new Map([["ac_coffee_1", "product_coffee"]]),
+  });
+  assert.equal(out.length, 0);
+});
+
+// ── extractGradeAdCampaignId ────────────────────────────────────────────────
+
+test("extractGradeAdCampaignId — media_buyer_promoted_winner reads source_ad_campaign_id", () => {
+  assert.equal(extractGradeAdCampaignId({ source_ad_campaign_id: "ac_1" }), "ac_1");
+});
+
+test("extractGradeAdCampaignId — media_buyer_replenished_test_cohort reads ad_campaign_id", () => {
+  assert.equal(extractGradeAdCampaignId({ ad_campaign_id: "ac_2" }), "ac_2");
+});
+
+test("extractGradeAdCampaignId — source_ad_campaign_id wins when both are present", () => {
+  assert.equal(
+    extractGradeAdCampaignId({ source_ad_campaign_id: "ac_source", ad_campaign_id: "ac_alt" }),
+    "ac_source",
+  );
+});
+
+test("extractGradeAdCampaignId — missing / empty / non-string → null", () => {
+  assert.equal(extractGradeAdCampaignId(null), null);
+  assert.equal(extractGradeAdCampaignId(undefined), null);
+  assert.equal(extractGradeAdCampaignId({}), null);
+  assert.equal(extractGradeAdCampaignId({ source_ad_campaign_id: "" }), null);
+  assert.equal(extractGradeAdCampaignId({ ad_campaign_id: 42 as unknown as string }), null);
 });

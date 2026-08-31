@@ -2,21 +2,31 @@
  * media-buyer/cold-scaler-arming-gate — Phase 2 of
  * [[../../../docs/brain/specs/bianca-cold-scaler-arming-gate-shadow-to-armed.md]]
  * (Bianca goal M4 "Bounded, supervised cold scaler gated on Dahlia winner
- * supply").
+ * supply"), with Precondition #1 rewritten by
+ * [[../../../docs/brain/specs/cold-scaler-arming-decides-on-evidence-not-absence.md]]
+ * Phase 3 to judge Bianca on GRADED OUTCOMES instead of shadow reviews she
+ * can no longer produce.
  *
  * The SCALER-rail sibling of [[./arming-gate]]. That gate authorises the TEST
  * cohort's `mode='shadow' → 'armed'` flip; this one authorises the COLD
- * SCALER cohort's flip. Same three preconditions, same denial-branch shape,
- * same weekly ISO-week row-per-authorization pattern — different table
+ * SCALER cohort's flip. Same three preconditions, same weekly ISO-week
+ * row-per-authorization pattern — different table
  * ([[media_buyer_cold_scaler_arming_authorization]]), different scope key
  * (`cold_scaler_cohort_id` instead of the account-only pair), different
  * escalation kind (`cold_scaler_arming_denied`).
  *
  * The three preconditions:
- *   1. Shadow-vs-review AGREEMENT — over the last 14d, at least
- *      `MIN_REVIEWED_SHADOW_ACTIONS` shadow actions tagged `metadata.surface='cold_scaler'`
- *      were reviewed AND concur rate ≥ `MIN_AGREEMENT_RATE`. Fewer reviews ⇒
- *      `insufficient_sample`. Concur < floor ⇒ `low_agreement`.
+ *   1. GRADED SCALE-ACTION PASS RATE — over the last 14d, at least
+ *      `MIN_GRADED_SCALE_ACTIONS` scaling-judgement grades exist in
+ *      [[media_buyer_action_grades]] scoped to the SCALE-vocabulary
+ *      (`media_buyer_promoted_winner` + `media_buyer_replenished_test_cohort`),
+ *      AND the fraction with `overall_grade >= SCALE_GRADE_PASS_THRESHOLD`
+ *      is ≥ `MIN_SCALE_PASS_RATE`. Fewer ⇒ `insufficient_graded_scale_actions`.
+ *      Below the bar ⇒ `scale_grade_below_bar`. The gate deliberately excludes
+ *      KILL grades (`media_buyer_paused_loser`) — Bianca's kill skill is
+ *      ~97% sound and her promote skill is ~36%; blending would let the
+ *      strongest skill vouch for the weakest, which is exactly the
+ *      supervision the gate is here to prevent.
  *   2. SENSOR-TRUST GREEN STREAK — at least `MIN_CONSECUTIVE_GREEN_TRUST`
  *      consecutive `band='green'` [[media_buyer_sensor_trust]] snapshots
  *      ending at the latest. Missing / broken ⇒ `trust_streak_short`. Zero
@@ -45,6 +55,8 @@ import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { computeBlendedCacLtv, DEFAULT_BLENDED_CAC_LTV_TARGET } from "@/lib/blended-cac-ltv";
 import { readLatestColdScalerCacLtvSnapshot } from "./cold-scaler-cac-ltv-sensor";
+import { getMediaBuyerColdScalerCohortById } from "./cold-scaler-cohort";
+import { errText } from "@/lib/error-text";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -61,11 +73,42 @@ const COLD_SCALER_SPEC_SLUG = "bianca-cold-scaler-arming-gate-shadow-to-armed";
 /** The sample window the three preconditions read from — mirrors the sibling. */
 export const ARMING_GATE_LOOKBACK_DAYS = 14;
 
-/** Minimum reviewed shadow actions before agreement rate is trustworthy. */
-export const MIN_REVIEWED_SHADOW_ACTIONS = 20;
+/**
+ * Minimum graded SCALE-vocabulary actions in the 14d window before the pass
+ * rate is trustworthy. Kept at 20 — the same sample floor the retired
+ * shadow-review branch used — so the gate's evidence threshold does not
+ * shift with the input source. Below this ⇒ `insufficient_graded_scale_actions`.
+ */
+export const MIN_GRADED_SCALE_ACTIONS = 20;
 
-/** Minimum concur / reviewed ratio. Below this the gate refuses. */
-export const MIN_AGREEMENT_RATE = 0.8;
+/**
+ * Minimum `passing / graded` ratio among SCALE-vocabulary grades in the 14d
+ * window. A grade "passes" when `overall_grade >= SCALE_GRADE_PASS_THRESHOLD`.
+ * Below ⇒ `scale_grade_below_bar`.
+ */
+export const MIN_SCALE_PASS_RATE = 0.8;
+
+/**
+ * The `overall_grade` floor a SCALE-vocabulary grade must clear to count as
+ * a pass. Matches the 30-day Growth-Director-brief rollup's 7/10 "good" band
+ * (`src/lib/agents/growth-director.ts` groups grades by kind and reports the
+ * per-kind average — the 7-of-10 threshold anchors the pass-rate to that
+ * same "sound decision" band the director sees on their brief).
+ */
+export const SCALE_GRADE_PASS_THRESHOLD = 7;
+
+/**
+ * The scaling-judgement vocabulary — the two [[director_activity]] verbs
+ * that MOVE budget into or up on a scaler cohort. The gate scores Bianca
+ * ONLY on these because that is the judgement it authorises. Blending in
+ * `media_buyer_paused_loser` (her ~97%-sound kill skill) would let the
+ * strongest skill vouch for the weakest and defeat the supervision.
+ */
+export const SCALE_ACTION_KINDS = [
+  "media_buyer_promoted_winner",
+  "media_buyer_replenished_test_cohort",
+] as const;
+export type ScaleActionKind = (typeof SCALE_ACTION_KINDS)[number];
 
 /** Minimum consecutive `band='green'` sensor-trust snapshots ending at the latest. */
 export const MIN_CONSECUTIVE_GREEN_TRUST = 7;
@@ -80,9 +123,16 @@ const AUTHORIZATION_TTL_DAYS = 7;
 
 // ── Pure gate ─────────────────────────────────────────────────────────────────
 
-export interface ShadowReviewInput {
-  verdict: "concur" | "dissent" | "undecided";
-  reviewedAt: string;
+/**
+ * The subset of a [[media_buyer_action_grades]] row the pure gate needs.
+ * `actionKind` MUST be one of the SCALE-vocabulary kinds — the DB loader is
+ * responsible for the vocabulary filter, so the pure gate can assume every
+ * row is a scale grade and count it verbatim.
+ */
+export interface GradedScaleActionInput {
+  actionKind: ScaleActionKind;
+  overallGrade: number;
+  gradedAt: string;
 }
 
 export interface TrustSnapshotInput {
@@ -110,8 +160,8 @@ export interface CacLtvInput {
 }
 
 export type ColdScalerArmingDenialReason =
-  | "insufficient_sample"
-  | "low_agreement"
+  | "insufficient_graded_scale_actions"
+  | "scale_grade_below_bar"
   | "trust_no_snapshots"
   | "trust_streak_short"
   | "cac_ltv_below_target"
@@ -123,7 +173,7 @@ export interface ColdScalerArmingReason {
 }
 
 export interface EvaluateColdScalerArmingPureInput {
-  shadowReviews: ShadowReviewInput[];
+  gradedScaleActions: GradedScaleActionInput[];
   trustSnapshots: TrustSnapshotInput[];
   cacLtv: CacLtvInput;
 }
@@ -132,9 +182,9 @@ export interface EvaluateColdScalerArmingPureResult {
   allowed: boolean;
   reasons: ColdScalerArmingReason[];
   metrics: {
-    reviewedCount: number;
-    concurredCount: number;
-    agreementRate: number | null;
+    gradedScaleActionCount: number;
+    passingScaleActionCount: number;
+    scalePassRate: number | null;
     consecutiveGreenCount: number;
     cacLtvRatio: number | null;
     target: number;
@@ -151,20 +201,29 @@ export function evaluateColdScalerArmingPure(
 ): EvaluateColdScalerArmingPureResult {
   const reasons: ColdScalerArmingReason[] = [];
 
-  // ── Precondition 1: shadow / review agreement over 14d ──────────────────
-  const reviewedCount = input.shadowReviews.length;
-  const concurredCount = input.shadowReviews.filter((r) => r.verdict === "concur").length;
-  const agreementRate = reviewedCount > 0 ? concurredCount / reviewedCount : null;
+  // ── Precondition 1: SCALE-vocabulary graded pass rate over 14d ─────────
+  // The DB loader is responsible for the vocabulary filter (SCALE_ACTION_KINDS);
+  // the pure gate defends against a bad caller by re-filtering here so a
+  // KILL grade can NEVER lift the verdict — a fixture of all-excellent
+  // `media_buyer_paused_loser` grades still lands `insufficient_graded_scale_actions`.
+  const scaleGrades = input.gradedScaleActions.filter((g) =>
+    (SCALE_ACTION_KINDS as readonly string[]).includes(g.actionKind),
+  );
+  const gradedScaleActionCount = scaleGrades.length;
+  const passingScaleActionCount = scaleGrades.filter(
+    (g) => Number.isFinite(g.overallGrade) && g.overallGrade >= SCALE_GRADE_PASS_THRESHOLD,
+  ).length;
+  const scalePassRate = gradedScaleActionCount > 0 ? passingScaleActionCount / gradedScaleActionCount : null;
 
-  if (reviewedCount < MIN_REVIEWED_SHADOW_ACTIONS) {
+  if (gradedScaleActionCount < MIN_GRADED_SCALE_ACTIONS) {
     reasons.push({
-      code: "insufficient_sample",
-      detail: `only ${reviewedCount}/${MIN_REVIEWED_SHADOW_ACTIONS} reviewed cold-scaler shadow actions in the last ${ARMING_GATE_LOOKBACK_DAYS}d`,
+      code: "insufficient_graded_scale_actions",
+      detail: `only ${gradedScaleActionCount}/${MIN_GRADED_SCALE_ACTIONS} graded scale-actions (${SCALE_ACTION_KINDS.join(" | ")}) in the last ${ARMING_GATE_LOOKBACK_DAYS}d`,
     });
-  } else if (agreementRate !== null && agreementRate < MIN_AGREEMENT_RATE) {
+  } else if (scalePassRate !== null && scalePassRate < MIN_SCALE_PASS_RATE) {
     reasons.push({
-      code: "low_agreement",
-      detail: `concur rate ${(agreementRate * 100).toFixed(1)}% below ${(MIN_AGREEMENT_RATE * 100).toFixed(0)}% floor (${concurredCount}/${reviewedCount})`,
+      code: "scale_grade_below_bar",
+      detail: `pass rate ${(scalePassRate * 100).toFixed(1)}% (overall_grade>=${SCALE_GRADE_PASS_THRESHOLD}) below ${(MIN_SCALE_PASS_RATE * 100).toFixed(0)}% floor (${passingScaleActionCount}/${gradedScaleActionCount})`,
     });
   }
 
@@ -202,9 +261,9 @@ export function evaluateColdScalerArmingPure(
     allowed: reasons.length === 0,
     reasons,
     metrics: {
-      reviewedCount,
-      concurredCount,
-      agreementRate,
+      gradedScaleActionCount,
+      passingScaleActionCount,
+      scalePassRate,
       consecutiveGreenCount,
       cacLtvRatio,
       target,
@@ -286,10 +345,36 @@ export async function runColdScalerArmingGate(
   const windowEndDate = isoDate(now);
   const target = input.targetCacLtv ?? DEFAULT_COLD_SCALER_CAC_LTV_TARGET;
 
-  const [shadowReviews, trustSnapshots, snapshot] = await Promise.all([
-    loadColdScalerShadowReviews(admin, {
+  // Phase 4 (cold-scaler-arming-decides-on-evidence-not-absence): the
+  // authorization row is scoped by `(workspace_id, meta_ad_account_id,
+  // cold_scaler_cohort_id, iso_week)`, so a workspace with two active scaler
+  // cohorts in the same Meta account (e.g. Coffee vs Creamer) MUST evaluate
+  // Precondition #1 on cohort-scoped evidence — otherwise grades from cohort
+  // A can vouch for cohort B's arm and authorise an autonomous budget move
+  // under the wrong cohort authorisation. Resolve the cohort's `product_id`
+  // here and thread it into the loader; the loader joins each grade's
+  // `director_activity.metadata.ad_campaign_id` (or `source_ad_campaign_id`)
+  // through `ad_campaigns` and keeps only rows whose linked `product_id`
+  // matches the cohort's. A missing / inactive cohort collapses the sample
+  // to zero (loader short-circuits) which lands `insufficient_graded_scale_actions`
+  // — the correct dormant behaviour for an unresolvable cohort.
+  const cohort = await getMediaBuyerColdScalerCohortById(admin, {
+    workspaceId: input.workspaceId,
+    id: input.coldScalerCohortId,
+  }).catch((e) => {
+    console.warn(
+      `[cold-scaler-arming-gate] getMediaBuyerColdScalerCohortById failed: ${errText(e)}`,
+    );
+    return null;
+  });
+
+  const [gradedScaleActions, trustSnapshots, snapshot] = await Promise.all([
+    loadColdScalerGradedScaleActions(admin, {
       workspaceId: input.workspaceId,
       metaAdAccountId: input.metaAdAccountId ?? null,
+      coldScalerCohortId: input.coldScalerCohortId,
+      cohortProductId: cohort?.productId ?? null,
+      cohortResolved: cohort !== null,
       sinceIso: `${windowStartDate}T00:00:00Z`,
     }),
     loadTrustSnapshots(admin, {
@@ -329,7 +414,7 @@ export async function runColdScalerArmingGate(
         unknownFlags: blended.flags,
       }));
 
-  const evaluation = evaluateColdScalerArmingPure({ shadowReviews, trustSnapshots, cacLtv });
+  const evaluation = evaluateColdScalerArmingPure({ gradedScaleActions, trustSnapshots, cacLtv });
 
   const expiresAt = new Date(now.getTime() + AUTHORIZATION_TTL_DAYS * 86_400_000).toISOString();
   const authorizationId = await upsertColdScalerAuthorization(admin, {
@@ -471,86 +556,200 @@ export async function readLatestColdScalerArmingAuthorization(
   return (data as ColdScalerAuthorizationRow | null) ?? null;
 }
 
-// ── Shadow-activity discriminator helper ─────────────────────────────────────
+// ── DB helpers ────────────────────────────────────────────────────────────────
 
-export interface WriteColdScalerShadowActivityInput {
-  workspaceId: string;
-  /** The kind on the underlying director_activity row (e.g. 'cold_scaler_publish_shadow'). */
-  actionKind: string;
-  /** Free-text reason surfaced on the activity row. */
-  reason: string;
-  /** Additional metadata; `mode='shadow'` + `surface='cold_scaler'` are stamped by this
-   *  helper so the arming-gate loader can discriminate scaler shadow calls from
-   *  test-loop shadow calls. */
-  metadata?: Record<string, unknown>;
+/**
+ * The raw shape of one graded row + its joined `director_activity.metadata`
+ * before the cohort-product filter narrows it. Extracted so the pure filter
+ * (`filterGradesToCohortProduct`) can be unit-tested without a DB round-trip.
+ * `adCampaignId` is the id extracted from metadata (either the
+ * `media_buyer_promoted_winner` `source_ad_campaign_id` or the
+ * `media_buyer_replenished_test_cohort` `ad_campaign_id`), or `null` when
+ * metadata is missing / malformed.
+ */
+export interface RawGradeRowForCohortFilter {
+  actionKind: ScaleActionKind;
+  overallGrade: number;
+  gradedAt: string;
+  metaAccountId: string | null;
+  adCampaignId: string | null;
 }
 
 /**
- * Small helper that stamps `metadata.mode='shadow'` + `metadata.surface='cold_scaler'`
- * on a director_activity write so the graduate spec's shadow branch can
- * emit rows that the arming gate can later filter to in its 14d sample.
- * Not the sole write path — callers that already stamp both flags don't
- * need this — but the canonical helper that keeps the discriminator
- * consistent across surfaces.
+ * PURE — filter graded scale-actions to those attributable to ONE cohort's
+ * `(meta_ad_account_id, product_id)` scope. This is the Phase-4 fix for
+ * [[../../../docs/brain/specs/cold-scaler-arming-decides-on-evidence-not-absence.md]]:
+ * a workspace with two active scaler cohorts sharing a Meta account (Coffee
+ * vs Creamer) must NOT let cohort A's passing grades vouch for cohort B's
+ * arm. The authorization row is per-`(workspace, account, cohort, iso_week)`,
+ * so the evidence must be per-cohort too.
+ *
+ * Rules:
+ *   • `metaAccountId` must equal `cohortMetaAccountId` (`null`-consistent).
+ *   • `adCampaignId` → `adCampaignProductById[adCampaignId] ?? null`.
+ *   • `cohortProductId === null` (a workspace-wide / account-default cohort)
+ *     accepts ONLY grades whose linked ad_campaign has `product_id=null`
+ *     (or an unresolvable / unlinked grade — same "no product bucket"
+ *     semantics as the meta_ad_account_id null branch).
+ *   • `cohortProductId !== null` requires an EXACT match on the resolved
+ *     product_id — a grade with no adCampaignId or an unresolvable id is
+ *     DROPPED (cohort A's grade cannot count for cohort B, and neither can
+ *     an ungrounded grade).
+ *   • When `!cohortResolved` (missing/inactive cohort) the whole sample
+ *     collapses to `[]` — the pure gate then lands
+ *     `insufficient_graded_scale_actions` for the row we're about to write,
+ *     which is the correct dormant behaviour for an unresolvable cohort.
  */
-export async function writeColdScalerShadowActivity(
-  admin: Admin,
-  input: WriteColdScalerShadowActivityInput,
-): Promise<void> {
-  await recordDirectorActivity(admin, {
-    workspaceId: input.workspaceId,
-    directorFunction: GROWTH_DIRECTOR_FUNCTION,
-    actionKind: input.actionKind,
-    specSlug: COLD_SCALER_SPEC_SLUG,
-    reason: input.reason,
-    metadata: {
-      ...(input.metadata ?? {}),
-      mode: "shadow",
-      surface: "cold_scaler",
-      autonomous: true,
-    },
-  });
+export function filterGradesToCohortProduct(input: {
+  rows: RawGradeRowForCohortFilter[];
+  cohortResolved: boolean;
+  cohortMetaAccountId: string | null;
+  cohortProductId: string | null;
+  adCampaignProductById: Map<string, string | null>;
+}): GradedScaleActionInput[] {
+  if (!input.cohortResolved) return [];
+  const out: GradedScaleActionInput[] = [];
+  for (const r of input.rows) {
+    // Meta-account scope — matches the runner's per-account authorization key.
+    if (input.cohortMetaAccountId === null) {
+      if (r.metaAccountId !== null) continue;
+    } else if (r.metaAccountId !== input.cohortMetaAccountId) {
+      continue;
+    }
+    // Cohort-product scope — the Phase-4 authorization boundary.
+    const gradeProductId = r.adCampaignId ? input.adCampaignProductById.get(r.adCampaignId) ?? null : null;
+    if (input.cohortProductId === null) {
+      if (gradeProductId !== null) continue; // workspace-wide/default cohort → only null-product grades.
+    } else if (gradeProductId !== input.cohortProductId) {
+      continue; // per-product cohort → EXACT product match (drops unresolvable grades).
+    }
+    out.push({
+      actionKind: r.actionKind,
+      overallGrade: r.overallGrade,
+      gradedAt: r.gradedAt,
+    });
+  }
+  return out;
 }
 
-// ── DB helpers ────────────────────────────────────────────────────────────────
+/**
+ * Extract the ad_campaign id from a director_activity metadata bucket for a
+ * SCALE-vocabulary grade row. `media_buyer_promoted_winner` writes
+ * `source_ad_campaign_id`; `media_buyer_replenished_test_cohort` writes
+ * `ad_campaign_id`. Returns `null` when neither is present as a non-empty
+ * string — the filter drops those rows for a per-product cohort (an
+ * ungrounded grade cannot ground the cohort's arm).
+ */
+export function extractGradeAdCampaignId(metadata: Record<string, unknown> | null | undefined): string | null {
+  if (!metadata) return null;
+  const source = metadata["source_ad_campaign_id"];
+  if (typeof source === "string" && source) return source;
+  const direct = metadata["ad_campaign_id"];
+  if (typeof direct === "string" && direct) return direct;
+  return null;
+}
 
-async function loadColdScalerShadowReviews(
+/**
+ * Load the last-14-day SCALE-vocabulary grades for one COLD-SCALER COHORT
+ * from [[../tables/media_buyer_action_grades]] — cohort-scoped, not just
+ * account-scoped. The grade table has `workspace_id` + `action_kind`
+ * directly, but the per-account and per-cohort scope lives on the JOINED
+ * `director_activity.metadata` — read with a `!inner` on `director_activity`,
+ * batch-resolve each row's `source_ad_campaign_id` / `ad_campaign_id`
+ * through [[../tables/ad_campaigns]] to a `product_id`, and apply the
+ * pure `filterGradesToCohortProduct` to narrow to the cohort's scope.
+ *
+ * The vocabulary filter is applied AT THE DB level via `.in('action_kind',
+ * SCALE_ACTION_KINDS)` so a KILL grade cannot reach the pure gate. The
+ * pure gate defends against a bad caller by re-filtering, but the loader
+ * is the primary chokepoint.
+ *
+ * When `cohortResolved=false` the loader short-circuits to `[]` before
+ * any DB read — a missing/inactive cohort cannot claim grades.
+ */
+async function loadColdScalerGradedScaleActions(
   admin: Admin,
-  opts: { workspaceId: string; metaAdAccountId: string | null; sinceIso: string },
-): Promise<ShadowReviewInput[]> {
-  // Scaler shadow reviews are the ones whose parent director_activity row
-  // carries `metadata.surface='cold_scaler'` (the discriminator
-  // `writeColdScalerShadowActivity` stamps). Join to director_activity via
-  // director_activity_id so the loader can filter on that flag AND on the
-  // per-account scope. A missing metadata bucket ⇒ excluded — the pure
-  // gate then lands `insufficient_sample`, which is the correct dormant
-  // behaviour for a workspace that has never emitted a scaler shadow.
+  opts: {
+    workspaceId: string;
+    metaAdAccountId: string | null;
+    coldScalerCohortId: string;
+    cohortProductId: string | null;
+    cohortResolved: boolean;
+    sinceIso: string;
+  },
+): Promise<GradedScaleActionInput[]> {
+  if (!opts.cohortResolved) return [];
+
   const { data, error } = await admin
-    .from("media_buyer_shadow_reviews")
-    .select("verdict, reviewed_at, director_activity_id, director_activity:director_activity!inner(metadata)")
+    .from("media_buyer_action_grades")
+    .select(
+      "overall_grade, graded_at, action_kind, director_activity:director_activity!inner(metadata)",
+    )
     .eq("workspace_id", opts.workspaceId)
-    .gte("reviewed_at", opts.sinceIso);
+    .in("action_kind", SCALE_ACTION_KINDS as unknown as string[])
+    .gte("graded_at", opts.sinceIso);
   if (error) {
-    console.warn(`[cold-scaler-arming-gate] media_buyer_shadow_reviews read failed: ${error.message}`);
+    console.warn(
+      `[cold-scaler-arming-gate] media_buyer_action_grades read failed: ${error.message}`,
+    );
     return [];
   }
   const rows = (data || []) as Array<{
-    verdict: string;
-    reviewed_at: string;
+    overall_grade: number | null;
+    graded_at: string | null;
+    action_kind: string | null;
     director_activity?: { metadata?: Record<string, unknown> | null } | null;
   }>;
-  return rows
-    .filter((r) => {
-      const meta = r.director_activity?.metadata ?? {};
-      if (meta["surface"] !== "cold_scaler") return false;
-      if (opts.metaAdAccountId === null) return true;
-      const metaAccount = meta["meta_ad_account_id"];
-      return typeof metaAccount === "string" && metaAccount === opts.metaAdAccountId;
-    })
-    .filter((r): r is { verdict: "concur" | "dissent" | "undecided"; reviewed_at: string } =>
-      r.verdict === "concur" || r.verdict === "dissent" || r.verdict === "undecided",
-    )
-    .map((r) => ({ verdict: r.verdict, reviewedAt: r.reviewed_at }));
+
+  const rawRows: RawGradeRowForCohortFilter[] = [];
+  const adCampaignIds = new Set<string>();
+  for (const r of rows) {
+    if (r.graded_at == null) continue;
+    if (r.overall_grade == null || !Number.isFinite(r.overall_grade)) continue;
+    if (!(SCALE_ACTION_KINDS as readonly string[]).includes(r.action_kind ?? "")) continue;
+    const metadata = r.director_activity?.metadata ?? null;
+    const metaAccount = metadata?.["meta_ad_account_id"];
+    const metaAccountStr = typeof metaAccount === "string" && metaAccount ? metaAccount : null;
+    const adCampaignId = extractGradeAdCampaignId(metadata);
+    if (adCampaignId) adCampaignIds.add(adCampaignId);
+    rawRows.push({
+      actionKind: r.action_kind as ScaleActionKind,
+      overallGrade: r.overall_grade,
+      gradedAt: r.graded_at,
+      metaAccountId: metaAccountStr,
+      adCampaignId,
+    });
+  }
+
+  const adCampaignProductById = new Map<string, string | null>();
+  if (adCampaignIds.size > 0) {
+    const { data: campaigns, error: cErr } = await admin
+      .from("ad_campaigns")
+      .select("id, product_id")
+      .eq("workspace_id", opts.workspaceId)
+      .in("id", Array.from(adCampaignIds));
+    if (cErr) {
+      // Fail closed — a resolve failure means we cannot prove the grades belong
+      // to this cohort's product, so the sample collapses. The gate then lands
+      // `insufficient_graded_scale_actions`, which is the safe answer under
+      // uncertainty for an autonomous-spend authorization.
+      console.warn(
+        `[cold-scaler-arming-gate] ad_campaigns product-scope resolve failed: ${cErr.message}`,
+      );
+      return [];
+    }
+    for (const c of (campaigns || []) as Array<{ id: string; product_id: string | null }>) {
+      adCampaignProductById.set(c.id, c.product_id ?? null);
+    }
+  }
+
+  return filterGradesToCohortProduct({
+    rows: rawRows,
+    cohortResolved: opts.cohortResolved,
+    cohortMetaAccountId: opts.metaAdAccountId,
+    cohortProductId: opts.cohortProductId,
+    adCampaignProductById,
+  });
 }
 
 async function loadTrustSnapshots(

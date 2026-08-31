@@ -127,6 +127,8 @@
     "test:creative-brief-cold-partition": "tsx --test src/lib/ads/creative-brief.cold-partition.test.ts",
     "test:never-fabricate": "tsx --test src/lib/ads/never-fabricate.test.ts",
     "test:debrand": "tsx --test src/lib/ads/debrand.test.ts",
+    "test:sensor-trust-probe-cadence": "tsx --test src/lib/inngest/sensor-trust-probe-cadence.test.ts",
+    "test:cold-scaler-cac-ltv-cadence": "tsx --test src/lib/inngest/cold-scaler-cac-ltv-cadence.test.ts",
     "test:ads-supervisor-lf8-disposition": "tsx --test src/lib/ads-supervisor.lf8-disposition.test.ts",
     "test:ads-supervisor-rail-defer-coverage": "tsx --test src/lib/ads-supervisor.rail-defer-coverage.test.ts",
     "test:cancel-jobs-archived-db-folded": "tsx --test src/lib/agent-jobs.cancel-archived-db-folded.test.ts",

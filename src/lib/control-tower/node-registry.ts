@@ -125,6 +125,7 @@ export const BUILDER_WORKER_KINDS = [
   "ad-review-feedback",
   "media-buyer-grade",
   "sensor-trust-probe",
+  "cold-scaler-cac-ltv",
   "calibrate-media-buyer-policy",
   "ads-supervisor",
   "imitation-quality-review",
@@ -165,6 +166,7 @@ const KIND_OWNER_FALLBACK: Record<string, OwnerFunction> = {
   "audit-spec-shipped-state": "platform", // Ada's audit sweep
   "ceo-authorized-out-of-leash": "ceo", // out-of-leash execution — the CEO owns it
   "sensor-trust-probe": "growth", // Bianca / Max sensor calibration
+  "cold-scaler-cac-ltv": "growth", // cold-scaler CAC:LTV weekly snapshot (Bianca / Max) — feeds the cold-scaler arming gate
   "calibrate-media-buyer-policy": "growth", // Bianca policy calibration under Max
   "goal-fold": "platform", // Fenn folds a completed goal
   // ── The CEO's own agent lane ──
