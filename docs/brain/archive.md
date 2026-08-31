@@ -12,6 +12,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Ads supervisor: product `Amazing Coffee K-Cups` — Bianca missed a kill on adset `split ingredient stack versus one pod`** · verified 2026-08-30 · → [[lifecycles/ad-creative]] + [[libraries/ads-supervisor]] + [[libraries/media-buyer-agent]]
+- **June can't apply a loyalty coupon to a subscription renewal — the order-scoped money-remedy rail hard-rejects it** · verified 2026-08-30 · → [[lifecycles/ticket-lifecycle]]
 - **Live-orchestrator assisted-purchase routing must carry the customer's picked item into assisted_purchase_params** · verified 2026-08-30 · → [[../libraries/playbook-executor]]
 - **Vacuum / autovacuum-tune ticket_messages (rising bloat trend)** · verified 2026-08-29 · → [[../recipes/db-vacuum-tune-ticket_messages]]
 - **Loyalty coupon reissue/apply must be internal-sub-native and verify real discount value** · verified 2026-08-29 · → [[../libraries/coupons]] · [[../libraries/internal-subscription]] · [[../tables/loyalty_redemptions]]
