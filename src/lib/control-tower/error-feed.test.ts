@@ -18,6 +18,7 @@ import {
   isForeignAppstleUnskipUpstream500,
   isForeignBraintreeVaultGatewayRejection,
   isForeignBraintreeVaultProcessorDecline,
+  isForeignEasyPostReturnsSweepMissingCarrierCredentials,
   isForeignEasyPostReturnsSweepRateLimit,
   isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
@@ -1454,6 +1455,65 @@ test("isForeignEasyPostReturnsSweepRateLimit KEEPS the same rate-limit message o
     isForeignEasyPostReturnsSweepRateLimit(
       "/api/portal",
       "[returns-reconcile-sweep] lookupTracking failed for return 1234abcd-5678-90ef-1234-567890abcdef (tracking 9400111899223345678901): Error: You are being temporarily rate-limited due to excessive resource consumption.",
+    ),
+    false,
+  );
+});
+
+// ── isForeignEasyPostReturnsSweepMissingCarrierCredentials (error-feed-scope-easypost-returns-sweep-missing-carrier-credentials) ──
+// Sibling of the rate-limit predicate on the identical call site. When the returns-sweep's
+// per-row `lookupTracking` call hits a tracking number whose carrier the EasyPost account
+// holds NO credentials for, the client throws with the exact `Credentials not found for
+// the specified carrier` body — the row is skipped and re-picked on the next daily sweep
+// and there is no lever to pull on our side. The false positive that opened Control Tower
+// signature `vercel:d9475d06cd1245a7` and sat parked for 41 days. Unlike the rate-limit
+// case this condition is PERMANENT for a given carrier rather than passing, so recurrence
+// on the daily sweep is EXPECTED and must not be re-escalated to a paging signal.
+
+test("isForeignEasyPostReturnsSweepMissingCarrierCredentials matches the captured /api/inngest signature", () => {
+  assert.equal(
+    isForeignEasyPostReturnsSweepMissingCarrierCredentials(
+      "/api/inngest",
+      "[returns-reconcile-sweep] lookupTracking failed for return 1234abcd-5678-90ef-1234-567890abcdef (tracking 9400111899223345678901): Error: Credentials not found for the specified carrier.",
+    ),
+    true,
+  );
+});
+
+test("isForeignEasyPostReturnsSweepMissingCarrierCredentials KEEPS a bad-tracking-number failure on the same sweep (paged)", () => {
+  // A real EasyPost bug on the same sweep — bad tracking number, genuine outage — carries
+  // a different marker and stays captured / paged so a real problem still surfaces on first
+  // sighting.
+  assert.equal(
+    isForeignEasyPostReturnsSweepMissingCarrierCredentials(
+      "/api/inngest",
+      "[returns-reconcile-sweep] lookupTracking failed for return 1234abcd-5678-90ef-1234-567890abcdef (tracking 9400111899223345678901): Error: bad tracking number",
+    ),
+    false,
+  );
+});
+
+test("isForeignEasyPostReturnsSweepMissingCarrierCredentials KEEPS the same credentials body on a non-/api/inngest path (paged)", () => {
+  // Only the returns-reconcile-sweep Inngest function reaches this call site today. If some
+  // other caller starts emitting the same body from a different path, that's a NEW surface
+  // and stays captured / paged.
+  assert.equal(
+    isForeignEasyPostReturnsSweepMissingCarrierCredentials(
+      "/api/portal",
+      "[returns-reconcile-sweep] lookupTracking failed for return 1234abcd-5678-90ef-1234-567890abcdef (tracking 9400111899223345678901): Error: Credentials not found for the specified carrier.",
+    ),
+    false,
+  );
+});
+
+test("isForeignEasyPostReturnsSweepMissingCarrierCredentials KEEPS the same credentials body without the sweep prefix (paged)", () => {
+  // The credentials body arriving from some other EasyPost caller on the same /api/inngest
+  // path (not the returns-sweep) stays captured / paged — the narrow three-condition shape
+  // is what keeps this predicate from silencing unrelated failures on the same path.
+  assert.equal(
+    isForeignEasyPostReturnsSweepMissingCarrierCredentials(
+      "/api/inngest",
+      "[some-other-caller] lookupTracking failed: Error: Credentials not found for the specified carrier.",
     ),
     false,
   );

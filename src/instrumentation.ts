@@ -28,6 +28,7 @@ import {
   isForeignAppstleUnskipUpstream500,
   isForeignBraintreeVaultGatewayRejection,
   isForeignBraintreeVaultProcessorDecline,
+  isForeignEasyPostReturnsSweepMissingCarrierCredentials,
   isForeignEasyPostReturnsSweepRateLimit,
   isInngestStepWrappedNonErrorLog,
   isInngestTerminalFailureMirrorLog,
@@ -77,6 +78,7 @@ export const onRequestError: Instrumentation.onRequestError = async (err, reques
       isTransientAppstleFrequencyUpstreamTimeout(path, message) ||
       isTransientKlaviyoReviewsFetch5xx(path, message) ||
       isForeignEasyPostReturnsSweepRateLimit(path, message) ||
+      isForeignEasyPostReturnsSweepMissingCarrierCredentials(path, message) ||
       isTransientSupabaseEdgeHandshakeError(message) ||
       isTransientSupabaseEdgeHtmlBody(message) ||
       isTransientUndiciHeadersTimeout(message) ||

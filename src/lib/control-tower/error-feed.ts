@@ -639,6 +639,54 @@ export function isForeignEasyPostReturnsSweepRateLimit(
 }
 
 /**
+ * Foreign-app noise — a tracked return whose carrier the EasyPost account holds
+ * no credentials for, surfacing on the returns-reconcile-sweep's `lookupTracking`
+ * call ([[../specs/error-feed-scope-easypost-returns-sweep-missing-carrier-credentials]]).
+ *
+ * Sibling of `isForeignEasyPostReturnsSweepRateLimit` on the identical call site.
+ * `src/lib/inngest/returns-reconcile-sweep.ts` looks up every in-flight return's
+ * tracking number through EasyPost; when the tracking number belongs to a carrier
+ * the account has no credentials for, EasyPost throws with the exact
+ * `Credentials not found for the specified carrier` marker, and the sweep's catch
+ * branch logs `[returns-reconcile-sweep] lookupTracking failed for return {id}...`
+ * and returns — the row is skipped and re-picked on the next daily sweep, and
+ * there is no lever to pull on our side. Minting a fresh OPEN paged incident +
+ * repair fan-out for it churns Platform owners on a surface we hold no levers on
+ * (the parked Control Tower incident that sat for 41 days).
+ *
+ * Unlike the rate-limit case this condition is PERMANENT for a given carrier
+ * rather than passing, so recurrence on the same daily sweep is EXPECTED and is
+ * NOT evidence of a new problem — a future reader must not "fix" it back into a
+ * paging signal on the theory that transient-recurrence should escalate.
+ *
+ * `true` ONLY when ALL of:
+ *   1. `path` equals `/api/inngest` — the returns-reconcile-sweep Inngest
+ *      function is the only surface that reaches this call site today; a
+ *      different caller would fire on a different path and stays captured /
+ *      paged,
+ *   2. the trimmed message begins with the exact
+ *      `[returns-reconcile-sweep] lookupTracking failed for return ` prefix
+ *      (the sweep's own console.error label — not any other EasyPost log), AND
+ *   3. the message carries the `Credentials not found for the specified carrier`
+ *      marker (EasyPost's own missing-credentials body).
+ *
+ * A different `lookupTracking` failure on the same sweep — a bad tracking
+ * number, a genuine EasyPost outage carrying a different body class, a throw
+ * from our own client — carries a different marker and stays captured /
+ * paged, exactly as the sibling rate-limit predicate promises.
+ */
+export function isForeignEasyPostReturnsSweepMissingCarrierCredentials(
+  path: string | null | undefined,
+  message: string | null | undefined,
+): boolean {
+  if (path !== "/api/inngest") return false;
+  const text = (message ?? "").trim();
+  if (!text) return false;
+  if (!text.startsWith("[returns-reconcile-sweep] lookupTracking failed for return ")) return false;
+  return text.includes("Credentials not found for the specified carrier");
+}
+
+/**
  * Browser network-abort TypeError noise — the CLIENT-feed companion to
  * `isTransientInngestTransportError` / `isTransientShopifyWebhookHmacFailure`, factored
  * here so `/api/client-errors` can reuse it
