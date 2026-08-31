@@ -43,11 +43,31 @@ Ask ONLY when EVERY item below is true — otherwise skip:
 - Per-product review coverage tilts toward the product WE NEED MOST — but ONLY as a tiebreaker between two otherwise-eligible products, never as a reason to decline. See "Coverage is a tiebreaker, NOT a veto" below.
 - The customer is a repeat buyer (goodwill compounds — the CX SDK snapshot shows tenure + order count).
 
+## Silence is the EXPECTED shape — never require a thank-you
+
+**The absence of a customer thank-you is NOT a disqualifier.** Do not require "goodwill in the thread", "a warm close", or customer-side acknowledgment before asking. Requiring it makes the ask structurally impossible.
+
+Here is why, in numbers. The detector enqueues **only tickets where WE spoke last** — that is its window condition. Measured over 30 days on real tickets where both sides spoke, **96.5% end with us speaking last; only 3.5% end with the customer having the last word.** So a bar of "the customer must have thanked us" is being applied to a cohort selected to contain almost none. The two rules cancel out and nothing is ever asked.
+
+Observed live: 126 sessions, **zero asks**, with verdicts reading *"the thread ends on a bare cancel confirmation with no thank-you/goodwill"*, *"no goodwill closure in the thread"*, *"the candidacy bar requires the conversation be genuinely finished with goodwill in the thread"*. There is no such bar. It was inferred from this skill's framing language and it is wrong.
+
+**What silence actually means.** A customer who is still unhappy TELLS you — they reply, they reopen, they escalate. That is why the trigger waits 24h after our last message: the waiting period IS the quality gate. Silence following our resolution is the ordinary shape of a solved problem, not evidence of a bad one.
+
+**Judge the CONTENT of the resolution, not the presence of gratitude.** These are real disqualifiers, and all of them are visible in what was said:
+
+- the thread is unresolved, or ends mid-question
+- the customer cancelled, is disengaging, or is unsubscribed from both channels
+- the fix was never actually delivered (a failed portal action, an undelivered credit)
+- the close was angry, or the AI looped without hearing them
+- there is an open escalation or a founder ruling pending
+
+Those are all good reasons to skip, and you have been calling them correctly. "They didn't say thanks" is not one of them.
+
 ## Coverage is a tiebreaker, NOT a veto
 
 **Two eligible products?** Prefer the one with fewer reviews — Sleep Gummies at 42 over Superfood Tabs at 3,158.
 
-**One eligible product?** Ask about it, whatever its coverage. High coverage is never a reason to decline.
+**One eligible product?** Ask about it, whatever its coverage. High coverage is never a reason to decline — not "the over-covered flagship we do NOT need", not "thousands of reviews already". If that product is the only thing the customer bought, it IS the ask.
 
 This is the most important correction in this skill, because getting it wrong silently kills the program. Across the first 117 sessions, **52 declines (44%) cited coverage as the disqualifier** — nearly all Superfood Tabs, the flagship, and the ONLY product most customers ever buy. A tiebreaker written for the rare multi-product case was eliminating the largest cohort we have. The verdicts read like:
 

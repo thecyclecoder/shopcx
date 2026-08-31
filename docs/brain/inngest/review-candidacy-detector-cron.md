@@ -60,3 +60,11 @@ Sol's brief ranks candidate products by review coverage so a thin product wins o
 The first 117 sessions produced **zero asks**, and **52 of the declines (44%)** cited coverage as a disqualifier — nearly all Superfood Tabs, the flagship and the only product most customers ever buy. The skill had listed "the coverage tilts the wrong way" among the reasons to skip, alongside "skipping is ALWAYS correct", so a tiebreaker meant for the rare multi-product case was vetoing the largest cohort. Corrected in `.claude/skills/review-candidacy/SKILL.md`.
 
 Second-order point worth keeping: Superfood Tabs' ~3,158 reviews are **all frozen Klaviyo-era rows predating 2026-07-01**. Lifetime totals are the wrong measure of coverage when nothing has been collected in months — a PDP needs recency and the ad tool mines current verbatims. A product with no recent reviews is UNDER-covered regardless of its total.
+
+## Silence is the expected shape — the contradiction that produced zero asks
+
+The detector's window condition is **"we spoke last"**, which over 30 days of real two-sided tickets covers **96.5%** of them; only 3.5% end with the customer having the last word.
+
+Sol then independently applied a "goodwill closure / customer acknowledgment in the thread" bar — a bar the skill never stated, inferred from its framing language (*"the goodwill of a solved problem is still fresh"*). Applied to a cohort selected for *us* speaking last, the two rules cancel: **126 sessions, zero asks.**
+
+Corrected in `.claude/skills/review-candidacy/SKILL.md`. Silence after our resolution is the ordinary shape of a solved problem — an unhappy customer replies, reopens, or escalates, which is exactly what the 24h quiet period is there to detect. Judge the **content** of the resolution (unresolved, cancelled, undelivered fix, angry close, open escalation), never the presence of a thank-you.
