@@ -43,6 +43,33 @@ Ask ONLY when EVERY item below is true — otherwise skip:
 - Per-product review coverage tilts toward the product WE NEED MOST — but ONLY as a tiebreaker between two otherwise-eligible products, never as a reason to decline. See "Coverage is a tiebreaker, NOT a veto" below.
 - The customer is a repeat buyer (goodwill compounds — the CX SDK snapshot shows tenure + order count).
 
+## SMS shape: block layout, and length is NOT the constraint
+
+**160 characters is a BULK-send billing budget, not a message budget.** It matters when one extra segment multiplies across tens of thousands of recipients. A review request is one-at-a-time and high-value: segments cost fractions of a cent, a stripped message costs the review. Write the message the message needs to be.
+
+Enforcing 160 actively produced a bad send. Compressed to fit, it lost the identity priming, the status reversal, the hand-picked tenure fact, and the stated incentive — four weighted rubric criteria — keeping only the named antagonist. The corrected version is ~370 chars across 3 segments and carries all of them.
+
+**Use the house block layout** (`.claude/skills/sms-marketing`) — blank line between every block, CTA label above the link, link alone on its own line:
+
+```
+Hey {first_name}, {identity priming}.
+
+{the antagonist's claim}. Here's where you come in — {the true hand-picked fact}.
+
+{the question}
+
+Click here (takes 1 min):
+{link}
+
+${amount} code waiting when you're done.
+
+Reply STOP to opt out
+```
+
+A single run-on paragraph with the URL buried mid-sentence reads as a wall of text on a phone — and the link is the one thing the message exists to get tapped. `review-request-validator` enforces both: `sms_link_not_on_its_own_line` and `sms_missing_block_layout`.
+
+**The CTA label must stand on its own.** "Click here (takes 1 min):" — an instruction plus the time cost, which is where the time cost belongs because it answers the "too busy" objection at the exact moment of the decision. Do NOT write "Tell her here" or any label whose pronoun refers back to the antagonist: the SMS names no one (the email does), so "her" has no antecedent and the reader stalls on it. The label is an instruction, not a continuation of the sentence above it.
+
 ## Silence is the EXPECTED shape — never require a thank-you
 
 **The absence of a customer thank-you is NOT a disqualifier.** Do not require "goodwill in the thread", "a warm close", or customer-side acknowledgment before asking. Requiring it makes the ask structurally impossible.
