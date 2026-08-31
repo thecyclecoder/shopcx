@@ -1,20 +1,26 @@
 /**
  * Unit tests for the cold-scaler arming gate — Phase 2 verification
- * (bianca-cold-scaler-arming-gate-shadow-to-armed). Pins each denial
- * branch of the PURE `evaluateColdScalerArmingPure` on fixture inputs so
- * the guard predicates are locked before the DB-touching runner assembles
- * them, plus one round-trip through `readLatestColdScalerArmingAuthorization`
- * against an in-memory admin fake.
+ * (bianca-cold-scaler-arming-gate-shadow-to-armed) with Precondition #1
+ * rewritten by
+ * [[../../../docs/brain/specs/cold-scaler-arming-decides-on-evidence-not-absence.md]]
+ * Phase 3. Pins each denial branch of the PURE `evaluateColdScalerArmingPure`
+ * on fixture inputs so the guard predicates are locked before the DB-touching
+ * runner assembles them, plus one round-trip through
+ * `readLatestColdScalerArmingAuthorization` against an in-memory admin fake.
  *
  * The named branches the spec calls out:
- *   1. insufficient_sample — reviewed shadow actions < MIN_REVIEWED_SHADOW_ACTIONS.
- *   2. low_agreement — concur rate below MIN_AGREEMENT_RATE.
+ *   1. insufficient_graded_scale_actions — <MIN_GRADED_SCALE_ACTIONS graded
+ *      SCALE-vocabulary actions in the 14d window.
+ *   2. scale_grade_below_bar — pass-rate (overall_grade>=7) below MIN_SCALE_PASS_RATE.
  *   3. trust_no_snapshots — zero sensor-trust snapshots in the window.
  *   4. trust_streak_short — <MIN_CONSECUTIVE_GREEN_TRUST consecutive green snapshots.
  *   5. cac_ltv_below_target — cacLtvRatio present but < target.
  *   6. cac_ltv_unknown — cacLtvRatio null (no CAC / no LTV / no mapping).
  *
- * Plus the happy path (all three preconditions clear → allowed=true, reasons=[]).
+ * Plus the happy path (all three preconditions clear → allowed=true, reasons=[])
+ * AND the KILL-lift guard: a fixture of all-excellent `media_buyer_paused_loser`
+ * grades with poor promote grades still denies — the pure gate must not let a
+ * kill grade lift the scale verdict.
  *
  * Run:
  *   npx tsx --test src/lib/media-buyer/cold-scaler-arming-gate.test.ts
@@ -25,25 +31,37 @@ import {
   evaluateColdScalerArmingPure,
   readLatestColdScalerArmingAuthorization,
   isoWeekLabel,
-  MIN_REVIEWED_SHADOW_ACTIONS,
-  MIN_AGREEMENT_RATE,
+  MIN_GRADED_SCALE_ACTIONS,
+  MIN_SCALE_PASS_RATE,
   MIN_CONSECUTIVE_GREEN_TRUST,
+  SCALE_GRADE_PASS_THRESHOLD,
   DEFAULT_COLD_SCALER_CAC_LTV_TARGET,
-  type ShadowReviewInput,
+  type GradedScaleActionInput,
   type TrustSnapshotInput,
   type CacLtvInput,
+  type ScaleActionKind,
 } from "./cold-scaler-arming-gate";
 
 // ── Fixture builders ────────────────────────────────────────────────────────
 
-function makeReviews(concurred: number, dissented: number, undecided: number): ShadowReviewInput[] {
-  const rows: ShadowReviewInput[] = [];
+/**
+ * Build `n` graded SCALE-vocabulary rows, of which `passing` clear the
+ * 7/10 pass threshold. Alternates between the two SCALE kinds so the
+ * fixture exercises both entries in `SCALE_ACTION_KINDS`.
+ */
+function makeGrades(n: number, passing: number, actionKind?: ScaleActionKind): GradedScaleActionInput[] {
   const now = new Date("2026-07-08T12:00:00Z").getTime();
-  const push = (verdict: ShadowReviewInput["verdict"], i: number) =>
-    rows.push({ verdict, reviewedAt: new Date(now - i * 3_600_000).toISOString() });
-  for (let i = 0; i < concurred; i++) push("concur", i);
-  for (let i = 0; i < dissented; i++) push("dissent", concurred + i);
-  for (let i = 0; i < undecided; i++) push("undecided", concurred + dissented + i);
+  const rows: GradedScaleActionInput[] = [];
+  const kinds: ScaleActionKind[] = actionKind
+    ? [actionKind]
+    : ["media_buyer_promoted_winner", "media_buyer_replenished_test_cohort"];
+  for (let i = 0; i < n; i++) {
+    rows.push({
+      actionKind: kinds[i % kinds.length],
+      overallGrade: i < passing ? SCALE_GRADE_PASS_THRESHOLD + 1 : SCALE_GRADE_PASS_THRESHOLD - 3,
+      gradedAt: new Date(now - i * 3_600_000).toISOString(),
+    });
+  }
   return rows;
 }
 
@@ -84,55 +102,80 @@ function cac(cacLtvRatio: number | null, opts: Partial<CacLtvInput> = {}): CacLt
 // ── Happy path ──────────────────────────────────────────────────────────────
 
 test("evaluateColdScalerArmingPure — all three preconditions clear → allowed=true", () => {
-  const reviews = makeReviews(24, 1, 0);
+  const grades = makeGrades(MIN_GRADED_SCALE_ACTIONS, MIN_GRADED_SCALE_ACTIONS); // 100% pass
   const trust = makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1);
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: reviews,
+    gradedScaleActions: grades,
     trustSnapshots: trust,
     cacLtv: cac(3.5),
   });
   assert.equal(r.allowed, true);
   assert.equal(r.reasons.length, 0);
-  assert.equal(r.metrics.reviewedCount, 25);
-  assert.equal(r.metrics.concurredCount, 24);
+  assert.equal(r.metrics.gradedScaleActionCount, MIN_GRADED_SCALE_ACTIONS);
+  assert.equal(r.metrics.passingScaleActionCount, MIN_GRADED_SCALE_ACTIONS);
+  assert.equal(r.metrics.scalePassRate, 1);
   assert.equal(r.metrics.consecutiveGreenCount, MIN_CONSECUTIVE_GREEN_TRUST + 1);
   assert.equal(r.metrics.cacLtvRatio, 3.5);
   assert.equal(r.metrics.target, DEFAULT_COLD_SCALER_CAC_LTV_TARGET);
 });
 
-// ── Deny branch 1: insufficient_sample ──────────────────────────────────────
+// ── Deny branch 1: insufficient_graded_scale_actions ────────────────────────
 
-test("evaluateColdScalerArmingPure — fewer than MIN_REVIEWED_SHADOW_ACTIONS reviews → insufficient_sample", () => {
+test("evaluateColdScalerArmingPure — fewer than MIN_GRADED_SCALE_ACTIONS grades → insufficient_graded_scale_actions", () => {
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(4, 1, 0),
+    gradedScaleActions: makeGrades(4, 4),
     trustSnapshots: makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1),
     cacLtv: cac(3.5),
   });
   assert.equal(r.allowed, false);
   const codes = r.reasons.map((x) => x.code);
-  assert.ok(codes.includes("insufficient_sample"), `expected insufficient_sample, got ${codes.join(",")}`);
-  assert.equal(r.metrics.reviewedCount, 5);
+  assert.ok(
+    codes.includes("insufficient_graded_scale_actions"),
+    `expected insufficient_graded_scale_actions, got ${codes.join(",")}`,
+  );
+  assert.equal(r.metrics.gradedScaleActionCount, 4);
 });
 
-// ── Deny branch 2: low_agreement ────────────────────────────────────────────
+// ── Deny branch 2: scale_grade_below_bar ────────────────────────────────────
 
-test("evaluateColdScalerArmingPure — concur rate below MIN_AGREEMENT_RATE → low_agreement", () => {
+test("evaluateColdScalerArmingPure — pass rate below MIN_SCALE_PASS_RATE → scale_grade_below_bar", () => {
+  // 60% pass rate: 12 of 20 passing.
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(15, 8, 2), // 60% concur
+    gradedScaleActions: makeGrades(20, 12),
     trustSnapshots: makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1),
     cacLtv: cac(3.5),
   });
   assert.equal(r.allowed, false);
   const codes = r.reasons.map((x) => x.code);
-  assert.ok(codes.includes("low_agreement"), `expected low_agreement, got ${codes.join(",")}`);
-  assert.ok(r.metrics.agreementRate !== null && r.metrics.agreementRate < MIN_AGREEMENT_RATE);
+  assert.ok(
+    codes.includes("scale_grade_below_bar"),
+    `expected scale_grade_below_bar, got ${codes.join(",")}`,
+  );
+  assert.ok(r.metrics.scalePassRate !== null && r.metrics.scalePassRate < MIN_SCALE_PASS_RATE);
+});
+
+// ── Above the floor + above the bar → scale precondition clears ─────────────
+
+test("evaluateColdScalerArmingPure — ≥ floor at/above the bar → scale branch clears", () => {
+  // 90% pass rate at the sample floor.
+  const r = evaluateColdScalerArmingPure({
+    gradedScaleActions: makeGrades(20, 18),
+    trustSnapshots: makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1),
+    cacLtv: cac(3.5),
+  });
+  assert.equal(r.allowed, true);
+  const codes = r.reasons.map((x) => x.code);
+  assert.ok(
+    !codes.includes("insufficient_graded_scale_actions") && !codes.includes("scale_grade_below_bar"),
+    `scale branch should have cleared, got ${codes.join(",")}`,
+  );
 });
 
 // ── Deny branch 3: trust_no_snapshots ───────────────────────────────────────
 
 test("evaluateColdScalerArmingPure — zero sensor-trust snapshots → trust_no_snapshots", () => {
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(24, 1, 0),
+    gradedScaleActions: makeGrades(MIN_GRADED_SCALE_ACTIONS, MIN_GRADED_SCALE_ACTIONS),
     trustSnapshots: [],
     cacLtv: cac(3.5),
   });
@@ -146,7 +189,7 @@ test("evaluateColdScalerArmingPure — zero sensor-trust snapshots → trust_no_
 
 test("evaluateColdScalerArmingPure — <MIN_CONSECUTIVE_GREEN_TRUST consecutive greens → trust_streak_short", () => {
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(24, 1, 0),
+    gradedScaleActions: makeGrades(MIN_GRADED_SCALE_ACTIONS, MIN_GRADED_SCALE_ACTIONS),
     trustSnapshots: makeBrokenStreak(),
     cacLtv: cac(3.5),
   });
@@ -160,7 +203,7 @@ test("evaluateColdScalerArmingPure — <MIN_CONSECUTIVE_GREEN_TRUST consecutive 
 
 test("evaluateColdScalerArmingPure — CAC:LTV below target → cac_ltv_below_target", () => {
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(24, 1, 0),
+    gradedScaleActions: makeGrades(MIN_GRADED_SCALE_ACTIONS, MIN_GRADED_SCALE_ACTIONS),
     trustSnapshots: makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1),
     cacLtv: cac(1.5),
   });
@@ -173,7 +216,7 @@ test("evaluateColdScalerArmingPure — CAC:LTV below target → cac_ltv_below_ta
 
 test("evaluateColdScalerArmingPure — CAC:LTV null → cac_ltv_unknown", () => {
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(24, 1, 0),
+    gradedScaleActions: makeGrades(MIN_GRADED_SCALE_ACTIONS, MIN_GRADED_SCALE_ACTIONS),
     trustSnapshots: makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1),
     cacLtv: cac(null, { unknownFlags: ["no new customers in window"] }),
   });
@@ -182,17 +225,53 @@ test("evaluateColdScalerArmingPure — CAC:LTV null → cac_ltv_unknown", () => 
   assert.ok(codes.includes("cac_ltv_unknown"), `expected cac_ltv_unknown, got ${codes.join(",")}`);
 });
 
+// ── KILL-lift guard: a kill grade cannot lift the verdict ───────────────────
+
+test("evaluateColdScalerArmingPure — all-excellent KILL grades with poor promote grades still denies", () => {
+  // A caller that leaked KILL grades into `gradedScaleActions` must not be able
+  // to inflate the pass rate — the pure gate re-filters to SCALE kinds, so a
+  // fixture of 30 excellent `media_buyer_paused_loser` grades + 5 poor
+  // `media_buyer_promoted_winner` grades reads as 5 scale grades below the
+  // floor → `insufficient_graded_scale_actions`. Not `scale_grade_below_bar`
+  // (that fires ONLY when the sample is large enough to trust the ratio), and
+  // NEVER `allowed=true`. Bianca's 97%-sound kill skill cannot vouch for her
+  // 36%-sound promote skill.
+  const now = new Date("2026-07-08T12:00:00Z").getTime();
+  const killGrades: GradedScaleActionInput[] = Array.from({ length: 30 }, (_, i) => ({
+    // The type says ScaleActionKind, but the pure gate must defend against a
+    // caller that leaked a KILL row in — cast to unknown then to the type so
+    // we exercise the pure gate's own filter, not the DB loader's filter.
+    actionKind: "media_buyer_paused_loser" as unknown as ScaleActionKind,
+    overallGrade: 10,
+    gradedAt: new Date(now - i * 3_600_000).toISOString(),
+  }));
+  const poorPromoteGrades = makeGrades(5, 0, "media_buyer_promoted_winner");
+  const r = evaluateColdScalerArmingPure({
+    gradedScaleActions: [...killGrades, ...poorPromoteGrades],
+    trustSnapshots: makeGreenStreak(MIN_CONSECUTIVE_GREEN_TRUST + 1),
+    cacLtv: cac(3.5),
+  });
+  assert.equal(r.allowed, false);
+  const codes = r.reasons.map((x) => x.code);
+  assert.ok(
+    codes.includes("insufficient_graded_scale_actions"),
+    `KILL grades must not count toward the SCALE sample; expected insufficient_graded_scale_actions, got ${codes.join(",")}`,
+  );
+  assert.equal(r.metrics.gradedScaleActionCount, 5);
+  assert.equal(r.metrics.passingScaleActionCount, 0);
+});
+
 // ── Multiple denials compose ────────────────────────────────────────────────
 
 test("evaluateColdScalerArmingPure — multiple failing preconditions surface every reason", () => {
   const r = evaluateColdScalerArmingPure({
-    shadowReviews: makeReviews(3, 1, 0),
+    gradedScaleActions: makeGrades(3, 1),
     trustSnapshots: [],
     cacLtv: cac(null),
   });
   assert.equal(r.allowed, false);
   const codes = r.reasons.map((x) => x.code).sort();
-  assert.deepEqual(codes, ["cac_ltv_unknown", "insufficient_sample", "trust_no_snapshots"]);
+  assert.deepEqual(codes, ["cac_ltv_unknown", "insufficient_graded_scale_actions", "trust_no_snapshots"]);
 });
 
 // ── ISO week label ──────────────────────────────────────────────────────────
