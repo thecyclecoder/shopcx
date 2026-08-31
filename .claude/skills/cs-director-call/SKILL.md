@@ -217,6 +217,25 @@ firm on the ceiling; when the situation genuinely needs the CEO for a non-loyalt
 subscription cancel + non-loyalty refund), `escalate_founder` on that reasoning — not on the
 loyalty question.
 
+**⭐ A cancelled-but-charged claim REQUIRES timestamps.** Before asserting that a subscription was
+charged AFTER it was cancelled, quote the cancellation timestamp AND each charge timestamp from
+the brief's CANCELLATION TIMELINE section (per-contract chronological list built by
+[[../../../docs/brain/libraries/cs-director-cancellation-timeline.md]]) and state the ordering
+explicitly. An order billing after a cancel is near-impossible by construction — if the cancel
+came AFTER the charge, it is an ordinary pre-cancel renewal, not a system error, and the Refund
+playbook's normal ladder applies. Do NOT `escalate_founder` on a "post-cancellation renewal" and
+do NOT compute a refund total from one without showing `charge_at > cancelled_at`; a
+cancelled-but-charged claim that cannot show the ordering is not escalatable as a system error.
+Ground truth: ticket **f773b8ec** (bonnie marlette, 2026-08-21) — the CS Director escalated
+"contract 27806990509 is alive in Appstle and has billed three post-cancellation renewals —
+$69.71 × 3 = $209.13 is fully refundable." The cancel actually fired at 2026-07-17T08:39:51,
+thirty-six minutes AFTER the last renewal billed at 08:03:45; all three charges were ordinary
+pre-cancel renewals, all three orders were DELIVERED and KEPT (2026-04-01, 2026-05-28,
+2026-07-21), and the founder ruled no refund. **A refund proposal for delivered-and-kept product
+is a goodwill call, not a system-error correction — frame it that way when you propose it.**
+Same rule-that-carries-its-evidence pattern the [[../open-tickets/SKILL.md]] cases (Julianne,
+Loretta) use.
+
 ### 2. `author_spec` — the ticket surfaces a REPEAT product / analyzer / rule GAP
 
 Return this when:
