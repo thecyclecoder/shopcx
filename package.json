@@ -67,6 +67,7 @@
     "test:specs-table-merge-contains-phase-build": "tsx --test src/lib/specs-table.merge-contains-phase-build.test.ts",
     "test:agent-jobs-merge-stamps-contained-phases": "tsx --test src/lib/agent-jobs.merge-stamps-contained-phases.test.ts",
     "test:agent-jobs-audit-enqueue-dedupe": "tsx --test src/lib/agent-jobs.audit-enqueue-dedupe.test.ts",
+    "test:drift-autorepair": "tsx --test src/lib/agents/platform-director.drift-autorepair.test.ts",
     "test:backfill-audit-unstamped-merged-specs": "tsx --test scripts/_backfill-audit-unstamped-merged-specs.test.ts",
     "test:backfill-migration-audit-immediate-charge-false-failures": "tsx --test scripts/_backfill-migration-audit-immediate-charge-false-failures.test.ts",
     "test:migration-fix-verdict-vocabulary": "tsx --test src/lib/migration-fix.verdict-vocabulary.test.ts",

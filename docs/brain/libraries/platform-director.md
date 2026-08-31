@@ -247,6 +247,21 @@ When a parked `agent_jobs` row is genuinely not worth pursuing (the underlying w
 
 Now the escalate branch walks the spec's prior `director_activity.redrive_deferred_build` rows, extracts each `metadata.failing_check_keys` (a stable [[spec-test-runs]] `checkKey` per failing check), and runs [[build-suspect-check]] `detectSuspectCheck`. When the SAME lone check has been the ONLY failing check across ≥3 consecutive builds AND siblings passed each time, the escalation summary is rewritten to `Spec {slug} — check X of phase Y has failed N builds while every other check passed — the check is the likely defect (not an unbuilt phase)`, includes the branch's near-miss evidence (what the branch DOES contain that the failing pattern narrowly missed), and appends a `loosen_check` `pending_actions` entry carrying the corrected pattern (computed via the same [[spec-phase-checks-table]] `detectBuilderChosenNameInGrep` predicate Phase 1 uses at author time) alongside the existing `reclaim_stuck_build` approval. The escalation still routes to the CEO — Ada now presents her with an **authoring defect** to loosen, not a **build defect** to reclaim, which is what she'd been asking for on `bianca-actually-graduates-crowned-winners` and `factor-scores-reweight-selection-engine`. Multi-check current-run failures and streak-broken histories stay as-is — the detector fails CLOSED on ambiguity, so a genuine build defect is never mislabeled.
 
+## Drift-suspect runs the audit it recommends ([[../specs/drift-suspect-runs-the-audit-it-recommends]] Phase 1)
+
+`flagShippedWithoutProvenance` (called from `escortApprovedGoals` / `escortFixSpecs` / `escortSweep` when it spots a `status='shipped'` card whose phases lack a merge-hook `pr` + SHA) used to escalate the drift to the CEO with a diagnosis whose own text said "run `audit-spec-shipped-state` on this slug to re-stamp." Detection and repair had been built separately and never wired together, so a card the system could have resolved itself spent the founder's attention. On 2026-08-31 that produced a founder card for a spec whose work was demonstrably live in production; every one of the three unstamped phases surfaced that day was a provenance gap.
+
+The lane now **detects → repairs → escalates only on ambiguity**, in that order:
+
+1. **Enqueue the audit first** via [[agent-jobs]] `enqueueAuditSpecShippedStateIfDue(workspaceId, slug, {requestedBy:'platform-director:drift-suspect', reason})` — the SAME helper `scripts/_backfill-audit-unstamped-merged-specs.ts` uses for this exact purpose. The helper's dedupe covers OPEN + RECENT TERMINAL, so a standing pass cannot hot-loop.
+2. **Branch on the enqueue result**:
+   - `enqueued:true` OR `dedup:'open'` (an audit is already in flight) → **do NOT escalate.** Record a `drift_suspect_audit_queued` [[../tables/director_activity]] row carrying the audit `job_id` + phase indices + dedup flag. The feed shows the detector acting rather than going quiet.
+   - `dedup:'recent_terminal'` (an audit ran within 24h and the phase is STILL tagless) → the audit could not re-derive provenance; this is the genuinely ambiguous case. **Escalate** as before, but with the diagnosis updated to say the audit ran and could not resolve the gap — a human must decide whether the work shipped elsewhere (drop the phantom) or the merge has no ledger evidence to stamp. Companion `drift_suspect_flagged` activity row with `audit_state:'ran_and_unresolved'` + `prior_audit_job_id`.
+   - **Enqueue THREW** → **escalate** (fail-open, never swallow a drift signal because the repair path errored). Companion `drift_suspect_flagged` activity row with `audit_state:'enqueue_error'`.
+3. The **`drift:{slug}` dedupe** on the escalation is preserved so the fallback path cannot spam.
+
+Pinned by `src/lib/agents/platform-director.drift-autorepair.test.ts` (`npm run test:drift-autorepair`) — the two escalate branches are load-bearing: a real phantom-ship must NEVER become silence.
+
 ## Safety invariants
 
 - **Never rubber-stamps** — a structural leash candidate must *also* pass the investigation verdict; an ambiguous/errored result escalates, never approves.

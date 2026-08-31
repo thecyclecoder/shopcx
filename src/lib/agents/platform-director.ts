@@ -67,7 +67,7 @@ import {
   validateEscalationRecheckDescriptor,
 } from "@/lib/escalation-recheck";
 import { getGoal, getGoals, getRoadmap, getRoadmapFilters, getSpec, listArchivedSlugs, type GoalCard, type SpecCard, type SpecStatus } from "@/lib/brain-roadmap";
-import { enqueueSpecTestIfDue, ACTIVE_STATUSES } from "@/lib/agent-jobs";
+import { enqueueSpecTestIfDue, ACTIVE_STATUSES, enqueueAuditSpecShippedStateIfDue } from "@/lib/agent-jobs";
 import { buildGate } from "@/lib/agents/director-directives";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { enqueueRepairJob, parseRepairSpecMeta } from "@/lib/repair-agent";
@@ -712,21 +712,45 @@ export async function reactiveEnqueuePlatformDirectorForTarget(
 // progress, and the per-spec blocker gate keeps it from queuing anything out of sequence.
 
 /**
- * director-trust-phase-pr-provenance Phase 1 — when an escort lane spots a `status='shipped'` card that
- * lacks per-phase merge-hook provenance (`pr` tags), surface it to the CEO ONCE so the canonical miss
- * (5 phases live on main, board said `planned`) can't recur silently. The merge hook is the only authoritative
- * writer of `pr`, so a tagless shipped phase means we cannot prove the merge landed. Deduped by `drift:{slug}`
- * (one ping per spec until acted on); the activity row carries the suspect phase indices for the audit ledger.
+ * drift-suspect-runs-the-audit-it-recommends Phase 1 — the drift-suspect branch now enqueues the
+ * `audit-spec-shipped-state` job first (the same helper `scripts/_backfill-audit-unstamped-merged-specs.ts`
+ * uses for this exact purpose) and only escalates to the CEO when the audit cannot recover the provenance.
  *
- * Phase 2 will give Ada a `request-audit` action so she can self-serve the cleanup; until then this is the
- * surface that gets the drift in front of the CEO. Best-effort; never blocks the calling lane.
+ * Detection and repair were built separately and never wired together: the repair path is complete and the
+ * detector's own diagnosis text names it as the fix, but the detector then asked a HUMAN to run it. On
+ * 2026-08-31 that produced a founder card for a spec whose work was demonstrably live in production
+ * (migration on main, index live) — three unstamped phases surfaced that day, and every one of them was a
+ * provenance gap the audit could have re-derived. So we call the repair path first and route to the CEO
+ * only for the genuinely ambiguous cases:
+ *
+ *   - queued OR dedup='open' (an audit is already in flight) → do NOT escalate. Record a
+ *     `drift_suspect_audit_queued` activity row so the feed shows the detector acting.
+ *   - dedup='recent_terminal' (the audit ran recently and the phase is STILL tagless) → the audit could
+ *     not re-derive provenance. Escalate exactly as before, with the diagnosis updated to reflect that
+ *     the audit ran and could not resolve it.
+ *   - enqueue threw → escalate as before (fail-open: never swallow a drift signal because the repair
+ *     path errored). This is a load-bearing branch — a phantom-ship must NEVER become silence.
+ *
+ * The `drift:{slug}` dedupe on the escalation is preserved so the fallback cannot spam.
+ *
+ * Exported + deps-injectable so `platform-director.drift-autorepair.test.ts` can pin all three branches
+ * without touching a live admin client. Best-effort; never blocks the calling lane.
  */
-async function flagShippedWithoutProvenance(
+export async function flagShippedWithoutProvenance(
   admin: Admin,
   workspaceId: string,
   card: SpecCard,
   lane: string,
+  depsOverride: {
+    enqueueAudit?: typeof enqueueAuditSpecShippedStateIfDue;
+    escalateFn?: typeof escalateDiagnosisToCeo;
+    recordActivityFn?: typeof recordDirectorActivity;
+  } = {},
 ): Promise<void> {
+  const enqueueAudit = depsOverride.enqueueAudit ?? enqueueAuditSpecShippedStateIfDue;
+  const escalateFn = depsOverride.escalateFn ?? escalateDiagnosisToCeo;
+  const recordActivityFn = depsOverride.recordActivityFn ?? recordDirectorActivity;
+
   // SpecPhase has no `index` field (phases are array-positioned), so derive indices from the parent array.
   const indices: number[] = [];
   const titles: string[] = [];
@@ -736,15 +760,78 @@ async function flagShippedWithoutProvenance(
       if (p.title) titles.push(p.title);
     }
   });
-  const diagnosis =
-    `Spec "${card.slug}" is rolled up as shipped on the board, but ` +
-    `${indices.length} phase(s) are tagged ✅ WITHOUT a merge-hook PR + SHA — drift suspect. ` +
-    `Indices: ${indices.map((i) => `#${i + 1}`).join(", ") || "—"}${titles.length ? ` (${titles.join(" · ")})` : ""}. ` +
-    `The merge hook is the only authoritative writer of \`pr\`, so a tagless ✅ phase means we can't prove ` +
-    `the merge landed (e.g. a director hand-flip or an old reconciler pass). Run \`audit-spec-shipped-state\` ` +
-    `on this slug to re-stamp the real phases with provenance, or drop the phantom phase if its work shipped elsewhere.`;
+  const baseReason =
+    `Spec "${card.slug}" rolled up as shipped, but ${indices.length} phase(s) are tagged ✅ WITHOUT a ` +
+    `merge-hook PR + SHA — drift suspect. Indices: ${indices.map((i) => `#${i + 1}`).join(", ") || "—"}` +
+    `${titles.length ? ` (${titles.join(" · ")})` : ""}.`;
+
+  // 1) Try the repair path FIRST. Its `enqueueAuditSpecShippedStateIfDue` centralises open + recent-terminal
+  //    dedupe, so a standing pass cannot hot-loop against a spec the runner already tried and couldn't resolve.
+  let enqueueRes: Awaited<ReturnType<typeof enqueueAuditSpecShippedStateIfDue>> | null = null;
+  let enqueueThrew: unknown = null;
   try {
-    await escalateDiagnosisToCeo(admin, {
+    enqueueRes = await enqueueAudit(workspaceId, card.slug, {
+      requestedBy: "platform-director:drift-suspect",
+      reason: baseReason,
+    });
+  } catch (err) {
+    enqueueThrew = err;
+  }
+
+  // 2) Branch on the result. queued OR dedup='open' → detector acts, no CEO card. recent_terminal OR
+  //    threw → escalate (audit ran and can't resolve, or repair path errored — both must reach the CEO).
+  if (
+    enqueueRes !== null &&
+    (enqueueRes.enqueued === true || (enqueueRes.enqueued === false && enqueueRes.dedup === "open"))
+  ) {
+    const auditJobId = enqueueRes.enqueued ? enqueueRes.jobId : enqueueRes.existingJobId;
+    const inFlight = enqueueRes.enqueued === false;
+    try {
+      await recordActivityFn(admin, {
+        workspaceId,
+        directorFunction: PLATFORM,
+        actionKind: "drift_suspect_audit_queued",
+        specSlug: card.slug,
+        reason:
+          `${baseReason} ${inFlight ? "Audit already in flight" : "Queued audit-spec-shipped-state"} ` +
+          `(job ${auditJobId.slice(0, 8)}) — will re-stamp phases from the merge ledger if it can; ` +
+          `escalation deferred until the audit reports back.`,
+        metadata: {
+          lane,
+          drift_suspect_phase_indices: indices,
+          drift_suspect_phase_titles: titles,
+          audit_job_id: auditJobId,
+          audit_dedup: inFlight ? "open" : null,
+          autonomous: true,
+        },
+      });
+    } catch {
+      /* best-effort activity write; the audit is already queued which is the load-bearing action here */
+    }
+    return;
+  }
+
+  // 3) Escalation path. Two entry points reach here:
+  //     (a) enqueue returned dedup='recent_terminal' — the audit ran within the 24h window and the phase
+  //         is STILL tagless, so the audit could not re-derive provenance. Genuinely ambiguous case.
+  //     (b) enqueue threw — repair path errored; escalate rather than swallow the drift signal.
+  const auditRanRecent =
+    enqueueRes !== null && enqueueRes.enqueued === false && enqueueRes.dedup === "recent_terminal";
+  const priorAuditJobId =
+    enqueueRes !== null && enqueueRes.enqueued === false ? enqueueRes.existingJobId : null;
+
+  const diagnosis = auditRanRecent
+    ? `${baseReason} The \`audit-spec-shipped-state\` job for this slug ran within the last 24h ` +
+      `(prior job ${priorAuditJobId?.slice(0, 8) ?? "?"}) and could not re-derive the merge. A human must ` +
+      `decide whether the work shipped under a different slug (drop the phantom phase) or whether the ` +
+      `merge landed but the ledger has no evidence to stamp.`
+    : enqueueThrew
+      ? `${baseReason} The audit enqueue itself errored (${errText(enqueueThrew).slice(0, 200)}) — escalating so the ` +
+        `drift signal isn't swallowed; a human should verify the repair path and re-run the audit.`
+      : `${baseReason} Audit-spec-shipped-state could not be queued for this slug — escalating so a human can decide.`;
+
+  try {
+    await escalateFn(admin, {
       workspaceId,
       specSlug: card.slug,
       title: `Drift suspect: ${card.slug}`,
@@ -752,15 +839,29 @@ async function flagShippedWithoutProvenance(
       dedupeKey: `drift:${card.slug}`,
       deepLink: `/dashboard/roadmap/${card.slug}`,
       escalationKind: "drift_suspect",
-      metadata: { lane, drift_suspect_phase_indices: indices, drift_suspect_phase_titles: titles, autonomous: true },
+      metadata: {
+        lane,
+        drift_suspect_phase_indices: indices,
+        drift_suspect_phase_titles: titles,
+        audit_state: auditRanRecent ? "ran_and_unresolved" : enqueueThrew ? "enqueue_error" : "unknown",
+        prior_audit_job_id: priorAuditJobId,
+        autonomous: true,
+      },
     });
-    await recordDirectorActivity(admin, {
+    await recordActivityFn(admin, {
       workspaceId,
       directorFunction: PLATFORM,
       actionKind: "drift_suspect_flagged",
       specSlug: card.slug,
-      reason: `Shipped rollup with ${indices.length} tagless ✅ phase(s) — drift suspect; audit recommended.`,
-      metadata: { lane, drift_suspect_phase_indices: indices, drift_suspect_phase_titles: titles, autonomous: true },
+      reason: `${baseReason} ${auditRanRecent ? "Audit ran and could not resolve — escalated." : "Escalated (repair path unavailable)."}`,
+      metadata: {
+        lane,
+        drift_suspect_phase_indices: indices,
+        drift_suspect_phase_titles: titles,
+        audit_state: auditRanRecent ? "ran_and_unresolved" : enqueueThrew ? "enqueue_error" : "unknown",
+        prior_audit_job_id: priorAuditJobId,
+        autonomous: true,
+      },
     });
   } catch {
     /* best-effort surface; the next escort/groom pass will re-detect and re-attempt */
