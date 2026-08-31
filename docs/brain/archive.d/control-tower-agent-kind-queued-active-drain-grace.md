@@ -1,0 +1,1 @@
+- **Control Tower should not call a queued agent job stuck while its lane is actively draining** · verified 2026-08-31 · → [[../libraries/control-tower]]
