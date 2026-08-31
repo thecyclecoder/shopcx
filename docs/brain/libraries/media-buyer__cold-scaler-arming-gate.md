@@ -48,6 +48,28 @@ async function readLatestColdScalerArmingAuthorization(admin: Admin, input: {
 
 The graduate-crowned-winners chokepoint. Returns the newest row for the trio, or `null`. Callers treat a null row / an `allowed=false` row / a row past `expires_at` as DENIED — the Bianca M4 "arming rail must be human-vetoable" contract encoded at the read site. Do NOT introduce a lenient read that treats a missing row as "not yet evaluated" — that would silently arm on absence.
 
+### `filterGradesToCohortProduct` — function (pure)
+
+```ts
+function filterGradesToCohortProduct(input: {
+  rows: RawGradeRowForCohortFilter[];
+  cohortResolved: boolean;
+  cohortMetaAccountId: string | null;
+  cohortProductId: string | null;
+  adCampaignProductById: Map<string, string | null>;
+}): GradedScaleActionInput[]
+```
+
+Pure — narrows the raw grade rows the DB loader gathered down to the cohort's `(meta_ad_account_id, product_id)` scope. Phase 4 of [[../specs/cold-scaler-arming-decides-on-evidence-not-absence]] introduced this to close the cross-cohort authorization boundary (see Gotchas). Drop-conditions: `cohortResolved=false` → `[]`; `metaAccountId` mismatch → drop row; `cohortProductId` non-null and grade's linked product not equal → drop row; `cohortProductId=null` and grade's linked product non-null → drop row.
+
+### `extractGradeAdCampaignId` — function (pure)
+
+```ts
+function extractGradeAdCampaignId(metadata: Record<string, unknown> | null | undefined): string | null
+```
+
+Extract the ad_campaign id from a `director_activity.metadata` bucket for a SCALE-vocabulary grade row. `media_buyer_promoted_winner` writes `source_ad_campaign_id` (winner takes precedence); `media_buyer_replenished_test_cohort` writes `ad_campaign_id`. Returns `null` on missing / empty / non-string — the pure filter drops those rows for a per-product cohort (an ungrounded grade cannot ground the cohort's arm).
+
 ### `isoWeekLabel` — function
 
 ```ts
@@ -70,6 +92,7 @@ ISO 8601 week label (`YYYY-Www`, e.g. `2026-W28`) for the given `Date`. Used as 
 
 - `GradedScaleActionInput` — `{ actionKind: ScaleActionKind, overallGrade: number, gradedAt: string }` — the subset the pure gate needs from a [[../tables/media_buyer_action_grades]] row. `actionKind` MUST be one of `SCALE_ACTION_KINDS` — the pure gate re-filters as a defense against a bad caller.
 - `ScaleActionKind` — `'media_buyer_promoted_winner' | 'media_buyer_replenished_test_cohort'` — the element type of `SCALE_ACTION_KINDS`.
+- `RawGradeRowForCohortFilter` — `{ actionKind, overallGrade, gradedAt, metaAccountId, adCampaignId }` — the shape the DB loader hands to `filterGradesToCohortProduct` before narrowing to the cohort's product scope.
 - `TrustSnapshotInput` — `{ snapshotDate: string, band: 'green'|'yellow'|'red' }` — the subset the pure gate needs from a `media_buyer_sensor_trust` row.
 - `CacLtvInput` — `{ cacLtvRatio: number | null, target: number, unknownFlags?: string[] }` — decoupled from `BlendedCacLtvResult` so the future Phase-8 `media_buyer_cold_scaler_cac_ltv_snapshot` row can feed the same shape.
 - `ColdScalerArmingDenialReason` — the six branch codes: `insufficient_graded_scale_actions | scale_grade_below_bar | trust_no_snapshots | trust_streak_short | cac_ltv_below_target | cac_ltv_unknown`.
@@ -79,7 +102,7 @@ ISO 8601 week label (`YYYY-Www`, e.g. `2026-W28`) for the given `Date`. Used as 
 
 | # | Precondition | Denial branches |
 |---|---|---|
-| 1 | SCALE-VOCABULARY PASS RATE: ≥ `MIN_GRADED_SCALE_ACTIONS` graded rows for `SCALE_ACTION_KINDS` in 14d AND the fraction with `overall_grade >= SCALE_GRADE_PASS_THRESHOLD` ≥ `MIN_SCALE_PASS_RATE` | `insufficient_graded_scale_actions`, `scale_grade_below_bar` |
+| 1 | SCALE-VOCABULARY PASS RATE, cohort-scoped: ≥ `MIN_GRADED_SCALE_ACTIONS` graded rows for `SCALE_ACTION_KINDS` in 14d AND the fraction with `overall_grade >= SCALE_GRADE_PASS_THRESHOLD` ≥ `MIN_SCALE_PASS_RATE`, filtered to grades whose linked [[../tables/ad_campaigns]] row shares the cohort's `product_id` | `insufficient_graded_scale_actions`, `scale_grade_below_bar` |
 | 2 | SENSOR TRUST: ≥ `MIN_CONSECUTIVE_GREEN_TRUST` consecutive `band='green'` snapshots ending at the latest | `trust_no_snapshots`, `trust_streak_short` |
 | 3 | CAC:LTV: `cacLtvRatio ≥ target` (default `DEFAULT_COLD_SCALER_CAC_LTV_TARGET` = 3) | `cac_ltv_below_target`, `cac_ltv_unknown` |
 
@@ -110,3 +133,7 @@ Swapping in the sensor row later is a one-line change in `runColdScalerArmingGat
 - **Consecutive green counts from the LATEST snapshot, not the historical max.** A yellow / red anywhere in the tail breaks the streak.
 - **CAC:LTV `null` is a distinct branch.** `cac_ltv_unknown` fires when the ratio is `null` (no CAC / no LTV / no mapping). It is NOT the same as "below target" — the CEO card names WHICH failure so the fix (map an ad account vs. buy back margin) is unambiguous.
 - **KILL grades never lift the verdict.** The DB loader filters `action_kind` at the query with `.in(action_kind, SCALE_ACTION_KINDS)`, and the pure gate re-filters as a defense. A caller that leaks `media_buyer_paused_loser` grades into `gradedScaleActions` sees them silently dropped — Bianca's ~97%-sound kill skill cannot vouch for her ~36%-sound promote skill, which is the whole point of the SCALE-only scope.
+- **Cross-cohort grades never lift the verdict** (Phase 4 of [[../specs/cold-scaler-arming-decides-on-evidence-not-absence]]). The authorization row is per-`(workspace, account, cohort, iso_week)`, so grades attributable to a SIBLING cohort in the same Meta account MUST NOT satisfy this cohort's arm. `runColdScalerArmingGate` resolves the target cohort's `product_id` via `getMediaBuyerColdScalerCohortById`, threads it into the loader, and the loader batch-resolves each grade's `director_activity.metadata.source_ad_campaign_id` / `ad_campaign_id` through [[../tables/ad_campaigns]] to a `product_id`. The pure filter `filterGradesToCohortProduct` accepts only grades whose linked product matches the cohort's — a workspace hosting a Coffee cohort AND a Creamer cohort in the same account is the ground-truth case, and each cohort must be armed on its own evidence.
+- **An unresolvable cohort collapses the sample.** When `getMediaBuyerColdScalerCohortById` returns `null` (missing / inactive / cross-workspace), `runColdScalerArmingGate` still evaluates — but the loader short-circuits to `[]`, the pure gate lands `insufficient_graded_scale_actions`, and the row is written as `allowed=false` with a named reason. Never treat "no cohort row" as "grade unknown, arm anyway" — that would re-introduce the exact regression Phase 4 closes.
+- **An ungrounded grade is DROPPED for a per-product cohort.** A grade whose `director_activity.metadata` carries neither `source_ad_campaign_id` nor `ad_campaign_id`, or whose id doesn't resolve to an `ad_campaigns` row in this workspace, cannot be attributed to the cohort's product. The pure filter drops it. Workspace-wide / account-default cohorts (`product_id=null`) accept only grades whose linked ad_campaign also has `product_id=null` — same null-consistent semantics as the meta-account branch.
+- **`ad_campaigns` resolve failure fails CLOSED.** A Supabase error on the ad_campaigns product-scope lookup collapses the sample to `[]` (the loader logs the warn and returns empty). Under uncertainty the safer answer for an autonomous-spend authorization is `insufficient_graded_scale_actions`.

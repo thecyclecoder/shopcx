@@ -55,6 +55,8 @@ import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { computeBlendedCacLtv, DEFAULT_BLENDED_CAC_LTV_TARGET } from "@/lib/blended-cac-ltv";
 import { readLatestColdScalerCacLtvSnapshot } from "./cold-scaler-cac-ltv-sensor";
+import { getMediaBuyerColdScalerCohortById } from "./cold-scaler-cohort";
+import { errText } from "@/lib/error-text";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -343,10 +345,36 @@ export async function runColdScalerArmingGate(
   const windowEndDate = isoDate(now);
   const target = input.targetCacLtv ?? DEFAULT_COLD_SCALER_CAC_LTV_TARGET;
 
+  // Phase 4 (cold-scaler-arming-decides-on-evidence-not-absence): the
+  // authorization row is scoped by `(workspace_id, meta_ad_account_id,
+  // cold_scaler_cohort_id, iso_week)`, so a workspace with two active scaler
+  // cohorts in the same Meta account (e.g. Coffee vs Creamer) MUST evaluate
+  // Precondition #1 on cohort-scoped evidence — otherwise grades from cohort
+  // A can vouch for cohort B's arm and authorise an autonomous budget move
+  // under the wrong cohort authorisation. Resolve the cohort's `product_id`
+  // here and thread it into the loader; the loader joins each grade's
+  // `director_activity.metadata.ad_campaign_id` (or `source_ad_campaign_id`)
+  // through `ad_campaigns` and keeps only rows whose linked `product_id`
+  // matches the cohort's. A missing / inactive cohort collapses the sample
+  // to zero (loader short-circuits) which lands `insufficient_graded_scale_actions`
+  // — the correct dormant behaviour for an unresolvable cohort.
+  const cohort = await getMediaBuyerColdScalerCohortById(admin, {
+    workspaceId: input.workspaceId,
+    id: input.coldScalerCohortId,
+  }).catch((e) => {
+    console.warn(
+      `[cold-scaler-arming-gate] getMediaBuyerColdScalerCohortById failed: ${errText(e)}`,
+    );
+    return null;
+  });
+
   const [gradedScaleActions, trustSnapshots, snapshot] = await Promise.all([
     loadColdScalerGradedScaleActions(admin, {
       workspaceId: input.workspaceId,
       metaAdAccountId: input.metaAdAccountId ?? null,
+      coldScalerCohortId: input.coldScalerCohortId,
+      cohortProductId: cohort?.productId ?? null,
+      cohortResolved: cohort !== null,
       sinceIso: `${windowStartDate}T00:00:00Z`,
     }),
     loadTrustSnapshots(admin, {
@@ -531,23 +559,127 @@ export async function readLatestColdScalerArmingAuthorization(
 // ── DB helpers ────────────────────────────────────────────────────────────────
 
 /**
- * Load the last-14-day SCALE-vocabulary grades for one
- * `(workspace, meta_ad_account_id)` cohort from
- * [[../tables/media_buyer_action_grades]]. The grade table has
- * `workspace_id` + `action_kind` directly, but the per-account scope
- * lives on the JOINED `director_activity.metadata.meta_ad_account_id`
- * (same shape as [[./self-correcting]] `loadCohortGrades`) — read with a
- * `!inner` on `director_activity`, then filter in code.
+ * The raw shape of one graded row + its joined `director_activity.metadata`
+ * before the cohort-product filter narrows it. Extracted so the pure filter
+ * (`filterGradesToCohortProduct`) can be unit-tested without a DB round-trip.
+ * `adCampaignId` is the id extracted from metadata (either the
+ * `media_buyer_promoted_winner` `source_ad_campaign_id` or the
+ * `media_buyer_replenished_test_cohort` `ad_campaign_id`), or `null` when
+ * metadata is missing / malformed.
+ */
+export interface RawGradeRowForCohortFilter {
+  actionKind: ScaleActionKind;
+  overallGrade: number;
+  gradedAt: string;
+  metaAccountId: string | null;
+  adCampaignId: string | null;
+}
+
+/**
+ * PURE — filter graded scale-actions to those attributable to ONE cohort's
+ * `(meta_ad_account_id, product_id)` scope. This is the Phase-4 fix for
+ * [[../../../docs/brain/specs/cold-scaler-arming-decides-on-evidence-not-absence.md]]:
+ * a workspace with two active scaler cohorts sharing a Meta account (Coffee
+ * vs Creamer) must NOT let cohort A's passing grades vouch for cohort B's
+ * arm. The authorization row is per-`(workspace, account, cohort, iso_week)`,
+ * so the evidence must be per-cohort too.
+ *
+ * Rules:
+ *   • `metaAccountId` must equal `cohortMetaAccountId` (`null`-consistent).
+ *   • `adCampaignId` → `adCampaignProductById[adCampaignId] ?? null`.
+ *   • `cohortProductId === null` (a workspace-wide / account-default cohort)
+ *     accepts ONLY grades whose linked ad_campaign has `product_id=null`
+ *     (or an unresolvable / unlinked grade — same "no product bucket"
+ *     semantics as the meta_ad_account_id null branch).
+ *   • `cohortProductId !== null` requires an EXACT match on the resolved
+ *     product_id — a grade with no adCampaignId or an unresolvable id is
+ *     DROPPED (cohort A's grade cannot count for cohort B, and neither can
+ *     an ungrounded grade).
+ *   • When `!cohortResolved` (missing/inactive cohort) the whole sample
+ *     collapses to `[]` — the pure gate then lands
+ *     `insufficient_graded_scale_actions` for the row we're about to write,
+ *     which is the correct dormant behaviour for an unresolvable cohort.
+ */
+export function filterGradesToCohortProduct(input: {
+  rows: RawGradeRowForCohortFilter[];
+  cohortResolved: boolean;
+  cohortMetaAccountId: string | null;
+  cohortProductId: string | null;
+  adCampaignProductById: Map<string, string | null>;
+}): GradedScaleActionInput[] {
+  if (!input.cohortResolved) return [];
+  const out: GradedScaleActionInput[] = [];
+  for (const r of input.rows) {
+    // Meta-account scope — matches the runner's per-account authorization key.
+    if (input.cohortMetaAccountId === null) {
+      if (r.metaAccountId !== null) continue;
+    } else if (r.metaAccountId !== input.cohortMetaAccountId) {
+      continue;
+    }
+    // Cohort-product scope — the Phase-4 authorization boundary.
+    const gradeProductId = r.adCampaignId ? input.adCampaignProductById.get(r.adCampaignId) ?? null : null;
+    if (input.cohortProductId === null) {
+      if (gradeProductId !== null) continue; // workspace-wide/default cohort → only null-product grades.
+    } else if (gradeProductId !== input.cohortProductId) {
+      continue; // per-product cohort → EXACT product match (drops unresolvable grades).
+    }
+    out.push({
+      actionKind: r.actionKind,
+      overallGrade: r.overallGrade,
+      gradedAt: r.gradedAt,
+    });
+  }
+  return out;
+}
+
+/**
+ * Extract the ad_campaign id from a director_activity metadata bucket for a
+ * SCALE-vocabulary grade row. `media_buyer_promoted_winner` writes
+ * `source_ad_campaign_id`; `media_buyer_replenished_test_cohort` writes
+ * `ad_campaign_id`. Returns `null` when neither is present as a non-empty
+ * string — the filter drops those rows for a per-product cohort (an
+ * ungrounded grade cannot ground the cohort's arm).
+ */
+export function extractGradeAdCampaignId(metadata: Record<string, unknown> | null | undefined): string | null {
+  if (!metadata) return null;
+  const source = metadata["source_ad_campaign_id"];
+  if (typeof source === "string" && source) return source;
+  const direct = metadata["ad_campaign_id"];
+  if (typeof direct === "string" && direct) return direct;
+  return null;
+}
+
+/**
+ * Load the last-14-day SCALE-vocabulary grades for one COLD-SCALER COHORT
+ * from [[../tables/media_buyer_action_grades]] — cohort-scoped, not just
+ * account-scoped. The grade table has `workspace_id` + `action_kind`
+ * directly, but the per-account and per-cohort scope lives on the JOINED
+ * `director_activity.metadata` — read with a `!inner` on `director_activity`,
+ * batch-resolve each row's `source_ad_campaign_id` / `ad_campaign_id`
+ * through [[../tables/ad_campaigns]] to a `product_id`, and apply the
+ * pure `filterGradesToCohortProduct` to narrow to the cohort's scope.
  *
  * The vocabulary filter is applied AT THE DB level via `.in('action_kind',
  * SCALE_ACTION_KINDS)` so a KILL grade cannot reach the pure gate. The
  * pure gate defends against a bad caller by re-filtering, but the loader
  * is the primary chokepoint.
+ *
+ * When `cohortResolved=false` the loader short-circuits to `[]` before
+ * any DB read — a missing/inactive cohort cannot claim grades.
  */
 async function loadColdScalerGradedScaleActions(
   admin: Admin,
-  opts: { workspaceId: string; metaAdAccountId: string | null; sinceIso: string },
+  opts: {
+    workspaceId: string;
+    metaAdAccountId: string | null;
+    coldScalerCohortId: string;
+    cohortProductId: string | null;
+    cohortResolved: boolean;
+    sinceIso: string;
+  },
 ): Promise<GradedScaleActionInput[]> {
+  if (!opts.cohortResolved) return [];
+
   const { data, error } = await admin
     .from("media_buyer_action_grades")
     .select(
@@ -568,25 +700,56 @@ async function loadColdScalerGradedScaleActions(
     action_kind: string | null;
     director_activity?: { metadata?: Record<string, unknown> | null } | null;
   }>;
-  const out: GradedScaleActionInput[] = [];
+
+  const rawRows: RawGradeRowForCohortFilter[] = [];
+  const adCampaignIds = new Set<string>();
   for (const r of rows) {
     if (r.graded_at == null) continue;
     if (r.overall_grade == null || !Number.isFinite(r.overall_grade)) continue;
     if (!(SCALE_ACTION_KINDS as readonly string[]).includes(r.action_kind ?? "")) continue;
-    const metaAccount = r.director_activity?.metadata?.["meta_ad_account_id"];
+    const metadata = r.director_activity?.metadata ?? null;
+    const metaAccount = metadata?.["meta_ad_account_id"];
     const metaAccountStr = typeof metaAccount === "string" && metaAccount ? metaAccount : null;
-    if (opts.metaAdAccountId === null) {
-      if (metaAccountStr !== null) continue; // workspace-wide bucket → only rows with NO meta account.
-    } else if (metaAccountStr !== opts.metaAdAccountId) {
-      continue;
-    }
-    out.push({
+    const adCampaignId = extractGradeAdCampaignId(metadata);
+    if (adCampaignId) adCampaignIds.add(adCampaignId);
+    rawRows.push({
       actionKind: r.action_kind as ScaleActionKind,
       overallGrade: r.overall_grade,
       gradedAt: r.graded_at,
+      metaAccountId: metaAccountStr,
+      adCampaignId,
     });
   }
-  return out;
+
+  const adCampaignProductById = new Map<string, string | null>();
+  if (adCampaignIds.size > 0) {
+    const { data: campaigns, error: cErr } = await admin
+      .from("ad_campaigns")
+      .select("id, product_id")
+      .eq("workspace_id", opts.workspaceId)
+      .in("id", Array.from(adCampaignIds));
+    if (cErr) {
+      // Fail closed — a resolve failure means we cannot prove the grades belong
+      // to this cohort's product, so the sample collapses. The gate then lands
+      // `insufficient_graded_scale_actions`, which is the safe answer under
+      // uncertainty for an autonomous-spend authorization.
+      console.warn(
+        `[cold-scaler-arming-gate] ad_campaigns product-scope resolve failed: ${cErr.message}`,
+      );
+      return [];
+    }
+    for (const c of (campaigns || []) as Array<{ id: string; product_id: string | null }>) {
+      adCampaignProductById.set(c.id, c.product_id ?? null);
+    }
+  }
+
+  return filterGradesToCohortProduct({
+    rows: rawRows,
+    cohortResolved: opts.cohortResolved,
+    cohortMetaAccountId: opts.metaAdAccountId,
+    cohortProductId: opts.cohortProductId,
+    adCampaignProductById,
+  });
 }
 
 async function loadTrustSnapshots(

@@ -29,6 +29,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   evaluateColdScalerArmingPure,
+  filterGradesToCohortProduct,
+  extractGradeAdCampaignId,
   readLatestColdScalerArmingAuthorization,
   isoWeekLabel,
   MIN_GRADED_SCALE_ACTIONS,
@@ -40,6 +42,7 @@ import {
   type TrustSnapshotInput,
   type CacLtvInput,
   type ScaleActionKind,
+  type RawGradeRowForCohortFilter,
 } from "./cold-scaler-arming-gate";
 
 // ── Fixture builders ────────────────────────────────────────────────────────
@@ -433,4 +436,184 @@ test("readLatestColdScalerArmingAuthorization — no row for the trio → null",
     coldScalerCohortId: "cohort_missing",
   });
   assert.equal(row, null);
+});
+
+// ── Phase 4 — filterGradesToCohortProduct: cohort-scoped evidence ───────────
+
+/**
+ * Build `n` raw grade rows tagged to one `(metaAccountId, adCampaignId)` pair
+ * with a fixed pass/fail split. Used by the Phase-4 regression fixtures so
+ * the two-cohort scenario reads naturally.
+ */
+function makeRawGrades(
+  n: number,
+  passing: number,
+  opts: { metaAccountId: string | null; adCampaignId: string | null; actionKind?: ScaleActionKind },
+): RawGradeRowForCohortFilter[] {
+  const now = new Date("2026-07-08T12:00:00Z").getTime();
+  const rows: RawGradeRowForCohortFilter[] = [];
+  const kind: ScaleActionKind = opts.actionKind ?? "media_buyer_promoted_winner";
+  for (let i = 0; i < n; i++) {
+    rows.push({
+      actionKind: kind,
+      overallGrade: i < passing ? SCALE_GRADE_PASS_THRESHOLD + 1 : SCALE_GRADE_PASS_THRESHOLD - 3,
+      gradedAt: new Date(now - i * 3_600_000).toISOString(),
+      metaAccountId: opts.metaAccountId,
+      adCampaignId: opts.adCampaignId,
+    });
+  }
+  return rows;
+}
+
+test("filterGradesToCohortProduct — Phase 4 regression: two cohorts in one account, only the OTHER cohort's grades exist → target denies", () => {
+  // The exact scenario the pre-merge sec:real-vuln finding calls out.
+  // - Account `act_42` hosts two active scaler cohorts:
+  //     • cohort_coffee → product_coffee
+  //     • cohort_creamer → product_creamer
+  // - The last 14d have 30 passing SCALE grades for cohort_coffee's product
+  //   (linked to ad_campaigns row `ac_coffee_1` with product_id=product_coffee).
+  // - cohort_creamer has ZERO grades in the window.
+  // Before Phase 4, the loader only filtered by (workspace, account, window)
+  // and cohort_creamer would see all 30 passing grades and ALLOW. The pure
+  // filter now drops them (their product does not match) and cohort_creamer
+  // correctly denies with `insufficient_graded_scale_actions` upstream.
+  const coffeeGrades = makeRawGrades(30, 30, { metaAccountId: "act_42", adCampaignId: "ac_coffee_1" });
+  const adCampaignProductById = new Map<string, string | null>([
+    ["ac_coffee_1", "product_coffee"],
+  ]);
+
+  const forCreamer = filterGradesToCohortProduct({
+    rows: coffeeGrades,
+    cohortResolved: true,
+    cohortMetaAccountId: "act_42",
+    cohortProductId: "product_creamer",
+    adCampaignProductById,
+  });
+  assert.equal(
+    forCreamer.length,
+    0,
+    "cohort_creamer must NOT see cohort_coffee's grades — the authorization row is per-cohort",
+  );
+
+  const forCoffee = filterGradesToCohortProduct({
+    rows: coffeeGrades,
+    cohortResolved: true,
+    cohortMetaAccountId: "act_42",
+    cohortProductId: "product_coffee",
+    adCampaignProductById,
+  });
+  assert.equal(forCoffee.length, 30, "cohort_coffee's own grades pass the product filter");
+});
+
+test("filterGradesToCohortProduct — a grade with no adCampaignId is DROPPED for a per-product cohort", () => {
+  // An ungrounded grade (missing metadata.ad_campaign_id / source_ad_campaign_id)
+  // cannot ground a per-product cohort's arm. Dropping it is the safe answer
+  // under uncertainty for an autonomous-spend authorization.
+  const ungroundedGrades = makeRawGrades(20, 20, { metaAccountId: "act_42", adCampaignId: null });
+  const out = filterGradesToCohortProduct({
+    rows: ungroundedGrades,
+    cohortResolved: true,
+    cohortMetaAccountId: "act_42",
+    cohortProductId: "product_coffee",
+    adCampaignProductById: new Map(),
+  });
+  assert.equal(out.length, 0);
+});
+
+test("filterGradesToCohortProduct — a grade whose ad_campaign is unresolvable (no row) is DROPPED for a per-product cohort", () => {
+  // adCampaignId is set but ad_campaigns has no row → resolve() returns null.
+  const orphanedGrades = makeRawGrades(20, 20, { metaAccountId: "act_42", adCampaignId: "ac_missing" });
+  const out = filterGradesToCohortProduct({
+    rows: orphanedGrades,
+    cohortResolved: true,
+    cohortMetaAccountId: "act_42",
+    cohortProductId: "product_coffee",
+    adCampaignProductById: new Map(), // no entry for ac_missing
+  });
+  assert.equal(out.length, 0);
+});
+
+test("filterGradesToCohortProduct — workspace-wide (null-product) cohort accepts only null-product grades", () => {
+  // A workspace-wide / account-default cohort (`product_id=null`) has no
+  // narrower product to defend, so it accepts grades whose linked ad_campaign
+  // has `product_id=null` (or was retired/unlinked). It does NOT accept a
+  // grade whose ad_campaign has a concrete product — that grade belongs to
+  // the per-product cohort for that product.
+  const nullProduct = makeRawGrades(10, 10, { metaAccountId: null, adCampaignId: "ac_default" });
+  const productLinked = makeRawGrades(10, 10, { metaAccountId: null, adCampaignId: "ac_coffee_1" });
+  const adCampaignProductById = new Map<string, string | null>([
+    ["ac_default", null],
+    ["ac_coffee_1", "product_coffee"],
+  ]);
+  const out = filterGradesToCohortProduct({
+    rows: [...nullProduct, ...productLinked],
+    cohortResolved: true,
+    cohortMetaAccountId: null,
+    cohortProductId: null,
+    adCampaignProductById,
+  });
+  assert.equal(out.length, 10);
+});
+
+test("filterGradesToCohortProduct — cross-account grades are dropped", () => {
+  // A grade whose director_activity.metadata.meta_ad_account_id is a
+  // DIFFERENT account cannot count toward this cohort's per-account arm.
+  const otherAccountGrades = makeRawGrades(20, 20, {
+    metaAccountId: "act_other",
+    adCampaignId: "ac_coffee_1",
+  });
+  const adCampaignProductById = new Map<string, string | null>([
+    ["ac_coffee_1", "product_coffee"],
+  ]);
+  const out = filterGradesToCohortProduct({
+    rows: otherAccountGrades,
+    cohortResolved: true,
+    cohortMetaAccountId: "act_42",
+    cohortProductId: "product_coffee",
+    adCampaignProductById,
+  });
+  assert.equal(out.length, 0);
+});
+
+test("filterGradesToCohortProduct — an unresolvable cohort collapses the sample to []", () => {
+  // getMediaBuyerColdScalerCohortById returned null → cohortResolved=false.
+  // Even a rich sample must land [] — the pure gate will then deny with
+  // insufficient_graded_scale_actions, the correct dormant behaviour.
+  const richSample = makeRawGrades(50, 50, {
+    metaAccountId: "act_42",
+    adCampaignId: "ac_coffee_1",
+  });
+  const out = filterGradesToCohortProduct({
+    rows: richSample,
+    cohortResolved: false,
+    cohortMetaAccountId: "act_42",
+    cohortProductId: "product_coffee",
+    adCampaignProductById: new Map([["ac_coffee_1", "product_coffee"]]),
+  });
+  assert.equal(out.length, 0);
+});
+
+// ── extractGradeAdCampaignId ────────────────────────────────────────────────
+
+test("extractGradeAdCampaignId — media_buyer_promoted_winner reads source_ad_campaign_id", () => {
+  assert.equal(extractGradeAdCampaignId({ source_ad_campaign_id: "ac_1" }), "ac_1");
+});
+
+test("extractGradeAdCampaignId — media_buyer_replenished_test_cohort reads ad_campaign_id", () => {
+  assert.equal(extractGradeAdCampaignId({ ad_campaign_id: "ac_2" }), "ac_2");
+});
+
+test("extractGradeAdCampaignId — source_ad_campaign_id wins when both are present", () => {
+  assert.equal(
+    extractGradeAdCampaignId({ source_ad_campaign_id: "ac_source", ad_campaign_id: "ac_alt" }),
+    "ac_source",
+  );
+});
+
+test("extractGradeAdCampaignId — missing / empty / non-string → null", () => {
+  assert.equal(extractGradeAdCampaignId(null), null);
+  assert.equal(extractGradeAdCampaignId(undefined), null);
+  assert.equal(extractGradeAdCampaignId({}), null);
+  assert.equal(extractGradeAdCampaignId({ source_ad_campaign_id: "" }), null);
+  assert.equal(extractGradeAdCampaignId({ ad_campaign_id: 42 as unknown as string }), null);
 });
