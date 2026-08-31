@@ -1,0 +1,1 @@
+- **EasyPost missing-carrier-credentials noise on the returns-reconcile-sweep scoped as foreign** · verified 2026-08-31 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
