@@ -1,0 +1,1 @@
+- **The pipeline doctor must not call a spec stuck for advisory human checks** · verified 2026-08-31 · → [[../lifecycles/spec-build-pipeline]]
