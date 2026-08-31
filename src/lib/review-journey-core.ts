@@ -305,7 +305,21 @@ export async function submitReviewForSession(input: SubmitReviewInput): Promise<
     .eq("id", session.id)
     .eq("workspace_id", session.workspace_id);
   if (input.claimCustomerIn?.length) claim = claim.in("customer_id", input.claimCustomerIn);
-  const { data: claimed } = await claim.in("status", ["pending", "in_progress"]).select("id");
+  const { data: claimed, error: claimError } = await claim
+    .in("status", ["pending", "in_progress"])
+    .select("id");
+
+  // Distinguish "someone else claimed it" from "the write itself failed".
+  // These are the same zero-rows shape, and conflating them hid a total
+  // outage: 'processing' was missing from journey_sessions_status_check, so
+  // EVERY claim was rejected by the constraint, returned no rows, and was
+  // reported to the customer as a benign 409 "already completed". Nobody
+  // could submit a review at all, and the error that said so was discarded
+  // one line above. A DB error here is a 500 that gets logged, never a 409.
+  if (claimError) {
+    console.error("[review-journey] session claim failed:", claimError.message);
+    return { ok: false, error: "session_claim_failed", status: 500 };
+  }
   if (!claimed || claimed.length !== 1) {
     return { ok: false, error: "session_already_completed_or_processing", status: 409 };
   }
