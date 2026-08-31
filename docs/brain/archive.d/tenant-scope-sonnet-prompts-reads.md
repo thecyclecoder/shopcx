@@ -1,0 +1,1 @@
+- **Tenant-scope sonnet_prompts reads before merchant-specific prompt seeds** · verified 2026-08-31 · → [[../tables/sonnet_prompts]]
