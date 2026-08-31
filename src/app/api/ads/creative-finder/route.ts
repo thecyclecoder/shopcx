@@ -19,6 +19,7 @@ import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { signCreativeShot } from "@/lib/creative-skeleton";
 import { inngest } from "@/lib/inngest/client";
+import { resolveShelfProductIds } from "@/lib/ads/creative-sourcing";
 
 async function authorize(workspaceId: string | null) {
   const { user } = await getAuthedUser();
@@ -86,13 +87,20 @@ export async function GET(req: Request) {
     eq: (col: string, val: unknown) => Q;
     in: (col: string, val: readonly string[]) => Q;
   };
+  // Resolve the SHARED SHELF before narrowing. A product that points at a sibling's shelf
+  // (`products.competitor_shelf_source_id` — e.g. Amazing Coffee K-Cups → Amazing Coffee) owns no
+  // skeleton rows of its own, so a bare `.eq("product_id", …)` renders an EMPTY grid and the owner
+  // reasonably concludes "there are no research ads for this product". Dahlia's sourcing path
+  // already resolves the pointer via `resolveShelfProductIds`; this read path did not, so the UI
+  // and the agent disagreed about the very same shelf. Same one-hop resolver, so they cannot drift.
+  const shelfProductIds = productId ? await resolveShelfProductIds(auth.admin, productId) : null;
   const applyNarrowing = <Q extends Narrowable<Q>>(q: Q): Q => {
     let out = q.eq("workspace_id", workspaceId as string);
     if (statusFilter) out = out.eq("status", statusFilter);
     else if (mediaType === "video") out = out.in("status", ["analyzed", "shortlisted", "video_pending"]);
     else out = out.in("status", ["analyzed", "shortlisted"]);
     if (kind) out = out.eq("seed_kind", kind);
-    if (productId) out = out.eq("product_id", productId);
+    if (shelfProductIds) out = out.in("product_id", shelfProductIds);
     if (mediaType === "static" || mediaType === "video") out = out.eq("media_type", mediaType);
     return out;
   };
