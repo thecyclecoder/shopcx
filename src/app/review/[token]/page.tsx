@@ -36,7 +36,7 @@ function ReviewPageInner({ params }: { params: Promise<{ token: string }> }) {
   const { token } = usePromise(params);
   const [state, setState] = useState<"loading" | "form" | "done" | "error">("loading");
   const [error, setError] = useState<string>("");
-  const [product, setProduct] = useState<{ title: string | null; image_url: string | null } | null>(null);
+  const [product, setProduct] = useState<{ title: string | null; image_url: string | null; variant_title?: string | null } | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
   const [minLen, setMinLen] = useState(15);
 
@@ -120,9 +120,9 @@ function ReviewPageInner({ params }: { params: Promise<{ token: string }> }) {
     <Shell>
       {product?.image_url && (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={product.image_url} alt={product.title || ""} style={{ width: 120, height: 120, objectFit: "cover", borderRadius: 14, marginBottom: 16 }} />
+        <img src={product.image_url} alt={product.title || ""} style={{ width: "100%", maxWidth: 320, aspectRatio: "1 / 1", objectFit: "cover", borderRadius: 18, marginBottom: 18 }} />
       )}
-      <h1 style={{ fontSize: 24, margin: "0 0 6px" }}>How's the {product?.title}?</h1>
+      <h1 style={{ fontSize: 24, margin: "0 0 6px" }}>How's the {product?.title}{product?.variant_title ? ` ${product.variant_title}` : ""}?</h1>
       <p style={{ color: "#6b6b6b", margin: "0 0 22px" }}>Takes about a minute.</p>
 
       <div style={{ marginBottom: 26 }}>
