@@ -26,6 +26,8 @@ async function appstleSubscriptionAction(workspaceId: string, contractId: string
 
 On a non-2xx/204 response it returns the Appstle **response body** in `error` (`text || \`Appstle API error: ${status}\``), not a bare status string — mirroring `appstleSkipUpcomingOrder`. This is what lets [[portal__remediation]]'s `classifyPortalFailure` recognize a transient cancel 400 (e.g. *"billing operation is already in progress"* right after a renewal bills) and auto-retry/self-resolve instead of escalating a stale cancel ticket to a human.
 
+**Cancel-truth on the local update.** After the Appstle write succeeds, the local `subscriptions` update calls [[subscription-cancel-truth]] `applyCancelTruth(localUpdate, action)` before hitting Supabase — for `action === 'cancel'` this nulls `next_billing_date` and stamps `cancelled_at` in the same write as `status='cancelled'`. Pause/resume paths return an empty patch and leave the billing date alone. The webhook `handleSubscriptionEvent` upsert enforces the same invariant on the Appstle-originated path. See [[../specs/cancelled-subs-stop-reporting-a-future-billing-date]] Phase 1.
+
 ### `appstleSkipNextOrder` — function
 
 ```ts
