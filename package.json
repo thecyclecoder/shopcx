@@ -122,6 +122,7 @@
     "test:creative-agent-revise-reason": "tsx --test src/lib/ads/creative-agent.revise-reason.test.ts",
     "test:creative-agent-firewall-recovery": "tsx --test src/lib/ads/creative-agent.firewall-recovery.test.ts",
     "test:creative-agent-explore-competitor-only": "tsx --test src/lib/ads/creative-agent.explore-competitor-only.test.ts",
+    "test:creative-brief-cold-partition": "tsx --test src/lib/ads/creative-brief.cold-partition.test.ts",
     "test:never-fabricate": "tsx --test src/lib/ads/never-fabricate.test.ts",
     "test:debrand": "tsx --test src/lib/ads/debrand.test.ts",
     "test:ads-supervisor-lf8-disposition": "tsx --test src/lib/ads-supervisor.lf8-disposition.test.ts",

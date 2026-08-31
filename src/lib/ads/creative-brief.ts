@@ -22,7 +22,7 @@ import type { ProductIntelligence, PIReview, ProductOffer } from "@/lib/product-
 import { META_CAPS } from "@/lib/ad-tool-config";
 import { hasAnyLf8 } from "@/lib/ads/lf8";
 import { chooseGroundedSubstitute, isCompetitorOffer, stripCompetitorOffer } from "@/lib/ads/debrand";
-import { competitorFocalIsWarmHot, type CreativeIntent } from "@/lib/ads/creative-sourcing";
+import { competitorFocalIsWarmHot, competitorFocalIsCold, offerIsHardDiscount, type CreativeIntent } from "@/lib/ads/creative-sourcing";
 import type { ConceptTags } from "@/lib/creative-skeleton";
 import { selectConfirmedBenefits, type ConfirmedBenefit } from "@/lib/ads/creative-imitation";
 import type { SkeletonElement } from "@/lib/ads/decision-engine";
@@ -267,12 +267,40 @@ export function selectAnglesForTemperature(
   if (temperature !== "cold") {
     return [...competitorAngles, ...ownBrandAngles];
   }
-  const coldCompetitorPool = competitorAngles.filter((a) => {
+  // PARTITION, NOT FILTER (CEO 2026-08-31). This used to `.filter()` every warm/hot-looking
+  // competitor angle OUT of a cold run, which starved the shelf: Amazing Coffee K-Cups' 40 shared
+  // angles collapsed to 1 and Superfood Tabs' 19 to 0, after which own-brand angles backfilled the
+  // explore slots and Dahlia freestyled instead of imitating.
+  //
+  // The exclusion was also self-contradictory. `competitorTemperatureFit` — right next door in
+  // creative-sourcing — already documents "a mismatch is a PARTITION not a FILTER (the shelf is
+  // never starved)", and `imageOfferForAudience` BLANKS `brief.offer` on every cold angle before
+  // generation. So we deleted a 120-day proven winner for carrying an offer, one step before we
+  // would have deleted its offer. The CEO's framing: a somewhat-warm element doesn't mean we can't
+  // modify the ad into a cold one — we imitate the STRUCTURE and write our own copy.
+  //
+  // So rank instead of drop, worst-first-out:
+  //   0  cold focal (curiosity / problem-aware), no discount    — the ideal imitation base
+  //   1  no clear signal                                        — fine
+  //   2  warm focal, but only price framing / risk reversal     — usable; the offer gets blanked
+  //   3  a real discount lever (% off, BOGO, free gift, sale)   — last resort, still not deleted
+  // Three independent rails still stop a cold offer from SHIPPING: the `imageOfferForAudience`
+  // strip, the `hasColdOfferLeak` pack gate, and Max's `no_cold_offer` hard gate. This function
+  // choosing the imitation base is the wrong place for a fourth.
+  const rank = (a: ScoredAngle): number => {
     const raw = (a.raw ?? {}) as { offer?: unknown };
     const offer = typeof raw.offer === "string" ? raw.offer : null;
-    return !competitorFocalIsWarmHot({ offer, conceptTags: a.conceptTags ?? null });
-  });
-  return [...coldCompetitorPool, ...ownBrandAngles];
+    const conceptTags = a.conceptTags ?? null;
+    if (offerIsHardDiscount(offer)) return 3;
+    if (competitorFocalIsWarmHot({ offer, conceptTags })) return 2;
+    if (competitorFocalIsCold({ conceptTags })) return 0;
+    return 1;
+  };
+  const rankedCompetitors = competitorAngles
+    .map((a, i) => ({ a, i, r: rank(a) }))
+    .sort((x, y) => x.r - y.r || x.i - y.i) // stable: preserve the caller's proven-ness order within a tier
+    .map(({ a }) => a);
+  return [...rankedCompetitors, ...ownBrandAngles];
 }
 
 // ── Brief ────────────────────────────────────────────────────────────────────

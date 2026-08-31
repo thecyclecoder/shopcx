@@ -78,6 +78,31 @@ export function competitorFocalIsWarmHot(angle: Pick<CompetitorAngle, "offer" | 
   return /offer|discount|deal|% ?off|sale|social.?proof|review|testimonial|guarantee|money.?back|risk.?free|us.?vs.?them|comparison/.test(text);
 }
 
+/**
+ * True iff an `offer` string is a REAL DISCOUNT (a retargeting lever) rather than ordinary price
+ * framing. CEO 2026-08-31: "just b/c a competitor ad may have a somewhat warm element — ie a price
+ * offer etc — doesn't mean we can't modify that ad into a cold one."
+ *
+ * `competitorFocalIsWarmHot` treats ANY non-empty `offer` as warm/hot, which is far too blunt:
+ * vision fills the offer slot on nearly every ad, so "As low as $0.90 per cup" (cost-per-serving
+ * framing — a standard COLD prospecting device) was scored identically to "60% OFF + FREE Starter
+ * Kit". That cost us Erth Labs' 120-day winner "Stopped Ozempic, Kept Losing Weight" — a pure cold
+ * curiosity hook — on a coffee cold run.
+ *
+ * A DISCOUNT is percentage/dollars-off, a sale, a bundle, or a free-gift lever: things that only
+ * make sense to someone already considering the purchase. A PRICE FRAME ($/day, $/cup, per serving,
+ * "as low as") is a value claim that works perfectly well on a stranger. Risk-reversal
+ * (money-back / risk-free) is likewise not a discount.
+ *
+ * Used to RANK, never to exclude — the imitation base's offer is blanked for cold anyway by
+ * `imageOfferForAudience`. PURE.
+ */
+export function offerIsHardDiscount(offer: string | null | undefined): boolean {
+  const t = (offer ?? "").toLowerCase();
+  if (!t.trim()) return false;
+  return /\d+\s*%|\bper ?cent\b|\boff\b|\bsale\b|\bbogo\b|buy ?one|buy ?\d|\bfree\b|\bgift\b|\bbundle\b|\bsave\s*\$?\d|\bdiscount\b|\bcoupon\b|\bpromo\b|\bdeal\b|\bclearance\b/.test(t);
+}
+
 /** True iff a competitor ad's FOCAL POINT reads COLD/prospecting — curiosity or problem→solution, the
  *  awareness-opening angles a stranger responds to. Signals (any → true): a cold awareness_stage
  *  (unaware / problem_aware), or an archetype/angle naming curiosity / a problem-agitate / a story hook. */
