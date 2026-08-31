@@ -41,6 +41,7 @@ import {
   SILENT_TURN_HOLDING_MESSAGE,
   type SilentTurnReason,
 } from "@/lib/silent-turn-guard";
+import { detectRepeatQuestion } from "@/lib/playbook-repeat-guard";
 import { logAiUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
@@ -1535,9 +1536,45 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
         const isPlaybookRelated = isSentinel ? true : await step.run("classify-playbook-msg", async () => {
           const { data: pb } = await admin.from("playbooks").select("name").eq("id", pbActive).single();
           const pbName = pb?.name || "active issue";
+          // Resolve the playbook step currently awaiting a customer answer — the same step
+          // executePlaybookStep would run (steps ordered by step_order, indexed by
+          // tickets.playbook_step) — and grab the question text the customer literally saw
+          // (the most recent outbound external AI message on this ticket, which is what the
+          // playbook rendered when it asked). Without this the classifier only knows the
+          // playbook NAME, so a substantive yes / address / order-# answer reads as
+          // ambiguous, the lean-NEW_TOPIC default fires, and the playbook is dropped mid-
+          // flow. Ticket 8e2c87d6 (Suzanne Ross 2026-08-24) is the ground-truth incident:
+          // the Replacement Order playbook asked "did you not receive your order at all?",
+          // she answered "I did not receive the order at all" — classified NEW_TOPIC —
+          // then answered the follow-up address question "Thank you. Yes confirming this
+          // is the correct address" and pure-gratitude swallowed the confirmation.
+          const [{ data: tState }, { data: lastOutbound }] = await Promise.all([
+            admin.from("tickets").select("playbook_step").eq("id", tid).single(),
+            admin.from("ticket_messages")
+              .select("body")
+              .eq("ticket_id", tid)
+              .eq("direction", "outbound")
+              .eq("visibility", "external")
+              .eq("author_type", "ai")
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle(),
+          ]);
+          const stepIdx = tState?.playbook_step ?? 0;
+          const { data: pendingStep } = await admin.from("playbook_steps")
+            .select("name, type")
+            .eq("playbook_id", pbActive)
+            .eq("step_order", stepIdx)
+            .maybeSingle();
+          const pendingQuestion = (lastOutbound?.body || "").replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
+          const stepLabel = pendingStep?.name || pendingStep?.type || `step ${stepIdx}`;
+          const pendingBlock = pendingQuestion
+            ? `\nTHE PLAYBOOK JUST ASKED (its pending step "${stepLabel}"):\n"${pendingQuestion}"\n`
+            : "";
           const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
           const result = await claude(
-            `A customer has an active "${pbName}" case being handled. They just sent this message:
+            `A customer has an active "${pbName}" case being handled.${pendingBlock}
+They just sent this message:
 
 "${cleanMsg}"
 
@@ -1545,16 +1582,18 @@ Is this message a continuation of the ${pbName.toLowerCase()} flow, or is the cu
 
 PLAYBOOK = the customer is answering the playbook's prompt, providing requested info (an order #, a yes/no, a specific item they want returned/refunded), confirming, asking a clarifying question about the same issue, or pushing back on an offer in the same flow.
 
+ANSWERS THE PENDING QUESTION OVERRIDES EVERYTHING: If a pending question is shown above and the message supplies what that question asked for — a yes/no, a confirmation, a choice between the options offered, an address, an order number, a "did not receive" answer to a "did you receive it?" question — it is PLAYBOOK. This wins over the lean-NEW_TOPIC default and over any gratitude read of tag-along thanks.
+
 ACCEPT/REJECT OVERRIDES EVERYTHING: If the message accepts or rejects the offer currently on the table ("yes do it", "I'll accept the refund", "no, I want my money back", "that works"), it is PLAYBOOK — even when it is bundled with a tag-on question (e.g. "I'll accept the refund. Are you cancelling the June 15 order?"). The playbook's acceptance handler answers the question AND executes the next step (it generates the return label / issues the resolution). Routing an acceptance to NEW_TOPIC drops it out of the playbook, where there is no return-label guardrail — so the accept signal always wins.
 
-NEW_TOPIC = the customer is switching intent, with NO accept/reject of the active offer. Examples (any of these → NEW_TOPIC, even if the surrounding flow is similar):
+NEW_TOPIC = the customer is switching intent, with NO accept/reject of the active offer AND NOT answering the pending question above. Examples (any of these → NEW_TOPIC, even if the surrounding flow is similar):
   • Requesting a different action: "please pause my subscription" while in a refund flow → NEW_TOPIC
   • Asking about a different subscription / order
   • Adding a new question with no accept/reject ("also, how do I use my points?")
   • Crisis mention ("I got the wrong flavor") while in a generic return flow
-  • Pure gratitude, satisfaction, or acknowledgement with no new ask ("thank you!", "right on", "perfect, ty", "👍") → NEW_TOPIC. A happy thank-you is NOT pushback on an offer.
+  • Pure gratitude with NO substantive content at all — a bare "thank you!", "right on", "perfect, ty", "👍" that carries no answer, confirmation, address, or order info. A message that ANSWERS or CONFIRMS with thanks attached ("Thank you. Yes confirming this is the correct address.") carries substantive content and is PLAYBOOK, not gratitude.
 
-When in doubt, lean NEW_TOPIC — Sonnet has full context to decide if it actually IS the playbook. Calling NEW_TOPIC is cheap (the playbook resumes if Sonnet says so). Calling PLAYBOOK incorrectly buries new asks under stand-firm rounds. The ONE exception to "lean NEW_TOPIC": a clear accept/reject of the active offer is always PLAYBOOK.
+When in doubt, lean NEW_TOPIC — Sonnet has full context to decide if it actually IS the playbook. Calling NEW_TOPIC is cheap (the playbook resumes if Sonnet says so). Calling PLAYBOOK incorrectly buries new asks under stand-firm rounds. The TWO exceptions to "lean NEW_TOPIC": (1) a clear accept/reject of the active offer is always PLAYBOOK; (2) a substantive answer to the pending question above is always PLAYBOOK.
 
 Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: wsId, ticketId: tid, purpose: "playbook-drift-check" });
           return (result || "").trim().toUpperCase().includes("PLAYBOOK");
@@ -1581,21 +1620,19 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         let responseSent = false;
         let escalationRaised = false;
 
-        // Log system note
-        if (pbResult.systemNote) await step.run("pb-note", () => sysNote(admin, tid, pbResult.systemNote!));
-
-        // Send response if one was generated
-        if (pbResult.response) {
-          await step.run("pb-send", () => sendWithDelay(admin, wsId, tid, st.ch, pbResult.response!, cfg.sandbox));
-          responseSent = true;
-        }
-
-        // Escalate + holding message + Slack — the SAME rail two callsites depend on:
+        // Escalate + holding message + Slack — the SAME rail three callsites depend on:
         //   • pbResult.action === "escalate_api_failure" (executor asked for it, pre-existing)
-        //   • the silent-turn guard below (post-auto-advance, Phase 2)
-        // Kept inline as a local closure so both callsites send the byte-identical
+        //   • the silent-turn guard below (post-auto-advance)
+        //   • the repeat-question loop guard on pb-send / pb-adv-send (Phase 2 of
+        //     docs/brain/specs/playbook-drift-classifier-sees-the-pending-question.md —
+        //     Suzanne Ross ticket 8e2c87d6, 2026-08-24 — where the playbook re-asked the
+        //     same "did you not receive your order at all?" and address-confirm questions
+        //     turn after turn because the classifier had dropped her answers as NEW_TOPIC).
+        // Kept inline as a local closure so all callsites send the byte-identical
         // SILENT_TURN_HOLDING_MESSAGE + share the Slack-notify shape. `reason` is a short
         // human string that renders on the sysNote, escalation_reason, and Slack payload.
+        // Declared BEFORE pb-send so the repeat-guard branch (which is invoked from the
+        // send path) can reference it without hitting a TDZ error.
         const raiseHoldingMessageEscalation = async (
           reason: string,
           sysNotePrefix: string,
@@ -1626,6 +1663,72 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
             }
           } catch {}
         };
+
+        // Repeat-question loop guard (Phase 2 of docs/brain/specs/playbook-drift-classifier-
+        // sees-the-pending-question.md). Before sending a customer-facing playbook reply,
+        // compare it against the most recent outbound external AI ticket_messages row on
+        // this ticket (the last thing the playbook said). If the pending body is
+        // substantially identical to it, DO NOT re-send — a playbook that repeats itself
+        // has lost state, not gathered information; a third identical question is never
+        // the right move. Escalate via the same raiseHoldingMessageEscalation rail the
+        // escalate_api_failure branch uses, with a sysNote naming the repeated question
+        // so the defect is visible in the thread rather than silently absorbed by the
+        // customer. detectRepeatQuestion is a pure predicate — see [[../playbook-repeat-
+        // guard]] for the equivalence rules and playbook-repeat-guard.test.ts for pins.
+        // Returns true when the guard fired (caller skips the normal responseSent flip
+        // for the request body but sets escalationRaised + responseSent for the holding
+        // message it delivered).
+        const sendOrEscalateOnRepeat = async (
+          body: string,
+          stepIdGuard: string,
+          stepIdSend: string,
+          stepIdEscalate: string,
+        ): Promise<{ escalated: boolean }> => {
+          const verdict = await step.run(stepIdGuard, async () => {
+            const { data: last } = await admin.from("ticket_messages")
+              .select("body")
+              .eq("ticket_id", tid)
+              .eq("direction", "outbound")
+              .eq("visibility", "external")
+              .eq("author_type", "ai")
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            return detectRepeatQuestion({ pending: body, lastOutbound: last?.body ?? null });
+          });
+          if (verdict.repeat) {
+            await step.run(stepIdEscalate, async () => {
+              await sysNote(
+                admin,
+                tid,
+                `[System] Repeat-question loop guard tripped — ${verdict.note}. Not resending; escalating instead.`,
+              );
+              await raiseHoldingMessageEscalation(
+                `repeat-question loop: ${verdict.note}`,
+                "Playbook repeat-question loop",
+                "🚨 *Playbook Repeat-Question Loop*",
+              );
+            });
+            return { escalated: true };
+          }
+          await step.run(stepIdSend, () => sendWithDelay(admin, wsId, tid, st.ch, body, cfg.sandbox));
+          return { escalated: false };
+        };
+
+        // Log system note
+        if (pbResult.systemNote) await step.run("pb-note", () => sysNote(admin, tid, pbResult.systemNote!));
+
+        // Send response if one was generated (guarded by the repeat-question loop check)
+        if (pbResult.response) {
+          const r = await sendOrEscalateOnRepeat(
+            pbResult.response,
+            "pb-send-repeat-guard",
+            "pb-send",
+            "pb-send-repeat-escalate",
+          );
+          responseSent = true;
+          if (r.escalated) escalationRaised = true;
+        }
 
         // Handle API failure escalation
         if (pbResult.action === "escalate_api_failure") {
@@ -1683,8 +1786,17 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           const pr = r as PlaybookExecResult;
           if (pr.systemNote) await step.run(`pb-adv-note-${advCount}`, () => sysNote(admin, tid, pr.systemNote!));
           if (pr.response) {
-            await step.run(`pb-adv-send-${advCount}`, () => sendWithDelay(admin, wsId, tid, st.ch, pr.response!, cfg.sandbox));
+            const rAdv = await sendOrEscalateOnRepeat(
+              pr.response,
+              `pb-adv-send-${advCount}-repeat-guard`,
+              `pb-adv-send-${advCount}`,
+              `pb-adv-send-${advCount}-repeat-escalate`,
+            );
             responseSent = true;
+            if (rAdv.escalated) {
+              escalationRaised = true;
+              break;
+            }
           }
         }
 
