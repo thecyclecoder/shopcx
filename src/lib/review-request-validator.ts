@@ -17,7 +17,7 @@
  *     first order);
  *   • the product named is not the product being asked about;
  *   • the pretext (angle) is not from the approved set (a fabricated angle);
- *   • SMS exceeds 160 GSM-7 including the shortlink, or is missing STOP;
+ *   • SMS is runaway-long (a template bug, not a long message) or missing STOP;
  *   • the coupon framing is conditional on sentiment;
  *   • there is more than one ask in the message.
  *
@@ -144,6 +144,15 @@ const MUSTACHE_TOKEN = /\{\{[^}]*\}\}/;
  * marketing that we ship the standard opt-out language. Case-insensitive
  * literal match against the composed body.
  */
+/**
+ * Runaway-length ceiling for a single review-request SMS — ~5 segments.
+ *
+ * NOT 160. That is a per-segment billing boundary that matters for BULK sends;
+ * a review request is one-at-a-time and high-value, so segments are cheap and
+ * a compressed message is expensive. This ceiling only catches a template bug.
+ */
+const SMS_RUNAWAY_CEILING = 700;
+
 const SMS_STOP_MARKERS: RegExp[] = [
   /\bstop\b/i,
   /\bunsubscribe\b/i,
@@ -317,18 +326,54 @@ export function validateReviewRequest(
     }
   }
 
-  // Rule: SMS-shape rails — the 160-char length ceiling and the required
-  // STOP suffix. The composed length includes the shortlink because THAT is
-  // what the carrier ships; a body under 160 that adds a 25-char shortlink
-  // over the wire is over the ceiling.
+  // Rule: SMS-shape rails — a RUNAWAY-length ceiling and the required STOP
+  // suffix.
+  //
+  // The ceiling is deliberately NOT 160. 160 GSM-7 is a per-segment billing
+  // boundary and it matters for BULK marketing sends, where an extra segment
+  // multiplies across tens of thousands of recipients. A review request is a
+  // one-at-a-time, high-value send: segments cost fractions of a cent and a
+  // stripped message costs the review.
+  //
+  // Enforcing 160 here actively produced a bad message. The first real send
+  // was compressed to fit and lost the identity priming, the status reversal
+  // ("here's where you come in"), the hand-picked tenure fact, and the stated
+  // incentive — four of the rubric's weighted criteria — keeping only the
+  // named antagonist. The rail was making the message worse, so the rail was
+  // wrong. The corrected send is 376 chars / 3 segments and carries all of it.
+  //
+  // What remains is a runaway guard: a body this long is a template bug (an
+  // unresolved loop, a pasted blob), not a considered message.
   if (channel === "sms") {
     const shortlink = String(draft.smsShortlink ?? "");
     const composedLen = body.length + (shortlink ? shortlink.length + 1 : 0);
-    if (composedLen > 160) {
-      reasons.push("sms_body_over_160_chars");
+    if (composedLen > SMS_RUNAWAY_CEILING) {
+      reasons.push("sms_body_runaway_length");
     }
     if (!SMS_STOP_MARKERS.some((p) => p.test(body))) {
       reasons.push("sms_missing_stop_word");
+    }
+
+    // Rule: block layout with the link isolated on its own line.
+    //
+    // The house SMS shape (.claude/skills/sms-marketing) is hook / body /
+    // CTA label + link on its OWN line / closer, with a blank line between
+    // blocks. The first real send was a single run-on paragraph with the URL
+    // buried mid-sentence, and it read as a wall of text on a phone — the
+    // link is the only thing the message exists to get tapped, and it was the
+    // hardest thing to find in it.
+    if (body.includes("http")) {
+      const linkLine = body
+        .split("\n")
+        .find((l) => l.includes("http"));
+      // The link's line must be the link and nothing else (trailing
+      // punctuation tolerated) — not a sentence with a URL inside it.
+      if (linkLine && !/^\s*https?:\/\/\S+\s*$/.test(linkLine)) {
+        reasons.push("sms_link_not_on_its_own_line");
+      }
+    }
+    if (!body.includes("\n\n")) {
+      reasons.push("sms_missing_block_layout");
     }
   }
 

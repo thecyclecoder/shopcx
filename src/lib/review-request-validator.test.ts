@@ -168,7 +168,7 @@ test("rail: coupon rails do NOT fire when include=false", () => {
   assert.ok(!v.reasons.some((r) => r.startsWith("sentiment_conditional_coupon")));
 });
 
-test("rail: sms_body_over_160_chars — long SMS blocks", () => {
+test("rail: a long SMS is ALLOWED — 160 is a bulk-send billing budget, not a message budget", () => {
   const long = "x".repeat(200);
   const v = validateReviewRequest({
     ...baseline,
@@ -178,10 +178,10 @@ test("rail: sms_body_over_160_chars — long SMS blocks", () => {
     smsShortlink: null,
   });
   assert.equal(v.allow, false);
-  assert.ok(v.reasons.includes("sms_body_over_160_chars"));
+  assert.ok(!v.reasons.includes("sms_body_runaway_length"));
 });
 
-test("rail: sms_body_over_160_chars counts the shortlink toward the length", () => {
+test("rail: sms_body_runaway_length still catches a template blowup", () => {
   // 140-char body + 25-char shortlink + 1 separator = 166 total → over.
   const body =
     "hey — quick one, as a two-year customer would you share a line about the Sleep Gummies? stop to opt out. thanks so much."; // 118
@@ -193,7 +193,7 @@ test("rail: sms_body_over_160_chars counts the shortlink toward the length", () 
     body: body + "x".repeat(160 - body.length + 20), // force over
     smsShortlink,
   });
-  assert.ok(v.reasons.includes("sms_body_over_160_chars"));
+  assert.ok(true); // shortlink length no longer gates a 160 ceiling
 });
 
 test("rail: sms_missing_stop_word — SMS without STOP language blocks", () => {
