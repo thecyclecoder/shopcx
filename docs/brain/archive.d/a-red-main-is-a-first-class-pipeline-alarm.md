@@ -1,0 +1,1 @@
+- **A red main is a first-class pipeline alarm, and the deploy build gate covers every PR** · verified 2026-08-31 · → [[../libraries/control-tower]] (main-build-status), [[../libraries/deploy-build-gate]], [[../libraries/github-pr-resolve]]
