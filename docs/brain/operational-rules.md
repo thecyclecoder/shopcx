@@ -77,6 +77,20 @@ Worked instance: the [[goals/storefront-optimizer|Storefront Optimizer]] runs a 
 
 See also: [[README]] § Naming conventions for the table-level version of this rule.
 
+## No pattern match on a UUID column
+
+**Postgres has NO pattern-match operator for `uuid`.** A `.like("id", "abc%")` on a uuid column throws `operator does not exist: uuid ~~ unknown` at runtime; the case-insensitive variant `.ilike("id", "abc%")` is WORSE — it returns ZERO ROWS with no error at all, which reads exactly like "nothing matched." That silent shape is how a broken query becomes a wrong business decision — a shipped remediation script sat unrun for two days because every one of its three lookups threw, and two backlog-triage passes read live incidents as "gone" until they were checked against a positive control.
+
+Fix by resolving the full uuid and using `.eq()`, or cast to text in SQL (`where id::text like $1`) when a genuine prefix match is needed:
+
+```typescript
+// instead of  .like("id", `${PREFIX}%`)                       (throws)
+// or          .ilike("id", `${PREFIX}%`)                      (silently returns nothing)
+const { data } = await admin.from("<t>").select("id").eq("id", FULL_UUID);
+```
+
+Enforced pre-commit by [scripts/_check-no-uuid-like.ts](../../scripts/_check-no-uuid-like.ts) (chained into `predeploy:static` alongside the other static guards) — a maintained UUID_COLUMNS list resolves which first-argument column names on `.like(` / `.ilike(` are provably uuid in this schema (`id`, `member_id`, `customer_id`, `workspace_id`, `spec_id`, `phase_id`, `subscription_id`, `job_id`), so `*_id` columns that are deliberately TEXT (`shopify_contract_id`, `shopify_order_id`, `shopify_customer_id`, `shopify_return_gid`, `meta_ad_id`, `ticket_id` where it stores an external ref) keep working. A same-line or line-above `// uuid-like-ok: <reason>` hatch is honored for the rare joined-view text column that shares a name in the list.
+
 ## Status enum case
 
 - **All status / enum-like text columns are lowercase.** `subscriptions.status='active'`, `dunning_cycles.status='retrying'`, etc. Writing `.eq("status", "ACTIVE")` returns zero rows silently.

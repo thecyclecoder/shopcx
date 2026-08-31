@@ -37,12 +37,20 @@ async function main() {
     if (j.log_tail) console.log(`     log tail: ${String(j.log_tail).slice(-1200)}`);
   }
 
-  // 3. The parked build itself.
-  const { data: build } = await admin.from("agent_jobs")
+  // 3. The parked build itself. agent_jobs.id is UUID; Postgres has no
+  //    pattern-match operator for uuid (spec:
+  //    no-sql-pattern-match-on-a-uuid-column — the SILENT `.ilike` variant
+  //    that was here returned zero rows with no error, reading exactly like
+  //    "the build doesn't exist"). Scope by workspace at the DB and narrow
+  //    by id-prefix in memory.
+  const { data: allJobs } = await admin.from("agent_jobs")
     .select("id,kind,status,spec_slug,created_at,log_tail").eq("workspace_id", WS)
-    .ilike("id", `${BUILD}%`).limit(1);
+    .order("created_at", { ascending: false }).limit(2000);
+  const build = (allJobs ?? []).filter(
+    (b) => typeof b.id === "string" && b.id.startsWith(BUILD),
+  );
   console.log(`\n=== the parked build ${BUILD} ===`);
-  for (const b of build ?? []) {
+  for (const b of build) {
     console.log(`  ${b.kind} [${b.status}] slug=${b.spec_slug}`);
     console.log(`  log tail: ${String(b.log_tail ?? "").slice(-1500)}`);
   }
