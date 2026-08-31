@@ -822,6 +822,27 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   { id: "brain-index-refresh", kind: "cron", owner: "platform", label: "Brain index refresh", description: "Rebuilds the docs/brain search index.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "security-dep-watch", kind: "cron", owner: "platform", label: "Security dep watch", description: "Daily CVE / dependency-upgrade watch (security-dependency-agent Phase 2): enqueues the box npm-audit scan that authors an owner-gated upgrade-fix spec on a vulnerable dep — never auto-bumps.", expectedCadence: "daily (0 4 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-06-24T00:00:00Z" },
   { id: "security-diff-backstop-cron", kind: "cron", owner: "platform", label: "Security diff backstop (if-due)", description: "Cheap 15-min backstop for Vault's post-merge diff security review (fix-vault-post-merge-diff-backstop-7fbde0): re-sweeps recently-merged claude/* builds and enqueues a diff-mode security review for any orphaned merge SHA. Idempotent via the 14d SHA dedup inside enqueueSecurityReviewJob.", expectedCadence: "every 15m (*/15 * * * *)", livenessWindowMs: 90 * MIN, registeredAt: "2026-07-02T00:00:00Z" },
+  // a-red-main-is-a-first-class-pipeline-alarm Phase 1 — the red-main detector cron. No
+  // other loop watches whether main is green (every stuck-detector reasons about a single
+  // spec in isolation, so a repo-wide breakage that blocks all of them at once is exactly
+  // the shape none of them can see — 2026-08-31 ran ~40 min red before a human noticed).
+  // Reads main's HEAD build state via the GitHub API, on failure walks back to the FIRST
+  // red commit (bounded), raises a CEO-visible dashboard_notifications card idempotent
+  // per first_red_sha (a 5-min tick must never fan out a new card per tick for the same
+  // breakage), and clears the open card when main goes green. Every-15-min cadence + 45m
+  // window satisfies assertRegistryInvariants (cadence × 1.2 = 18m; 45m gives comfortable
+  // slack for a GitHub blip). registeredAt claims the newcron-grace so the tile stays
+  // amber "awaiting first run" for the first window instead of RED-alerting on cut-over.
+  {
+    id: "main-build-status",
+    kind: "cron",
+    owner: "platform",
+    label: "Main build status",
+    description: "Reads the combined build status of main's HEAD commit via GitHub; on failure identifies the FIRST red commit and raises a CEO-visible alarm (idempotent per first_red_sha), clearing the card the moment main goes green again. The backstop for a red main whatever the cause + whoever merged it — the deploy build gate lives inside the box build lane and a hand-authored hotfix (or GitHub-UI merge) bypasses it.",
+    expectedCadence: "every 15 min (*/15 * * * *)",
+    livenessWindowMs: 45 * MIN,
+    registeredAt: "2026-08-31T00:00:00Z",
+  },
   {
     id: "blueprint-build-submit-cron",
     kind: "cron",
