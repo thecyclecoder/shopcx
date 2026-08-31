@@ -20,7 +20,7 @@ Idea → spec → autonomous build → merged PR, phone-first, on the Max subscr
 AI-driven management of the live Shopify store + theme from inside ShopCX.
 - **Specs:** **shopify-theme-via-shopcx** ✅ (verified + archived → [[../recipes/edit-shopify-theme]])
 
-### Infra & DevOps / reliability
+### Infra & DevOps / reliability {#infra-devops-reliability}
 The "actually improve the system" work — the build box + worker ([[../recipes/build-box-setup]]), deploys, CI/tsc gates, and reliability of the platform itself. (Folded into Platform rather than a separate function; promote to its own function only if the surface grows.)
 - **Metric:** build/deploy success rate, green CI, box uptime.
 - **Supervisable-autonomy backbone:** the [[../lifecycles/control-tower|CEO Control Tower]] — one CEO-only kill-switch cascade (department → director → agent → tool) unified with the org-mirror monitor, enforced at the real chokepoints ([[../libraries/kill-switch-resolver]] · [[../tables/kill_switches]] · `claim_agent_job`), plus the standing **node-completeness rule** ([[../operational-rules#node-completeness--a-node-without-a-switch--heartbeat--owner-is-incomplete-hard-rule|owner + switch + heartbeat or it's incomplete]]) Ada enforces on every new node.

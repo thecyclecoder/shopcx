@@ -11,7 +11,11 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractFailedPredeployGuards } from "./predeploy-guard-extract";
+import {
+  classifyPredeployViolationScope,
+  extractFailedPredeployGuards,
+  extractPredeployViolationPaths,
+} from "./predeploy-guard-extract";
 
 test("shape (a) — a guard's own ❌ line names the guard", () => {
   const out = `
@@ -127,4 +131,161 @@ test("shape (0) — the per-script echo is normalized onto the `check-foo` form"
 test("shape (0) — absent the echo, the (a)/(b)/(c) union is unchanged", () => {
   const out = "❌ check-box-types — tsc failed on the box entrypoint\n";
   assert.deepEqual(extractFailedPredeployGuards(out), ["check-box-types"]);
+});
+
+// ── extractPredeployViolationPaths ──
+
+test("extractPredeployViolationPaths — real competitors-sdk-compliance failure names the three _kcups files", () => {
+  // Modelled on the actual 2026-08-31 park output: the guard prints one line per finding via the `•`
+  // shape (see scripts/_check-competitors-sdk-compliance.ts:121). This is the exact case that had two
+  // concurrent unrelated builds racing to author the same fix on files neither spec was about.
+  // Snippet TEXT after each `→` is paraphrased on purpose. The extractor only reads `{file}:{line}`
+  // before the `→` (see extractPredeployViolationPaths shapes a+b), so the snippet is decorative.
+  // Quoting a literal competitors-table write here would make check-competitors-sdk-compliance flag
+  // this test file itself — same paraphrase-your-fixtures trap the sibling PM guard hit and the
+  // existing `returns EVERY distinct guard` fixture already documents.
+  const out = `
+> shopcx-init@0.1.0 check:competitors-sdk-compliance
+> tsx scripts/_check-competitors-sdk-compliance.ts
+
+❌ check-competitors-sdk-compliance — 3 raw competitors-table writes outside the SDK:
+
+  • scripts/_kcups-blockers.ts:44  →  raw competitors-table select outside the SDK
+  • scripts/_kcups-competitors.ts:81  →  raw competitors-table upsert outside the SDK
+  • scripts/_kcups-readiness.ts:12  →  raw competitors-table select outside the SDK
+`;
+  assert.deepEqual(extractPredeployViolationPaths(out), [
+    "scripts/_kcups-blockers.ts",
+    "scripts/_kcups-competitors.ts",
+    "scripts/_kcups-readiness.ts",
+  ]);
+});
+
+test("extractPredeployViolationPaths — [VIOLATION] shape from the summary path is picked up too", () => {
+  // The same guard emits a `[VIOLATION]` line via its summary block (scripts/_check-competitors-sdk-
+  // compliance.ts:113). Both shapes must resolve — mixing them in one output should still dedupe.
+  // Snippet text after the file:line is paraphrased for the same reason as the fixture above.
+  const out = `
+competitors-SDK-compliance — 12 file(s) scanned, 2 raw competitors-table findings
+  [VIOLATION] src/lib/foo.ts:44  raw competitors-table select outside the SDK
+  [VIOLATION] scripts/_bar.ts:9  raw competitors-table upsert outside the SDK
+
+❌ check-competitors-sdk-compliance — 2 raw competitors-table writes outside the SDK:
+
+  • src/lib/foo.ts:44  →  raw competitors-table select outside the SDK
+  • scripts/_bar.ts:9  →  raw competitors-table upsert outside the SDK
+`;
+  assert.deepEqual(extractPredeployViolationPaths(out), [
+    "src/lib/foo.ts",
+    "scripts/_bar.ts",
+  ]);
+});
+
+test("extractPredeployViolationPaths — ignores the `> tsx scripts/_check-foo.ts` npm lifecycle frame", () => {
+  // The guard's OWN runner line contains `scripts/…`. Without the lifecycle-frame skip the extractor
+  // would report the guard as its own violation and the repair pass would target the wrong file — the
+  // exact class of bug `extractFailedPredeployGuards`'s `lastEcho` precedence rule already defends
+  // against. Snippet paraphrased per the note on the fixture above.
+  const out = `
+> shopcx-init@0.1.0 check:competitors-sdk-compliance
+> tsx scripts/_check-competitors-sdk-compliance.ts
+
+  • src/lib/real-owner.ts:12  →  raw competitors-table select outside the SDK
+`;
+  assert.deepEqual(extractPredeployViolationPaths(out), ["src/lib/real-owner.ts"]);
+});
+
+test("extractPredeployViolationPaths — unattributable output returns EMPTY (fails-closed at the caller)", () => {
+  const out = "npm error code 1\nnpm error path /repo\nsome unrelated failure\n";
+  assert.deepEqual(extractPredeployViolationPaths(out), []);
+});
+
+// ── classifyPredeployViolationScope ──
+
+test("classifyPredeployViolationScope — every extracted path is inherited from main → allInherited", () => {
+  // Ground truth: the 2026-08-31 park. cold-scaler-arming-decides-on-evidence-not-absence's diff did not
+  // touch any _kcups file, yet the competitors SDK guard demanded a repair on all three of them because a
+  // separate PR had introduced them on main. Classification MUST say "inherited" and the repair loop must
+  // step aside.
+  // Snippet paraphrased per the note on the extractPredeployViolationPaths kcups fixture above.
+  const out = `
+❌ check-competitors-sdk-compliance — 3 raw competitors-table writes outside the SDK:
+
+  • scripts/_kcups-blockers.ts:44  →  raw competitors-table select outside the SDK
+  • scripts/_kcups-competitors.ts:81  →  raw competitors-table upsert outside the SDK
+  • scripts/_kcups-readiness.ts:12  →  raw competitors-table select outside the SDK
+`;
+  const changedPaths = [
+    "src/lib/cold-scaler.ts",
+    "src/lib/inngest/cold-scaler-tick.ts",
+  ];
+  const r = classifyPredeployViolationScope({ out, changedPaths });
+  assert.deepEqual(r.owned, []);
+  assert.deepEqual(r.inherited, [
+    "scripts/_kcups-blockers.ts",
+    "scripts/_kcups-competitors.ts",
+    "scripts/_kcups-readiness.ts",
+  ]);
+  assert.equal(r.allInherited, true);
+});
+
+test("classifyPredeployViolationScope — the branch touched the violating file → owned, allInherited=false", () => {
+  // Snippet TEXT is paraphrased on purpose — the extractor only reads `{file}:{line}` before the `→`.
+  // Quoting a literal `.from('<pm-table>').update(...)` here would make check-pm-sdk-compliance flag
+  // this test file itself (same trap the `returns EVERY distinct guard` fixture defends against).
+  const out = `❌ check-pm-sdk-compliance — raw PM-table write outside the SDK\n  • src/lib/x.ts:12  →  raw PM-table update outside the SDK\n`;
+  const r = classifyPredeployViolationScope({
+    out,
+    changedPaths: ["src/lib/x.ts", "docs/brain/libraries/x.md"],
+  });
+  assert.deepEqual(r.owned, ["src/lib/x.ts"]);
+  assert.deepEqual(r.inherited, []);
+  assert.equal(r.allInherited, false);
+});
+
+test("classifyPredeployViolationScope — mixed owned + inherited → allInherited=false (repair proceeds)", () => {
+  // See paraphrase note on the owned-only case above.
+  const out = `
+❌ check-pm-sdk-compliance — 2 raw PM-table writes outside the SDK:
+
+  • src/lib/x.ts:12  →  raw PM-table update outside the SDK
+  • src/lib/legacy-untouched.ts:44  →  raw PM-table delete outside the SDK
+`;
+  const r = classifyPredeployViolationScope({
+    out,
+    changedPaths: ["src/lib/x.ts"],
+  });
+  assert.deepEqual(r.owned, ["src/lib/x.ts"]);
+  assert.deepEqual(r.inherited, ["src/lib/legacy-untouched.ts"]);
+  // The branch genuinely owns part of it, so the repair loop must run — the load-bearing property is
+  // that a mixed result stays repairable, not gets skipped.
+  assert.equal(r.allInherited, false);
+});
+
+test("classifyPredeployViolationScope — unparseable output falls back to allInherited=false (fail-closed)", () => {
+  // The load-bearing rule of the phase: a guard whose output we could not parse into any path must NOT
+  // be treated as "nothing this branch owns" — the caller's contract is that allInherited=false ⇒
+  // repair as today. Silently skipping a real violation would be strictly worse than a redundant repair.
+  const out = "npm error code 1\nnpm error path /repo\nsome opaque stack trace\n";
+  const r = classifyPredeployViolationScope({
+    out,
+    changedPaths: ["src/lib/whatever.ts"],
+  });
+  assert.deepEqual(r.paths, []);
+  assert.deepEqual(r.owned, []);
+  assert.deepEqual(r.inherited, []);
+  assert.equal(r.allInherited, false);
+});
+
+test("classifyPredeployViolationScope — normalization: leading `./` and backslashes match cross-shape", () => {
+  const out = `❌ check-pm-sdk-compliance\n  • src/lib/x.ts:12  →  raw PM-table update outside the SDK\n`;
+  // changedPaths as git-diff might present them on a Windows checkout or a `./`-prefixed diff; both
+  // should compare equal after normalization.
+  const r = classifyPredeployViolationScope({
+    out,
+    changedPaths: ["./src\\lib\\x.ts"],
+  });
+  assert.deepEqual(r.owned, ["src/lib/x.ts"]);
+  assert.deepEqual(r.inherited, []);
+  assert.equal(r.allInherited, false);
 });
