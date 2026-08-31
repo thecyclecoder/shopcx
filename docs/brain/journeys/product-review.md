@@ -3,7 +3,9 @@
 Tokenized product-review collection — the surface a review request points at.
 
 **Definition:** `journey_definitions` slug `product-review` (seeded by `supabase/migrations/20261215130000_seed_product_review_journey.sql`)
-**Handler:** `src/lib/portal/handlers/review-journey.ts`
+**Public magic link:** `src/app/review/[token]/page.tsx` + `src/app/api/review/[token]/route.ts` — **no login**
+**Portal (authenticated) surface:** `src/lib/portal/handlers/review-journey.ts`
+**Shared core:** `src/lib/review-journey-core.ts` — both surfaces call it, so they cannot diverge
 **Owner:** [[../functions/cmo]] — "Review collection" mandate
 
 ## Flow
@@ -38,3 +40,13 @@ The reward is minted **regardless of rating** — contingent-on-a-good-rating is
 ---
 
 [[../README]] · [[../../CLAUDE]]
+
+## Why there are two surfaces
+
+The journey first shipped as a portal handler only. But `PortalAuthResult.loggedInCustomerId` is a **non-optional string** — the portal is authenticated by construction — so a security pass correctly bound the token to the logged-in customer. That was right for the portal and wrong for the product: it turned a no-login magic link into a login wall in front of a message already asking the customer for a favour. The spec asked for "tokenized magic link, no login" AND "portal handler" in the same phase; those are incompatible.
+
+The **public** route is now the real path. **The token is the credential**: 96 stored random bits, an expiry, a single-use compare-and-set claim, and every authority (workspace, customer, product) read from the session row rather than the request. Holding a link lets you review one product as one customer, once, before it expires.
+
+Same posture as the CSAT flow already in production (`src/app/api/csat/[ticketId]/route.ts`), and strictly stronger — CSAT's token is a deterministic HMAC of the ticket id.
+
+The portal surface is kept for logged-in customers and retains its extra linked-account binding. Both call `review-journey-core`, so the review write, low-star routing, reward mint, and single-use claim are defined once.
