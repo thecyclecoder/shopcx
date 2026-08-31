@@ -1799,6 +1799,53 @@ export interface PhaseContainmentInput {
   merge_sha: string | null;
 }
 
+/**
+ * fold-accepts-squash-merge-provenance — is `mergeSha` a SQUASH commit that landed on origin/main?
+ *
+ * `mergeContainsPhaseBuild` proves a merge carried a phase by asking whether the phase's `build_sha`
+ * is an ANCESTOR of the merge. That is sound for a merge commit, which keeps the branch in its
+ * history. A SQUASH merge does not: it replays the branch as ONE new single-parent commit and drops
+ * the branch commits entirely, so the build commit can NEVER be an ancestor — and once the branch is
+ * deleted the build SHA may not resolve at all. Under squash the containment question is not FALSE,
+ * it is UNANSWERABLE, and answering it fail-closed permanently strands a spec whose code is
+ * demonstrably on main. Measured 2026-08-31: four specs shipped and could never fold, every one
+ * squash-merged; the designated repair lane (`audit-spec-shipped-state`) ran on all four and
+ * re-derived nothing, because the evidence it looks for no longer exists.
+ *
+ * So when containment is negative or inconclusive we ask the narrower question this repo CAN still
+ * answer: did this merge actually land on main, as a squash? True only when BOTH hold:
+ *   1. `mergeSha` is reachable from origin/main (it really shipped), AND
+ *   2. `mergeSha` has exactly ONE parent (the squash shape). A real merge commit has two, and for
+ *      those the ancestry check still applies and still governs — this changes nothing for them.
+ *
+ * WHAT THIS DELIBERATELY GIVES UP: under squash we can no longer prove PER-PHASE that this merge
+ * carried this phase's code, because the squash destroyed that evidence. We fall back to proving the
+ * merge itself is real and on main. The `build_sha`-is-NULL rule in `verifyPhasesContainedByMerges`
+ * is therefore NOT relaxed: a phase with no build evidence at all still blocks the fold. That is the
+ * shape that stranded PR #2508 and it remains the protection worth keeping.
+ *
+ * Fail-closed by construction: if origin/main cannot be resolved, or either git call errors, this
+ * returns false and the caller's original failure stands.
+ */
+export async function mergeIsSquashOnMain(
+  mergeSha: string | null | undefined,
+  deps: ResolveBranchRefDeps = { runGitCmd },
+): Promise<boolean> {
+  const m = (mergeSha ?? "").trim();
+  if (!m || !HEX_SHA_RE.test(m)) return false;
+  // Resolve origin/main through the same origin-first resolver the containment helper uses, so we
+  // compare against the pushed main rather than a stale local ref.
+  const mainRef = await resolveBranchRefForVerification("main", deps);
+  if (!mainRef.ok) return false;
+  const onMain = await deps.runGitCmd(["merge-base", "--is-ancestor", m, mainRef.ref]);
+  if (onMain.error || onMain.code !== 0) return false;
+  // `rev-list --parents -n 1 <sha>` prints "<sha> <parent…>": 2 tokens ⇒ exactly one parent ⇒ squash.
+  const parents = await deps.runGitCmd(["rev-list", "--parents", "-n", "1", m]);
+  if (parents.error || parents.code !== 0) return false;
+  const tokens = (parents.stdout || "").trim().split(/\s+/).filter(Boolean);
+  return tokens.length === 2;
+}
+
 export type PhaseContainmentReport =
   | { ok: true }
   | { ok: false; failures: Array<{ position: number; reason: string }> };
@@ -1829,6 +1876,10 @@ export async function verifyPhasesContainedByMerges(
     }
     const res = await mergeContainsPhaseBuild(p.merge_sha, p.build_sha, deps);
     if (!res.ok) {
+      // Inconclusive — most often the build SHA no longer resolves because the branch was deleted
+      // after a squash merge. If the merge itself is a squash that landed on main, the ancestry was
+      // DISCARDED rather than absent, so accept the merge as the provenance. Otherwise fail-closed.
+      if (await mergeIsSquashOnMain(p.merge_sha, deps)) continue;
       failures.push({
         position: p.position,
         reason: `phase ${p.position} containment check inconclusive (fail-closed): ${res.error}`,
@@ -1836,6 +1887,10 @@ export async function verifyPhasesContainedByMerges(
       continue;
     }
     if (!res.contained) {
+      // A squash merge REPLAYS the branch as one new commit, so the build commit is provably not an
+      // ancestor even though the code shipped. "Not contained" is evidence of a stamp exceeding its
+      // evidence ONLY when the merge kept its history — i.e. a real merge commit with two parents.
+      if (await mergeIsSquashOnMain(p.merge_sha, deps)) continue;
       failures.push({
         position: p.position,
         reason: `phase ${p.position} merge ${p.merge_sha.slice(0, 8)} does NOT contain its build ${p.build_sha.slice(0, 8)} — a stamp exceeded its evidence`,
