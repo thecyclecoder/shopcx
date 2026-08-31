@@ -253,11 +253,28 @@ export function validateReviewRequest(
     reasons.push("unfilled_mustache_in_subject");
   }
 
-  // Rule: more than one ask. A drafted review request asks ONE question.
-  // Two literal question marks means the draft is stacking asks or wedging
-  // a rhetorical question alongside the ask; either way, a human should
-  // look at it before it sends.
-  if (countLiteralQuestions(body) > 1) {
+  // Rule: more than one ask.
+  //
+  // What this is really protecting against is a message that requests two
+  // different ACTIONS ("leave a review? and follow us on Instagram?") — that
+  // splits attention and costs both. Counting literal question marks is a
+  // crude proxy for it, and as first written the proxy was wrong twice:
+  //
+  //   1. It counted the compliance footer. "Don't want notes like this from
+  //      me?" is not an ask, and every CAN-SPAM-compliant email has something
+  //      like it — so EVERY email draft failed. 17 of the first 50 real drafts
+  //      died on this alone.
+  //   2. It counted a rhetorical setup paired with the ask. "Is Erica right?
+  //      How are you liking X?" is ONE request phrased as two questions, and it
+  //      is the founder's own proven Klaviyo copy.
+  //
+  // So: strip the footer, then allow a rhetorical pair, and block at three or
+  // more — which still catches genuine ask-stacking while passing the shape
+  // that actually works. The proxy stays crude; the difference is it now errs
+  // toward the message being sendable rather than silently killing the whole
+  // channel.
+  const bodyWithoutFooter = body.split(/\n--\s*\n/)[0];
+  if (countLiteralQuestions(bodyWithoutFooter) > 2) {
     reasons.push("more_than_one_ask");
   }
 
