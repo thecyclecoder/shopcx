@@ -1,0 +1,1 @@
+- **Cold-scaler arming gate decides on real evidence** · verified 2026-08-31 · → [[../libraries/media-buyer__cold-scaler-arming-gate]]

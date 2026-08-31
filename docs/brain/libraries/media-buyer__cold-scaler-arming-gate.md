@@ -4,7 +4,7 @@ Cold-scaler **arming gate** — the deterministic authorization that a scaler co
 
 **File:** `src/lib/media-buyer/cold-scaler-arming-gate.ts`
 
-**Callers:** a Growth-supervised box lane on cadence (dispatch surface pending — the Phase-2 artifact is the runner itself + the pure gate + tests + brain pages). The graduate-crowned-winners spec (Bianca M4 follow-on) reads `readLatestColdScalerArmingAuthorization` at the budget-move site and refuses to graduate a winner when the row is missing, `allowed=false`, or expired.
+**Callers:** the [[../inngest/sensor-trust-probe-cadence]] (Phase 1) and [[../inngest/cold-scaler-cac-ltv-cadence]] (Phase 2) enqueue box lanes that feed preconditions #2 and #3; a separate Growth-supervised runner (TBD) invokes `runColdScalerArmingGate` on cadence to evaluate the full gate. The graduate-crowned-winners spec (Bianca M4 follow-on) reads `readLatestColdScalerArmingAuthorization` at the budget-move site and refuses to graduate a winner when the row is missing, `allowed=false`, or expired.
 
 **Distinct from** [[media-buyer__arming-gate]] — that authorizes the TEST cohort's shadow→armed flip; this one authorizes the COLD SCALER cohort's flip. Both gates share sensor-trust + CAC:LTV; **Precondition #1 differs on purpose**. The TEST gate reads shadow-vs-review agreement (a test cohort still runs in shadow, so the sample is producible). The SCALER gate reads Bianca's live SCALE-vocabulary grade pass rate (Bianca stopped running in shadow weeks ago, so the shadow-review sample is unproducible and the graded-outcomes sample is what actually exists — 288 rows on Dylan's account today). Two tables, two independent authorizations. The test rail's arm does NOT imply the scaler's, and vice versa.
 
