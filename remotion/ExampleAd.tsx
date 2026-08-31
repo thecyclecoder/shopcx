@@ -86,11 +86,13 @@ const EMOJI_MAP: [RegExp, string][] = [
   [/crash|jitter/i, "🚫"],
   [/cravin|appetite|hunger/i, "🙅"],
   [/free|shipping/i, "📦"],
-  [/off|forty|40|percent|%|deal|save/i, "🏷️"],
+  // Discount language ONLY — a bare number is an age at least as often as a price
+  // ("if you're over forty"), and a bare /off/ matches "shuts off what's draining it".
+  [/\d+\s*%|\bpercent\b|\bdeal\b|\bsave\b|\bdiscount\b/i, "🏷️"],
   [/limited|time|now|today|hurry/i, "⏰"],
   [/website|visit|click|link/i, "👉"],
   [/dietitian|recommend|doctor|expert/i, "✅"],
-  [/wrong|bad|stop/i, "❌"],
+  [/\bwrong\b|\bbad\b|\bstop\b/i, "❌"],
 ];
 function emojiFor(text: string): string | null {
   for (const [re, e] of EMOJI_MAP) if (re.test(text)) return e;
