@@ -717,6 +717,13 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // ~340/mo; this is the path to the other ~1,500 customers who never write in).
   // 90m livenessWindow gives ≥ 1.2× the 60m cadence per assertRegistryInvariants.
   { id: "post-order-review-ask-detector-cron", kind: "cron", owner: "cmo", label: "Post-order review-ask detector", description: "Hourly sweep for first-purchase-of-a-reviewable-product events. Joins orders.line_items[].product_id through products.shopify_product_id (never a uuid cast), splits per-product 10d repeat vs 21d first-time on ORDER DATE, applies the shared ladder skip predicates, and fires review/post-order.ask-due events Phase 2 will consume. Forward-only — no historical backfill.", expectedCadence: "every hour (0 * * * *)", livenessWindowMs: 90 * MIN, registeredAt: "2026-08-31T00:00:00Z" },
+  // Post-order review-ask REACTIVE send handler (review-request-post-order-ask
+  // Phase 2). Consumes review/post-order.ask-due events fired by the detector
+  // above and runs the shared apply-path in src/lib/review-request-sender.ts —
+  // the same trigger-agnostic pipeline the ticket-side Phase-2 apply-path
+  // calls. Owner cmo. Reactive lane — no cadence; livenessWindow long enough
+  // to survive a genuinely idle day without alerting (36h = 1.2× 30h + slack).
+  { id: "post-order-review-ask-send", kind: "reactive", owner: "cmo", label: "Post-order review-ask send", description: "Reactive Inngest handler for review/post-order.ask-due events. Routes each candidate through the shared applyReviewRequest pipeline (journey reachability probe → shared ladder dedup → channel pick → shared body composer → shared pre-send validator → shared drafts persist → shared review_requests row → shared canary-held send). No cadence — event-driven.", expectedCadence: "reactive (per review/post-order.ask-due event)", livenessWindowMs: 36 * HOUR, registeredAt: "2026-08-31T00:00:00Z" },
   // amplifier-import-reliability-rail Phase 2 — the reconcile sweep for paid orders the 3PL never
   // received. Re-submits any paid order past a 10-minute grace whose amplifier_order_id is still
   // null, under the retry cap, and not held by a non-dismissed fraud_cases row. 30-min window
