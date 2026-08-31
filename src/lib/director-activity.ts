@@ -290,7 +290,22 @@ export type DirectorActionKind =
   // preserved instead of a silent pass. metadata: { job_id, spec_slug, cap, reconciled_count,
   //   unreconciled: [{ phase_position, check_position, description, old_pattern, reason }],
   //   cap_reached: boolean, autonomous:true }.
-  | "check_reconcile_cap_reached";
+  | "check_reconcile_cap_reached"
+  // drift-suspect-runs-the-audit-it-recommends Phase 1 — the platform-director drift-suspect branch
+  // ([[platform-director]] `flagShippedWithoutProvenance`) now enqueues `audit-spec-shipped-state`
+  // FIRST and escalates only when the audit cannot recover the provenance. Emitted on the enqueue-
+  // success path (audit queued OR already in flight) so the activity feed shows the detector acting
+  // rather than going quiet; the fallback escalation still writes `drift_suspect_flagged` when the
+  // audit already ran and could not re-derive the merge (or the enqueue itself errored). metadata:
+  // { lane, drift_suspect_phase_indices, drift_suspect_phase_titles, audit_job_id,
+  //   audit_dedup: 'open' | null, autonomous:true }.
+  | "drift_suspect_audit_queued"
+  // Companion to `drift_suspect_audit_queued` — the FALLBACK escalation. Written when the audit ran
+  // within the recent-terminal dedupe window and the phase is STILL tagless (audit could not resolve)
+  // OR the enqueue itself threw (fail-open path — never swallow a drift signal). metadata:
+  // { lane, drift_suspect_phase_indices, drift_suspect_phase_titles, audit_state:
+  //   'ran_and_unresolved' | 'enqueue_error' | 'unknown', prior_audit_job_id, autonomous:true }.
+  | "drift_suspect_flagged";
 
 export interface DirectorActivityInput {
   workspaceId: string;
