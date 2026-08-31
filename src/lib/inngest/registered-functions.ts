@@ -137,6 +137,7 @@ import { acquisitionResearchCadenceCron, acquisitionResearchCadenceManual } from
 import { angleDemandSweepCadenceCron, angleDemandSweepCadenceManual } from "@/lib/inngest/angle-demand-sweep-cadence";
 import { researchSensorCron } from "@/lib/inngest/research-sensor";
 import { controlTowerMonitor } from "@/lib/inngest/control-tower-monitor";
+import { mainBuildStatusCron } from "@/lib/inngest/main-build-status-cron";
 import { nodeAncestrySyncCron } from "@/lib/inngest/node-ancestry-sync-cron";
 import { specDriftReconcileCron } from "@/lib/inngest/spec-drift-reconcile";
 import { fleetSpendGovernorCron } from "@/lib/inngest/fleet-spend-governor";
@@ -330,6 +331,7 @@ export const registeredInngestFunctions = [
   angleDemandSweepCadenceManual,
   researchSensorCron,
   controlTowerMonitor,
+  mainBuildStatusCron,
   nodeAncestrySyncCron,
   specDriftReconcileCron,
   fleetSpendGovernorCron,

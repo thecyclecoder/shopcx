@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import { AUTO_MERGE_GATE_LOOP_ID } from "@/lib/control-tower/registry";
 import { findMergedSiblingBuild, handleAutoMergedBuildBranch, getBranchBuildSuccess } from "@/lib/agent-jobs";
+import { shouldRunBuildGate, type BuildGateResult } from "@/lib/deploy-build-gate";
 import { openDeployWatch } from "@/lib/deploy-guardian";
 import { getSpecTestStateForBranch } from "@/lib/spec-test-runs";
 import { isSecurityGreenForBranch } from "@/lib/security-agent";
@@ -288,6 +289,31 @@ export function verifyGithubWebhook(
     return timingSafeEqual(Buffer.from(computed, "hex"), Buffer.from(providedHex, "hex"));
   } catch {
     return false;
+  }
+}
+
+/**
+ * a-red-main-is-a-first-class-pipeline-alarm Phase 2 — fetch the list of file paths a PR modified,
+ * paginated. Returns null on any transport / read error (the deploy build gate then treats "can't
+ * read" as "we don't know" and — matching the fail-closed posture of the other pre-merge gates —
+ * defers rather than fake-passing). Bounded to `maxPages` × 100 = 300 files so a giant PR can't
+ * fan-hit the GitHub API forever.
+ */
+async function fetchPrFileNames(prNumber: number, maxPages = 3): Promise<string[] | null> {
+  try {
+    const names: string[] = [];
+    for (let page = 1; page <= maxPages; page++) {
+      const r = await gh("GET", `/repos/${GH_REPO}/pulls/${prNumber}/files?per_page=100&page=${page}`);
+      if (!r.ok || !Array.isArray(r.json)) return null;
+      const arr = r.json as Array<{ filename?: string }>;
+      for (const f of arr) {
+        if (typeof f?.filename === "string") names.push(f.filename);
+      }
+      if (arr.length < 100) break; // last page
+    }
+    return names;
+  } catch {
+    return null;
   }
 }
 
@@ -1762,6 +1788,14 @@ export interface AutoMergeResult {
    *  fold is a brain-doc merge of ALREADY-shipped specs, so the build/accumulation/tests/goal gates do NOT
    *  apply; the only gate is "the fold job that authored this branch finished". */
   foldGateBlocked: number;
+  /**
+   * a-red-main-is-a-first-class-pipeline-alarm Phase 2: PRs the deploy build gate refused. Either the
+   * `runDeployBuildGate` callback ran a real `next build` in a fresh checkout of the PR head and it failed
+   * on the cacheComponents/prerender class (block), OR the caller couldn't run the gate (no callback
+   * supplied — the webhook path) so a build-affecting PR without a passing box-lane build record is
+   * DEFERRED (safer to defer than to merge unchecked). Left UNCHANGED — the box's next pass runs the gate.
+   */
+  deployBuildGateBlocked: number;
   /** 0 or 1 — SERIALIZED: at most one merge per pass (the resulting push-to-main webhook handles the next). */
   merged: number;
   mergedPr?: number;
@@ -1774,8 +1808,31 @@ export interface AutoMergeResult {
     /** True when BOTH `spec-test green` AND `security green` signals are clean for the branch (M4
      *  promote-on-green Phase 1). Undefined when the build-gate refused first / the PR wasn't ready. */
     testsGateOk?: boolean;
+    /** True when the deploy build gate (a-red-main-is-a-first-class-pipeline-alarm Phase 2) passed for
+     *  this PR head (or was skipped because the PR doesn't touch build-affecting paths, or because the
+     *  box lane already recorded a passing build for the same head). Undefined when an earlier gate
+     *  refused first / the PR wasn't ready. False = the PR was refused by the deploy build gate. */
+    deployBuildGateOk?: boolean;
     merged: boolean;
   }>;
+}
+
+/**
+ * a-red-main-is-a-first-class-pipeline-alarm Phase 2 — the deploy-build-gate callback contract.
+ * The auto-merge chokepoint calls this on a PR whose diff touches build-affecting paths when the
+ * box lane hasn't already gated the current head SHA. Callers (typically the box worker) implement
+ * it by checking out `headSha` in a fresh worktree and calling [[deploy-build-gate]]'s
+ * `runNextBuildGate` — the SAME gate the box lane uses. Return the classifier's verdict verbatim.
+ *
+ * The webhook path passes NO callback — in that case the chokepoint DEFERS a build-affecting-but-
+ * ungated PR (leaves it in `deployBuildGateBlocked`) rather than merging it unchecked. The box's
+ * next standing-pass tick supplies the callback and runs the gate.
+ */
+export interface AutoMergeRunOptions {
+  admin?: Admin;
+  /** When provided, the chokepoint calls this for a build-affecting PR without a box-lane pass. When
+   *  omitted (webhook path), such a PR is deferred instead of merged. */
+  runDeployBuildGate?: (input: { branch: string; headSha: string }) => Promise<BuildGateResult>;
 }
 
 /**
@@ -1812,9 +1869,17 @@ export interface AutoMergeResult {
  * SAME predicate as this gate). Imported above; called inline below.
  */
 
-export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult> {
-  const db = admin || createAdminClient();
-  const result: AutoMergeResult = { enabled: true, syncActive: false, checked: 0, ready: 0, buildGateBlocked: 0, testsGateBlocked: 0, accumulationBlocked: 0, goalBoundBlocked: 0, foldGateBlocked: 0, merged: 0, prs: [] };
+export async function autoMergeReadyPrs(
+  adminOrOpts?: Admin | AutoMergeRunOptions,
+): Promise<AutoMergeResult> {
+  // Legacy positional call `autoMergeReadyPrs(db)` still works — a Supabase admin client (function
+  // shape) has NO string keys we care about, so we detect an options-object by absence of `.from`.
+  const opts: AutoMergeRunOptions = (adminOrOpts && typeof adminOrOpts === "object" && !("from" in adminOrOpts))
+    ? (adminOrOpts as AutoMergeRunOptions)
+    : { admin: adminOrOpts as Admin | undefined };
+  const db = opts.admin || createAdminClient();
+  const runDeployBuildGate = opts.runDeployBuildGate;
+  const result: AutoMergeResult = { enabled: true, syncActive: false, checked: 0, ready: 0, buildGateBlocked: 0, testsGateBlocked: 0, accumulationBlocked: 0, goalBoundBlocked: 0, foldGateBlocked: 0, deployBuildGateBlocked: 0, merged: 0, prs: [] };
   let ok = true;
   try {
     if (!ghToken()) return result;
@@ -1851,6 +1916,10 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
       let merged = false;
       let buildGateOk: boolean | undefined;
       let testsGateOk: boolean | undefined;
+      // a-red-main-is-a-first-class-pipeline-alarm Phase 2 — hoisted to the outer PR-scope so the
+      // final `result.prs.push` can carry it (the build-gate branch below sets it; fold PRs skip
+      // the block and leave it undefined — correct: the deploy build gate doesn't apply to a fold).
+      let deployBuildGateOk: boolean | undefined;
       if (ready) {
         result.ready++;
         // SERIALIZE: only attempt the first ready PR — the post-merge push webhook drives the next one.
@@ -1981,6 +2050,62 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
             result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, testsGateOk, merged });
             continue;
           }
+          // a-red-main-is-a-first-class-pipeline-alarm Phase 2 — DEPLOY BUILD GATE at the auto-merge
+          // chokepoint. tsc + the tests gate above cannot see the cacheComponents/prerender class of
+          // failure — only a REAL `next build` can. The box lane already runs this exact gate ([[../
+          // scripts/builder-worker.ts]] `runNextBuildGate` — extracted to [[../lib/deploy-build-gate]]
+          // in Phase 2 so both callers share ONE truth), but a PR whose head SHA was authored/pushed
+          // AFTER the box's last build (a hand-authored commit on a claude/* branch) escapes that. We
+          // re-gate here on the current PR head — skip when the diff doesn't touch build-affecting
+          // paths (docs-only, lib-only), else run the injected callback. When no callback is supplied
+          // (webhook path — Vercel can't run `next build`), a build-affecting PR is DEFERRED (safer to
+          // wait for the box's next standing pass than to merge unchecked). On a real block: refuse
+          // the merge, surface via `deployBuildGateBlocked`, leave the PR and branch UNCHANGED (the
+          // owner then reads the failing gate error on the job's log_tail — same posture as the
+          // advisory-supersede path).
+          const prHeadSha = (pr.head as { sha?: string } | undefined)?.sha || "";
+          try {
+            const files = await fetchPrFileNames(prNumber);
+            if (files !== null && shouldRunBuildGate(files.join("\n"))) {
+              if (!runDeployBuildGate) {
+                result.deployBuildGateBlocked++;
+                console.warn(
+                  `[auto-merge] PR #${prNumber} (${branch}) touches build-affecting paths and no deploy-build-gate runner is available in this caller (webhook path) — deferring to the box's next pass`,
+                );
+                result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, testsGateOk, deployBuildGateOk: false, merged });
+                continue;
+              }
+              if (!prHeadSha) {
+                result.deployBuildGateBlocked++;
+                console.warn(`[auto-merge] PR #${prNumber} (${branch}) has no resolvable head SHA — deferring the deploy build gate`);
+                result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, testsGateOk, deployBuildGateOk: false, merged });
+                continue;
+              }
+              const gate = await runDeployBuildGate({ branch, headSha: prHeadSha });
+              deployBuildGateOk = gate.pass;
+              if (!gate.pass) {
+                result.deployBuildGateBlocked++;
+                console.warn(
+                  `[auto-merge] PR #${prNumber} (${branch}) failed the deploy build gate at head ${prHeadSha.slice(0, 7)} — leaving PR + branch UNCHANGED for the owner: ${gate.error}`,
+                );
+                result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, testsGateOk, deployBuildGateOk, merged });
+                continue;
+              }
+              console.log(`[auto-merge] PR #${prNumber} (${branch}) deploy build gate ✓ at head ${prHeadSha.slice(0, 7)}`);
+            } else {
+              deployBuildGateOk = true; // no build-affecting paths (or we couldn't read the file list) → gate is a no-op
+            }
+          } catch (e) {
+            // Fail CLOSED on a callback throw — the gate blocking is safer than an unchecked merge past a
+            // check we couldn't complete. Same posture as the tests-gate throw above.
+            result.deployBuildGateBlocked++;
+            console.warn(
+              `[auto-merge] PR #${prNumber} (${branch}) deploy build gate threw — deferring:`,
+              e instanceof Error ? e.message : e,
+            );
+            result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, testsGateOk, deployBuildGateOk: false, merged });
+            continue;
+          }
           } // end build-gate branch (a fold PR skips straight here once its fold gate passed)
           const headSha = (pr.head as { sha?: string } | undefined)?.sha;
           try {
@@ -2033,7 +2158,7 @@ export async function autoMergeReadyPrs(admin?: Admin): Promise<AutoMergeResult>
           }
         }
       }
-      result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, testsGateOk, merged });
+      result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, testsGateOk, deployBuildGateOk, merged });
     }
     return result;
   } catch (e) {

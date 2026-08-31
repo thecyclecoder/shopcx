@@ -78,6 +78,8 @@
     "test:pr-create-diagnostic": "tsx --test src/lib/pr-create-diagnostic.test.ts",
     "test:built-not-stamped": "tsx --test src/lib/pipeline-doctor.built-not-stamped.test.ts",
     "test:doctor-human-advisory": "tsx --test src/lib/pipeline-doctor.human-advisory.test.ts",
+    "test:main-build-status": "tsx --test src/lib/control-tower/main-build-status.test.ts",
+    "test:deploy-build-gate": "tsx --test src/lib/deploy-build-gate.test.ts",
     "test:chain-advance-skip": "tsx --test src/lib/agent-jobs.chain-advance-skip.test.ts",
     "test:vercel-drain-redact": "tsx --test src/lib/vercel-drain-redact.test.ts",
     "test:completed-effect-backing": "tsx --test src/lib/completed-effect-backing.test.ts",

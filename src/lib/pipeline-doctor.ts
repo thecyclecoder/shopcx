@@ -26,6 +26,7 @@ import { getSecurityStateBySlug, getSecurityStateForSlug } from "@/lib/security-
 import { buildLifecycleContext, specTestHasOpenRegression } from "@/lib/build-lifecycle-context";
 import { deriveLifecycleStage } from "@/lib/build-lifecycle";
 import type { LifecycleDerivation } from "@/lib/build-lifecycle";
+import { readMainBuildStatus } from "@/lib/control-tower/main-build-status";
 
 // The reaper's staleness window (scripts/builder-worker.ts REAP_STALE_MS = 20 min). A `building`/`claimed`
 // session whose heartbeat is older than this is DEAD — the reaper re-queues/escalates it. We flag it as a
@@ -134,6 +135,21 @@ export interface SpecDiagnosis {
   stuck: StuckVerdict;
 }
 
+/**
+ * Red-main summary — the FIRST-CLASS pipeline alarm. When main cannot build, every
+ * production deploy is failing and every stuck-detector's spec-in-isolation view lies
+ * (stuck=0 while the repo is structurally unmergeable — 2026-08-31). Populated from
+ * [[../control-tower/main-build-status]] `readMainBuildStatus` so `stuck=0` can never
+ * again be reported while main is red. `state='unknown'` = GitHub was unreachable (a
+ * transient blip must NEVER be promoted to a red-main claim).
+ */
+export interface MainBuildRedSummary {
+  state: "success" | "failure" | "pending" | "unknown";
+  headSha: string | null;
+  firstRedSha: string | null;
+  firstRedSubject: string | null;
+}
+
 export interface PipelineDiagnosis {
   workspaceId: string;
   generatedAt: string;
@@ -146,6 +162,14 @@ export interface PipelineDiagnosis {
   };
   /** The first-class LOUD check: specs whose raw `specs.status` holds a derived value (override-only bug). */
   storedStatusViolations: SpecDiagnosis[];
+  /**
+   * FIRST-CLASS pipeline alarm — main's build state at scan time. A red main is the
+   * most severe form of "green CI" and "deploy success rate" failing at once, and no
+   * per-spec detector can see it. The board must NEVER report health while this is red
+   * (a-red-main-is-a-first-class-pipeline-alarm Phase 1). Read-only mirror of
+   * `readMainBuildStatus`; the alarm CARD is raised by the red-main cron sweep.
+   */
+  mainBuildRed: MainBuildRedSummary;
   /** Build/plan pool occupancy context (for the not-claimed "stuck vs queued" call). */
   lanes: { buildPoolSize: number; activeBuilds: number };
   /** The diagnosed specs (stuck-first). Healthy specs included only when `includeHealthy` (or single-slug). */
@@ -604,13 +628,20 @@ export async function diagnosePipeline(opts: DiagnoseOptions = {}): Promise<Pipe
   const now = Date.now();
 
   // Batched canonical reads — the same sources the board + fold gate read, so the doctor can't drift.
-  const [roadmap, latestJobsBySlug, runs, liveSpecTestSlugs, securityBySlug, humanResolutions] = await Promise.all([
+  // `mainBuildRedRead` runs in parallel with the rest and is best-effort — a GitHub blip returns
+  // state='unknown' and the board renders that as "can't tell", NOT green (a-red-main-is-a-first-
+  // class-pipeline-alarm Phase 1).
+  const [roadmap, latestJobsBySlug, runs, liveSpecTestSlugs, securityBySlug, humanResolutions, mainBuildRed] = await Promise.all([
     getRoadmap(workspaceId),
     getLatestJobsBySlug(workspaceId),
     getLatestSpecTestRuns(workspaceId),
     getLiveSpecTestSlugs(workspaceId),
     getSecurityStateBySlug(admin, workspaceId),
     getHumanCheckResolutions(workspaceId),
+    readMainBuildStatus().catch((err): MainBuildRedSummary => {
+      console.warn("[pipeline-doctor] readMainBuildStatus threw:", err instanceof Error ? err.message : err);
+      return { state: "unknown", headSha: null, firstRedSha: null, firstRedSubject: null };
+    }),
   ]);
 
   let cards = roadmap.specs;
@@ -755,6 +786,7 @@ export async function diagnosePipeline(opts: DiagnoseOptions = {}): Promise<Pipe
       bySeverity,
     },
     storedStatusViolations,
+    mainBuildRed,
     lanes: { buildPoolSize: BUILD_POOL_SIZE, activeBuilds },
     specs: specsOut,
   };

@@ -38,6 +38,10 @@ import {
 // member spec slugs that the areSpecsGoalMates gate (src/lib/agent-jobs.ts) can actually resolve.
 import { normalizePlannerBlockedByList } from "../src/lib/agents/goal-proposals";
 import { patchIgnoredBuildStep } from "../src/lib/vercel-project"; // auto-heal the Vercel Ignored-Build-Step override on every tick (regression-of: per-build-vercel-preview-deploys)
+import {
+  runNextBuildGate as runNextBuildGateShared,
+  BUILD_GATE_MAX_ATTEMPTS as BUILD_GATE_MAX_ATTEMPTS_SHARED,
+} from "../src/lib/deploy-build-gate"; // a-red-main-is-a-first-class-pipeline-alarm Phase 2 — extracted so autoMergeReadyPrs can reuse it
 // agent-jobs-update-retry-and-error-surface Phase 1 — the bounded-retry chokepoint the shared
 // `update(id, patch)` helper below funnels every agent_jobs PATCH through. Absorbs a transient
 // Cloudflare 521 / edge-5xx blip in front of PostgREST + surfaces the terminal case as a typed
@@ -6671,12 +6675,39 @@ async function runPlatformDirectorStandingPass(job: Job, tag: string) {
     // as the webhook — kill-switched, sync-aware, SERIALIZED (≤1 merge/pass), build+tests+mergeable gated —
     // so running it every standing pass is idempotent + best-effort. A goal-bound spec is handed off to B/C.
     const { autoMergeReadyPrs } = await import("../src/lib/github-pr-resolve");
-    const am = await autoMergeReadyPrs(db);
+    // a-red-main-is-a-first-class-pipeline-alarm Phase 2 — the box supplies the deploy-build-gate
+    // runner (it has the git repo + `next build` capability). Checks out the PR's head SHA into a
+    // temp worktree, runs the extracted `runNextBuildGate` (SAME gate the box lane runs on its own
+    // builds — one truth), tears down. On any preflight failure (fetch / worktree add) we return
+    // pass:true with an infra-noise message rather than block: an infra failure is NOT the author's
+    // code, same asymmetry as `classifyBuildGateOutput`. The webhook path passes NO callback and
+    // defers a build-affecting PR to the box's next standing pass.
+    const runDeployBuildGate = async (input: { branch: string; headSha: string }) => {
+      const wtDir = join(BUILDS_DIR, `.deploy-gate-${input.headSha.slice(0, 12)}-${Date.now()}`);
+      try {
+        // Fetch the PR head from origin so the worktree can check it out — a hand-authored branch we
+        // never built locally won't be in the local ref set.
+        const fetched = sh("git", ["fetch", "origin", input.branch]);
+        if (fetched.code !== 0) {
+          console.warn(`[auto-merge/deploy-gate] fetch ${input.branch} failed — treating as infra noise (not blocking):`, fetched.err.slice(0, 200));
+          return { pass: true, error: "", log: fetched.err.slice(-2000) };
+        }
+        const added = sh("git", ["worktree", "add", "--detach", wtDir, input.headSha]);
+        if (added.code !== 0) {
+          console.warn(`[auto-merge/deploy-gate] worktree add ${input.headSha} failed — treating as infra noise (not blocking):`, added.err.slice(0, 200));
+          return { pass: true, error: "", log: added.err.slice(-2000) };
+        }
+        return await runNextBuildGate(wtDir);
+      } finally {
+        sh("git", ["worktree", "remove", "--force", wtDir]);
+      }
+    };
+    const am = await autoMergeReadyPrs({ admin: db, runDeployBuildGate });
     if (am.merged && am.mergedPr) {
       notes.push(`auto-merge → squash-merged 1 ready one-off PR (#${am.mergedPr})`);
-    } else if (am.ready > 0 && (am.buildGateBlocked || am.testsGateBlocked || am.accumulationBlocked || am.goalBoundBlocked)) {
+    } else if (am.ready > 0 && (am.buildGateBlocked || am.testsGateBlocked || am.accumulationBlocked || am.goalBoundBlocked || am.deployBuildGateBlocked)) {
       notes.push(
-        `auto-merge → ${am.ready} ready, none merged (build-gate ${am.buildGateBlocked}, tests-gate ${am.testsGateBlocked}, accumulation ${am.accumulationBlocked}, goal-bound ${am.goalBoundBlocked})`,
+        `auto-merge → ${am.ready} ready, none merged (build-gate ${am.buildGateBlocked}, tests-gate ${am.testsGateBlocked}, accumulation ${am.accumulationBlocked}, goal-bound ${am.goalBoundBlocked}, deploy-build-gate ${am.deployBuildGateBlocked})`,
       );
     }
   } catch (e) {
@@ -27713,31 +27744,14 @@ async function runJob(job: Job) {
   return _modelCtx.run({ modelId }, () => dispatchJob(job));
 }
 
-// ⭐ DEPLOY BUILD GATE (deploy-build-gate). The repo has no CI; `tsc --noEmit` is the only pre-merge check —
-// but cacheComponents PRERENDER errors + route-segment-config errors are NOT type errors, so they sail past
-// tsc and break the Vercel production build (8 breaks in one afternoon). The fix: before a build can COMPLETE
-// (→ auto-merge, which gates on `completed`), it must survive a REAL `next build` — a CLEAN one (wipe .next,
-// which otherwise serves stale prerenders that mask the error). Runs in the worktree (node_modules symlinked,
-// the worker's env inherited for prerender DB reads). On failure the worker re-dispatches Bo to fix his own
-// error; only after BUILD_GATE_MAX_ATTEMPTS does it escalate to a human. The CEO is never pulled in.
-const BUILD_GATE_MAX_ATTEMPTS = 3;
+// ⭐ DEPLOY BUILD GATE — extracted to [[../src/lib/deploy-build-gate]] (a-red-main-is-a-first-class-
+// pipeline-alarm Phase 2) so the auto-merge chokepoint in [[../src/lib/github-pr-resolve]]
+// `autoMergeReadyPrs` can reuse EXACTLY the same gate. Before extraction: only the box lane ran it, so
+// a hand-authored hotfix branch bypassing the box lane escaped it (2026-08-31 incident). The
+// re-exported name/constant preserve the local call shape below.
+const BUILD_GATE_MAX_ATTEMPTS = BUILD_GATE_MAX_ATTEMPTS_SHARED;
 async function runNextBuildGate(wt: string): Promise<{ pass: boolean; error: string; log: string }> {
-  sh("rm", ["-rf", join(wt, ".next")]); // a stale .next masks prerender errors — the build MUST be clean
-  const nb = await shAsync("npx", ["next", "build"], { timeout: 15 * 60 * 1000, cwd: wt });
-  const out = `${nb.out}\n${nb.err}`;
-  if (nb.code === 0) return { pass: true, error: "", log: out.slice(-2000) };
-  // BLOCK only on the cacheComponents class (the errors tsc can't see + that break Vercel): a prerender
-  // failure or an incompatible route-segment config. A COMPILE/module failure (e.g. ffmpeg-static binary
-  // missing on the box, or a transient) is NOT Bo's code — bouncing it to him would loop forever, so don't
-  // block on it (tsc already passed; let the build complete + log a warning for infra to notice).
-  const blocking =
-    /Uncached data was accessed outside of <Suspense>|Error occurred prerendering page|Export encountered an error|Route segment config[^\n]*not compatible/.exec(out);
-  if (!blocking) {
-    console.warn(`[build-gate] next build failed but NOT a prerender/config error (infra/transient — NOT blocking the merge): ${out.slice(-400).replace(/\s+/g, " ")}`);
-    return { pass: true, error: "", log: out.slice(-2000) };
-  }
-  const m = /Error: Route "[^"]+": [^\n]+/.exec(out) || /Route segment config[^\n]+/.exec(out) || blocking;
-  return { pass: false, error: m[0].replace(/\s+/g, " ").slice(0, 600), log: out.slice(-4000) };
+  return runNextBuildGateShared(wt, { runShellSync: sh, runShellAsync: shAsync });
 }
 
 // ⭐ PRE-COMMIT SELF-VERIFY GATE ([[../specs/build-lane-pre-commit-self-verify]] Phase 1).
