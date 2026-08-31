@@ -12,6 +12,9 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Cancelled subs must not report a future billing date** · verified 2026-08-31 · → [[../tables/subscriptions]]
+- **The pipeline doctor must not call a spec stuck for advisory human checks** · verified 2026-08-31 · → [[../lifecycles/spec-build-pipeline]]
+- **Playbook drift classifier must see the question the playbook just asked** · verified 2026-08-31 · → [[../inngest/unified-ticket-handler]]
 - **Ads supervisor: product `Amazing Coffee K-Cups` — Bianca missed a kill on adset `split ingredient stack versus one pod`** · verified 2026-08-30 · → [[lifecycles/ad-creative]] + [[libraries/ads-supervisor]] + [[libraries/media-buyer-agent]]
 - **June can't apply a loyalty coupon to a subscription renewal — the order-scoped money-remedy rail hard-rejects it** · verified 2026-08-30 · → [[lifecycles/ticket-lifecycle]]
 - **Live-orchestrator assisted-purchase routing must carry the customer's picked item into assisted_purchase_params** · verified 2026-08-30 · → [[../libraries/playbook-executor]]
