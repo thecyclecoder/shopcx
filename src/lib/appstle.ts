@@ -3,6 +3,7 @@ import { errText } from "@/lib/error-text";
 import { decrypt } from "@/lib/crypto";
 import { loggedAppstleFetch } from "@/lib/appstle-call-log";
 import { healOnTouch } from "@/lib/appstle-pricing";
+import { applyCancelTruth } from "@/lib/subscription-cancel-truth";
 import {
   isInternalSubscription,
   internalSubscriptionAction,
@@ -125,14 +126,17 @@ export async function appstleSubscriptionAction(
     // Update local subscription status
     const admin = createAdminClient();
     const localStatusMap: Record<string, string> = { pause: "paused", cancel: "cancelled", resume: "active" };
-    // A cancelled sub has no next charge to advertise. Nulling it here (not
-    // at each reader) keeps the CS director brief, founder escalation card,
-    // portal detail, and agent context panel from surfacing a stale date.
-    const patch: Record<string, unknown> = { status: localStatusMap[action], updated_at: new Date().toISOString() };
-    if (action === "cancel") patch.next_billing_date = null;
+    const localUpdate: Record<string, unknown> = {
+      status: localStatusMap[action],
+      updated_at: new Date().toISOString(),
+    };
+    // Cancel-truth: on cancel, null next_billing_date and stamp cancelled_at in the
+    // same write as status='cancelled'. A cancelled row must not advertise a future
+    // charge date. See [[cancelled-subs-stop-reporting-a-future-billing-date]] Phase 1.
+    applyCancelTruth(localUpdate, action);
     const { data: sub } = await admin
       .from("subscriptions")
-      .update(patch)
+      .update(localUpdate)
       .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", contractId)
       .select("customer_id")
