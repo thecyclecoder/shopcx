@@ -1,0 +1,1 @@
+- **Playbook drift classifier must see the question the playbook just asked** · verified 2026-08-31 · → [[../inngest/unified-ticket-handler]]
