@@ -1,0 +1,1 @@
+- **Add an index to specs (seq scan)** · verified 2026-08-31 · → [[tables/specs]]
