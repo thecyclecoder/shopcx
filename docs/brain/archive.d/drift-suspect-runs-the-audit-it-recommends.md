@@ -1,0 +1,1 @@
+- **The drift-suspect detector runs the audit it recommends instead of paging the founder** · verified 2026-08-31 · → [[libraries/platform-director]]
