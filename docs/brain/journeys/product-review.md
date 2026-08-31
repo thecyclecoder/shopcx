@@ -56,3 +56,17 @@ The portal surface is kept for logged-in customers and retains its extra linked-
 `/review` and `/api/review` are listed in `PUBLIC_ROUTES` (`src/lib/supabase/middleware.ts`), beside `/csat` and `/api/csat` — the same token-authorized, no-login shape.
 
 Without that entry the middleware 307s the magic link to `/login`, which is the login wall the public route exists to remove, just one layer higher. It was caught by curling the deployed route rather than trusting the merge: `csat api → 401` (reaches the handler, refuses on token) vs `review api → 307 → /login` (never reaches the handler at all).
+
+## Imagery: variant-scoped review heroes
+
+Resolution order: **variant `review_hero` → product `review_hero` → `products.image_url`.**
+
+`products.image_url` is the PDP hero — a packshot. That image sells *"what am I buying"*; this page needs *"remember why you love this"*, which is the prepared product looking craveable. And it must be **per-variant**, because flavours are different colours: Creatine Prime+ Black Cherry is a deep red glass, Pina Colada a creamy tropical one, so one product-level shot is wrong for at least one of them by construction.
+
+`journey_sessions.variant_id` carries the variant the customer **actually bought**, resolved from the order line — the same hand-picked principle as the tenure fact: specific to them, and checkable. The header reads "How's the Creatine Prime+ Black Cherry?"
+
+**Where the assets live:** `product_media` with `slot='review_hero'` and `variant_id` set. Stored there rather than as a URL column on `product_variants` so they inherit the responsive derivative set (avif/webp at 480→1920) — this is the hero of a page opened almost entirely on phones from an SMS link. `category='lifestyle'`, because category describes the *persuasive job* while `slot` is the addressing key.
+
+**Generated** with Nano Banana Pro, each anchored on the variant's real packshot as a reference image with an exact-label-match instruction — invented packaging on a page asking for sincerity would be worse than no image. The prepared half is derived from how the product is actually consumed: a fizzing tablet in ice water for Tabs, a mid-pour ribbon for Creamer, crema and steam for Coffee, a glossy handful for Gummies. 16 variants, founder-approved before going live.
+
+**Accessories are never asked about** (`products.reviewable=false` for the Mixer, Mug, and Tumbler) — an accessory review is a wasted ask, and they have no prepared result to photograph anyway.
