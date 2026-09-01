@@ -206,7 +206,7 @@ export async function applyReviewRequest(
   // in, then hand off to the shared trigger-aware body composer.
   const token = mintReviewRequestToken();
   const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
-  const reviewUrl = `${siteUrl}/journey/product-review/${token}`;
+  const reviewUrl = `${siteUrl}/review/${token}`;
   const tenureDays =
     typeof customer.created_at === "string"
       ? Math.floor(

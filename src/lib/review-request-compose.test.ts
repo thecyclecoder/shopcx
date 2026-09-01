@@ -30,6 +30,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, existsSync } from "node:fs";
 import { composeReviewRequestFirstTouchBody } from "./review-request-compose";
 import { validateReviewRequest } from "./review-request-validator";
 
@@ -45,7 +46,7 @@ test("post-order: NEVER references a support conversation (no fabricated warmth)
     angle: "fence-sitter",
     productName: "Superfood Tabs",
     customerFirstName: "Amy",
-    reviewUrl: "https://x/journey/product-review/abcd",
+    reviewUrl: "https://x/review/abcd",
     window: "repeat",
     tenureDays: 400,
   });
@@ -61,7 +62,7 @@ test("post-order + repeat: leans on the 'ordered again' warrant", () => {
     angle: "fence-sitter",
     productName: "Creatine Prime+",
     customerFirstName: "Sam",
-    reviewUrl: "https://x/journey/product-review/xyz",
+    reviewUrl: "https://x/review/xyz",
     window: "repeat",
     tenureDays: 400,
   });
@@ -76,7 +77,7 @@ test("post-order + first-time: leans on the 'tried for the first time' warrant",
     angle: "fence-sitter",
     productName: "Sleep Gummies",
     customerFirstName: "Sam",
-    reviewUrl: "https://x/journey/product-review/xyz",
+    reviewUrl: "https://x/review/xyz",
     window: "first-time",
     tenureDays: 200,
   });
@@ -91,7 +92,7 @@ test("ticket trigger: keeps the thread warmth phrasing", () => {
     angle: "fence-sitter",
     productName: "Superfood Tabs",
     customerFirstName: "Amy",
-    reviewUrl: "https://x/journey/product-review/abcd",
+    reviewUrl: "https://x/review/abcd",
     window: null,
   });
   assert.match(body, /Thanks again for reaching out/i);
@@ -104,7 +105,7 @@ test("post-order email: subject names the product so the customer sees what the 
     angle: "fence-sitter",
     productName: "Amazing Coffee",
     customerFirstName: null,
-    reviewUrl: "https://x/journey/product-review/xyz",
+    reviewUrl: "https://x/review/xyz",
     window: "repeat",
     tenureDays: 500,
   });
@@ -121,7 +122,7 @@ test("post-order sms: passes the shared validator's block-layout + link-line + S
     angle: "fence-sitter",
     productName: "Sleep Gummies",
     customerFirstName: "Ren",
-    reviewUrl: "https://x/journey/product-review/xyz",
+    reviewUrl: "https://x/review/xyz",
     window: "first-time",
     tenureDays: 90,
   });
@@ -134,7 +135,7 @@ test("post-order sms: passes the shared validator's block-layout + link-line + S
     angle: "fence-sitter",
     productName: "Sleep Gummies",
     coupon: { include: false },
-    smsShortlink: "https://x/journey/product-review/xyz",
+    smsShortlink: "https://x/review/xyz",
   });
   assert.equal(
     verdict.allow,
@@ -154,7 +155,7 @@ test("both triggers respect the SAME angle set (defend / fence-sitter) — the v
     angle: "defend",
     productName: "Amazing Coffee",
     customerFirstName: "Ali",
-    reviewUrl: "https://x/journey/product-review/xyz",
+    reviewUrl: "https://x/review/xyz",
     window: null,
   });
   const post = composeReviewRequestFirstTouchBody({
@@ -163,7 +164,7 @@ test("both triggers respect the SAME angle set (defend / fence-sitter) — the v
     angle: "defend",
     productName: "Amazing Coffee",
     customerFirstName: "Ali",
-    reviewUrl: "https://x/journey/product-review/xyz",
+    reviewUrl: "https://x/review/xyz",
     window: "repeat",
     tenureDays: 400,
   });
@@ -171,4 +172,25 @@ test("both triggers respect the SAME angle set (defend / fence-sitter) — the v
   // works" antagonist claim — the angle branch is trigger-agnostic.
   assert.match(ticket.body, /worried about whether/i);
   assert.match(post.body, /worried about whether/i);
+});
+
+// 4. **The review link must point at a route that exists.** The post-order
+//    sender minted `/journey/product-review/<token>` — a path with no
+//    `src/app` route — so every ask it drafted would have landed the
+//    customer on a 404. The composer's own tests passed because they
+//    asserted the string, never the route. Pin the path to the real
+//    public magic-link route so a rename has to break this test first.
+test("the review link path resolves to a real app route", () => {
+  const senderSrc = readFileSync(
+    new URL("./review-request-sender.ts", import.meta.url),
+    "utf8",
+  );
+  const match = senderSrc.match(/const reviewUrl = `\$\{siteUrl\}(\/[^$`]*)\$\{token\}`/);
+  assert.ok(match, "review-request-sender must build reviewUrl from siteUrl + a literal path + token");
+  const path = match![1];
+  assert.equal(path, "/review/", `review link path ${path} is not the public magic-link route`);
+  assert.ok(
+    existsSync(new URL(`../app${path}[token]/page.tsx`, import.meta.url)),
+    `no src/app${path}[token]/page.tsx — the review link would 404`,
+  );
 });
