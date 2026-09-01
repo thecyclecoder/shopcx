@@ -194,3 +194,23 @@ test("the review link path resolves to a real app route", () => {
     `no src/app${path}[token]/page.tsx — the review link would 404`,
   );
 });
+
+// 5. **The review-request ticket lands closed.** The ask is one-way; there is
+//    no reply expected and no agent work to do. Creating it `open` put 91
+//    tickets into the CS queue in a single night. The inbound webhook
+//    reopens a closed ticket when the customer actually writes back, so
+//    closed-on-create loses nothing.
+test("the post-order ask creates its ticket closed, not open", () => {
+  const senderSrc = readFileSync(
+    new URL("./review-request-sender.ts", import.meta.url),
+    "utf8",
+  );
+  const insert = senderSrc.slice(senderSrc.indexOf('subject: `Review request'));
+  const status = insert.match(/status: "(\w+)"/);
+  assert.ok(status, "review-request ticket insert must set an explicit status");
+  assert.equal(
+    status![1],
+    "closed",
+    "a review request is a one-way ask — an open ticket lands in the CS queue with no work to do",
+  );
+});

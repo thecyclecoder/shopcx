@@ -352,7 +352,12 @@ export async function createPostOrderAnchorTicket(
       workspace_id: input.workspaceId,
       customer_id: input.customerId,
       subject: `Review request — ${productLabel}`,
-      status: "open",
+      // A review request is a one-way ask with no reply expected. Landing it
+      // `open` put 91 tickets in the CS queue that no agent should ever work
+      // — the queue is for customers who need something. It lands closed;
+      // the inbound path reopens it if the customer actually writes back.
+      status: "closed",
+      closed_at: new Date().toISOString(),
       // Portal-channel routes through sendPortalThreadEmail — the same
       // email path the ticket-trigger's ask would use (portal is the
       // "system-initiated" channel already used by dunning + delivery-
