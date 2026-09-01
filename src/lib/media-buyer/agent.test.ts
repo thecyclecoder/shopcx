@@ -2774,3 +2774,42 @@ test("readLiveCohortConceptTags: a just-published adset the structure sync hasn'
   });
   assert.deepEqual([...tags], ["curiosity"], "must not double-post a concept while the sync lags");
 });
+
+// ── angle-less manual creatives: the campaign-level copy_pack surface ────────────────────────
+// A creative landed by `landManualCreative` (hand-produced, no product_ad_angles row) keeps its
+// pack on `ad_campaigns.metadata.copy_pack` — the publisher's documented third copy surface.
+// `enqueueReplenishPublish` now falls back to it, so these pin the resolver contract that
+// fallback depends on. Before the fix an angle-less campaign deferred forever on "no angle_id"
+// regardless of how complete its copy was.
+
+test("resolveReplenishAdCopy: campaign-level pack with a NULL angle → ok, all variations survive", () => {
+  const pack = {
+    headlines: ["H one", "H two", "H three", "H four", "H five"],
+    primaryTexts: ["P one", "P two", "P three", "P four", "P five"],
+    description: "5g creatine + rhodiola",
+  };
+  const r = resolveReplenishAdCopy(null, { variants: [], copyPack: pack });
+  assert.equal(r.ok, true);
+  assert.equal(r.headlines.length, 5);
+  assert.equal(r.primaryTexts.length, 5);
+  assert.deepEqual(r.descriptions, ["5g creatine + rhodiola"]);
+});
+
+test("resolveReplenishAdCopy: multi-paragraph primary text passes through unmangled", () => {
+  const body = "Hook line.\n\nSecond paragraph.\n\nThird paragraph.";
+  const r = resolveReplenishAdCopy(null, {
+    variants: [],
+    copyPack: {
+      headlines: ["a", "b", "c", "d"],
+      primaryTexts: [body, body, body, body],
+      description: "d",
+    },
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.primaryTexts[0], body, "blank-line paragraph breaks must reach Meta intact");
+});
+
+test("resolveReplenishAdCopy: still fails closed when neither angle nor pack carries copy", () => {
+  const r = resolveReplenishAdCopy(null, { variants: [], copyPack: null });
+  assert.equal(r.ok, false);
+});

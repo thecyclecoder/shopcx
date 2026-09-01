@@ -4059,7 +4059,7 @@ async function enqueueReplenishPublish(
   }
   const { data: campaign } = await admin
     .from("ad_campaigns")
-    .select("id, name, landing_url, angle_id")
+    .select("id, name, landing_url, angle_id, metadata")
     .eq("id", action.adCampaignId)
     .eq("workspace_id", workspaceId)
     .maybeSingle();
@@ -4098,14 +4098,27 @@ async function enqueueReplenishPublish(
   // prefers copy_pack when non-empty; variants fire only when the angle carries no copy_pack.
   // Deterministic-mode compat unchanged (both absent → single-angle-caption fallback fires).
   const variants = await readCopyVariants(admin, action.adCampaignId);
-  const copy = resolveReplenishAdCopy(angle, { variants, copyPack: angleMetadataCopyPack });
+  // A creative landed by [[../ads/manual-creative]] `landManualCreative` (hand-produced — the
+  // podcast-interview video ads, a founder-shot clip, a one-off render) carries NO
+  // `product_ad_angles` row, so its pack lives on `ad_campaigns.metadata.copy_pack`. That is the
+  // publisher's documented THIRD copy surface ([[../../../docs/brain/lifecycles/ad-publish]]), but
+  // replenish only ever read the angle — so an angle-less campaign deferred forever with
+  // "no angle_id" and could never reach Meta no matter how complete its copy was. Read the same
+  // surfaces the publisher does; angle pack still wins when both are present.
+  const campaignMetadataCopyPack =
+    ((campaign as { metadata?: { copy_pack?: ReplenishCopyPack | null } | null } | null)?.metadata
+      ?.copy_pack) ?? null;
+  const copy = resolveReplenishAdCopy(angle, {
+    variants,
+    copyPack: angleMetadataCopyPack ?? campaignMetadataCopyPack,
+  });
   if (!copy.ok) {
     return {
       inserted: false,
       jobId: null,
       reason: angleId
         ? `campaign angle ${copy.reason} — skipped to avoid a malformed Meta creative (meta_400 'link field is required')`
-        : "campaign has no angle_id — no ad-copy source; skipped to avoid a malformed Meta creative",
+        : "campaign has no angle_id AND no ad_campaigns.metadata.copy_pack — no ad-copy source; skipped to avoid a malformed Meta creative",
     };
   }
   const { headlines, primaryTexts, descriptions } = copy;
