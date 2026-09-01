@@ -1,0 +1,1 @@
+- **apply_loyalty_coupon verify must match the internal-sub {code} discount shape** · verified 2026-09-01 · → [[../libraries/action-executor]]
