@@ -17,7 +17,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateManualCreativeGate, type LandManualCreativeArgs } from "@/lib/ads/manual-creative";
+import { evaluateManualCreativeGate, evaluateManualCopyRails, type LandManualCreativeArgs } from "@/lib/ads/manual-creative";
 import { META_CAPS } from "@/lib/ad-tool-config";
 import { AUTHOR_SELF_SCORE_FLOOR } from "@/lib/ads/creative-agent";
 
@@ -90,4 +90,52 @@ test("refuses a self-score below the author floor, accepts at the floor", () => 
 
 test("a null self-score skips the floor check (deliberately unscored creative still lands)", () => {
   assert.equal(evaluateManualCreativeGate(args({ selfScore: null })).ok, true);
+});
+
+// ── evaluateManualCopyRails — the copy-only half, shared with updateManualCreativeCopy ──
+// A copy REVISION on an already-landed creative must clear the same bar as the insert;
+// otherwise a revision could quietly drop a postable row below 4 variations or past a cap.
+
+test("copy rails accept a valid pack with no URL or media supplied", () => {
+  assert.deepEqual(
+    evaluateManualCopyRails({ copyPack: { headlines: [...FOUR], primaryTexts: [...FOUR], description: "d" } }),
+    { ok: true },
+  );
+});
+
+test("copy rails refuse a revision that drops below the pack minimum", () => {
+  const r = evaluateManualCopyRails({ copyPack: { headlines: ["a"], primaryTexts: [...FOUR], description: "d" } });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "headlines_below_min");
+});
+
+test("copy rails refuse a revision that breaches a Meta cap", () => {
+  const r = evaluateManualCopyRails({
+    copyPack: { headlines: [...FOUR], primaryTexts: [...FOUR], description: "x".repeat(META_CAPS.description + 1) },
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "description_over_cap");
+});
+
+test("copy rails enforce the same self-score floor as the land gate", () => {
+  const score = (total: number) => ({ lf8: 2, schwartz: 2, cialdini: 2, hopkins: 2, sugarman: 2, total, evidence: [] });
+  const r = evaluateManualCopyRails({
+    copyPack: { headlines: [...FOUR], primaryTexts: [...FOUR], description: "d" },
+    selfScore: score(AUTHOR_SELF_SCORE_FLOOR - 1),
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "self_score_below_floor");
+});
+
+test("the land gate still surfaces copy refusals (it delegates to the shared rails)", () => {
+  const r = evaluateManualCreativeGate(args({ copyPack: { headlines: ["a"], primaryTexts: [...FOUR], description: "d" } }));
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "headlines_below_min");
+});
+
+test("multi-paragraph primary text is accepted (newlines are not a cap or rail concern)", () => {
+  const para = "Hook line.\n\nSecond paragraph.\n\nThird paragraph.";
+  assert.equal(evaluateManualCopyRails({
+    copyPack: { headlines: [...FOUR], primaryTexts: [para, para, para, para], description: "d" },
+  }).ok, true);
 });

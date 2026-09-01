@@ -92,7 +92,33 @@ export interface ManualCreativeGateResult {
  * media before score — so a caller fixing refusals walks the same sequence every time.
  */
 export function evaluateManualCreativeGate(args: LandManualCreativeArgs): ManualCreativeGateResult {
-  const { copyPack, landingUrl, media, selfScore } = args;
+  const { landingUrl, media } = args;
+
+  const copyRails = evaluateManualCopyRails(args);
+  if (!copyRails.ok) return copyRails;
+
+  // Without ?angle=&variant= the attribution sensor buckets clicks to (unresolved) and
+  // per-creative ROAS goes dark — see [[../../docs/brain/lifecycles/ad-publish]].
+  if (!landingUrl || !hasScentMatchParams(landingUrl)) {
+    return { ok: false, reason: "missing_scent_match_params", detail: landingUrl || "(empty)" };
+  }
+
+  if (!media?.buffer?.length) return { ok: false, reason: "empty_media" };
+
+  return { ok: true };
+}
+
+/**
+ * PURE copy-only rails, shared by the land gate and `updateManualCreativeCopy`. Split out so a
+ * copy revision on an already-landed creative is held to the EXACT same pack-completeness, Meta
+ * cap, and self-score bar as the original insert — a revision can otherwise quietly degrade a
+ * postable row (drop below 4 variations, breach a cap) with no gate in its path.
+ */
+export function evaluateManualCopyRails(args: {
+  copyPack: MetaCopyPack;
+  selfScore?: AuthorSelfScore | null;
+}): ManualCreativeGateResult {
+  const { copyPack, selfScore } = args;
 
   if ((copyPack.headlines?.length ?? 0) < CREATIVE_PACK_MIN.headlines) {
     return { ok: false, reason: "headlines_below_min", detail: `${copyPack.headlines?.length ?? 0} < ${CREATIVE_PACK_MIN.headlines}` };
@@ -113,14 +139,6 @@ export function evaluateManualCreativeGate(args: LandManualCreativeArgs): Manual
   if ((copyPack.description?.length ?? 0) > META_CAPS.description) {
     return { ok: false, reason: "description_over_cap", detail: `${copyPack.description.length} > ${META_CAPS.description}` };
   }
-
-  // Without ?angle=&variant= the attribution sensor buckets clicks to (unresolved) and
-  // per-creative ROAS goes dark — see [[../../docs/brain/lifecycles/ad-publish]].
-  if (!landingUrl || !hasScentMatchParams(landingUrl)) {
-    return { ok: false, reason: "missing_scent_match_params", detail: landingUrl || "(empty)" };
-  }
-
-  if (!media?.buffer?.length) return { ok: false, reason: "empty_media" };
 
   if (selfScore && selfScore.total < AUTHOR_SELF_SCORE_FLOOR) {
     return { ok: false, reason: "self_score_below_floor", detail: `total=${selfScore.total}, floor=${AUTHOR_SELF_SCORE_FLOOR}` };
@@ -208,4 +226,61 @@ export async function landManualCreative(
   await admin.from("ad_campaigns").update({ status: "ready" }).eq("id", campaign.id);
 
   return { kind: "ok", campaignId: campaign.id, videoId: video.id, storagePath, finalUrl };
+}
+
+export type UpdateManualCreativeCopyResult =
+  | { kind: "ok"; adCampaignId: string; headlines: number; primaryTexts: number }
+  | { kind: "refused"; reason: ManualCreativeRefusal; detail?: string }
+  | { kind: "failed"; detail: string };
+
+/**
+ * Revise the copy on an already-landed manual creative, in place.
+ *
+ * Writes the SAME three surfaces `landManualCreative` does — `metadata.copy_pack` (the full
+ * pack the publisher reads as its third fallback when the campaign carries no `angle_id`) plus
+ * the denormalised slot-0 `headline` / `primary_text` / `description` columns the ad detail page
+ * renders. Keeping them in lockstep matters: a revision that updated only the pack would leave
+ * the detail page showing stale copy while Meta served the new text.
+ *
+ * Held to the same copy rails as the original insert via `evaluateManualCopyRails`, so a
+ * revision cannot quietly drop a postable row below 4 variations or past a Meta cap. Media,
+ * landing URL, and publish state are untouched — this is copy only.
+ */
+export async function updateManualCreativeCopy(
+  admin: Admin,
+  opts: {
+    workspaceId: string;
+    adCampaignId: string;
+    copyPack: MetaCopyPack;
+    selfScore?: AuthorSelfScore | null;
+  },
+): Promise<UpdateManualCreativeCopyResult> {
+  const gate = evaluateManualCopyRails(opts);
+  if (!gate.ok) return { kind: "refused", reason: gate.reason!, detail: gate.detail };
+
+  const { workspaceId, adCampaignId, copyPack, selfScore } = opts;
+  const patch: Record<string, unknown> = {
+    headline: copyPack.headlines[0],
+    primary_text: copyPack.primaryTexts[0],
+    description: copyPack.description,
+    metadata: { copy_pack: copyPack },
+  };
+  if (selfScore !== undefined) patch.author_self_score = selfScore ?? null;
+
+  const { data, error } = await admin
+    .from("ad_campaigns")
+    .update(patch)
+    .eq("id", adCampaignId)
+    .eq("workspace_id", workspaceId)
+    .select("id")
+    .maybeSingle();
+  if (error) return { kind: "failed", detail: `campaign_update: ${error.message}` };
+  if (!data) return { kind: "failed", detail: "campaign_update: no matching row (wrong id or workspace)" };
+
+  return {
+    kind: "ok",
+    adCampaignId: data.id,
+    headlines: copyPack.headlines.length,
+    primaryTexts: copyPack.primaryTexts.length,
+  };
 }

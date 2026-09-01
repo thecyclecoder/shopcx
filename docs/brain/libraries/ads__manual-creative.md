@@ -12,7 +12,10 @@ The chokepoint for shelving a creative that was **not** produced by an autonomou
 |---|---|
 | `evaluateManualCreativeGate(args)` | **Pure**, no Supabase. First-match refusal in a deliberate order — pack completeness → Meta caps → destination URL → media → self-score — so a caller fixing refusals walks the same sequence every time. Returns `{ ok: true }` or `{ ok: false, reason, detail? }`. |
 | `landManualCreative(admin, args)` | The writer. Runs the gate, then inserts `ad_campaigns` + `ad_videos`, uploads the bytes, and promotes both to `ready`. |
+| `evaluateManualCopyRails(args)` | **Pure**, the copy-only half of the gate (pack completeness · Meta caps · self-score floor). Shared by the land gate and the copy updater so a REVISION clears the same bar as the insert. |
+| `updateManualCreativeCopy(admin, opts)` | Revise copy on an already-landed creative in place. Writes `metadata.copy_pack` **and** the denormalised slot-0 `headline`/`primary_text`/`description` together — updating only the pack would leave the detail page showing stale copy while Meta served the new text. Media, landing URL, and publish state untouched. |
 | `ManualCreativeRefusal` | Union of every deterministic refusal: `headlines_below_min` · `primary_texts_below_min` · `headline_over_cap` · `primary_text_over_cap` · `description_over_cap` · `missing_scent_match_params` · `empty_media` · `self_score_below_floor`. |
+| `UpdateManualCreativeCopyResult` | `{ kind:'ok', adCampaignId, headlines, primaryTexts }` \| `{ kind:'refused', reason, detail? }` \| `{ kind:'failed', detail }`. |
 | `LandManualCreativeResult` | `{ kind:'ok', campaignId, videoId, storagePath, finalUrl }` \| `{ kind:'refused', reason, detail? }` \| `{ kind:'failed', detail }`. |
 | `LandManualCreativeArgs` / `ManualCreativeMedia` / `ManualCreativeGateResult` | Input + verdict shapes. |
 
@@ -38,6 +41,13 @@ Mirrors the render path in [[../inngest/ad-tool]] (`render-formats`) so a manual
 **`max_qc_eligible` is left NULL** — Max never ran on a hand-made creative. Bianca's `.not("max_qc_eligible","is",false)` filter treats NULL the same as TRUE, so the row is postable without pretending a QC pass happened ([[ads__ready-to-test]]).
 
 **Write order is crash-safe.** The campaign lands `draft` and the video `rendering` FIRST, the bytes upload, and only then are both promoted to `ready`. A failure between those points leaves a visible draft with a stamped error rather than a `ready` row pointing at missing media.
+
+## Formatting note — primary text is read on a phone
+
+Meta truncates primary text behind a "… See more" tap. The first line has to stand alone and open a
+loop, and the body needs blank-line paragraph breaks or it renders as a word wall. Neither is a rail
+(newlines cost nothing against `META_CAPS.primary_text` = 1200), but both decide whether the body is
+read at all. Founder feedback 2026-09-01 on the Creatine Prime+ podcast creative.
 
 ## Copy scoring is the caller's job
 
