@@ -722,19 +722,31 @@ export async function verifyLoyaltyCouponAppliedToContract(
 }
 
 /**
- * True when a `subscriptions.applied_discounts` JSONB blob still carries the
- * given coupon code under ANY of the stored shapes the codebase writes:
- * bare string, `{title}`, `{code}`, `{id}`. Match is case-insensitive
- * because `resolveCoupon` returns the caller's casing. Load-bearing for
- * `verifyActionInDB`'s `remove_coupon` case: the executor confirms the
- * removal actually landed before the customer-facing "removed" message
- * goes out, so a coupon rewritten as `{code}` by
- * `internal_subscription_renewal` (Randi Stier 2026-08-10) cannot slip
- * past a `{title}`-only read-back.
+ * True when a `subscriptions.applied_discounts` JSONB blob carries the given
+ * coupon code under ANY of the stored shapes the codebase writes: bare string,
+ * `{title}`, `{code}`, `{id}`. Match is case-insensitive because `resolveCoupon`
+ * returns the caller's casing.
+ *
+ * Load-bearing for both sides of `verifyActionInDB`'s coupon read-back:
+ *   • `remove_coupon` uses `!hasDiscountCode(...)` — the removal is only
+ *     verified when the code is truly gone under every shape (a coupon
+ *     rewritten as `{code}` by `internal_subscription_renewal` cannot slip
+ *     past a `{title}`-only read-back). Precedent: Randi Stier 2026-08-10,
+ *     ticket `c2bc8bd8-2aca-4eeb-968b-dd968a3d0dbc`.
+ *   • `apply_coupon` / `apply_loyalty_coupon` use `hasDiscountCode(...)`
+ *     directly — an apply is verified when the code is genuinely present
+ *     under any stored shape. The pre-fix `discounts.some(d => d.title ===
+ *     action.code)` matched only `{title}` and returned FALSE for the
+ *     `{code}` shape that `computeAppliedDiscountCents` honors, so a
+ *     coupon that was correctly applied to an internal sub verified as
+ *     failed, the outcome-completion gate blocked auto-close, and the
+ *     resolved ticket false-escalated. Precedent: Janelle Heath 2026-08,
+ *     ticket `715658b5-934e-4ec8-937f-6ea749e8d3ea` (LOYALTY-10-Z2XRVP
+ *     applied to K-Cups sub `internal-e392298b48834705`).
  *
  * Exported for unit tests.
  */
-export function stillHasDiscountCode(
+export function hasDiscountCode(
   appliedDiscounts: unknown,
   code: string,
 ): boolean {
@@ -754,6 +766,14 @@ export function stillHasDiscountCode(
   }
   return false;
 }
+
+/**
+ * Semantic alias for `hasDiscountCode` — reads naturally at the
+ * `remove_coupon` verify call site (`!stillHasDiscountCode(...)` = "the
+ * code is truly gone"). Same predicate, exported under both names so
+ * apply-side and remove-side callers read symmetrically.
+ */
+export const stillHasDiscountCode = hasDiscountCode;
 
 // ── Phase-2 order/sub-scoped loyalty-ceiling guards
 // (spec: loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates)
@@ -4598,12 +4618,23 @@ export async function verifyActionInDB(
     }
     case "apply_coupon":
     case "apply_loyalty_coupon": {
+      // Mirror-image of the remove_coupon read-back below: an apply is
+      // verified when the code is genuinely present under ANY of the stored
+      // shapes the codebase writes (bare string · {title} · {code} · {id}),
+      // case-insensitively. The pre-fix `d.title === action.code` matched
+      // only {title} and returned FALSE for the {code} shape that
+      // `internal_subscription_renewal` rewrites the row to (and that
+      // `computeAppliedDiscountCents` honors), so a coupon that WAS
+      // correctly applied to an internal sub verified as failed, the
+      // outcome-completion gate blocked auto-close, and the resolved
+      // ticket false-escalated (Janelle Heath 2026-08, ticket
+      // 715658b5-934e-4ec8-937f-6ea749e8d3ea — LOYALTY-10-Z2XRVP genuinely
+      // applied to K-Cups sub internal-e392298b48834705).
       if (!action.contract_id || !action.code) return true;
       const q = scopeSub(admin.from("subscriptions")
         .select("applied_discounts").eq("shopify_contract_id", action.contract_id));
-      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { applied_discounts?: { title?: string }[] } | null }> }).maybeSingle();
-      const discounts = (data?.applied_discounts || []) as { title?: string }[];
-      return discounts.some(d => d.title === action.code);
+      const { data } = await (q as unknown as { maybeSingle: () => Promise<{ data: { applied_discounts?: unknown } | null }> }).maybeSingle();
+      return hasDiscountCode(data?.applied_discounts, action.code);
     }
     case "remove_coupon": {
       // Re-read applied_discounts and confirm the removed code is truly gone.
