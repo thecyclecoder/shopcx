@@ -12,11 +12,20 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **A red main is a first-class pipeline alarm, and the deploy build gate covers every PR** · verified 2026-08-31 · → [[../libraries/control-tower]] (main-build-status), [[../libraries/deploy-build-gate]], [[../libraries/github-pr-resolve]]
+- **Amazing Coffee supply-tier pricing vs flat subscription & interval cap** · verified 2026-08-31 · → [[../tables/sonnet_prompts]]
 - **Cancelled subs must not report a future billing date** · verified 2026-08-31 · → [[../tables/subscriptions]]
 - **Cold-scaler arming gate decides on real evidence** · verified 2026-08-31 · → [[../libraries/media-buyer__cold-scaler-arming-gate]]
+- **Control Tower should not call a queued agent job stuck while its lane is actively draining** · verified 2026-08-31 · → [[../libraries/control-tower]]
 - **Add an index to specs (seq scan)** · verified 2026-08-31 · → [[tables/specs]]
+- **The drift-suspect detector runs the audit it recommends instead of paging the founder** · verified 2026-08-31 · → [[libraries/platform-director]]
+- **EasyPost missing-carrier-credentials noise on the returns-reconcile-sweep scoped as foreign** · verified 2026-08-31 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
+- **No pattern match on a UUID column** · verified 2026-08-31 · → [[../operational-rules]]
 - **The pipeline doctor must not call a spec stuck for advisory human checks** · verified 2026-08-31 · → [[../lifecycles/spec-build-pipeline]]
 - **Playbook drift classifier must see the question the playbook just asked** · verified 2026-08-31 · → [[../inngest/unified-ticket-handler]]
+- **A build repairs only the predeploy violations its own diff caused** · verified 2026-08-31 · → [[lifecycles/spec-build-pipeline]]
+- **Review requests — the post-order ask** · verified 2026-08-31 · → [[../lifecycles/ticket-lifecycle]]
+- **Tenant-scope sonnet_prompts reads before merchant-specific prompt seeds** · verified 2026-08-31 · → [[../tables/sonnet_prompts]]
 - **Ads supervisor: product `Amazing Coffee K-Cups` — Bianca missed a kill on adset `split ingredient stack versus one pod`** · verified 2026-08-30 · → [[lifecycles/ad-creative]] + [[libraries/ads-supervisor]] + [[libraries/media-buyer-agent]]
 - **June can't apply a loyalty coupon to a subscription renewal — the order-scoped money-remedy rail hard-rejects it** · verified 2026-08-30 · → [[lifecycles/ticket-lifecycle]]
 - **Live-orchestrator assisted-purchase routing must carry the customer's picked item into assisted_purchase_params** · verified 2026-08-30 · → [[../libraries/playbook-executor]]
