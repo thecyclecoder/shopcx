@@ -1,0 +1,1 @@
+- **A shipped spec that cannot fold counts as stuck on the board** · verified 2026-09-02 · → [[../libraries/pipeline-doctor]]
