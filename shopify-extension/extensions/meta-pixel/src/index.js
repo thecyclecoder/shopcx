@@ -46,6 +46,19 @@ function readFbclid(href) {
   }
 }
 
+/**
+ * SCOPE: CHECKOUT EVENTS ONLY.
+ *
+ * PageView / ViewContent / AddToCart / Lead are owned by the THEME script
+ * (snippets/meta-pixel.liquid), which can do what this sandbox cannot: call
+ * fbq() directly for a real BROWSER event, and read first-party cookies from a
+ * normal DOM. Subscribing to them HERE too would send Meta two copies of every
+ * storefront event under DIFFERENT event ids — double-counting, not deduping.
+ * (That regression shipped briefly on 2026-09-02 and was caught in Test Events.)
+ *
+ * What only this surface can see is checkout: Shopify's checkout is a separate
+ * surface theme code cannot reach.
+ */
 register(({analytics, browser, init, settings}) => {
   const pixelId = settings.pixelId;
   if (!pixelId) return;
@@ -83,32 +96,44 @@ register(({analytics, browser, init, settings}) => {
    * a normal fetch would be cancelled mid-flight. Fire-and-forget — a tracking
    * failure must never surface to the shopper.
    */
-  async function send(eventName, eventId, event, customData) {
-    const href = event?.context?.document?.location?.href || "";
-    const {fbp, fbc} = await resolveMetaCookies(href);
-    const body = {
-      pixelId,
-      eventName,
-      eventId,
-      eventTimeMs: event?.timestamp ? Date.parse(event.timestamp) : Date.now(),
-      sourceUrl: href,
-      referrer: event?.context?.document?.referrer || null,
-      fbp,
-      fbc,
-      customerId: init?.data?.customer?.id ?? null,
-      email: init?.data?.customer?.email ?? null,
-      customData: customData || {},
-    };
+  // Cookies are resolved ONCE at init, not per event. The previous version awaited
+  // browser.cookie.get() inside send(), which put an async hop between the event
+  // firing and the fetch leaving. On events that coincide with a navigation
+  // (checkout_started, payment_info_submitted) the sandbox can be torn down during
+  // that hop, so the request was never issued at all — `keepalive` cannot rescue a
+  // fetch that never started. checkout_completed survived only because the
+  // thank-you page sits still. Symptom: Purchase deduped fine while
+  // InitiateCheckout and AddPaymentInfo produced no events whatsoever (2026-09-02).
+  var cookies = { fbp: null, fbc: null };
+  resolveMetaCookies(init && init.context && init.context.document
+    && init.context.document.location && init.context.document.location.href)
+    .then(function (c) { cookies = c; })
+    .catch(function () {});
+
+  function send(eventName, eventId, event, customData) {
+    var href = (event && event.context && event.context.document
+      && event.context.document.location && event.context.document.location.href) || "";
+    // Synchronous through to fetch() — nothing may await between here and the send.
     try {
-      await fetch(ENDPOINT, {
+      fetch(ENDPOINT, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(body),
         keepalive: true,
-      });
-    } catch {
-      /* never break the storefront on a tracking failure */
-    }
+        body: JSON.stringify({
+          pixelId: pixelId,
+          eventName: eventName,
+          eventId: eventId,
+          eventTimeMs: event && event.timestamp ? Date.parse(event.timestamp) : Date.now(),
+          sourceUrl: href,
+          referrer: (event && event.context && event.context.document && event.context.document.referrer) || null,
+          fbp: cookies.fbp,
+          fbc: cookies.fbc,
+          customerId: (init && init.data && init.data.customer && init.data.customer.id) || null,
+          email: (init && init.data && init.data.customer && init.data.customer.email) || null,
+          customData: customData || {},
+        }),
+      }).catch(function () {});
+    } catch (e) { /* never break checkout on a tracking failure */ }
   }
 
   const money = (p) => (p?.amount != null ? Number(p.amount) : undefined);
@@ -120,43 +145,13 @@ register(({analytics, browser, init, settings}) => {
   // outside the US — the server half reads the order's real `currency` already.
   const CURRENCY = "USD";
 
-  analytics.subscribe("page_viewed", (event) => {
-    send("PageView", `pv_${event.id}`, event, {});
-  });
 
-  analytics.subscribe("product_viewed", (event) => {
-    const v = event.data?.productVariant;
-    send("ViewContent", `vc_${event.id}`, event, {
-      content_type: "product",
-      content_ids: [v?.sku || v?.product?.id].filter(Boolean),
-      content_name: v?.product?.title,
-      value: money(v?.price),
-      currency: CURRENCY,
-    });
-  });
 
-  analytics.subscribe("product_added_to_cart", (event) => {
-    const l = event.data?.cartLine;
-    const v = l?.merchandise;
-    send("AddToCart", `atc_${event.id}`, event, {
-      content_type: "product",
-      content_ids: [v?.sku || v?.product?.id].filter(Boolean),
-      content_name: v?.product?.title,
-      value: money(l?.cost?.totalAmount),
-      currency: CURRENCY,
-      num_items: l?.quantity,
-    });
-  });
 
-  analytics.subscribe("checkout_started", (event) => {
-    const c = event.data?.checkout;
-    send("InitiateCheckout", `ic_${event.id}`, event, {
-      value: money(c?.totalPrice),
-      currency: CURRENCY,
-      num_items: c?.lineItems?.length,
-      content_ids: (c?.lineItems || []).map((li) => li?.variant?.sku).filter(Boolean),
-    });
-  });
+  // checkout_started is NOT subscribed here. Shopify never emitted it on either
+  // of our checkout entries, and the theme script now fires InitiateCheckout off
+  // the cart drawer's Checkout button instead — a truer intent signal, and it gets
+  // both the fbq and relay paths. Re-subscribing here would double-count.
 
   analytics.subscribe("payment_info_submitted", (event) => {
     const c = event.data?.checkout;
