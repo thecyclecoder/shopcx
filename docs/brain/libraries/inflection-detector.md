@@ -159,16 +159,19 @@ Per spec: the corrected reply is the new box session's job — writing it from t
 
 ### Holding message on `'frustration'` (gate-site policy, not router)
 
-The Phase-2 gate call site — BEFORE it calls `reSessionSol` — sends a short "we're looking into that for you" inline holding message via `stampedSend` when:
+The Phase-2 gate call site — BEFORE it calls `reSessionSol` — enqueues a short "we're looking into that for you" holding message as a DEFERRED pending row via `enqueuePendingHolding` ([[./holding-message-defer]]) when:
 
 - `kind === 'frustration'` (drift is silent by default — the customer doesn't need to be told the AI is re-orienting).
 - `ai_channel_config.sol_frustration_holding_message_enabled` is `true` (default `true`, workspace-tunable — a workspace that prefers a fully silent re-session can turn it off). Migration: `supabase/migrations/20260928120000_ai_channel_config_sol_frustration_holding_message_enabled.sql` (`boolean NOT NULL DEFAULT true`), applied via `scripts/apply-ai-channel-config-sol-frustration-holding-message-enabled-migration.ts`.
+
+The write is NO LONGER synchronous ([[../specs/the-holding-message-only-sends-if-the-real-reply-is-actually-slow]] Phase 1). The row lands with `pending_send_at = now + HOLDING_DEFER_MS`; the [[../inngest/deliver-pending-send]] cron dispatches it only if no substantive reply lands first. Every substantive reply path goes through `send()` in unified-ticket-handler.ts, which calls `cancelPendingHoldingMessagesForTicket` before its own insert — so a fast re-session answer supersedes the stall without the customer ever seeing it. See [[./holding-message-defer]] for the pure decision helper (`shouldCancelPendingHolding`), the compare-and-set guarantee that a delivered holding row is never retroactively marked cancelled, and the 90-second `HOLDING_DEFER_MS` rationale.
 
 ## Related
 
 - [[../specs/sol-drift-frustration-detector-and-re-session-router]]
 - [[../specs/sol-ticket-direction-artifact-and-first-touch-box-session]]
 - [[../specs/sol-cheap-execution-over-ticket-direction]]
+- [[./holding-message-defer]] — pure-helper + DB wiring for the deferred holding row (fast-reply cancel, slow-reply preserve-ledger).
 - [[./ticket-directions]] — the durable Direction artifact whose `intent` this detector reads and whose `superseDirection` the router calls.
 - [[../tables/ticket_directions]] — one live row per ticket (partial UNIQUE `superseded_at IS NULL`).
 - [[../tables/ticket_resolution_events]] — where the flagged `sol:inflection-<kind>` reasoning lands.

@@ -729,9 +729,15 @@ export async function reSessionSol(
  *     the existing dispatch (playbook short-circuit OR Sonnet).
  *   - kind='drift'|'frustration' → stages one `ticket_resolution_events` row with
  *     `reasoning='sol:inflection-<kind>'` (evidence in `chosen` jsonb), then on frustration
- *     AND `sol_frustration_holding_message_enabled !== false` sends a short inline holding
- *     message via the injected `sendHoldingMessage` callback, then calls `reSessionSol`.
- *     The caller drops the drafted reply and returns without dispatching.
+ *     AND `sol_frustration_holding_message_enabled !== false` DEFERS a short holding
+ *     message via the injected `sendHoldingMessage` callback — the callback's production
+ *     impl writes a PENDING `ticket_messages` row with
+ *     `pending_send_at = now + HOLDING_DEFER_MS` (see
+ *     [[../../docs/brain/libraries/holding-message-defer]]), NOT a synchronous dispatch.
+ *     The `deliver-pending-sends` cron ships the row only if no substantive reply lands
+ *     first (that reply's `send()` chokepoint compare-and-set-cancels the pending holding
+ *     via `cancelPendingHoldingMessagesForTicket`). Then calls `reSessionSol`. The caller
+ *     drops the drafted reply and returns without dispatching.
  */
 export interface ApplyInflectionGateInput {
   admin: SupabaseClient;
@@ -741,7 +747,13 @@ export interface ApplyInflectionGateInput {
   newestMessage: string;
   aiTurnLimit: number;
   solFrustrationHoldingMessageEnabled: boolean;
-  /** Injected send callback — the caller provides its own send wrapper (sendWithDelay + sandbox). */
+  /**
+   * Injected holding-message callback. Production impl writes a PENDING
+   * `ticket_messages` row with `pending_send_at = now + HOLDING_DEFER_MS`
+   * (see [[../../docs/brain/libraries/holding-message-defer]]) — NOT a synchronous
+   * send. Tests inject a lightweight recording stub so applyInflectionGate can be
+   * exercised without booting the pending-outbox path.
+   */
   sendHoldingMessage: (channel: string, body: string) => Promise<void>;
   /** Injected only for tests; production uses the real Haiku transport. */
   haiku?: HaikuVerdictFn;
@@ -824,10 +836,14 @@ export async function applyInflectionGate(
   let holdingMessageSent = false;
   if (verdict.kind === "frustration" && input.solFrustrationHoldingMessageEnabled) {
     try {
+      // Deferred, not dispatched inline: the callback's production impl writes a PENDING
+      // ticket_messages row with `pending_send_at = now + HOLDING_DEFER_MS`. The
+      // deliver-pending-sends cron ships it only if no substantive reply lands first.
+      // See [[../../docs/brain/libraries/holding-message-defer]].
       await input.sendHoldingMessage(input.channel, "We're looking into that for you.");
       holdingMessageSent = true;
     } catch {
-      // Holding-message send failure must not block the bounce.
+      // Holding-message write failure must not block the bounce.
     }
   }
 

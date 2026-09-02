@@ -286,6 +286,22 @@ async function send(admin: Admin, wsId: string, tid: string, ch: string, msg: st
   const { addTicketTag } = await import("@/lib/ticket-tags");
   await addTicketTag(tid, "ai");
 
+  // SPEC: the-holding-message-only-sends-if-the-real-reply-is-actually-slow Phase 1.
+  // Cancel any still-pending "We're looking into that for you." holding row on this
+  // ticket BEFORE inserting the substantive outbound. The Sol frustration branch
+  // deferred the holding via enqueuePendingHolding; if the real reply lands before
+  // the deadline passes, the customer should never see the stall. Placed here in
+  // send() because it is the single chokepoint every reply path (Sonnet, playbook,
+  // canned responses, first-touch ack) traverses — the spec pins the cancel at the
+  // reply chokepoint so no path can silently ship the stall behind the real answer.
+  // The helper's DB write is a compare-and-set on sent_at IS NULL, so a holding row
+  // the cron already delivered is never retroactively marked cancelled.
+  const { cancelPendingHoldingMessagesForTicket, HOLDING_MESSAGE_BODY } =
+    await import("@/lib/holding-message-defer");
+  if (msg !== HOLDING_MESSAGE_BODY) {
+    await cancelPendingHoldingMessagesForTicket(admin, tid);
+  }
+
   if (sandbox) {
     await admin.from("ticket_messages").insert({ ticket_id: tid, direction: "outbound", visibility: "internal", author_type: "ai", body: `[AI Draft] ${html}` });
     return;
@@ -2081,8 +2097,18 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         newestMessage: msg,
         aiTurnLimit: cfg.ai_turn_limit ?? 4,
         solFrustrationHoldingMessageEnabled: cfg.sol_frustration_holding_message_enabled !== false,
-        sendHoldingMessage: async (channel, body) => {
-          await sendWithDelay(admin, wsId, tid, channel, body, cfg.sandbox);
+        sendHoldingMessage: async (_channel, _body) => {
+          // SPEC: the-holding-message-only-sends-if-the-real-reply-is-actually-slow Phase 1.
+          // The holding message is DEFERRED — written as a pending ticket_messages row
+          // with a short pending_send_at. The deliver-pending-sends cron ships it once
+          // the deadline passes AND no send_cancelled flag is raised in the interim by a
+          // substantive reply landing first (cancelPendingHoldingMessagesForTicket is
+          // called from send() below on every substantive outbound). Channel/body come
+          // through the callback signature for backwards compat with the injected test
+          // mocks; the DB write uses the pinned HOLDING_MESSAGE_BODY constant so the
+          // cancel query can identify the row without a new schema column.
+          const { enqueuePendingHolding } = await import("@/lib/holding-message-defer");
+          await enqueuePendingHolding(admin, tid, cfg.sandbox);
         },
       });
       if (result.kind !== "none") {
