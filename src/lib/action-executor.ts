@@ -1960,6 +1960,29 @@ export const directActionHandlers: Record<
     if (!code) return { success: false, error: "Missing coupon code (pass via 'code')" };
     if (!p.contract_id) return { success: false, error: "apply_loyalty_coupon missing contract_id" };
 
+    // Phase-1 owner-mismatch guard (spec:
+    // loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen).
+    // A code minted for one Shopify customer cannot land on a contract owned
+    // by another — points combine across a link group, codes do not. Runs
+    // BEFORE the 2s propagation delay and BEFORE the apply→regen self-heal so
+    // Appstle is never called (its apply path removes automatic discounts
+    // first) and regen never mints a second doomed code.
+    //
+    // MUST run BEFORE the same-code idempotent-success return below (spec:
+    // apply-loyalty-coupon-same-code-reapply-is-idempotent-success-not-stacking
+    // Phase 2 security fix). Otherwise an attacker-controlled state where
+    // `applied_discounts` already carries the incoming code — but the code
+    // belongs to a DIFFERENT Shopify customer than the contract owner —
+    // would stamp a successful authorization for a coupon this contract
+    // owner does not own. The mismatch check gates both paths.
+    const mismatch = await refuseLoyaltyCouponIfCustomerMismatch(
+      ctx.admin,
+      ctx.workspaceId,
+      p.contract_id,
+      code,
+    );
+    if (mismatch) return mismatch;
+
     // Phase-2 stacking guard (spec:
     // loyalty-remedy-hard-cap-15-no-cashout-makewhole-june-never-escalates).
     // Refuse a second LOYALTY-* coupon on a contract already carrying one —
@@ -1977,7 +2000,9 @@ export const directActionHandlers: Record<
     // first apply landed the code, three retries all hit the guard, and the
     // required-outcome gate then blocked auto-close and re-escalated. Refuse
     // ONLY when a DIFFERENT LOYALTY-* code is present (the real stacking
-    // case the loyalty-remedy-hard-cap ceiling exists to protect).
+    // case the loyalty-remedy-hard-cap ceiling exists to protect). Owner
+    // mismatch already refused above so the success return below cannot
+    // authorize a code that belongs to a different contract owner.
     const { data: subForStacking } = await ctx.admin
       .from("subscriptions")
       .select("applied_discounts")
@@ -2005,21 +2030,6 @@ export const directActionHandlers: Record<
         };
       }
     }
-
-    // Phase-1 owner-mismatch guard (spec:
-    // loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen).
-    // A code minted for one Shopify customer cannot land on a contract owned
-    // by another — points combine across a link group, codes do not. Runs
-    // BEFORE the 2s propagation delay and BEFORE the apply→regen self-heal so
-    // Appstle is never called (its apply path removes automatic discounts
-    // first) and regen never mints a second doomed code.
-    const mismatch = await refuseLoyaltyCouponIfCustomerMismatch(
-      ctx.admin,
-      ctx.workspaceId,
-      p.contract_id,
-      code,
-    );
-    if (mismatch) return mismatch;
 
     // Brief delay — coupon may have just been created in Shopify and needs a moment to propagate
     await new Promise(resolve => setTimeout(resolve, 2000));
