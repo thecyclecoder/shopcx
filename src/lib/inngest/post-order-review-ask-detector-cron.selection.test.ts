@@ -163,6 +163,7 @@ test("select: an already-asked (customer, product) key is counted under skipped_
       [c.customerId, { sms_marketing_status: "subscribed", email_marketing_status: null }],
     ]),
     firstTimeKeys: new Set(),
+    blindHistoryCustomers: new Set<string>(),
     now: NOW,
     readCap: POST_ORDER_READ_CAP,
   });
@@ -181,6 +182,7 @@ test("select: an already-reviewed (customer, product) key is counted under skipp
       [c.customerId, { sms_marketing_status: "subscribed", email_marketing_status: null }],
     ]),
     firstTimeKeys: new Set(),
+    blindHistoryCustomers: new Set<string>(),
     now: NOW,
     readCap: POST_ORDER_READ_CAP,
   });
@@ -198,6 +200,7 @@ test("select: an unreachable customer is counted under skipped_unreachable", () 
       [c.customerId, { sms_marketing_status: null, email_marketing_status: "unsubscribed" }],
     ]),
     firstTimeKeys: new Set(),
+    blindHistoryCustomers: new Set<string>(),
     now: NOW,
     readCap: POST_ORDER_READ_CAP,
   });
@@ -219,6 +222,7 @@ test("select: a first-timer at 10 days is NOT READY (per-product 21d window)", (
       [c.customerId, { sms_marketing_status: "subscribed", email_marketing_status: null }],
     ]),
     firstTimeKeys: new Set([`${c.customerId}|${c.productId}`]),
+    blindHistoryCustomers: new Set<string>(),
     now: NOW,
     readCap: POST_ORDER_READ_CAP,
   });
@@ -235,7 +239,8 @@ test("select: a repeat-buyer at 10 days IS READY under the 10d window", () => {
     marketingByCustomer: new Map([
       [c.customerId, { sms_marketing_status: "subscribed", email_marketing_status: null }],
     ]),
-    firstTimeKeys: new Set(), // not in the set → REPEAT
+    firstTimeKeys: new Set(),
+    blindHistoryCustomers: new Set<string>(), // not in the set → REPEAT
     now: NOW,
     readCap: POST_ORDER_READ_CAP,
   });
@@ -262,10 +267,73 @@ test("select: same (customer, product) across two orders in the window is de-dup
     marketingByCustomer: new Map([
       [c1.customerId, { sms_marketing_status: "subscribed", email_marketing_status: null }],
     ]),
-    firstTimeKeys: new Set(), // repeat window
+    firstTimeKeys: new Set(),
+    blindHistoryCustomers: new Set<string>(), // repeat window
     now: NOW,
     readCap: POST_ORDER_READ_CAP,
   });
   assert.equal(r.ready.length, 1);
   assert.equal(r.ready[0].orderId, "order-1"); // earliest wins
+});
+
+// ── The blind-history rail ────────────────────────────────────────────────
+//
+// `firstTimeKeys` is built by ABSENCE: a (customer, product) key is
+// "first-time" when no prior order was found containing that product. But
+// `orders.line_items[].product_id` was only 4-12% populated before July 2026
+// (94% after), so for a tenured customer that absence usually means "we
+// cannot see their history", not "they never bought it".
+//
+// The failing state this pins, observed in production: the first 132 drafted
+// asks were 132/132 "you tried it for the first time" — and 96 of those
+// customers had SIX OR MORE prior orders. Absence of evidence was going out
+// to customers as evidence of absence.
+
+test("a blind history withholds the first-time claim, keeping the neutral copy", () => {
+  const cls = classifyPostOrderWindow({
+    orderCreatedAt: new Date(Date.now() - 22 * 86400_000).toISOString(),
+    firstTimeForProduct: true,
+    historyVisible: false,
+    now: Date.now(),
+  });
+  assert.equal(
+    cls.window,
+    null,
+    "an unreadable history must not assert 'you tried it for the first time'",
+  );
+  assert.equal(cls.ready, true, "withholding the claim must not withhold the ask");
+});
+
+test("a visible history still makes the first-time claim", () => {
+  const cls = classifyPostOrderWindow({
+    orderCreatedAt: new Date(Date.now() - 22 * 86400_000).toISOString(),
+    firstTimeForProduct: true,
+    historyVisible: true,
+    now: Date.now(),
+  });
+  assert.equal(cls.window, "first-time");
+});
+
+test("a blind history keeps the LONGER first-time cadence, never the 10-day one", () => {
+  const orderedAt = new Date(Date.now() - 12 * 86400_000).toISOString();
+  const cls = classifyPostOrderWindow({
+    orderCreatedAt: orderedAt,
+    firstTimeForProduct: true,
+    historyVisible: false,
+    now: Date.now(),
+  });
+  // 12 days in: past the 10d repeat window, short of the 21d first-time one.
+  // Withholding the claim must not silently promote them to the fast cadence.
+  assert.equal(cls.ready, false, "a blind candidate must still wait the 21-day window");
+});
+
+test("a known repeat buyer is unaffected by the blind-history rail", () => {
+  const cls = classifyPostOrderWindow({
+    orderCreatedAt: new Date(Date.now() - 11 * 86400_000).toISOString(),
+    firstTimeForProduct: false,
+    historyVisible: false,
+    now: Date.now(),
+  });
+  assert.equal(cls.window, "repeat", "a positive match is evidence; only absence is unreliable");
+  assert.equal(cls.ready, true);
 });

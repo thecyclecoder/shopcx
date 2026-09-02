@@ -134,15 +134,25 @@ export interface PostOrderCandidate {
 export function classifyPostOrderWindow(input: {
   orderCreatedAt: string;
   firstTimeForProduct: boolean;
+  /** Can we actually SEE this customer's purchase history? False when any
+   * prior order's line_items carry no product_id — see the doc comment on
+   * `blindHistoryCustomers` below. When false, `firstTimeForProduct` is an
+   * artifact of missing data, not a fact about the customer, and the copy
+   * must not assert it. */
+  historyVisible?: boolean;
   now: number;
-}): { window: "first-time" | "repeat"; dueAtMs: number; ready: boolean } {
+}): { window: "first-time" | "repeat" | null; dueAtMs: number; ready: boolean } {
   const t = Date.parse(input.orderCreatedAt);
   const windowDays = input.firstTimeForProduct
     ? POST_ORDER_FIRST_TIME_WINDOW_DAYS
     : POST_ORDER_REPEAT_WINDOW_DAYS;
   const dueAtMs = Number.isNaN(t) ? Number.POSITIVE_INFINITY : t + windowDays * DAY_MS;
+  // Cadence still uses the longer first-time window when in doubt — waiting
+  // an extra 11 days never hurts. Only the CLAIM is withheld: a null window
+  // renders the neutral opening, which asserts nothing about their history.
+  const claimable = input.historyVisible !== false;
   return {
-    window: input.firstTimeForProduct ? "first-time" : "repeat",
+    window: input.firstTimeForProduct ? (claimable ? "first-time" : null) : "repeat",
     dueAtMs,
     ready: dueAtMs <= input.now,
   };
@@ -195,10 +205,23 @@ export function selectPostOrderReadyCandidates(input: {
    * key NOT in this set is treated as REPEAT (they have prior orders
    * containing this product). */
   firstTimeKeys: Set<string>;
+  /** customer_ids whose purchase history we CANNOT read. A customer lands
+   * here when they have at least one prior order whose line_items carry no
+   * product_id at all.
+   *
+   * This exists because `firstTimeKeys` is built by absence: a key is
+   * "first-time" when no prior order was found containing the product. But
+   * `orders.line_items[].product_id` was only 4-12% populated before July
+   * 2026 (94% after), so for a long-tenured customer that absence usually
+   * means "we can't see their history", not "they never bought it". The
+   * first 132 drafts were 132/132 "you tried it for the first time" — 96 of
+   * those customers had SIX OR MORE prior orders. Absence of evidence was
+   * being sent to customers as evidence of absence. */
+  blindHistoryCustomers: Set<string>;
   now: number;
   readCap: number;
 }): {
-  ready: Array<PostOrderCandidate & { window: "first-time" | "repeat" }>;
+  ready: Array<PostOrderCandidate & { window: "first-time" | "repeat" | null }>;
   skipped_already_asked: number;
   skipped_already_reviewed: number;
   skipped_unreachable: number;
@@ -209,7 +232,7 @@ export function selectPostOrderReadyCandidates(input: {
   let skipped_already_reviewed = 0;
   let skipped_unreachable = 0;
   let skipped_not_due = 0;
-  const out: Array<PostOrderCandidate & { window: "first-time" | "repeat" }> = [];
+  const out: Array<PostOrderCandidate & { window: "first-time" | "repeat" | null }> = [];
   const seen = new Set<string>();
   for (const c of input.candidates) {
     const key = `${c.customerId}|${c.productId}`;
@@ -231,6 +254,7 @@ export function selectPostOrderReadyCandidates(input: {
     const cls = classifyPostOrderWindow({
       orderCreatedAt: c.orderCreatedAt,
       firstTimeForProduct,
+      historyVisible: !input.blindHistoryCustomers.has(c.customerId),
       now: input.now,
     });
     if (!cls.ready) {
@@ -493,6 +517,7 @@ export const postOrderReviewAskDetectorCron = inngest.createFunction(
       // to `created_at < now-21d-1d` so we only need to prove
       // pre-existence, not enumerate.
       const firstTimeKeys = new Set<string>();
+      let blindHistoryCustomers = new Set<string>();
       {
         const earliestAnchor = candidates.reduce(
           (min, c) => (c.orderCreatedAt < min ? c.orderCreatedAt : min),
@@ -504,6 +529,10 @@ export const postOrderReviewAskDetectorCron = inngest.createFunction(
           .in("customer_id", customerIds)
           .lt("created_at", earliestAnchor);
         const priorByCustomer = new Map<string, Set<string>>();
+        // A prior order we cannot read tells us nothing about what they
+        // bought. One such order is enough to make "they never bought this
+        // before" unprovable for that customer.
+        blindHistoryCustomers = new Set<string>();
         for (const o of (priorOrders || []) as Array<{
           customer_id: string | null;
           line_items: unknown;
@@ -515,11 +544,16 @@ export const postOrderReviewAskDetectorCron = inngest.createFunction(
             bag = new Set<string>();
             priorByCustomer.set(o.customer_id, bag);
           }
+          let readable = false;
           for (const raw of items) {
             const li = raw as { product_id?: unknown } | null | undefined;
             const pid = li?.product_id;
-            if (typeof pid === "string" && pid.length > 0) bag.add(pid);
+            if (typeof pid === "string" && pid.length > 0) {
+              bag.add(pid);
+              readable = true;
+            }
           }
+          if (!readable) blindHistoryCustomers.add(o.customer_id);
         }
         for (const c of candidates) {
           const bag = priorByCustomer.get(c.customerId);
@@ -543,6 +577,7 @@ export const postOrderReviewAskDetectorCron = inngest.createFunction(
         reviewedKeys,
         marketingByCustomer,
         firstTimeKeys,
+        blindHistoryCustomers,
         now,
         readCap: POST_ORDER_READ_CAP,
       });
