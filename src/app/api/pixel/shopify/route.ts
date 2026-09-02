@@ -35,6 +35,10 @@ const ALLOWED_EVENTS = new Set([
   "InitiateCheckout",
   "AddPaymentInfo",
   "Purchase",
+  // Fired by window.scxTrackLead from the theme pixel when the SMS/email
+  // collector captures a contact. Meta's standard "handed over contact info"
+  // event — powers Lead-optimised campaigns and subscriber lookalikes.
+  "Lead",
 ]);
 
 /** Meta rejects event_time older than 7 days; also bounds clock-skewed clients. */
@@ -85,6 +89,9 @@ export async function POST(request: Request) {
 
   const userData: CapiUserData = {
     email: typeof body.email === "string" ? body.email : null,
+    // Lead events carry a phone when the collector captured one for SMS —
+    // `ph` is a strong Meta match key and the browser has no other source for it.
+    phone: typeof body.phone === "string" ? body.phone : null,
     externalId: body.customerId != null ? String(body.customerId) : null,
     fbp: typeof body.fbp === "string" ? body.fbp : null,
     fbc: typeof body.fbc === "string" ? body.fbc : null,
