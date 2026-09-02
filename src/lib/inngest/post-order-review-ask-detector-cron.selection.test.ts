@@ -32,6 +32,7 @@ import {
   POST_ORDER_READ_CAP,
   POST_ORDER_REPEAT_WINDOW_DAYS,
   classifyPostOrderWindow,
+  resolveLineItemProductId,
   isPostOrderCustomerReachable,
   selectPostOrderReadyCandidates,
   type PostOrderCandidate,
@@ -336,4 +337,50 @@ test("a known repeat buyer is unaffected by the blind-history rail", () => {
   });
   assert.equal(cls.window, "repeat", "a positive match is evidence; only absence is unreliable");
   assert.equal(cls.ready, true);
+});
+
+// ── Line-item resolution ──────────────────────────────────────────────────
+//
+// `line_items[].product_id` only exists on orders from July 2026 onward
+// (4-6% Jan-May, 12% June, 92-94% after). `variant_id` and `sku` are on 100%
+// of line items across the whole history and resolve to a product with 100%
+// coverage through `product_variants`.
+//
+// Reading `product_id` alone made every pre-July order invisible to the
+// prior-purchase lookup, which treats "not found" as "never bought it". The
+// production result: 132 of 132 drafted asks said "you tried it for the
+// first time", and re-running the lookup with variant/sku resolution showed
+// all 132 had bought that exact product before. The copy was backwards for
+// every single recipient.
+
+const INDEX = {
+  byVariant: new Map([["42614433480877", "8238402896045"]]),
+  bySku: new Map([["SC-TABS-SL-2", "8238402896045"]]),
+};
+
+test("a pre-July line item resolves by variant_id when product_id is absent", () => {
+  const li = {
+    sku: "SC-TABS-SL-2",
+    title: "Superfood Tabs",
+    quantity: 1,
+    variant_id: "42614433480877",
+    price_cents: 5996,
+  };
+  assert.equal(resolveLineItemProductId(li, INDEX), "8238402896045");
+});
+
+test("sku closes the gap when the variant is unknown", () => {
+  const li = { sku: "SC-TABS-SL-2", variant_id: "99999999999" };
+  assert.equal(resolveLineItemProductId(li, INDEX), "8238402896045");
+});
+
+test("an explicit product_id still wins — it is the most direct key", () => {
+  const li = { product_id: "111", variant_id: "42614433480877" };
+  assert.equal(resolveLineItemProductId(li, INDEX), "111");
+});
+
+test("a line that resolves to nothing returns null, not a guess", () => {
+  assert.equal(resolveLineItemProductId({ sku: "insure01" }, INDEX), null);
+  assert.equal(resolveLineItemProductId(null, INDEX), null);
+  assert.equal(resolveLineItemProductId({}, INDEX), null);
 });
