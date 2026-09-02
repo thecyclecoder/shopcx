@@ -19,11 +19,18 @@
  * while looking healthy. Pinned in the spec's ⚠️ warning + the pure test
  * suite [[./post-order-review-ask-detector-cron.selection.test]].
  *
- * ⚠️ No historical backfill. Line-item `product_id` coverage was 6-13%
- * through June 2026 and only jumped to 94-95% in July, so an older-orders
- * sweep would attribute confidently for a minority and silently miss the
- * majority. This cron is forward-only; the sliding window bounds every
- * read to orders newer than the (21d + jitter) ceiling.
+ * ⚠️ Line items are resolved through `resolveLineItemProductId`, NOT by
+ * reading `line_items[].product_id` directly. That key is only populated
+ * from July 2026 onward (4-6% Jan-May, 12% June, 92-94% after); `variant_id`
+ * and `sku` are present on 100% of line items across the whole history and
+ * resolve to a product with 100% coverage via `product_variants`. Reading
+ * `product_id` alone made every pre-July order invisible, which the
+ * first-time predicate below reads as "never bought it".
+ *
+ * The sweep itself stays forward-only — the sliding window bounds every read
+ * to orders newer than the (21d + jitter) ceiling — but the PRIOR-purchase
+ * lookup reaches back over the customer's full history and is now accurate
+ * there.
  *
  * Windows — anchored on ORDER DATE, per the spec:
  *   - 10 days when the customer bought THIS product BEFORE this order.
@@ -131,6 +138,60 @@ export interface PostOrderCandidate {
  * since order" branch and enqueues a first-timer at 10d (shipping-adjusted
  * they would have had it three days — the review would be dishonest).
  */
+/**
+ * Index of the identifiers a line item can carry, all pointing at the same
+ * SHOPIFY product id. Built once per tick from `product_variants` joined to
+ * `products`.
+ */
+export type LineItemProductIndex = {
+  /** `product_variants.shopify_variant_id` → `products.shopify_product_id` */
+  byVariant: Map<string, string>;
+  /** `product_variants.sku` → `products.shopify_product_id` */
+  bySku: Map<string, string>;
+};
+
+/**
+ * Resolve a line item to its SHOPIFY product id.
+ *
+ * ⚠️ Read this before "simplifying" it back to `li.product_id`.
+ *
+ * `line_items[].product_id` is only populated on orders from July 2026
+ * onward (4-6% Jan-May, 12% June, 92-94% July+). `variant_id` and `sku` are
+ * populated on 100% of line items across the whole history, and
+ * `product_variants` resolves either one to a product with 100% coverage
+ * (99.6% by variant alone, sku closes the rest).
+ *
+ * The original implementation read ONLY `product_id`. Because the caller
+ * treats "no prior order contained this product" as "first purchase", every
+ * pre-July order was invisible and 132 of 132 drafted asks told the customer
+ * they were trying the product for the first time — 96 of them had six or
+ * more prior orders. The bug was never missing data; it was reading the one
+ * key that happened to be empty.
+ */
+export function resolveLineItemProductId(
+  raw: unknown,
+  index: LineItemProductIndex,
+): string | null {
+  const li = raw as
+    | { product_id?: unknown; variant_id?: unknown; sku?: unknown }
+    | null
+    | undefined;
+  if (!li) return null;
+  const pid = li.product_id;
+  if (typeof pid === "string" && pid.length > 0) return pid;
+  const vid = li.variant_id;
+  if (typeof vid === "string" && vid.length > 0) {
+    const hit = index.byVariant.get(vid);
+    if (hit) return hit;
+  }
+  const sku = li.sku;
+  if (typeof sku === "string" && sku.length > 0) {
+    const hit = index.bySku.get(sku);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 export function classifyPostOrderWindow(input: {
   orderCreatedAt: string;
   firstTimeForProduct: boolean;
@@ -343,12 +404,39 @@ export const postOrderReviewAskDetectorCron = inngest.createFunction(
           skipped_no_shopify_id: 0,
         };
 
+      // Build the variant/sku → shopify_product_id index once for the tick.
+      // Line items only carry `product_id` from July 2026 onward; variant_id
+      // and sku are present on 100% of them, historically and now.
+      const productIndex: LineItemProductIndex = { byVariant: new Map(), bySku: new Map() };
+      {
+        const orderWorkspaceIds = Array.from(
+          new Set(orderRows.map((o) => o.workspace_id).filter(Boolean)),
+        );
+        const { data: variantRows } = await admin
+          .from("product_variants")
+          .select("shopify_variant_id, sku, products!inner(shopify_product_id)")
+          .in("workspace_id", orderWorkspaceIds);
+        for (const v of ((variantRows || []) as unknown) as Array<{
+          shopify_variant_id: string | null;
+          sku: string | null;
+          products:
+            | { shopify_product_id: string | null }
+            | Array<{ shopify_product_id: string | null }>
+            | null;
+        }>) {
+          const joined = Array.isArray(v.products) ? v.products[0] : v.products;
+          const spid = joined?.shopify_product_id;
+          if (!spid) continue;
+          if (v.shopify_variant_id) productIndex.byVariant.set(v.shopify_variant_id, spid);
+          if (v.sku) productIndex.bySku.set(v.sku, spid);
+        }
+      }
+
       // Extract the (order, shopify_product_id) pairs from every order's
-      // line_items JSONB. A line without a product_id (or one shaped as
-      // anything other than a non-empty string) is silently skipped —
-      // Shipping Protection lines historically carried a Shopify numeric
-      // id here, so a string form is expected even for add-ons; the
-      // reviewable filter downstream is what excludes them.
+      // line_items JSONB, resolving each line through the index above. A
+      // line that resolves to nothing at all is silently skipped — Shipping
+      // Protection and other add-ons land here; the reviewable filter
+      // downstream is what excludes the ones that do resolve.
       let skipped_no_shopify_id = 0;
       type Pair = {
         workspaceId: string;
@@ -362,9 +450,8 @@ export const postOrderReviewAskDetectorCron = inngest.createFunction(
         if (!o.customer_id || !o.created_at) continue;
         const items = Array.isArray(o.line_items) ? o.line_items : [];
         for (const raw of items) {
-          const li = raw as { product_id?: unknown } | null | undefined;
-          const pid = li?.product_id;
-          if (typeof pid !== "string" || pid.length === 0) {
+          const pid = resolveLineItemProductId(raw, productIndex);
+          if (!pid) {
             skipped_no_shopify_id++;
             continue;
           }
@@ -546,13 +633,16 @@ export const postOrderReviewAskDetectorCron = inngest.createFunction(
           }
           let readable = false;
           for (const raw of items) {
-            const li = raw as { product_id?: unknown } | null | undefined;
-            const pid = li?.product_id;
-            if (typeof pid === "string" && pid.length > 0) {
+            const pid = resolveLineItemProductId(raw, productIndex);
+            if (pid) {
               bag.add(pid);
               readable = true;
             }
           }
+          // With variant/sku resolution this is now a genuine last resort —
+          // an order whose every line resolves to nothing (a gift card, a
+          // deleted variant). It was previously hit by ~94% of pre-July
+          // orders because only `product_id` was consulted.
           if (!readable) blindHistoryCustomers.add(o.customer_id);
         }
         for (const c of candidates) {
