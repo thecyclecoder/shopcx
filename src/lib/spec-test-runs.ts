@@ -777,7 +777,23 @@ export function isFoldAllowedZeroCheckRun(
   return true;
 }
 
-export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<string[]> {
+/**
+ * Result of a single fold-gate evaluation over the workspace: the set of ELIGIBLE slugs (fed to the
+ * auto-fold cron) and, for every OTHER shipped-and-un-archived spec, the exact REFUSAL reason the
+ * gate computed and would otherwise have discarded to a console line.
+ *
+ * ⭐ [[../specs/a-shipped-spec-that-cannot-fold-is-stuck]] Phase 1 — the two exports
+ * `getAutoFoldEligibleSlugs` (eligible list) and `getFoldRefusalsBySlug` (refusal map) BOTH come
+ * from ONE evaluation so the pipeline-doctor's `shipped-not-folded` classifier and the fold gate
+ * itself can never disagree about why a spec did not fold. Same single-definition rule
+ * [[isCleanMachinePassRun]] already enforces for spec-test greenness.
+ */
+interface AutoFoldGateEvaluation {
+  eligible: string[];
+  refusals: Map<string, string>;
+}
+
+async function evaluateAutoFoldGate(workspaceId: string): Promise<AutoFoldGateEvaluation> {
   const admin = createAdminClient();
   // Rail 3 imports (goal-promotion-fold-collision-and-held-surfacing Phase 1) — hoisted so the loop
   // doesn't re-import per spec. Dynamic to break the specs-table ↔ agent-jobs ↔ spec-test-runs cycle the
@@ -844,12 +860,20 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
   const autoChecksBySlug = new Map<string, number>();
   let workspaceSpecsBySlug: Map<string, { phases: { id: string; position: number; verification: string | null }[] }> | null = null;
   const eligible: string[] = [];
+  // ⭐ a-shipped-spec-that-cannot-fold-is-stuck Phase 1 — refusal reasons the doctor's classifier
+  // surfaces. Only populated for SHIPPED-and-un-archived specs (the fold gate's own scope): a spec
+  // that isn't shipped yet has nothing to fold and the classifier gates on derivedStatus === "shipped"
+  // anyway.
+  const refusals = new Map<string, string>();
   for (const s of specs) {
     // Rail 1 — DERIVED-shipped only. `s.status` is the PHASE ROLLUP from getRoadmap (deriveSpecCardStatus),
     // never the stale stored `specs.status` column; a `planned`/`in_progress`/`in_review`/`deferred` rollup
     // (or an archived spec) is rejected. All phases shipped ⇒ shipped ⇒ pass this gate.
     if (s.status !== "shipped" || archivedSet.has(s.slug)) continue;
-    if (liveSlugs.has(s.slug)) continue;
+    if (liveSlugs.has(s.slug)) {
+      refusals.set(s.slug, "a live build/spec-test job is running — auto-folding would orphan it (deferred, not dropped).");
+      continue;
+    }
     const run = runs[s.slug];
     // Rail 2 — POSITIVE machine pass, not absence-of-failure. The latest run must be a CLEAN MACHINE PASS by
     // the SINGLE shared predicate [[isCleanMachinePassRun]] (the pre-merge promote gate
@@ -876,9 +900,22 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
       // unchanged so the SHARED pre-merge promote gate ([[getSpecTestStateForBranch]]) keeps
       // its checks-floor — the two gates DIVERGE here on purpose (fold has post-merge signals
       // like a clean security review + all-shipped phases; promote does not).
-      if (!run) continue;
-      if (run.agent_verdict !== "approved" && run.agent_verdict !== "needs_human") continue;
-      if (run.checks.length !== 0) continue;
+      if (!run) {
+        refusals.set(s.slug, "no spec-test run has been recorded for this spec — the fold gate needs a clean machine pass.");
+        continue;
+      }
+      if (run.agent_verdict !== "approved" && run.agent_verdict !== "needs_human") {
+        refusals.set(s.slug, `spec-test verdict='${run.agent_verdict}' is not a clean machine pass — the fold gate rejects it.`);
+        continue;
+      }
+      if (run.checks.length !== 0) {
+        const fails = run.summary.auto_fail;
+        refusals.set(
+          s.slug,
+          `spec-test is not a clean machine pass (verdict='${run.agent_verdict}'${fails ? `, ${fails} unresolved auto-fail check${fails === 1 ? "" : "s"}` : ""}).`,
+        );
+        continue;
+      }
       // Load workspace specs on first miss so we can count kind='auto' checks per candidate.
       if (!workspaceSpecsBySlug) {
         try {
@@ -908,7 +945,13 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
         }
         autoChecksBySlug.set(s.slug, autoDefined);
       }
-      if (!isFoldAllowedZeroCheckRun(run, autoDefined)) continue;
+      if (!isFoldAllowedZeroCheckRun(run, autoDefined)) {
+        refusals.set(
+          s.slug,
+          `spec-test asserted 0 checks and the zero-check fold allowance did not apply (declared auto-check count=${autoDefined}).`,
+        );
+        continue;
+      }
     }
 
     // Security-test gate (build-card-lifecycle-timeline Phase 3): require a clean terminal security review.
@@ -918,7 +961,17 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
     // (a `completed` job with no live/surfaced sibling) clears the gate — the exact condition Phase 1's
     // Security node renders as `done`.
     const sec = securityBySlug[s.slug];
-    if (!sec?.completedClean) continue;
+    if (!sec?.completedClean) {
+      const reason = !sec
+        ? "no security review record — the post-merge security pass has not landed yet."
+        : sec.live
+          ? "security review is still live (queued/claimed/building/needs_input)."
+          : sec.surfaced
+            ? "security review is surfaced to the owner (a routed real-vuln fix or needs-human finding is awaiting action)."
+            : "security review is not completedClean.";
+      refusals.set(s.slug, reason);
+      continue;
+    }
 
     // Rail 3 — GOAL-BOUND DEFER (goal-promotion-fold-collision-and-held-surfacing Phase 1). A spec whose
     // parent goal is still in-flight (`goals.status` ∈ {`proposed`,`greenlit`} — atomic goal→main promotion
@@ -947,7 +1000,13 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
         }
         goalStatusCache.set(goalSlug, goalStatus);
       }
-      if (!isFoldSafeGivenGoalStatus(goalStatus)) continue;
+      if (!isFoldSafeGivenGoalStatus(goalStatus)) {
+        refusals.set(
+          s.slug,
+          `parent goal '${goalSlug}' is still in-flight (status='${goalStatus ?? "unknown"}') — folding to main now would race the goal's atomic promotion.`,
+        );
+        continue;
+      }
     }
 
     // ⭐ Rail 4 (a-merge-stamps-only-the-phases-whose-code-it-actually-contains Phase 2). Two hard
@@ -967,9 +1026,9 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
       })),
     );
     if (!containment.ok) {
-      console.warn(
-        `[auto-fold] refusing to fold ${s.slug} — phase merge_sha does NOT contain phase build_sha for: ${containment.failures.map((f) => `pos ${f.position} (${f.reason})`).join("; ")}`,
-      );
+      const detail = `phase merge_sha does NOT contain phase build_sha for: ${containment.failures.map((f) => `pos ${f.position} (${f.reason})`).join("; ")}`;
+      console.warn(`[auto-fold] refusing to fold ${s.slug} — ${detail}`);
+      refusals.set(s.slug, detail);
       continue;
     }
     // Rail 4b — an open pull request on the spec's build branch is sufficient evidence the spec is
@@ -977,21 +1036,38 @@ export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<str
     // the moment the spec folded, and it was never consulted). If we couldn't list open PRs
     // (`openBuildBranches === null`), fail-CLOSED — the read recovers on the next sweep.
     if (openBuildBranches === null) {
-      console.warn(
-        `[auto-fold] refusing to fold ${s.slug} — GitHub open-PR list unavailable (cannot prove no build PR is still open for claude/build-${s.slug})`,
-      );
+      const detail = `GitHub open-PR list unavailable (cannot prove no build PR is still open for claude/build-${s.slug})`;
+      console.warn(`[auto-fold] refusing to fold ${s.slug} — ${detail}`);
+      refusals.set(s.slug, detail);
       continue;
     }
     if (openBuildBranches.has(`claude/build-${s.slug}`)) {
-      console.warn(
-        `[auto-fold] refusing to fold ${s.slug} — an OPEN PR still carries branch claude/build-${s.slug} (the spec is not finished)`,
-      );
+      const detail = `an OPEN PR still carries branch claude/build-${s.slug} (the spec is not finished)`;
+      console.warn(`[auto-fold] refusing to fold ${s.slug} — ${detail}`);
+      refusals.set(s.slug, detail);
       continue;
     }
 
     eligible.push(s.slug);
   }
-  return eligible;
+  return { eligible, refusals };
+}
+
+export async function getAutoFoldEligibleSlugs(workspaceId: string): Promise<string[]> {
+  return (await evaluateAutoFoldGate(workspaceId)).eligible;
+}
+
+/**
+ * Per-slug refusal reasons the fold gate computed but would otherwise discard. Populated ONLY for
+ * shipped-and-un-archived specs the gate rejected this pass; an eligible spec has no entry. The
+ * pipeline-doctor's `shipped-not-folded` classifier reads this so the board reports the fold gate's
+ * OWN reason instead of a generic "investigate". Comes from the SAME evaluation as
+ * `getAutoFoldEligibleSlugs` — the two rails cannot disagree about why a spec did not fold.
+ *
+ * ⭐ [[../specs/a-shipped-spec-that-cannot-fold-is-stuck]] Phase 1.
+ */
+export async function getFoldRefusalsBySlug(workspaceId: string): Promise<Map<string, string>> {
+  return (await evaluateAutoFoldGate(workspaceId)).refusals;
 }
 
 export interface AutoFoldResult {
