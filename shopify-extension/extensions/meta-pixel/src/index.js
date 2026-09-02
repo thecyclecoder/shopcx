@@ -113,6 +113,13 @@ register(({analytics, browser, init, settings}) => {
 
   const money = (p) => (p?.amount != null ? Number(p.amount) : undefined);
 
+  // Meta needs `currency` alongside `value` or it can't book a conversion value.
+  // Shopify's Checkout.currencyCode is `string | null` and Shop carries no currency
+  // at all, so reading it risks sending a value with no currency. Superfoods sells
+  // US-only (founder, 2026-09-02), so this is a constant. Revisit if we ever sell
+  // outside the US — the server half reads the order's real `currency` already.
+  const CURRENCY = "USD";
+
   analytics.subscribe("page_viewed", (event) => {
     send("PageView", `pv_${event.id}`, event, {});
   });
@@ -124,7 +131,7 @@ register(({analytics, browser, init, settings}) => {
       content_ids: [v?.sku || v?.product?.id].filter(Boolean),
       content_name: v?.product?.title,
       value: money(v?.price),
-      currency: v?.price?.currencyCode,
+      currency: CURRENCY,
     });
   });
 
@@ -136,7 +143,7 @@ register(({analytics, browser, init, settings}) => {
       content_ids: [v?.sku || v?.product?.id].filter(Boolean),
       content_name: v?.product?.title,
       value: money(l?.cost?.totalAmount),
-      currency: l?.cost?.totalAmount?.currencyCode,
+      currency: CURRENCY,
       num_items: l?.quantity,
     });
   });
@@ -145,7 +152,7 @@ register(({analytics, browser, init, settings}) => {
     const c = event.data?.checkout;
     send("InitiateCheckout", `ic_${event.id}`, event, {
       value: money(c?.totalPrice),
-      currency: c?.currencyCode,
+      currency: CURRENCY,
       num_items: c?.lineItems?.length,
       content_ids: (c?.lineItems || []).map((li) => li?.variant?.sku).filter(Boolean),
     });
@@ -155,7 +162,7 @@ register(({analytics, browser, init, settings}) => {
     const c = event.data?.checkout;
     send("AddPaymentInfo", `api_${event.id}`, event, {
       value: money(c?.totalPrice),
-      currency: c?.currencyCode,
+      currency: CURRENCY,
     });
   });
 
@@ -173,7 +180,7 @@ register(({analytics, browser, init, settings}) => {
     const eventId = orderId ? `shopify_purchase_${orderId}` : `checkout_${c?.token || event.id}`;
     send("Purchase", eventId, event, {
       value: money(c?.totalPrice),
-      currency: c?.currencyCode,
+      currency: CURRENCY,
       num_items: c?.lineItems?.length,
       content_type: "product",
       content_ids: (c?.lineItems || []).map((li) => li?.variant?.sku).filter(Boolean),
