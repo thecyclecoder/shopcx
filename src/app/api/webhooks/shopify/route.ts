@@ -8,6 +8,7 @@ import {
   handleFulfillmentUpdate,
 } from "@/lib/shopify-webhooks";
 import { handlePaymentMethodEvent } from "@/lib/dunning-webhook";
+import { sendShopifyPurchase } from "@/lib/meta-capi-shopify-purchase";
 
 export async function POST(request: Request) {
   const body = await request.text();
@@ -50,6 +51,14 @@ export async function POST(request: Request) {
         break;
 
       case "orders/create":
+        await handleOrderEvent(workspace.id, payload);
+        // Meta CAPI Purchase — new web checkouts ONLY (renewals are filtered
+        // inside). Fires on create, never on update, so a later edit to the
+        // order can't emit a second conversion. Deduped against the web pixel's
+        // browser Purchase on `shopify_purchase_{orderId}`. Never throws.
+        await sendShopifyPurchase(workspace.id, payload);
+        break;
+
       case "orders/updated":
         await handleOrderEvent(workspace.id, payload);
         break;
