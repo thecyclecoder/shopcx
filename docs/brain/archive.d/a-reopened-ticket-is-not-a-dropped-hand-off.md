@@ -1,0 +1,1 @@
+- **The open-ticket defect check measures neglect, not ticket age** · verified 2026-09-02 · → [[../recipes/open-tickets-queue]]
