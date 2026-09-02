@@ -1,0 +1,1 @@
+- **An unreadable optimizer answer earns one re-ask, not a permanent park** · verified 2026-09-02 · → [[../libraries/builder-worker]], [[../libraries/storefront-optimizer-reask]]
