@@ -1,0 +1,1 @@
+- **The CS Director must timestamp a cancelled-but-charged claim before escalating it** · verified 2026-09-02 · → [[lifecycles/ticket-lifecycle]] · [[libraries/cs-director]]
