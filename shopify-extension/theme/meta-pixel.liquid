@@ -1,0 +1,183 @@
+{%- comment -%}
+  Meta pixel — first-party, dual-path.
+
+  Fires each storefront event TWICE with the SAME eventID:
+    1. fbq() straight to Meta      → a real BROWSER event (Pixel Helper sees it)
+    2. POST to shopcx.ai/api/pixel/shopify → our server signs it into CAPI
+                                     (first-party request, survives ad blockers)
+  Meta dedups on (event_name, eventID) and keeps whichever arrived, so a shopper
+  running uBlock still produces the event via path 2 while everyone else
+  produces it on both and it collapses to one.
+
+  SCOPE — storefront pages only. Shopify's checkout is a separate surface theme
+  code cannot reach, so InitiateCheckout / AddPaymentInfo / browser-Purchase are
+  NOT here; they come from the custom pixel (Settings → Customer events). The
+  authoritative Purchase is server-side off the orders/create webhook
+  ([[src/lib/meta-capi-shopify-purchase.ts]]) with hashed PII off the order.
+
+  DO NOT also subscribe to page_viewed / product_viewed / product_added_to_cart
+  in the custom pixel — the event IDs would differ and every event would double.
+{%- endcomment -%}
+
+<script>
+(function () {
+  var PIXEL_ID = '468487900426092';
+  var COLLECTOR = 'https://shopcx.ai/api/pixel/shopify';
+  var CURRENCY = 'USD'; // US-only store
+
+  // ── Meta base pixel ──────────────────────────────────────────────────────
+  !function(f,b,e,v,n,t,s){if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+  n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!f._fbq)f._fbq=n;
+  n.push=n;n.loaded=!0;n.version='2.0';n.queue=[];t=b.createElement(e);t.async=!0;
+  t.src=v;s=b.getElementsByTagName(e)[0];s.parentNode.insertBefore(t,s)}
+  (window,document,'script','https://connect.facebook.net/en_US/fbevents.js');
+  fbq('init', PIXEL_ID);
+
+  function cookie(name) {
+    var m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
+    return m ? m.pop() : null;
+  }
+
+  // _fbc is only set by fbevents when an fbclid is present; if the click landed
+  // before the script loaded (or it was blocked) reconstruct it ourselves so the
+  // server copy still carries click attribution.
+  function fbc() {
+    var existing = cookie('_fbc');
+    if (existing) return existing;
+    var id = new URLSearchParams(window.location.search).get('fbclid');
+    return id ? 'fb.1.' + Date.now() + '.' + id : null;
+  }
+
+  // Unique per event occurrence — the SAME value goes to Meta and to our
+  // server, which is what lets Meta collapse the two copies into one.
+  function newId(prefix) {
+    return prefix + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10);
+  }
+
+  function send(eventName, eventId, customData) {
+    // Path 1 — browser → Meta. Blocked by ad blockers; that's expected.
+    try { fbq('track', eventName, customData || {}, { eventID: eventId }); } catch (e) {}
+
+    // Path 2 — browser → us → Meta (CAPI). First-party, so it survives blockers.
+    try {
+      fetch(COLLECTOR, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        keepalive: true,
+        body: JSON.stringify({
+          pixelId: PIXEL_ID,
+          eventName: eventName,
+          eventId: eventId,
+          eventTimeMs: Date.now(),
+          sourceUrl: window.location.href,
+          referrer: document.referrer || null,
+          fbp: cookie('_fbp'),
+          fbc: fbc(),
+          {%- if customer %}
+          customerId: {{ customer.id | json }},
+          email: {{ customer.email | json }},
+          {%- else %}
+          customerId: null,
+          email: null,
+          {%- endif %}
+          customData: customData || {}
+        })
+      }).catch(function () {});
+    } catch (e) {}
+  }
+
+  // ── Public Lead hook ─────────────────────────────────────────────────────
+  // Anything that captures an email or phone on the storefront calls this — the
+  // ShopCX SMS/email collector, a popup, an embedded form. Fires Lead on BOTH
+  // paths with one eventID, and forwards the identifier so the server can hash
+  // it into a match key (em/ph). Exposed on window so a collector loaded later
+  // (or from a different bundle) can call it without importing anything.
+  //
+  //   window.scxTrackLead({ email: 'a@b.com', source: 'exit_popup' })
+  //
+  // Meta's Lead is the standard event for "handed over contact info", so this
+  // is also what powers Lead-optimised campaigns and lookalikes off subscribers.
+  window.scxTrackLead = function (opts) {
+    opts = opts || {};
+    var id = newId('lead');
+    var custom = { content_name: opts.source || 'storefront', currency: CURRENCY };
+    try { fbq('track', 'Lead', custom, { eventID: id }); } catch (e) {}
+    try {
+      fetch(COLLECTOR, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        keepalive: true,
+        body: JSON.stringify({
+          pixelId: PIXEL_ID,
+          eventName: 'Lead',
+          eventId: id,
+          eventTimeMs: Date.now(),
+          sourceUrl: window.location.href,
+          referrer: document.referrer || null,
+          fbp: cookie('_fbp'),
+          fbc: fbc(),
+          email: opts.email || null,
+          phone: opts.phone || null,
+          customerId: opts.customerId || null,
+          customData: custom
+        })
+      }).catch(function () {});
+    } catch (e) {}
+    return id;
+  };
+
+  send('PageView', newId('pv'), {});
+
+  {%- if template contains 'product' and product -%}
+  {%- assign v = product.selected_or_first_available_variant -%}
+  send('ViewContent', newId('vc'), {
+    content_type: 'product',
+    content_ids: [{{ v.sku | default: product.id | json }}],
+    content_name: {{ product.title | json }},
+    value: {{ v.price | divided_by: 100.0 }},
+    currency: CURRENCY
+  });
+  {%- endif -%}
+
+  // ── AddToCart ────────────────────────────────────────────────────────────
+  // Themes add to cart in many different ways, but they all end up POSTing to
+  // /cart/add. Intercepting the network call catches every path (quick-add,
+  // PDP form, drawer upsell) instead of guessing at DOM selectors that break
+  // whenever the theme changes.
+  function onAdd(payload) {
+    var item = (payload && payload.items && payload.items[0]) || payload || {};
+    send('AddToCart', newId('atc'), {
+      content_type: 'product',
+      content_ids: [item.sku || item.product_id || item.id].filter(Boolean),
+      content_name: item.product_title || item.title,
+      value: item.final_line_price != null ? item.final_line_price / 100 : undefined,
+      currency: CURRENCY,
+      num_items: item.quantity || 1
+    });
+  }
+
+  var _fetch = window.fetch;
+  if (_fetch) {
+    window.fetch = function () {
+      var url = arguments[0] && (arguments[0].url || arguments[0]);
+      var p = _fetch.apply(this, arguments);
+      if (typeof url === 'string' && url.indexOf('/cart/add') !== -1) {
+        p.then(function (res) {
+          res.clone().json().then(onAdd).catch(function () {});
+        }).catch(function () {});
+      }
+      return p;
+    };
+  }
+
+  var _open = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    if (typeof url === 'string' && url.indexOf('/cart/add') !== -1) {
+      this.addEventListener('load', function () {
+        try { onAdd(JSON.parse(this.responseText)); } catch (e) {}
+      });
+    }
+    return _open.apply(this, arguments);
+  };
+})();
+</script>

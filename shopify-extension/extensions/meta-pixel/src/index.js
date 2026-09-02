@@ -46,6 +46,19 @@ function readFbclid(href) {
   }
 }
 
+/**
+ * SCOPE: CHECKOUT EVENTS ONLY.
+ *
+ * PageView / ViewContent / AddToCart / Lead are owned by the THEME script
+ * (snippets/meta-pixel.liquid), which can do what this sandbox cannot: call
+ * fbq() directly for a real BROWSER event, and read first-party cookies from a
+ * normal DOM. Subscribing to them HERE too would send Meta two copies of every
+ * storefront event under DIFFERENT event ids — double-counting, not deduping.
+ * (That regression shipped briefly on 2026-09-02 and was caught in Test Events.)
+ *
+ * What only this surface can see is checkout: Shopify's checkout is a separate
+ * surface theme code cannot reach.
+ */
 register(({analytics, browser, init, settings}) => {
   const pixelId = settings.pixelId;
   if (!pixelId) return;
@@ -120,33 +133,8 @@ register(({analytics, browser, init, settings}) => {
   // outside the US — the server half reads the order's real `currency` already.
   const CURRENCY = "USD";
 
-  analytics.subscribe("page_viewed", (event) => {
-    send("PageView", `pv_${event.id}`, event, {});
-  });
 
-  analytics.subscribe("product_viewed", (event) => {
-    const v = event.data?.productVariant;
-    send("ViewContent", `vc_${event.id}`, event, {
-      content_type: "product",
-      content_ids: [v?.sku || v?.product?.id].filter(Boolean),
-      content_name: v?.product?.title,
-      value: money(v?.price),
-      currency: CURRENCY,
-    });
-  });
 
-  analytics.subscribe("product_added_to_cart", (event) => {
-    const l = event.data?.cartLine;
-    const v = l?.merchandise;
-    send("AddToCart", `atc_${event.id}`, event, {
-      content_type: "product",
-      content_ids: [v?.sku || v?.product?.id].filter(Boolean),
-      content_name: v?.product?.title,
-      value: money(l?.cost?.totalAmount),
-      currency: CURRENCY,
-      num_items: l?.quantity,
-    });
-  });
 
   analytics.subscribe("checkout_started", (event) => {
     const c = event.data?.checkout;
