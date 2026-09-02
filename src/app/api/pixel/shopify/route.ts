@@ -44,6 +44,40 @@ const ALLOWED_EVENTS = new Set([
 /** Meta rejects event_time older than 7 days; also bounds clock-skewed clients. */
 const MAX_EVENT_AGE_SEC = 6 * 24 * 60 * 60;
 
+/**
+ * The theme snippet calls this from the shopper's browser on superfoodscompany.com,
+ * which is a DIFFERENT origin to shopcx.ai. Because the body is
+ * `Content-Type: application/json`, the browser treats it as a non-simple request
+ * and sends a preflight OPTIONS first — without these headers it refuses to send
+ * the POST at all, and the relay half of the pixel silently never fires.
+ * (Shipped without them on 2026-09-02; caught by BROWSER=16 / SERVER=1 in Meta.)
+ *
+ * Allowlisted rather than `*`: this endpoint forwards into our Meta dataset, so
+ * only our own storefronts may call it from a browser.
+ */
+const ALLOWED_ORIGINS = new Set([
+  "https://superfoodscompany.com",
+  "https://www.superfoodscompany.com",
+  "https://shop.superfoodscompany.com",
+  "https://account.superfoodscompany.com",
+]);
+
+function corsHeaders(req: Request): Record<string, string> {
+  const origin = req.headers.get("origin");
+  if (!origin || !ALLOWED_ORIGINS.has(origin)) return {};
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "86400",
+    Vary: "Origin",
+  };
+}
+
+export async function OPTIONS(request: Request) {
+  return new Response(null, { status: 204, headers: corsHeaders(request) });
+}
+
 function clientIp(req: Request): string | null {
   const xff = req.headers.get("x-forwarded-for");
   if (xff) return xff.split(",")[0]!.trim();
@@ -55,14 +89,14 @@ export async function POST(request: Request) {
   try {
     body = (await request.json()) as Record<string, unknown>;
   } catch {
-    return new NextResponse(null, { status: 204 });
+    return new NextResponse(null, { status: 204, headers: corsHeaders(request) });
   }
 
   const eventName = String(body.eventName ?? "");
   const eventId = String(body.eventId ?? "");
   const pixelId = String(body.pixelId ?? "");
   if (!ALLOWED_EVENTS.has(eventName) || !eventId || !pixelId) {
-    return new NextResponse(null, { status: 204 });
+    return new NextResponse(null, { status: 204, headers: corsHeaders(request) });
   }
 
   // Resolve the workspace from the pixel id itself — the sandbox has no session
@@ -75,12 +109,12 @@ export async function POST(request: Request) {
     .eq("is_active", true)
     .eq("config->>pixel_id", pixelId)
     .maybeSingle();
-  if (!sinkRow?.workspace_id) return new NextResponse(null, { status: 204 });
+  if (!sinkRow?.workspace_id) return new NextResponse(null, { status: 204, headers: corsHeaders(request) });
 
   const sink = await getActiveMetaSink(sinkRow.workspace_id as string);
   // Re-check: the sink we send through must be the pixel the client named, so a
   // forged pixelId can never route events into a different workspace's dataset.
-  if (!sink || sink.pixelId !== pixelId) return new NextResponse(null, { status: 204 });
+  if (!sink || sink.pixelId !== pixelId) return new NextResponse(null, { status: 204, headers: corsHeaders(request) });
 
   const nowSec = Math.floor(Date.now() / 1000);
   const rawMs = Number(body.eventTimeMs);
@@ -117,5 +151,5 @@ export async function POST(request: Request) {
   if (!res.ok) {
     console.warn(`[pixel/shopify] CAPI ${res.status} for ${eventName} ${eventId}: ${res.body.slice(0, 300)}`);
   }
-  return new NextResponse(null, { status: 204 });
+  return new NextResponse(null, { status: 204, headers: corsHeaders(request) });
 }
