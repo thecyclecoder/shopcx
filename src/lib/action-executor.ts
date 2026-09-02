@@ -838,7 +838,27 @@ export function hasLoyaltyCodeApplied(
 export function subscriptionHasLoyaltyCoupon(
   appliedDiscounts: unknown,
 ): boolean {
-  if (!Array.isArray(appliedDiscounts)) return false;
+  return subscriptionLoyaltyCouponCodes(appliedDiscounts).length > 0;
+}
+
+/**
+ * Return the LOYALTY-* / SMILE-* codes currently attached to a subscription's
+ * `applied_discounts` JSONB, uppercased for comparison. Same tolerant shape
+ * matcher as `subscriptionHasLoyaltyCoupon` (bare string · `{title}` · `{code}`).
+ *
+ * Callers: `apply_loyalty_coupon`'s stacking guard — differentiates a SAME-CODE
+ * re-apply (idempotent success, the coupon is already on the sub) from a
+ * DIFFERENT-CODE stacking attempt (refuse — the single-$15 ceiling would be
+ * blown by combining two LOYALTY-* codes). Spec:
+ * apply-loyalty-coupon-same-code-reapply-is-idempotent-success-not-stacking.
+ *
+ * Exported for unit tests.
+ */
+export function subscriptionLoyaltyCouponCodes(
+  appliedDiscounts: unknown,
+): string[] {
+  if (!Array.isArray(appliedDiscounts)) return [];
+  const codes: string[] = [];
   for (const entry of appliedDiscounts) {
     let label: string | null = null;
     if (typeof entry === "string") {
@@ -850,9 +870,11 @@ export function subscriptionHasLoyaltyCoupon(
     }
     if (!label) continue;
     const upper = label.toUpperCase();
-    if (upper.startsWith("LOYALTY-") || upper.startsWith("SMILE-")) return true;
+    if (upper.startsWith("LOYALTY-") || upper.startsWith("SMILE-")) {
+      codes.push(upper);
+    }
   }
-  return false;
+  return codes;
 }
 
 /**
@@ -1946,23 +1968,42 @@ export const directActionHandlers: Record<
     // attempt fails fast without minting a duplicate discount code. Not
     // duplicated with `reconcileLoyaltyRefundCoupons` (that reconciles AFTER
     // a cash refund settles; this refuses UPFRONT).
+    //
+    // Idempotency carve-out (spec:
+    // apply-loyalty-coupon-same-code-reapply-is-idempotent-success-not-stacking).
+    // When the LOYALTY-* code ALREADY on the sub is the SAME code being
+    // applied, return SUCCESS — the desired terminal state is already the
+    // case (nothing to do). Refusing here was the ticket-be3d6ab7 bug: the
+    // first apply landed the code, three retries all hit the guard, and the
+    // required-outcome gate then blocked auto-close and re-escalated. Refuse
+    // ONLY when a DIFFERENT LOYALTY-* code is present (the real stacking
+    // case the loyalty-remedy-hard-cap ceiling exists to protect).
     const { data: subForStacking } = await ctx.admin
       .from("subscriptions")
       .select("applied_discounts")
       .eq("workspace_id", ctx.workspaceId)
       .eq("shopify_contract_id", p.contract_id)
       .maybeSingle();
-    if (
-      subForStacking &&
-      subscriptionHasLoyaltyCoupon(
+    if (subForStacking) {
+      const existing = subscriptionLoyaltyCouponCodes(
         (subForStacking as { applied_discounts?: unknown }).applied_discounts,
-      )
-    ) {
-      const capDollars = (LOYALTY_REMEDY_MAX_CENTS / 100).toFixed(0);
-      return {
-        success: false,
-        error: `Subscription ${p.contract_id} already has a loyalty coupon applied — no stacking (single-$${capDollars} ceiling)`,
-      };
+      );
+      if (existing.length > 0) {
+        const upperCode = code.toUpperCase();
+        const different = existing.filter((c) => c !== upperCode);
+        if (different.length === 0) {
+          return {
+            success: true,
+            summary: `Loyalty coupon ${code} already applied to ${p.contract_id} (idempotent no-op)`,
+            couponCode: code,
+          };
+        }
+        const capDollars = (LOYALTY_REMEDY_MAX_CENTS / 100).toFixed(0);
+        return {
+          success: false,
+          error: `Subscription ${p.contract_id} already has a loyalty coupon applied (${different[0]}) — no stacking (single-$${capDollars} ceiling)`,
+        };
+      }
     }
 
     // Phase-1 owner-mismatch guard (spec:

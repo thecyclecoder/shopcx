@@ -28,6 +28,7 @@ import assert from "node:assert/strict";
 import {
   hasLoyaltyCodeApplied,
   subscriptionHasLoyaltyCoupon,
+  subscriptionLoyaltyCouponCodes,
 } from "./action-executor";
 
 // ── hasLoyaltyCodeApplied ─────────────────────────────────────────────
@@ -132,4 +133,93 @@ test("Phase 2 invariant: an order carrying a $15 LOYALTY-* AND a sub carrying a 
   const alreadyLoyaltySub = [{ title: "LOYALTY-15-ATTACHED" }];
   assert.equal(hasLoyaltyCodeApplied(alreadyLoyaltyOrder), true);
   assert.equal(subscriptionHasLoyaltyCoupon(alreadyLoyaltySub), true);
+});
+
+// ── subscriptionLoyaltyCouponCodes — the same-vs-different-code split ─
+// Spec: apply-loyalty-coupon-same-code-reapply-is-idempotent-success-not-stacking.
+// A same-code re-apply is idempotent success (ticket be3d6ab7: the first
+// apply landed LOYALTY-15-8M8HKP; the next three retries hit the coarse
+// "already has a loyalty coupon" refusal → false escalation to June). The
+// stacking-cap refusal must fire ONLY when a DIFFERENT LOYALTY-* code is
+// on the sub (real single-$15 ceiling case the hard-cap spec intended).
+
+test("subscriptionLoyaltyCouponCodes: extracts the LOYALTY-* codes uppercased for same-code comparison", () => {
+  assert.deepEqual(
+    subscriptionLoyaltyCouponCodes([{ title: "LOYALTY-15-ABC123" }]),
+    ["LOYALTY-15-ABC123"],
+  );
+  assert.deepEqual(
+    subscriptionLoyaltyCouponCodes([{ code: "loyalty-15-xyz" }]),
+    ["LOYALTY-15-XYZ"],
+  );
+  assert.deepEqual(
+    subscriptionLoyaltyCouponCodes(["LOYALTY-10-QQ", "SAVE10"]),
+    ["LOYALTY-10-QQ"],
+  );
+});
+
+test("subscriptionLoyaltyCouponCodes: legacy smile-* included (same tolerant family)", () => {
+  assert.deepEqual(
+    subscriptionLoyaltyCouponCodes([{ title: "smile-abc-15" }]),
+    ["SMILE-ABC-15"],
+  );
+});
+
+test("subscriptionLoyaltyCouponCodes: no loyalty codes → [] (a fresh apply is legitimate — guard proceeds)", () => {
+  assert.deepEqual(subscriptionLoyaltyCouponCodes([]), []);
+  assert.deepEqual(subscriptionLoyaltyCouponCodes(null), []);
+  assert.deepEqual(subscriptionLoyaltyCouponCodes([{ title: "SAVE10" }]), []);
+});
+
+test("subscriptionLoyaltyCouponCodes: multiple loyalty codes on the sub (pathological — a prior stacking bug leaked one through)", () => {
+  assert.deepEqual(
+    subscriptionLoyaltyCouponCodes([
+      { title: "LOYALTY-15-AAA" },
+      { title: "LOYALTY-15-BBB" },
+    ]),
+    ["LOYALTY-15-AAA", "LOYALTY-15-BBB"],
+  );
+});
+
+test("apply_loyalty_coupon guard semantics: same code already on the sub → idempotent success (no different-code entry)", () => {
+  const applied = [{ title: "LOYALTY-15-8M8HKP" }];
+  const incoming = "LOYALTY-15-8M8HKP";
+  const existing = subscriptionLoyaltyCouponCodes(applied);
+  const different = existing.filter((c) => c !== incoming.toUpperCase());
+  assert.equal(existing.length, 1, "exactly one loyalty code present");
+  assert.equal(different.length, 0, "no DIFFERENT loyalty code → guard returns success (ticket be3d6ab7 no longer re-escalates)");
+});
+
+test("apply_loyalty_coupon guard semantics: same-code re-apply is case-insensitive (Shopify may normalize case)", () => {
+  const applied = [{ title: "loyalty-15-8m8hkp" }];
+  const incoming = "LOYALTY-15-8M8HKP";
+  const existing = subscriptionLoyaltyCouponCodes(applied);
+  const different = existing.filter((c) => c !== incoming.toUpperCase());
+  assert.equal(different.length, 0);
+});
+
+test("apply_loyalty_coupon guard semantics: DIFFERENT loyalty code on the sub → refuse (the real single-$15 ceiling stacking case)", () => {
+  const applied = [{ title: "LOYALTY-15-EXISTING" }];
+  const incoming = "LOYALTY-15-INCOMING";
+  const existing = subscriptionLoyaltyCouponCodes(applied);
+  const different = existing.filter((c) => c !== incoming.toUpperCase());
+  assert.equal(different.length, 1, "a different loyalty code IS present — refuse stacks past the cap");
+  assert.equal(different[0], "LOYALTY-15-EXISTING");
+});
+
+test("apply_loyalty_coupon guard semantics: same code PLUS a different loyalty code → refuse (the different one still means stacking)", () => {
+  const applied = [{ title: "LOYALTY-15-SAME" }, { title: "LOYALTY-15-OTHER" }];
+  const incoming = "LOYALTY-15-SAME";
+  const existing = subscriptionLoyaltyCouponCodes(applied);
+  const different = existing.filter((c) => c !== incoming.toUpperCase());
+  assert.equal(different.length, 1, "the OTHER loyalty code makes this a stacking case regardless of the SAME hit");
+});
+
+test("apply_loyalty_coupon guard semantics: no loyalty code on the sub → guard proceeds to the mint/apply path (existing = [])", () => {
+  const applied = [{ title: "SAVE10" }];
+  const incoming = "LOYALTY-15-FRESH";
+  const existing = subscriptionLoyaltyCouponCodes(applied);
+  assert.equal(existing.length, 0, "no loyalty codes → this is a fresh apply, guard does not fire");
+  // guard body only runs when existing.length > 0 — mirror the handler
+  assert.ok(!(existing.length > 0));
 });
