@@ -88,6 +88,7 @@ function diag(overrides: Partial<SpecDiagnosis> = {}): SpecDiagnosis {
     specTest: specTest({}),
     security: null,
     lifecycle: { stage: "fold", status: "pending" } as SpecDiagnosis["lifecycle"],
+    foldRefusal: null,
     detectors: [],
     stuck: { isStuck: false, severity: "none", detector: null, reason: "", sinceMinutes: null, suggestedAction: null },
   };

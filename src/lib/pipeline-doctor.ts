@@ -20,7 +20,7 @@ import { getRoadmap, getSpec as getSpecCard } from "@/lib/brain-roadmap";
 import type { AgentJob } from "@/lib/agent-jobs";
 import { getLatestJobsBySlug, ACTIVE_STATUSES, resolveGoalSlugForSpec } from "@/lib/agent-jobs";
 import type { SpecTestRun, AgentVerdict, HumanCheckRow } from "@/lib/spec-test-runs";
-import { getLatestSpecTestRuns, getLiveSpecTestSlugs, getHumanCheckResolutions, normalizeRun, hasActiveSpecTestJob, isCleanMachinePassRun } from "@/lib/spec-test-runs";
+import { getLatestSpecTestRuns, getLiveSpecTestSlugs, getHumanCheckResolutions, normalizeRun, hasActiveSpecTestJob, isCleanMachinePassRun, getFoldRefusalsBySlug } from "@/lib/spec-test-runs";
 import type { SecurityStateBySlug } from "@/lib/security-agent";
 import { getSecurityStateBySlug, getSecurityStateForSlug } from "@/lib/security-agent";
 import { buildLifecycleContext, specTestHasOpenRegression } from "@/lib/build-lifecycle-context";
@@ -131,6 +131,12 @@ export interface SpecDiagnosis {
   lifecycle: { stage: LifecycleDerivation["current"]; status: LifecycleDerivation["currentStatus"] };
   /** For a deferred spec — the audited defer reason + actor (from spec_status_history), when found. */
   deferAudit?: string;
+  /** The fold gate's OWN refusal reason when a shipped spec did NOT clear it this pass (null when the
+   *  spec is not shipped, is eligible, or fold-refusal wasn't queried). Populated from the SAME
+   *  evaluation as `getAutoFoldEligibleSlugs` via [[spec-test-runs]] `getFoldRefusalsBySlug`, so the
+   *  board and the gate can never disagree about why a spec did not fold.
+   *  ⭐ [[../specs/a-shipped-spec-that-cannot-fold-is-stuck]] Phase 1. */
+  foldRefusal: string | null;
   detectors: DetectorResult[];
   stuck: StuckVerdict;
 }
@@ -427,6 +433,65 @@ const detectNotClaimed: Classifier = (d, ctx) => {
   };
 };
 
+/** MEDIUM — the DERIVED rollup is `shipped`, the spec is not folded, and the fold gate is refusing
+ *  for a specific, computed reason. Reports the fold gate's OWN refusal (from
+ *  [[spec-test-runs]] `getFoldRefusalsBySlug`) — the board says WHY, not merely that something is.
+ *
+ *  ⭐ [[../specs/a-shipped-spec-that-cannot-fold-is-stuck]] Phase 1. Grounded in four 2026-08-31 /
+ *  2026-09-02 incidents where a spec sat shipped-but-unfolded for days while the doctor reported
+ *  zero stuck — the founder noticed every time. The refusal reason was already computed by the fold
+ *  gate and thrown to a console line; this classifier connects the two.
+ *
+ *  A LIVE build/spec-test/fold job means the pipeline is still working on the spec and the fold
+ *  itself defers — mirror that or the board would alarm on healthy in-flight work. A `deferred`
+ *  spec is parked by CEO choice and stays off the stuck list regardless.
+ *
+ *  Grace window: 12 hours. The fold cron sweeps daily AND runs reactively on every spec-test
+ *  completion + human-check resolution ([[../control-tower/registry]] AUTO_FOLD_GATE_LOOP_ID —
+ *  livenessWindowMs = 30h). 12h is comfortably longer than the reactive lag (the fold enqueues
+ *  within seconds of the spec-test callback) and long enough that the daily sweep has run at least
+ *  once — so a spec that just shipped is NOT stuck, but one that sat unfolded for half a day is. */
+const SHIPPED_NOT_FOLDED_GRACE_MIN = 12 * 60;
+export const detectShippedNotFolded: Classifier = (d) => {
+  // Rail 1 — DERIVED-shipped only. Same source-of-truth every other classifier uses.
+  if (d.derivedStatus !== "shipped") return null;
+  // Rail 2 — a deliberately parked spec is never stuck. A shipped rollup should not reach here, but
+  // belt + suspenders: the CEO can override via `specs.status='deferred'` and derived rollups can
+  // theoretically diverge.
+  if (d.rawStatus === "deferred") return null;
+  // Rail 3 — already folded (either derived or via the stored override): nothing to alarm about.
+  if (d.rawStatus === "folded") return null;
+  // Rail 4 — mirror the fold gate's OWN in-flight defer: a live build/spec-test/fold/goal-fold job
+  // means the pipeline is still working on the spec, so it's not stuck (`getAutoFoldEligibleSlugs`
+  // rejects live-slug candidates). Failing to mirror this would alarm on healthy work — the exact
+  // cry-wolf case that would recreate the blindness this classifier is closing.
+  for (const j of d.jobs) {
+    if (j.kind !== "build" && j.kind !== "spec-test" && j.kind !== "fold" && j.kind !== "goal-fold") continue;
+    if (ACTIVE_STATUSES.includes(j.status as never)) return null;
+  }
+  // Rail 5 — the fold gate must have produced a specific refusal for this slug. When the map is
+  // missing (older caller not passing refusals) or the slug is not in it (the gate said ELIGIBLE),
+  // there is nothing to alarm about — the fold will happen on the next reactive/cron sweep.
+  if (!d.foldRefusal) return null;
+  // Rail 6 — grace: how long has the spec sat quiescent? The most-recent job activity is the best
+  // proxy the doctor has for "when did this spec last move" (there is no `shipped_at` on the card).
+  const minAge = d.jobs.reduce<number | null>((acc, j) => {
+    if (j.ageMinutes == null) return acc;
+    return acc == null ? j.ageMinutes : Math.min(acc, j.ageMinutes);
+  }, null);
+  if (minAge == null || minAge < SHIPPED_NOT_FOLDED_GRACE_MIN) return null;
+
+  return {
+    name: "shipped-not-folded",
+    severity: "medium",
+    reason: `Shipped but the fold gate is refusing: ${d.foldRefusal}`,
+    // The spec's whole point: `suggestedAction` must be the fold gate's OWN refusal, not a generic
+    // "investigate". A board that says WHY is what closes the visibility gap.
+    suggestedAction: d.foldRefusal,
+    sinceMinutes: minAge,
+  };
+};
+
 /** INFO — status=deferred. Surfaces the audited defer reason + who (from spec_status_history). */
 const detectDeferredParked: Classifier = (d) => {
   if (d.derivedStatus !== "deferred") return null;
@@ -449,6 +514,7 @@ export const CLASSIFIERS: Classifier[] = [
   detectInTestingNeedsHuman,
   detectAwaitingHuman,
   detectDriftSuspect,
+  detectShippedNotFolded,
   detectNotClaimed,
   detectDeferredParked,
 ];
@@ -503,6 +569,7 @@ function assembleSpec(
   humanResolutions: Map<string, HumanCheckRow>,
   goalSlug: string | null,
   deferAudit: string | undefined,
+  foldRefusal: string | null,
   ctx: DoctorContext,
 ): SpecDiagnosis {
   const phases: PhaseDiag[] = card.phases.map((p, i) => ({
@@ -556,6 +623,7 @@ function assembleSpec(
     security: security ? { ...security, hasRecord: true } : null,
     lifecycle: { stage: lifecycle.current, status: lifecycle.currentStatus },
     deferAudit,
+    foldRefusal,
     detectors: [],
     stuck: { isStuck: false, severity: "none", detector: null, reason: "", sinceMinutes: null, suggestedAction: null },
   };
@@ -631,7 +699,7 @@ export async function diagnosePipeline(opts: DiagnoseOptions = {}): Promise<Pipe
   // `mainBuildRedRead` runs in parallel with the rest and is best-effort — a GitHub blip returns
   // state='unknown' and the board renders that as "can't tell", NOT green (a-red-main-is-a-first-
   // class-pipeline-alarm Phase 1).
-  const [roadmap, latestJobsBySlug, runs, liveSpecTestSlugs, securityBySlug, humanResolutions, mainBuildRed] = await Promise.all([
+  const [roadmap, latestJobsBySlug, runs, liveSpecTestSlugs, securityBySlug, humanResolutions, mainBuildRed, foldRefusalsBySlug] = await Promise.all([
     getRoadmap(workspaceId),
     getLatestJobsBySlug(workspaceId),
     getLatestSpecTestRuns(workspaceId),
@@ -641,6 +709,13 @@ export async function diagnosePipeline(opts: DiagnoseOptions = {}): Promise<Pipe
     readMainBuildStatus().catch((err): MainBuildRedSummary => {
       console.warn("[pipeline-doctor] readMainBuildStatus threw:", err instanceof Error ? err.message : err);
       return { state: "unknown", headSha: null, firstRedSha: null, firstRedSubject: null };
+    }),
+    // ⭐ a-shipped-spec-that-cannot-fold-is-stuck Phase 1 — the fold gate's per-slug refusal map so
+    // `detectShippedNotFolded` can surface the gate's OWN reason. Best-effort; a lookup blip yields
+    // an empty map (never a thrown diagnosis).
+    getFoldRefusalsBySlug(workspaceId).catch((err) => {
+      console.warn("[pipeline-doctor] getFoldRefusalsBySlug threw:", err instanceof Error ? err.message : err);
+      return new Map<string, string>();
     }),
   ]);
 
@@ -748,6 +823,7 @@ export async function diagnosePipeline(opts: DiagnoseOptions = {}): Promise<Pipe
       humanResolutions,
       goalSlug,
       deferAuditBySlug.get(card.slug),
+      foldRefusalsBySlug.get(card.slug) ?? null,
       ctx,
     );
   });
@@ -853,8 +929,21 @@ export async function diagnoseSpec(workspaceId: string, slug: string): Promise<S
     if (h) deferAudit = `Deferred by ${h.actor ?? "?"}${h.reason ? ` — ${h.reason}` : ""}.`;
   }
 
+  // ⭐ a-shipped-spec-that-cannot-fold-is-stuck Phase 1 — fetch the fold refusal for this slug so
+  // Mario / the investigation SDK sees the same shipped-not-folded reason the board renders. The
+  // gate evaluation is workspace-wide (no slug-scoped variant), so pluck the one entry we need.
+  let foldRefusal: string | null = null;
+  if ((card.status as SpecStatus | "folded") === "shipped") {
+    try {
+      const refusals = await getFoldRefusalsBySlug(workspaceId);
+      foldRefusal = refusals.get(slug) ?? null;
+    } catch (err) {
+      console.warn("[pipeline-doctor] getFoldRefusalsBySlug threw:", err instanceof Error ? err.message : err);
+    }
+  }
+
   const ctx: DoctorContext = { workspaceId, now, activeBuilds: buildCount.count ?? 0, staleFloorMin: null };
-  return assembleSpec(card, raw, jobs, run, liveSpecTestSlugs, security, humanResolutions, goalSlug, deferAudit, ctx);
+  return assembleSpec(card, raw, jobs, run, liveSpecTestSlugs, security, humanResolutions, goalSlug, deferAudit, foldRefusal, ctx);
 }
 
 /** Build/plan pool occupancy — the lane context for the "stuck vs just queued" call, as a COUNT-only
