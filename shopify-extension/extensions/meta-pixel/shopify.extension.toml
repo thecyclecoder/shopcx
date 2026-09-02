@@ -1,0 +1,20 @@
+name = "meta-pixel"
+type = "web_pixel_extension"
+uid = "febaf404-7bad-fd46-c1a9-85722210d5f56b963526"
+
+# strict = sandboxed, no DOM. We never inject fbevents.js; the pixel is a
+# COLLECTOR that forwards to ShopCX, which signs into Meta's CAPI server-side.
+# `browser.cookie` still reads/writes the TOP frame, so _fbp/_fbc are real
+# first-party cookies on the merchant domain.
+runtime_context = "strict"
+
+[settings]
+type = "object"
+
+[settings.fields.pixelId]
+name = "Meta Pixel ID"
+description = "Meta pixel / dataset ID that events are attributed to."
+type = "single_line_text_field"
+validations = [
+  { name = "min", value = "1" }
+]
