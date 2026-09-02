@@ -1,0 +1,1 @@
+- **Stop sending "we're looking into that" seconds before the actual answer** · verified 2026-09-02 · → [[../libraries/holding-message-defer]]
