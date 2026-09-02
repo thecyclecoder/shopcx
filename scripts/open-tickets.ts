@@ -23,6 +23,7 @@
 import { loadEnv, createAdminClient } from "./_bootstrap";
 loadEnv();
 import { investigateTicket } from "../src/lib/tickets-read";
+import { classifyEscalationHealth } from "../src/lib/escalation-health";
 
 const WS = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 
@@ -97,10 +98,19 @@ async function list() {
     const cust = c ? `${(c as { first_name?: string }).first_name ?? ""} ${(c as { last_name?: string }).last_name ?? ""}`.trim() : "—";
 
     // Escalation health — the whole point of the queue view.
-    // An assigned ticket is legitimately open + unescalated: a human agent OWNS it. Not a defect.
+    // The rule lives in classifyEscalationHealth so it can be unit-tested; this branch just
+    // renders the state (assigned needs the display_name lookup, which isn't pure).
+    // A reopened old thread (customer replied a minute ago) is NOT a defect — idle, not age, is neglect.
+    const verdict = classifyEscalationHealth({
+      ageMin: age,
+      idleMin: idle,
+      escalatedTo: t.escalated_to,
+      assignedTo: t.assigned_to,
+      graceMin: JUST_CREATED_GRACE_MIN,
+    });
     let health: string;
-    if (t.escalated_to) health = "escalated → CEO";
-    else if (t.assigned_to) {
+    if (verdict.state === "escalated") health = "escalated → CEO";
+    else if (verdict.state === "assigned") {
       const { data: m } = await admin
         .from("workspace_members")
         .select("display_name")
@@ -110,8 +120,9 @@ async function list() {
       const who = (m as { display_name?: string } | null)?.display_name ?? "a human agent";
       health = `owned by ${who} — human-worked`;
     }
-    else if (age <= JUST_CREATED_GRACE_MIN) health = `new (${human(age)}) — still in flow`;
-    else { health = `⚠️ DEFECT — open ${human(age)}, NOT escalated`; defects++; }
+    else if (verdict.state === "new") health = `new (${human(verdict.ageMin)}) — still in flow`;
+    else if (verdict.state === "reopened") health = `reopened ${human(verdict.idleMin)} ago — in flow`;
+    else { health = `⚠️ DEFECT — untouched ${human(verdict.idleMin)}, NOT escalated`; defects++; }
 
     const june = await juneVerdicts(admin, t.id);
     const cards = await ceoCards(admin, t.id);
@@ -126,10 +137,10 @@ async function list() {
   }
 
   if (defects) {
-    console.log(`⚠️  ${defects} open ticket(s) are NOT escalated, NOT assigned, and past the ${JUST_CREATED_GRACE_MIN}m grace.`);
+    console.log(`⚠️  ${defects} open ticket(s) are NOT escalated, NOT assigned, and have gone untouched past the ${JUST_CREATED_GRACE_MIN}m grace.`);
     console.log(`    In steady state every open ticket should be escalated or owned by a human — these were dropped, not queued.\n`);
   } else if (rows.length) {
-    console.log(`✅ every open ticket is escalated, owned by a human, or newer than ${JUST_CREATED_GRACE_MIN}m.\n`);
+    console.log(`✅ every open ticket is escalated, owned by a human, or has been touched within the last ${JUST_CREATED_GRACE_MIN}m.\n`);
   }
 }
 
