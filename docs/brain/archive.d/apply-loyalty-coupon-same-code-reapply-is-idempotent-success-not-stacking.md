@@ -1,0 +1,1 @@
+- **apply_loyalty_coupon: a same-code re-apply is an idempotent success, not a 'no stacking' failure** · verified 2026-09-02 · → [[../libraries/action-executor]]
