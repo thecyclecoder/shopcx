@@ -84,9 +84,10 @@ export function computeReturnNetRefundCents(input: {
 }
 
 /**
- * Derive an order's REFUNDABLE SUBTOTAL from its `line_items` — the sum of `price_cents * quantity`
- * EXCLUDING any Shipping Protection line. Pinned in one exported helper so every downstream refund
- * path (return-creation + any future refund path) agrees on which lines count.
+ * Derive an order's REFUNDABLE SUBTOTAL from its `line_items` — the sum of
+ * `price_cents * quantity - total_discount_cents` EXCLUDING any Shipping Protection line. Pinned in
+ * one exported helper so every downstream refund path (return-creation + any future refund path)
+ * agrees on which lines count.
  *
  * Phase 3 of [[../../docs/brain/specs/remedy-state-must-see-out-of-band-refunds]] — the `returns`
  * policy row (see [[../tables/policies]]) reads: "Refund math: net_refund = order_subtotal -
@@ -97,6 +98,19 @@ export function computeReturnNetRefundCents(input: {
  * title match is what [[../libraries/avalara-tax-codes]] `classifyByShopifyCategory` uses to bucket
  * a line as `shipping_protection` on the tax side, so a policy change to the SP title propagates in
  * one place, not several. Pure + deterministic — no async, no dependencies beyond a lines array.
+ *
+ * Phase 1 of [[../../docs/brain/specs/return-net-refund-must-net-per-line-discounts]] — Shopify
+ * stores each line's discount in `total_discount_cents` (the sum across the line's units, mirrored
+ * from webhook payload `total_discount`, see [[shopify-webhooks]] `line_items` map). BEFORE this
+ * fix the derivation summed gross `price_cents * quantity` and IGNORED that field, so any
+ * discounted order over-promised the refundable ceiling by exactly the discount amount. Live case
+ * from ticket `d17c7b1c` / SC137380: coffee line $79.95 × 2 GROSS = $159.90 with a $12.78 line
+ * discount (customer paid $147.12), order collected $155.95 — the gross figure tripped
+ * `assertReturnRefundHeadroom` ("$159.90 exceeds live refundable ceiling $155.95") and REFUSED a
+ * legitimate in-policy Tier-2 return. Netting per-line makes the subtotal match what the customer
+ * actually paid, so the headroom check sees $147.12 (below the $155.95 ceiling) and clears.
+ * `total_discount_cents` floors at 0 and clamps to `qty * price` — a bad row cannot push the line's
+ * contribution negative.
  */
 export function deriveOrderSubtotalCentsFromLines(
   lines: OrderLineItemLite[] | null | undefined,
@@ -108,7 +122,11 @@ export function deriveOrderSubtotalCentsFromLines(
     if (/shipping\s*protection|upcart|shopwill/i.test(title)) continue;
     const qty = Number.isFinite(l?.quantity) ? Math.max(0, Math.round(l!.quantity!)) : 0;
     const price = Number.isFinite(l?.price_cents) ? Math.max(0, Math.round(l!.price_cents!)) : 0;
-    subtotal += qty * price;
+    const gross = qty * price;
+    const discount = Number.isFinite(l?.total_discount_cents)
+      ? Math.max(0, Math.round(l!.total_discount_cents!))
+      : 0;
+    subtotal += Math.max(0, gross - discount);
   }
   return subtotal;
 }
@@ -370,6 +388,13 @@ export interface OrderLineItemLite {
   variant_title?: string | null;
   quantity?: number;
   price_cents?: number;
+  /**
+   * Per-line discount total in cents (sum across the line's units), mirrored from Shopify's
+   * `total_discount` webhook field by [[shopify-webhooks]]. Read by
+   * `deriveOrderSubtotalCentsFromLines` so the refundable subtotal matches what the customer
+   * actually paid — see [[../../docs/brain/specs/return-net-refund-must-net-per-line-discounts]].
+   */
+  total_discount_cents?: number;
   variant_id?: string | number | null;
 }
 
