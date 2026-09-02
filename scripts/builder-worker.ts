@@ -57,6 +57,7 @@ import { buildQcChildEnv } from "../src/lib/ads/creative-qc-sandbox";
 // d5999907 was recovered by hand this way; this makes it automatic.
 import { recoverSpecsForSession, type RecoveredSpec } from "./planner-transcript-recover";
 import { isStrandedFoldCandidate } from "./builder-worker.stranded-fold"; // fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 1 — pure decision predicate for sweepStrandedFolds
+import { shouldReAskForJsonEnvelope, storefrontOptimizerReAskPrompt } from "../src/lib/storefront-optimizer-reask"; // storefront-optimizer-re-asks-once-before-parking Phase 1 — pure decision helper for the one bounded re-ask before park
 import { applyRefreshOutcome, classifyAccountHealth, decideHeldAccountRecovery, decideSweepAction } from "./builder-worker.auth-refresh"; // a-test-that-no-runner-executes-is-not-a-test Phase 1 — pure decision predicates for sweepExpiredCredentials + attemptCredentialRefresh, extracted so scripts/builder-worker.auth-refresh.test.ts can pin the four cases the outage named. build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 — classifyAccountHealth is the shared account-health classifier the sweepUpcomingExpiries + brain runbook document as the SoT for the reason vocabulary. Re-authored Phase 1 — decideHeldAccountRecovery is the pure predicate the sweep consults for accounts ALREADY held, so a CEO re-auth returns them to rotation on the next sweep tick instead of waiting out the 25-hour weekly-cap window.
 // planner-authoring-survives-large-multi-spec-output Phase 2 — bounded per-result size for the
 // planner authoring turn: split the approved specs into small batches (K=2), one runClaude call
@@ -27460,13 +27461,26 @@ async function runStorefrontOptimizerJob(job: Job) {
       return;
     }
 
-    const { session, resultText, isError, raw, usage, model, configDir: sfDir } = await runBoxLane(
+    const firstRun = await runBoxLane(
       (cfg, sid) => runStorefrontOptimizerClaude(storefrontOptimizerPrompt(brief.text, surface), sid, REPO_DIR, cfg, job.id),
     );
-    await meterAgentJob(job, sfDir ?? undefined, usage, model);
+    let { session, resultText, isError, raw } = firstRun;
+    const sfDir = firstRun.configDir;
+    await meterAgentJob(job, sfDir ?? undefined, firstRun.usage, firstRun.model);
     if (session) await update(job.id, { claude_session_id: session, claude_session_config_dir: sfDir });
+
+    // ── storefront-optimizer-re-asks-once-before-parking Phase 1 ─────────────
+    // The prior lane parsed once, ran the status branches, and dropped straight into
+    // `needs_attention` on any unparseable result — twice on the same lander in 24h, both times
+    // the session had picked a sound lever but answered in prose. Wrap the parse-and-branch in a
+    // bounded while loop so the terminal fall-through can consult shouldReAskForJsonEnvelope,
+    // resume the SAME session ONCE for the JSON envelope, and fall through into the existing
+    // status branches on success. Mirrors the deploy-review + mario parse-repair pattern.
+    let alreadyReAsked = false;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
     const parsed = extractJson<Record<string, unknown>>(resultText);
-    console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}`);
+    console.log(`${tag} claude finished — status: ${parsed?.status ?? "(none)"} isError=${isError}${alreadyReAsked ? " · post-re-ask" : ""}`);
 
     if (parsed?.status === "idle") {
       await update(job.id, { status: "completed", error: null, log_tail: `idle: ${String(parsed.reason || "no worthwhile lever to test")}`.slice(-2000) });
@@ -27647,11 +27661,43 @@ async function runStorefrontOptimizerJob(job: Job) {
       return;
     }
 
-    if (isError && !parsed) {
+    // ── Terminal fall-through: consult the pure re-ask helper. ONE bounded re-ask on the SAME
+    //    session for the JSON envelope only, then park exactly as before if that fails too. The
+    //    `isError && !parsed` failure branch is preserved verbatim by the helper's "fail" return;
+    //    a parsed-but-unrecognized status still parks (the helper returns "park" for that).
+    const decision = shouldReAskForJsonEnvelope({ parsed, isError, alreadyReAsked });
+    if (decision === "fail") {
       await update(job.id, { status: "failed", error: "storefront-optimizer run errored", log_tail: raw.slice(-2000) });
       return;
     }
-    await update(job.id, { status: "needs_attention", error: "storefront-optimizer ended without a recognizable status", log_tail: raw.slice(-2000) });
+    if (decision === "re_ask") {
+      if (!session) {
+        // No session id to --resume against (the box never wrote one). Nothing to re-ask; park
+        // like today. Vanishingly rare — runBoxLane surfaces a session id on every real run.
+        await update(job.id, { status: "needs_attention", error: "storefront-optimizer ended without a recognizable status (no session id available for re-ask)", log_tail: raw.slice(-2000) });
+        return;
+      }
+      console.warn(`${tag} unparseable envelope — same-session re-ask (attempt 2, JSON envelope only)`);
+      const reAsk = await runStorefrontOptimizerClaude(storefrontOptimizerReAskPrompt(), session, REPO_DIR, sfDir ?? undefined, job.id);
+      await meterAgentJob(job, sfDir ?? undefined, reAsk.usage, reAsk.model);
+      if (reAsk.session) await update(job.id, { claude_session_id: reAsk.session, claude_session_config_dir: sfDir });
+      session = reAsk.session ?? session;
+      resultText = reAsk.resultText;
+      raw = reAsk.raw;
+      isError = reAsk.isError;
+      alreadyReAsked = true;
+      continue; // re-enter the parse-and-branch loop with the fresh resultText
+    }
+    // decision === "park" — either alreadyReAsked (the re-ask fired and its result is also
+    // unparseable) or a parsed-but-unrecognized status. Park like today, but say so in the text
+    // when the re-ask was already attempted so the next reader knows this is a genuine formatting
+    // failure rather than an un-retried one.
+    const parkText = alreadyReAsked
+      ? "storefront-optimizer ended without a recognizable status (re-ask attempted, second attempt also unparseable)"
+      : "storefront-optimizer ended without a recognizable status";
+    await update(job.id, { status: "needs_attention", error: parkText, log_tail: raw.slice(-2000) });
+    return;
+    }
   } catch (e) {
     await update(job.id, { status: "failed", error: errText(e) });
     console.error(`${tag} failed:`, e instanceof Error ? e.message : e);
