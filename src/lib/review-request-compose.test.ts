@@ -214,3 +214,27 @@ test("the post-order ask creates its ticket closed, not open", () => {
     "a review request is a one-way ask — an open ticket lands in the CS queue with no work to do",
   );
 });
+
+// 6. **A submitted review carries the reviewer's name.** The journey's insert
+//    set customer_id but never `reviewer_name`, so every review it wrote
+//    rendered as "Anonymous" on /dashboard/reviews and the PDP — against
+//    10,745 legacy rows that all read "First L.". The customer signed it with
+//    their name; the byline has to show it.
+test("the review insert populates reviewer_name from the customer", () => {
+  const coreSrc = readFileSync(
+    new URL("./review-journey-core.ts", import.meta.url),
+    "utf8",
+  );
+  const insert = coreSrc.slice(coreSrc.indexOf('.from("product_reviews")'));
+  assert.match(
+    insert,
+    /reviewer_name:/,
+    "product_reviews insert must set reviewer_name or the review renders as Anonymous",
+  );
+  // "First L." — the shape every named legacy review uses.
+  assert.match(
+    coreSrc,
+    /\$\{firstName\} \$\{lastInitial\.toUpperCase\(\)\}\./,
+    "reviewer_name must be built as First + last initial + period",
+  );
+});

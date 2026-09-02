@@ -331,15 +331,33 @@ export async function submitReviewForSession(input: SubmitReviewInput): Promise<
   // the ad tool's proof anchors, and in Google rich snippets: a 5-star rating
   // says nothing about whether the BODY is publishable — it can name a
   // competitor, contain a medical claim we cannot make, describe the wrong
-  // product, or carry personal information. The first real submission proved
-  // the point: a sincere 5-star review of Superfood Tabs ("the stickpacks are
-  // so convenient") auto-published against Creatine Prime+, because that is
-  // the product the session named.
+  // product, or carry personal information. The first real submission went
+  // straight to a live PDP the moment it was written, with no one having read
+  // it — that is the exposure, independent of whether any given review turns
+  // out to be fine.
   //
   // A team member publishes from /dashboard/reviews, which already buckets
   // pending / published / rejected / featured and whose moderation actions are
   // local-only since the Klaviyo sunset.
   const status: "pending" = "pending";
+
+  // The reviewer's name. Every one of the 10,745 named legacy reviews reads
+  // "First L." — that is the storefront's established byline, and the same
+  // shape the ask copy quotes back ("Erica F."). Leaving it null renders the
+  // review as "Anonymous" on /dashboard/reviews and on the PDP, which is not
+  // what the customer agreed to when they signed a review with their name.
+  const { data: reviewer } = await admin
+    .from("customers")
+    .select("first_name, last_name, email")
+    .eq("id", session.customer_id)
+    .maybeSingle();
+  const firstName = (reviewer?.first_name || "").trim();
+  const lastInitial = (reviewer?.last_name || "").trim().charAt(0);
+  const reviewerName = firstName
+    ? lastInitial
+      ? `${firstName} ${lastInitial.toUpperCase()}.`
+      : firstName
+    : null;
 
   const { data: reviewInsert, error: reviewErr } = await admin
     .from("product_reviews")
@@ -355,6 +373,9 @@ export async function submitReviewForSession(input: SubmitReviewInput): Promise<
       // product would hit this again), but we populate it regardless so the
       // legacy column stays consistent for anything still reading it.
       shopify_product_id: product.shopify_product_id ?? "internal",
+      reviewer_name: reviewerName,
+      email: reviewer?.email ?? null,
+      product_name: product.title ?? null,
       rating,
       body: comment,
       attribute_scores,
