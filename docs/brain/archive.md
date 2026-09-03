@@ -12,6 +12,14 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Security dependency upgrades** · verified 2026-09-03 · → [[../libraries/security-agent]]
+- **The open-ticket defect check measures neglect, not ticket age** · verified 2026-09-02 · → [[../recipes/open-tickets-queue]]
+- **A shipped spec that cannot fold counts as stuck on the board** · verified 2026-09-02 · → [[../libraries/pipeline-doctor]]
+- **apply_loyalty_coupon: a same-code re-apply is an idempotent success, not a 'no stacking' failure** · verified 2026-09-02 · → [[../libraries/action-executor]]
+- **The CS Director must timestamp a cancelled-but-charged claim before escalating it** · verified 2026-09-02 · → [[lifecycles/ticket-lifecycle]] · [[libraries/cs-director]]
+- **Return net_refund derivation must subtract per-line total_discount_cents** · verified 2026-09-02 · → [[../libraries/shopify-returns]]
+- **An unreadable optimizer answer earns one re-ask, not a permanent park** · verified 2026-09-02 · → [[../libraries/builder-worker]], [[../libraries/storefront-optimizer-reask]]
+- **Stop sending "we're looking into that" seconds before the actual answer** · verified 2026-09-02 · → [[../libraries/holding-message-defer]]
 - **apply_loyalty_coupon verify must match the internal-sub {code} discount shape** · verified 2026-09-01 · → [[../libraries/action-executor]]
 - **A red main is a first-class pipeline alarm, and the deploy build gate covers every PR** · verified 2026-08-31 · → [[../libraries/control-tower]] (main-build-status), [[../libraries/deploy-build-gate]], [[../libraries/github-pr-resolve]]
 - **Amazing Coffee supply-tier pricing vs flat subscription & interval cap** · verified 2026-08-31 · → [[../tables/sonnet_prompts]]
