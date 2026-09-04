@@ -46,7 +46,11 @@ Mirrors the checkout route's money path, minus the cart:
    `avalara_enabled`. Guarded: a failure warns and proceeds at zero tax rather
    than blocking a charge the customer is expecting.
 4. **Evidence before money** — a `pending` row in `transactions` BEFORE the
-   sale, so a crash mid-flight still records that we tried to charge.
+   sale, so a crash mid-flight still records that we tried to charge. **This
+   fails closed**: if the row cannot be written, the card is never touched.
+   `transactions.type` is constrained to
+   `initial_checkout | renewal | dunning_retry | manual | comp` — a one-off is
+   `manual`, tagged `metadata.kind='one_time_charge'`.
 5. **The sale** — `gateway.transaction.sale({ paymentMethodToken, customerId,
    options: { submitForSettlement: true } })`.
 6. **Patch** the transaction row to `succeeded` / `failed`.
@@ -71,6 +75,12 @@ Mirrors the checkout route's money path, minus the cart:
   Shopify-shaped; `toAvalaraAddress` returns `null` on a half-formed address so
   we quote no tax rather than commit a SalesInvoice against it. Pinned in
   `one-time-charge.test.ts`.
+- **Probe the constraint before inventing an enum value.** The first version
+  wrote `type='one_time_charge'`, which violates `transactions_type_check`.
+  The insert discarded its error, so the evidence row silently never existed
+  and the charge ran with nothing behind it — the exact property step 4 claims
+  to provide. Both failures in this file were the same shape: a swallowed
+  PostgREST error.
 - **Never embed `products(title)` on `product_variants`.** More than one FK
   links the two tables, so PostgREST rejects the embed as ambiguous. The first
   real call failed `variant_not_found` on a variant that plainly existed,

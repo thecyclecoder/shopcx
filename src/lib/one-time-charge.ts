@@ -305,23 +305,45 @@ export async function chargeOneTimeOrder(
   if (totalCents <= 0) return { success: false, error: "zero_total" };
 
   // ── 5. Evidence before money. ───────────────────────────────────────
-  const { data: txnRow } = await admin
+  // `transactions.type` is constrained to
+  // initial_checkout | renewal | dunning_retry | manual | comp.
+  // A CS-initiated one-off is 'manual'; `orders.source_name` and
+  // metadata.reason are what distinguish it downstream. The first version of
+  // this used 'one_time_charge', which violated the check constraint — and
+  // because the insert discarded its error, the row silently never existed
+  // and the charge went through with no evidence behind it.
+  const { data: txnRow, error: txnErr } = await admin
     .from("transactions")
     .insert({
       workspace_id: workspaceId,
       customer_id: customerId,
       payment_method_id: pm.id,
-      type: "one_time_charge",
+      type: "manual",
       status: "pending",
       amount_cents: totalCents,
       currency: "USD",
       braintree_payment_method_token: pm.braintree_payment_method_token,
       braintree_customer_id: pm.braintree_customer_id,
-      metadata: { order_number: orderNumber, reason: input.reason ?? null },
+      metadata: {
+        order_number: orderNumber,
+        reason: input.reason ?? null,
+        kind: "one_time_charge",
+      },
     })
     .select("id")
     .single();
-  const transactionRecordId = txnRow?.id as string | undefined;
+
+  // FAIL CLOSED. This row is the whole point of writing evidence before money:
+  // if we cannot record that we are about to charge, we do not charge. Better a
+  // customer who has to be told "try again" than a card charged against nothing.
+  if (txnErr || !txnRow?.id) {
+    return {
+      success: false,
+      error: "transaction_record_failed",
+      details: txnErr?.message ?? "insert returned no row",
+    };
+  }
+  const transactionRecordId = txnRow.id as string;
 
   // ── 6. The sale. ────────────────────────────────────────────────────
   const gateway = await getBraintreeGateway(workspaceId);
@@ -338,22 +360,18 @@ export async function chargeOneTimeOrder(
       (sale as { transaction?: { processorResponseText?: string } }).transaction
         ?.processorResponseText ||
       "Braintree transaction failed";
-    if (transactionRecordId) {
-      await admin
-        .from("transactions")
-        .update({ status: "failed", error_message: message })
-        .eq("id", transactionRecordId);
-    }
+    await admin
+      .from("transactions")
+      .update({ status: "failed", error_message: message })
+      .eq("id", transactionRecordId);
     return { success: false, error: "charge_declined", details: message };
   }
   const transaction = sale.transaction;
 
-  if (transactionRecordId) {
-    await admin
-      .from("transactions")
-      .update({ status: "succeeded", braintree_transaction_id: transaction.id })
-      .eq("id", transactionRecordId);
-  }
+  await admin
+    .from("transactions")
+    .update({ status: "succeeded", braintree_transaction_id: transaction.id })
+    .eq("id", transactionRecordId);
 
   // ── 7. The order. ───────────────────────────────────────────────────
   const { data: order, error: orderErr } = await admin
@@ -408,12 +426,10 @@ export async function chargeOneTimeOrder(
     // for something no one can find. Mirrors the checkout route.
     try {
       await gateway.transaction.refund(transaction.id);
-      if (transactionRecordId) {
-        await admin
-          .from("transactions")
-          .update({ status: "refunded", error_message: "order insert failed" })
-          .eq("id", transactionRecordId);
-      }
+      await admin
+        .from("transactions")
+        .update({ status: "refunded", error_message: "order insert failed" })
+        .eq("id", transactionRecordId);
     } catch (refundErr) {
       console.error(
         `[one-time-charge] REFUND FAILED for braintree txn ${transaction.id} — reconcile by hand:`,
@@ -423,9 +439,7 @@ export async function chargeOneTimeOrder(
     return { success: false, error: "order_insert_failed", details: orderErr?.message };
   }
 
-  if (transactionRecordId) {
-    await admin.from("transactions").update({ order_id: order.id }).eq("id", transactionRecordId);
-  }
+  await admin.from("transactions").update({ order_id: order.id }).eq("id", transactionRecordId);
 
   // ── 8. The warehouse. ───────────────────────────────────────────────
   // A charge that never reaches Amplifier is a customer who paid and gets
