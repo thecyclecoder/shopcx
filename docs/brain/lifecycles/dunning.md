@@ -56,6 +56,17 @@ If cards are exhausted, the payday-retry path takes over (only if `dunning_payda
 
 Up to N payday retries (configurable; default 4). After exhaustion, fall through to cycle action.
 
+### Stranded cycles — a `retrying` cycle whose sub stopped being active
+
+A `retrying` cycle only ever advances while its subscription is **active**, and there are two disjoint engines:
+
+- **Appstle-billed subs** — `dunningPaydayRetryCron` in [[../inngest/dunning]], which explicitly **excludes** `internal-*` contracts (they'd 400 against Appstle with a synthetic billing-attempt id).
+- **Internal (Braintree) subs** — [[../inngest/internal-subscription-renewals]], which only ever selects subs with `status='active'`.
+
+So the moment a sub is **paused or cancelled** mid-dunning, neither engine can touch its cycle again: it sits `retrying` with a `next_retry_at` in the past forever. The payday cron's inline guard catches only `cancelled`, and only for cycles it already selected — so it can never reach an `internal-*` row. Control Tower's `stuck_dunning` assertion then fires permanently (cycle `b5d638a7`, `internal-d083b94d2cfa4ba2`, stranded 2026-08-07 → 2026-09-04 on a **paused** sub — an alert nobody could clear).
+
+The `close-stranded-cycles` step at the top of `dunningPaydayRetryCron` sweeps this: any `retrying` cycle past due by more than the **same 48h grace the monitor uses** whose subscription is not `active` is terminated (`status='exhausted'`, `next_retry_at=null`). Terminating is the correct end state — a non-active sub cannot be billed, so the retry is meaningless; if the customer resumes, the next failed renewal opens a fresh cycle. The count surfaces on the cron heartbeat as `strandedClosed`, so a recurring non-zero value means something upstream is stranding cycles.
+
 ## Phase 4 — cycle action
 
 After silent rotation AND payday retries both fail, the cycle action defined in [[../tables/workspaces]] kicks in:
