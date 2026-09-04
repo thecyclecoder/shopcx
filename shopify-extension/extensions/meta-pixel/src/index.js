@@ -171,8 +171,14 @@ register(({analytics, browser, init, settings}) => {
    */
   analytics.subscribe("checkout_completed", (event) => {
     const c = event.data?.checkout;
+    // ⚠️ KEY ON THE CHECKOUT TOKEN, NOT THE ORDER ID.
+    // `checkout.order.id` does NOT return a Shopify order id at runtime — it returns
+    // an opaque Meta-style token (`EII1|AQAA…`), so keying on it produced a different
+    // id to the webhook's and every purchase was counted TWICE. `checkout.token` here
+    // equals `checkout_token` on the orders/create payload. Verified 2026-09-04.
     const orderId = c?.order?.id;
-    const eventId = orderId ? `shopify_purchase_${orderId}` : `checkout_${c?.token || event.id}`;
+    const dedupKey = c?.token;
+    const eventId = dedupKey ? `shopify_purchase_${dedupKey}` : `checkout_${orderId || event.id}`;
     send("Purchase", eventId, event, {
       value: money(c?.totalPrice),
       currency: CURRENCY,

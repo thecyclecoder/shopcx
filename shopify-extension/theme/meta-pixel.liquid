@@ -131,6 +131,7 @@
   };
 
   refreshCart();
+  stampCartAttributes();
 
   send('PageView', newId('pv'), {});
 
@@ -161,6 +162,7 @@
       num_items: item.quantity || 1
     });
     refreshCart();
+    stampCartAttributes();
   }
 
   // ── InitiateCheckout — the cart drawer's Checkout button ─────────────────
@@ -174,6 +176,33 @@
   // navigates away, and an async hop before fetch() is exactly what silently
   // dropped InitiateCheckout from the app pixel.
   var cart = { total: undefined, count: 0, ids: [] };
+  // ── Carry _fbp / _fbc into the ORDER ─────────────────────────────────────
+  // The orders/create webhook is server-to-server: no cookies, no shopper IP. Without
+  // these it sends perfect PII (email/phone/name/address) but nothing tying the
+  // conversion to an ad click, which is most of what Meta actually matches on.
+  // Writing them as cart attributes makes them land on the order as note_attributes,
+  // where meta-capi-shopify-purchase reads them back. Fire-and-forget: a tracking
+  // failure must never block a cart update.
+  var _stamped = null;
+  function stampCartAttributes() {
+    try {
+      var fbp = cookie('_fbp'), fbcv = fbc();
+      if (!fbp && !fbcv) return;
+      var key = (fbp || '') + '|' + (fbcv || '');
+      if (key === _stamped) return;   // don't re-POST the same values
+      _stamped = key;
+      var attrs = {};
+      if (fbp) attrs['_fbp'] = fbp;
+      if (fbcv) attrs['_fbc'] = fbcv;
+      _origFetch('/cart/update.js', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ attributes: attrs })
+      }).catch(function () {});
+    } catch (e) {}
+  }
+
   function refreshCart() {
     try {
       _origFetch('/cart.js', { credentials: 'same-origin' })

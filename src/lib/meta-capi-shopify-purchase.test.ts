@@ -17,6 +17,7 @@ import { buildShopifyPurchaseEvent, CAPI_ALLOWED_SOURCE_NAMES } from "@/lib/meta
 function order(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: 6123456789012,
+    checkout_token: "06dccb9c0c53ef6ddc755579e91dbb72",
     source_name: "web",
     total_price: "49.00",
     currency: "USD",
@@ -58,11 +59,38 @@ test("an UNKNOWN source_name fails closed (positive allowlist, not a denylist)",
   assert.deepEqual([...CAPI_ALLOWED_SOURCE_NAMES], ["web"]);
 });
 
-test("event id matches the web pixel's dedup key exactly", () => {
-  const d = buildShopifyPurchaseEvent(order({ id: 6123456789012 }));
-  // The pixel emits `shopify_purchase_${checkout.order.id}` — these must be identical
-  // strings or Meta double-counts instead of deduping.
+test("event id keys on the CHECKOUT TOKEN, matching the web pixel", () => {
+  const d = buildShopifyPurchaseEvent(order());
+  // The pixel emits `shopify_purchase_${checkout.token}`. It must NOT be the order id:
+  // the pixel's `checkout.order.id` returns an opaque Meta token at runtime
+  // ("EII1|AQAA…"), so keying on the order id gave the two paths DIFFERENT ids and
+  // every purchase was counted twice (observed in production 2026-09-04).
+  assert.equal(d.event?.eventId, "shopify_purchase_06dccb9c0c53ef6ddc755579e91dbb72");
+});
+
+test("falls back to the order id when no checkout token is present", () => {
+  // Sends (won't dedup) rather than being dropped entirely.
+  const d = buildShopifyPurchaseEvent(order({ checkout_token: undefined }));
+  assert.equal(d.send, true);
   assert.equal(d.event?.eventId, "shopify_purchase_6123456789012");
+});
+
+test("browser identifiers come off the order when the caller has none", () => {
+  // A webhook is server-to-server: no cookies, no IP. Shopify records the real
+  // browser IP/UA on the order, and the theme stashes _fbp/_fbc in note_attributes.
+  const d = buildShopifyPurchaseEvent(order({
+    browser_ip: "203.0.113.9",
+    client_details: { user_agent: "Mozilla/5.0 (iPhone)" },
+    note_attributes: [
+      { name: "_fbp", value: "fb.1.1700000000000.123" },
+      { name: "_fbc", value: "fb.1.1700000000000.IwAR_x" },
+    ],
+  }));
+  const ud = d.event!.userData;
+  assert.equal(ud.clientIp, "203.0.113.9");
+  assert.equal(ud.clientUserAgent, "Mozilla/5.0 (iPhone)");
+  assert.equal(ud.fbp, "fb.1.1700000000000.123");
+  assert.equal(ud.fbc, "fb.1.1700000000000.IwAR_x");
 });
 
 test("test orders and zero-value orders are refused", () => {
