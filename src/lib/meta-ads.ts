@@ -255,6 +255,52 @@ export async function getVideoThumbnail(token: string, videoId: string): Promise
  *     person: Disabled") — don't let Meta personalize/rewrite the copy.
  *   - UTM tracking stays in the top-level `url_tags` (the asset feed can't carry it).
  */
+export interface PostReuseCreativeArgs {
+  accountId: string;
+  name: string;
+  /** `{pageId}_{postId}` — an existing post, normally a prior ad's `effective_object_story_id`. */
+  objectStoryId: string;
+  /** Optional UTM query string appended at delivery (`url_tags`). The post's own destination
+   *  link CANNOT be changed — it is baked into the post — but tracking params can be added. */
+  urlTags?: string | null;
+}
+
+/**
+ * Create an ad creative that REUSES AN EXISTING PAGE POST — the API equivalent of Ads Manager's
+ * "Use existing post". The new ad inherits that post's accumulated likes / comments / shares
+ * instead of starting at zero social proof, which is the entire point of post-id reuse: a
+ * winner that already carries two years of engagement re-enters the auction with it intact.
+ *
+ * `createAdCreative` (above) builds a creative FROM SCRATCH out of an uploaded asset +
+ * `object_story_spec`. This is the other half — Meta treats `object_story_id` and
+ * `object_story_spec` as mutually exclusive, so the two can never be combined.
+ *
+ * ⚠️ The post owns its destination link, headline, body and CTA; none can be overridden here.
+ * Only `url_tags` may be added. A post pointing at a retired lander produces an ad pointing at a
+ * retired lander — verify the destination in the ad preview before spending. The link is NOT
+ * readable back off the creative (the ads API omits it for reused posts) and reading the post
+ * itself needs `pages_read_engagement`, which the platform token does not carry.
+ *
+ * ⚠️ A post on a CREATOR page (branded content) needs that page's branded-content permission for
+ * this ad account to still be in force. Meta rejects with `(#200)` / `(#1487472)` when it has
+ * lapsed — attempting the creative is the only reliable test, for the same permission reason.
+ *
+ * ⚠️ A DCO ad may have no single `effective_object_story_id` to reuse.
+ *
+ * Post ids are `{pageId}_{postId}`. The number in a `facebook.com/{n}/posts/{id}` URL is often
+ * the page's LINKED-PROFILE id (`1000…`), not the ads-API page id — build the id from the page
+ * id in `listPages`, or read `effective_object_story_id` off the original ad.
+ *
+ * Returns the new creative id, to be passed to `createAd`.
+ */
+export async function createAdCreativeFromPost(token: string, a: PostReuseCreativeArgs): Promise<string> {
+  const body: Record<string, unknown> = { name: a.name, object_story_id: a.objectStoryId };
+  if (a.urlTags) body.url_tags = a.urlTags;
+  const j = await metaPost(`${actId(a.accountId)}/adcreatives`, body, token);
+  if (!j.id) throw new Error("meta_creative_no_id");
+  return j.id as string;
+}
+
 export async function createAdCreative(token: string, a: CreativeArgs): Promise<string> {
   const igPart = a.instagramUserId ? { instagram_user_id: a.instagramUserId } : {};
 
