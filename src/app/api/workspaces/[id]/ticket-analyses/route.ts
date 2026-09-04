@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { centralDateStr, centralDayWindowUtc, centralTodayStartUtcIso } from "@/lib/central-day";
+import { activeIssues } from "@/lib/ticket-analyses-table";
 
 // GET — rollup of ticket analyses
 //   ?view=today          — today's score + count + recent issues
@@ -32,10 +33,12 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const scores = rows.map(r => (r.admin_score ?? r.score) as number).filter(s => s != null);
     const avg = scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : null;
 
-    // Recent issues (most common types today)
+    // Recent issues (most common types today). Filter refuted findings — a disproven
+    // entry must not drive the "top issues" tile (Phase 2 of
+    // refuted-qc-findings-must-be-marked-not-just-argued).
     const issueCounts: Record<string, number> = {};
     for (const r of rows) {
-      for (const i of ((r.issues as Array<{type?: string}>) || [])) {
+      for (const i of activeIssues({ issues: (r.issues as Array<{ type: string; description: string; refuted_at?: string | null }>) || [] })) {
         if (i.type) issueCounts[i.type] = (issueCounts[i.type] || 0) + 1;
       }
     }
@@ -132,7 +135,16 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
       return key === date;
     });
 
-    return NextResponse.json({ analyses: inDay });
+    // Filter refuted findings from each row's issues array — this is the founder-facing
+    // day detail (a DECIDING surface, not the per-ticket audit-trail viewer). Phase 2 of
+    // refuted-qc-findings-must-be-marked-not-just-argued: a disproven entry must not show
+    // up as a live issue on this rollup.
+    const filtered = inDay.map((r) => ({
+      ...(r as Record<string, unknown>),
+      issues: activeIssues({ issues: ((r as { issues?: Array<{ type: string; description: string; refuted_at?: string | null }> }).issues) || [] }),
+    }));
+
+    return NextResponse.json({ analyses: filtered });
   }
 
   // Daily rollups (default) — last 14 days. We pull the joined
@@ -162,7 +174,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     if (!byDate[d]) byDate[d] = { scores: [], issues: {}, actions: 0, corrected: 0 };
     const score = (r.admin_score ?? r.score) as number | null;
     if (score != null) byDate[d].scores.push(score);
-    for (const i of ((r.issues as Array<{type?: string}>) || [])) {
+    // Trend rollup — filter refuted so a disproven entry never inflates a day's top-issues
+    // (Phase 2 of refuted-qc-findings-must-be-marked-not-just-argued).
+    for (const i of activeIssues({ issues: (r.issues as Array<{ type: string; description: string; refuted_at?: string | null }>) || [] })) {
       if (i.type) byDate[d].issues[i.type] = (byDate[d].issues[i.type] || 0) + 1;
     }
     byDate[d].actions += ((r.action_items as Array<unknown>) || []).length;
