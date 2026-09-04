@@ -1,0 +1,1 @@
+- **A refuted QC finding must be marked refuted, not argued in prose** · verified 2026-09-04 · → [[../libraries/ticket-analyses]]
