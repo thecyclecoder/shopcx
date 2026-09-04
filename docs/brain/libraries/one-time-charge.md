@@ -23,7 +23,7 @@ raced against an async charge, or asking the customer to go do it herself.
 ```ts
 chargeOneTimeOrder({
   workspaceId, customerId,
-  items: [{ variant_id, quantity }],   // internal product_variants.id
+  items: [{ variant_id, quantity, unit_price_cents? }],  // internal product_variants.id
   paymentMethodId?,                     // default: the customer's active default card
   shippingAddress?,                     // default: their most recent order's
   shippingCents?,                       // default 0
@@ -71,6 +71,13 @@ Mirrors the checkout route's money path, minus the cart:
   Shopify-shaped; `toAvalaraAddress` returns `null` on a half-formed address so
   we quote no tax rather than commit a SalesInvoice against it. Pinned in
   `one-time-charge.test.ts`.
+- **Catalog price is usually NOT what the customer pays.** Susan's K-Cups are
+  $79.95 in the catalog and $59.96 on her subscription line — charging a
+  one-time box at catalog would have billed her $20 over her own rate. Pass
+  `unit_price_cents` from the subscription line whenever the one-off stands in
+  for a subscription shipment. Off-catalog lines are recorded in
+  `orders.payment_details.price_overrides` so an audit can tell a deliberate
+  price from a stale-price bug.
 - **Shipping defaults to $0.** Most one-time assists ship free; pass
   `shippingCents` when they shouldn't.
 
