@@ -59,6 +59,55 @@ export const SEVERE_ISSUE_TYPES = new Set(["inaccuracy", "false_promise", "broke
 export const UNVERIFIED_FROM_SURFACE_ISSUE_TYPE = "unverified_from_surface";
 
 /**
+ * An `inaccuracy` finding must show its work, or it loses its teeth.
+ *
+ * `inaccuracy` is the only issue type that BOTH caps the score and force-escalates, so it is
+ * the grader's most powerful output — and the grader's own prompt already constrains it:
+ * "Claim VERIFIED CONTRADICTED by research → include it with a concrete description that cites
+ * what you looked up and what it returned", and "Claim research CANNOT SETTLE → do NOT emit an
+ * 'inaccuracy' issue on it. Do not score-cap or escalate on an unverified detail."
+ *
+ * That contract was prose-only, so nothing enforced it. Ticket b28e7744 (Juana): the grader
+ * flagged "$158.30 is the subscribe-and-save price" as an inaccuracy, reading
+ * `subscriptions.items[].price_cents` ($59.96 flat) and concluding a 3-bag sub bills $179.88.
+ * The quantity break does not live on the line — it is an Appstle AUTOMATIC_DISCOUNT
+ * ("Buy 3 Discount", 12%) and, for internal subs, a `pricing_rules.quantity_breaks` row. Both
+ * resolve to $79.95 × 3 × 0.75 × 0.88 = $158.30, exactly as advertised. The claim was correct;
+ * the grader's surface simply did not contain the discount layer. On that finding it capped the
+ * score to 5 and silently re-opened a closed, human-resolved ticket.
+ *
+ * So: an `inaccuracy` carrying no evidence of an actual lookup is demoted to
+ * `unverified_from_surface` — a type that already exists for precisely this case and which the
+ * score-cap and force-escalate paths already ignore. The finding is preserved verbatim for a
+ * human to read; it just cannot act on its own. A grader that cites its lookup keeps full power.
+ */
+export function demoteUnevidencedInaccuracies<
+  T extends { type: string; description?: string; evidence?: unknown },
+>(issues: T[] | null | undefined): T[] {
+  const arr = Array.isArray(issues) ? issues : [];
+  return arr.map((issue) => {
+    if (issue?.type !== "inaccuracy") return issue;
+    if (hasUsableEvidence(issue.evidence)) return issue;
+    return {
+      ...issue,
+      type: UNVERIFIED_FROM_SURFACE_ISSUE_TYPE,
+      description:
+        "[demoted from inaccuracy — no lookup cited, so it cannot cap the score or escalate] " +
+        String(issue.description ?? ""),
+    };
+  });
+}
+
+/** Evidence counts only when it names BOTH what was looked up and what came back. */
+function hasUsableEvidence(evidence: unknown): boolean {
+  if (!evidence || typeof evidence !== "object") return false;
+  const e = evidence as { looked_up?: unknown; returned?: unknown };
+  const lookedUp = typeof e.looked_up === "string" ? e.looked_up.trim() : "";
+  const returned = typeof e.returned === "string" ? e.returned.trim() : "";
+  return lookedUp.length > 0 && returned.length > 0;
+}
+
+/**
  * Pure predicate — does the analyzer's issues array carry NO signal other
  * than one-or-more `unverified_from_surface` notes? True only when the
  * array is non-empty AND every entry is typed `unverified_from_surface`.
@@ -268,7 +317,7 @@ function matchesEscalationKeyword(loweredText: string, keyword: string): boolean
 
 interface AnalysisResult {
   score: number;
-  issues: Array<{ type: string; description: string }>;
+  issues: Array<{ type: string; description: string; evidence?: { looked_up?: string; returned?: string } }>;
   action_items: Array<{ priority: string; description: string }>;
   summary: string;
 }
@@ -327,7 +376,8 @@ SCORING (1-10):
 RESEARCH-FIRST GRADING DISCIPLINE (Phase 2 of cora-gets-readonly-research-power-to-verify-claims-before-grading):
 When the AI's message contains a specific factual claim you cannot confirm from the transcript itself (a variant/flavor name, a per-unit price, a subscription state, a policy quote, a customer entitlement, an order line-item amount), the PRIMARY path is: verify it first with the bounded read-only research tools (product / order + line-item / subscription / customer / brain lookups) BEFORE flagging it.
   • Claim VERIFIED CORRECT by research → NOT an 'inaccuracy' issue. Do not include it in issues. Do not apply the inaccuracy cap. Example: AI said "Berry"; get_product_nutrition confirms Berry is a real Superfoods flavor → cleared.
-  • Claim VERIFIED CONTRADICTED by research → a REAL 'inaccuracy' issue. Include it with a concrete description that cites what you looked up and what it returned. This is the case the inaccuracy hard cap is written for. Example: AI said "$47.99 per unit"; get_customer_account's orders block shows the line at $50.99 → kept.
+  • Claim VERIFIED CONTRADICTED by research → a REAL 'inaccuracy' issue. Include it with a concrete description that cites what you looked up and what it returned, AND fill the issue's \`evidence\` object: {"looked_up": "<the exact tool/field you consulted>", "returned": "<what it actually returned>"}. This is ENFORCED, not advisory: an 'inaccuracy' with no \`evidence.looked_up\` + \`evidence.returned\` is automatically demoted to 'unverified_from_surface', which cannot cap the score and cannot escalate. Cite your lookup and your finding keeps its full weight.
+  • A price, discount, or entitlement is NEVER settled by a single field. A subscription's per-unit \`price_cents\` is the line price BEFORE quantity breaks — those live in Appstle AUTOMATIC_DISCOUNTs ("Buy 2/3/4 Discount" = 8/12/16%) and in \`pricing_rules.quantity_breaks\` for internal subs, plus a subscribe-and-save percentage. Reading the line price alone and declaring an advertised bundle price wrong is the exact error that re-opened ticket b28e7744. If you have not seen the discount layer, you CANNOT settle a price claim. Example: AI said "$47.99 per unit"; get_customer_account's orders block shows the line at $50.99 → kept.
   • Claim research CANNOT SETTLE (tool returned nothing conclusive, the surface isn't documented, or the fact is outside the read-only research surface) → FALLBACK: do NOT emit an 'inaccuracy' issue on it. Do not score-cap or escalate on an unverified detail. If the surface is documented but the specific fact is missing, note it as 'kb_gap' (which does NOT force-escalate) instead of 'inaccuracy' (which does). Silence is better than a fabrication flag.
 The confidence guard (do not score-cap or escalate on an unverified detail) is the FALLBACK for the third case only. Research is the primary path.
 
@@ -899,6 +949,11 @@ export async function applyAnalyzerVerdict(
   usage?: AnalyzerBoxRunUsage | null,
 ): Promise<{ ok: true; analysis: AnalysisResult; analysis_id: string | undefined; cost_cents: number; ai_message_count: number }> {
   const admin = createAdminClient();
+
+  // Demote any `inaccuracy` the grader did not evidence BEFORE the deterministic
+  // checks below cap the score or severity routing reads the types — every
+  // downstream consumer must see the demoted type, not the raw one.
+  analysis.issues = demoteUnevidencedInaccuracies(analysis.issues);
 
   // ── Deterministic post-grader checks ──
   // The AI grader sees the conversation transcript but can't query the DB. Some failures are
