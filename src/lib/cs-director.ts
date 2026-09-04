@@ -2013,8 +2013,25 @@ const FOUNDER_ACK_VARIANTS: ReadonlyArray<{ body: string }> = [
   { body: "I know you've been waiting on me, and I owe you an honest update: {topic} needs a call I want to get exactly right, and I'm still on it. I'll be back with you as soon as I can say something worth saying." },
 ];
 
+const GENERIC_ACK_TOPIC = "what you've written in";
+
+/**
+ * The variants splice this into "taking a proper look at {topic} before I come back to
+ * you", so it has to read as a thing, not a paragraph.
+ *
+ * The failing case (ticket d17c7b1c, Kimberly): her subject WAS the whole request —
+ * "Recent order - though I ordered k-cups can I send this back and reorder the k-cups".
+ * At 82 chars the old code trimmed it to 80 and sent her:
+ *
+ *   "…taking a proper look at Recent order - though I ordered k-cups can I send this
+ *    back and reorder the… before I come back to you."
+ *
+ * Truncation was the bug. A subject too long to splice cannot be repaired by cutting it
+ * mid-clause, so it falls back to the generic phrase. Subjects that fit are still named
+ * specifically — that's the spec's subject-scoped invariant and it stays.
+ */
 function normalizeAckTopic(subject: string | null | undefined): string {
-  if (!subject) return "what you've written in";
+  if (!subject) return GENERIC_ACK_TOPIC;
   let s = String(subject).trim();
   // Strip common thread-reply prefixes so the sentence reads naturally ("looking at Your order"
   // is fine; "looking at Re: Your order" is not). Repeated Re:/Fwd: chains are collapsed.
@@ -2023,12 +2040,10 @@ function normalizeAckTopic(subject: string | null | undefined): string {
     if (stripped === s) break;
     s = stripped.trim();
   }
-  if (!s) return "what you've written in";
-  // Guard against a subject long enough to blow the two-sentence budget — trim on a word boundary.
-  if (s.length > 80) {
-    const trimmed = s.slice(0, 80).replace(/\s+\S*$/, "").trim();
-    s = trimmed.length > 0 ? `${trimmed}…` : s.slice(0, 80);
-  }
+  if (!s) return GENERIC_ACK_TOPIC;
+  // Too long to splice → generic. Never truncate: a half-sentence read back to the
+  // customer is worse than not naming the topic at all.
+  if (s.length > 80) return GENERIC_ACK_TOPIC;
   return s;
 }
 
