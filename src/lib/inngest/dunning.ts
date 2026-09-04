@@ -879,6 +879,51 @@ export const dunningPaydayRetryCron = inngest.createFunction(
     // rows that still carry an internal-* shopify_contract_id would otherwise be
     // fed back into subscriptionAttemptBilling with a synthetic billing-attempt id and
     // 400 against Appstle. Signature vercel:cdfbac68e30a91f9.
+    // ── Close STRANDED cycles first ────────────────────────────────────────
+    // A `retrying` cycle only ever advances while its subscription is ACTIVE:
+    // the Appstle path below skips internal-* contracts entirely (see the note
+    // on the select), and the internal path (internal-subscription-renewals)
+    // only ever selects subs with status='active'. So the moment a sub is
+    // PAUSED or CANCELLED mid-dunning, nothing can advance its cycle again and
+    // it sits `retrying` with a past `next_retry_at` forever — Control Tower's
+    // stuck_dunning assertion then fires permanently (cycle b5d638a7,
+    // internal-d083b94d2cfa4ba2, stranded 2026-08-07 → 2026-09-04 on a paused
+    // sub). The inline guard further down catches only `cancelled`, and only
+    // for cycles this cron actually selected, so it can never reach these.
+    //
+    // Terminating is the correct end state: a non-active sub cannot be billed,
+    // so a retry cycle against it is meaningless. If the customer resumes, the
+    // next failed renewal opens a fresh cycle. Bounded by the SAME 48h grace
+    // the monitor uses, so this only ever closes what the monitor would flag.
+    const STRANDED_GRACE_MS = 48 * 60 * 60_000;
+    const strandedClosed = await step.run("close-stranded-cycles", async () => {
+      const strandedBefore = new Date(Date.now() - STRANDED_GRACE_MS).toISOString();
+      const { data: candidates } = await admin
+        .from("dunning_cycles")
+        .select("id, subscription_id, shopify_contract_id")
+        .eq("status", "retrying")
+        .lt("next_retry_at", strandedBefore)
+        .not("subscription_id", "is", null);
+      if (!candidates?.length) return { closed: 0, ids: [] as string[] };
+
+      const subIds = [...new Set(candidates.map((c) => c.subscription_id as string))];
+      const { data: subs } = await admin
+        .from("subscriptions")
+        .select("id, status")
+        .in("id", subIds);
+      const statusById = new Map((subs ?? []).map((r) => [r.id as string, r.status as string]));
+
+      const closed: string[] = [];
+      for (const c of candidates) {
+        // Missing sub OR any non-active status (paused / cancelled / …) strands it.
+        const subStatus = statusById.get(c.subscription_id as string);
+        if (subStatus === "active") continue;
+        await updateDunningCycle(c.id as string, { status: "exhausted", next_retry_at: null });
+        closed.push(c.id as string);
+      }
+      return { closed: closed.length, ids: closed };
+    });
+
     const cycles = await step.run("find-retryable-cycles", async () => {
       const { data } = await admin
         .from("dunning_cycles")
@@ -897,7 +942,7 @@ export const dunningPaydayRetryCron = inngest.createFunction(
       // ticket-csat.ts, abandoned-cart.ts). Without this, a healthy hourly cron
       // that found no work writes no loop_heartbeats row and trips
       // monitor.ts never_fired ('registered but never firing').
-      const result = { status: "no_cycles_to_retry", processed: 0, results: [] };
+      const result = { status: "no_cycles_to_retry", processed: 0, results: [], strandedClosed: strandedClosed.closed };
       await step.run("emit-heartbeat", async () => {
         await emitCronHeartbeat("dunning-payday-retry-cron", { ok: true, produced: result });
       });
@@ -1036,7 +1081,7 @@ export const dunningPaydayRetryCron = inngest.createFunction(
     }
     } // end batch loop
 
-    const result = { processed: results.length, results };
+    const result = { processed: results.length, results, strandedClosed: strandedClosed.closed };
 
     // Control Tower: end-of-run heartbeat (control-tower-complete-coverage spec, Phase 1).
     await step.run("emit-heartbeat", async () => {
