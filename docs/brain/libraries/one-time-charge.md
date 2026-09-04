@@ -71,6 +71,11 @@ Mirrors the checkout route's money path, minus the cart:
   Shopify-shaped; `toAvalaraAddress` returns `null` on a half-formed address so
   we quote no tax rather than commit a SalesInvoice against it. Pinned in
   `one-time-charge.test.ts`.
+- **Never embed `products(title)` on `product_variants`.** More than one FK
+  links the two tables, so PostgREST rejects the embed as ambiguous. The first
+  real call failed `variant_not_found` on a variant that plainly existed,
+  because the error was discarded and the read came back empty. Product titles
+  come from a second explicit query, and every read here checks its error.
 - **Catalog price is usually NOT what the customer pays.** Susan's K-Cups are
   $79.95 in the catalog and $59.96 on her subscription line — charging a
   one-time box at catalog would have billed her $20 over her own rate. Pass

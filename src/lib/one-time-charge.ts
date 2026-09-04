@@ -161,14 +161,23 @@ export async function chargeOneTimeOrder(
     .maybeSingle();
   if (!customer?.email) return { success: false, error: "customer_not_found" };
 
-  const { data: variants } = await admin
+  // NO `products(title)` embed here. There is more than one FK between
+  // product_variants and products, so PostgREST rejects the embed as
+  // ambiguous — and because the error was discarded, the read came back
+  // EMPTY and every item failed as `variant_not_found`. A wrong/ambiguous
+  // select reading as zero rows is the exact failure CLAUDE.md warns about,
+  // so the error is surfaced now instead of being swallowed.
+  const { data: variants, error: variantErr } = await admin
     .from("product_variants")
-    .select("id, sku, title, price_cents, product_id, products(title)")
+    .select("id, sku, title, price_cents, product_id")
     .eq("workspace_id", workspaceId)
     .in(
       "id",
       input.items.map((i) => i.variant_id),
     );
+  if (variantErr) {
+    return { success: false, error: "variant_lookup_failed", details: variantErr.message };
+  }
 
   type VariantRow = {
     id: string;
@@ -176,10 +185,26 @@ export async function chargeOneTimeOrder(
     title: string | null;
     price_cents: number | null;
     product_id: string | null;
-    products: { title: string | null } | Array<{ title: string | null }> | null;
   };
+  const rows = (variants || []) as VariantRow[];
   const byId = new Map<string, VariantRow>();
-  for (const v of ((variants || []) as unknown) as VariantRow[]) byId.set(v.id, v);
+  for (const v of rows) byId.set(v.id, v);
+
+  // Product titles in a second, unambiguous read.
+  const productIds = [...new Set(rows.map((v) => v.product_id).filter(Boolean))] as string[];
+  const productTitle = new Map<string, string>();
+  if (productIds.length) {
+    const { data: prods, error: prodErr } = await admin
+      .from("products")
+      .select("id, title")
+      .in("id", productIds);
+    if (prodErr) {
+      return { success: false, error: "product_lookup_failed", details: prodErr.message };
+    }
+    for (const p of (prods || []) as Array<{ id: string; title: string | null }>) {
+      if (p.title) productTitle.set(p.id, p.title);
+    }
+  }
 
   const lines: Array<Record<string, unknown>> = [];
   let subtotalCents = 0;
@@ -190,14 +215,13 @@ export async function chargeOneTimeOrder(
     const catalog = v.price_cents ?? 0;
     const unit = it.unit_price_cents ?? catalog;
     if (unit <= 0) return { success: false, error: "variant_has_no_price", details: it.variant_id };
-    const joined = Array.isArray(v.products) ? v.products[0] : v.products;
-    const productTitle = joined?.title || v.title || "Item";
+    const lineTitle = (v.product_id ? productTitle.get(v.product_id) : null) || v.title || "Item";
     subtotalCents += unit * it.quantity;
     lines.push({
       variant_id: v.id,
       product_id: v.product_id,
       sku: v.sku,
-      title: productTitle,
+      title: lineTitle,
       variant_title: v.title,
       quantity: it.quantity,
       price_cents: unit,
