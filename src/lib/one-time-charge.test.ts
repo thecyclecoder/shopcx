@@ -54,3 +54,28 @@ test("omits line2 entirely when there is no second line", () => {
   assert.equal("line2" in out!, false, "an empty line2 must not be sent as a blank string");
   assert.equal(out!.country, "US", "country defaults to US when absent");
 });
+
+// The price-override rail. Catalog price is usually not what the customer pays:
+// Susan's K-Cups are $79.95 in the catalog and $59.96 on her subscription line.
+// Charging a one-time box at catalog would have billed her $20 over her rate.
+test("a price override must be a non-negative integer", async () => {
+  const { chargeOneTimeOrder } = await import("./one-time-charge");
+  for (const bad of [-1, 12.5, NaN]) {
+    const res = await chargeOneTimeOrder({
+      workspaceId: "w",
+      customerId: "c",
+      items: [{ variant_id: "v", quantity: 1, unit_price_cents: bad }],
+    });
+    assert.equal(res.error, "invalid_price_override", `${bad} must be rejected`);
+  }
+});
+
+test("quantity must be a positive integer before anything touches a card", async () => {
+  const { chargeOneTimeOrder } = await import("./one-time-charge");
+  const res = await chargeOneTimeOrder({
+    workspaceId: "w",
+    customerId: "c",
+    items: [{ variant_id: "v", quantity: 0 }],
+  });
+  assert.equal(res.error, "invalid_item");
+});

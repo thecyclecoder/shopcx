@@ -70,6 +70,17 @@ export interface OneTimeChargeItem {
   /** Internal `product_variants.id` (uuid). Shopify is being sunset. */
   variant_id: string;
   quantity: number;
+  /**
+   * Unit price the customer is actually entitled to, in cents. Defaults to the
+   * catalog `product_variants.price_cents`.
+   *
+   * Needed because catalog price is often NOT what the customer pays. Susan's
+   * K-Cups are $79.95 in the catalog and $59.96 on her subscription line;
+   * charging her a one-time box at catalog would have quietly billed her $20
+   * over her own rate. Pass the subscription line's `price_cents` when the
+   * one-off is standing in for a subscription shipment.
+   */
+  unit_price_cents?: number;
 }
 
 export interface OneTimeChargeInput {
@@ -105,15 +116,24 @@ export interface OneTimeChargeResult {
 export async function chargeOneTimeOrder(
   input: OneTimeChargeInput,
 ): Promise<OneTimeChargeResult> {
-  const admin = createAdminClient();
   const { workspaceId, customerId } = input;
 
+  // Validate BEFORE constructing anything. These guards stand between a caller
+  // typo and a real card, so they must not depend on a DB client existing.
   if (!input.items?.length) return { success: false, error: "no_items" };
   for (const it of input.items) {
     if (!it.variant_id || !Number.isInteger(it.quantity) || it.quantity < 1) {
       return { success: false, error: "invalid_item" };
     }
+    if (
+      it.unit_price_cents !== undefined &&
+      (!Number.isInteger(it.unit_price_cents) || it.unit_price_cents < 0)
+    ) {
+      return { success: false, error: "invalid_price_override" };
+    }
   }
+
+  const admin = createAdminClient();
 
   // ── 1. The card. ────────────────────────────────────────────────────
   // status='active' is the same filter the renewal uses. A card the
@@ -166,7 +186,9 @@ export async function chargeOneTimeOrder(
   for (const it of input.items) {
     const v = byId.get(it.variant_id);
     if (!v) return { success: false, error: "variant_not_found", details: it.variant_id };
-    const unit = v.price_cents ?? 0;
+    // An explicit override wins over catalog — see OneTimeChargeItem.
+    const catalog = v.price_cents ?? 0;
+    const unit = it.unit_price_cents ?? catalog;
     if (unit <= 0) return { success: false, error: "variant_has_no_price", details: it.variant_id };
     const joined = Array.isArray(v.products) ? v.products[0] : v.products;
     const productTitle = joined?.title || v.title || "Item";
@@ -179,6 +201,9 @@ export async function chargeOneTimeOrder(
       variant_title: v.title,
       quantity: it.quantity,
       price_cents: unit,
+      ...(it.unit_price_cents !== undefined && it.unit_price_cents !== catalog
+        ? { catalog_price_cents: catalog }
+        : {}),
     });
   }
 
@@ -337,6 +362,15 @@ export async function chargeOneTimeOrder(
         processor_response_code: transaction.processorResponseCode,
         processor_response_text: transaction.processorResponseText,
         one_time_reason: input.reason ?? null,
+        // Any line priced off-catalog is recorded so an audit can see the
+        // charge was deliberate rather than a stale-price bug.
+        price_overrides: lines
+          .filter((l) => l.catalog_price_cents !== undefined)
+          .map((l) => ({
+            sku: l.sku,
+            charged_cents: l.price_cents,
+            catalog_cents: l.catalog_price_cents,
+          })),
       },
       avalara_transaction_code: avalaraTransactionCode,
       avalara_total_tax_cents: avalaraTransactionCode ? taxCents : null,
