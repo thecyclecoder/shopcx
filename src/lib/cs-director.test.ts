@@ -2459,3 +2459,49 @@ test("Phase 3 pin — a DIFFERENT job_id on the same ticket (Phase-2 recheck) IS
   assert.notEqual(deliveries[0], initial, "recheck must not re-send the initial variant");
   assert.equal(deliveries[0], second, "recheck delivers the second variant");
 });
+
+// ── The ack topic must never be a truncated sentence ──────────────────────
+//
+// The variants splice the subject into "taking a proper look at {topic} before
+// I come back to you", which needs a noun phrase. Ticket d17c7b1c (Kimberly)
+// had the whole request as the subject — "Recent order - though I ordered
+// k-cups can I send this back and reorder the k-cups" — and the old 80-char
+// trim cut it mid-clause and sent it to her. Shortening cannot repair a
+// sentence; it falls back to the generic phrase instead.
+
+test("a sentence subject falls back to the generic topic, never a truncated splice", () => {
+  const ack = composeFounderEscalationAck({
+    subject: "Recent order - though I ordered k-cups can I send this back and reorder the k-cups",
+  });
+  assert.ok(!ack.includes("…"), "must not send a mid-clause truncation to a customer");
+  assert.ok(!ack.includes("reorder the"), "must not splice a half-sentence back at them");
+  assert.match(ack, /what you've written in/);
+});
+
+test("a short noun-phrase subject is still named specifically", () => {
+  for (const subject of ["Question regarding Account", "Subscription", "Misleading Practices"]) {
+    const ack = composeFounderEscalationAck({ subject });
+    assert.ok(ack.includes(subject), `${subject} should be named directly`);
+  }
+});
+
+test("Re:/Fwd: chains are still stripped before the topic test", () => {
+  const ack = composeFounderEscalationAck({ subject: "Re: Fwd: Subscription" });
+  assert.ok(ack.includes("Subscription"));
+  assert.ok(!ack.includes("Re:") && !ack.includes("Fwd:"));
+});
+
+test("every variant refuses an over-long subject, not just the first", () => {
+  const tooLong =
+    "Recent order - though I ordered k-cups can I send this back and reorder the k-cups";
+  for (const recheckIndex of [0, 1, 2]) {
+    const ack = composeFounderEscalationAck({ subject: tooLong, recheckIndex });
+    assert.ok(!ack.includes("…"), `variant ${recheckIndex} truncated the subject`);
+    assert.match(ack, /what you've written in/);
+  }
+});
+
+test("a subject that fits is still named, right up to the boundary", () => {
+  const fits = "My subscription renewed twice this month";
+  assert.ok(composeFounderEscalationAck({ subject: fits }).includes(fits));
+});
