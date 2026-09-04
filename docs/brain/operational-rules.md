@@ -303,3 +303,35 @@ After editing anything under `remotion/` (compositions, `ExampleAd`/`AdStatic`, 
 ## Related
 
 [[customer-voice]] · [[ui-conventions]] · [[lifecycles/ai-multi-turn]] · [[lifecycles/fraud-detection]] · [[lifecycles/return-pipeline]] · [[recipes/build-box-setup]] · [[README]]
+
+## Grader authority — an `inaccuracy` must show its work
+
+`inaccuracy` is the only analyzer issue type that BOTH caps the score and force-escalates, which
+makes it the grader's most powerful output. It is now **evidence-gated**: an `inaccuracy` whose
+issue carries no `evidence.looked_up` + `evidence.returned` is demoted at parse time to
+`unverified_from_surface` ([[libraries/ticket-analyzer]] `demoteUnevidencedInaccuracies`) — a type
+that already exists for unsettleable claims and which the score-cap and force-escalate paths
+already ignore. The finding is preserved verbatim for a human; it just cannot act alone.
+
+**The case (ticket b28e7744, 2026-09-04).** The grader read `subscriptions.items[].price_cents`
+($59.96 flat), concluded a 3-bag Amazing Coffee subscription bills $179.88, and flagged the AI's
+*correct* "$158.30 is the subscribe-and-save price" as an inaccuracy. It capped the score to 5 and
+silently re-opened a closed, founder-resolved ticket.
+
+**A price is never settled by one field.** The quantity break does not live on the line:
+
+| layer | where |
+|---|---|
+| subscribe & save (25%) | `pricing_rules.subscribe_discount_pct` · storefront `data-sns=0.75` |
+| quantity break (8 / 12 / 16%) | Appstle `AUTOMATIC_DISCOUNT` "Buy 2/3/4 Discount" · `pricing_rules.quantity_breaks` · storefront `data-qty2/3/4` |
+
+$79.95 × 3 × 0.75 × 0.88 = **$158.30**, exactly as advertised. All three surfaces agree.
+
+## Human resolution must be legible to the analyzer
+
+[[libraries/ticket-analyzer]] already skips its re-open when `tickets.agent_intervened` is set —
+"auto-reopening overrides their judgment … and creates churn (close → analyze → reopen → close
+again loop)". That flag was only ever written by the two dashboard UI routes, so a ticket resolved
+through the SDK (the path [[../../.claude/skills/open-tickets]] uses) looked AI-resolved and the
+guard never fired. `closeTicket(admin, id, { byHuman: true })` now sets it. **Pass `byHuman` whenever
+a person — founder, operator, or an agent acting on their explicit instruction — resolves a ticket.**

@@ -54,7 +54,7 @@ export type TicketStatus = "open" | "pending" | "closed" | "archived";
 export async function closeTicket(
   admin: Admin,
   ticketId: string,
-  opts: { reason?: string; clearEscalation?: boolean } = {},
+  opts: { reason?: string; clearEscalation?: boolean; byHuman?: boolean } = {},
 ): Promise<void> {
   const ts = nowIso();
   const patch: Record<string, unknown> = {
@@ -62,6 +62,18 @@ export async function closeTicket(
     closed_at: ts,
     updated_at: ts,
   };
+  // `agent_intervened` is what tells the ticket analyzer a human already ruled
+  // on this ticket — [[inngest/../ticket-analyzer]] skips its re-open when the
+  // flag is set, because "auto-reopening overrides their judgment … and creates
+  // churn (close → analyze → reopen → close again loop)".
+  //
+  // The flag was only ever written by the two dashboard UI routes, so a ticket
+  // resolved through THIS SDK (the path the open-tickets skill uses) looked
+  // AI-resolved and the guard never fired. Ticket b28e7744: closed by the
+  // founder, re-opened and re-escalated by the grader minutes later on a
+  // finding that was itself wrong. Human resolution has to be legible to the
+  // analyzer, not just to the dashboard.
+  if (opts.byHuman) patch.agent_intervened = true;
   if (opts.clearEscalation) {
     patch.escalated_to = null;
     patch.escalated_at = null;
