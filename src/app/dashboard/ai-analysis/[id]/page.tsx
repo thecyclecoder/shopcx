@@ -11,7 +11,13 @@ interface AnalysisRow {
   admin_score: number | null;
   admin_score_reason: string | null;
   summary: string | null;
-  issues: { type: string; description: string }[];
+  issues: {
+    type: string;
+    description: string;
+    refuted_at?: string | null;
+    refuted_by?: string | null;
+    refutation_reason?: string | null;
+  }[];
   action_items: { priority: string; description: string }[];
   created_at: string;
   cost_cents: number | null;
@@ -190,11 +196,35 @@ export default function AIAnalysisDayPage() {
                     )}
                     {a.issues?.length > 0 && (
                       <div className="mt-2 flex flex-wrap gap-1">
-                        {a.issues.map((i, idx) => (
-                          <span key={idx} className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-                            {i.type}
-                          </span>
-                        ))}
+                        {a.issues.map((i, idx) => {
+                          const refuted = !!i.refuted_at;
+                          // Refuted findings are struck through with their refutation_reason +
+                          // refuted_by exposed on hover — the audit trail stays visible rather
+                          // than disappearing, per Phase 3 of the refuted-QC-findings spec.
+                          if (refuted) {
+                            const tooltip = `Refuted${i.refuted_by ? ` by ${i.refuted_by}` : ""}${i.refutation_reason ? `: ${i.refutation_reason}` : ""}`;
+                            return (
+                              <span
+                                key={idx}
+                                title={tooltip}
+                                className="inline-flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400 line-through dark:bg-zinc-800 dark:text-zinc-500"
+                              >
+                                <span>{i.type}</span>
+                                <span className="not-italic no-underline text-[9px] uppercase tracking-wide text-rose-500 dark:text-rose-400">refuted</span>
+                                {i.refutation_reason && (
+                                  <span className="not-italic no-underline text-zinc-500 dark:text-zinc-400">
+                                    — {i.refutation_reason}
+                                  </span>
+                                )}
+                              </span>
+                            );
+                          }
+                          return (
+                            <span key={idx} className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                              {i.type}
+                            </span>
+                          );
+                        })}
                       </div>
                     )}
                     {a.action_items?.length > 0 && (

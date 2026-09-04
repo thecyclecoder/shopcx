@@ -290,12 +290,20 @@ async function executeAnalysisRescore(admin: Admin, todo: AgentTodo): Promise<Ex
   // workspace id can never overwrite another workspace's row. `todo.workspace_id` is the
   // authenticated approver's scope.
   const { applyAgentRescore } = await import("@/lib/ticket-analyses-table");
+  // Narrow the free-form todo payload to the typed TicketAnalysisIssue[] shape. Anything that
+  // fails the check drops back to `undefined` so applyAgentRescore leaves issues untouched
+  // (rather than clobbering with malformed data and losing refutation carry-forward).
+  const issuesTyped = Array.isArray(p.issues)
+    ? p.issues.every((i) => i && typeof i === "object" && typeof (i as { type?: unknown }).type === "string" && typeof (i as { description?: unknown }).description === "string")
+      ? (p.issues as { type: string; description: string }[])
+      : undefined
+    : undefined;
   const r = await applyAgentRescore({
     analysisId: p.ticket_analysis_id,
     workspaceId: todo.workspace_id,
     score: p.score,
     summary: p.summary,
-    issues: p.issues,
+    issues: issuesTyped,
     source: "escalation-triage:approved",
   });
   if (!r.ok) return { ok: false, error: r.error ?? "applyAgentRescore failed" };

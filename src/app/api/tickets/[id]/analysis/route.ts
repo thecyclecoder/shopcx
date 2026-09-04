@@ -23,6 +23,12 @@ export async function GET(
   // billing_source (Phase 3 of ticket-cost-distinguishes-max-subscription-from-real-api-spend) is
   // returned so the panel can render a subtle 'on Max (subscription)' indicator instead of a
   // fabricated dollar figure — the fleet-cost apiBilled rule surfaced to the ticket UI.
+  //
+  // `issues` is JSONB, so the refutation fields (`refuted_at`, `refuted_by`, `refutation_reason`)
+  // stamped by `refuteAnalysisIssue` flow through automatically. This is the DISPLAY endpoint —
+  // per Phase 2 of refuted-qc-findings-must-be-marked-not-just-argued we do NOT strip refuted
+  // entries here; the dashboard renders them struck through with their `refutation_reason` so
+  // the audit trail stays visible.
   const { data: latest } = await admin.from("ticket_analyses")
     .select("id, score, admin_score, admin_score_reason, admin_corrected_at, issues, action_items, summary, model, cost_cents, ai_message_count, window_start, window_end, created_at, trigger, billing_source")
     .eq("ticket_id", ticketId)

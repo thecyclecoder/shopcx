@@ -55,6 +55,44 @@ async function updateAnalysis(
 
 Updates an existing analysis (e.g., admin score override). Idempotent on unchanged rows.
 
+### `refuteAnalysisIssue` — async function
+
+```ts
+async function refuteAnalysisIssue(input: {
+  analysisId: string;
+  workspaceId: string;
+  issueIndex: number;
+  reason: string;
+  refutedBy: string;
+}): Promise<{ ok: boolean; error: string | null }>
+```
+
+Stamps ONE element of `ticket_analyses.issues[]` as refuted — adding `refuted_at`, `refuted_by`, and `refutation_reason` on the target element (JSONB, no migration required). The single writer for the per-issue refutation channel introduced by spec `refuted-qc-findings-must-be-marked-not-just-argued`: without it, a disproven finding can only be argued in prose on the ticket thread and every downstream reader keeps citing the void entry (ground truth: ticket b28e7744, where two 'inaccuracy' findings were refuted in an internal note that same afternoon but the analysis row was never touched, and four hours later the CS director cited the same substance and re-escalated to the founder).
+
+Semantics:
+- **Bounds-checked**: `issueIndex >= issues.length` returns `{ ok: false, error }`, never a silent no-op.
+- **Idempotent**: refuting an already-refuted entry preserves the original `refuted_at` / `refuted_by` / `refutation_reason` — a re-run does NOT overwrite the audit trail.
+- **Compare-and-set**: `.eq('id', analysisId).eq('workspace_id', workspaceId).select('id')` — exactly one row must transition; a cross-workspace id sneak fails cleanly.
+- Distinct from `applyAdminOverride` (which writes a whole-row admin score + reason) — the score-override and a per-issue verdict are different facts, and overloading `applyAdminOverride` would conflate them.
+
+### `activeIssues` — pure function
+
+```ts
+function activeIssues(row: { issues: TicketAnalysisIssue[] | null | undefined }): TicketAnalysisIssue[]
+```
+
+Returns only issues whose `refuted_at` is null. The accessor every DECIDING consumer switches to (Phase 2 of the same spec: `coraIssuesToMessySignals`, `selectResearchRecipes`, the reopen/escalate branch, and the daily-analysis-report rollup). Rule of thumb: a surface that DECIDES filters refuted out; a surface that DISPLAYS the audit trail keeps them and marks them.
+
+### Refutation carry-forward rule on `applyAgentRescore`
+
+`applyAgentRescore` (agent-authored rescore from the escalation-triage approved todo) REPLACES `issues[]` wholesale. Left alone, that would silently drop refutations recorded by `refuteAnalysisIssue` — reviving a finding a reviewer already disproved. The SDK now guards against this:
+
+1. Reads the existing row's `issues` before writing.
+2. For every prior element with `refuted_at != null`, the refutation fields (`refuted_at`, `refuted_by`, `refutation_reason`) are carried forward onto the same index of the new array.
+3. If the new array is SHORTER than the highest refuted index, the write is REFUSED (`{ ok: false, error }`). The caller must include a slot for every refuted entry.
+
+Same rule applies to any future issues[]-replacing writer added to this SDK.
+
 ## Callers
 
 - `scripts/builder-worker.ts → runTicketAnalyzeJob` — the box worker dispatches ticket analysis, runs the Max session, calls `insertAnalysis` to write the verdict, then `applySeverityActions` (in [[../libraries/ticket-analyzer]]) to apply escalation rules and write [[../tables/director_activity]]

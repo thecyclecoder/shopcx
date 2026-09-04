@@ -21,6 +21,7 @@ import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { proposePrompt } from "@/lib/sonnet-prompts-table";
 import { getInternalRules } from "@/lib/policies";
+import { activeIssues } from "@/lib/ticket-analyses-table";
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const REPORT_MODEL = OPUS_MODEL;
@@ -31,7 +32,7 @@ interface AnalysisInput {
   admin_score: number | null;
   admin_score_reason: string | null;
   summary: string | null;
-  issues: Array<{ type: string; description: string }>;
+  issues: Array<{ type: string; description: string; refuted_at?: string | null; refuted_by?: string | null; refutation_reason?: string | null }>;
   action_items: Array<{ priority: string; description: string }>;
 }
 
@@ -285,7 +286,10 @@ function buildReportUserMessage(date: string, analyses: AnalysisInput[]): string
     admin_overridden: a.admin_score != null,
     admin_reason: a.admin_score_reason || null,
     summary: a.summary,
-    issues: (a.issues || []).map(i => `${i.type}: ${i.description}`),
+    // Phase 2 of refuted-qc-findings-must-be-marked-not-just-argued: the founder-facing
+    // rollup must not report refuted findings as issues — a disproven inaccuracy cannot
+    // drive themes / recommendations / proposed grader rules.
+    issues: activeIssues({ issues: a.issues || [] }).map(i => `${i.type}: ${i.description}`),
     action_items: (a.action_items || []).map(ai => `[${ai.priority}] ${ai.description}`),
   }));
   return `Generate the daily report for ${date}. Here are ${analyses.length} per-ticket analyses to synthesize:\n\n${JSON.stringify(compact, null, 2)}\n\nReturn the JSON only.`;

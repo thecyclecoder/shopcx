@@ -22,7 +22,7 @@ import { cleanEmailBody } from "@/lib/email-cleaner";
 import { SKIP_TAGS } from "@/lib/ticket-tags";
 import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
 import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
-import { insertAnalysis, getLatestForTicket, applyAgentRescore } from "@/lib/ticket-analyses-table";
+import { insertAnalysis, getLatestForTicket, applyAgentRescore, activeIssues } from "@/lib/ticket-analyses-table";
 import { runCheapTriagePass, recordCheapPassClean } from "@/lib/cora-triage-pass";
 import { recordSolMessyTurns, normalizeMessyTurnSignals } from "@/lib/sol-coaching-signal";
 
@@ -1395,6 +1395,54 @@ export function decideRemediationTier(input: {
 }
 
 /**
+ * Prefix on the internal note that `refuteAnalysisIssue` posts when a QC finding is disproven.
+ * Distinct from `[Cora Analysis]` so a thread-reading agent (the CS director in particular) sees
+ * the claim and its rebuttal adjacent, in order, and never re-cites the void finding — the
+ * b28e7744 failure mode was exactly a refutation living in prose that the director did not
+ * treat as authoritative. Exported for `refuteAnalysisIssue` in [[ticket-analyses-table]].
+ */
+export const CORA_REFUTED_NOTE_PREFIX = "[Cora Analysis — REFUTED]";
+
+/**
+ * Pure body composer for the `[Cora Analysis — REFUTED]` internal note — the wording a
+ * thread-reading agent will act on. Unit-testable + kept in one place so the "finding is VOID
+ * and must not be cited" phrasing cannot drift across callers.
+ */
+export function buildCoraRefutedNoteBody(input: {
+  issueType: string;
+  reason: string;
+  refutedBy: string;
+  analysisId?: string | null;
+}): string {
+  const reason = (input.reason || "").trim() || "(no reason provided)";
+  const refutedBy = (input.refutedBy || "").trim() || "unknown reviewer";
+  return (
+    `${CORA_REFUTED_NOTE_PREFIX} The '${input.issueType}' finding above is VOID — do NOT cite it as an issue on this ticket. ` +
+    `Refuted by ${refutedBy}: ${reason}.` +
+    (input.analysisId ? ` Analysis ${input.analysisId}.` : "")
+  ).slice(0, 4000);
+}
+
+/**
+ * Small factored helper — the ticket_messages insert both Cora note writers share so the
+ * insert shape (direction=outbound, visibility=internal, author_type=system) stays in one
+ * place. Best-effort; never throws.
+ */
+async function postCoraInternalNote(admin: Admin, ticketId: string, body: string): Promise<void> {
+  try {
+    await admin.from("ticket_messages").insert({
+      ticket_id: ticketId,
+      direction: "outbound",
+      visibility: "internal",
+      author_type: "system",
+      body: body.slice(0, 4000),
+    });
+  } catch (err) {
+    console.warn("[ticket-analyzer] postCoraInternalNote failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+/**
  * Post Cora's verdict as an internal `[Cora Analysis]` note on the ticket. Distinct prefix + wording
  * so a later hasCleanPositiveClose() scan never mistakes it for POSITIVE_CLOSE_NOTE or a
  * REOPEN_NOTE_MARKER. Best-effort; never throws.
@@ -1406,25 +1454,37 @@ async function postCoraAnalysisNote(
   trigger: AnalyzeTrigger,
   analysisId: string | null,
 ): Promise<void> {
-  try {
-    const issueTypes = (analysis.issues || []).map((i) => i.type);
-    const issuesLine = issueTypes.length ? issueTypes.join(", ") : "none";
-    const summary = (analysis.summary || "").trim() || "(no summary)";
-    const body =
-      `[Cora Analysis] Score ${analysis.score}/10` +
-      (trigger === "low_csat" ? " (triggered by a low CSAT rating)" : "") +
-      `. ${summary} — Issues: ${issuesLine}.` +
-      (analysisId ? ` Analysis ${analysisId}.` : "");
-    await admin.from("ticket_messages").insert({
-      ticket_id: ticketId,
-      direction: "outbound",
-      visibility: "internal",
-      author_type: "system",
-      body: body.slice(0, 4000),
-    });
-  } catch (err) {
-    console.warn("[ticket-analyzer] postCoraAnalysisNote failed:", err instanceof Error ? err.message : err);
-  }
+  const issueTypes = (analysis.issues || []).map((i) => i.type);
+  const issuesLine = issueTypes.length ? issueTypes.join(", ") : "none";
+  const summary = (analysis.summary || "").trim() || "(no summary)";
+  const body =
+    `[Cora Analysis] Score ${analysis.score}/10` +
+    (trigger === "low_csat" ? " (triggered by a low CSAT rating)" : "") +
+    `. ${summary} — Issues: ${issuesLine}.` +
+    (analysisId ? ` Analysis ${analysisId}.` : "");
+  await postCoraInternalNote(admin, ticketId, body);
+}
+
+/**
+ * Post the `[Cora Analysis — REFUTED]` companion note beside the original `[Cora Analysis]` note,
+ * naming the refuted issue's type + the refutation reason + the reviewer. Called by
+ * `refuteAnalysisIssue` in [[ticket-analyses-table]] via a dynamic import (avoids a circular
+ * ticket-analyzer ↔ ticket-analyses-table import). Best-effort; never throws.
+ *
+ * A thread-reading director (the b28e7744 failure mode) now sees the claim and its rebuttal
+ * adjacent, so a refuted 'inaccuracy' cannot drive a founder escalation.
+ */
+export async function postCoraRefutedNote(
+  admin: Admin,
+  input: { ticketId: string; issueType: string; reason: string; refutedBy: string; analysisId?: string | null },
+): Promise<void> {
+  const body = buildCoraRefutedNoteBody({
+    issueType: input.issueType,
+    reason: input.reason,
+    refutedBy: input.refutedBy,
+    analysisId: input.analysisId ?? null,
+  });
+  await postCoraInternalNote(admin, input.ticketId, body);
 }
 
 async function applySeverityActions(
@@ -1438,7 +1498,13 @@ async function applySeverityActions(
   analysisId?: string,
 ): Promise<void> {
   const score = analysis.score;
-  const issues = analysis.issues || [];
+  // Phase 2 of refuted-qc-findings-must-be-marked-not-just-argued: every DECIDING consumer
+  // reads through `activeIssues`. A finding a reviewer refuted via `refuteAnalysisIssue`
+  // stops driving reopen/escalate, severe-type detection, and downstream research recipes —
+  // the b28e7744 failure was exactly a refuted 'inaccuracy' entry surviving through this
+  // decision path. The audit-trail note writer (`postCoraAnalysisNote`) keeps the full
+  // `analysis.issues` so refuted entries stay visible for humans, only marked.
+  const issues = activeIssues({ issues: analysis.issues || [] });
 
   // ── Human veto: analyzer_locked ──
   // Checked BEFORE the forceEscalate math (below) so a severe-issue
