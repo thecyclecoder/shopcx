@@ -24,6 +24,10 @@ The unified handler's classify-bucket Haiku step (see [[../inngest/unified-ticke
 
 - [[../inngest/unified-ticket-handler]] § 1a2 — the pre-classifier short-circuit calls `isAutomatedInbound` (via [[outreach-route]] `decideOutreachRoute`) before the classify-bucket Haiku step. A true return path costs zero AI dollars.
 
+## Downstream progress accounting
+
+The handler's sysNote on a pre-filter close (`[System] Automated-sender pre-filter tripped (sender=…) — deterministically closed, no AI response, classify-bucket skipped (zero AI cost).`) counts as a **streak-resetting handled turn** in [[no-progress-guard]] — the substring `Automated-sender pre-filter tripped` is on the `ACTION_MARKERS` list. Deterministic handling IS progress: a run of pre-filter-closed inbounds (e.g. 13 auto-merged TestFlight spam invites from `testflight_no_reply@email.apple.com` on ticket `91579acf-67ef-4cb3-be89-0c9da7dac7af`) must not silently accumulate into `no_progress_context_cap` and escalate deterministic spam to the CS Director with no remedy.
+
 ## Testing
 
 `src/lib/automated-sender.test.ts` — 12 node:test cases. Run:
