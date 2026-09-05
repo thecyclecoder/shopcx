@@ -1,0 +1,1 @@
+- **Automated-sender pre-filter closes must reset the no-progress streak** · verified 2026-09-05 · → [[../libraries/no-progress-guard]]
