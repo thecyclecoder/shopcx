@@ -17,10 +17,12 @@ Small enough to catch a stuck ticket after two clear failures; large enough that
 
 ### `inboundStreakSinceLastResponse(messages) → number`
 Walks the message tail backwards from the newest. Increments on `direction='inbound' && author_type='customer'`. Resets on either:
-- An action-executed system note (`author_type='system'` matching the same [[sonnet-orchestrator-v2]] `Action / Applied / Refund / …` marker list the convo renderer uses — kept aligned so the two views can't disagree).
+- An action-executed system note (`author_type='system'` matching the same [[sonnet-orchestrator-v2]] `Action / Applied / Refund / …` marker list the convo renderer uses — kept aligned so the two views can't disagree). The list also carries `"Automated-sender pre-filter tripped"` — the deterministic pre-filter close from [[automated-sender]] via [[../inngest/unified-ticket-handler]] § 1a2 IS a real state change (`open → auto_resolve`), so a run of pre-filter-closed inbounds must not silently accumulate into `no_progress_context_cap`.
 - An outbound reply that isn't a system note (`direction='outbound' && author_type !== 'system'`) — i.e. a real customer-facing AI/agent reply, not a routing / model-picker breadcrumb.
 
 Non-action system notes (routing, `Orchestrator model: opus (turn>=1)`, merge stubs) are **transparent** — they don't mask a genuine streak.
+
+**Ground-truth case for the pre-filter marker:** ticket `91579acf-67ef-4cb3-be89-0c9da7dac7af` — 13 auto-merged TestFlight "AdsGPT" spam invites, every one deterministically pre-filter-closed, escalated to the CS Director as `no_progress_context_cap` with literally no remedy to hand back. The pre-filter's sysNote (`[System] Automated-sender pre-filter tripped (sender=…) — deterministically closed, no AI response, classify-bucket skipped (zero AI cost).`) carries no ACTION_MARKERS substring, so the streak counter used to skip past it and treat each spam inbound as un-answered. The marker addition closes the loop: deterministic handling IS progress.
 
 ### `shouldTripNoProgressCircuit(streak) → boolean`
 Returns `streak >= NO_PROGRESS_M`.
@@ -49,7 +51,7 @@ Look up the active `cancel_subscription` journey for the workspace ([[../tables/
 
 ## Testing
 
-Pure predicates covered in `src/lib/no-progress-guard.test.ts` (node:test). Named failing state (spec Phase-3 verification bullet): *"A no-progress ticket stops escalating context/model and is surfaced instead of silently re-charged."* Test asserts M consecutive inbound → streak=M → `shouldTripNoProgressCircuit(streak) === true`; complementary tests cover the action-note reset, the outbound reply reset, and the non-action system-note transparency (a `[System] Orchestrator model: opus (turn>=1)` breadcrumb must NOT reset the streak).
+Pure predicates covered in `src/lib/no-progress-guard.test.ts` (node:test). Named failing state (spec Phase-3 verification bullet): *"A no-progress ticket stops escalating context/model and is surfaced instead of silently re-charged."* Test asserts M consecutive inbound → streak=M → `shouldTripNoProgressCircuit(streak) === true`; complementary tests cover the action-note reset, the outbound reply reset, and the non-action system-note transparency (a `[System] Orchestrator model: opus (turn>=1)` breadcrumb must NOT reset the streak). A separate pair of tests pin the ticket-`91579acf` fix: 13 pre-filter-closed inbounds interleaved with the `Automated-sender pre-filter tripped` sysNote → streak = 0, circuit does NOT trip (deterministic handling counts as progress).
 
 ## Gotchas
 

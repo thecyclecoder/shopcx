@@ -70,6 +70,19 @@ const ACTION_MARKERS = [
   "Refund",
   "All done",
   "Here's what we",
+  // Deterministic pre-filter close from [[libraries/automated-sender]] via
+  // unified-ticket-handler.ts § 1a2 (`outreach-automated-sender-pre-filter`
+  // step). The handler writes the sysNote body
+  //   "[System] Automated-sender pre-filter tripped (sender=…) —
+  //    deterministically closed, no AI response, classify-bucket skipped
+  //    (zero AI cost)."
+  // The close IS a real state change (open → auto_resolve) and counts as
+  // progress — a run of pre-filter-closed inbounds must not silently
+  // accumulate as no_progress_context_cap. Ground-truth case: ticket
+  // 91579acf-67ef-4cb3-be89-0c9da7dac7af — 13 auto-merged TestFlight
+  // "AdsGPT" spam invites, every one pre-filter-closed, escalated to the
+  // CS Director with no remedy before this marker landed.
+  "Automated-sender pre-filter tripped",
 ];
 
 function isActionSystemMessage(m: StreakMessage): boolean {
