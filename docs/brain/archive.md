@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **A refuted QC finding must be marked refuted, not argued in prose** · verified 2026-09-04 · → [[../libraries/ticket-analyses]]
 - **Security dependency upgrades** · verified 2026-09-03 · → [[../libraries/security-agent]]
 - **The open-ticket defect check measures neglect, not ticket age** · verified 2026-09-02 · → [[../recipes/open-tickets-queue]]
 - **A shipped spec that cannot fold counts as stuck on the board** · verified 2026-09-02 · → [[../libraries/pipeline-doctor]]
