@@ -71,10 +71,13 @@ export interface DunningRecoveryProbe {
  * Pure boundary: is a subscription already recovered from a prior dunning
  * cycle, so a late/duplicate internal renewal failure event should NOT open
  * or advance a new cycle? True iff the sub is `active`, its most-recent
- * charge is `succeeded`, and `next_billing_date` is strictly after the
- * reference time (safely in the future). Fail-open (returns false) on any
- * missing field, unparseable date, or non-active/non-succeeded state so a
- * genuinely-due failure still enters dunning normally.
+ * charge is `succeeded`, and `next_billing_date` is strictly after
+ * end-of-today UTC derived from the reference timestamp — the same boundary
+ * the renewal cron uses when it picks up due subs. A same-day-later
+ * next_billing_date is NOT recovered (the failure could still be genuinely
+ * due today). Fail-open (returns false) on any missing field, unparseable
+ * date, or non-active/non-succeeded state so a genuinely-due failure still
+ * enters dunning normally.
  *
  * Pure — no I/O. Tested via `internal-dunning.recovered-skip.test.ts`.
  */
@@ -89,7 +92,17 @@ export function isSubscriptionRecoveredFromDunning(
   const nextMs = new Date(sub.next_billing_date).getTime();
   if (!Number.isFinite(nextMs)) return false;
   if (!Number.isFinite(referenceMs)) return false;
-  return nextMs > referenceMs;
+  const ref = new Date(referenceMs);
+  const endOfTodayMs = Date.UTC(
+    ref.getUTCFullYear(),
+    ref.getUTCMonth(),
+    ref.getUTCDate(),
+    23,
+    59,
+    59,
+    999,
+  );
+  return nextMs > endOfTodayMs;
 }
 
 /**

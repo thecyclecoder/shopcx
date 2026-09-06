@@ -58,6 +58,28 @@ test("Phase 1: active + succeeded + next_billing_date exactly = now is NOT recov
   );
 });
 
+test("Phase 1: active + succeeded + next_billing_date is same UTC day but later is NOT recovered (end-of-today UTC boundary)", () => {
+  // Reference is 2026-09-05 09:00 UTC; next_billing_date is 2026-09-05
+  // 23:05 UTC — a same-day-later time. Under the old Date.now boundary
+  // this would falsely count as 'recovered' (nextMs > referenceMs) and
+  // the fresh decline would be silently dropped. Under the new
+  // end-of-today-UTC boundary the sub is only recovered when it has
+  // advanced PAST today, so a same-day-later time correctly stays NOT
+  // recovered and the dunning cycle opens.
+  const ref = new Date("2026-09-05T09:00:00Z").getTime();
+  assert.equal(
+    isSubscriptionRecoveredFromDunning(
+      {
+        status: "active",
+        last_payment_status: "succeeded",
+        next_billing_date: "2026-09-05T23:05:22Z",
+      },
+      ref,
+    ),
+    false,
+  );
+});
+
 test("Phase 1: cancelled sub is NEVER recovered (the exhausted-then-cancelled path stays fair game)", () => {
   assert.equal(
     isSubscriptionRecoveredFromDunning(
