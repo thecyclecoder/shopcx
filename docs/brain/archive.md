@@ -12,6 +12,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Internal dunning: stop skipping fraud declines when next_billing_date is later the same UTC day** · verified 2026-09-06 · → [[../inngest/internal-dunning]]
+- **Automated-sender pre-filter closes must reset the no-progress streak** · verified 2026-09-05 · → [[../libraries/no-progress-guard]]
 - **A refuted QC finding must be marked refuted, not argued in prose** · verified 2026-09-04 · → [[../libraries/ticket-analyses]]
 - **Security dependency upgrades** · verified 2026-09-03 · → [[../libraries/security-agent]]
 - **The open-ticket defect check measures neglect, not ticket age** · verified 2026-09-02 · → [[../recipes/open-tickets-queue]]
