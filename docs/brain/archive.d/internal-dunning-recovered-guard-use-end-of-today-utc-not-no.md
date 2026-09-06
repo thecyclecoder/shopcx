@@ -1,0 +1,1 @@
+- **Internal dunning: stop skipping fraud declines when next_billing_date is later the same UTC day** · verified 2026-09-06 · → [[../inngest/internal-dunning]]
