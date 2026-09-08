@@ -210,12 +210,25 @@ async function handle(req: NextRequest) {
             },
           });
 
+          // A deliberate enforcement block — `checkPortalBan` in
+          // [[portal__helpers]] is the only producer of `{ error:
+          // "account_restricted" }` with 403, and it fires purely on
+          // `customers.portal_banned`. That is a call WE made (fraud ban),
+          // not a customer who failed to self-serve. Suppress the ticket
+          // lookup/insert here so the ban does not manufacture an opposing
+          // ticket that argues to reverse it. Guard the exact string, not the
+          // status code — a 403 from another cause still raises a ticket.
+          // The 403 return is unchanged upstream; the audit event above is
+          // preserved. Ground truth: ticket 3947c9e1 (2026-09-07) opened by
+          // four account_restricted responses (`orderdetail`,
+          // `paymentmethods`, `resources` x2) minutes after the ban landed.
+          const isDeliberateBlock = body?.error === "account_restricted";
           // The portal UI promises "we're submitting a ticket on your behalf"
           // when an action fails — so actually create one (tagged, so a view
           // can collect them) and the agent gets the full context. Light
           // dedupe: reuse an open `portal-action-failed` ticket from the last
           // hour instead of spawning a new one per retry.
-          try {
+          if (!isDeliberateBlock) try {
             const { createAdminClient } = await import("@/lib/supabase/admin");
             const adminDb = createAdminClient();
             const hourAgo = new Date(Date.now() - 60 * 60_000).toISOString();

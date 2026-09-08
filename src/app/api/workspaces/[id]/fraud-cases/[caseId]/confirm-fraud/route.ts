@@ -4,6 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { subscriptionAction } from "@/lib/commerce/subscription";
 import { cancelOrder } from "@/lib/shopify-order-actions";
 import { refundOrder } from "@/lib/refund";
+import { resolveFraudCaseLinkedCustomers } from "@/lib/fraud-linked-customers";
 
 /**
  * Confirmed Fraud — multi-step action series.
@@ -257,22 +258,150 @@ export async function POST(
   }
 
   // ── Step: ban_customer ──
+  //
+  // Bans EVERY account the case has linked, not just the accounts on
+  // fraud_cases.customer_ids. The linked cluster is the set the
+  // investigate route already renders as "Customer Accounts" on the
+  // detail page (the list the operator read and confirmed against),
+  // so we call the exact same resolver here — no second heuristic.
+  // See docs/brain/libraries/fraud-linked-customers.md.
+  //
+  // The caller may pass `customer_ids` in the body to narrow the ban
+  // to the accounts still checked in the confirm dialog (the operator
+  // is allowed to exclude linked accounts that look unrelated — 26
+  // genuinely unrelated same-surname customers in the ground-truth
+  // cluster). We intersect that list with the resolved linked set;
+  // anything outside the linked set is ignored — the case defines
+  // the ceiling, the operator can only narrow within it.
   if (step === "ban_customer") {
-    const results: { customer_id: string; success: boolean }[] = [];
+    const { allCustomerIds: linkedIds } = await resolveFraudCaseLinkedCustomers(admin, fraudCase);
 
-    for (const custId of customerIds) {
-      const { error } = await admin.from("customers")
+    const requested = Array.isArray(body.customer_ids)
+      ? (body.customer_ids as string[]).filter((id): id is string => typeof id === "string")
+      : null;
+    const linkedSet = new Set(linkedIds);
+    const targets = requested
+      ? requested.filter(id => linkedSet.has(id))
+      : linkedIds;
+
+    // Pull existing ban state + emails so the response can distinguish
+    // banned-now vs already-banned and label each row for the operator.
+    const { data: existing } = await admin.from("customers")
+      .select("id, email, portal_banned")
+      .eq("workspace_id", workspaceId)
+      .in("id", targets.length > 0 ? targets : ["__none__"]);
+    const existingById = new Map((existing || []).map(c => [c.id, c] as const));
+
+    const nowIso = new Date().toISOString();
+    // `success` is retained for the pre-Phase-2 wizard UI (checkmark
+    // per row) — Phase 2 replaces that display with an explicit
+    // banned / already-banned / failed breakdown and this field can go.
+    const results: {
+      customer_id: string;
+      email: string | null;
+      already_banned: boolean;
+      banned: boolean;
+      success: boolean;
+      error?: string;
+    }[] = [];
+
+    for (const custId of targets) {
+      const row = existingById.get(custId);
+      const email = row?.email ?? null;
+
+      if (!row) {
+        results.push({
+          customer_id: custId,
+          email: null,
+          already_banned: false,
+          banned: false,
+          success: false,
+          error: "Customer not found in workspace",
+        });
+        continue;
+      }
+
+      if (row.portal_banned) {
+        results.push({
+          customer_id: custId,
+          email,
+          already_banned: true,
+          banned: false,
+          success: true,
+        });
+        continue;
+      }
+
+      // Compare-and-set: only flip a currently-unbanned row so a
+      // concurrent ban isn't overwritten (and to assert exactly one
+      // row transitioned — bail with an error otherwise).
+      const { data: updated, error } = await admin.from("customers")
         .update({
           portal_banned: true,
-          portal_banned_at: new Date().toISOString(),
+          portal_banned_at: nowIso,
           portal_banned_by: member.id,
         })
         .eq("id", custId)
-        .eq("workspace_id", workspaceId);
-      results.push({ customer_id: custId, success: !error });
+        .eq("workspace_id", workspaceId)
+        .eq("portal_banned", false)
+        .select("id");
+
+      if (error) {
+        results.push({
+          customer_id: custId,
+          email,
+          already_banned: false,
+          banned: false,
+          success: false,
+          error: error.message,
+        });
+        continue;
+      }
+
+      if (!updated || updated.length === 0) {
+        // Something else banned this row between the read and the
+        // update — surface as already-banned so the UI doesn't say
+        // it failed silently.
+        results.push({
+          customer_id: custId,
+          email,
+          already_banned: true,
+          banned: false,
+          success: true,
+        });
+        continue;
+      }
+
+      results.push({
+        customer_id: custId,
+        email,
+        already_banned: false,
+        banned: true,
+        success: true,
+      });
     }
 
-    return NextResponse.json({ ok: true, step: "ban_customer", results });
+    // Report the FULL scope back: how many accounts the case links to,
+    // how many the request targeted (targets), how many banned now,
+    // how many were already banned, how many failed. The caller
+    // renders this instead of assuming — a silent partial success is
+    // the failure mode this whole feature exists to remove.
+    const bannedCount = results.filter(r => r.banned).length;
+    const alreadyBannedCount = results.filter(r => r.already_banned).length;
+    const failedCount = results.filter(r => !r.banned && !r.already_banned).length;
+
+    return NextResponse.json({
+      ok: true,
+      step: "ban_customer",
+      results,
+      scope: {
+        linked_customer_ids: linkedIds,
+        targeted_customer_ids: targets,
+        banned_count: bannedCount,
+        already_banned_count: alreadyBannedCount,
+        failed_count: failedCount,
+      },
+    });
   }
 
   // ── Step: complete ──
