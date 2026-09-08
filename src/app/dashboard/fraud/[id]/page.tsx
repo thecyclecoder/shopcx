@@ -110,7 +110,23 @@ export default function FraudCaseDetailPage() {
   const [wizardAmplifierOrders, setWizardAmplifierOrders] = useState<{ order_id: string; order_number: string; amplifier_order_id: string | null; amplifier_status: string | null; amplifier_shipped_at: string | null; at_amplifier: boolean; shipped: boolean; cancellable: boolean; amplifier_url: string | null }[]>([]);
   const [wizardSubResults, setWizardSubResults] = useState<{ subscription_id: string; shopify_contract_id: string; success: boolean; error?: string }[]>([]);
   const [wizardOrderResults, setWizardOrderResults] = useState<{ order_id: string; order_number: string; success: boolean; error?: string }[]>([]);
-  const [wizardBanResults, setWizardBanResults] = useState<{ customer_id: string; success: boolean }[]>([]);
+  // Ban step now returns per-account results. `banned`, `already_banned`,
+  // and `error` are the authoritative fields; the caller renders those
+  // explicitly (Phase 2 of the ban-the-linked-cluster spec — no silent
+  // partial-success rollup).
+  const [wizardBanResults, setWizardBanResults] = useState<{ customer_id: string; email: string | null; banned: boolean; already_banned: boolean; error?: string }[]>([]);
+  // Blast-radius preview — the full linked cluster the ban WILL cover
+  // (sourced from the same investigate endpoint that populates the
+  // "Customer Accounts (N)" panel on this page, so the number the
+  // operator sees before confirming matches the number that gets banned).
+  // Loaded once when the wizard opens.
+  const [wizardLinkedAccounts, setWizardLinkedAccounts] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; is_case_customer: boolean; is_linked: boolean }[]>([]);
+  // Customer ids the operator has excluded from the ban via the
+  // pre-confirm checkbox list. Excluding narrows the ban within the
+  // linked set — never silently drops the account from the case (Phase
+  // 2 spec: 26 unrelated same-surname customers had to be kept out by
+  // hand; the case still records them as linked).
+  const [wizardExcludedIds, setWizardExcludedIds] = useState<Set<string>>(new Set());
   const [wizardComplete, setWizardComplete] = useState(false);
 
   const applyData = (data: { case: FraudCaseDetail; history: HistoryEntry[]; members: Member[] }) => {
@@ -167,6 +183,23 @@ export default function FraudCaseDetailPage() {
     setWizardSubResults([]);
     setWizardOrderResults([]);
     setWizardBanResults([]);
+    setWizardLinkedAccounts([]);
+    setWizardExcludedIds(new Set());
+    // Kick off the blast-radius preview fetch in parallel — reuses the
+    // investigate endpoint that also feeds the "Customer Accounts"
+    // panel, so the count the operator sees on the confirm screen
+    // matches what the panel shows. Same shared resolver on the server.
+    void fetch(`/api/workspaces/${workspace.id}/fraud-cases/${caseId}/investigate`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => {
+        if (data?.customers) {
+          setWizardLinkedAccounts(
+            (data.customers as { id: string; email: string; first_name: string | null; last_name: string | null; is_case_customer: boolean; is_linked: boolean }[])
+              .map(c => ({ id: c.id, email: c.email, first_name: c.first_name, last_name: c.last_name, is_case_customer: !!c.is_case_customer, is_linked: !!c.is_linked }))
+          );
+        }
+      })
+      .catch(() => {});
     // Step 0: check amplifier
     setWizardLoading(true);
     const data = await wizardCallStep("check_amplifier");
@@ -187,7 +220,19 @@ export default function FraudCaseDetailPage() {
   };
 
   const wizardBanCustomer = async () => {
-    const data = await wizardCallStep("ban_customer");
+    // Pass an explicit customer_ids list so the ban covers exactly what
+    // the operator confirmed in the pre-confirm dialog (linked set
+    // minus anything they checked off). If the preview never loaded
+    // (network hiccup) we fall through with null — the server then
+    // falls back to the full resolved linked set, matching the spec's
+    // "the case defines the ceiling" invariant.
+    const explicit = wizardLinkedAccounts.length > 0
+      ? wizardLinkedAccounts.filter(a => !wizardExcludedIds.has(a.id)).map(a => a.id)
+      : null;
+    const data = await wizardCallStep(
+      "ban_customer",
+      explicit ? { customer_ids: explicit } : undefined
+    );
     if (data) setWizardBanResults(data.results || []);
     setWizardStep(4);
   };
@@ -694,52 +739,132 @@ export default function FraudCaseDetailPage() {
                 </div>
               )}
 
-              {/* Step 3: Ban Customer */}
-              {wizardStep === 3 && !wizardComplete && (
-                <div className="space-y-3">
-                  <p className="mb-1 text-xs font-semibold uppercase text-green-500">Orders Cancelled & Refunded</p>
-                  {wizardOrderResults.length === 0 ? (
-                    <p className="text-sm text-zinc-400">No orders to cancel.</p>
-                  ) : (
-                    <div className="space-y-1">
-                      {wizardOrderResults.map(r => (
-                        <div key={r.order_id} className="flex items-center gap-2 text-sm">
-                          <span className={r.success ? "text-green-600" : "text-red-500"}>{r.success ? "&#10003;" : "&#10007;"}</span>
-                          <span className="text-zinc-700 dark:text-zinc-300">Order #{r.order_number}</span>
-                          {r.error && <span className="text-xs text-red-400">({r.error})</span>}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  <button
-                    onClick={wizardBanCustomer}
-                    disabled={wizardLoading}
-                    className="mt-2 w-full rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
-                  >
-                    {wizardLoading ? "Banning customer..." : "Ban Customer from Portal"}
-                  </button>
-                </div>
-              )}
+              {/* Step 3: Ban Customer — pre-confirm blast radius */}
+              {wizardStep === 3 && !wizardComplete && (() => {
+                const includedIds = wizardLinkedAccounts.filter(a => !wizardExcludedIds.has(a.id)).map(a => a.id);
+                const includedCount = includedIds.length;
+                const excludedCount = wizardExcludedIds.size;
+                const totalCount = wizardLinkedAccounts.length;
+                return (
+                  <div className="space-y-3">
+                    <p className="mb-1 text-xs font-semibold uppercase text-green-500">Orders Cancelled & Refunded</p>
+                    {wizardOrderResults.length === 0 ? (
+                      <p className="text-sm text-zinc-400">No orders to cancel.</p>
+                    ) : (
+                      <div className="space-y-1">
+                        {wizardOrderResults.map(r => (
+                          <div key={r.order_id} className="flex items-center gap-2 text-sm">
+                            <span className={r.success ? "text-green-600" : "text-red-500"}>{r.success ? "✓" : "✗"}</span>
+                            <span className="text-zinc-700 dark:text-zinc-300">Order #{r.order_number}</span>
+                            {r.error && <span className="text-xs text-red-400">({r.error})</span>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
 
-              {/* Step 4: Complete */}
-              {wizardStep === 4 && !wizardComplete && (
-                <div className="space-y-3">
-                  <p className="mb-1 text-xs font-semibold uppercase text-green-500">Customer Banned</p>
-                  {wizardBanResults.map(r => (
-                    <div key={r.customer_id} className="flex items-center gap-2 text-sm">
-                      <span className={r.success ? "text-green-600" : "text-red-500"}>{r.success ? "&#10003;" : "&#10007;"}</span>
-                      <span className="text-zinc-700 dark:text-zinc-300">Customer banned from self-service portal</span>
+                    <div className="mt-4 rounded-md border border-red-200 bg-red-50/50 p-3 dark:border-red-900 dark:bg-red-950/20">
+                      <p className="text-xs font-semibold uppercase text-red-600 dark:text-red-400">Ban Blast Radius</p>
+                      {totalCount === 0 ? (
+                        <p className="mt-1 text-sm text-zinc-500">Loading linked accounts…</p>
+                      ) : (
+                        <>
+                          <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">
+                            This will block <span className="font-semibold">{includedCount}</span> {includedCount === 1 ? "account" : "accounts"}
+                            {excludedCount > 0 && <> ({excludedCount} excluded)</>}. Uncheck any account that looks unrelated — it stays on the case as a linked account but won&apos;t be banned.
+                          </p>
+                          <div className="mt-2 max-h-56 space-y-1 overflow-y-auto rounded border border-red-100 bg-white p-2 dark:border-red-900/40 dark:bg-zinc-900">
+                            {wizardLinkedAccounts.map(a => {
+                              const included = !wizardExcludedIds.has(a.id);
+                              return (
+                                <label key={a.id} className="flex items-center gap-2 text-xs">
+                                  <input
+                                    type="checkbox"
+                                    checked={included}
+                                    onChange={() => {
+                                      setWizardExcludedIds(prev => {
+                                        const next = new Set(prev);
+                                        if (next.has(a.id)) next.delete(a.id); else next.add(a.id);
+                                        return next;
+                                      });
+                                    }}
+                                    className="h-3.5 w-3.5"
+                                  />
+                                  <span className={included ? "text-zinc-700 dark:text-zinc-300" : "text-zinc-400 line-through dark:text-zinc-500"}>
+                                    {a.email || "(no email)"}
+                                  </span>
+                                  {a.is_case_customer && (
+                                    <span className="rounded bg-red-100 px-1.5 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">on case</span>
+                                  )}
+                                  {a.is_linked && (
+                                    <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">linked</span>
+                                  )}
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
                     </div>
-                  ))}
-                  <button
-                    onClick={wizardFinish}
-                    disabled={wizardLoading}
-                    className="mt-2 w-full rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
-                  >
-                    {wizardLoading ? "Completing..." : "Mark Case as Confirmed Fraud"}
-                  </button>
-                </div>
-              )}
+
+                    <button
+                      onClick={wizardBanCustomer}
+                      disabled={wizardLoading || includedCount === 0}
+                      className="mt-2 w-full rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                    >
+                      {wizardLoading ? "Banning accounts…" : (includedCount === 0 ? "No accounts selected" : `Ban ${includedCount} ${includedCount === 1 ? "Account" : "Accounts"}`)}
+                    </button>
+                  </div>
+                );
+              })()}
+
+              {/* Step 4: Complete — per-account ban results */}
+              {wizardStep === 4 && !wizardComplete && (() => {
+                const bannedNow = wizardBanResults.filter(r => r.banned);
+                const alreadyBanned = wizardBanResults.filter(r => r.already_banned);
+                const failed = wizardBanResults.filter(r => !r.banned && !r.already_banned);
+                return (
+                  <div className="space-y-3">
+                    <p className="mb-1 text-xs font-semibold uppercase text-green-500">Ban Results</p>
+                    <p className="text-xs text-zinc-500">
+                      Banned {bannedNow.length}
+                      {alreadyBanned.length > 0 && <> · already banned {alreadyBanned.length}</>}
+                      {failed.length > 0 && <> · failed {failed.length}</>}
+                    </p>
+                    {wizardBanResults.length === 0 ? (
+                      <p className="text-sm text-zinc-400">No accounts to ban.</p>
+                    ) : (
+                      <div className="max-h-56 space-y-1 overflow-y-auto rounded border border-zinc-200 bg-white p-2 dark:border-zinc-800 dark:bg-zinc-900">
+                        {wizardBanResults.map(r => {
+                          const isOk = r.banned || r.already_banned;
+                          return (
+                            <div key={r.customer_id} className="flex items-center gap-2 text-xs">
+                              <span className={isOk ? "text-green-600" : "text-red-500"}>{isOk ? "✓" : "✗"}</span>
+                              <span className="text-zinc-700 dark:text-zinc-300">{r.email || r.customer_id}</span>
+                              {r.banned && (
+                                <span className="rounded bg-green-100 px-1.5 py-0.5 text-[9px] font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">banned</span>
+                              )}
+                              {r.already_banned && (
+                                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">already banned</span>
+                              )}
+                              {r.error && <span className="text-[10px] text-red-400">({r.error})</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {failed.length > 0 && (
+                      <p className="text-xs text-red-500">Some accounts didn&apos;t get banned. Fix and retry before completing, or continue if the failures are acceptable — they will be recorded on the case.</p>
+                    )}
+                    <button
+                      onClick={wizardFinish}
+                      disabled={wizardLoading}
+                      className="mt-2 w-full rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                    >
+                      {wizardLoading ? "Completing..." : "Mark Case as Confirmed Fraud"}
+                    </button>
+                  </div>
+                );
+              })()}
 
               {/* Success state */}
               {wizardComplete && (
@@ -758,9 +883,19 @@ export default function FraudCaseDetailPage() {
                     {wizardOrderResults.length > 0 && (
                       <p className="text-sm text-zinc-600 dark:text-zinc-400"><span className="text-green-600">&#10003;</span> {wizardOrderResults.filter(r => r.success).length} order(s) cancelled & refunded</p>
                     )}
-                    {wizardBanResults.length > 0 && (
-                      <p className="text-sm text-zinc-600 dark:text-zinc-400"><span className="text-green-600">&#10003;</span> Customer banned from portal</p>
-                    )}
+                    {wizardBanResults.length > 0 && (() => {
+                      const bannedNow = wizardBanResults.filter(r => r.banned).length;
+                      const alreadyBanned = wizardBanResults.filter(r => r.already_banned).length;
+                      const failed = wizardBanResults.filter(r => !r.banned && !r.already_banned).length;
+                      return (
+                        <p className="text-sm text-zinc-600 dark:text-zinc-400">
+                          <span className={failed > 0 ? "text-amber-600" : "text-green-600"}>{failed > 0 ? "!" : "✓"}</span>{" "}
+                          {bannedNow} account(s) banned from portal
+                          {alreadyBanned > 0 && <> · {alreadyBanned} already banned</>}
+                          {failed > 0 && <> · {failed} failed</>}
+                        </p>
+                      );
+                    })()}
                     <p className="text-sm text-zinc-600 dark:text-zinc-400"><span className="text-green-600">&#10003;</span> Case marked as confirmed fraud</p>
                   </div>
                   <button
