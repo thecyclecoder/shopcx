@@ -75,7 +75,20 @@ const NAV_STRUCTURE: (NavItem | NavSection)[] = [
       { href: "/dashboard/replacements", label: "Replacements", icon: "M19.5 12c0-1.232-.046-2.453-.138-3.662a4.006 4.006 0 00-3.7-3.7 48.678 48.678 0 00-7.324 0 4.006 4.006 0 00-3.7 3.7c-.017.22-.032.441-.046.662M19.5 12l3-3m-3 3l-3-3m-12 3c0 1.232.046 2.453.138 3.662a4.006 4.006 0 003.7 3.7 48.656 48.656 0 007.324 0 4.006 4.006 0 003.7-3.7c.017-.22.032-.441.046-.662M4.5 12l3 3m-3-3l-3 3" },
       { href: "/dashboard/crisis", label: "Crisis", icon: "M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" },
       { href: "/dashboard/loyalty", label: "Loyalty", icon: ICONS.loyalty },
-      { href: "/dashboard/reviews", label: "Reviews", icon: ICONS.reviews },
+      // Reviews moved OUT of Customers to its own top-level section (CEO 2026-09-08) —
+      // it is a programme with its own funnel, not a per-customer attribute.
+    ],
+  },
+  {
+    label: "Reviews",
+    icon: ICONS.reviews,
+    collapsible: true,
+    items: [
+      // Stats first: the funnel is how you tell a working programme from a broken one. On
+      // 2026-09-08 the response rate sat at 0.00% for eight days because every magic link
+      // 404'd, and nothing surfaced it — the manager list looked normal throughout.
+      { href: "/dashboard/reviews/stats", label: "Stats", icon: "M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" },
+      { href: "/dashboard/reviews", label: "Manage", icon: ICONS.reviews },
     ],
   },
   {
