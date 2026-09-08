@@ -24,7 +24,14 @@ import { ctaButton, renderLabelUrlsAsButtons } from "@/lib/label-cta";
 type Admin = ReturnType<typeof createAdminClient>;
 
 // Same paragraph→HTML shaping the orchestrator's send() uses.
-const toHtml = (t: string) =>
+/**
+ * Plain text -> HTML paragraphs. Exported because the OUTBOX
+ * (`deliver-pending-send`) sends bodies straight to `sendTicketReply`, which
+ * injects them raw — so a plain-text body composed with \n\n breaks arrived as
+ * one unbroken wall of text. Every review ask sent before 2026-09-08 looked
+ * like that. Same converter both paths, so they cannot drift again.
+ */
+export const toHtml = (t: string) =>
   t
     .split(/\n\n+/)
     .map((p) => p.trim())

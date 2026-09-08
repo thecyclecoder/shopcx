@@ -71,7 +71,7 @@ export const deliverPendingSends = inngest.createFunction(
         // Get ticket info for email delivery
         const { data: ticket } = await admin
           .from("tickets")
-          .select("workspace_id, subject, email_message_id, channel, customers(email)")
+          .select("workspace_id, subject, email_message_id, channel, customers(email, phone)")
           .eq("id", msg.ticket_id)
           .single();
 
@@ -142,6 +142,34 @@ export const deliverPendingSends = inngest.createFunction(
           return;
         }
 
+        // SMS — must come BEFORE the non-email bail below, which marks a message
+        // "sent" without sending anything. A review ask composed for SMS that fell
+        // into that branch would be silently dropped; one that was routed to a
+        // portal anchor instead went out as EMAIL carrying "Reply STOP to opt out",
+        // which is what 249 customers received (2026-09-08).
+        if (ticket.channel === "sms") {
+          const phone = (ticket.customers as unknown as { phone?: string | null })?.phone;
+          if (!phone) {
+            // No number = undeliverable. Leave it PENDING rather than marking it
+            // sent: a false "sent" is what hid the original outage.
+            console.warn("[deliver-pending-send] sms message has no customer phone", { messageId: msg.id });
+            return;
+          }
+          const { sendSMS } = await import("@/lib/twilio");
+          const res = await sendSMS(ticket.workspace_id, phone, msg.body as string);
+          if (!res.success) {
+            console.warn("[deliver-pending-send] sms send failed", { messageId: msg.id, error: res.error });
+            return; // stays pending; the next tick retries
+          }
+          await admin.from("ticket_messages").update({
+            sent_at: new Date().toISOString(),
+            pending_send_at: null,
+            meta_message_id: res.messageSid ?? null,
+          }).eq("id", msg.id);
+          delivered++;
+          return;
+        }
+
         if (ticket.channel !== "email") {
           // Other non-email channels — just mark as sent
           await admin.from("ticket_messages").update({ sent_at: new Date().toISOString(), pending_send_at: null }).eq("id", msg.id);
@@ -161,11 +189,21 @@ export const deliverPendingSends = inngest.createFunction(
           .single();
 
         try {
+          // `sendTicketReply` injects the body RAW into the email HTML, so a
+          // plain-text body composed with \n\n paragraph breaks arrives as one
+          // unbroken wall of text — every review ask before 2026-09-08 looked
+          // like that. `deliverTicketMessage` runs the same conversion; the
+          // outbox never did. Bodies that are already HTML pass through
+          // untouched so the chat branch's CTA markup is not double-wrapped.
+          const { toHtml } = await import("@/lib/ticket-delivery");
+          const looksLikeHtml = /<(p|div|br|a|table|ul|ol)\b/i.test(msg.body as string);
+          const emailBody = looksLikeHtml ? (msg.body as string) : toHtml(msg.body as string);
+
           const emailResult = await sendTicketReply({
             workspaceId: ticket.workspace_id,
             toEmail: email,
             subject: `Re: ${ticket.subject || "Your request"}`,
-            body: msg.body,
+            body: emailBody,
             inReplyTo: ticket.email_message_id || null,
             agentName: "Support",
             workspaceName: ws?.name || "",

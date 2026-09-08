@@ -152,6 +152,13 @@ export function composeReviewRequestFirstTouchBody(
     "",
     `Leave a review here:`,
     url,
+    "",
+    // A review ask is a favour, so it carries its own decline. Deliberately NOT
+    // an email unsubscribe: someone who doesn't want to write a review has not
+    // asked to stop hearing from us, and taking more than they offered is its
+    // own failure. SMS uses "Reply STOP" instead — carrier convention, and a
+    // link in a text is worse. (CEO 2026-09-08.)
+    `Don't want review requests? Turn them off here: ${url}/stop`,
   ].join("\n");
   return { subject, body };
 }
