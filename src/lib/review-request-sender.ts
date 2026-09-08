@@ -110,6 +110,7 @@ export type ApplyReviewRequestResult =
   | { outcome: "skipped_customer_missing" }
   | { outcome: "skipped_product_missing" }
   | { outcome: "skipped_unreachable" }
+  | { outcome: "skipped_opted_out" }
   | { outcome: "skipped_no_rubric" }
   | {
       outcome: "blocked_by_validator";
@@ -171,12 +172,17 @@ export async function applyReviewRequest(
   const { data: customer } = await admin
     .from("customers")
     .select(
-      "id, email, first_name, sms_marketing_status, email_marketing_status, created_at, total_orders",
+      "id, email, first_name, sms_marketing_status, email_marketing_status, created_at, total_orders, review_asks_opted_out_at",
     )
     .eq("id", input.customerId)
     .eq("workspace_id", input.workspaceId)
     .maybeSingle();
   if (!customer) return { outcome: "skipped_customer_missing" };
+
+  // "Don't ask me again" is absolute (CEO 2026-09-08). Checked BEFORE the channel
+  // pick so it cannot be routed around by a customer being reachable on the other
+  // channel — the opt-out is about the ASK, not the pipe it arrives on.
+  if (customer.review_asks_opted_out_at) return { outcome: "skipped_opted_out" };
 
   const { data: product } = await admin
     .from("products")
@@ -310,6 +316,7 @@ export async function applyReviewRequest(
           workspaceId: input.workspaceId,
           customerId: input.customerId,
           productTitle: (product.title as string) || null,
+          channel,
         });
 
   const ticketMessageId = await queueReviewRequestAsPendingTicketMessage(admin, {
@@ -343,6 +350,9 @@ export async function createPostOrderAnchorTicket(
     workspaceId: string;
     customerId: string;
     productTitle: string | null;
+    /** The channel `pickReviewRequestChannel` chose. The outbox routes on the
+     *  TICKET's channel, so this is what makes that choice real. */
+    channel: "email" | "sms";
   },
 ): Promise<string> {
   const productLabel = input.productTitle?.trim() || "your recent order";
@@ -358,11 +368,15 @@ export async function createPostOrderAnchorTicket(
       // the inbound path reopens it if the customer actually writes back.
       status: "closed",
       closed_at: new Date().toISOString(),
-      // Portal-channel routes through sendPortalThreadEmail — the same
-      // email path the ticket-trigger's ask would use (portal is the
-      // "system-initiated" channel already used by dunning + delivery-
-      // audit synthetic tickets).
-      channel: "portal",
+      // The CHOSEN channel — not a hardcoded 'portal'.
+      //
+      // This was `channel: "portal"`, and the outbox's portal branch is
+      // always-email. So `pickReviewRequestChannel` picking SMS had no effect at
+      // all: every one of the 311 asks recorded as `sms` went out as EMAIL
+      // carrying the SMS body, "Reply STOP to opt out" included — 249 customers
+      // received that in an inbox (2026-09-08). `review_requests.channel`
+      // recorded a decision nothing downstream acted on.
+      channel: input.channel,
       tags: ["review_request:post_order"],
     })
     .select("id")
