@@ -20,9 +20,40 @@ The Phase-2 rubric + validator + drafts persistence sits upstream of the custome
 | `pickReviewRequestChannel(input)` | function | PURE — SMS if opted-in, else email if not unsubscribed, else null (skip). |
 | `shouldSuppressReviewRequestNudge(input)` | function | PURE — the spec's suppression list encoded verbatim. |
 | `isReviewRequestReadyForNudge(input)` | function | PURE — inside the 3-day window? |
-| `insertReviewRequestRow(admin, input)` | async | Live — one `review_requests` row per ask. |
+| `createReviewJourneySession(admin, input)` | async | Live — mints the `journey_sessions` row the magic link resolves against. **This is what makes a link work.** |
+| `insertReviewRequestRow(admin, input)` | async | Live — mints the session FIRST, then writes one `review_requests` row joined to it via `journey_session_id`. |
 | `queueReviewRequestAsPendingTicketMessage(admin, input)` | async | Live — canary-hold outbound as `ticket_messages.pending_send_at` (default hold: 18h). |
 | `markReviewRequestNudgeFired(admin, reviewRequestId)` | async | Live — compare-and-set `nudged_at` (returns false on lost race; caller MUST short-circuit). |
+
+## ⚠️ The link is only as real as its session (2026-09-08 dead-link outage)
+
+`insertReviewRequestRow` used to REQUIRE a token (it threw without one) and then never persist it —
+no `journey_sessions` row, no column on `review_requests`. The token existed only inside the sent
+message body. So every minted `/review/{token}` link resolved to [[review-journey-core]]
+`loadReviewSessionByToken` → `journey_sessions.token = …` → **no row** → 404 `session_not_found`.
+
+**455 asks and 341 nudges all pointed at a dead page.** The response rate was 0.00% — not low, dead.
+A real token was byte-for-byte as useful as a junk one.
+
+Three things kept it invisible:
+
+1. **The code said it did this.** Comments described the session as materializing "on first click",
+   but nothing implemented that and the loader is a plain `SELECT`.
+2. **The page 200s for junk.** `/review/[token]` is a client shell; it renders fine and only fails
+   when it calls `/api/review/{token}`. A smoke test on the page URL passes.
+3. **The tests only covered the pure half** — token shape, channel pick, nudge suppression. Nothing
+   asserted the token a customer receives can actually be resolved.
+
+The invariant now pinned in `review-request-delivery.session.test.ts`: **an ask MUST leave behind a
+session keyed on the SAME token that goes into the link**, and if the session cannot be created the
+ask ABORTS — no `review_requests` row is written. A row claiming `outcome='sent'` behind a 404 link
+is worse than no row at all.
+
+Recovery: `scripts/_backfill-review-journey-sessions.ts` revived 449 of 455 already-sent links
+(98.7%) by parsing tokens out of message bodies and matching them back to their ask by
+(customer, send-time) — the two rows are written within 0.1s of each other — with the product name
+in the body breaking same-instant ties. Ambiguous matches are skipped, never guessed: a session
+pointing at the wrong product asks someone to review something they did not buy.
 
 ## Design
 
