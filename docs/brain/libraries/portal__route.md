@@ -27,9 +27,15 @@ const tokenStr = String(token); if (tokenStr.startsWith(...)) { ... }
 
 Every portal handler and route utility that receives input should apply this guard. Signature: `vercel:a08795a29d9404a4` (the prod stack minified `.startsWith` to `t`, traced to a non-string value at the route boundary).
 
+### Deliberate enforcement blocks that shouldn't create tickets
+
+The route short-circuits on **deliberate enforcement decisions** (no ticket):
+
+- **`account_restricted`** — when `checkPortalBan` returns a 403 with `{ error: "account_restricted" }`, it signals a portal ban (from `customers.portal_banned = true`) — a deliberate fraud-enforcement block WE chose, not a customer who failed to self-serve. A ban blocks every portal action (`orderdetail`, `paymentmethods`, `resources`, etc.) and would otherwise generate multiple "Portal action needs help" tickets. These manufactured opposition tickets pressure the director to reverse exactly the fraud calls that were correct. Do NOT create a ticket on `account_restricted` errors; the 403 return is unchanged upstream and preserved on the `portal.error` audit event. Guard the exact string (`error === "account_restricted"`), not the HTTP status — a 403 from another cause still raises a ticket. See [[../specs/a-fraud-ban-must-not-manufacture-a-ticket-arguing-to-reverse-it]] Phase 1 + ground-truth ticket `3947c9e1` (2026-09-07): four `account_restricted` responses minutes after a fraud ban landed.
+
 ### Validation errors that shouldn't create tickets
 
-The route short-circuits on **predictable validation failures** that the customer already knows about (no ticket):
+The route also short-circuits on **predictable validation failures** that the customer already knows about (no ticket):
 
 - `insufficient_points` (loyalty redeem out of budget)
 - `would_remove_last_item` / `would_remove_all_regular_products` (subscription constraints)
