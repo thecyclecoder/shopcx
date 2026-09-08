@@ -1,0 +1,1 @@
+- **A fraud ban must not manufacture a ticket arguing to reverse it** · verified 2026-09-08 · → [[../lifecycles/fraud-detection]] + [[../libraries/portal__route]] + [[../libraries/cs-director]]

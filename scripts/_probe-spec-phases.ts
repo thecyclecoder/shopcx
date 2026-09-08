@@ -1,28 +1,22 @@
 import { readFileSync } from "fs";
 import { resolve } from "path";
 
-(async () => {
+async function main() {
   const envPath = resolve(__dirname, "../.env.local");
   for (const line of readFileSync(envPath, "utf8").split("\n")) {
-    const t = line.trim();
-    if (!t || t.startsWith("#")) continue;
-    const eq = t.indexOf("=");
-    if (eq < 0) continue;
-    const k = t.slice(0, eq);
-    if (!process.env[k]) process.env[k] = t.slice(eq + 1);
+    const t = line.trim(); if (!t || t.startsWith("#")) continue;
+    const eq = t.indexOf("="); if (eq < 0) continue;
+    const k = t.slice(0, eq); if (!process.env[k]) process.env[k] = t.slice(eq + 1);
   }
-
   const { createAdminClient } = await import("../src/lib/supabase/admin");
   const admin = createAdminClient();
 
-  // Check the spec and its phases
-  const specSlug = "build-lane-requeue-on-expired-oauth-401-instead-of-terminal-fail";
+  const slugToCheck = "a-fraud-ban-must-not-manufacture-a-ticket-arguing-to-reverse-it";
 
   const { data: specs } = await admin
     .from("specs")
-    .select("id, slug, status, created_at")
-    .eq("slug", specSlug)
-    .limit(1);
+    .select("id, slug, status")
+    .eq("slug", slugToCheck);
 
   console.log("Spec:", specs);
 
@@ -31,15 +25,18 @@ import { resolve } from "path";
 
     const { data: phases } = await admin
       .from("spec_phases")
-      .select("phase, status, completed_at")
+      .select("phase, status")
       .eq("spec_id", specId)
       .order("phase", { ascending: true });
 
-    console.log("\nPhases for", specSlug);
-    console.log(phases);
+    console.log("Spec phases:", phases);
 
-    // Check if all phases are shipped
-    const allShipped = phases?.every(p => p.status === "shipped");
-    console.log("\nAll phases shipped?", allShipped);
+    if (phases) {
+      const allShipped = phases.every(p => p.status === "shipped");
+      console.log(`\nDerived shipped status: ${allShipped ? "YES (all phases shipped)" : "NO"}`);
+      console.log(`Stored specs.status: ${specs[0].status}`);
+    }
   }
-})();
+}
+
+main().catch(console.error);
