@@ -53,6 +53,9 @@ const { data } = await admin.from("customer_link_rejections")
 - Linkage is via `group_id`. All customers in the same group are the same real person.
 - Always expand to the group before scoping per-customer queries — see [[../README]] `linkedIds()`.
 - When suggesting links, check `customer_link_rejections` first — never re-offer a rejected link.
+- Fraud case confirmation uses the linked group to determine the full cluster to ban — see [[../libraries/fraud-linked-customers]] and [[../lifecycles/fraud-detection]] Phase 7. The operator's screen shows all linked accounts, and the ban must cover the same set.
+
+---
 
 ---
 
