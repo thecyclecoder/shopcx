@@ -22,7 +22,8 @@
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { fetchAmplifierInventory } from "@/lib/integrations/amplifier";
-import { fetchFbaInventoryByAsin } from "@/lib/amazon/fba-inventory";
+import { fetchFbaInventoryByAsin, fetchFbaInventory } from "@/lib/amazon/fba-inventory";
+import { fetchOpenInboundShipments } from "@/lib/amazon/fba-inbound";
 
 export interface SyncResult {
   table: string;
@@ -271,6 +272,60 @@ export async function syncFbaInventoryForClose(
     if (error) throw new Error(`qb_amazon_inventory_snapshots: ${error.message}`);
   }
   return { table: "qb_amazon_inventory_snapshots", rows: rows.length };
+}
+
+/**
+ * Open FBA inbound shipments → `qb_inbound_shipment_snapshots` for `snapshotDate` — the close's
+ * THIRD physical bucket.
+ *
+ * ⭐ Units on an FBA replenishment are invisible to the other two sources: the 3PL has already
+ * decremented them and Amazon's inventory summaries report nothing until receiving starts. In
+ * August 2026 one shipment left Amplifier on 08-15 and Amazon checked it in on 09-01 — 1,050
+ * units across 11 ASINs uncounted on the 08-31 cutoff, which the audit booked as shrinkage and
+ * which tripped `adjustment_implausible` at $12,607.56.
+ *
+ * A failed lookup writes NOTHING rather than a row of zeros: an absent snapshot is visibly absent,
+ * whereas a zeroed one reads as "nothing in transit" and silently understates physical.
+ */
+export async function syncInboundShipmentsForClose(
+  admin: SupabaseClient,
+  workspaceId: string,
+  snapshotDate: string,
+): Promise<SyncResult> {
+  const { data: conns } = await admin
+    .from("amazon_connections").select("id, marketplace_id").eq("workspace_id", workspaceId);
+  if (!conns?.length) return { table: "qb_inbound_shipment_snapshots", rows: 0, note: "no amazon_connections for this workspace" };
+
+  const rows: Record<string, unknown>[] = [];
+  let unitsInTransit = 0;
+  for (const c of conns) {
+    const [{ lines, ok }, fba] = await Promise.all([
+      fetchOpenInboundShipments(c.id, c.marketplace_id),
+      fetchFbaInventory(c.id, c.marketplace_id),
+    ]);
+    if (!ok) throw new Error("FBA inbound lookup degraded — refusing to write a partial in-transit position");
+    for (const l of lines) {
+      unitsInTransit += l.inTransit;
+      rows.push({
+        workspace_id: workspaceId, snapshot_date: snapshotDate,
+        shipment_id: l.shipmentId, shipment_name: l.shipmentName, shipment_status: l.shipmentStatus,
+        seller_sku: l.sellerSku, asin: fba.skuToAsin.get(l.sellerSku) ?? null,
+        quantity_shipped: l.quantityShipped, quantity_received: l.quantityReceived, in_transit: l.inTransit,
+      });
+    }
+  }
+  for (let i = 0; i < rows.length; i += 500) {
+    const { error } = await admin
+      .from("qb_inbound_shipment_snapshots")
+      .upsert(rows.slice(i, i + 500), { onConflict: "workspace_id,snapshot_date,shipment_id,seller_sku" });
+    if (error) throw new Error(`qb_inbound_shipment_snapshots: ${error.message}`);
+  }
+  const unresolved = rows.filter((r) => !r.asin).length;
+  return {
+    table: "qb_inbound_shipment_snapshots",
+    rows: rows.length,
+    note: `${unitsInTransit} unit(s) in transit${unresolved ? ` · ${unresolved} line(s) unresolved to an ASIN` : ""}`,
+  };
 }
 
 /**

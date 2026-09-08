@@ -89,6 +89,18 @@ export function assessDryRun(inp: AssessDryRunInput): DryRunAssessment {
     });
   }
 
+  // ── third physical bucket ──
+  // A WARNING, not a blocker: a month that genuinely shipped nothing to FBA legitimately has no
+  // rows, and blocking would stall every such close. But an absent bucket is not an empty one —
+  // August 2026 had 1,050 units on a truck across the cutoff, which the audit booked as shrinkage
+  // and which took the adjustment to $12,607.56 against a $2,376.66 band.
+  if (!a.meta.inTransitRows) {
+    warnings.push(
+      "No in-transit snapshot for this period end — if any FBA replenishment shipped near the " +
+      "cutoff, its units are counted by neither the 3PL nor Amazon and will read as shrinkage.",
+    );
+  }
+
   // ── processor rollups ──
   const missing = REQUIRED_PROCESSORS.filter((p) => !processorsPresent.includes(p));
   if (missing.length) {

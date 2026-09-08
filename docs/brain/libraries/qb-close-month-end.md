@@ -18,7 +18,7 @@ buildMonthEndArtifacts(opts: BuildMonthEndOptions): Promise<MonthEndArtifacts>
 | `orders` | live Shopify orders for the month — the JE's revenue/tax/shipping/discount basis |
 | `receivedByProduct` | `qb_items.id` → units received via QB Bill/Purchase in the period |
 
-Returns `{ month, journalEntry, receipts{amazon,shopify,internal}, inventoryAdjustment, meta }`. `meta` carries the opening-book row count and the FBA/3PL snapshot dates actually used — read these, a silently-empty basis is the difference between a $2K and an $86K adjustment.
+Returns `{ month, journalEntry, receipts{amazon,shopify,internal}, inventoryAdjustment, auditRows, meta }`. `meta` carries the opening-book row count and the FBA/3PL snapshot dates actually used — read these, a silently-empty basis is the difference between a $2K and an $86K adjustment.
 
 ## The three source-column invariants (each cost a real incident)
 
@@ -26,7 +26,8 @@ These live here rather than in the builders because they are decisions about **w
 
 1. **Shopify burn = `units_sold + refund_units`.** `units_sold` excludes fully-refunded orders (the sync buckets those into `refund_units`). A refunded unit still *shipped* and is not guaranteed restockable, so it must burn inventory and carry COGS. CEO directive 2026-08-11. Cross-check: `units_sold + refund_units` equals Shopify's own `quantity_ordered` exactly (July: 3,880 + 11 = 3,891).
 2. **3PL physical = `quantity_on_hand`, NOT `quantity_available`.** `available` nets off units **committed** to orders the 3PL has not yet shipped — still on the shelf, still ours at the cutoff. Reading `available` booked owned stock as shrinkage; in July the excluded bucket swung 1,053 → 2,754 units and turned the whole coffee/creamer range negative.
-3. **FBA physical = `fulfillable + transit` ONLY.** `quantity_transit` is *defined* as `inboundWorking + quantity_inbound + quantity_reserved` (Shoptics `sync-engine.ts:283-285`). Adding `reserved` or `inbound` on top double-counts. Verified across 3,240 rows (2026-06-01 → 08-11): `transit == inbound + reserved` in 3,234, the 6 exceptions resolving exactly to `inboundWorking`, and **zero** rows where `transit < reserved`.
+3. **Physical has THREE buckets, not two.** FBA (`fulfillable + transit`) + 3PL (`quantity_on_hand`) + **in transit to Amazon** ([[../tables/qb_inbound_shipment_snapshots]]). A unit on an FBA replenishment is in none of the first two — Amplifier has decremented it and Amazon reports nothing until receiving. August 2026: 1,050 units across 11 ASINs on a truck across the cutoff, adjustment $12,607.56 vs a correct $5,064.54. `meta.inTransitUnits` / `meta.inTransitRows` are the tell; **`inTransitRows === 0` on a month that shipped to FBA means the bucket is MISSING, not empty.**
+4. **FBA physical = `fulfillable + transit` ONLY.** `quantity_transit` is *defined* as `inboundWorking + quantity_inbound + quantity_reserved` (Shoptics `sync-engine.ts:283-285`). Adding `reserved` or `inbound` on top double-counts. Verified across 3,240 rows (2026-06-01 → 08-11): `transit == inbound + reserved` in 3,234, the 6 exceptions resolving exactly to `inboundWorking`, and **zero** rows where `transit < reserved`.
 
 ## Reading pattern
 

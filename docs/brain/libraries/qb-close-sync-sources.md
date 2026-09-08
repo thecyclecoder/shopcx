@@ -10,6 +10,7 @@ Keeps the month-end close's `qb_*` source tables fed from **ShopCX's own integra
 | `syncInternalSalesForClose` | [[../tables/qb_internal_sales_snapshots]] | `public.orders` (ShopCX-native) |
 | `syncFbaInventoryForClose` | [[../tables/qb_amazon_inventory_snapshots]] | Amazon SP-API `fetchFbaInventoryByAsin` |
 | `syncTplInventoryForClose` | [[../tables/qb_tpl_inventory_snapshots]] | Amplifier `fetchAmplifierInventory` |
+| `syncInboundShipmentsForClose` | [[../tables/qb_inbound_shipment_snapshots]] | Amazon SP-API `fetchOpenInboundShipments` |
 | `storeLocalDate(utcIso, tz)` | — | UTC → store-local calendar date |
 
 All idempotent (upsert on the natural key), safe to re-run for a range, read-only upstream.
@@ -22,6 +23,17 @@ That table is a **lossy logistics view** and using it would silently reintroduce
 - for the 3PL it stores Amplifier's **`quantity_available` in a column named `on_hand`** (`sync-3pl-inventory.ts:28`), which excludes committed stock
 
 The close needs `quantity_on_hand` (= available + committed) and `reserved`. So these syncs go to the APIs directly.
+
+## ⭐ The third physical bucket
+
+`syncInboundShipmentsForClose` records units **shipped to Amazon but not yet received**. Those units are counted by NEITHER of the other two sources — Amplifier has already decremented them and Amazon's inventory summaries report nothing until receiving starts — so before this existed they read as shrinkage.
+
+August 2026 is the ground-truth case: one shipment left Amplifier 08-15 and Amazon checked it in 09-01, leaving **1,050 units across 11 ASINs** uncounted on the 08-31 cutoff and taking the adjustment to **$12,607.56** (correct figure: **$5,064.54**). See [[../tables/qb_inbound_shipment_snapshots]].
+
+Two rules it inherits from the inventory syncs, and one of its own:
+- **Point-in-time only** — `shipped − received` collapses to zero once receiving completes, so a missed day is permanently unrecoverable.
+- **A degraded lookup throws** rather than writing zeros; "nothing in transit" and "the query broke" must never look alike.
+- **Seller SKU → ASIN** is resolved from the same `/fba/inventory/v1/summaries` crawl (`fetchFbaInventory` now returns both the per-ASIN rollup and the map, so there is no second paginated call). An unresolved SKU stores `asin = null` and the close skips it rather than guessing.
 
 ## Amazon SALES lives in its own module
 
