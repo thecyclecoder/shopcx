@@ -24,6 +24,7 @@ import {
   syncInternalSalesForClose,
   syncFbaInventoryForClose,
   syncTplInventoryForClose,
+  syncInboundShipmentsForClose,
   type SyncResult,
 } from "@/lib/qb-close/sync-sources";
 import { syncProcessorSummaries } from "@/lib/qb-close/sync-processors";
@@ -92,6 +93,10 @@ export const syncQbCloseSources = inngest.createFunction(
         }],
         ["fba-inventory", () => syncFbaInventoryForClose(admin, ws, today)],
         ["tpl-inventory", () => syncTplInventoryForClose(admin, ws, today)],
+        // The close's THIRD physical bucket: units shipped to Amazon but not yet received. Like
+        // the two above it is a POINT-IN-TIME position that cannot be reconstructed later — once
+        // Amazon finishes receiving, shipped−received collapses to zero.
+        ["inbound-shipments", () => syncInboundShipmentsForClose(admin, ws, today)],
         // Processor rollups for BOTH the current month and the previous one. Transactions keep
         // settling for days after the sale, so last month's figures move well into the first week
         // of the next — Shoptics' equivalent snapshot froze 16h before month-end and understated

@@ -41,6 +41,8 @@ function artifacts(over: Partial<MonthEndArtifacts["meta"]> = {}, jeOver: Partia
       tplSnapshotDate: PERIOD_END,
       shopifyOrderCount: 2048,
       receivedItemCount: 1,
+      inTransitUnits: 0,
+      inTransitRows: 0,
       ...over,
     },
   };

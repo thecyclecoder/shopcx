@@ -14,8 +14,17 @@ export interface FbaAsinInventory {
   reserved: number;          // Σ reserved
 }
 
-export async function fetchFbaInventoryByAsin(connectionId: string, marketplaceId: string): Promise<FbaAsinInventory[]> {
+/**
+ * One pass over the summaries, returning BOTH the per-ASIN rollup and the sellerSKU→ASIN map.
+ * The map is what lets the inbound-shipment sync (which reports per seller SKU) resolve to the
+ * ASIN the close's mappings are keyed on — without paying for a second paginated crawl.
+ */
+export async function fetchFbaInventory(
+  connectionId: string,
+  marketplaceId: string,
+): Promise<{ byAsin: FbaAsinInventory[]; skuToAsin: Map<string, string> }> {
   const byAsin = new Map<string, FbaAsinInventory>();
+  const skuToAsin = new Map<string, string>();
   let nextToken: string | null = null;
   let pages = 0;
   do {
@@ -28,6 +37,7 @@ export async function fetchFbaInventoryByAsin(connectionId: string, marketplaceI
       if (!asin) continue;
       const d = s.inventoryDetails ?? {};
       const inbound = (d.inboundWorkingQuantity ?? 0) + (d.inboundShippingQuantity ?? 0) + (d.inboundReceivingQuantity ?? 0);
+      if (s.sellerSku) skuToAsin.set(String(s.sellerSku), asin);
       const cur = byAsin.get(asin) ?? { asin, sellerSku: s.sellerSku ?? null, onHand: 0, inbound: 0, reserved: 0 };
       cur.onHand += d.fulfillableQuantity ?? s.totalQuantity ?? 0;
       cur.inbound += inbound;
@@ -37,5 +47,10 @@ export async function fetchFbaInventoryByAsin(connectionId: string, marketplaceI
     nextToken = data?.pagination?.nextToken ?? null;
     pages++;
   } while (nextToken && pages < 50);
-  return Array.from(byAsin.values());
+  return { byAsin: Array.from(byAsin.values()), skuToAsin };
+}
+
+/** Per-ASIN rollup only — the long-standing signature every existing caller uses. */
+export async function fetchFbaInventoryByAsin(connectionId: string, marketplaceId: string): Promise<FbaAsinInventory[]> {
+  return (await fetchFbaInventory(connectionId, marketplaceId)).byAsin;
 }

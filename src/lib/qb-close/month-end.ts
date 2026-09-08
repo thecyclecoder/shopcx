@@ -65,6 +65,11 @@ export interface MonthEndArtifacts {
     tplSnapshotDate: string | null;
     shopifyOrderCount: number;
     receivedItemCount: number;
+    /** Units shipped to Amazon but not yet received on the snapshot date, and the number of
+     *  inbound lines behind them. `inTransitRows === 0` on a month that shipped to FBA means the
+     *  third bucket is MISSING, not empty — read it before trusting an outsized adjustment. */
+    inTransitUnits: number;
+    inTransitRows: number;
   };
 }
 
@@ -175,12 +180,30 @@ export async function buildMonthEndArtifacts(opts: BuildMonthEndOptions): Promis
   const fbaDate = fbaDateRow[0]?.snapshot_date ?? null;
   const tplDate = tplDateRow[0]?.snapshot_date ?? null;
 
-  const fbaByAsin = new Map<string, { fulfillable: number; transit: number }>();
+  const fbaByAsin = new Map<string, { fulfillable: number; transit: number; inTransit?: number }>();
+  let inTransitUnits = 0;
+  let inTransitRows = 0;
   if (fbaDate) {
     const rows = await all<{ asin: string; quantity_fulfillable: number; quantity_transit: number }>(
       admin, "qb_amazon_inventory_snapshots", (q) => q.select("asin, quantity_fulfillable, quantity_transit").eq("workspace_id", ws).eq("snapshot_date", fbaDate));
     // correction 3 — transit already contains reserved + inbound; do NOT add them
     for (const r of rows) fbaByAsin.set(r.asin, { fulfillable: r.quantity_fulfillable ?? 0, transit: r.quantity_transit ?? 0 });
+
+    // ── third physical bucket: shipped to Amazon, not yet received ──
+    // Read on the SAME date as the FBA snapshot so all three buckets describe one instant. An
+    // absent snapshot leaves inTransit unset (not zero) — see the fbaByAsin doc comment.
+    const inbound = await all<{ asin: string | null; in_transit: number }>(
+      admin, "qb_inbound_shipment_snapshots", (q) =>
+        q.select("asin, in_transit").eq("workspace_id", ws).eq("snapshot_date", fbaDate));
+    for (const r of inbound) {
+      if (!r.asin) continue; // unresolved seller SKU — never guess which ASIN it belongs to
+      const cur = fbaByAsin.get(r.asin);
+      const add = Math.max(0, Number(r.in_transit ?? 0));
+      if (cur) cur.inTransit = (cur.inTransit ?? 0) + add;
+      else fbaByAsin.set(r.asin, { fulfillable: 0, transit: 0, inTransit: add });
+    }
+    inTransitUnits = inbound.reduce((a, r) => a + Math.max(0, Number(r.in_transit ?? 0)), 0);
+    inTransitRows = inbound.length;
   }
   const tplBySku = new Map<string, number>();
   if (tplDate) {
@@ -248,6 +271,7 @@ export async function buildMonthEndArtifacts(opts: BuildMonthEndOptions): Promis
     meta: {
       priorMonth: prior, qbBasisRows: bookRows.length, fbaSnapshotDate: fbaDate, tplSnapshotDate: tplDate,
       shopifyOrderCount: orders.length, receivedItemCount: receivedByProduct.size,
+      inTransitUnits, inTransitRows,
     },
   };
 }

@@ -34,6 +34,8 @@ So input health is graded as **hard blockers, never warnings**, and an input tha
 
 **All blockers are reported at once**, not just the first — an operator fixing one input per run is how July took six passes.
 
+`inTransitRows === 0` is likewise a **warning**, not a blocker: a month that genuinely shipped nothing to FBA legitimately has no in-transit rows, and blocking would stall every such close. But an absent bucket is not an empty one — see [[../tables/qb_inbound_shipment_snapshots]].
+
 `receipts_lookup_ok = true` with zero items is a **warning** ("genuinely nothing received"), not a blocker. That distinction is the whole point.
 
 ## Gotchas

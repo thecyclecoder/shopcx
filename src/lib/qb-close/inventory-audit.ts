@@ -19,7 +19,11 @@ export interface AuditInputs {
   mappings: AuditMapping[];
   bom: AuditBomRow[];
   qbInventory: Map<string, number>;       // product_id → QB book qty (prior-month month_end_post)
-  fbaByAsin: Map<string, { fulfillable: number; transit: number }>;
+  /** `inTransit` = units shipped to Amazon but not yet received ([[qb_inbound_shipment_snapshots]]).
+   *  Counted by NEITHER of the other sources — the 3PL has decremented them and Amazon's summaries
+   *  report nothing until receiving starts. Optional so a month with no snapshot behaves exactly
+   *  as before rather than silently reading zero physical. */
+  fbaByAsin: Map<string, { fulfillable: number; transit: number; inTransit?: number }>;
   tplBySku: Map<string, number>;
   manualByProduct: Map<string, number>;   // product_id → summed manual qty
   amzSalesByAsin: Map<string, number>;
@@ -60,7 +64,13 @@ export function computeAuditVariances(inp: AuditInputs): AuditResult {
     const pm = mappingsByProduct.get(productId) || [];
     let fba = 0, fbaTransit = 0, tpl = 0;
     for (const m of pm) {
-      if (m.source === "amazon") { const s = inp.fbaByAsin.get(m.external_id); fba += Math.max(0, s?.fulfillable || 0) * m.multiplier; fbaTransit += Math.max(0, s?.transit || 0) * m.multiplier; }
+      if (m.source === "amazon") {
+        const s = inp.fbaByAsin.get(m.external_id);
+        fba += Math.max(0, s?.fulfillable || 0) * m.multiplier;
+        // Amazon's own `transit` plus the units still on the truck to Amazon. Both are stock we
+        // own at the cutoff; only the second is invisible to Amazon on that date.
+        fbaTransit += (Math.max(0, s?.transit || 0) + Math.max(0, s?.inTransit || 0)) * m.multiplier;
+      }
       else if (m.source === "3pl") { tpl += Math.max(0, inp.tplBySku.get(m.external_id) || 0) * m.multiplier; }
     }
     const manual = inp.manualByProduct.get(productId) || 0;

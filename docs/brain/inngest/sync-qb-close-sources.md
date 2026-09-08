@@ -21,13 +21,14 @@ Per workspace that has `qb_items` (i.e. the mapping layer is ported):
 | Amazon sales (shipped) | trailing **35 days** | [[../tables/qb_amazon_sales_snapshots]] |
 | FBA inventory | **today** | [[../tables/qb_amazon_inventory_snapshots]] |
 | 3PL inventory | **today** | [[../tables/qb_tpl_inventory_snapshots]] |
+| FBA inbound (in transit) | **today** | [[../tables/qb_inbound_shipment_snapshots]] |
 | Processor rollups | **this month + last** | [[../tables/qb_payment_processor_summaries]] |
 
 Runs at 09:30, after the 09:00 logistics FBA/3PL syncs.
 
 ## ⭐ Why a daily cron and not something run at close time
 
-**A dated inventory snapshot cannot be reconstructed later.** Inventory APIs report *now* — there is no "what was on hand on the 31st" endpoint. A missed day is a permanently missing period-end physical count, and the close needs the snapshot to land on the actual last day of the month ([[../libraries/qb-close-guard]] blocks on `stale_physical_snapshot`).
+**A dated inventory snapshot cannot be reconstructed later.** Inventory APIs report *now* — there is no "what was on hand on the 31st" endpoint. The same is true of the **in-transit** position: `shipped − received` collapses to zero the moment Amazon finishes receiving, so a missed day permanently loses it. A missed day is a permanently missing period-end physical count, and the close needs the snapshot to land on the actual last day of the month ([[../libraries/qb-close-guard]] blocks on `stale_physical_snapshot`).
 
 Sales, by contrast, are re-synced over a **35-day trailing window** rather than yesterday-only, because refunds and order edits land days after the sale and every sales sync is an idempotent upsert.
 
