@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { resolveFraudCaseLinkedCustomers } from "@/lib/fraud-linked-customers";
 
 // GET: Deep investigation of a fraud case — surfaces all related data
 export async function GET(
@@ -36,43 +37,12 @@ export async function GET(
 
   if (!fraudCase) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  // Get all customer IDs from the case
-  const caseCustomerIds: string[] = fraudCase.customer_ids || [];
-
-  // Also extract customer IDs from evidence
-  const evidence = fraudCase.evidence as Record<string, unknown>;
-  if (evidence?.customer_id && !caseCustomerIds.includes(evidence.customer_id as string)) {
-    caseCustomerIds.push(evidence.customer_id as string);
-  }
-  if (Array.isArray(evidence?.customers)) {
-    for (const c of evidence.customers as { customer_id?: string }[]) {
-      if (c.customer_id && !caseCustomerIds.includes(c.customer_id)) {
-        caseCustomerIds.push(c.customer_id);
-      }
-    }
-  }
-
-  // Expand to include all linked accounts
-  const allCustomerIds = new Set(caseCustomerIds);
-  if (caseCustomerIds.length > 0) {
-    const { data: links } = await admin
-      .from("customer_links")
-      .select("customer_id, group_id")
-      .in("customer_id", caseCustomerIds);
-
-    if (links && links.length > 0) {
-      const groupIds = [...new Set(links.map(l => l.group_id))];
-      const { data: groupMembers } = await admin
-        .from("customer_links")
-        .select("customer_id")
-        .in("group_id", groupIds);
-      for (const m of groupMembers || []) {
-        allCustomerIds.add(m.customer_id);
-      }
-    }
-  }
-
-  const customerIdArray = [...allCustomerIds];
+  // Resolve the full linked-cluster set via the shared resolver — the
+  // confirm-fraud route's ban_customer step calls the exact same helper,
+  // so the "Customer Accounts" list on the operator's screen and the
+  // list that actually gets banned cannot drift apart.
+  const { caseCustomerIds, allCustomerIds: customerIdArray } =
+    await resolveFraudCaseLinkedCustomers(admin, fraudCase);
 
   // Load all customer profiles
   const { data: customersBase } = await admin
@@ -90,7 +60,8 @@ export async function GET(
   }));
 
   // Determine which customers are linked vs just in the case
-  const linkedIds = new Set(customerIdArray.filter(id => !caseCustomerIds.includes(id)));
+  const caseCustomerIdSet = new Set(caseCustomerIds);
+  const linkedIds = new Set(customerIdArray.filter(id => !caseCustomerIdSet.has(id)));
 
   // Load fraud rules + check which rules each customer triggers
   const { data: rules } = await admin
@@ -230,7 +201,7 @@ export async function GET(
   return NextResponse.json({
     customers: (customers || []).map(c => ({
       ...c,
-      is_case_customer: caseCustomerIds.includes(c.id),
+      is_case_customer: caseCustomerIdSet.has(c.id),
       is_linked: linkedIds.has(c.id),
     })),
     triggered_rules: triggeredRules,
