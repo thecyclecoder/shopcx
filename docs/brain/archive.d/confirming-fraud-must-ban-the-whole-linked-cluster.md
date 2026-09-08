@@ -1,0 +1,1 @@
+- **Confirming fraud must ban the whole linked cluster, not one account** · verified 2026-09-08 · → [[lifecycles/fraud-detection]]
