@@ -164,7 +164,98 @@ export interface InsertReviewRequestInput {
   channel: ReviewRequestChannel;
   angle: string;
   token: string;
+  /** Optional — drives per-flavour imagery on the review page when known. */
+  variantId?: string | null;
 }
+
+/** Slug of the journey definition every review session belongs to. */
+export const REVIEW_JOURNEY_SLUG = "product-review";
+
+/**
+ * How long a minted review link stays usable. The nudge fires at 3 days, so the
+ * window has to comfortably outlive it; 30 days matches the other tokenized
+ * journeys in the table.
+ */
+export const REVIEW_REQUEST_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Create the `journey_sessions` row the magic link resolves against.
+ *
+ * ⚠️ This is the fix for the 2026-09-08 dead-link outage. `insertReviewRequestRow`
+ * REQUIRED a token (it threw without one) and then never persisted it anywhere —
+ * no session row, no column on `review_requests`. So every minted
+ * `/review/{token}` link resolved to `loadReviewSessionByToken` →
+ * `journey_sessions.token = …` → no row → 404 `session_not_found`. 439 delivered
+ * asks plus 341 nudges all pointed at a dead page, which is exactly why the
+ * response rate was 0.00% rather than merely low.
+ *
+ * The code comments described the session as materializing "on first click", but
+ * nothing implemented that and the loader is a plain SELECT. Minting at SEND time
+ * is the simpler contract: we already hold workspace, customer, product and token
+ * at that moment, and the link is verifiable the instant it goes out.
+ *
+ * `status: 'pending'` is deliberate — `loadReviewSessionByToken` refuses
+ * `completed`, and the submit path moves the row forward itself.
+ */
+export async function createReviewJourneySession(
+  admin: SupabaseClient,
+  input: {
+    workspaceId: string;
+    customerId: string;
+    productId: string;
+    token: string;
+    variantId?: string | null;
+    ttlMs?: number;
+  },
+): Promise<string> {
+  const { data: journey, error: jErr } = await admin
+    .from("journey_definitions")
+    .select("id")
+    .eq("workspace_id", input.workspaceId)
+    .eq("slug", REVIEW_JOURNEY_SLUG)
+    .maybeSingle();
+  if (jErr) throw jErr;
+  if (!journey?.id) {
+    throw new Error(`createReviewJourneySession: no '${REVIEW_JOURNEY_SLUG}' journey definition for workspace ${input.workspaceId}`);
+  }
+
+  const ttl = typeof input.ttlMs === "number" && input.ttlMs > 0 ? input.ttlMs : REVIEW_REQUEST_TOKEN_TTL_MS;
+  const { data, error } = await admin
+    .from("journey_sessions")
+    .insert({
+      workspace_id: input.workspaceId,
+      journey_id: journey.id as string,
+      customer_id: input.customerId,
+      product_id: input.productId,
+      variant_id: input.variantId ?? null,
+      token: input.token,
+      token_expires_at: new Date(Date.now() + ttl).toISOString(),
+      status: "pending",
+      current_step: 0,
+      responses: {},
+      config_snapshot: {
+        journeyType: "product_review",
+        codeDriven: true,
+        workspaceId: input.workspaceId,
+        productId: input.productId,
+      },
+    })
+    .select("id")
+    .single();
+  if (error) throw error;
+  if (!data?.id) throw new Error("createReviewJourneySession: insert returned no id");
+  return data.id as string;
+}
+
+/**
+ * Write the ladder row AND the session its link resolves against, then join them.
+ *
+ * The session comes FIRST on purpose: if it fails we throw before a
+ * `review_requests` row exists, so the sender aborts and no customer receives a
+ * link that cannot work. The previous order of operations had no session at all,
+ * which is the bug this replaces — a row that claims `outcome='sent'` while the
+ * link behind it 404s is worse than no row.
+ */
 export async function insertReviewRequestRow(
   admin: SupabaseClient,
   input: InsertReviewRequestInput,
@@ -173,6 +264,15 @@ export async function insertReviewRequestRow(
   if (!input.customerId) throw new Error("insertReviewRequestRow: missing customerId");
   if (!input.productId) throw new Error("insertReviewRequestRow: missing productId");
   if (!input.token) throw new Error("insertReviewRequestRow: missing token");
+
+  const journeySessionId = await createReviewJourneySession(admin, {
+    workspaceId: input.workspaceId,
+    customerId: input.customerId,
+    productId: input.productId,
+    token: input.token,
+    variantId: input.variantId ?? null,
+  });
+
   const { data, error } = await admin
     .from("review_requests")
     .insert({
@@ -182,6 +282,7 @@ export async function insertReviewRequestRow(
       channel: input.channel,
       angle: input.angle,
       outcome: "sent",
+      journey_session_id: journeySessionId,
     })
     .select("id")
     .single();

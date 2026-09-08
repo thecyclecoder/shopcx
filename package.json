@@ -59,6 +59,7 @@
     "test:review-message-rubric": "tsx --test src/lib/review-message-rubric.test.ts",
     "test:review-message-drafts": "tsx --test src/lib/review-message-drafts.test.ts",
     "test:review-request-delivery": "tsx --test src/lib/review-request-delivery.test.ts",
+    "test:review-request-delivery-session": "tsx --test src/lib/review-request-delivery.session.test.ts",
     "test:journey-definition-probe": "tsx --test src/lib/journey-definition-probe.test.ts",
     "test:review-candidacy-permission-gate": "tsx --test src/lib/review-candidacy-permission-gate.test.ts",
     "test:review-candidacy-detector-cron-selection": "tsx --test src/lib/inngest/review-candidacy-detector-cron.selection.test.ts",
