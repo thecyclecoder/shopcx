@@ -252,11 +252,98 @@ async function readFailedBuildStalls(
     if (!j.spec_slug || latestBySlug.has(j.spec_slug)) continue;
     latestBySlug.set(j.spec_slug, { status: j.status, updated_at: j.updated_at });
   }
-  const out: Array<{ workspace_id: string; spec_slug: string; age_ms: number }> = [];
+  const aged: Array<{ spec_slug: string; failed_at: string; age_ms: number }> = [];
   for (const [slug, j] of latestBySlug) {
     if (j.status !== "failed" || !j.updated_at) continue;
     const age = now - Date.parse(j.updated_at);
-    if (age > graceMs) out.push({ workspace_id, spec_slug: slug, age_ms: age });
+    if (age > graceMs) aged.push({ spec_slug: slug, failed_at: j.updated_at, age_ms: age });
+  }
+  if (aged.length === 0) return [];
+
+  // ── init_loop_guard dedupe ────────────────────────────────────────────────────────────────
+  // When the platform init lane's loop-guard fires (a build failed the cap, no in-flight),
+  // it POSTS an escalation to the CEO ("stopped resubmitting; approve modifying the spec")
+  // and records a `director_activity` row: action_kind='escalated' with
+  // metadata.escalation_kind='init_loop_guard', dedupe_key='initguard:<slug>' — a human now
+  // OWNS the spec. But the failed-build source above only sees a `failed` build aged past
+  // the grace, so on every Mario tick it re-surfaces the same spec and burns a box session
+  // re-diagnosing pipeline work the CEO already parked. Drop any slug whose latest
+  // init_loop_guard escalation is newer than the LATEST build failure (the escalation covers
+  // this failure) AND is not yet superseded (no later `escorted_init` on the director ledger
+  // or `build_done` on the timecard — either would mean the human resolved it and a new
+  // build has been driven). Genuinely orphaned failures with no such escalation still
+  // surface unchanged. Mirrors the shape of `readPromoteGateHeldStalls`: read the escalation
+  // signal, then re-confirm current state before acting on it.
+  const slugs = aged.map((a) => a.spec_slug);
+  const sinceIso = new Date(now - MARIO_PROMOTE_GATE_LOOKBACK_MS).toISOString();
+  const { data: escRows } = await admin
+    .from("director_activity")
+    .select("spec_slug, created_at")
+    .eq("workspace_id", workspace_id)
+    .eq("action_kind", "escalated")
+    .eq("metadata->>escalation_kind", "init_loop_guard")
+    .in("spec_slug", slugs)
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: false })
+    .limit(500);
+  const latestEscBySlug = new Map<string, string>();
+  for (const r of (escRows ?? []) as Array<{ spec_slug: string | null; created_at: string }>) {
+    if (!r.spec_slug || latestEscBySlug.has(r.spec_slug)) continue;
+    latestEscBySlug.set(r.spec_slug, r.created_at);
+  }
+  const dropSet = new Set<string>();
+  for (const a of aged) {
+    const escAt = latestEscBySlug.get(a.spec_slug);
+    if (!escAt) continue; // no escalation → normal orphaned failure, keep
+    if (Date.parse(escAt) <= Date.parse(a.failed_at)) continue; // failure came after the escalation → new failure, escalation is stale, keep
+    dropSet.add(a.spec_slug);
+  }
+  if (dropSet.size > 0) {
+    const dropSlugs = [...dropSet];
+    const [{ data: escortedRows }, { data: doneRows }] = await Promise.all([
+      admin
+        .from("director_activity")
+        .select("spec_slug, created_at")
+        .eq("workspace_id", workspace_id)
+        .eq("action_kind", "escorted_init")
+        .in("spec_slug", dropSlugs)
+        .order("created_at", { ascending: false })
+        .limit(500),
+      admin
+        .from("spec_timecard_events")
+        .select("spec_slug, at")
+        .eq("workspace_id", workspace_id)
+        .eq("event_kind", "build_done")
+        .in("spec_slug", dropSlugs)
+        .order("at", { ascending: false })
+        .limit(500),
+    ]);
+    const latestEscortedBySlug = new Map<string, string>();
+    for (const r of (escortedRows ?? []) as Array<{ spec_slug: string | null; created_at: string }>) {
+      if (!r.spec_slug || latestEscortedBySlug.has(r.spec_slug)) continue;
+      latestEscortedBySlug.set(r.spec_slug, r.created_at);
+    }
+    const latestBuildDoneBySlug = new Map<string, string>();
+    for (const r of (doneRows ?? []) as Array<{ spec_slug: string; at: string }>) {
+      if (!r.spec_slug || latestBuildDoneBySlug.has(r.spec_slug)) continue;
+      latestBuildDoneBySlug.set(r.spec_slug, r.at);
+    }
+    for (const slug of dropSlugs) {
+      const escAt = latestEscBySlug.get(slug)!;
+      const escAtMs = Date.parse(escAt);
+      const escortedAt = latestEscortedBySlug.get(slug);
+      const buildDoneAt = latestBuildDoneBySlug.get(slug);
+      const superseded =
+        (escortedAt && Date.parse(escortedAt) > escAtMs) ||
+        (buildDoneAt && Date.parse(buildDoneAt) > escAtMs);
+      if (superseded) dropSet.delete(slug); // escalation resolved → surface as normal failed-build stall
+    }
+  }
+
+  const out: Array<{ workspace_id: string; spec_slug: string; age_ms: number }> = [];
+  for (const a of aged) {
+    if (dropSet.has(a.spec_slug)) continue;
+    out.push({ workspace_id, spec_slug: a.spec_slug, age_ms: a.age_ms });
   }
   return out;
 }
