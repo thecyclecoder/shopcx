@@ -15693,6 +15693,32 @@ async function loadCsDirectorCallBrief(
     parts.push(`CURRENT POLICIES: read failed — ${errText(e)}`);
   }
 
+  // Phase 2 of a-fraud-ban-must-not-manufacture-a-ticket-arguing-to-reverse-it: when the
+  // ticket's customer is currently `portal_banned`, surface that customer's non-dismissed
+  // `fraud_cases` (open, reviewing, confirmed_fraud) in the brief so a reviewer cannot
+  // recommend reversal without the evidence behind the ban in view. Discovered via
+  // `customer_ids` array containment so a ring case where the customer sits alongside five
+  // others is not missed, and sorted by severity so a `high` case cannot be buried under a
+  // `low` (the ground-truth incident: the director cited a single `low` name_mismatch case
+  // and never mentioned the two `high` cases that justified the ban). Context only — never
+  // changes the leash. Best-effort — the helper catches its own errors.
+  try {
+    const { loadFraudCasesForBannedCustomerBrief } = await import("../src/lib/cs-director");
+    const { data: ticketRow } = await db
+      .from("tickets")
+      .select("customer_id")
+      .eq("id", ticketId)
+      .maybeSingle();
+    const fraudBrief = await loadFraudCasesForBannedCustomerBrief(db, workspaceId, ticketRow?.customer_id ?? null);
+    if (fraudBrief) {
+      parts.push("");
+      parts.push(fraudBrief);
+    }
+  } catch (e) {
+    parts.push("");
+    parts.push(`FRAUD CASES: read failed — ${errText(e)}`);
+  }
+
   // Phase 1 of cs-director-treats-tier-eligible-out-of-policy-refund-as-playbook-offer-not-
   // escalation — for the ticket's customer, evaluate every active playbook's tier-exception ladder
   // (thresholds pulled verbatim from the playbook_exceptions rows) and its disqualifier list
