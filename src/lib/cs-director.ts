@@ -2571,3 +2571,97 @@ export async function loadDirectorPolicyBrief(admin: Admin, workspaceId: string)
     return `CURRENT POLICIES: read failed — ${errText(e)}`;
   }
 }
+
+/* ---------------------------------------------------------------------------------------------
+ * Phase 2 of a-fraud-ban-must-not-manufacture-a-ticket-arguing-to-reverse-it:
+ *
+ * When a ticket's customer has `customers.portal_banned = true`, the CS-director brief MUST
+ * carry that customer's open `fraud_cases` — the evidence that justified the ban. Without it a
+ * reviewer sees only a long-tenured customer suddenly locked out and can recommend reversing
+ * exactly the calls that worked. Ground truth: the director cited a single `low` name_mismatch
+ * case and never mentioned the two `high` cases (`bin_velocity`, `confirmed_fraud_match`) that
+ * existed on the same customer, then escalated to reverse the ban.
+ *
+ * Query invariants:
+ *  - Discover cases via `customer_ids` array containment (there is no primary customer_id on
+ *    `fraud_cases`) — every case that touches the customer, including ring cases where the
+ *    customer sits alongside five others in `customer_ids`.
+ *  - Exclude only `dismissed` — surface `open`, `reviewing`, and `confirmed_fraud` (the case
+ *    that established the ban is the most important one a reversal-reviewer must see).
+ *  - Sort in JS by severity rank (high < medium < low) so a `high` case cannot be buried under
+ *    a `low` — Postgres text sort would put `high` between `dismissed` and `low` and give the
+ *    wrong glance-order.
+ *
+ * Context only — this MUST NOT change the director's leash or auto-decide anything. A reviewer
+ * may still recommend reversal; they just cannot do it blind. See
+ * [[../../docs/brain/tables/fraud_cases]].
+ * --------------------------------------------------------------------------------------------- */
+
+type FraudCaseBriefRow = {
+  id: string;
+  rule_type: string | null;
+  severity: string | null;
+  status: string | null;
+  title: string | null;
+  reviewed_by: string | null;
+  review_notes: string | null;
+};
+
+const FRAUD_SEVERITY_RANK: Record<string, number> = { high: 0, medium: 1, low: 2 };
+
+function fraudSeverityRank(sev: string | null | undefined): number {
+  return FRAUD_SEVERITY_RANK[(sev ?? "").toLowerCase()] ?? 3;
+}
+
+/**
+ * Returns the FRAUD CASES block a director's brief embeds when the ticket's customer is
+ * currently `portal_banned`. Returns empty string when the customer is NOT banned, when no
+ * non-dismissed cases exist, or on load failure — the base brief still renders. Context only;
+ * never touches a leash or auto-decides. See
+ * [[../../docs/brain/specs/a-fraud-ban-must-not-manufacture-a-ticket-arguing-to-reverse-it]].
+ */
+export async function loadFraudCasesForBannedCustomerBrief(
+  admin: Admin,
+  workspaceId: string,
+  customerId: string | null,
+): Promise<string> {
+  if (!workspaceId || !customerId) return "";
+  try {
+    const { data: customer } = await admin
+      .from("customers")
+      .select("portal_banned")
+      .eq("workspace_id", workspaceId)
+      .eq("id", customerId)
+      .maybeSingle();
+    if (!customer?.portal_banned) return "";
+
+    const { data: cases } = await admin
+      .from("fraud_cases")
+      .select("id, rule_type, severity, status, title, reviewed_by, review_notes")
+      .eq("workspace_id", workspaceId)
+      .contains("customer_ids", [customerId])
+      .neq("status", "dismissed");
+    const rows = (cases ?? []) as FraudCaseBriefRow[];
+    if (!rows.length) return "";
+
+    rows.sort((a, b) => fraudSeverityRank(a.severity) - fraudSeverityRank(b.severity));
+
+    const lines: string[] = [];
+    lines.push(
+      "--- FRAUD CASES (this customer is currently portal_banned — this is the evidence behind the ban; you MUST NOT recommend reversal without addressing every high-severity case below) ---",
+    );
+    for (const c of rows) {
+      const parts = [
+        `  - ${(c.severity ?? "?").toUpperCase()} · ${c.rule_type ?? "unknown_rule"} · ${c.status ?? "?"}`,
+        `    id: ${c.id}`,
+        `    title: ${c.title ?? "(untitled)"}`,
+      ];
+      if (c.reviewed_by) parts.push(`    reviewed_by: ${c.reviewed_by}`);
+      if (c.review_notes) parts.push(`    review_notes: ${c.review_notes.slice(0, 400)}`);
+      lines.push(parts.join("\n"));
+    }
+    return lines.join("\n");
+  } catch (e) {
+    return `FRAUD CASES: read failed — ${errText(e)}`;
+  }
+}
