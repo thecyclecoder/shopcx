@@ -17,6 +17,11 @@ import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 // shopify_mismatch=true. Catches days where the 1 AM cron ran before our
 // Shopify sync ingested that day's orders — symptom: snapshot shows 0/0/0
 // while Shopify GraphQL says there were N orders.
+//
+// The flag compares Shopify's count against SHOPIFY-ORIGIN orders only, so a day flagged here
+// is a real ingest gap, not a ShopCX-native order Shopify cannot see. A day that never heals
+// ages out of this 7-day window and stays flagged — that is a genuine unrecovered gap and the
+// dashboard card is the durable record of it.
 export const dailyOrderSnapshotSelfHeal = inngest.createFunction(
   {
     id: "daily-order-snapshot-self-heal",
@@ -107,11 +112,11 @@ export const dailyOrderSnapshot = inngest.createFunction(
         const sourceMapping = (ws.order_source_mapping || {}) as Record<string, string>;
 
         // Query our DB
-        const dbOrders: { source_name: string; total_cents: number; tags: string | string[] | null; subscription_id: string | null }[] = [];
+        const dbOrders: { source_name: string; total_cents: number; tags: string | string[] | null; subscription_id: string | null; isShopifyOrigin: boolean }[] = [];
         let offset = 0;
         while (true) {
           const { data } = await admin.from("orders")
-            .select("source_name, total_cents, tags, subscription_id")
+            .select("source_name, total_cents, tags, subscription_id, shopify_order_id")
             .eq("workspace_id", ws.id)
             .gte("created_at", utcStartISO)
             .lt("created_at", utcEndISO)
@@ -122,6 +127,9 @@ export const dailyOrderSnapshot = inngest.createFunction(
             total_cents: o.total_cents || 0,
             tags: o.tags,
             subscription_id: o.subscription_id,
+            // Shopify can only count what Shopify created. ShopCX-native orders
+            // (storefront / internal_subscription_renewal / comp) carry no shopify_order_id.
+            isShopifyOrigin: o.shopify_order_id != null,
           })));
           if (data.length < 1000) break;
           offset += 1000;
@@ -132,8 +140,11 @@ export const dailyOrderSnapshot = inngest.createFunction(
         let newSubCount = 0, newSubRevenue = 0;
         let oneTimeCount = 0, oneTimeRevenue = 0;
         let replacementCount = 0, replacementRevenue = 0;
+        // The only orders Shopify's own count can possibly include.
+        let shopifyOriginCount = 0;
 
         for (const o of dbOrders) {
+          if (o.isShopifyOrigin) shopifyOriginCount++;
           const bucket = bucketOrder(o, sourceMapping);
           if (bucket === "recurring") {
             recurringCount++;
@@ -154,6 +165,8 @@ export const dailyOrderSnapshot = inngest.createFunction(
         const totalCount = recurringCount + newSubCount + oneTimeCount;
         const totalRevenue = recurringRevenue + newSubRevenue + oneTimeRevenue;
         const dbTotalWithReplacements = totalCount + replacementCount;
+        // ShopCX-native orders — real revenue, structurally absent from Shopify.
+        const nativeCount = dbTotalWithReplacements - shopifyOriginCount;
 
         // Validate against Shopify GraphQL
         let shopifyCount: number | null = null;
@@ -183,8 +196,14 @@ export const dailyOrderSnapshot = inngest.createFunction(
               hasMore = gqlData.data?.orders?.pageInfo?.hasNextPage || false;
             }
             shopifyCount = count;
-            // Compare against total including replacements since Shopify counts all orders
-            shopifyMismatch = count !== dbTotalWithReplacements;
+            // ⭐ Compare Shopify's count against SHOPIFY-ORIGIN orders only, never the DB total.
+            // Since the Braintree migration off Appstle/Shopify, a growing share of real orders
+            // (storefront, internal_subscription_renewal, comp) exist only in ShopCX and have no
+            // shopify_order_id — Shopify cannot count them and never will. Comparing the full DB
+            // total flagged every single day (86 of 99 days to 2026-09-07), buried a genuine sync
+            // gap under the noise, and left the self-heal re-firing forever. See
+            // docs/brain/tables/daily_order_snapshots.md § The mismatch check counts Shopify-origin only.
+            shopifyMismatch = count !== shopifyOriginCount;
           } catch {
             // Non-fatal — snapshot still saves without validation
           }
@@ -208,21 +227,39 @@ export const dailyOrderSnapshot = inngest.createFunction(
           total_revenue_cents: totalRevenue,
           shopify_count: shopifyCount,
           shopify_mismatch: shopifyMismatch,
+          native_count: nativeCount,
           utc_start: utcStartISO,
           utc_end: utcEndISO,
           computed_at: new Date().toISOString(),
         }, { onConflict: "workspace_id,snapshot_date" });
 
-        // Alert on mismatch
+        // Alert on mismatch — ONE card per (workspace, date). The self-heal cron re-fires every
+        // flagged day for 7 days, so an unconditional insert produced ~7 cards per day and 676
+        // in total by 2026-09-08. A day that is still broken keeps its existing card.
         if (shopifyMismatch && shopifyCount !== null) {
-          await admin.from("dashboard_notifications").insert({
-            workspace_id: ws.id,
-            type: "system",
-            title: `Order sync mismatch on ${snapshotDate}`,
-            body: `DB has ${dbTotalWithReplacements} orders but Shopify has ${shopifyCount} for ${snapshotDate}. Difference: ${Math.abs(dbTotalWithReplacements - shopifyCount)} orders.`,
-            link: "/dashboard/orders",
-            metadata: { type: "order_sync_mismatch", date: snapshotDate, db_count: dbTotalWithReplacements, shopify_count: shopifyCount },
-          });
+          const { data: existingCard } = await admin.from("dashboard_notifications")
+            .select("id")
+            .eq("workspace_id", ws.id)
+            .eq("metadata->>type", "order_sync_mismatch")
+            .eq("metadata->>date", snapshotDate)
+            .maybeSingle();
+          if (!existingCard) {
+            await admin.from("dashboard_notifications").insert({
+              workspace_id: ws.id,
+              type: "system",
+              title: `Order sync mismatch on ${snapshotDate}`,
+              body: `Shopify reports ${shopifyCount} orders for ${snapshotDate}, but only ${shopifyOriginCount} Shopify-origin orders reached our DB. Difference: ${Math.abs(shopifyOriginCount - shopifyCount)} orders. (${nativeCount} ShopCX-native order(s) that day are excluded — Shopify never sees those.)`,
+              link: "/dashboard/orders",
+              metadata: {
+                type: "order_sync_mismatch",
+                date: snapshotDate,
+                db_count: shopifyOriginCount,
+                shopify_count: shopifyCount,
+                native_count: nativeCount,
+                db_total_all_sources: dbTotalWithReplacements,
+              },
+            });
+          }
         }
 
         // Alert if zero orders (something is broken)
@@ -261,6 +298,8 @@ export const dailyOrderSnapshot = inngest.createFunction(
         return {
           date: snapshotDate,
           db_count: totalCount,
+          shopify_origin_count: shopifyOriginCount,
+          native_count: nativeCount,
           shopify_count: shopifyCount,
           mismatch: shopifyMismatch,
           recurring: recurringCount,

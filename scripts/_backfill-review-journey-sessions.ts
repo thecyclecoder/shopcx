@@ -25,6 +25,7 @@
  */
 import { createAdminClient } from "./_bootstrap";
 import { createReviewJourneySession, REVIEW_REQUEST_TOKEN_TTL_MS } from "../src/lib/review-request-delivery";
+import { errText } from "../src/lib/error-text";
 
 const WS = process.env.WORKSPACE_ID ?? "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 const APPLY = process.argv.includes("--apply");
@@ -145,7 +146,7 @@ async function main() {
       ok += 1;
     } catch (e) {
       failed += 1;
-      console.error(`   ❌ ${p.token.slice(0, 10)}…: ${e instanceof Error ? e.message : String(e)}`);
+      console.error(`   ❌ ${p.token.slice(0, 10)}…: ${errText(e)}`);
     }
   }
   console.log(`\n✅ revived ${ok} links${failed ? `, ❌ ${failed} failed` : ""}`);
