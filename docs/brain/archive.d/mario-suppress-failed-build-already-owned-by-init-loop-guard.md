@@ -1,0 +1,1 @@
+- **Mario's failed-build source must skip specs already owned by an init_loop_guard escalation** · verified 2026-09-08 · → [[../lifecycles/mario-pipeline-plumbing]]
