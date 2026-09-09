@@ -302,6 +302,42 @@ An Appstle `order-now` / `bill_now` that ACKs then declines lands in the same re
 
 **On card update, order-now retries deterministically on the migrated (internal) rail.** After the recover flow migrates the sub Appstle→internal and reactivates it (above), the order-now retry runs in plain Node against the deterministic Braintree pipeline — no box/Sol session needed, immediate charge, idempotency-guarded so a re-drive can't create a second order. Only a verified paid order (Sol's end-state pass — items present, non-zero total, sub active, `last_payment_status='succeeded'`) unblocks the customer confirmation reply via [[../libraries/sol-outcome-claim-guard]]; a drifted end state escalates via [[../libraries/outcome-completion-gate]] instead of sending a false "your order shipped." See [[subscription-billing]] § Order-now (bill_now) for the full flow trace.
 
+## Incident 2026-09-09: 56 cycles stuck in `skipped`, no card ever tried
+
+`handleAllCardsExhausted` rotates the cards it reads from `customer_payment_methods`. That
+mirror's oldest row is **2026-05-20** — and 55 of these 56 cycles were created BEFORE it held any
+data. Dunning read an empty card list, concluded "all cards exhausted" in a **median of 1.11
+seconds** without attempting a single charge, and (because `dunning_cycle_1_action = 'skip'`)
+wrote `status='skipped'`. All 56 customers were then emailed "your payment failed, update your
+payment method" for a card we never tried. Sampling 10 against live Shopify, **5 had a valid
+unrevoked card the whole time** (one expiring 6/2029) while our mirror held 0 rows for all 10.
+
+`skipped` is in `ACTIVE_SLOT_STATUSES`, so it holds `idx_dunning_cycles_active_contract`. The cron
+therefore returned `active_cycle_exists` forever and could never open cycle 2 — the cycle that
+would actually resolve them. Only `dunning-new-card-recovery` reopens a `skipped` cycle, and only
+if the customer adds a card; none did. They sat from 2026-03..05 as `status='active'` subs, a
+median of **287 days** since their last order, invisible to both billing and dunning.
+
+Released by `scripts/_backfill-stale-skipped-dunning-cycles.ts` (55 rows; 1 cycle that HAD tried
+cards was deliberately left alone). Two deliberate choices in that write:
+
+- **`closed_reason` set NON-NULL** (`stale_skip_no_cards_tried`). `dunning-new-card-recovery`
+  treats `status='exhausted' AND closed_reason IS NULL` as "dunning gave up" and will REACTIVATE
+  + CHARGE on a later card update. These customers were never actually charged, were told
+  otherwise, and are ~287 days dormant — a surprise catch-up charge is the wrong outcome.
+- **`terminal_error_code` left NULL**, so the analytics panel does not miscount these as terminal
+  cancellations. Same reasoning as `endDunningForSubscription`.
+
+Releasing the slot does **not** resume billing and does **not** cancel anything; it only removes
+the block.
+
+⚠️ **The mirror is still thin — 16% of active-sub customers have a `customer_payment_methods`
+row** (157/957 sampled). It is not currently producing skips (0 new `skipped` rows since
+2026-06), but any card-rotation decision read from that table is only as good as its coverage.
+Recent cycles with an empty `cards_tried` are a DIFFERENT and correct path — they short-circuit on
+a terminal error code (`fraud_suspected`, `payment_method_not_found`) which deliberately skips
+rotation.
+
 ## Status / open work
 
 **Shipped:** Silent card rotation (`deduplicatePaymentMethods`), payday-aware retries (`getNextPaydayDates` — 1st/15th/Fridays/last-business-day), Cycle 2 cancel-instead-of-pause + auto-reactivate, customer-driven new-card recovery, terminal-card cancel-without-entering-dunning, replacement-of-Appstle-payment-update-email, **internal-sub dunning (Braintree, payday-retry via renewal cron, magic-link recovery, cancel+reactivate, AI visibility)**, **transient-Shopify-error resilience (retry-on-5xx/429/network)** — all functional.
