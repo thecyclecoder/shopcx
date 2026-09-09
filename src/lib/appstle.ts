@@ -4,6 +4,7 @@ import { decrypt } from "@/lib/crypto";
 import { loggedAppstleFetch } from "@/lib/appstle-call-log";
 import { healOnTouch } from "@/lib/appstle-pricing";
 import { applyCancelTruth } from "@/lib/subscription-cancel-truth";
+import { endDunningForSubscription } from "@/lib/dunning";
 import {
   isInternalSubscription,
   internalSubscriptionAction,
@@ -134,6 +135,14 @@ export async function appstleSubscriptionAction(
     // same write as status='cancelled'. A cancelled row must not advertise a future
     // charge date. See [[cancelled-subs-stop-reporting-a-future-billing-date]] Phase 1.
     applyCancelTruth(localUpdate, action);
+
+    // A pause or cancel ENDS dunning — the customer has made their intent clear, and an
+    // open cycle would keep retrying them AND let a later card update resume + charge a
+    // sub they paused. See dunning.ts endDunningForSubscription.
+    if (action === "pause" || action === "cancel") {
+      await endDunningForSubscription(workspaceId, contractId, action === "pause" ? "paused" : "cancelled");
+    }
+
     const { data: sub } = await admin
       .from("subscriptions")
       .update(localUpdate)

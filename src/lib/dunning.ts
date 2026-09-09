@@ -393,6 +393,55 @@ export async function updateDunningCycle(
     .eq("id", cycleId);
 }
 
+/** Cycle states that are still "in flight" — a sub pause/cancel should close these. */
+const OPEN_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped"] as const;
+
+/**
+ * End dunning for a subscription because the SUB itself was paused or cancelled.
+ *
+ * CEO rule (2026-09-09): "a pause or cancellation should end your dunning experience."
+ *
+ * Two live failures this closes:
+ *  1. The payday-retry cron only gated on `status === "cancelled"`, so a customer-paused sub
+ *     kept getting billing retries — and would receive a "your payment failed, update your
+ *     card" email for a subscription they deliberately paused (one until 2026-10-30).
+ *  2. Worse, `dunning-new-card-recovery` treats ANY open cycle on a paused sub as a "legacy
+ *     paused" sub and RESUMES it, then charges. So a customer who paused and later updated
+ *     their card for an unrelated reason would be resumed and billed.
+ *
+ * Only closes cycles that are still open. A cycle dunning itself already drove to `exhausted`
+ * is left alone, which preserves the deliberate behaviour that adding a card to a
+ * DUNNING-cancelled sub reactivates it (see lifecycles/dunning.md Phase 5, fixed 2026-06-09).
+ * Sends nothing — this is a silent close, not an exhaustion.
+ */
+export async function endDunningForSubscription(
+  workspaceId: string,
+  shopifyContractId: string,
+  reason: "paused" | "cancelled",
+): Promise<number> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("dunning_cycles")
+    .update({
+      status: "exhausted",
+      next_retry_at: null,
+      terminal_error_code: `subscription_${reason}`,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", shopifyContractId)
+    .in("status", OPEN_DUNNING_STATUSES as unknown as string[])
+    .select("id");
+  if (error) {
+    console.error(`[Dunning] endDunningForSubscription(${shopifyContractId}, ${reason}) failed:`, error.message);
+    return 0;
+  }
+  if (data?.length) {
+    console.log(`[Dunning] Closed ${data.length} open cycle(s) for ${shopifyContractId} — subscription ${reason}.`);
+  }
+  return data?.length ?? 0;
+}
+
 export async function logPaymentFailure(params: {
   workspaceId: string;
   customerId: string | null;

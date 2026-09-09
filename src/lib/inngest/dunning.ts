@@ -960,9 +960,17 @@ export const dunningPaydayRetryCron = inngest.createFunction(
             .select("status")
             .eq("id", cycle.subscription_id)
             .single();
-          if (!sub || sub.status === "cancelled") {
-            await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
-            return { contractId: cycle.shopify_contract_id, outcome: "sub_cancelled" };
+          // A paused sub must not be retried either — it only gated on "cancelled" before,
+          // so customer-paused subs kept getting billed and emailed. Belt to
+          // endDunningForSubscription's braces: that closes the cycle at pause time, this
+          // catches anything already in flight or paused outside the chokepoint.
+          if (!sub || sub.status === "cancelled" || sub.status === "paused") {
+            await updateDunningCycle(cycle.id, {
+              status: "exhausted",
+              next_retry_at: null,
+              terminal_error_code: `subscription_${sub?.status ?? "missing"}`,
+            });
+            return { contractId: cycle.shopify_contract_id, outcome: `sub_${sub?.status ?? "missing"}` };
           }
         }
 
