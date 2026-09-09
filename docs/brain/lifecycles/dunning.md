@@ -60,6 +60,23 @@ Up to `MAX_PAYDAY_RETRIES = 4` per cycle, counted on [[../tables/dunning_cycles]
 
 ## Phase 4 — cycle action
 
+> **⭐ The payday path did not run the cycle action until 2026-09-09.** `handleAllCardsExhausted`
+> was reachable only from the card-rotation flow, so a cycle that burned through its payday
+> retries was marked exhausted and emailed but never skipped, paused **or** cancelled — the
+> subscription stayed ACTIVE with a dead card, and the next billing attempt simply reopened
+> dunning. That is why the fleet showed **1,357 cycles at `cycle_number = 1` against 123 at 2**:
+> nobody was ever escalated. `exhaustPaydayCycle` now delegates to `handleAllCardsExhausted`,
+> which owns the status transition, the recovery email and the note — so the payday path must
+> not duplicate them.
+>
+> Consequence: `cycle_number` on a pre-2026-09-09 cycle is an artifact of that bug plus the
+> unenforced retry cap, **not** a record of how much dunning the customer actually received.
+> `scripts/_backfill-dunning-escalate-long-declined.ts` escalated **385** cycles with ≥10
+> declines from cycle 1 → 2 (avg 74 declines each over 136 days; 339 past 50 declines), so
+> exhaustion cancels them instead of running a skip that would only defer one order on a card
+> dead since April. Cancel is reversible here — Phase 5 reactivates a dunning-cancelled sub as
+> soon as the customer adds a working card.
+
 After silent rotation AND payday retries both fail, the cycle action defined in [[../tables/workspaces]] kicks in:
 
 - **Cycle 1 default — `skip`**: call [[../integrations/appstle]] `subscription-contracts-skip` for the next order. The customer doesn't get charged but the sub stays active. Tag the ticket `dunning:skipped`. The customer's NEXT billing attempt (one cycle later) restarts the whole dunning flow.
