@@ -70,7 +70,8 @@ type Admin = ReturnType<typeof createAdminClient>;
 
 /** Default target depth per product for the ready-to-test bin — kept small; the media buyer tests a
  *  handful at a time and creatives fatigue, so we top up rather than stockpile. */
-export const DEFAULT_BIN_FLOOR = 4;
+export { DEFAULT_BIN_FLOOR } from "./bin-floor";
+import { DEFAULT_BIN_FLOOR } from "./bin-floor";
 /** Cap how many creatives one job produces, so a deep deficit can't run away on image-gen cost. */
 const MAX_PER_JOB = 4;
 /** Regenerate-on-QA-fail attempts per creative before giving up on that angle. Bumped 2→3 (2026-07-13)
