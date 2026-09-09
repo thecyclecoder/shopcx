@@ -48,14 +48,22 @@ async function gql<T>(
   query: string,
   variables?: Record<string, unknown>,
 ): Promise<GqlResult<T>> {
-  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
-  const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
-    method: "POST",
-    headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
-    body: JSON.stringify({ query, variables }),
-  });
-  if (!res.ok) return { errors: [{ message: `Shopify HTTP ${res.status}` }] };
-  return (await res.json()) as GqlResult<T>;
+  // ⭐ Every caller expects `{success:false}`, never a throw — `getShopifyCredentials` throws on a
+  // disconnected workspace, `fetch` rejects on a network fault, and `res.json()` throws on a
+  // non-JSON 200. appstle.ts wraps each export; we convert once, here, so no exported function
+  // can surprise the routing layer with an exception.
+  try {
+    const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+    const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+      method: "POST",
+      headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (!res.ok) return { errors: [{ message: `Shopify HTTP ${res.status}` }] };
+    return (await res.json()) as GqlResult<T>;
+  } catch (err) {
+    return { errors: [{ message: errText(err) }] };
+  }
 }
 
 /** Collapse a mutation payload's transport errors + userErrors into our flat result shape. */
@@ -135,7 +143,12 @@ export async function shopifySetNextBillingDate(
   contractId: string,
   nextBillingDate: string,
 ): Promise<SubscriptionActionResult> {
-  const iso = nextBillingDate.includes("T") ? nextBillingDate : `${nextBillingDate}T10:00:00Z`;
+  // ⭐ NOON UTC, matching appstle.ts. Midnight-UTC floored "Oct 2" back to Oct 1 in negative-offset
+  // US zones and mis-billed the wrong day (Sofia, ticket 83ee7005). Noon is the SAME calendar day
+  // across UTC-10..UTC-4; 10:00Z is exactly midnight at UTC-10, i.e. zero margin on that very edge.
+  const iso = /^\d{4}-\d{2}-\d{2}$/.test(nextBillingDate)
+    ? `${nextBillingDate}T12:00:00Z`
+    : nextBillingDate;
   const env = await gql(
     workspaceId,
     `mutation($id:ID!,$d:DateTime!){ subscriptionContractSetNextBillingDate(contractId:$id, date:$d){ contract { id nextBillingDate } userErrors { message } } }`,
@@ -151,6 +164,37 @@ export async function shopifyUpdateBillingInterval(
   interval: "DAY" | "WEEK" | "MONTH" | "YEAR",
   intervalCount: number,
 ): Promise<SubscriptionActionResult> {
+  // ⭐ The TS union is NOT a runtime guarantee — action-executor.ts force-casts a raw
+  // LLM-produced string into this position, so a lowercase "month" reaches us. Appstle
+  // normalized here after Jim O'Brien (ticket 5e7c1c80, 2026-05-19) was escalated over exactly
+  // that. Keep the guard.
+  const iv = String(interval).toUpperCase();
+  if (!["DAY", "WEEK", "MONTH", "YEAR"].includes(iv)) {
+    return { success: false, error: `invalid interval "${interval}" (expected DAY|WEEK|MONTH|YEAR)` };
+  }
+  if (!Number.isFinite(intervalCount) || intervalCount < 1) {
+    return { success: false, error: `invalid intervalCount "${intervalCount}"` };
+  }
+
+  // Read the existing policies first: SubscriptionBillingPolicyInput is a WHOLE-OBJECT replace,
+  // so sending only {interval,intervalCount} silently wipes anchors / minCycles / maxCycles and
+  // moves every future charge date on an anchored contract.
+  const existing = await gql<{ subscriptionContract?: {
+    billingPolicy?: { minCycles: number | null; maxCycles: number | null; anchors: unknown[] };
+    deliveryPolicy?: { anchors: unknown[] };
+  } }>(
+    workspaceId,
+    `query($id:ID!){ subscriptionContract(id:$id){
+        billingPolicy { minCycles maxCycles anchors { type day month cutoffDay } }
+        deliveryPolicy { anchors { type day month cutoffDay } } } }`,
+    { id: contractGid(contractId) },
+  );
+  if (existing.errors?.length) {
+    return { success: false, error: existing.errors.map((e) => e.message).join("; ") };
+  }
+  const bp = existing.data?.subscriptionContract?.billingPolicy;
+  const dp = existing.data?.subscriptionContract?.deliveryPolicy;
+
   return withDraft(workspaceId, contractId, async (draftId) => {
     const env = await gql(
       workspaceId,
@@ -158,8 +202,18 @@ export async function shopifyUpdateBillingInterval(
       {
         id: draftId,
         in: {
-          billingPolicy: { interval, intervalCount },
-          deliveryPolicy: { interval, intervalCount },
+          billingPolicy: {
+            interval: iv,
+            intervalCount,
+            ...(bp?.minCycles != null ? { minCycles: bp.minCycles } : {}),
+            ...(bp?.maxCycles != null ? { maxCycles: bp.maxCycles } : {}),
+            ...(bp?.anchors?.length ? { anchors: bp.anchors } : {}),
+          },
+          deliveryPolicy: {
+            interval: iv,
+            intervalCount,
+            ...(dp?.anchors?.length ? { anchors: dp.anchors } : {}),
+          },
         },
       },
     );
@@ -167,7 +221,37 @@ export async function shopifyUpdateBillingInterval(
   });
 }
 
-// ── skip / unskip ──────────────────────────────────────────────────────────────────────────
+// ── skip / unskip ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Resolve a concrete cycle index.
+ *
+ * ⚠️ Shopify enforces `SubscriptionBillingCycleSelector requires exactly one of index, date` —
+ * an empty selector `{}` is REJECTED, so there is no "just do the next one" mode. Indices are
+ * 1-based (`index: 0` → "Billing cycle index out of range").
+ *
+ * `date: now` is NOT a usable default either: it resolves to the CURRENT cycle, which is
+ * normally already BILLED. So we read the schedule and pick the first cycle that is actually
+ * still actionable.
+ */
+async function resolveCycleSelector(
+  workspaceId: string,
+  contractId: string,
+  cycleIndex: number | undefined,
+  opts: { wantSkipped?: boolean } = {},
+): Promise<{ ok: true; index: number } | { ok: false; error: string }> {
+  if (cycleIndex != null) return { ok: true, index: cycleIndex };
+  const cycles = await getUpcomingBillingCycles(workspaceId, contractId, { first: 25 });
+  if (!cycles.success) return { ok: false, error: cycles.error ?? "could not read billing cycles" };
+  const match = (cycles.cycles ?? []).find((c) =>
+    c.status === "UNBILLED" && (opts.wantSkipped ? c.skipped : !c.skipped));
+  if (!match) {
+    return { ok: false, error: opts.wantSkipped
+      ? "no skipped upcoming billing cycle to unskip"
+      : "no unbilled upcoming billing cycle to skip" };
+  }
+  return { ok: true, index: match.index };
+}
 
 /**
  * Mirrors `appstleSkipNextOrder` / `appstleSkipUpcomingOrder`.
@@ -183,10 +267,12 @@ export async function shopifySkipBillingCycle(
   contractId: string,
   cycleIndex?: number,
 ): Promise<SubscriptionActionResult> {
+  const sel = await resolveCycleSelector(workspaceId, contractId, cycleIndex);
+  if (!sel.ok) return { success: false, error: sel.error };
   const env = await gql(
     workspaceId,
     `mutation($in:SubscriptionBillingCycleInput!){ subscriptionBillingCycleSkip(billingCycleInput:$in){ billingCycle { skipped } userErrors { message } } }`,
-    { in: { contractId: contractGid(contractId), selector: cycleIndex != null ? { index: cycleIndex } : {} } },
+    { in: { contractId: contractGid(contractId), selector: { index: sel.index } } },
   );
   return toResult(env as never, "subscriptionBillingCycleSkip");
 }
@@ -197,10 +283,12 @@ export async function shopifyUnskipBillingCycle(
   contractId: string,
   cycleIndex?: number,
 ): Promise<SubscriptionActionResult> {
+  const sel = await resolveCycleSelector(workspaceId, contractId, cycleIndex, { wantSkipped: true });
+  if (!sel.ok) return { success: false, error: sel.error };
   const env = await gql(
     workspaceId,
     `mutation($in:SubscriptionBillingCycleInput!){ subscriptionBillingCycleUnskip(billingCycleInput:$in){ billingCycle { skipped } userErrors { message } } }`,
-    { in: { contractId: contractGid(contractId), selector: cycleIndex != null ? { index: cycleIndex } : {} } },
+    { in: { contractId: contractGid(contractId), selector: { index: sel.index } } },
   );
   return toResult(env as never, "subscriptionBillingCycleUnskip");
 }
@@ -228,7 +316,18 @@ export async function shopifySwitchPaymentMethod(
 
 // ── lines ──────────────────────────────────────────────────────────────────────────────────
 
-/** Mirrors `appstleAddFreeProduct` — a $0 line. */
+/**
+ * Add a line to the contract.
+ *
+ * 🚨 **NOT a drop-in for `appstleAddFreeProduct`.** Appstle sends `isOneTimeProduct: "true"`, so
+ * its free gift ships ONCE. `subscriptionDraftLineAdd` adds a **RECURRING** contract line. The
+ * live caller is the cancel-flow save offer (`portal/handlers/cancel-journey.ts`) — swapping it
+ * naively would ship a free product on every renewal, forever, to every customer who took a
+ * retention gift. Real recurring COGS, and it would "succeed" silently.
+ *
+ * A one-time addition on Shopify is a per-cycle contract edit, not a draft line add. Until that
+ * is built, do NOT route the retention-gift caller here.
+ */
 export async function shopifyAddLine(
   workspaceId: string,
   contractId: string,
@@ -239,7 +338,7 @@ export async function shopifyAddLine(
   return withDraft(workspaceId, contractId, async (draftId) => {
     const env = await gql(
       workspaceId,
-      `mutation($id:ID!,$in:SubscriptionLineInput!){ subscriptionDraftLineAdd(draftId:$id, input:$in){ lineUpdated { id } userErrors { message } } }`,
+      `mutation($id:ID!,$in:SubscriptionLineInput!){ subscriptionDraftLineAdd(draftId:$id, input:$in){ lineAdded { id } userErrors { message } } }`,
       { id: draftId, in: { productVariantId: variantGid(variantId), quantity, currentPrice } },
     );
     return toResult(env as never, "subscriptionDraftLineAdd");
@@ -303,6 +402,12 @@ export interface BillingAttemptResult extends SubscriptionActionResult {
   orderId?: string;
   orderName?: string;
   errorCode?: string;
+  /** Shopify ACCEPTED the attempt. Says nothing about whether the card was charged. */
+  accepted?: boolean;
+  /** The outcome is settled — `success` is only meaningful once this is true. */
+  terminal?: boolean;
+  /** Dispatched but unresolved (3DS/CHALLENGED, or our poll timed out). Do NOT bill or retry. */
+  pending?: boolean;
 }
 
 /**
@@ -322,7 +427,17 @@ export async function shopifyAttemptBilling(
   workspaceId: string,
   contractId: string,
   idempotencyKey: string,
-  opts: { inventoryPolicy?: "PRODUCT_VARIANT_INVENTORY_POLICY" | "ALLOW_OVERSELLING" } = {},
+  opts: {
+    inventoryPolicy?: "PRODUCT_VARIANT_INVENTORY_POLICY" | "ALLOW_OVERSELLING";
+    /**
+     * Which cycle to bill. **Omitting this bills Shopify's CURRENT calendar cycle**, which is
+     * anchored to `createdAt + n × billingPolicy` and drifts from our `next_billing_date` — on a
+     * live contract we observed our mirror saying 2027-01-15 while Shopify's next unbilled cycle
+     * was 2026-11-03, and the "current" cycle was already BILLED. Pass a selector once the
+     * renewal worker knows which cycle it is firing.
+     */
+    billingCycleSelector?: { index: number } | { date: string };
+  } = {},
 ): Promise<BillingAttemptResult> {
   const env = await gql<{ subscriptionBillingAttemptCreate: { subscriptionBillingAttempt?: { id: string; ready: boolean }; userErrors: { message: string }[] } }>(
     workspaceId,
@@ -331,13 +446,20 @@ export async function shopifyAttemptBilling(
          subscriptionBillingAttempt { id ready } userErrors { message } } }`,
     {
       id: contractGid(contractId),
-      in: { idempotencyKey, ...(opts.inventoryPolicy ? { inventoryPolicy: opts.inventoryPolicy } : {}) },
+      in: {
+        idempotencyKey,
+        ...(opts.inventoryPolicy ? { inventoryPolicy: opts.inventoryPolicy } : {}),
+        ...(opts.billingCycleSelector ? { billingCycleSelector: opts.billingCycleSelector } : {}),
+      },
     },
   );
   const base = toResult(env as never, "subscriptionBillingAttemptCreate");
   if (!base.success) return base;
   const a = env.data?.subscriptionBillingAttemptCreate?.subscriptionBillingAttempt;
-  return { success: true, attemptId: a?.id, ready: a?.ready };
+  // `toResult` passes a 200 whose payload never materialized. Without this guard we would
+  // return success with attemptId undefined, and the caller would poll `id: undefined`.
+  if (!a?.id) return { success: false, error: "billingAttemptCreate returned no attempt" };
+  return { success: true, accepted: true, terminal: false, attemptId: a.id, ready: a.ready };
 }
 
 /** Read a billing attempt back. `ready`/`completedAt` set means the outcome is final. */
@@ -353,8 +475,14 @@ export async function getBillingAttempt(
   if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
   const a = env.data?.subscriptionBillingAttempt;
   if (!a) return { success: false, error: "billing attempt not found" };
+  const terminal = a.ready || !!a.completedAt || !!a.errorCode;
   return {
-    success: !a.errorCode,
+    // ⭐ `success` requires a SETTLED, error-free attempt. Previously this was `!a.errorCode`,
+    // which reported a still-PENDING attempt (no errorCode yet) as success — a caller doing
+    // `if (r.success) markRenewalPaid()` would book a charge that never happened.
+    success: terminal && !a.errorCode,
+    terminal,
+    pending: !terminal,
     attemptId: a.id,
     ready: a.ready || !!a.completedAt,
     orderId: a.order?.id,
@@ -378,8 +506,13 @@ export async function awaitBillingAttempt(
   const started = Date.now();
   for (;;) {
     const r = await getBillingAttempt(workspaceId, attemptId);
-    if (r.ready) return r;
-    if (Date.now() - started > timeoutMs) return { ...r, timedOut: true };
+    if (r.terminal) return r;
+    if (Date.now() - started > timeoutMs) {
+      // ⭐ NEVER report an unsettled charge as success. A CHALLENGED (3DS) attempt sits pending
+      // for hours; returning `success:true` here would book an uncollected renewal as paid.
+      // `pending:true` is the signal to leave the cycle open and let the webhook settle it.
+      return { ...r, success: false, terminal: false, pending: true, timedOut: true };
+    }
     await new Promise((res) => setTimeout(res, intervalMs));
   }
 }
@@ -416,7 +549,7 @@ export async function getSubscriptionContract(
         id status nextBillingDate
         billingPolicy { interval intervalCount }
         customerPaymentMethod { id }
-        lines(first:50){ edges { node { id title quantity sellingPlanName sku
+        lines(first:50){ pageInfo { hasNextPage } edges { node { id title quantity sellingPlanName sku
           variantId
           currentPrice { amount } } } } } }`,
     { id: contractGid(contractId) },
