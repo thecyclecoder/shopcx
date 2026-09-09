@@ -394,7 +394,14 @@ export async function updateDunningCycle(
 }
 
 /** Cycle states that are still "in flight" — a sub pause/cancel should close these. */
-export const OPEN_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped"] as const;
+// ⭐ Must stay in step with `idx_dunning_cycles_active_contract`
+// (partial unique on status IN ('active','skipped','paused')) and with
+// getActiveDunningCycle / getActiveDunningCyclesForCustomer. Omitting 'paused' meant a
+// paused CYCLE was never closed by a sub pause/cancel: it still surfaced in
+// dunning-new-card-recovery (→ resume + charge, the exact harm this function prevents) and
+// still held the unique-index slot with no way to clear it. Nothing writes 'paused' today,
+// but the codebase retains it for legacy rows, so the lists must not diverge silently.
+export const OPEN_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped", "paused"] as const;
 
 // ────────────────────────────────────────────────────────────────────────────────────────
 // Pure dunning decisions.
@@ -404,6 +411,24 @@ export const OPEN_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped
 // Inngest step that no test could reach. Same idiom as `isRenewalAttemptStale` and
 // `filterCandidatesByDunningRetryWindow`.
 // ────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Statuses covered by `idx_dunning_cycles_active_contract` — the partial UNIQUE index on
+ * `(workspace_id, shopify_contract_id) WHERE status IN ('active','skipped','paused')`.
+ *
+ * ⭐ A cycle left in ANY of these holds the slot, so the next billing failure's cycle insert
+ * conflicts, logs "duplicate", never fires `dunning/payment-failed`, and the subscription
+ * drops out of dunning permanently. That is why a payday exhaustion must land on a status
+ * OUTSIDE this set — `handleAllCardsExhausted`'s skip branch writes `'skipped'`, which is
+ * safe on the card-rotation path (step 7 flips it straight back to `retrying`) and fatal on
+ * the payday path, where nothing flips it.
+ */
+export const ACTIVE_SLOT_STATUSES = ["active", "skipped", "paused"] as const;
+
+/** Does a cycle in this status still hold the partial-unique "one active cycle" slot? */
+export function holdsActiveCycleSlot(status: string | null | undefined): boolean {
+  return !!status && (ACTIVE_SLOT_STATUSES as readonly string[]).includes(status);
+}
 
 /** Is this cycle still in flight (and therefore closable by a sub pause/cancel)? */
 export function isOpenDunningStatus(status: string | null | undefined): boolean {
@@ -478,7 +503,11 @@ export async function endDunningForSubscription(
     .update({
       status: "exhausted",
       next_retry_at: null,
-      terminal_error_code: `subscription_${reason}`,
+      // NOT terminal_error_code — the dunning analytics panel counts
+      // status='exhausted' AND terminal_error_code IS NOT NULL as "terminal cancellations",
+      // and a customer-initiated pause/cancel is not one. Provenance goes in a field the
+      // panel does not read.
+      closed_reason: `subscription_${reason}`,
       updated_at: new Date().toISOString(),
     })
     .eq("workspace_id", workspaceId)

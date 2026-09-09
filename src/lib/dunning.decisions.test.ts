@@ -16,6 +16,8 @@ import {
   shouldExhaustForRetryCap,
   resolveCycleAction,
   OPEN_DUNNING_STATUSES,
+  ACTIVE_SLOT_STATUSES,
+  holdsActiveCycleSlot,
 } from "./dunning";
 
 const MAX_PAYDAY_RETRIES = 4;
@@ -119,4 +121,35 @@ test("open cycles: an unknown or absent status is not treated as open", () => {
   assert.equal(isOpenDunningStatus(null), false);
   assert.equal(isOpenDunningStatus(undefined), false);
   assert.equal(isOpenDunningStatus("nonsense"), false);
+});
+
+// ── the active-cycle slot (what a terminal status must NOT hold) ────────────────────────
+//
+// Added after a code review caught three regressions the cases above did not: the payday
+// exhaustion path was leaving cycle-1 rows in `status='skipped'`, which still holds the
+// partial-unique slot, so those subscriptions could never open another dunning cycle.
+
+test("slot: 'skipped' HOLDS the active-cycle slot — a terminal status must never be it", () => {
+  // The trap. handleAllCardsExhausted's skip branch writes 'skipped'; that is safe on the
+  // card-rotation path (step 7 flips it back to 'retrying') and fatal on the payday path,
+  // where nothing flips it and the cron never re-selects it.
+  assert.equal(holdsActiveCycleSlot("skipped"), true);
+});
+
+test("slot: 'exhausted' does NOT hold the slot — the only safe payday terminal", () => {
+  assert.equal(holdsActiveCycleSlot("exhausted"), false);
+  assert.equal(holdsActiveCycleSlot("recovered"), false);
+});
+
+test("slot: the set matches the DB partial unique index exactly", () => {
+  // idx_dunning_cycles_active_contract: WHERE status IN ('active','skipped','paused').
+  // Drifting from it silently reintroduces the duplicate-cycle block.
+  assert.deepEqual([...ACTIVE_SLOT_STATUSES].sort(), ["active", "paused", "skipped"]);
+});
+
+test("open cycles: 'paused' IS open — it must be closable by a sub pause/cancel", () => {
+  // Omitted from OPEN_DUNNING_STATUSES originally, so a paused CYCLE was never closed:
+  // it still reached new-card-recovery (→ resume + charge) and still held the slot with no
+  // way to clear it. Nothing writes 'paused' today, but legacy rows retain it.
+  assert.equal(isOpenDunningStatus("paused"), true);
 });

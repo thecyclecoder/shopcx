@@ -158,6 +158,44 @@ Every card try writes to [[../tables/payment_failures]]:
 
 Querying this table reveals retry patterns + failure-code distribution — feeds the dunning analytics dashboard. Errors are categorized via [[../tables/dunning_error_codes]] (insufficient_funds, expired_card, hard_decline, etc.).
 
+## ⭐ The one-active-cycle slot (why a terminal status matters)
+
+`idx_dunning_cycles_active_contract` is a partial UNIQUE index on
+`(workspace_id, shopify_contract_id) WHERE status IN ('active','skipped','paused')`. A cycle
+left in **any** of those holds the slot — so the next billing failure's cycle insert conflicts,
+logs "cycle already exists… skipping duplicate", never fires `dunning/payment-failed`, and the
+subscription **drops out of dunning permanently**.
+
+That makes the terminal status load-bearing. `handleAllCardsExhausted`'s skip branch writes
+`status='skipped'`, which is safe on the card-rotation path (step 7 flips it straight back to
+`retrying`) and **fatal** on the payday path, where nothing flips it. `exhaustPaydayCycle`
+therefore forces `status='exhausted'` after the ladder runs. Pinned by `holdsActiveCycleSlot`
+in the regression suite; the set must not drift from the index.
+
+Two orderings in the same function are also load-bearing:
+
+- **`resetBillingDateAfterDunning` runs BEFORE the ladder.** For cycle 2+ the ladder cancels the
+  subscription and `applyCancelTruth` nulls `next_billing_date`. Resetting afterwards re-stamped
+  a charge date on a cancelled row — and with `original_billing_date` months old, a date in the
+  **past**. Cancel-truth must be the last write.
+- **`payday_retry_count` increments once per cron PASS**, before the card loop — not per accepted
+  submission. Inside the loop it sat after `continue` on "no upcoming orders" and inside the
+  try/catch, so a cycle whose cards never yield an order never incremented and the cap could
+  never fire on exactly the runaway cycles it exists to stop.
+
+## `closed_reason` vs `terminal_error_code`
+
+`terminal_error_code` means **dunning gave up**. `closed_reason` means **the customer left** —
+set by `endDunningForSubscription` on a pause/cancel. Keeping them apart matters twice:
+
+- the dunning analytics panel counts `status='exhausted' AND terminal_error_code IS NOT NULL`
+  as terminal cancellations; customer pauses were inflating it (64 rows moved on 2026-09-09,
+  dropping the count from 198 to 134)
+- `dunning-new-card-recovery` Step 1b reactivates `exhausted` cycles whose sub is `cancelled`.
+  A customer-initiated cancel produces the identical shape, so without the split a later card
+  update would **resume and charge a subscription the customer ended**. Step 1b now filters
+  `closed_reason IS NULL`.
+
 ## Regression tests
 
 `src/lib/dunning.decisions.test.ts` (registered as `test:dunning-decisions`) pins the four
