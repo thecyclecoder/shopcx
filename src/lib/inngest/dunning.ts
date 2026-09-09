@@ -879,22 +879,39 @@ const MAX_PAYDAY_RETRIES = 4;
  * MAX_PAYDAY_RETRIES cap and the (in practice unreachable) no-more-paydays branch — so
  * both paths send the customer the same single closing email.
  */
-async function exhaustPaydayCycle(cycle: {
-  id: string;
-  workspace_id: string;
-  shopify_contract_id: string;
-  customer_id: string | null;
-  cycle_number: number | null;
-}): Promise<{ contractId: string; outcome: string }> {
-  await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
-  await resetBillingDateAfterDunning(cycle.workspace_id, cycle.shopify_contract_id, cycle.id, false);
+async function exhaustPaydayCycle(
+  cycle: {
+    id: string;
+    workspace_id: string;
+    shopify_contract_id: string;
+    customer_id: string | null;
+    cycle_number: number | null;
+  },
+  settings: { dunning_cycle_1_action: string; dunning_cycle_2_action: string },
+): Promise<{ contractId: string; outcome: string }> {
+  await updateDunningCycle(cycle.id, { next_retry_at: null });
 
-  if (cycle.customer_id) {
-    await sendPaymentRecoveryEmail(cycle.workspace_id, cycle.customer_id);
-    await postDunningNote(cycle.workspace_id, cycle.customer_id, dunningInternalNote(
-      `All payday retries exhausted for subscription ${cycle.shopify_contract_id}. Payment update email sent.`
-    ));
-  }
+  // ⭐ Apply the configured cycle ladder — skip on cycle 1, cancel on cycle 2+.
+  //
+  // This was NEVER wired to the payday path. `handleAllCardsExhausted` is called only from
+  // the card-rotation flow, so a cycle that burned through its payday retries was marked
+  // exhausted and emailed but never skipped, paused OR cancelled — the subscription stayed
+  // ACTIVE with a dead card indefinitely, and the next billing attempt just reopened dunning.
+  // That is why the fleet shows 1,357 cycles at cycle_number=1 and only 123 at 2: nobody was
+  // ever escalated. Measured 2026-09-09 on the 387 about to exhaust: average 74 declines
+  // each over 136 days, 339 of them past 50 declines.
+  //
+  // It also owns the status transition, the recovery email and the internal note, so this
+  // function must not duplicate them.
+  await handleAllCardsExhausted(
+    cycle.workspace_id,
+    cycle.shopify_contract_id,
+    cycle.customer_id,
+    { id: cycle.id, cycle_number: cycle.cycle_number ?? 1 },
+    settings,
+  );
+
+  await resetBillingDateAfterDunning(cycle.workspace_id, cycle.shopify_contract_id, cycle.id, false);
 
   dispatchSlackNotification(cycle.workspace_id, "dunning_failed", {
     customer: { email: "" },
@@ -990,7 +1007,7 @@ export const dunningPaydayRetryCron = inngest.createFunction(
         const paydayRetriesSoFar = cycle.payday_retry_count ?? 0;
         if (paydayRetriesSoFar >= MAX_PAYDAY_RETRIES) {
           console.log(`[Dunning Payday] Contract ${cycle.shopify_contract_id}: ${paydayRetriesSoFar}/${MAX_PAYDAY_RETRIES} payday retries used — exhausting instead of rescheduling.`);
-          return await exhaustPaydayCycle(cycle);
+          return await exhaustPaydayCycle(cycle, settings);
         }
 
         // Get customer's Shopify ID for payment methods
@@ -1078,7 +1095,7 @@ export const dunningPaydayRetryCron = inngest.createFunction(
         }
 
         // No more paydays — exhausted. Send final payment update email.
-        return await exhaustPaydayCycle(cycle);
+        return await exhaustPaydayCycle(cycle, settings);
       });
 
       results.push(result);
