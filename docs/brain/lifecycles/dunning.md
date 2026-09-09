@@ -158,6 +158,23 @@ Every card try writes to [[../tables/payment_failures]]:
 
 Querying this table reveals retry patterns + failure-code distribution — feeds the dunning analytics dashboard. Errors are categorized via [[../tables/dunning_error_codes]] (insufficient_funds, expired_card, hard_decline, etc.).
 
+## Regression tests
+
+`src/lib/dunning.decisions.test.ts` (registered as `test:dunning-decisions`) pins the four
+decisions that were live defects in the week of 2026-09-09. Every case is a real failure:
+
+| Decision | Helper | What it pins |
+|---|---|---|
+| Retry cap | `shouldExhaustForRetryCap` | `0` and `null` never read as "capped" (the hardcoded `attemptNumber: 0` that made the guard dead code); fires **at** the max, not past it; a runaway 192 still exhausts |
+| Sub-state halt | `shouldHaltRetryForSubStatus` | `paused` **and** `cancelled` **and** missing all halt; `active` still retries |
+| Cycle ladder | `resolveCycleAction` | cycle 1 → gentle, 2+ → hard; a null `cycle_number` falls back to cycle 1, **never** to cancel; reads workspace settings rather than hardcoded verbs |
+| Open-cycle set | `isOpenDunningStatus` | `exhausted` is **NOT** open — closing it would silently kill Phase 5 reactivation |
+
+The decisions were extracted from inline Inngest steps specifically so they could be tested —
+same idiom as `isRenewalAttemptStale` and `filterCandidatesByDunningRetryWindow`. That was the
+common thread in all four defects: a guard that looked present in the code but could never
+fire, degrading silently instead of erroring, with no test able to reach it.
+
 ## Terminal error codes
 
 `isTerminalErrorCode()` in `src/lib/dunning.ts` short-circuits the flow for codes flagged `is_terminal` in [[../tables/dunning_error_codes]] — the **table is the source of truth, not this page**. As of 2026-09-09 that set is `payment_method_not_found`, `fraud_suspected`, `purchase_type_not_supported`, `buyer_canceled_payment_method`, `invalid_payment_method`, `expired_payment_method`, `card_number_incorrect`. Note `do_not_honor` is **NOT** terminal despite older docs saying so. Beware the duplicate-semantics pairs — `expired_card` (not terminal) vs `expired_payment_method` (terminal), `incorrect_number` vs `card_number_incorrect`, `invalid_purchase_type` vs `purchase_type_not_supported` — the same condition is classified differently depending on which layer reported it — no point rotating to other cards from the same customer if the bank has hard-blocked transactions. Direct-jump to the cycle action.
