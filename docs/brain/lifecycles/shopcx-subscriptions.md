@@ -297,6 +297,25 @@ failures **silently** — no errors, cards simply never rotate and nobody gets a
 
 Register and prove those topics **before the first contract moves**. See [[dunning]].
 
+**Done 2026-09-09** ✅ — all three are registered and verified live on the shop:
+`subscription_billing_attempts/success`, `/failure`, `/challenged`. They dispatch to
+`src/lib/shopify-billing-attempt-webhook.ts`, which **records into
+[[../tables/shopify_billing_attempt_events]] and deliberately does NOT drive dunning yet**.
+
+The expectation is that these webhooks are scoped to the app that CREATED the contract, so
+Appstle's contracts never reach us — well supported, since `subscriptionContracts` already
+returns empty to us under `read_OWN_subscription_contracts`. But if that is wrong, wiring
+dunning straight through would double-trigger every Appstle failure. The observation costs
+nothing and answers itself within hours given the failure volume: **any row whose
+`resolved_subscription_id` is NULL is an Appstle contract reaching us**. No null rows ⇒
+confirmed ⇒ wire dunning to the failure topic and retire the Appstle relay.
+
+Registering also surfaced a long-standing bug: **`fulfillments/update` is not a valid Shopify
+topic** and had never registered — the old registrar counted its 422 as success. The registrar
+now verifies against `GET /webhooks.json` instead of trusting the status. No data was lost
+(fulfillments arrive via `orders/updated` + EasyPost), but `handleFulfillmentUpdate` is dead
+code.
+
 ## Related
 
 [[subscription-billing]] · [[dunning]] · [[customer-portal]] · [[../integrations/appstle]] ·

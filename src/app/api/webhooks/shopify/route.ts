@@ -8,6 +8,7 @@ import {
   handleFulfillmentUpdate,
 } from "@/lib/shopify-webhooks";
 import { handlePaymentMethodEvent } from "@/lib/dunning-webhook";
+import { handleBillingAttemptEvent } from "@/lib/shopify-billing-attempt-webhook";
 import { sendShopifyPurchase } from "@/lib/meta-capi-shopify-purchase";
 
 export async function POST(request: Request) {
@@ -75,6 +76,15 @@ export async function POST(request: Request) {
       case "customer_payment_methods/create":
       case "customer_payment_methods/update":
         await handlePaymentMethodEvent(workspace.id, payload);
+        break;
+
+      case "subscription_billing_attempts/success":
+      case "subscription_billing_attempts/failure":
+      case "subscription_billing_attempts/challenged":
+        // RECORDS ONLY — does not drive dunning. Appstle still relays failures, and
+        // double-triggering would re-dun customers already in a cycle. See
+        // src/lib/shopify-billing-attempt-webhook.ts.
+        await handleBillingAttemptEvent(workspace.id, payload, topic);
         break;
 
       default:
