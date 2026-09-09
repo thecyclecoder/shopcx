@@ -21,7 +21,10 @@ import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { listReadyToTest } from "@/lib/ads/ready-to-test";
-import { DEFAULT_BIN_FLOOR } from "@/lib/ads/creative-agent";
+// From the leaf, NOT from creative-agent — that import closes a module cycle through
+// platform-director → monitor → self-audit → registered-functions and puts this file's own
+// cron export in a TDZ. See lib/ads/bin-floor.ts.
+import { DEFAULT_BIN_FLOOR } from "@/lib/ads/bin-floor";
 import { listAdvertisedProductIds } from "@/lib/advertised-products";
 import { ACTIVE_MEDIA_BUYER_JOB_STATUSES, utcDayStartIso } from "@/lib/inngest/media-buyer-cadence";
 import { resolveEffectiveSwitch, type EffectiveSwitch } from "@/lib/control-tower/kill-switch-resolver";

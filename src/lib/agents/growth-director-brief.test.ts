@@ -480,7 +480,13 @@ test("gradeDirectorDecision applies an override on an existing grade row (writes
 //     null and the prompt OMITS the section rather than rendering an empty header.
 
 test("buildGrowthDirectorBrief carries a populated mediaBuyerRollup + growthDirectorInvestigationPrompt renders the Media Buyer supervision section (Phase 1)", async () => {
-  const now = new Date("2026-07-09T00:00:00Z");
+  // ⭐ Anchored to the REAL clock, not a fixed date. `buildGrowthDirectorBrief` computes its
+  // 14-day sparkline window from `new Date()` and takes no injectable clock, so a hardcoded
+  // `now` rots: this was pinned to 2026-07-09, and once the real date passed 2026-07-23 the
+  // day(1..3) grades fell outside the window and `dailyOverallAvg14d` came back empty. The
+  // test then failed for every run thereafter — it was red on main, not because the code
+  // broke, but because time moved.
+  const now = new Date();
   const iso = (d: Date) => d.toISOString();
   const day = (offsetDays: number) => iso(new Date(now.getTime() - offsetDays * 24 * 60 * 60 * 1000));
   const admin = makeAdmin({

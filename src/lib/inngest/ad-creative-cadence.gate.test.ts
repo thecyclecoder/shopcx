@@ -107,10 +107,22 @@ function baseStore(): Store {
   };
 }
 
+/**
+ * Keep the kill-switch resolver OFF the network.
+ *
+ * `dispatchAdCreativeCadence` gates on `resolveEffectiveSwitch("ad-creative")`, which builds
+ * its OWN admin client via `createAdminClient()` and ignores the injected one — so without
+ * this stub both cases die with "supabaseUrl is required" rather than testing enumeration.
+ * The production code already supports injection (`deps.resolveSwitch ?? resolveEffectiveSwitch`);
+ * the gate landed after this test was written and nobody noticed, because the file was already
+ * failing at import time on a module cycle.
+ */
+const SWITCH_ON = { resolveSwitch: async () => ({ off: false } as never) };
+
 test("Dahlia enumeration yields the advertised product and NOT the attachment SKU (even with a stray angle row)", async () => {
   const store = baseStore();
   const { admin, inserts } = makeAdmin(store);
-  const result = await dispatchAdCreativeCadence(admin, WS, /* binFloor */ 1);
+  const result = await dispatchAdCreativeCadence(admin, WS, /* binFloor */ 1, new Date(), SWITCH_ON);
 
   const dispatchedProducts = inserts
     .filter((i) => i.table === "agent_jobs" && i.row["kind"] === "ad-creative")
@@ -131,7 +143,7 @@ test("Dahlia enumeration returns zero dispatches when no products are advertised
     { id: ATTACHMENT, workspace_id: WS, is_advertised: false },
   ];
   const { admin, inserts } = makeAdmin(store);
-  const result = await dispatchAdCreativeCadence(admin, WS, 1);
+  const result = await dispatchAdCreativeCadence(admin, WS, 1, new Date(), SWITCH_ON);
   assert.equal(result.evaluated, 0);
   assert.equal(result.dispatched, 0);
   assert.equal(inserts.filter((i) => i.table === "agent_jobs").length, 0);
