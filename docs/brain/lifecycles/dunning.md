@@ -4,7 +4,7 @@ When a subscription's billing attempt fails, we don't immediately email the cust
 
 ## Cast
 
-- Trigger: **Appstle's** webhook (`/api/webhooks/appstle/[workspaceId]`, HMAC-verified with `workspaces.appstle_webhook_secret_encrypted`) relaying its `billing-*` events. **NOT** a Shopify-native topic — the app has no `SUBSCRIPTION_BILLING_ATTEMPTS_*` webhooks registered. Anything that removes Appstle must register those first or dunning stops receiving failures **silently**.
+- Trigger: **Appstle's** webhook (`/api/webhooks/appstle/[workspaceId]`, HMAC-verified with `workspaces.appstle_webhook_secret_encrypted`) relaying its `billing-*` events. **NOT** a Shopify-native topic — the app has no `SUBSCRIPTION_BILLING_ATTEMPTS_*` webhooks registered. Anything that removes Appstle must register those first or dunning stops receiving failures **silently**. See [[shopcx-subscriptions]] § Cutover blocker.
 - Brain: [[../inngest/dunning]] — four functions: payment-failed, new-card-recovery, billing-success, payday-retry-cron.
 - State: [[../tables/dunning_cycles]] (per-billing-cycle), [[../tables/payment_failures]] (per-attempt).
 - Card source: dunning rotation reads cards **live** from Shopify (`getCustomerPaymentMethods()` in `src/lib/dunning.ts`). Separately, the payment-method webhook mirrors them into [[../tables/customer_payment_methods]] (`provider='shopify'`) for portal/dashboard/orchestrator visibility — that table is NOT what rotation reads.

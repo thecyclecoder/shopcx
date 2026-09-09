@@ -1,5 +1,9 @@
 # Subscription billing
 
+> **Replacing Appstle:** the target architecture for our own Shopify subscription app —
+> renewal loop, pricing layers, order↔contract linkage and the migration — is
+> [[shopcx-subscriptions]]. This page describes how billing works **today**.
+
 In-house recurring billing scheduler — the post-Appstle path. For internal subscriptions (`is_internal=true`) we own the contract, tax quote, charge, and order creation. For legacy Appstle subs we mirror state but Appstle still owns the charge. This page traces both paths and how they fail-over to dunning.
 
 ## Cast
