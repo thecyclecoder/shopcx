@@ -4,7 +4,7 @@ When a subscription's billing attempt fails, we don't immediately email the cust
 
 ## Cast
 
-- Trigger: Shopify `billing_attempt_failure` webhook → handler in `src/lib/dunning-webhook.ts`.
+- Trigger: **Appstle's** webhook (`/api/webhooks/appstle/[workspaceId]`, HMAC-verified with `workspaces.appstle_webhook_secret_encrypted`) relaying its `billing-*` events. **NOT** a Shopify-native topic — the app has no `SUBSCRIPTION_BILLING_ATTEMPTS_*` webhooks registered. Anything that removes Appstle must register those first or dunning stops receiving failures **silently**.
 - Brain: [[../inngest/dunning]] — four functions: payment-failed, new-card-recovery, billing-success, payday-retry-cron.
 - State: [[../tables/dunning_cycles]] (per-billing-cycle), [[../tables/payment_failures]] (per-attempt).
 - Card source: dunning rotation reads cards **live** from Shopify (`getCustomerPaymentMethods()` in `src/lib/dunning.ts`). Separately, the payment-method webhook mirrors them into [[../tables/customer_payment_methods]] (`provider='shopify'`) for portal/dashboard/orchestrator visibility — that table is NOT what rotation reads.
@@ -54,7 +54,9 @@ If cards are exhausted, the payday-retry path takes over (only if `dunning_payda
 5. **On success** → `dunning/billing-success` fires (see Phase 5).
 6. **On failure** → loop back to step 2 with the next payday date.
 
-Up to N payday retries (configurable; default 4). After exhaustion, fall through to cycle action.
+Up to `MAX_PAYDAY_RETRIES = 4` per cycle, counted on [[../tables/dunning_cycles]] `payday_retry_count`. After exhaustion, fall through to cycle action.
+
+> **⭐ This cap was unenforced until 2026-09-09.** The cron's only exit was a "no more paydays" branch, but `getNextPaydayDates()` always returns a future date (1st, 15th, every Friday, last business day), so it was unreachable and cycles rescheduled forever. Every attempt was also logged with a hardcoded `attemptNumber: 0`, making any count-based guard dead code (`0 > 4` is never true). Measured before the fix: **17,729 of 17,949 payday retries (98.8%) carried `attempt_number = 0`** across 733 subs; **509 of 787 subs exceeded the 4-retry cap**; 86 exceeded 50; one cycle reached **192 attempts** between 2026-04-17 and 2026-09-04. Sustained decline volume like that is a card-network risk, not just noise. The counter is deliberately **not backfilled** — starting existing cycles at 0 bounds the runaway without pushing ~509 cycles past the cap at once, which would fire a 400+ customer payment-recovery email blast in a single batch.
 
 ## Phase 4 — cycle action
 
@@ -115,7 +117,7 @@ Querying this table reveals retry patterns + failure-code distribution — feeds
 
 ## Terminal error codes
 
-`isTerminalErrorCode()` in `src/lib/dunning.ts` short-circuits the flow for codes like `card_blocked`, `do_not_honor` after first occurrence — no point rotating to other cards from the same customer if the bank has hard-blocked transactions. Direct-jump to the cycle action.
+`isTerminalErrorCode()` in `src/lib/dunning.ts` short-circuits the flow for codes flagged `is_terminal` in [[../tables/dunning_error_codes]] — the **table is the source of truth, not this page**. As of 2026-09-09 that set is `payment_method_not_found`, `fraud_suspected`, `purchase_type_not_supported`, `buyer_canceled_payment_method`, `invalid_payment_method`, `expired_payment_method`, `card_number_incorrect`. Note `do_not_honor` is **NOT** terminal despite older docs saying so. Beware the duplicate-semantics pairs — `expired_card` (not terminal) vs `expired_payment_method` (terminal), `incorrect_number` vs `card_number_incorrect`, `invalid_purchase_type` vs `purchase_type_not_supported` — the same condition is classified differently depending on which layer reported it — no point rotating to other cards from the same customer if the bank has hard-blocked transactions. Direct-jump to the cycle action.
 
 ### Early terminal + no-backup cancel
 `cancelForTerminalNoBackup` (`src/lib/dunning.ts`, called from the Appstle webhook's early path) handles **terminal error + ≤1 payment method**: there's nothing to rotate to, so it cancels the sub + sends the recovery email immediately, skipping the rotation/retry phases.

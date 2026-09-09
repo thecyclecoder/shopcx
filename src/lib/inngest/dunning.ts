@@ -863,6 +863,47 @@ async function resetBillingDateAfterDunning(
 // Runs hourly, picks up dunning cycles with status='retrying' and next_retry_at <= now()
 // Tries all payment methods, then schedules next payday or marks exhausted
 
+/**
+ * Max payday retries per dunning cycle on the APPSTLE/Shopify path.
+ *
+ * The internal (Braintree) renewal path declares its own `MAX_PAYDAY_RETRIES = 4` in
+ * `internal-dunning.ts` and enforces it there. This cron had NO cap at all —
+ * its only exit was a "no more paydays" branch that `getNextPaydayDates()` can never
+ * satisfy — which is how one cycle reached 192 attempts. Keep the two values in step.
+ */
+const MAX_PAYDAY_RETRIES = 4;
+
+/**
+ * Close out a payday-retry cycle: mark it exhausted, restore the billing date, send the
+ * final payment-update email and notify. Shared by the two ways a cycle ends — the
+ * MAX_PAYDAY_RETRIES cap and the (in practice unreachable) no-more-paydays branch — so
+ * both paths send the customer the same single closing email.
+ */
+async function exhaustPaydayCycle(cycle: {
+  id: string;
+  workspace_id: string;
+  shopify_contract_id: string;
+  customer_id: string | null;
+  cycle_number: number | null;
+}): Promise<{ contractId: string; outcome: string }> {
+  await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
+  await resetBillingDateAfterDunning(cycle.workspace_id, cycle.shopify_contract_id, cycle.id, false);
+
+  if (cycle.customer_id) {
+    await sendPaymentRecoveryEmail(cycle.workspace_id, cycle.customer_id);
+    await postDunningNote(cycle.workspace_id, cycle.customer_id, dunningInternalNote(
+      `All payday retries exhausted for subscription ${cycle.shopify_contract_id}. Payment update email sent.`
+    ));
+  }
+
+  dispatchSlackNotification(cycle.workspace_id, "dunning_failed", {
+    customer: { email: "" },
+    attempts: cycle.cycle_number || 0,
+  }).catch(() => {});
+
+  return { contractId: cycle.shopify_contract_id, outcome: "exhausted" };
+}
+
 export const dunningPaydayRetryCron = inngest.createFunction(
   {
     id: "dunning-payday-retry-cron",
@@ -882,7 +923,7 @@ export const dunningPaydayRetryCron = inngest.createFunction(
     const cycles = await step.run("find-retryable-cycles", async () => {
       const { data } = await admin
         .from("dunning_cycles")
-        .select("id, workspace_id, shopify_contract_id, subscription_id, customer_id, cycle_number, cards_tried, billing_attempt_id")
+        .select("id, workspace_id, shopify_contract_id, subscription_id, customer_id, cycle_number, cards_tried, billing_attempt_id, payday_retry_count")
         .eq("status", "retrying")
         .not("shopify_contract_id", "ilike", "internal-%")
         .lte("next_retry_at", new Date().toISOString());
@@ -929,6 +970,19 @@ export const dunningPaydayRetryCron = inngest.createFunction(
         if (!settings?.dunning_payday_retry_enabled) {
           await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
           return { contractId: cycle.shopify_contract_id, outcome: "payday_disabled" };
+        }
+
+        // ⭐ Enforce MAX_PAYDAY_RETRIES. The reschedule branch below asks getNextPaydayDates()
+        // for the next payday and it ALWAYS returns one (1st, 15th, every Friday, last business
+        // day), so its "no more paydays — exhausted" branch is unreachable and a cycle would
+        // retry forever. Before this cap, 509 of 787 subs exceeded the documented 4-retry limit;
+        // one cycle reached 192 attempts between 2026-04-17 and 2026-09-04. The count lives on
+        // the cycle rather than being derived from payment_failures because that table has no
+        // cycle_id to scope by.
+        const paydayRetriesSoFar = cycle.payday_retry_count ?? 0;
+        if (paydayRetriesSoFar >= MAX_PAYDAY_RETRIES) {
+          console.log(`[Dunning Payday] Contract ${cycle.shopify_contract_id}: ${paydayRetriesSoFar}/${MAX_PAYDAY_RETRIES} payday retries used — exhausting instead of rescheduling.`);
+          return await exhaustPaydayCycle(cycle);
         }
 
         // Get customer's Shopify ID for payment methods
@@ -980,12 +1034,18 @@ export const dunningPaydayRetryCron = inngest.createFunction(
               billingAttemptId: attemptId,
               paymentMethodLast4: card.last4,
               paymentMethodId: card.id,
-              attemptNumber: 0,
+              // Real attempt number, not 0. A hardcoded 0 made every count-based guard
+              // (`attemptNumber > MAX_PAYDAY_RETRIES`) dead code — 0 > 4 is never true.
+              attemptNumber: paydayRetriesSoFar + 1,
               attemptType: "payday_retry",
               succeeded: false,
             });
 
-            await updateDunningCycle(cycle.id, { billing_attempt_id: attemptId, last_attempted_last4: card.last4 });
+            await updateDunningCycle(cycle.id, {
+              billing_attempt_id: attemptId,
+              last_attempted_last4: card.last4,
+              payday_retry_count: paydayRetriesSoFar + 1,
+            });
           } catch (e) {
             console.error(`[Dunning Payday] Card ${card.last4} failed for ${cycle.shopify_contract_id}:`, e);
           }
@@ -1010,26 +1070,7 @@ export const dunningPaydayRetryCron = inngest.createFunction(
         }
 
         // No more paydays — exhausted. Send final payment update email.
-        await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
-        await resetBillingDateAfterDunning(cycle.workspace_id, cycle.shopify_contract_id, cycle.id, false);
-
-        // Send payment update email
-        if (cycle.customer_id) {
-          if (cycle.customer_id) {
-            await sendPaymentRecoveryEmail(cycle.workspace_id, cycle.customer_id);
-          }
-
-          await postDunningNote(cycle.workspace_id, cycle.customer_id, dunningInternalNote(
-            `All payday retries exhausted for subscription ${cycle.shopify_contract_id}. Payment update email sent.`
-          ));
-        }
-
-        dispatchSlackNotification(cycle.workspace_id, "dunning_failed", {
-          customer: { email: "" },
-          attempts: cycle.cycle_number || 0,
-        }).catch(() => {});
-
-        return { contractId: cycle.shopify_contract_id, outcome: "exhausted" };
+        return await exhaustPaydayCycle(cycle);
       });
 
       results.push(result);

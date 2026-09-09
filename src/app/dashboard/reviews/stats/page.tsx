@@ -11,6 +11,7 @@
  * marketer. It should always equal Sent. When it doesn't, that gap IS an outage, and the page
  * says so in words rather than leaving it to be inferred from two numbers that disagree.
  */
+import { errText } from "@/lib/error-text";
 import { useState, useEffect, useCallback } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
 import { errText } from "@/lib/error-text";
