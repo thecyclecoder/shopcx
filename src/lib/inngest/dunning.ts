@@ -459,7 +459,12 @@ export const dunningNewCardRecovery = inngest.createFunction(
         .from("dunning_cycles")
         .select("shopify_contract_id, subscription_id, billing_attempt_id")
         .eq("customer_id", customer_id)
-        .eq("status", "exhausted");
+        .eq("status", "exhausted")
+        // ⭐ Only cycles DUNNING gave up on. A cycle closed because the customer paused or
+        // cancelled carries a closed_reason, and produces the identical (exhausted cycle +
+        // cancelled sub) shape — reactivating those would resume and charge a subscription
+        // the customer deliberately ended, the moment they updated a card for any reason.
+        .is("closed_reason", null);
 
       if (!exhaustedCycles?.length) return [];
 
@@ -701,13 +706,29 @@ async function handleAllCardsExhausted(
     await subscriptionAction(workspaceId, shopifyContractId, "cancel", "dunning", "Cancelled by ShopCX — payment failed after multiple billing cycles");
     await updateDunningCycle(cycle.id, { status: "exhausted", paused_at: new Date().toISOString() });
     await tagCustomerTickets(workspaceId, customerId, "dunning:cancelled");
+  } else {
+    // ⭐ No else-branch previously: a workspace whose dunning_cycle_N_action is anything
+    // other than skip/pause/cancel (a config typo is enough — resolveCycleAction returns the
+    // raw setting) wrote NO status. Reached from exhaustPaydayCycle that leaves a cycle the
+    // cron can never re-select (next_retry_at null) but which getActiveDunningCycle still
+    // reports live, holding the unique-index slot forever. Fail closed to terminal.
+    console.error(`[Dunning] Unknown cycle action "${action}" for ${shopifyContractId} — closing the cycle as exhausted.`);
+    await updateDunningCycle(cycle.id, { status: "exhausted" });
   }
 
   await updateDunningCycle(cycle.id, { payment_update_sent: true, payment_update_sent_at: new Date().toISOString() });
 
   // Magic-link recovery email + tagged closed ticket (replaces the static
   // portal URL for both the paused/cancelled and skip cases).
-  if (customerId) {
+  //
+  // ⭐ Guarded on payment_update_sent. This function is now reached TWICE for a cycle that
+  // exhausts its cards AND later its payday retries — once from dunning-payment-failed, once
+  // from exhaustPaydayCycle — and it writes payment_update_sent without ever reading it. That
+  // sent a second recovery email plus a duplicate ticket a month after the first. The
+  // internal path already guards this way (internal-dunning.ts).
+  const { data: alreadySent } = await admin
+    .from("dunning_cycles").select("payment_update_sent").eq("id", cycle.id).maybeSingle();
+  if (customerId && !alreadySent?.payment_update_sent) {
     await sendPaymentRecoveryEmail(workspaceId, customerId);
   }
 
@@ -906,6 +927,14 @@ async function exhaustPaydayCycle(
   //
   // It also owns the status transition, the recovery email and the internal note, so this
   // function must not duplicate them.
+  // ⭐ BEFORE the ladder. For cycle 2+ the ladder CANCELS the subscription, and
+  // applyCancelTruth nulls next_billing_date + stamps cancelled_at. Running the reset
+  // afterwards re-stamped a charge date onto a cancelled row — and since
+  // original_billing_date on these cycles is months old (avg 136 days), the date written
+  // was in the PAST, surfacing a stale charge date on the portal, CS-director brief and
+  // forecast. Cancel-truth must be the last write.
+  await resetBillingDateAfterDunning(cycle.workspace_id, cycle.shopify_contract_id, cycle.id, false);
+
   await handleAllCardsExhausted(
     cycle.workspace_id,
     cycle.shopify_contract_id,
@@ -914,7 +943,15 @@ async function exhaustPaydayCycle(
     settings,
   );
 
-  await resetBillingDateAfterDunning(cycle.workspace_id, cycle.shopify_contract_id, cycle.id, false);
+  // ⭐ Force a TERMINAL status. handleAllCardsExhausted's skip branch writes
+  // status='skipped', which is correct on the card-rotation path (step 7 immediately flips
+  // it back to 'retrying') but fatal here: nothing flips it, the cron never re-selects it
+  // (.eq status 'retrying'), and idx_dunning_cycles_active_contract — partial unique on
+  // status IN ('active','skipped','paused') — keeps holding the slot. The next billing
+  // failure's cycle insert then conflicts, logs "duplicate", never fires
+  // dunning/payment-failed, and the subscription drops out of dunning FOREVER at
+  // cycle_number=1. The skip's own side effects (skipped_at, tags, email) still stand.
+  await updateDunningCycle(cycle.id, { status: "exhausted", next_retry_at: null });
 
   dispatchSlackNotification(cycle.workspace_id, "dunning_failed", {
     customer: { email: "" },
@@ -1038,6 +1075,14 @@ export const dunningPaydayRetryCron = inngest.createFunction(
           return { contractId: cycle.shopify_contract_id, outcome: "no_payment_methods" };
         }
 
+        // ⭐ Count the PASS, not the submission. This lived inside the card loop, after
+        // `continue` on "no upcoming orders" and inside the try/catch — so a cycle whose
+        // cards never yield an upcoming order (a documented state) or whose payment-method
+        // switch throws never incremented, fell through to the reschedule branch, and
+        // re-entered the cron forever with the counter pinned. The cap could never fire on
+        // exactly the runaway cycles it exists to stop.
+        await updateDunningCycle(cycle.id, { payday_retry_count: paydayRetriesSoFar + 1 });
+
         // Try each payment method (no sleep — all at once for this cycle)
         let recovered = false;
         for (const card of paymentMethods) {
@@ -1072,7 +1117,6 @@ export const dunningPaydayRetryCron = inngest.createFunction(
             await updateDunningCycle(cycle.id, {
               billing_attempt_id: attemptId,
               last_attempted_last4: card.last4,
-              payday_retry_count: paydayRetriesSoFar + 1,
             });
           } catch (e) {
             console.error(`[Dunning Payday] Card ${card.last4} failed for ${cycle.shopify_contract_id}:`, e);
