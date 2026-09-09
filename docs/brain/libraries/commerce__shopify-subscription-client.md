@@ -1,7 +1,11 @@
-# `src/lib/shopify-subscriptions.ts`
+# `src/lib/commerce/shopify-subscription-client.ts`
 
-ShopCX's own Shopify subscription client — the replacement for [[appstle]]. Mirrors `appstle.ts`'s
-function signatures so swapping a caller is an import change, not a rewrite.
+ShopCX's own Shopify subscription client — the replacement for [[appstle]]. It sits **behind the
+commerce-SDK chokepoint** ([[commerce__subscription]]) and is reached only through it: a caller
+never imports this module directly, exactly as a caller never reaches the Appstle API directly.
+
+It mirrors `appstle.ts`'s signatures so the routing layer can dispatch on `billing_source` — but
+the swap is **not** mechanical (see below).
 
 Design + migration plan: [[../lifecycles/shopcx-subscriptions]]. Dunning interaction: [[../lifecycles/dunning]].
 
@@ -146,6 +150,20 @@ commits, a charge landing in the window bills the new quantity at the old tier.
 - **No throttle/backoff yet.** `shopify-draft-orders.ts` already has the right primitive
   (`isThrottleError` + exponential backoff over 429/5xx, THROTTLED arrives as an HTTP **200**).
   Reuse it before the renewal worker runs this at thousands-of-contracts scale.
+
+## The guard, and why this file lives here
+
+**CEO rule 2026-07-20** — "nothing mutates a subscription directly in Shopify" — deleted the old
+`src/lib/shopify-subscriptions.ts` and left `scripts/_check-no-shopify-sub-mutations.ts` behind so
+"the module can't come back one helper at a time."
+
+**Superseded in part, CEO 2026-09-09** (the Appstle-removal program): a Shopify subscription
+mutation now has exactly ONE sanctioned home — this file — and the guard carries a narrow
+`IMPLEMENTATION_ALLOW_LIST` naming only this path. That list is deliberately separate from
+`PROSE_ALLOW_LIST` (which permits *naming* a mutation, not *calling* it), and it must stay at
+exactly one entry: **a second entry means a caller is reaching Shopify outside the chokepoint,
+which is the thing the rule forbids.** Verified after the carve-out that a forbidden mutation in
+any other file still fails the guard red.
 
 ## Status
 

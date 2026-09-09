@@ -16,6 +16,14 @@
  * 2026-07-20 while triaging a stale PR. The module it called, `src/lib/shopify-subscriptions.ts`,
  * was deleted in the same change once that last caller was gone.
  *
+ * ⭐ **Superseded in part (CEO, 2026-09-09) — the Appstle-removal program.** ShopCX is replacing
+ * Appstle with its own Shopify subscription client, so a Shopify subscription mutation now has
+ * exactly ONE sanctioned home: `src/lib/commerce/shopify-subscription-client.ts`, which sits
+ * BEHIND the same commerce-SDK chokepoint and is reached only through it. The rule's actual
+ * protection — a caller never reaches a vendor API itself — is unchanged, and the guard stays
+ * hard for every other path so the module still cannot come back one helper at a time elsewhere.
+ * See [[../docs/brain/lifecycles/shopcx-subscriptions.md]].
+ *
  * This guard makes the rule mechanical: any NEW Shopify subscription-mutation GraphQL call
  * fails `predeploy` red instead of quietly becoming the next silent divergence. Read-only; never
  * mutates state. Mirrors the `_check-pm-sdk-compliance.ts` / `_check-pm-md-reads.ts` shape.
@@ -48,6 +56,18 @@ const PROSE_ALLOW_LIST = new Set<string>([
   "scripts/_gen-brain-libraries.ts", // brain-page description strings
 ]);
 
+/**
+ * The ONE file permitted to actually ISSUE these mutations (CEO, 2026-09-09 — see the header).
+ *
+ * Deliberately separate from `PROSE_ALLOW_LIST`: that list permits *naming* an identifier, this
+ * one permits *calling* it. Keep it to exactly one path — the vendor client behind the commerce
+ * SDK. Adding a second entry means a caller is reaching Shopify outside the chokepoint, which is
+ * the thing the rule forbids.
+ */
+const IMPLEMENTATION_ALLOW_LIST = new Set<string>([
+  "src/lib/commerce/shopify-subscription-client.ts",
+]);
+
 const SCAN_ROOTS = ["src", "scripts"];
 const SCAN_EXTENSIONS = [".ts", ".tsx"];
 
@@ -76,6 +96,7 @@ function main(): void {
     for (const file of walk(root)) {
       const rel = file.replace(/^\.\//, "");
       if (PROSE_ALLOW_LIST.has(rel)) continue;
+      if (IMPLEMENTATION_ALLOW_LIST.has(rel)) continue;
       if (rel.includes(".test.")) continue;
 
       const lines = readFileSync(file, "utf8").split("\n");

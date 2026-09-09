@@ -43,7 +43,7 @@ Common mutations used:
 - `orderCreate` / `orderUpdate` / `refundCreate`
 - `returnCreate` / `reverseFulfillmentOrderCreate` — see `src/lib/shopify-returns.ts`
 - `tagsAdd` / `tagsRemove` — for fraud holds
-- ~~`subscriptionContractUpdate` + `subscriptionDraftLineAdd/Remove/Update` + `subscriptionDraftCommit`~~ — **RETIRED 2026-07-20.** We never mutate a subscription in Shopify; every subscription write goes through [[../libraries/commerce__subscription]] (Appstle path or internal path). `src/lib/shopify-subscriptions.ts` was deleted once its last caller was removed, and `npm run check:no-shopify-sub-mutations` (chained into `predeploy`) fails the build on any new raw Shopify subscription mutation. See [[../operational-rules]] § Subscription mutations.
+- `subscriptionContractUpdate` + `subscriptionDraftLineAdd/Remove/Update` + `subscriptionDraftCommit` — **retired 2026-07-20, reinstated behind the SDK 2026-09-09.** A caller still never mutates a subscription in Shopify: every subscription write goes through [[../libraries/commerce__subscription]], which dispatches to the Appstle path, the internal path, or (as Appstle is removed) [[../libraries/commerce__shopify-subscription-client]]. That client is the ONLY file allowed to issue these mutations — `npm run check:no-shopify-sub-mutations` (chained into `predeploy`) still fails the build on a raw Shopify subscription mutation anywhere else, via a one-entry `IMPLEMENTATION_ALLOW_LIST`. See [[../operational-rules]] § Subscription mutations and [[../lifecycles/shopcx-subscriptions]].
 - `storeCreditAccountCredit` — see `src/lib/store-credit.ts`
 
 ## Rate limits + retry
