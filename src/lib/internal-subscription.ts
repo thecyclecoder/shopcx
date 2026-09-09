@@ -20,6 +20,7 @@
  * Anything that requires a Braintree charge (attemptBilling) is
  * stubbed for now — the renewal scheduler lands in a future commit.
  */
+import { endDunningForSubscription } from "@/lib/dunning";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { resolveSubscriptionPricing } from "@/lib/pricing";
 import { assertSwapDidNotRaise, type PriceGuardRefusal } from "@/lib/swap-price-assertion";
@@ -118,6 +119,14 @@ export async function internalSubscriptionAction(
   // portal detail, and agent context panel from surfacing a stale date.
   const patch: Record<string, unknown> = { status: statusMap[action], updated_at: new Date().toISOString() };
   if (action === "cancel") patch.next_billing_date = null;
+
+  // A pause or cancel ENDS dunning — same rule as the Appstle path. Internal subs reach
+  // here directly (appstleSubscriptionAction delegates before its own hook runs), so the
+  // close has to be repeated rather than inherited.
+  if (action === "pause" || action === "cancel") {
+    await endDunningForSubscription(workspaceId, contractId, action === "pause" ? "paused" : "cancelled");
+  }
+
   await admin
     .from("subscriptions")
     .update(patch)

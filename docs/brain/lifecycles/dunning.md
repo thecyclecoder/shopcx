@@ -69,6 +69,32 @@ The Cycle 1 action can also be configured to pause; Cycle 2 can be configured to
 
 The cycle row updates to `status='exhausted'` after action is taken.
 
+## ⭐ A pause or cancel ENDS dunning (CEO rule, 2026-09-09)
+
+The moment a subscription is paused or cancelled, every **open** dunning cycle on it closes —
+`endDunningForSubscription()` in `src/lib/dunning.ts`, called from the pause/cancel chokepoints
+in both `appstle.ts` (`appstleSubscriptionAction`) and `internal-subscription.ts`
+(`internalSubscriptionAction` — internal subs are delegated to before the Appstle hook runs, so
+the call is repeated rather than inherited). The payday cron also gates on `paused` as a belt.
+
+Two live failures this closed:
+
+1. The payday cron only checked `status === "cancelled"`, so a **customer-paused** sub kept being
+   retried. Four such subs were in the 2026-09-11 cohort about to be emailed "your payment failed,
+   update your card" for a subscription they had deliberately paused — one until 2026-10-30.
+2. Worse: `dunning-new-card-recovery` treats any open cycle on a paused sub as a "legacy paused"
+   sub, **resumes it and charges**. So a customer who paused and later updated their card for an
+   unrelated reason would be resumed and billed. With no open cycle, recovery cannot find them.
+
+**Only OPEN cycles close** (`active`/`rotating`/`retrying`/`skipped`). A cycle dunning itself drove
+to `exhausted` is deliberately left alone, which preserves Phase 5's intended behaviour that adding
+a card to a **dunning-cancelled** sub reactivates it. Closing is silent — status goes to
+`exhausted` with `terminal_error_code = 'subscription_paused'|'subscription_cancelled'`, and **no
+customer email is sent**; this is a close, not an exhaustion.
+
+Backfill on 2026-09-09 closed **64** pre-existing cycles sitting on paused/cancelled subs
+(`scripts/_backfill-end-dunning-on-paused-cancelled.ts`).
+
 ## Phase 5 — new-card recovery (customer-driven)
 
 If during ANY of the above, the customer updates their card in Shopify:
@@ -76,7 +102,7 @@ If during ANY of the above, the customer updates their card in Shopify:
 1. Shopify fires `customer_payment_methods/create` or `customer_payment_methods/update` webhook.
 2. Handler in `src/lib/dunning-webhook.ts`:
    - **Mirrors the card** into [[../tables/customer_payment_methods]] via `syncShopifyPaymentMethods()` (`provider='shopify'`) so the portal / dashboard / orchestrator can see it. Dunning rotation reads cards live from Shopify, but everything else reads this table, and it was Braintree-only before — so Appstle customers' cards were invisible until captured here.
-   - Checks for recoverable dunning cycles ([[../tables/dunning_cycles]] `status IN ('active','skipped','exhausted')`).
+   - Checks for recoverable dunning cycles ([[../tables/dunning_cycles]] `status IN ('active','skipped','exhausted')`). Note this deliberately includes `exhausted` so a dunning-CANCELLED sub reactivates — which is also why a customer-paused sub must have its cycle closed at pause time, or this path would resume and charge it (see § A pause or cancel ENDS dunning).
 3. If any → fires `dunning/new-card-recovery`.
 
 **Gotcha (why this used to silently fail):** the cycle filter previously only matched `active`/`skipped`. But a sub that dunning *cancelled* leaves its cycle `exhausted` — so adding a card after cancellation never fired recovery, even though the recovery function is explicitly built to reactivate dunning-cancelled subs (Step 1b). `exhausted` is now included. (Fixed 2026-06-09.)
