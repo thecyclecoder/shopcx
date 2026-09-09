@@ -394,7 +394,60 @@ export async function updateDunningCycle(
 }
 
 /** Cycle states that are still "in flight" — a sub pause/cancel should close these. */
-const OPEN_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped"] as const;
+export const OPEN_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped"] as const;
+
+// ────────────────────────────────────────────────────────────────────────────────────────
+// Pure dunning decisions.
+//
+// Extracted so they can be pinned by tests. Every one of these was a live defect in the
+// week of 2026-09-09, and each was invisible because the decision lived inline inside an
+// Inngest step that no test could reach. Same idiom as `isRenewalAttemptStale` and
+// `filterCandidatesByDunningRetryWindow`.
+// ────────────────────────────────────────────────────────────────────────────────────────
+
+/** Is this cycle still in flight (and therefore closable by a sub pause/cancel)? */
+export function isOpenDunningStatus(status: string | null | undefined): boolean {
+  return !!status && (OPEN_DUNNING_STATUSES as readonly string[]).includes(status);
+}
+
+/**
+ * Must the payday cron STOP retrying because of the subscription's own state?
+ *
+ * Gated only on "cancelled" until 2026-09-09, so customer-PAUSED subs kept being billed and
+ * would have received "your payment failed, update your card" for a subscription they had
+ * deliberately paused — one until 2026-10-30.
+ */
+export function shouldHaltRetryForSubStatus(subStatus: string | null | undefined): boolean {
+  return !subStatus || subStatus === "cancelled" || subStatus === "paused";
+}
+
+/**
+ * Has this cycle used up its payday retries?
+ *
+ * The cron had no cap at all: its only exit asked `getNextPaydayDates()` for a future payday,
+ * which ALWAYS returns one, so the "exhausted" branch was unreachable. Combined with a
+ * hardcoded `attemptNumber: 0` on every logged attempt, one cycle reached 192 attempts.
+ * A null/undefined count must read as 0, never as "cap reached".
+ */
+export function shouldExhaustForRetryCap(
+  paydayRetryCount: number | null | undefined,
+  max: number,
+): boolean {
+  return (paydayRetryCount ?? 0) >= max;
+}
+
+/**
+ * Which terminal action does this cycle get — skip, pause or cancel?
+ *
+ * Cycle 1 gets the gentle action, cycle 2+ the hard one. A null cycle_number must fall back
+ * to cycle 1 (the gentler branch), never to cancel.
+ */
+export function resolveCycleAction(
+  cycleNumber: number | null | undefined,
+  settings: { dunning_cycle_1_action: string; dunning_cycle_2_action: string },
+): string {
+  return (cycleNumber ?? 1) >= 2 ? settings.dunning_cycle_2_action : settings.dunning_cycle_1_action;
+}
 
 /**
  * End dunning for a subscription because the SUB itself was paused or cancelled.

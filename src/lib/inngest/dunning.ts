@@ -19,6 +19,9 @@ import {
   getActiveDunningCyclesForCustomer,
   dunningInternalNote,
   isTerminalErrorCode,
+  shouldHaltRetryForSubStatus,
+  shouldExhaustForRetryCap,
+  resolveCycleAction,
 } from "@/lib/dunning";
 import {
   subscriptionAttemptBilling,
@@ -685,7 +688,7 @@ async function handleAllCardsExhausted(
   settings: { dunning_cycle_1_action: string; dunning_cycle_2_action: string },
 ) {
   const admin = createAdminClient();
-  const action = cycle.cycle_number >= 2 ? settings.dunning_cycle_2_action : settings.dunning_cycle_1_action;
+  const action = resolveCycleAction(cycle.cycle_number, settings);
 
   if (action === "skip") {
     // Appstle auto-skips on billing failure — don't skip again
@@ -981,7 +984,7 @@ export const dunningPaydayRetryCron = inngest.createFunction(
           // so customer-paused subs kept getting billed and emailed. Belt to
           // endDunningForSubscription's braces: that closes the cycle at pause time, this
           // catches anything already in flight or paused outside the chokepoint.
-          if (!sub || sub.status === "cancelled" || sub.status === "paused") {
+          if (shouldHaltRetryForSubStatus(sub?.status)) {
             await updateDunningCycle(cycle.id, {
               status: "exhausted",
               next_retry_at: null,
@@ -1005,7 +1008,7 @@ export const dunningPaydayRetryCron = inngest.createFunction(
         // the cycle rather than being derived from payment_failures because that table has no
         // cycle_id to scope by.
         const paydayRetriesSoFar = cycle.payday_retry_count ?? 0;
-        if (paydayRetriesSoFar >= MAX_PAYDAY_RETRIES) {
+        if (shouldExhaustForRetryCap(paydayRetriesSoFar, MAX_PAYDAY_RETRIES)) {
           console.log(`[Dunning Payday] Contract ${cycle.shopify_contract_id}: ${paydayRetriesSoFar}/${MAX_PAYDAY_RETRIES} payday retries used — exhausting instead of rescheduling.`);
           return await exhaustPaydayCycle(cycle, settings);
         }
