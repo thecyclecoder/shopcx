@@ -1,5 +1,9 @@
 # appstle
 
+> **Being replaced.** Appstle is a wrapper around Shopify's own subscription APIs plus a
+> scheduler; nearly every function here maps 1:1 onto a Shopify mutation. The replacement
+> design is [[../lifecycles/shopcx-subscriptions]].
+
 Appstle Subscriptions API. Per-workspace credentials. Subscription contracts live here today; we mirror in `subscriptions` and will become source of truth post-cutover.
 
 ## Auth
