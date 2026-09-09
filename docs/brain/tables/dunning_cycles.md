@@ -89,7 +89,7 @@ const { count } = await admin.from("dunning_cycles")
 
 ## Gotchas
 
-- **`payday_retry_count` caps the payday path.** Incremented per attempt by [[../inngest/dunning]] `dunning-payday-retry-cron`, capped at `MAX_PAYDAY_RETRIES = 4`. Added 2026-09-09 — before it the cron had no cap and one cycle reached 192 attempts. Existing cycles start at 0 by design (backfilling would exhaust ~509 at once and blast their customers with payment-recovery emails).
+- **`payday_retry_count` caps the payday path.** Incremented per attempt by [[../inngest/dunning]] `dunning-payday-retry-cron`, capped at `MAX_PAYDAY_RETRIES = 4`. Added 2026-09-09 — before it the cron had no cap and one cycle reached 192 attempts. Pre-existing cycles were seeded to `least(retries already made, 3)` — a runaway cycle gets exactly one more attempt so it reaches the exhaustion path (closing email + cycle action) instead of being granted a fresh 4. See `scripts/_backfill-dunning-payday-retry-count.ts`.
 
 - Status: production values (as of probe): `retrying`, `recovered`, `exhausted`, `skipped`, `active` (**lowercase**). Most rows are `retrying` (in-flight) or `recovered` (success). `active` is rare and short-lived. No `paused` state on this row — pausing the SUB is a `payment_failures` event + `subscriptions.status='paused'`.
 - Per-(subscription, billing cycle). Don't conflate with `payment_failures` which is per-attempt within a cycle.
