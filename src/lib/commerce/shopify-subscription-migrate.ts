@@ -103,6 +103,38 @@ export interface MigrationPlan {
   newTotalCents: number;
 }
 
+/**
+ * Reproduce Shopify's own discount arithmetic, per LINE, in cents.
+ *
+ * Measured on contract 35945218221 (the first multi-discount migration) rather than assumed:
+ * discounts stack MULTIPLICATIVELY and SEQUENTIALLY, each allocation computed on the running
+ * remainder of the LINE TOTAL and then TRUNCATED to cents — not rounded.
+ *
+ *   base 79.95 x1 -> S&S 25% = trunc(19.9875) = 19.98
+ *                 -> vol 12% = trunc((79.95-19.98) x 0.12) = trunc(7.1964) = 7.19
+ *                 -> line = 79.95 - 19.98 - 7.19 = 52.78
+ *
+ * Getting this exactly right is not pedantry: the grandfather lock is `standard - current`, so a
+ * one-cent error in `standard` is a one-cent error in the price we promised to preserve. (An
+ * additive model would have produced $50.37 against the real $52.78 — measured, not guessed.)
+ */
+export function shopifyLineMath(
+  baseCents: number,
+  quantity: number,
+  snsPct: number,
+  breakPct: number,
+  grandfatherUnitCents = 0,
+): { standardUnitCents: number; lineTotalCents: number } {
+  const lineBase = baseCents * quantity;
+  const sns = Math.trunc((lineBase * snsPct) / 100);
+  const brk = Math.trunc(((lineBase - sns) * breakPct) / 100);
+  const standardLine = lineBase - sns - brk;
+  return {
+    standardUnitCents: Math.trunc(standardLine / quantity),
+    lineTotalCents: standardLine - grandfatherUnitCents * quantity,
+  };
+}
+
 export function breakPctForQty(breaks: { quantity: number; discount_pct: number }[], qty: number): number {
   if (!breaks?.length) return 0;
   const exact = breaks.find((b) => b.quantity === qty);
@@ -225,7 +257,11 @@ export function planMigration(
     }
 
     const base = variant.price_cents;
-    const standard = onRule ? Math.round(base * (1 - breakPct / 100) * (1 - ctx.snsPct / 100)) : base;
+    // ⭐ Shopify's arithmetic, not ours — see shopifyLineMath. A cent of drift here becomes a cent
+    // of drift in the grandfathered price we promised to preserve exactly.
+    const standard = onRule
+      ? shopifyLineMath(base, qty, ctx.snsPct, breakPct).standardUnitCents
+      : base;
     // Grandfather only ever REDUCES. Where standard is already cheaper the customer takes it.
     const grandfather = currentUnit > 0 && currentUnit < standard ? standard - currentUnit : 0;
     return {
@@ -470,6 +506,14 @@ export async function executeMigration(
   // MailingAddressInput accepts only these fields; the Appstle payload also carries __typename,
   // country, countryCodeV2, name and province, every one of which is rejected.
   const dm = norm.delivery_method as { address?: Record<string, unknown>; shippingOption?: Record<string, unknown> } | null;
+  // ⭐ 20 migratable contracts have NO deliveryMethod from Appstle and no shipping_address in our
+  // mirror. They still ship — to the payment method's BILLING address, which is what Shopify falls
+  // back to when a subscription has no shipping address (CEO, 2026-09-10). So use it rather than
+  // blocking a live subscription over a missing field.
+  const billingAddr = (fresh.raw as {
+    customerPaymentMethod?: { instrument?: { billingAddress?: Record<string, unknown> } };
+  }).customerPaymentMethod?.instrument?.billingAddress;
+  const addrSource = dm?.address && Object.keys(dm.address).length ? dm.address : billingAddr;
   const pick = (o: Record<string, unknown> | undefined, keys: string[]) =>
     Object.fromEntries(keys.filter((k) => o?.[k] != null && o[k] !== "").map((k) => [k, (o as Record<string, unknown>)[k]]));
 
@@ -503,7 +547,7 @@ export async function executeMigration(
       deliveryPrice: "0.00",
       deliveryMethod: {
         shipping: {
-          address: pick(dm?.address, ["address1","address2","city","company","countryCode","firstName","lastName","phone","provinceCode","zip"]),
+          address: pick(addrSource, ["address1","address2","city","company","countryCode","firstName","lastName","phone","provinceCode","zip"]),
           shippingOption: pick(dm?.shippingOption, ["title","presentmentTitle","description","code"]),
         },
       },
