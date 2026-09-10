@@ -23,7 +23,11 @@
  * `portal-action-healer` cron, so behaviour is identical.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { appstleUpdateNextBillingDate, appstleUpdateBillingInterval } from "@/lib/appstle";
+// ⭐ Vendor writes go through the commerce SDK, never the Appstle wrapper directly. Calling the
+// vendor straight bypasses billing_source resolution, so a migrated subscription's change would
+// hit Appstle for a contract it no longer holds — failing there and returning BEFORE the local
+// write, leaving the customer's change silently unapplied.
+import { subscriptionUpdateNextBillingDate, subscriptionUpdateBillingInterval } from "@/lib/commerce/subscription";
 
 const PORTAL_FAIL_TAG = "portal-action-failed";
 // Route slugs the portal uses for a cancel (see src/lib/portal/handlers/index.ts).
@@ -233,7 +237,7 @@ export async function healPortalAction(
       const contractId = String(ctx.payload?.contractId || "");
       const date = String(ctx.payload?.nextBillingDate || "");
       if (!contractId || !date) return { success: false, error: "missing contractId/nextBillingDate in payload" };
-      const r = await appstleUpdateNextBillingDate(workspaceId, contractId, date);
+      const r = await subscriptionUpdateNextBillingDate(workspaceId, contractId, date);
       if (!r.success) return { success: false, error: r.error || "date update failed" };
       const iso = /^\d{4}-\d{2}-\d{2}$/.test(date) ? `${date}T00:00:00Z` : date;
       await admin
@@ -261,7 +265,7 @@ export async function healPortalAction(
       if (intervalRaw !== "DAY" && intervalRaw !== "WEEK" && intervalRaw !== "MONTH" && intervalRaw !== "YEAR") {
         return { success: false, error: `invalid interval "${String(ctx.payload?.interval ?? "")}" (expected DAY/WEEK/MONTH/YEAR)` };
       }
-      const r = await appstleUpdateBillingInterval(workspaceId, contractId, intervalRaw, intervalCount);
+      const r = await subscriptionUpdateBillingInterval(workspaceId, contractId, intervalRaw, intervalCount);
       if (!r.success) return { success: false, error: r.error || "frequency update failed" };
       return { success: true, detail: `frequency set to every ${intervalCount} ${intervalRaw.toLowerCase()}(s)` };
     }

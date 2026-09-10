@@ -1,6 +1,10 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, addDaysFromNow, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch } from "@/lib/portal/helpers";
-import { appstleSubscriptionAction } from "@/lib/appstle";
+// ⭐ Vendor writes go through the commerce SDK, never the Appstle wrapper directly. Calling the
+// vendor straight bypasses billing_source resolution, so a migrated subscription's change would
+// hit Appstle for a contract it no longer holds — failing there and returning BEFORE the local
+// write, leaving the customer's change silently unapplied.
+import { subscriptionAction } from "@/lib/commerce/subscription";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -26,8 +30,13 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
     // 1) Set next billing date — Appstle subs go through the Appstle API; internal
     //    subs get their date from the DB update below (no Appstle contract exists).
     if (!resolved?.is_internal) {
-      const { healOnTouch } = await import("@/lib/appstle-pricing");
-      await healOnTouch(auth.workspaceId, String(contractId));
+      // healOnTouch repairs APPSTLE-side pricing; a ShopCX-billed contract isn't in Appstle at
+      // all, so calling it would reach a contract the vendor no longer has.
+      const { resolveBillingSource } = await import("@/lib/internal-subscription");
+      if ((await resolveBillingSource(auth.workspaceId, String(contractId))) === "appstle") {
+        const { healOnTouch } = await import("@/lib/appstle-pricing");
+        await healOnTouch(auth.workspaceId, String(contractId));
+      }
       const admin = createAdminClient();
       const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
       if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");
@@ -40,7 +49,7 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
     }
 
     // 2) Resume subscription (wrapper is internal-aware)
-    const result = await appstleSubscriptionAction(auth.workspaceId, String(contractId), "resume");
+    const result = await subscriptionAction(auth.workspaceId, String(contractId), "resume");
     if (!result.success) throw new Error(result.error || "Resume failed");
   } catch (e) {
     return handleAppstleError(e);

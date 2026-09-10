@@ -1,7 +1,11 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { appstleSubscriptionAction } from "@/lib/appstle";
+// ⭐ Vendor writes go through the commerce SDK, never the Appstle wrapper directly. Calling the
+// vendor straight bypasses billing_source resolution, so a migrated subscription's change would
+// hit Appstle for a contract it no longer holds — failing there and returning BEFORE the local
+// write, leaving the customer's change silently unapplied.
+import { subscriptionAction } from "@/lib/commerce/subscription";
 
 export const resume: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -17,7 +21,7 @@ export const resume: RouteHandler = async ({ auth, route, req }) => {
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
 
   // Route through the internal-aware wrapper (handles is_internal vs Appstle).
-  const resumeResult = await appstleSubscriptionAction(auth.workspaceId, String(contractId), "resume");
+  const resumeResult = await subscriptionAction(auth.workspaceId, String(contractId), "resume");
   if (!resumeResult.success) return handleAppstleError(new Error(resumeResult.error || "Resume failed"));
 
   // Update our DB: clear pause, set active

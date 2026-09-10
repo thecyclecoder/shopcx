@@ -1,6 +1,10 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
-import { appstleUpdateBillingInterval } from "@/lib/appstle";
+// ⭐ Vendor writes go through the commerce SDK, never the Appstle wrapper directly. Calling the
+// vendor straight bypasses billing_source resolution, so a migrated subscription's change would
+// hit Appstle for a contract it no longer holds — failing there and returning BEFORE the local
+// write, leaving the customer's change silently unapplied.
+import { subscriptionUpdateBillingInterval } from "@/lib/commerce/subscription";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { shouldBlockForFailedPayment } from "@/lib/portal/failed-payment-guard";
 
@@ -36,7 +40,7 @@ export const frequency: RouteHandler = async ({ auth, route, req }) => {
     return jsonErr({ error: "payment_failed_update_blocked", message: "This subscription has a failed payment. Update your payment method or cancel before changing frequency." }, 409);
   }
 
-  const result = await appstleUpdateBillingInterval(auth.workspaceId, String(contractId), intervalRaw, intervalCount);
+  const result = await subscriptionUpdateBillingInterval(auth.workspaceId, String(contractId), intervalRaw, intervalCount);
   if (!result.success) {
     return jsonErr({ error: "frequency_update_failed", message: result.error }, 502);
   }

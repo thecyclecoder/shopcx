@@ -53,6 +53,46 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
     return jsonErr({ error: guard.reason, message: guard.message }, 409);
   }
 
+  // ⭐ ShopCX-billed subs take a different shape entirely. The Appstle flow is
+  // getUpcomingOrders -> attemptBilling(ATTEMPT id); a Shopify contract has no Appstle attempts, so
+  // there is nothing to look up — we charge the contract directly, addressing the cycle that
+  // contains its billing date. Routing this through the SDK is impossible: by the time control
+  // reaches subscriptionAttemptBilling the contract id has already been traded for an attempt id.
+  const { resolveBillingSource } = await import("@/lib/internal-subscription");
+  if ((await resolveBillingSource(auth.workspaceId, String(contractId))) === "shopcx") {
+    const { shopifyAttemptBilling, awaitBillingAttempt } = await import("@/lib/commerce/shopify-subscription-client");
+    const { cycleKeyFromNextBillingDate } = await import("@/lib/subscription-cycle-charge-claim");
+    const due = (resolved as { next_billing_date?: string | null }).next_billing_date ?? null;
+    const cycleKey = cycleKeyFromNextBillingDate(due);
+    // Same idempotency key the renewal worker would use for this cycle, so a portal "order now"
+    // and the nightly cron cannot both charge it.
+    const started = await shopifyAttemptBilling(
+      auth.workspaceId, String(contractId), `${contractId}:${cycleKey}`,
+      due ? { billingCycleSelector: { date: due } } : {},
+    );
+    if (!started.success || !started.attemptId) {
+      return jsonErr({ error: "billing_failed", message: started.error ?? "Could not start billing." }, 502);
+    }
+    const outcome = await awaitBillingAttempt(auth.workspaceId, started.attemptId);
+    if (outcome.pending) {
+      return jsonOk({ ok: true, pending: true, message: "Your order is being processed." });
+    }
+    if (!outcome.success) {
+      return jsonErr({ error: "billing_failed", message: outcome.error ?? "Payment was declined." }, 502);
+    }
+    const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
+    if (customer) {
+      await logPortalAction({
+        workspaceId: auth.workspaceId, customerId: customer.id,
+        eventType: "portal.order_now",
+        summary: "Customer triggered immediate billing via portal (ShopCX-billed contract)",
+        properties: { shopify_contract_id: String(contractId), order: outcome.orderName ?? null, cycle_key: cycleKey },
+        createNote: true,
+      });
+    }
+    return jsonOk({ ok: true, order: outcome.orderName ?? null });
+  }
+
   const ordersRes = await appstleGetUpcomingOrders(auth.workspaceId, String(contractId));
   if (!ordersRes.success || !ordersRes.orders?.length) {
     return jsonErr({ error: "no_upcoming_orders", message: "No upcoming orders found to bill." }, 400);
