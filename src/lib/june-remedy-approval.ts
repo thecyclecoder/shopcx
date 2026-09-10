@@ -100,6 +100,36 @@ export function isNonOrderScopedLoyaltyAction(
   return true;
 }
 
+/**
+ * True when a MONEY-typed step is a FREE replacement — `create_replacement_order`, always
+ * shipped at a 100% discount by `createReplacementDraftOrder` in shopify-draft-orders.ts
+ * (`appliedDiscount.value = 100`) and by `createReplacementOrder` in replacement-order.ts
+ * (`appliedDiscount: { value: 100.0, valueType: "PERCENTAGE" }`). The replacement is a
+ * FRESH order — it does NOT draw from the original order's refund ledger. So the
+ * order-scoped refund-headroom rail in `verifyPlanAgainstRemedyStates` (which fails closed
+ * on `headroom_confidence != "live"`) does not apply: there is no headroom to check because
+ * no money moves on the original order.
+ *
+ * `create_replacement_order` remains in `MONEY_ACTION_TYPES` — the founder-approval gate
+ * still fires because a $0-discount replacement still costs the business in COGS + shipping.
+ * The absent `amount_cents` collapses the founder gate to null → gate, so a human still
+ * signs off on a make-whole replacement above threshold. Only the double-pay rail is bypassed.
+ *
+ * `dollar_replacement` is DELIBERATELY excluded — it refunds `replacement_amount_cents`
+ * back on the original order and MUST stay inside the order-scoped rail.
+ *
+ * Derived-from ticket `1aea6114-7417-421f-99d0-05cce22f2ff6` — an internal renewal (SHOPCX272)
+ * whose replacement was hard-refused because the internal order has no Shopify refund ledger
+ * so `headroom_confidence` was never "live" → permanent needs_attention.
+ * Pure. Mirrors [[isNonOrderScopedLoyaltyAction]] in shape.
+ */
+export function isNonRefundReplacementAction(
+  actionType: string,
+  _actionParams: Record<string, unknown>,
+): boolean {
+  return actionType === "create_replacement_order";
+}
+
 /** The `tool_name` on the god_mode_approvals card that carries a parked June remedy. */
 export const JUNE_REMEDY_TOOL = "june_remedy";
 /** The decision category (drives standing "don't ask again" grants). */

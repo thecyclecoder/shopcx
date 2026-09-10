@@ -29,6 +29,7 @@ import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { loggedActionFetch } from "@/lib/appstle-call-log";
 import { normalizeCountryToIso2Strict } from "@/lib/country-iso2";
+import { resolveShopifyVariantId } from "@/lib/product-variants";
 
 /**
  * Hard ceiling on units of a single variant per replacement. The CEO set
@@ -239,7 +240,33 @@ export function buildReplacementDraftOrderInput(
 export async function createReplacementOrder(input: CreateReplacementInput): Promise<CreateReplacementResult> {
   const admin = createAdminClient();
 
-  // ── 0. Refuse an over-cap request BEFORE we insert or call Shopify.
+  // ── 0a. Normalise every incoming variant reference to a numeric Shopify
+  // variant id. An internally-billed renewal (SHOPCX*, no shopify_order_id)
+  // carries `product_variants.id` UUIDs on its line items — passing a UUID
+  // through unchanged surfaces to Shopify as the opaque "Product with ID X
+  // is no longer available" and escalates every internal-order replacement
+  // to a human. Ticket 1aea6114 is the ground truth. Passthrough for a
+  // numeric Shopify id; the whole batch is refused up front if any variant
+  // is unresolvable (internal-only variant with no Shopify counterpart, or
+  // a bad ref) — better a specific failure here than an opaque Shopify
+  // rejection with a half-created draft.
+  const resolvedItems: typeof input.items = [];
+  for (const it of input.items) {
+    const sid = await resolveShopifyVariantId(input.workspaceId, it.variantId);
+    if (!sid) {
+      const label = it.title ? `${it.title} (${it.variantId})` : it.variantId;
+      return {
+        success: false,
+        replacementId: "",
+        shopifyOrderName: null,
+        error: `Replacement variant not on Shopify: ${label} — no shopify_variant_id for this product_variants row`,
+      };
+    }
+    resolvedItems.push({ ...it, variantId: sid });
+  }
+  input = { ...input, items: resolvedItems };
+
+  // ── 0b. Refuse an over-cap request BEFORE we insert or call Shopify.
   // The CEO ceiling (REPLACEMENT_MAX_UNITS_PER_VARIANT) is enforced here
   // in the SDK so every caller inherits it. We do NOT silently truncate
   // — the caller decides whether to split, drop the excess, or escalate.

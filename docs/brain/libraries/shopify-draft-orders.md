@@ -64,6 +64,19 @@ async function createAndCompleteReplacement(workspaceId: string, input: Replacem
   'US', and non-US full names → ISO-2 with 'US' fallback. Grounded in ticket
   SC132896 (Catherine Green — carrier-lost replacement that failed when
   countryCode was 'United States'). Cross-linked with [[replacement-order]].
+- **Every incoming `variantId` is resolved to a numeric Shopify variant id
+  before the GID is built.** An internally-billed renewal (SHOPCX*, no
+  `shopify_order_id`) references our `product_variants.id` UUID on its line
+  items — passing that straight through as
+  `gid://shopify/ProductVariant/<uuid>` surfaces to the API as the opaque
+  "Product with ID X is no longer available" and escalates every internal-order
+  replacement to a human. `createReplacementDraftOrder` now calls
+  [[product-variants]] `resolveShopifyVariantId(workspaceId, ref)` per line
+  item; a numeric id passes through, a UUID looks up its
+  `shopify_variant_id`, and an unresolvable ref throws a specific error
+  ("variant X has no shopify_variant_id — internal-only variant, cannot ship
+  via Shopify") instead of leaking Shopify's opaque message. Ticket
+  `1aea6114-7417-421f-99d0-05cce22f2ff6` (SHOPCX272) is the ground truth.
 
 ## Status / open work
 

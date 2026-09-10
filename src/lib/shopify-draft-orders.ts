@@ -4,6 +4,7 @@
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { normalizeCountryToIso2 } from "@/lib/country-iso2";
+import { resolveShopifyVariantId } from "@/lib/product-variants";
 
 export interface ReplacementLineItem {
   variantId: string; // Shopify variant ID (numeric, not GID)
@@ -138,12 +139,30 @@ async function shopifyGraphQL(
 /**
  * Create a $0 draft order for replacement items.
  * Uses 100% discount so no coupon codes are needed.
+ *
+ * An internally-billed renewal (SHOPCX*, no shopify_order_id) carries our
+ * `product_variants.id` UUIDs on its line items — pass those in directly.
+ * We resolve every incoming variantId to its numeric Shopify id via
+ * `resolveShopifyVariantId` before building the GID, so a UUID that never
+ * saw Shopify surfaces as a specific error here instead of the opaque
+ * "Product with ID X is no longer available" from Shopify (ticket 1aea6114).
  */
 export async function createReplacementDraftOrder(
   workspaceId: string,
   input: ReplacementOrderInput,
 ): Promise<CreatedDraftOrder> {
   const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+
+  const resolvedLineItems: ReplacementLineItem[] = [];
+  for (const li of input.lineItems) {
+    const sid = await resolveShopifyVariantId(workspaceId, li.variantId);
+    if (!sid) {
+      throw new Error(
+        `Draft order creation failed: variant ${li.title || li.variantId} has no shopify_variant_id (internal-only variant — cannot ship via Shopify)`,
+      );
+    }
+    resolvedLineItems.push({ ...li, variantId: sid });
+  }
 
   const mutation = `
     mutation draftOrderCreate($input: DraftOrderInput!) {
@@ -164,7 +183,7 @@ export async function createReplacementDraftOrder(
 
   const variables = {
     input: {
-      lineItems: input.lineItems.map((item) => ({
+      lineItems: resolvedLineItems.map((item) => ({
         variantId: `gid://shopify/ProductVariant/${item.variantId}`,
         quantity: item.quantity,
       })),
