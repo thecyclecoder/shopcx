@@ -76,6 +76,10 @@ import {
   internalSubscriptionRenewalCron,
   internalSubscriptionRenewalAttempt,
 } from "@/lib/inngest/internal-subscription-renewals";
+import {
+  shopifySubscriptionRenewalCron,
+  shopifySubscriptionRenewalAttempt,
+} from "@/lib/inngest/shopify-subscription-renewals";
 import { migrationAuditRetryCron } from "@/lib/inngest/migration-audit-retry";
 import { migrationIntegritySweepCron } from "@/lib/inngest/migration-integrity-sweep";
 import { metaCapiDispatchCron } from "@/lib/inngest/meta-capi-dispatch";
@@ -262,6 +266,8 @@ export const registeredInngestFunctions = [
   amplifierWebhookProcess,
   internalSubscriptionRenewalCron,
   internalSubscriptionRenewalAttempt,
+  shopifySubscriptionRenewalCron,
+  shopifySubscriptionRenewalAttempt,
   migrationAuditRetryCron,
   migrationIntegritySweepCron,
   metaCapiDispatchCron,

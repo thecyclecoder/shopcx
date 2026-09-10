@@ -463,6 +463,15 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 30 * HOUR,
   },
   {
+    id: "shopify-subscription-renewal-cron",
+    kind: "cron",
+    owner: "retention",
+    label: "Shopify subscription renewals",
+    description: "Daily fan-out of due renewals for subs our Shopify app bills (billing_source='shopcx'). Shopify fires nothing on its own — if this stops, migrated subs stop earning.",
+    expectedCadence: "daily (0 10 * * *)",
+    livenessWindowMs: 30 * HOUR,
+  },
+  {
     id: "internal-subscription-renewal-cron",
     kind: "cron",
     owner: "retention",
