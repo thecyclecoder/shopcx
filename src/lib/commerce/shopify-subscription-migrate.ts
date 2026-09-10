@@ -544,8 +544,17 @@ export async function executeMigration(
       paymentMethodId: norm.payment_method_id,
       billingPolicy: { interval: norm.billing_interval, intervalCount: norm.billing_interval_count },
       deliveryPolicy: { interval: norm.billing_interval, intervalCount: norm.billing_interval_count },
-      // Free shipping is structural (the pricing rule carries it), never a copied discount.
-      deliveryPrice: "0.00",
+      // ⭐ CARRY the customer's existing shipping charge — do NOT zero it.
+      //
+      // The pricing rule grants free shipping, but that rule governs NEW subscriptions. 1,620
+      // active contracts pay $4.95 from a period when free shipping was not offered on all subs
+      // (CEO, 2026-09-10), and a legacy shipping term is a term of their subscription exactly like
+      // a legacy unit price — which this migration preserves in 1,916 places. Zeroing it here
+      // would hand those customers an unrequested ~$8,019/cycle upgrade on a migration that is
+      // supposed to be structural, and would be inconsistent with how every other legacy term is
+      // treated. New subscriptions still get free shipping from the rule; migrated ones keep what
+      // they have.
+      deliveryPrice: ((norm.delivery_price_cents ?? 0) / 100).toFixed(2),
       deliveryMethod: {
         shipping: {
           address: pick(addrSource, ["address1","address2","city","company","countryCode","firstName","lastName","phone","provinceCode","zip"]),

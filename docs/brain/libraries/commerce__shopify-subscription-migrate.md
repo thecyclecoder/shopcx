@@ -50,6 +50,7 @@ sit below standard and get preserved rather than nudged.
 | `$0` line dropped | a $0 consumable is invalid on a live sub; all such lines had already shipped and were stale |
 | protection: own price, no S&S, no break, excluded from mix qty, qty≤1 | it is a passthrough digital add-on, not a consumable |
 | structural discounts **recomputed**, never copied | copying a stored tier is exactly how 386 contracts froze at the wrong quantity break |
+| **shipping charge CARRIED, not zeroed** | the rule's free shipping governs NEW subs; 1,620 active contracts pay $4.95 from a period when free shipping wasn't offered on all subs. A legacy shipping term is a term of the subscription exactly like a legacy unit price — zeroing it is an unrequested ~$8,019/cycle giveaway and inconsistent with the 1,916 grandfather locks. |
 | customer codes carried only if `recurringCycleLimit`/`usageCount` allow | `usageCount` **resets to 0 on a new contract**, so a consumed one-use code would be re-granted |
 
 ## Ordering — every partial failure leaves the customer billed by SOMEONE
