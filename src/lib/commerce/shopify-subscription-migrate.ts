@@ -41,6 +41,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { fetchAppstleContract, normalizeAppstleContract } from "@/lib/appstle-snapshot";
+import { appstleCancelContractVendorOnly } from "@/lib/appstle";
 import {
   shopifyCreateContract,
   shopifyAddDraftDiscount,
@@ -454,7 +455,7 @@ export async function executeMigration(
   workspaceId: string,
   appstleContractId: string,
   ctx: PricingContext,
-  opts: { dryRun?: boolean; nextBillingDateOverride?: string } = {},
+  opts: { dryRun?: boolean; nextBillingDateOverride?: string; completeSwap?: boolean } = {},
 ): Promise<MigrationResult> {
   const admin = createAdminClient();
 
@@ -627,5 +628,122 @@ export async function executeMigration(
     return { ok: false, stage: "verify-pricing", error: mismatches.join("; "), plan, newContractId };
   }
 
-  return { ok: true, stage: "verified", plan, newContractId };
+  if (!opts.completeSwap) return { ok: true, stage: "verified", plan, newContractId };
+
+  // ─── The swap. Everything above is reversible; from here it is not. ───────────────────────
+  //
+  // Ordering is chosen so that EVERY partial failure leaves the customer billed by SOMEONE:
+  //
+  //   (a) point our row at the new contract and flip billing_source  -> we bill it
+  //   (b) cancel Appstle                                             -> they stop
+  //
+  // (a) before (b) deliberately. If we cancelled first and then failed to flip, the sub would be
+  // billed by NOBODY — silent revenue loss, the exact failure this whole design exists to prevent.
+  // Doing it this way, a failure between the two leaves BOTH engines believing they own it for a
+  // few seconds. That is survivable because Shopify fires nothing on its own and our renewal cron
+  // runs once daily, so a same-day double charge is not reachable; `migration_completed_at` stays
+  // null and the sweeper finishes the cancel.
+  const subId = (snap as { subscription_id: string | null }).subscription_id;
+  if (subId) {
+    const { error: subErr } = await admin
+      .from("subscriptions")
+      .update({
+        shopify_contract_id: newContractId.replace("gid://shopify/SubscriptionContract/", ""),
+        billing_source: "shopcx",
+        migrated_from_contract_id: appstleContractId,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", subId);
+    if (subErr) {
+      return { ok: false, stage: "swap-local", error: subErr.message, plan, newContractId };
+    }
+  }
+
+  const cancelled = await appstleCancelContractVendorOnly(workspaceId, appstleContractId);
+  if (!cancelled.success) {
+    // Local row already points at the new contract, so WE are billing it. Appstle may also still
+    // think it owns the sub — flagged for the sweeper rather than silently left.
+    return { ok: false, stage: "appstle-cancel", error: cancelled.error, plan, newContractId };
+  }
+
+  await admin
+    .from("appstle_contract_snapshots")
+    .update({ migration_completed_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
+    .eq("appstle_contract_id", appstleContractId);
+
+  return { ok: true, stage: "swapped", plan, newContractId };
+}
+
+export interface SweepRow {
+  appstleContractId: string;
+  newContractId: string;
+  subscriptionId: string | null;
+  billingSource: string | null;
+  state: "orphan_contract" | "half_swapped" | "complete";
+  action: string;
+}
+
+/**
+ * Find and finish migrations that stopped part-way.
+ *
+ * A row with `migrated_to_contract_id` set but `migration_completed_at` null is unfinished. Two
+ * very different shapes hide behind that, and conflating them would be dangerous:
+ *
+ *  - **orphan_contract** — a Shopify contract was created but the swap never started
+ *    (`billing_source` still 'appstle'). Appstle is still billing normally, so nothing is broken;
+ *    the new contract is inert. Reported, NEVER auto-cancelled: it may be a deliberate rehearsal,
+ *    and cancelling someone's replacement contract on a guess is worse than leaving it.
+ *  - **half_swapped** — our row already points at the new contract with `billing_source='shopcx'`,
+ *    but the Appstle cancel did not land. BOTH engines think they own the sub. This is the one
+ *    that must be finished promptly, because it is the only state where a double charge is
+ *    reachable. Fixing it is idempotent: cancel Appstle again.
+ */
+export async function sweepIncompleteMigrations(
+  workspaceId: string,
+  opts: { apply?: boolean } = {},
+): Promise<SweepRow[]> {
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("appstle_contract_snapshots")
+    .select("appstle_contract_id, subscription_id, migrated_to_contract_id")
+    .eq("workspace_id", workspaceId)
+    .not("migrated_to_contract_id", "is", null)
+    .is("migration_completed_at", null);
+
+  const rows: SweepRow[] = [];
+  for (const r of (data ?? []) as { appstle_contract_id: string; subscription_id: string | null; migrated_to_contract_id: string }[]) {
+    let billingSource: string | null = null;
+    if (r.subscription_id) {
+      const { data: sub } = await admin
+        .from("subscriptions").select("billing_source").eq("id", r.subscription_id).maybeSingle();
+      billingSource = (sub as { billing_source: string } | null)?.billing_source ?? null;
+    }
+    const halfSwapped = billingSource === "shopcx";
+    const row: SweepRow = {
+      appstleContractId: r.appstle_contract_id,
+      newContractId: r.migrated_to_contract_id,
+      subscriptionId: r.subscription_id,
+      billingSource,
+      state: halfSwapped ? "half_swapped" : "orphan_contract",
+      action: halfSwapped ? "cancel Appstle + stamp complete" : "report only — swap never started",
+    };
+
+    if (halfSwapped && opts.apply) {
+      const c = await appstleCancelContractVendorOnly(workspaceId, r.appstle_contract_id);
+      if (c.success) {
+        await admin
+          .from("appstle_contract_snapshots")
+          .update({ migration_completed_at: new Date().toISOString() })
+          .eq("workspace_id", workspaceId)
+          .eq("appstle_contract_id", r.appstle_contract_id);
+        row.state = "complete";
+        row.action = "cancelled Appstle, stamped complete";
+      } else {
+        row.action = `cancel FAILED: ${c.error}`;
+      }
+    }
+    rows.push(row);
+  }
+  return rows;
 }
