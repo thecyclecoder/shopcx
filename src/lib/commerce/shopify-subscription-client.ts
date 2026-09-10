@@ -527,6 +527,9 @@ export interface ContractLine {
   variantId: string | null;
   sku: string | null;
   currentPrice: string | null;
+  /** LINE TOTAL after discount allocations. Divide by quantity for the effective unit rate. */
+  lineDiscountedPrice: string | null;
+  discountAllocationCount: number;
   sellingPlanName: string | null;
 }
 
@@ -551,7 +554,9 @@ export async function getSubscriptionContract(
         customerPaymentMethod { id }
         lines(first:50){ pageInfo { hasNextPage } edges { node { id title quantity sellingPlanName sku
           variantId
-          currentPrice { amount } } } } } }`,
+          currentPrice { amount }
+          lineDiscountedPrice { amount }
+          discountAllocations { amount { amount } } } } } } }`,
     { id: contractGid(contractId) },
   );
   if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
@@ -559,7 +564,7 @@ export async function getSubscriptionContract(
     id: string; status: string; nextBillingDate: string | null;
     billingPolicy?: { interval: string; intervalCount: number };
     customerPaymentMethod?: { id: string };
-    lines: { edges: { node: { id: string; title: string; quantity: number; sellingPlanName: string | null; variantId: string | null; sku: string | null; currentPrice?: { amount: string } } }[] };
+    lines: { edges: { node: { id: string; title: string; quantity: number; sellingPlanName: string | null; variantId: string | null; sku: string | null; currentPrice?: { amount: string }; lineDiscountedPrice?: { amount: string }; discountAllocations?: unknown[] } }[] };
   } | undefined;
   if (!k) return { success: false, error: "contract not found (or not owned by this app)" };
   return {
@@ -578,6 +583,8 @@ export async function getSubscriptionContract(
         variantId: e.node.variantId,
         sku: e.node.sku,
         currentPrice: e.node.currentPrice?.amount ?? null,
+        lineDiscountedPrice: e.node.lineDiscountedPrice?.amount ?? null,
+        discountAllocationCount: Array.isArray(e.node.discountAllocations) ? e.node.discountAllocations.length : 0,
         sellingPlanName: e.node.sellingPlanName,
       })),
     },
