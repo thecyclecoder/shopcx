@@ -16,6 +16,18 @@
  *
  * MUTATION: Every subscription mutation flows through here as one canonical
  * subscriptionX surface (renaming the current appstleX + subX exports).
+ * ⭐ Each op resolves THREE engines via `resolveBillingSource`, not two.
+ *
+ * `isInternalSubscription` answered a two-valued question that stopped being sufficient when the
+ * Appstle→ShopCX migration began. A migrated sub is `is_internal = false` — a Shopify contract WE
+ * own, not a Braintree sub — so an `isInternal ? internal : appstle` branch sent its writes to a
+ * vendor that no longer holds the contract. A cancel would fail at Appstle and return BEFORE the
+ * local `status='cancelled'` write, leaving the row active while the renewal cron kept billing a
+ * customer who had cancelled.
+ *
+ * Ops with no ShopCX equivalent yet return `shopcxUnsupported(...)` — LOUD, never a silent
+ * fall-through to Appstle. A visible refusal is recoverable; a write that vanishes is not.
+ *
  * Each op branches on isInternalSubscription() — internal → internalSub*
  * handlers; else → the existing appstleX / subX wrappers, which top-guard
  * with healOnTouch and handle the Appstle boundary.
@@ -41,6 +53,7 @@ import type {
 } from "./types";
 import {
   isInternalSubscription,
+  resolveBillingSource,
   internalSubscriptionAction,
   internalSubSkipNextOrder,
   internalSubUpdateBillingInterval,
@@ -48,6 +61,19 @@ import {
   internalSubUpdateShippingAddress,
   type ShippingAddressInput,
 } from "@/lib/internal-subscription";
+import {
+  applySubscriptionStatusTruth,
+  shopcxUnsupported,
+} from "@/lib/commerce/subscription-status-truth";
+import {
+  shopifySubscriptionAction,
+  shopifySetNextBillingDate,
+  shopifyUpdateBillingInterval,
+  shopifySwitchPaymentMethod,
+  shopifySkipBillingCycle,
+  getSubscriptionContract,
+  getUpcomingBillingCycles,
+} from "@/lib/commerce/shopify-subscription-client";
 import {
   appstleSubscriptionAction,
   appstleSkipNextOrder,
@@ -419,8 +445,19 @@ export async function subscriptionAction(
   cancelReason?: string,
   cancelledBy?: string,
 ): Promise<OpResult> {
-  if (await isInternalSubscription(workspaceId, contractId)) {
+  const src = await resolveBillingSource(workspaceId, contractId);
+  if (src === "internal") {
     return internalSubscriptionAction(workspaceId, contractId, action);
+  }
+  if (src === "shopcx") {
+    // ⭐ The vendor call is the easy half. The LOCAL half — cancel-truth, ending dunning, the
+    // customer status rollup — used to live inside appstleSubscriptionAction, so a migrated sub
+    // skipped all of it: the row stayed active, still advertised a future charge date, kept an
+    // open dunning cycle, and the renewal cron went on billing a customer who had cancelled.
+    const r = await shopifySubscriptionAction(workspaceId, contractId, action);
+    if (!r.success) return r;
+    await applySubscriptionStatusTruth(workspaceId, contractId, action);
+    return { success: true };
   }
   return appstleSubscriptionAction(workspaceId, contractId, action, cancelReason, cancelledBy);
 }
@@ -431,9 +468,11 @@ export async function subscriptionSkipNextOrder(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
-  if (await isInternalSubscription(workspaceId, contractId)) {
+  const src = await resolveBillingSource(workspaceId, contractId);
+  if (src === "internal") {
     return internalSubSkipNextOrder(workspaceId, contractId);
   }
+  if (src === "shopcx") return shopifySkipBillingCycle(workspaceId, contractId);
   return appstleSkipNextOrder(workspaceId, contractId);
 }
 
@@ -448,6 +487,9 @@ export async function subscriptionSkipUpcomingOrder(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    return shopifySkipBillingCycle(workspaceId, contractId);
+  }
   return appstleSkipUpcomingOrder(workspaceId, contractId);
 }
 
@@ -459,6 +501,9 @@ export async function subscriptionUnskipOrder(
   workspaceId: string,
   billingAttemptId: string,
 ): Promise<OpResult> {
+  // ⚠️ Addressed by Appstle BILLING-ATTEMPT id, so there is no contract to resolve an engine from.
+  // A ShopCX-billed sub has no Appstle attempts at all; its caller (dunning's payday retry) must
+  // be made engine-aware before this can route. Deliberately left Appstle-only.
   return appstleUnskipOrder(workspaceId, billingAttemptId);
 }
 
@@ -475,6 +520,18 @@ export async function subscriptionGetUpcomingOrders(
   orders?: { id: string; billingDate: string; status: string }[];
   error?: string;
 }> {
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    const cy = await getUpcomingBillingCycles(workspaceId, contractId, { first: 6 });
+    if (!cy.success) return { success: false, error: cy.error };
+    // Shape-compatible with the Appstle response, but note the `id` is a CYCLE INDEX, not an
+    // Appstle billing-attempt id — a caller that feeds it back into an attempt-id API will fail.
+    return {
+      success: true,
+      orders: (cy.cycles ?? [])
+        .filter((c) => c.status === "UNBILLED" && !c.skipped)
+        .map((c) => ({ id: String(c.index), billingDate: c.expectedDate, status: c.status })),
+    };
+  }
   return appstleGetUpcomingOrders(workspaceId, contractId);
 }
 
@@ -484,9 +541,11 @@ export async function subscriptionUpdateBillingInterval(
   interval: "DAY" | "WEEK" | "MONTH" | "YEAR",
   intervalCount: number,
 ): Promise<OpResult> {
-  if (await isInternalSubscription(workspaceId, contractId)) {
+  const src = await resolveBillingSource(workspaceId, contractId);
+  if (src === "internal") {
     return internalSubUpdateBillingInterval(workspaceId, contractId, interval, intervalCount);
   }
+  if (src === "shopcx") return shopifyUpdateBillingInterval(workspaceId, contractId, interval, intervalCount);
   return appstleUpdateBillingInterval(workspaceId, contractId, interval, intervalCount);
 }
 
@@ -495,9 +554,11 @@ export async function subscriptionUpdateNextBillingDate(
   contractId: string,
   nextBillingDate: string,
 ): Promise<OpResult> {
-  if (await isInternalSubscription(workspaceId, contractId)) {
+  const src = await resolveBillingSource(workspaceId, contractId);
+  if (src === "internal") {
     return internalSubUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
   }
+  if (src === "shopcx") return shopifySetNextBillingDate(workspaceId, contractId, nextBillingDate);
   return appstleUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
 }
 
@@ -512,6 +573,9 @@ export async function subscriptionSwitchPaymentMethod(
   // token → customer_payment_methods.is_default flip). Delegate to preserve
   // that path exactly; the wrapper top-guards with healOnTouch on the
   // Appstle branch.
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    return shopifySwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
+  }
   return appstleSwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
 }
 
@@ -519,6 +583,10 @@ export async function subscriptionSendPaymentUpdateEmail(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    // Vendor-email feature with no Shopify equivalent; needs our own Resend flow.
+    return shopcxUnsupported("send payment-update email");
+  }
   return appstleSendPaymentUpdateEmail(workspaceId, contractId);
 }
 
@@ -530,6 +598,9 @@ export async function subscriptionAddItem(
   variantId: string,
   quantity: number = 1,
 ): Promise<OpResult> {
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    return shopcxUnsupported("add line item");
+  }
   return subAddItem(workspaceId, contractId, variantId, quantity);
 }
 
@@ -538,6 +609,9 @@ export async function subscriptionRemoveItem(
   contractId: string,
   variantOrLine: string | { variantId?: string; lineGid?: string },
 ): Promise<OpResult & { alreadyAbsent?: boolean }> {
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    return shopcxUnsupported("remove line item");
+  }
   return subRemoveItem(workspaceId, contractId, variantOrLine);
 }
 
@@ -547,6 +621,9 @@ export async function subscriptionChangeQuantity(
   variantId: string,
   quantity: number,
 ): Promise<OpResult> {
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    return shopcxUnsupported("change quantity");
+  }
   return subChangeQuantity(workspaceId, contractId, variantId, quantity);
 }
 
@@ -557,6 +634,9 @@ export async function subscriptionSwapVariant(
   newVariantId: string,
   quantity: number = 1,
 ): Promise<OpResult & { newLineGid?: string }> {
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    return shopcxUnsupported("swap variant");
+  }
   return subSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
 }
 
@@ -567,6 +647,9 @@ export async function subscriptionUpdateLineItemPrice(
   basePriceCents: number,
   lineGid?: string,
 ): Promise<OpResult> {
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    return shopcxUnsupported("update line price");
+  }
   return subUpdateLineItemPrice(workspaceId, contractId, variantId, basePriceCents, lineGid);
 }
 
@@ -759,6 +842,9 @@ export async function subscriptionAddFreeProduct(
   variantId: string,
   quantity: number = 1,
 ): Promise<OpResult> {
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    return shopcxUnsupported("add free product");
+  }
   return appstleAddFreeProduct(workspaceId, contractId, variantId, quantity);
 }
 
@@ -768,6 +854,9 @@ export async function subscriptionSwapProduct(
   oldVariantId: string,
   newVariantId: string,
 ): Promise<OpResult> {
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    return shopcxUnsupported("swap product");
+  }
   return appstleSwapProduct(workspaceId, contractId, oldVariantId, newVariantId);
 }
 
@@ -786,6 +875,11 @@ export async function subscriptionAttemptBilling(
   workspaceId: string,
   billingAttemptId: string,
 ): Promise<OpResult> {
+  // ⚠️ Addressed by Appstle BILLING-ATTEMPT id, so there is no contract to resolve an engine from
+  // — this cannot be routed here. A ShopCX-billed sub has no Appstle attempts at all; its charge
+  // path is shopifyAttemptBilling(contractId, cycleKey), which the renewal worker calls directly.
+  // The callers (dunning's card rotation + payday retry) must be made engine-aware before a
+  // migrated sub can reach dunning. Tracked as a migration blocker.
   return appstleAttemptBilling(workspaceId, billingAttemptId);
 }
 
