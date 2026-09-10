@@ -100,11 +100,18 @@ export const shopifySubscriptionRenewalCron = inngest.createFunction(
           .select("id, workspace_id, shopify_contract_id, next_billing_date")
           .eq("billing_source", "shopcx")
           .eq("status", "active")
+          // A shopcx sub with no contract id would build `gid://…/null` and skip silently forever.
+          .not("shopify_contract_id", "is", null)
           .lte("next_billing_date", endOfToday.toISOString())
           .order("id", { ascending: true })
           .limit(1000);
         if (afterId) q = q.gt("id", afterId);
-        const { data } = await q;
+        const { data, error } = await q;
+        // ⚠️ NEVER swallow this. A PostgREST error mid-loop reads as "no more rows", the loop
+        // breaks, those subs are simply not billed, and the heartbeat reports a smaller `due` as if
+        // healthy. On a path where nothing else bills these subs, a green outage is the worst
+        // possible failure — fail loud.
+        if (error) throw new Error(`due-sub selection failed: ${error.message}`);
         if (!data?.length) break;
 
         // Don't re-charge a sub whose dunning cycle says the next retry is still in the future.
@@ -173,12 +180,13 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
     const sub = await step.run("load-subscription", async () => {
       const { data } = await admin
         .from("subscriptions")
-        .select("id, workspace_id, shopify_contract_id, status, next_billing_date, billing_source, customer_id")
+        .select("id, workspace_id, shopify_contract_id, status, next_billing_date, billing_source, customer_id, shopify_customer_id")
         .eq("id", subscription_id)
         .maybeSingle();
       return data as {
         id: string; workspace_id: string; shopify_contract_id: string; status: string;
         next_billing_date: string | null; billing_source: string; customer_id: string | null;
+        shopify_customer_id: string | null;
       } | null;
     });
 
@@ -212,12 +220,26 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
       // finds nothing there and the customer is silently never charged.
       const due = sub.next_billing_date;
       if (!due) return { ok: false as const, reason: "no_next_billing_date" };
-      const cyc = await getBillingCycleForDate(workspace_id, sub.shopify_contract_id, due);
+
+      // ⚠️ Shopify rejects a selector date BEFORE the contract's createdAt with
+      // "Billing cycle start date out of range" — and a migrated contract is created TODAY while
+      // the customer may already be overdue, so this is the normal case for anyone due on or
+      // before migration day (63 such subs live right now), not an edge case. Left unhandled they
+      // resolve to nothing and are silently never charged.
+      // Clamping to just inside the contract's first cycle is correct: that cycle covers the
+      // charge we owe, and the customer is due now.
+      const created = contract.contract.createdAt ? new Date(contract.contract.createdAt).getTime() : 0;
+      const selectorDate =
+        created && new Date(due).getTime() < created
+          ? new Date(created + 1000).toISOString()
+          : due;
+
+      const cyc = await getBillingCycleForDate(workspace_id, sub.shopify_contract_id, selectorDate);
       if (!cyc.success || !cyc.cycle) return { ok: false as const, reason: cyc.error ?? "cycle_unresolvable" };
       // BILLED is Shopify's own idempotency signal — this cycle already charged, whoever did it.
       if (cyc.cycle.status === "BILLED") return { ok: false as const, reason: "cycle_already_billed" };
       if (cyc.cycle.skipped) return { ok: false as const, reason: "cycle_skipped" };
-      return { ok: true as const, cycleIndex: cyc.cycle.index, expectedDate: cyc.cycle.endAt, dueDate: due };
+      return { ok: true as const, cycleIndex: cyc.cycle.index, expectedDate: cyc.cycle.endAt, dueDate: selectorDate };
     });
 
     if (!plan.ok) {
@@ -233,7 +255,10 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
         workspace_id,
         subscription_id: sub.id,
         cycle_key: cycleKey,
-        claimant: "shopify-subscription-renewal-attempt",
+        // ⭐ EVENT-scoped, not a constant. `claimCycleCharge` treats a same-claimant collision as a
+        // RESUME and returns ok:true — so a constant claimant lets a duplicate event charge again.
+        // Matches internal-subscription-renewals.ts, which keys on event.id for exactly this reason.
+        claimant: (event as { id?: string }).id || `sub:${sub.id}:cycle:${cycleKeyFromNextBillingDate(sub.next_billing_date)}`,
         source: "shopcx",
       }),
     );
@@ -254,7 +279,15 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
         { billingCycleSelector: { date: plan.dueDate } },
       );
       if (!started.success || !started.attemptId) {
-        return { settled: false as const, error: started.error ?? "attempt_not_accepted" };
+        // ⚠️ `gql` funnels transport faults (HTTP 5xx, DNS, non-JSON) into the same {success:false}
+        // as a genuine userError. Treating "we could not reach Shopify" as a decline stamps the
+        // cycle failed and duns a customer whose card was never asked. THROW so Inngest retries;
+        // only a real userError is a decline.
+        const msg = started.error ?? "attempt_not_accepted";
+        if (/HTTP \d|fetch|network|ENOTFOUND|ECONNRESET|timeout|Throttled|not connected/i.test(msg)) {
+          throw new Error(`transient Shopify failure, retrying: ${msg}`);
+        }
+        return { settled: false as const, error: msg };
       }
       const outcome = await awaitBillingAttempt(workspace_id, started.attemptId);
       return {
@@ -279,20 +312,44 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
 
     // 5b. Success — Shopify created the order. Advance our calendar.
     if (charged.settled && charged.success) {
-      await step.run("resolve-claim-succeeded", () =>
-        resolveCycleCharge(admin, claim.id, { status: "succeeded", order_id: charged.orderId ?? undefined }),
-      );
+      await step.run("resolve-claim-succeeded", async () => {
+        // ⚠️ `subscription_cycle_charges.order_id` is a **uuid** column, but Shopify hands back a
+        // GID (`gid://shopify/Order/…`). Writing it raises 22P02, `resolveCycleCharge` throws, the
+        // step dies — and `advance-next-billing-date` NEVER RUNS. The customer is charged once and
+        // then skipped forever, because the cycle now reads BILLED. Resolve to OUR order uuid, and
+        // simply omit it when the order webhook has not landed yet: the charge is recorded either
+        // way, and a missing link is repairable where a dead run is not.
+        let orderUuid: string | undefined;
+        const bare = charged.orderId?.replace("gid://shopify/Order/", "");
+        if (bare) {
+          const { data: o } = await admin
+            .from("orders").select("id").eq("workspace_id", workspace_id).eq("shopify_order_id", bare).maybeSingle();
+          orderUuid = (o as { id: string } | null)?.id;
+        }
+        return resolveCycleCharge(admin, claim.id, { status: "succeeded", order_id: orderUuid });
+      });
       await step.run("advance-next-billing-date", async () => {
         const next = await getSubscriptionContract(workspace_id, sub.shopify_contract_id);
         const cycles = await getUpcomingBillingCycles(workspace_id, sub.shopify_contract_id, { first: 6 });
-        // Prefer Shopify's next unbilled cycle over arithmetic on our own field — it already
-        // accounts for skips and anchors.
-        const upcoming = (cycles.cycles ?? []).find((c) => c.status === "UNBILLED" && !c.skipped);
-        const advanceTo = upcoming?.expectedDate ?? next.contract?.nextBillingDate ?? null;
-        if (!advanceTo) return;
+        // ⭐ Must be STRICTLY AFTER the cycle we just charged. `now` still sits inside that cycle,
+        // so it comes back in this page — and if its status has not flipped to BILLED yet
+        // (read-after-write lag) a bare `find(UNBILLED)` returns the cycle we just billed. We would
+        // re-arm the same date, resolve BILLED tomorrow, and skip forever.
+        const upcoming = (cycles.cycles ?? []).find(
+          (c) => c.status === "UNBILLED" && !c.skipped && new Date(c.expectedDate).getTime() > new Date(plan.expectedDate).getTime(),
+        );
+        // ⚠️ NO fallback to contract.nextBillingDate: Shopify never advances it, so that would
+        // write back the very date we just charged. Leaving the date alone is recoverable and
+        // visible to the renewal-integrity assertion; silently re-arming it is neither.
+        const advanceTo = upcoming?.expectedDate ?? null;
+        if (!advanceTo) {
+          console.error(`[shopcx-renewal] charged ${sub.shopify_contract_id} but found no cycle after ${plan.expectedDate} — date NOT advanced, needs attention`);
+          return;
+        }
         await admin
           .from("subscriptions")
-          .update({ next_billing_date: advanceTo, last_payment_status: "paid", updated_at: new Date().toISOString() })
+          // `succeeded`, not "paid" — the vocabulary the rules engine and the dashboard badge use.
+          .update({ next_billing_date: advanceTo, last_payment_status: "succeeded", updated_at: new Date().toISOString() })
           .eq("id", sub.id);
       });
       await step.run("beat-charged", () => emitReactiveHeartbeat(ATTEMPT_FN_ID, { produced: { outcome: "charged" } }));
@@ -306,11 +363,19 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
     );
     await step.run("dispatch-dunning", async () => {
       await inngest.send({
-        name: "subscription/payment-failed",
+        // ⚠️ The topic is `dunning/payment-failed` — every other producer uses it and
+        // `inngest/dunning.ts` triggers on it. A private name here means declines vanish silently:
+        // no cycle, no rotation, no email, and the same idempotencyKey tomorrow so Shopify replays
+        // the cached attempt instead of retrying the card.
+        name: "dunning/payment-failed",
         data: {
           workspace_id,
+          subscription_id: sub.id,
           shopify_contract_id: sub.shopify_contract_id,
           customer_id: sub.customer_id,
+          // Without this, dunning takes its `no-customer-skip` branch and exhausts the cycle on the
+          // FIRST decline with no retries at all.
+          shopify_customer_id: sub.shopify_customer_id,
           error_code: charged.settled ? charged.errorCode : null,
           error_message: failure,
           billing_attempt_id: charged.settled ? charged.attemptId : null,

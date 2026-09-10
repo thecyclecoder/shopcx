@@ -541,7 +541,7 @@ export async function getSubscriptionContract(
   success: boolean;
   error?: string;
   contract?: {
-    id: string; status: string; nextBillingDate: string | null;
+    id: string; status: string; nextBillingDate: string | null; createdAt: string | null;
     interval: string | null; intervalCount: number | null;
     paymentMethodId: string | null; lines: ContractLine[];
   };
@@ -549,7 +549,7 @@ export async function getSubscriptionContract(
   const env = await gql<{ subscriptionContract?: Record<string, unknown> }>(
     workspaceId,
     `query($id:ID!){ subscriptionContract(id:$id){
-        id status nextBillingDate
+        id status nextBillingDate createdAt
         billingPolicy { interval intervalCount }
         customerPaymentMethod { id }
         lines(first:50){ pageInfo { hasNextPage } edges { node { id title quantity sellingPlanName sku
@@ -561,7 +561,7 @@ export async function getSubscriptionContract(
   );
   if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
   const k = env.data?.subscriptionContract as never as {
-    id: string; status: string; nextBillingDate: string | null;
+    id: string; status: string; nextBillingDate: string | null; createdAt: string | null;
     billingPolicy?: { interval: string; intervalCount: number };
     customerPaymentMethod?: { id: string };
     lines: { edges: { node: { id: string; title: string; quantity: number; sellingPlanName: string | null; variantId: string | null; sku: string | null; currentPrice?: { amount: string }; lineDiscountedPrice?: { amount: string }; discountAllocations?: unknown[] } }[] };
@@ -573,6 +573,7 @@ export async function getSubscriptionContract(
       id: k.id,
       status: k.status,
       nextBillingDate: k.nextBillingDate,
+      createdAt: k.createdAt ?? null,
       interval: k.billingPolicy?.interval ?? null,
       intervalCount: k.billingPolicy?.intervalCount ?? null,
       paymentMethodId: k.customerPaymentMethod?.id ?? null,

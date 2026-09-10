@@ -470,6 +470,21 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "Daily fan-out of due renewals for subs our Shopify app bills (billing_source='shopcx'). Shopify fires nothing on its own — if this stops, migrated subs stop earning.",
     expectedCadence: "daily (0 10 * * *)",
     livenessWindowMs: 30 * HOUR,
+    // ⭐ renewal-integrity = "overdue subs never advanced". EVERY permanent-stuck failure on this
+    // path (a cycle charged but the date not advanced, a cycle that resolves to nothing, a claim
+    // left in_flight) shows up as exactly that signature. On a worker whose own header says "if it
+    // doesn't run, they don't bill — not late, never", shipping without this assertion means the
+    // first signal is a customer email.
+    outputAssertions: ["renewal-integrity"],
+  },
+  {
+    id: "shopify-subscription-renewal-attempt",
+    kind: "reactive",
+    owner: "retention",
+    label: "Shopify subscription renewal — attempt",
+    description: "Per-subscription charge attempt for shopcx-billed subs. Registered so its kill switch actually resolves — an UNREGISTERED node resolves to {off:false}, i.e. a switch that silently can never fire.",
+    expectedCadence: "event-driven (shopify-subscription/renewal-attempt)",
+    livenessWindowMs: 30 * HOUR,
   },
   {
     id: "internal-subscription-renewal-cron",
