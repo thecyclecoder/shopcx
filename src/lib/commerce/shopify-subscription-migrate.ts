@@ -543,24 +543,16 @@ export async function executeMigration(
   // this only bites a stale contract. A due-today date whose clock time has passed is nudged to
   // tomorrow (delaying one charge by a day is harmless); anything genuinely stale BLOCKS rather
   // than being guessed at, because inventing a billing date silently reschedules a customer.
-  let rawNext = opts.nextBillingDateOverride ?? norm.next_billing_date;
-
-  // ⭐ A PAUSED sub must not carry a billing date that predates its own resume date. 294 of 453
-  // paused contracts do — so on resume the renewal cron would see a date already passed and charge
-  // IMMEDIATELY, which for a customer who deliberately paused is the worst possible first
-  // impression of the new engine. `pause_resume_at` is ours (Shopify has no auto-resume concept;
-  // portal-auto-resume drives it), so we align the contract to it at migration time.
-  if (norm.status === "PAUSED" && !opts.nextBillingDateOverride) {
-    const { data: pauseRow } = await admin
-      .from("subscriptions").select("pause_resume_at")
-      .eq("id", (snap as { subscription_id: string | null }).subscription_id ?? "")
-      .maybeSingle();
-    const resumeAt = (pauseRow as { pause_resume_at: string | null } | null)?.pause_resume_at;
-    if (resumeAt && rawNext && new Date(rawNext).getTime() < new Date(resumeAt).getTime()) {
-      rawNext = resumeAt;
-    }
-  }
-
+  // ⭐ A paused contract keeps its own billing date, deliberately.
+  //
+  // 294 paused contracts have a billing date that falls BEFORE their resume date, and it is
+  // tempting to "fix" that by pushing the date out to the resume. Don't: a pause DEFERS billing,
+  // so when a 30/60/90-day pause carries the customer past their normal date, resuming is exactly
+  // when the charge should happen — the renewal cron sees a due date and bills, which is the
+  // behaviour customers expect from "resume my subscription". Aligning the date to the resume
+  // instead makes an EARLY resume wait for no reason. (And it guards nothing: 0 paused contracts
+  // carry a date in the past, so the create-time rejection never comes up.)
+  const rawNext = opts.nextBillingDateOverride ?? norm.next_billing_date;
   let nextBillingDate = rawNext;
   if (!opts.nextBillingDateOverride) {
     const t = rawNext ? new Date(rawNext).getTime() : NaN;
