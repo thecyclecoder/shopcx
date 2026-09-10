@@ -643,8 +643,15 @@ export async function executeMigration(
   // few seconds. That is survivable because Shopify fires nothing on its own and our renewal cron
   // runs once daily, so a same-day double charge is not reachable; `migration_completed_at` stays
   // null and the sweeper finishes the cancel.
+  // ⚠️ HARD ABORT, not an `if`. With no local row there is nothing to point at the new contract,
+  // so cancelling Appstle below would leave the customer billed by NOBODY — the exact outcome this
+  // ordering exists to prevent, and the table's own page names a null subscription_id as the
+  // revenue-losing direction ("Appstle knows a contract we don't").
   const subId = (snap as { subscription_id: string | null }).subscription_id;
-  if (subId) {
+  if (!subId) {
+    return { ok: false, stage: "swap-local", error: "snapshot has no subscription_id — refusing to cancel Appstle with nothing to bill it", plan, newContractId };
+  }
+  {
     const { error: subErr } = await admin
       .from("subscriptions")
       .update({
@@ -704,15 +711,28 @@ export async function sweepIncompleteMigrations(
   opts: { apply?: boolean } = {},
 ): Promise<SweepRow[]> {
   const admin = createAdminClient();
-  const { data } = await admin
-    .from("appstle_contract_snapshots")
-    .select("appstle_contract_id, subscription_id, migrated_to_contract_id")
-    .eq("workspace_id", workspaceId)
-    .not("migrated_to_contract_id", "is", null)
-    .is("migration_completed_at", null);
+  // ⭐ Paginate. This is the detector for `half_swapped` — the one state this module itself calls
+  // "the only state where a double charge is reachable" — so a silent 1000-row truncation would
+  // hide exactly the rows that must not be missed.
+  type SnapRow = { appstle_contract_id: string; subscription_id: string | null; migrated_to_contract_id: string };
+  const pending: SnapRow[] = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await admin
+      .from("appstle_contract_snapshots")
+      .select("appstle_contract_id, subscription_id, migrated_to_contract_id")
+      .eq("workspace_id", workspaceId)
+      .not("migrated_to_contract_id", "is", null)
+      .is("migration_completed_at", null)
+      .order("appstle_contract_id", { ascending: true })
+      .range(from, from + 999);
+    if (error) throw new Error(`sweep select failed: ${error.message}`);
+    if (!data?.length) break;
+    pending.push(...(data as SnapRow[]));
+    if (data.length < 1000) break;
+  }
 
   const rows: SweepRow[] = [];
-  for (const r of (data ?? []) as { appstle_contract_id: string; subscription_id: string | null; migrated_to_contract_id: string }[]) {
+  for (const r of pending) {
     let billingSource: string | null = null;
     if (r.subscription_id) {
       const { data: sub } = await admin

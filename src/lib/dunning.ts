@@ -787,8 +787,13 @@ export async function cancelForTerminalNoBackup(params: {
  * `original_billing_date + one interval`, and a cycle that ran for weeks lands before today.
  *
  * Rolling by WHOLE intervals (rather than clamping to "tomorrow") preserves the customer's cadence
- * anchor — a 1st-of-the-month subscriber stays on the 1st — while guaranteeing a date Shopify will
- * accept. Returns the base unchanged when it is already in the future.
+ * anchor while guaranteeing a date Shopify will accept. Returns the base unchanged when it is
+ * already in the future.
+ *
+ * ⚠️ Month-end anchors need care: naive `setMonth` OVERFLOWS — stepping from Jan 31 lands on Mar 3,
+ * and the drift compounds every step (measured: 2026-01-31 → 2026-10-03). Days 1–28 are unaffected,
+ * but 6 live monthly subs are anchored on day ≥ 29. We therefore remember the intended day-of-month
+ * and clamp to the last day of the target month, so Jan 31 → Feb 28 → Mar 31 rather than sliding.
  */
 export function rollForwardToFutureBillingDate(
   base: Date,
@@ -799,13 +804,31 @@ export function rollForwardToFutureBillingDate(
   const step = Math.max(1, count || 1);
   const unit = String(interval || "month").toLowerCase();
   const out = new Date(base);
-  // Bounded: a decade of intervals is far more than any real dunning gap, and a malformed
-  // interval must not spin forever.
+  const anchorDay = base.getUTCDate();   // the day-of-month the customer is anchored to
+  let months = 0;
+
+  // Bounded: a malformed interval must not spin forever.
   for (let i = 0; i < 520 && out.getTime() <= now.getTime(); i++) {
-    if (unit === "week") out.setDate(out.getDate() + 7 * step);
-    else if (unit === "day") out.setDate(out.getDate() + step);
-    else if (unit === "year") out.setFullYear(out.getFullYear() + step);
-    else out.setMonth(out.getMonth() + step);
+    if (unit === "week") out.setUTCDate(out.getUTCDate() + 7 * step);
+    else if (unit === "day") out.setUTCDate(out.getUTCDate() + step);
+    else if (unit === "year") out.setUTCFullYear(out.getUTCFullYear() + step);
+    else {
+      // Month stepping from a fixed ORIGIN, clamped — never `setMonth` on a drifting value.
+      months += step;
+      const y = base.getUTCFullYear();
+      const m = base.getUTCMonth() + months;
+      const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+      out.setUTCFullYear(y, m, Math.min(anchorDay, lastDay));
+    }
+  }
+
+  // ⚠️ Post-condition. Hitting the iteration cap and returning a PAST date would be worse than
+  // throwing: the caller writes it locally, Shopify rejects it, and the renewal cron then re-selects
+  // that sub every day while never resolving a cycle — charged never, silently.
+  if (out.getTime() <= now.getTime()) {
+    throw new Error(
+      `rollForwardToFutureBillingDate could not reach a future date from ${base.toISOString()} (${step} ${unit})`,
+    );
   }
   return out;
 }

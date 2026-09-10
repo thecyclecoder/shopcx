@@ -342,6 +342,9 @@ export async function migrateContractToInternalComp(
         // resolveSub map the old numeric id back to THIS row, not a dead shell.
         migrated_from_contract_id: contractId,
         is_internal: true,
+        // Keep the routing column in step — it is what the ShopCX renewal cron selects on, and a
+        // sub left reading 'appstle' after moving to Braintree is a row whose engine is a lie.
+        billing_source: "internal",
         comp: true,
         comp_note: opts.compNote ?? null,
         status: sub.status,
@@ -474,6 +477,9 @@ export async function migrateCustomerAppstleSubsToInternal(
           // resolveSub map the old numeric id back to THIS row, not a dead shell.
           migrated_from_contract_id: contractId,
           is_internal: true,
+        // Keep the routing column in step — it is what the ShopCX renewal cron selects on, and a
+        // sub left reading 'appstle' after moving to Braintree is a row whose engine is a lie.
+        billing_source: "internal",
           status: sub.status,
           customer_id: billableCustomerId,
           // Pin the default card so the renewal charges it explicitly (the

@@ -837,11 +837,19 @@ async function resetBillingDateAfterDunning(
     .select("original_billing_date")
     .eq("id", cycleId).single();
 
-  const { data: sub } = await admin.from("subscriptions")
+  const { data: sub, error: subErr } = await admin.from("subscriptions")
     .select("billing_interval, billing_interval_count, billing_source")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", shopifyContractId).single();
 
+  // ⚠️ Log, never swallow. Discarding this made a missing column (PostgREST 42703) read as
+  // `sub === null` and silently no-op the WHOLE function — no local write, no vendor write — for
+  // every subscription, with no log line. Deploying ahead of the billing_source migration would
+  // have disabled dunning's date reset entirely and looked completely healthy.
+  if (subErr) {
+    console.error(`[Dunning] resetBillingDateAfterDunning could not read ${shopifyContractId}: ${subErr.message}`);
+    return;
+  }
   if (!sub) return;
 
   const interval = sub.billing_interval || "month";
