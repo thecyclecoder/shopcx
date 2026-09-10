@@ -618,6 +618,74 @@ export async function getUpcomingBillingCycles(
   };
 }
 
+
+// ── manual discounts ───────────────────────────────────────────────────────────────────────
+
+/**
+ * A manual discount on a subscription draft.
+ *
+ * ⚠️ `percentage` is an **Int** — 25 means 25%, and there are no fractional percentages.
+ * `fixedAmount.appliesOnEachItem` decides per-unit vs per-line; grandfathering wants `true`.
+ * `entitledLines.lines.add` scopes a discount to specific line ids — that is what makes a
+ * grandfathered rate variant-specific rather than an order-level giveaway.
+ */
+export interface ManualDiscountInput {
+  title: string;
+  value:
+    | { percentage: number }
+    | { fixedAmount: { amount: number; appliesOnEachItem?: boolean } };
+  /** Number of cycles the discount survives. Omit for "forever". */
+  recurringCycleLimit?: number;
+  entitledLines?: { all: boolean } | { lines: { add: string[]; remove?: string[] } };
+}
+
+/** Add one manual discount to an OPEN draft. Call inside `withDraft`. */
+export async function shopifyAddDraftDiscount(
+  workspaceId: string,
+  draftId: string,
+  input: ManualDiscountInput,
+): Promise<SubscriptionActionResult> {
+  const env = await gql(
+    workspaceId,
+    `mutation($d:ID!,$in:SubscriptionManualDiscountInput!){
+       subscriptionDraftDiscountAdd(draftId:$d, input:$in){ discountAdded { id } userErrors { message } } }`,
+    { d: draftId, in: input },
+  );
+  return toResult(env as never, "subscriptionDraftDiscountAdd");
+}
+
+/**
+ * Create a subscription contract in one shot.
+ *
+ * `subscriptionContractAtomicCreate` takes lines but NOT manual discounts, so a migrated contract
+ * is created at MSRP and the discounts are added in a follow-up draft. That ordering matters: a
+ * contract that exists at MSRP with no discounts yet would OVERCHARGE if anything billed it in
+ * between — which is why the migrator leaves `billing_source` on the old engine until the whole
+ * swap verifies, so nothing of ours will bill the half-built contract.
+ */
+export async function shopifyCreateContract(
+  workspaceId: string,
+  input: {
+    customerId: string;
+    nextBillingDate: string;
+    currencyCode: string;
+    contract: Record<string, unknown>;
+    lines: Record<string, unknown>[];
+  },
+): Promise<{ success: boolean; error?: string; contractId?: string }> {
+  const env = await gql<{ subscriptionContractAtomicCreate: { contract?: { id: string }; userErrors: { message: string }[] } }>(
+    workspaceId,
+    `mutation($in:SubscriptionContractAtomicCreateInput!){
+       subscriptionContractAtomicCreate(input:$in){ contract { id } userErrors { message } } }`,
+    { in: input },
+  );
+  const base = toResult(env as never, "subscriptionContractAtomicCreate");
+  if (!base.success) return base;
+  const id = env.data?.subscriptionContractAtomicCreate?.contract?.id;
+  if (!id) return { success: false, error: "atomicCreate returned no contract" };
+  return { success: true, contractId: id };
+}
+
 /** Surface a thrown error the same way every caller here reports a failed one. */
 export function asFailure(e: unknown): SubscriptionActionResult {
   return { success: false, error: errText(e) };
