@@ -46,7 +46,7 @@ async function resolveContractIdForAppstle(
   };
 }
 
-async function getAppstleCredentials(workspaceId: string): Promise<{ apiKey: string; shop: string } | null> {
+export async function getAppstleCredentials(workspaceId: string): Promise<{ apiKey: string; shop: string } | null> {
   const admin = createAdminClient();
   const { data: workspace } = await admin
     .from("workspaces")
