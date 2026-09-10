@@ -22,6 +22,29 @@ It is NOT universal — in a 10-contract sample, 0 of 11 lines had allocations a
 throughout. The mirror is right *most* of the time, which is precisely why it can't be trusted for
 pricing: the failures are invisible without the source.
 
+## Measured on the full pull (2,477 contracts, 2026-09-10, 0 fetch errors)
+
+| | |
+|---|---|
+| payment methods | ShopPay **994 (40.1%)** · CreditCard **930 (37.5%)** · PayPal **542 (21.9%)** · none **11** |
+| **revoked** payment methods | **0** — the "can't migrate" cohort is 11 contracts, not hundreds |
+| mirror `next_billing_date` vs Appstle | 2,413 agree · **64 disagree (2.6%)** |
+| direction of disagreement | mirror is **always behind**, never ahead — median **112 days**, max 168 |
+| unresolved lines (SKU → variant_id) | **0** |
+| true per-cycle revenue, active subs | **$190,133.13** today → **$184,173.70** after migration (**−3.1%**) |
+| subs whose price increases | **0** |
+
+⭐ **60% of the base is not a credit card.** Anything keying on last4 / expiry / brand mis-handles
+Shop Pay and PayPal.
+
+⭐ **The mirror-date staleness is why this table exists.** Had the migrator taken
+`next_billing_date` from `subscriptions`, 64 contracts would have been created with billing dates
+up to 5½ months in the PAST — an immediate wrong charge or a schedule broken from birth.
+
+⭐ A mirror-derived estimate of the revenue impact said **−5.3%**; the truth from
+`lineDiscountedPrice` is **−3.1%**. The mirror overstated *current* revenue by $6,245/cycle because
+it cannot see discount allocations at all.
+
 ## Shape
 
 | column | notes |
