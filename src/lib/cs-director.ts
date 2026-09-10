@@ -61,7 +61,7 @@ import { errText } from "@/lib/error-text";
 import type { ActionContext, ActionParams, SonnetDecision } from "@/lib/action-executor";
 import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
 import type { CxOrderRemedyState, CxOrderRemedyStateRef } from "@/lib/cx-agent-sdk";
-import { MONEY_ACTION_TYPES, isNonOrderScopedLoyaltyAction } from "@/lib/june-remedy-approval";
+import { MONEY_ACTION_TYPES, isNonOrderScopedLoyaltyAction, isNonRefundReplacementAction } from "@/lib/june-remedy-approval";
 import { getAgentPolicyPackage, formatAgentPolicyPackage } from "@/lib/policies";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -661,6 +661,15 @@ export function verifyPlanAgainstRemedyStates(
     // rails on this shape. `redeem_points_as_refund` is NOT in the exemption — it draws down
     // a real order and stays inside this rail.
     if (isNonOrderScopedLoyaltyAction(step.actionType, step.actionParams)) continue;
+    // spec: replacements-must-work-for-internal-non-shopify-renewal-orders — a
+    // `create_replacement_order` is always a 100% discount fresh order (see
+    // buildReplacementDraftOrderInput in replacement-order.ts + createReplacementDraftOrder
+    // in shopify-draft-orders.ts). It does NOT refund on the original order, so the
+    // headroom-degraded fail-closed on internal orders (no Shopify refund ledger →
+    // `headroom_confidence` NEVER "live") is a permanent hard-refuse for a remedy that
+    // moves NO money on the original order. `dollar_replacement` stays in the rail — it
+    // refunds `replacement_amount_cents` on the original order. Ticket 1aea6114.
+    if (isNonRefundReplacementAction(step.actionType, step.actionParams)) continue;
     const ref = extractRemedyOrderRefFromStep(step.actionParams);
     if (!ref) {
       return {
@@ -765,6 +774,7 @@ export function verifyPlanAgainstRemedyStates(
         const step = actions[i];
         if (!MONEY_ACTION_TYPES.has(step.actionType)) continue;
         if (isNonOrderScopedLoyaltyAction(step.actionType, step.actionParams)) continue;
+        if (isNonRefundReplacementAction(step.actionType, step.actionParams)) continue;
         const ref = extractRemedyOrderRefFromStep(step.actionParams);
         if (ref?.key === key) {
           violatingIndex = i;
@@ -805,6 +815,9 @@ export async function loadRemedyStatesForPlan(
     // Same exemption as `verifyPlanAgainstRemedyStates` — a subscription-scoped loyalty coupon
     // (or the paired mint) names no order to prefetch state for.
     if (isNonOrderScopedLoyaltyAction(step.actionType, step.actionParams)) continue;
+    // Same exemption for a free `create_replacement_order` — it moves no money on the original
+    // order, so there is no headroom to prefetch. Ticket 1aea6114.
+    if (isNonRefundReplacementAction(step.actionType, step.actionParams)) continue;
     const ref = extractRemedyOrderRefFromStep(step.actionParams);
     if (ref && !refs.has(ref.key)) refs.set(ref.key, ref);
   }

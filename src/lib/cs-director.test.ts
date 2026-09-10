@@ -1997,6 +1997,97 @@ test("verifyPlanAgainstRemedyStates — mixed batch: subscription loyalty coupon
   assert.equal(verdict.violation.actionIndex, 1);
 });
 
+// ── replacements-must-work-for-internal-non-shopify-renewal-orders — the free-replacement exemption
+// Derived-from ticket 1aea6114 (SHOPCX272, internally-billed renewal 2×Amazing Coffee Cocoa French
+// Roast, never received). create_replacement_order is always a 100% discount fresh order — it never
+// draws money off the original order. An internal renewal (SHOPCX*, shopify_order_id NULL) has no
+// Shopify refund ledger so headroom_confidence is NEVER "live" → the old rail hard-refused every
+// internal-order replacement permanently. dollar_replacement is NOT exempt (it does refund the
+// original order and stays inside the rail).
+
+test("verifyPlanAgainstRemedyStates — create_replacement_order on an internal order (no Shopify refund ledger) PASSES (free-replacement exemption)", () => {
+  const plan: RemedyActionStep[] = [
+    {
+      actionType: "create_replacement_order",
+      actionParams: {
+        order_number: "SHOPCX272",
+        variant_id: "some-uuid-or-numeric",
+        quantity: 2,
+        reason: "not_received",
+      },
+    },
+  ];
+  // No remedy states prefetched — an internal renewal (SHOPCX*) has no Shopify refund ledger to
+  // read. Old behavior: headroom_degraded (or missing_order_reference if the state map was empty).
+  // New behavior: passes because a 100% discount replacement can't double-pay any order.
+  const verdict = verifyPlanAgainstRemedyStates(plan, new Map());
+  assert.equal(verdict.ok, true);
+});
+
+test("verifyPlanAgainstRemedyStates — dollar_replacement is NEVER exempt (refunds the original order, keeps order-scoped rail)", () => {
+  const plan: RemedyActionStep[] = [
+    {
+      actionType: "dollar_replacement",
+      actionParams: {
+        shopify_order_id: "SC135494",
+        variant_id: "42614433513645",
+        quantity: 1,
+        replacement_amount_cents: 3000,
+        reason: "damaged_items",
+      },
+    },
+  ];
+  // No remedy states prefetched → the guard fails closed on the missing prefetch (order_not_found),
+  // proving dollar_replacement still hits the order-scoped rail unlike create_replacement_order.
+  const verdict = verifyPlanAgainstRemedyStates(plan, new Map());
+  assert.equal(verdict.ok, false);
+  if (verdict.ok) throw new Error("unreachable");
+  assert.equal(verdict.violation.actionType, "dollar_replacement");
+});
+
+test("verifyPlanAgainstRemedyStates — mixed batch: exempt create_replacement_order + a partial_refund that violates → violation names the partial_refund", () => {
+  // A batch mixing the exempt free replacement with a real partial_refund on an order with a live
+  // return: the replacement step is skipped, but the partial_refund step still trips the double-pay
+  // rail. The violation must correctly name the partial_refund's index (not the replacement's).
+  const state: CxOrderRemedyState = {
+    ...cleanState(),
+    open_returns: [
+      {
+        id: "ret-1",
+        status: "label_created",
+        resolution_type: "refund_return",
+        net_refund_cents: 5000,
+        label_cost_cents: 700,
+        refunded_at: null,
+        delivered_at: null,
+        shipped_at: null,
+        created_at: "2026-07-27T20:32:00Z",
+        refund_id: null,
+        tracking_number: null,
+      },
+    ],
+  };
+  const ref = extractRemedyOrderRefFromStep({ shopify_order_id: "SC135494" })!;
+  const plan: RemedyActionStep[] = [
+    {
+      actionType: "create_replacement_order",
+      actionParams: { order_number: "SHOPCX272", variant_id: "v-1", quantity: 1, reason: "not_received" },
+    },
+    {
+      actionType: "partial_refund",
+      actionParams: { shopify_order_id: "SC135494", amount_cents: 5000, reason: "shipping" },
+    },
+  ];
+  const states = new Map<string, CxOrderRemedyState>();
+  states.set(ref.key, state);
+  const verdict = verifyPlanAgainstRemedyStates(plan, states);
+  assert.equal(verdict.ok, false);
+  if (verdict.ok) throw new Error("unreachable");
+  assert.equal(verdict.violation.reason, "live_return_would_double_pay");
+  assert.equal(verdict.violation.actionType, "partial_refund");
+  assert.equal(verdict.violation.actionIndex, 1);
+});
+
 test("extractRemedyOrderRefFromStep — canonicalizes an order_number smuggled into shopify_order_id", () => {
   // partial_refund's executor resolves a non-digit shopify_order_id against the order_number column
   // (action-executor.ts:2227). The extractor mirrors that so the state lookup matches what the

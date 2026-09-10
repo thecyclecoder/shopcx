@@ -114,3 +114,45 @@ export async function getVariantIndex(workspaceId: string): Promise<{
   }
   return { byShopifyId, byUuid };
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Resolve an incoming variant reference to a numeric Shopify variant id — the
+ * shape the Shopify draft-order API expects (it wraps the value in
+ * `gid://shopify/ProductVariant/<id>`).
+ *
+ * Accepts either a numeric Shopify id (passthrough) or our internal
+ * `product_variants.id` UUID (looks up `shopify_variant_id` for that row).
+ * Returns null when the input is empty, when a UUID row has no
+ * `shopify_variant_id` (internal-only variant with no Shopify counterpart),
+ * or when the id refers to no variant in this workspace.
+ *
+ * Why this exists: an internally-billed renewal order's line items reference
+ * our variant UUID, not the Shopify numeric id (SHOPCX* orders have no
+ * `shopify_order_id`). Handing a UUID straight to Shopify surfaces as the
+ * opaque "Product with ID X is no longer available" error and the whole
+ * replacement escalates to a human. Normalising at the call boundary — every
+ * draft-order caller inherits this — closes the internal-order replacement
+ * gap identified on ticket 1aea6114.
+ */
+export async function resolveShopifyVariantId(
+  workspaceId: string,
+  ref: string | number | null | undefined,
+): Promise<string | null> {
+  const raw = String(ref ?? "").trim();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) return raw;
+  if (!UUID_RE.test(raw)) return null;
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("product_variants")
+    .select("shopify_variant_id")
+    .eq("workspace_id", workspaceId)
+    .eq("id", raw)
+    .maybeSingle();
+  const sid = (data as { shopify_variant_id: string | null } | null)?.shopify_variant_id;
+  if (!sid) return null;
+  const s = String(sid);
+  return /^\d+$/.test(s) ? s : null;
+}
