@@ -289,7 +289,11 @@ export function planMigration(
   // and two rows already disagree with our mirror (35133620397 is CANCELLED in Appstle but
   // `active` locally with a 2026-09-19 billing date, so migrating it bills a cancelled customer).
   // Paused subs must migrate as create-then-pause; until that exists, refuse.
-  if (snapshot.status && snapshot.status !== "ACTIVE") blocked = `contract_${String(snapshot.status).toLowerCase()}`;
+  // ACTIVE and PAUSED both migrate (status is carried, not forced). CANCELLED / EXPIRED / FAILED
+  // have no schedule to move and must never be recreated as live contracts.
+  if (snapshot.status && snapshot.status !== "ACTIVE" && snapshot.status !== "PAUSED") {
+    blocked = `contract_${String(snapshot.status).toLowerCase()}`;
+  }
   else if (!snapshot.payment_method_id) blocked = "no_payment_method";
   else if (snapshot.payment_method_revoked) blocked = "payment_method_revoked";
   else if (!lines.length) blocked = "no_lines_after_rules";
@@ -556,7 +560,12 @@ export async function executeMigration(
     nextBillingDate: nextBillingDate ?? new Date().toISOString(),
     currencyCode: "USD",
     contract: {
-      status: "ACTIVE",
+      // ⭐ CARRY the source status — do not force ACTIVE. Hardcoding it silently REACTIVATED every
+      // paused subscription (456 of them), billing customers who had deliberately stopped.
+      // `SubscriptionContractSubscriptionStatus` is ACTIVE | PAUSED | CANCELLED | EXPIRED | FAILED,
+      // and PAUSED is accepted at CREATE (probed) — so there is no create-then-pause window where
+      // the contract is briefly active and billable.
+      status: norm.status === "PAUSED" ? "PAUSED" : "ACTIVE",
       paymentMethodId: norm.payment_method_id,
       billingPolicy: { interval: norm.billing_interval, intervalCount: norm.billing_interval_count },
       deliveryPolicy: { interval: norm.billing_interval, intervalCount: norm.billing_interval_count },
