@@ -302,41 +302,57 @@ An Appstle `order-now` / `bill_now` that ACKs then declines lands in the same re
 
 **On card update, order-now retries deterministically on the migrated (internal) rail.** After the recover flow migrates the sub Appstle→internal and reactivates it (above), the order-now retry runs in plain Node against the deterministic Braintree pipeline — no box/Sol session needed, immediate charge, idempotency-guarded so a re-drive can't create a second order. Only a verified paid order (Sol's end-state pass — items present, non-zero total, sub active, `last_payment_status='succeeded'`) unblocks the customer confirmation reply via [[../libraries/sol-outcome-claim-guard]]; a drifted end state escalates via [[../libraries/outcome-completion-gate]] instead of sending a false "your order shipped." See [[subscription-billing]] § Order-now (bill_now) for the full flow trace.
 
-## Incident 2026-09-09: 56 cycles stuck in `skipped`, no card ever tried
+## Incident 2026-09-09: 56 cycles stuck forever in `skipped`
 
-`handleAllCardsExhausted` rotates the cards it reads from `customer_payment_methods`. That
-mirror's oldest row is **2026-05-20** — and 55 of these 56 cycles were created BEFORE it held any
-data. Dunning read an empty card list, concluded "all cards exhausted" in a **median of 1.11
-seconds** without attempting a single charge, and (because `dunning_cycle_1_action = 'skip'`)
-wrote `status='skipped'`. All 56 customers were then emailed "your payment failed, update your
-payment method" for a card we never tried. Sampling 10 against live Shopify, **5 had a valid
-unrevoked card the whole time** (one expiring 6/2029) while our mirror held 0 rows for all 10.
+**Where dunning gets its cards — read this before theorising about a card bug.**
+`getCustomerPaymentMethods` ([[../libraries/dunning]], `src/lib/dunning.ts:35`) queries **Shopify
+LIVE** (`customer.paymentMethods`, with 429/5xx retries). It does **NOT** read
+`customer_payment_methods`. That table is a *write-side* mirror fed by the
+`customer_payment_methods/create|update` webhook (`dunning-webhook.ts`) and consumed by checkout,
+the portal and the orchestrator — **never by card rotation.** So the mirror's row coverage is
+irrelevant to dunning, and a thin mirror is not a dunning risk.
 
-`skipped` is in `ACTIVE_SLOT_STATUSES`, so it holds `idx_dunning_cycles_active_contract`. The cron
-therefore returned `active_cycle_exists` forever and could never open cycle 2 — the cycle that
-would actually resolve them. Only `dunning-new-card-recovery` reopens a `skipped` cycle, and only
-if the customer adds a card; none did. They sat from 2026-03..05 as `status='active'` subs, a
-median of **287 days** since their last order, invisible to both billing and dunning.
+**What actually happened.** 56 cycles carried `cards_tried: []` and went from created → `skipped`
+in a **median of 1.11 seconds**, spread daily across 2026-03-29 → 2026-05-26 (not one outage
+burst). `shopify_customer_id` was present on all 55 released rows, so the
+`no_shopify_customer` short-circuit was not the cause. `cards_tried: []` means the live Shopify
+read returned **zero usable cards** — and `getCustomerPaymentMethods` deliberately skips
+`revokedAt` methods, so for a customer whose cards are all revoked, zero is the CORRECT answer.
+Sampling 10 against live Shopify: 5 had a valid unrevoked card, 5 had none (several with 1–2
+revoked). So for a good share of them there was genuinely nothing to rotate.
+
+**The defect is not the card lookup — it is the outcome.** With 0 cards,
+`maxRotations = min(setting, 0) = 0`, so rotation is skipped and `handleAllCardsExhausted` runs.
+On cycle 1 (`dunning_cycle_1_action = 'skip'`) that writes `status='skipped'`, which is in
+`ACTIVE_SLOT_STATUSES` and therefore **holds `idx_dunning_cycles_active_contract`**. The cron then
+returns `active_cycle_exists` forever, so cycle 2 — the one that would actually resolve them —
+can never open. Only `dunning-new-card-recovery` reopens a `skipped` cycle, and only if the
+customer adds a card; none did. They sat as `status='active'` subs, a median of **287 days** since
+their last order, invisible to both billing and dunning. All 56 had been emailed "your payment
+failed, update your payment method".
 
 Released by `scripts/_backfill-stale-skipped-dunning-cycles.ts` (55 rows; 1 cycle that HAD tried
 cards was deliberately left alone). Two deliberate choices in that write:
 
 - **`closed_reason` set NON-NULL** (`stale_skip_no_cards_tried`). `dunning-new-card-recovery`
   treats `status='exhausted' AND closed_reason IS NULL` as "dunning gave up" and will REACTIVATE
-  + CHARGE on a later card update. These customers were never actually charged, were told
-  otherwise, and are ~287 days dormant — a surprise catch-up charge is the wrong outcome.
+  + CHARGE on a later card update. These customers are ~287 days dormant — a surprise catch-up
+  charge is the wrong outcome.
 - **`terminal_error_code` left NULL**, so the analytics panel does not miscount these as terminal
   cancellations. Same reasoning as `endDunningForSubscription`.
 
-Releasing the slot does **not** resume billing and does **not** cancel anything; it only removes
-the block.
+Releasing the slot does **not** resume billing and does **not** cancel anything.
 
-⚠️ **The mirror is still thin — 16% of active-sub customers have a `customer_payment_methods`
-row** (157/957 sampled). It is not currently producing skips (0 new `skipped` rows since
-2026-06), but any card-rotation decision read from that table is only as good as its coverage.
-Recent cycles with an empty `cards_tried` are a DIFFERENT and correct path — they short-circuit on
-a terminal error code (`fraud_suspected`, `payment_method_not_found`) which deliberately skips
-rotation.
+### ⚠️ Live fragility this exposed: a Shopify blip is indistinguishable from "no cards"
+
+`getCustomerPaymentMethods` THROWS on exhausted retries / non-OK / GraphQL errors, and the caller
+(`inngest/dunning.ts` step `get-payment-methods`) catches it, logs `[Dunning] CRITICAL:` and
+**returns `[]`**. An API failure therefore produces the exact same `[]` as a customer with no
+cards — and `[]` drives real consequences: rotation is skipped, and at **step 4b** a terminal
+error code with `paymentMethods.length <= 1` **CANCELS the subscription immediately**. So a
+Shopify outage during a terminal decline can cancel subscriptions that had perfectly good cards,
+with a `console.error` as the only signal. Worth a distinct `card_lookup_failed` state that halts
+the cycle instead of collapsing into "no cards".
 
 ## Status / open work
 
