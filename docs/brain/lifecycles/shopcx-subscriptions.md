@@ -1,6 +1,6 @@
 # ShopCX subscriptions — the custom subscription platform (design)
 
-**Status: DESIGN, not built.** This page is the architecture for replacing **Appstle** with our own
+**Status: DESIGN + client shipped (behind the commerce SDK); no caller wired yet.** This page is the architecture for replacing **Appstle** with our own
 Shopify subscription app. Everything marked ✅ was verified against the live store on 2026-09-09;
 everything else is design intent. Owner: [[../functions/retention]] · Builder: Ada
 ([[../functions/platform]]).
@@ -321,3 +321,4 @@ code.
 [[subscription-billing]] · [[dunning]] · [[customer-portal]] · [[../integrations/appstle]] ·
 [[../integrations/shopify]] · [[../libraries/pricing]] · [[../tables/subscriptions]] ·
 [[../functions/retention]] · [[../functions/platform]]
+- [[../libraries/commerce__shopify-subscription-client]] — the client itself (exports, gotchas, the guard carve-out)
