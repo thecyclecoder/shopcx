@@ -43,7 +43,7 @@ async function resolveShopifyVariantId(workspaceId: string, ref: string | number
 
 Resolve an incoming variant reference to the numeric Shopify variant id the Shopify draft-order API expects (it wraps the value in `gid://shopify/ProductVariant/<id>`). Accepts either a numeric Shopify id (passthrough) or our internal `product_variants.id` UUID (workspace-scoped lookup of `shopify_variant_id`). Returns `null` for an empty/unknown-shape ref, a UUID with no matching workspace row, or an internal-only variant with a null `shopify_variant_id`.
 
-Called by the two draft-order boundaries — [[replacement-order]] `createReplacementOrder` and [[shopify-draft-orders]] `createReplacementDraftOrder` — so an internally-billed renewal (SHOPCX*, `shopify_order_id` NULL) whose line items carry `product_variants.id` UUIDs surfaces a specific error at the boundary instead of Shopify's opaque "Product with ID X is no longer available". Ground-truth ticket `1aea6114-7417-421f-99d0-05cce22f2ff6` (SHOPCX272 — the internal-order replacement that couldn't remediate).
+Called by the two draft-order boundaries — [[replacement-order]] `createReplacementOrder` and [[shopify-draft-orders]] `createReplacementDraftOrder` — so an internally-billed renewal (SHOPCX*, `shopify_order_id` NULL) whose line items carry `product_variants.id` UUIDs surfaces a specific error at the boundary instead of Shopify's opaque "Product with ID X is no longer available". Ground-truth ticket `1aea6114-7417-421f-99d0-05cce22f2ff6` (SHOPCX272 — the internal-order replacement that couldn't remediate). See [[../specs/replacements-must-work-for-internal-non-shopify-renewal-orders]].
 
 ### `ProductVariant` — interface
 

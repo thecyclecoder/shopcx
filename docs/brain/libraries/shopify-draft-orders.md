@@ -76,7 +76,7 @@ async function createAndCompleteReplacement(workspaceId: string, input: Replacem
   `shopify_variant_id`, and an unresolvable ref throws a specific error
   ("variant X has no shopify_variant_id — internal-only variant, cannot ship
   via Shopify") instead of leaking Shopify's opaque message. Ticket
-  `1aea6114-7417-421f-99d0-05cce22f2ff6` (SHOPCX272) is the ground truth.
+  `1aea6114-7417-421f-99d0-05cce22f2ff6` (SHOPCX272) is the ground truth. Paired with [[replacement-order]] `resolveShopifyVariantId` call that happens first, so both code paths resolve UUIDs consistently. See [[../specs/replacements-must-work-for-internal-non-shopify-renewal-orders]].
 
 ## Status / open work
 

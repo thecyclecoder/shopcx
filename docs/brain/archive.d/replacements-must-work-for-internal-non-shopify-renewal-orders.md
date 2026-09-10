@@ -1,0 +1,1 @@
+- **Replacements must work for internally-billed (non-Shopify) subscription renewal orders** · verified 2026-09-10 · → [[../libraries/replacement-order]]
