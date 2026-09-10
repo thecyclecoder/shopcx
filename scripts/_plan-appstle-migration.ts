@@ -70,8 +70,11 @@ async function main() {
   Object.entries(droppedReasons).forEach(([k, v]) => console.log(`   dropped: ${k.padEnd(38)} ${v}`));
   console.log(`   variant remapped (relist drift)          ${remapped}`);
   console.log(`   grandfather locks                        ${gfLines}`);
-  console.log(`\nPER-CYCLE REVENUE (active subs only):`);
-  console.log(`   today            ${money(cur)}`);
+  console.log(`\nPER-CYCLE REVENUE (active, migratable subs only):`);
+  // ⚠️ Both sides are measured BEFORE customer discount codes, because a carried code applies
+  // identically on both and cancels out of the delta. So "today" here is the customer's ONGOING
+  // rate, not this cycle's charge — a one-use code makes those differ.
+  console.log(`   today (pre-code) ${money(cur)}`);
   console.log(`   after migration  ${money(nw)}`);
   console.log(`   change           ${money(nw - cur)}   (${((nw - cur) / cur * 100).toFixed(1)}%)`);
   console.log(`\n   down ${down}   unchanged ${unchanged}   UP ${up}${up === 0 ? "   <- invariant holds" : "   <- INVARIANT VIOLATED"}`);

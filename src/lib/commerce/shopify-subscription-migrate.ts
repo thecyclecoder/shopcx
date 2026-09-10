@@ -194,6 +194,8 @@ interface SnapshotLineIn {
   quantity: number;
   current_price_cents: number | null;
   effective_unit_cents: number | null;
+  /** Per-unit portion of the effective price that comes from a CUSTOMER CODE. */
+  code_allocation_unit_cents?: number | null;
 }
 
 /**
@@ -204,6 +206,7 @@ export function planMigration(
   snapshot: {
     appstle_contract_id: string;
     subscription_id: string | null;
+    status?: string | null;
     payment_method_id: string | null;
     payment_method_revoked: boolean | null;
     lines: SnapshotLineIn[];
@@ -242,7 +245,13 @@ export function planMigration(
   const lines: PlannedLine[] = kept.map(({ l, v }) => {
     const variant = v as CatalogVariant;
     const qty = l.quantity || 1;
-    const currentUnit = l.effective_unit_cents ?? l.current_price_cents ?? 0;
+    // ⭐ Grandfather against the price BEFORE customer codes. `effective_unit_cents` already has
+    // the code baked in, and step 5 re-applies the code to the new contract — so comparing against
+    // it counts the code TWICE, mints a permanently inflated grandfather, and then fails
+    // verify-pricing (leaving an orphan contract whose marker blocks any retry). 133 contracts
+    // carry such a code; every one would have failed exactly this way.
+    const codeUnit = l.code_allocation_unit_cents ?? 0;
+    const currentUnit = (l.effective_unit_cents ?? l.current_price_cents ?? 0) + codeUnit;
     const prot = isProtection(variant);
     const onRule = ctx.ruleProducts.has(variant.product_id) && !prot;
 
@@ -275,7 +284,13 @@ export function planMigration(
   });
 
   let blocked: string | null = null;
-  if (!snapshot.payment_method_id) blocked = "no_payment_method";
+  // ⚠️ ACTIVE only. `executeMigration` hardcodes status ACTIVE on the new contract, so migrating a
+  // PAUSED or CANCELLED one silently REACTIVATES it. Live population: 455 PAUSED, 2 CANCELLED —
+  // and two rows already disagree with our mirror (35133620397 is CANCELLED in Appstle but
+  // `active` locally with a 2026-09-19 billing date, so migrating it bills a cancelled customer).
+  // Paused subs must migrate as create-then-pause; until that exists, refuse.
+  if (snapshot.status && snapshot.status !== "ACTIVE") blocked = `contract_${String(snapshot.status).toLowerCase()}`;
+  else if (!snapshot.payment_method_id) blocked = "no_payment_method";
   else if (snapshot.payment_method_revoked) blocked = "payment_method_revoked";
   else if (!lines.length) blocked = "no_lines_after_rules";
 
@@ -491,6 +506,7 @@ export async function executeMigration(
     {
       appstle_contract_id: appstleContractId,
       subscription_id: (snap as { subscription_id: string | null }).subscription_id,
+      status: norm.status,
       payment_method_id: norm.payment_method_id,
       payment_method_revoked: norm.payment_method_revoked,
       lines: norm.lines as unknown as SnapshotLineIn[],
@@ -661,21 +677,51 @@ export async function executeMigration(
     return { ok: false, stage: "swap-local", error: "snapshot has no subscription_id — refusing to cancel Appstle with nothing to bill it", plan, newContractId };
   }
   {
-    const { error: subErr } = await admin
+    const { data: swapped, error: subErr } = await admin
       .from("subscriptions")
       .update({
         shopify_contract_id: newContractId.replace("gid://shopify/SubscriptionContract/", ""),
         billing_source: "shopcx",
         migrated_from_contract_id: appstleContractId,
+        // ⭐ Reconcile the date in the SAME write. The renewal cron selects and charges on OUR
+        // mirror, and 61 active subs carry a local date over a day stale — diverging from Appstle
+        // by up to 168 days. Left unreconciled they are selected immediately and (with the
+        // first-cycle clamp) charged up to months early. This is the date actually written to the
+        // contract, so mirror and contract agree from birth.
+        next_billing_date: nextBillingDate,
         updated_at: new Date().toISOString(),
       })
+      .select("id")
       .eq("id", subId);
+    // ⚠️ A PostgREST update that matches ZERO rows returns no error. Without this check a deleted
+    // or moved subscription row produces the same outcome as the null-subId case: Appstle
+    // cancelled, nothing pointing at the new contract, billed by nobody.
     if (subErr) {
       return { ok: false, stage: "swap-local", error: subErr.message, plan, newContractId };
+    }
+    if (!swapped?.length) {
+      return { ok: false, stage: "swap-local", error: `subscription ${subId} matched zero rows — refusing to cancel Appstle`, plan, newContractId };
     }
   }
 
   const cancelled = await appstleCancelContractVendorOnly(workspaceId, appstleContractId);
+  // ⚠️ VERIFY, do not trust. This uses `update-status?status=CANCELLED`; the proven cancel route in
+  // appstle.ts is DELETE, and update-status is otherwise only ever called with PAUSED/ACTIVE. If
+  // Appstle accepts the call and ignores an unsupported status we would stamp success and BOTH
+  // engines would bill every migrated customer. A read-back is one metered call against that risk.
+  if (cancelled.success) {
+    const after = await fetchAppstleContract(workspaceId, appstleContractId);
+    const stillActive = after.ok && (after.raw as { status?: string }).status !== "CANCELLED";
+    if (stillActive) {
+      return {
+        ok: false,
+        stage: "appstle-cancel-unverified",
+        error: `Appstle reported success but the contract still reads ${(after.raw as { status?: string }).status} — BOTH engines may bill; do not proceed`,
+        plan,
+        newContractId,
+      };
+    }
+  }
   if (!cancelled.success) {
     // Local row already points at the new contract, so WE are billing it. Appstle may also still
     // think it owns the sub — flagged for the sweeper rather than silently left.

@@ -31,8 +31,19 @@ export interface SnapshotLine {
   current_price_cents: number | null;
   /** LINE TOTAL after discount allocations (Appstle returns a total here, not a unit price). */
   discounted_total_cents: number | null;
-  /** ⭐ What the customer actually pays per unit. This is the migration's input. */
+  /** ⭐ What the customer actually pays per unit, INCLUDING any customer discount code. */
   effective_unit_cents: number | null;
+  /**
+   * ⭐ The portion of this line's discount that comes from a CUSTOMER CODE (loyalty / promo),
+   * per unit.
+   *
+   * The migration recreates structural discounts but CARRIES customer codes, so grandfathering
+   * must be computed against the price BEFORE codes — otherwise the code is counted twice: once
+   * baked into `effective_unit_cents` and again when re-applied to the new contract. Measured on
+   * 27959525549: currentPrice $31.95 x2 with a $15 code gives an effective $24.45/unit, which
+   * would mint a permanent $30.72/unit grandfather AND then re-apply the $15.
+   */
+  code_allocation_unit_cents: number;
   selling_plan_name: string | null;
   discount_allocation_count: number;
 }
@@ -68,9 +79,19 @@ function lineNodes(raw: Record<string, unknown>): Record<string, unknown>[] {
 export function normalizeAppstleContract(raw: Record<string, any>): NormalizedSnapshot {
   const bp = raw?.billingPolicy ?? {};
   const pm = raw?.customerPaymentMethod ?? null;
+  // Contract-level discounts carry the TYPE; the line allocations carry only an id and an amount.
+  // Join them so a line can tell "a code the customer applied" from "a discount Appstle baked in".
+  const codeDiscountIds = new Set<string>(
+    ((raw?.discounts?.nodes ?? []) as Record<string, unknown>[])
+      .filter((d) => String(d.type ?? "") === "CODE_DISCOUNT")
+      .map((d) => String(d.id ?? "")),
+  );
   const lines: SnapshotLine[] = lineNodes(raw).map((n: any) => {
     const qty = Number(n?.quantity ?? 1) || 1;
     const discountedTotal = toCents(n?.lineDiscountedPrice?.amount);
+    const codeTotal = ((n?.discountAllocations ?? []) as Record<string, any>[])
+      .filter((a) => codeDiscountIds.has(String(a?.discount?.id ?? "")))
+      .reduce((sum, a) => sum + (toCents(a?.amount?.amount) ?? 0), 0);
     return {
       sku: n?.sku ?? null,
       variant_id: n?.variantId ? String(n.variantId).replace("gid://shopify/ProductVariant/", "") : null,
@@ -82,6 +103,7 @@ export function normalizeAppstleContract(raw: Record<string, any>): NormalizedSn
       discounted_total_cents: discountedTotal,
       // lineDiscountedPrice is a LINE TOTAL; divide to get the per-unit rate the customer pays.
       effective_unit_cents: discountedTotal != null ? Math.round(discountedTotal / qty) : null,
+      code_allocation_unit_cents: Math.round(codeTotal / qty),
       selling_plan_name: n?.sellingPlanName ?? null,
       discount_allocation_count: Array.isArray(n?.discountAllocations) ? n.discountAllocations.length : 0,
     };
