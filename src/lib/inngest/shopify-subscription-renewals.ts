@@ -34,6 +34,7 @@ import {
 import {
   getSubscriptionContract,
   getUpcomingBillingCycles,
+  getBillingCycleForDate,
   shopifyAttemptBilling,
   awaitBillingAttempt,
 } from "@/lib/commerce/shopify-subscription-client";
@@ -203,19 +204,20 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
       if (contract.contract.status !== "ACTIVE") {
         return { ok: false as const, reason: `contract_${contract.contract.status.toLowerCase()}` };
       }
-      const cycles = await getUpcomingBillingCycles(workspace_id, sub.shopify_contract_id, { first: 6 });
-      if (!cycles.success) return { ok: false as const, reason: cycles.error ?? "cycles_unreadable" };
 
-      // Due = the earliest UNBILLED, unskipped cycle whose expected date has arrived.
-      // `billingAttemptExpectedDate` is the END of the cycle window, so "in the past" means the
-      // window closed without a charge. This is computed by Shopify from the contract anchor and
-      // cannot be corrupted by a stray write to either side's stored date.
-      const cutoff = Date.now() + DUE_GRACE_MS;
-      const target = (cycles.cycles ?? []).find(
-        (c) => c.status === "UNBILLED" && !c.skipped && new Date(c.expectedDate).getTime() <= cutoff,
-      );
-      if (!target) return { ok: false as const, reason: "no_cycle_due_in_shopify" };
-      return { ok: true as const, cycleIndex: target.index, expectedDate: target.expectedDate };
+      // ⭐ Target the cycle CONTAINING our billing date — do NOT hunt for a past-due cycle.
+      // Shopify anchors the cycle calendar to the contract's createdAt, not to the nextBillingDate
+      // we set, so a MIGRATED contract is born up to a full interval out of step (observed on
+      // 35945087149: our date 2026-10-15 vs Shopify's first cycle 2026-11-05). Past-due hunting
+      // finds nothing there and the customer is silently never charged.
+      const due = sub.next_billing_date;
+      if (!due) return { ok: false as const, reason: "no_next_billing_date" };
+      const cyc = await getBillingCycleForDate(workspace_id, sub.shopify_contract_id, due);
+      if (!cyc.success || !cyc.cycle) return { ok: false as const, reason: cyc.error ?? "cycle_unresolvable" };
+      // BILLED is Shopify's own idempotency signal — this cycle already charged, whoever did it.
+      if (cyc.cycle.status === "BILLED") return { ok: false as const, reason: "cycle_already_billed" };
+      if (cyc.cycle.skipped) return { ok: false as const, reason: "cycle_skipped" };
+      return { ok: true as const, cycleIndex: cyc.cycle.index, expectedDate: cyc.cycle.endAt, dueDate: due };
     });
 
     if (!plan.ok) {
@@ -247,7 +249,9 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
         workspace_id,
         sub.shopify_contract_id,
         `${sub.shopify_contract_id}:${cycleKey}`,
-        { billingCycleSelector: { index: plan.cycleIndex } },
+        // Address by DATE, matching how the cycle was resolved — index is stable today but the
+        // date is what our schedule actually means.
+        { billingCycleSelector: { date: plan.dueDate } },
       );
       if (!started.success || !started.attemptId) {
         return { settled: false as const, error: started.error ?? "attempt_not_accepted" };

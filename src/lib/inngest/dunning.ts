@@ -20,6 +20,7 @@ import {
   dunningInternalNote,
   isTerminalErrorCode,
   shouldHaltRetryForSubStatus,
+  rollForwardToFutureBillingDate,
   shouldExhaustForRetryCap,
   resolveCycleAction,
 } from "@/lib/dunning";
@@ -837,7 +838,7 @@ async function resetBillingDateAfterDunning(
     .eq("id", cycleId).single();
 
   const { data: sub } = await admin.from("subscriptions")
-    .select("billing_interval, billing_interval_count")
+    .select("billing_interval, billing_interval_count, billing_source")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", shopifyContractId).single();
 
@@ -858,11 +859,28 @@ async function resetBillingDateAfterDunning(
   else if (interval === "year") nextDate.setFullYear(nextDate.getFullYear() + count);
   else if (interval === "day") nextDate.setDate(nextDate.getDate() + count);
 
+  // ⭐ Shopify REJECTS a past next-billing-date, and this function routinely computes one: the
+  // exhaustion path is `original_billing_date + one interval`, which for a cycle that ran for
+  // weeks lands before today. Roll forward by whole intervals so the customer's cadence anchor
+  // survives and the date is one Shopify will accept.
+  const safeDate = rollForwardToFutureBillingDate(nextDate, interval, count);
+
   // Update locally
   await admin.from("subscriptions")
-    .update({ next_billing_date: nextDate.toISOString(), updated_at: new Date().toISOString() })
+    .update({ next_billing_date: safeDate.toISOString(), updated_at: new Date().toISOString() })
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", shopifyContractId);
+
+  // ⭐ ShopCX-billed subs are NOT in Appstle any more — their contract is ours. Push the date to
+  // Shopify and return; touching Appstle would 404 (or worse, hit a stale contract).
+  if ((sub as { billing_source?: string }).billing_source === "shopcx") {
+    const { shopifySetNextBillingDate } = await import("@/lib/commerce/shopify-subscription-client");
+    const r = await shopifySetNextBillingDate(workspaceId, shopifyContractId, safeDate.toISOString());
+    if (!r.success) {
+      console.error(`[Dunning] shopcx setNextBillingDate failed for ${shopifyContractId}: ${r.error}`);
+    }
+    return;
+  }
 
   // Update in Appstle via billing date change endpoint
   try {
@@ -872,7 +890,7 @@ async function resetBillingDateAfterDunning(
       await healOnTouch(workspaceId, shopifyContractId);
       const { decrypt } = await import("@/lib/crypto");
       const apiKey = decrypt(ws.appstle_api_key_encrypted);
-      const dateStr = nextDate.toISOString().split("T")[0]; // YYYY-MM-DD
+      const dateStr = safeDate.toISOString().split("T")[0]; // YYYY-MM-DD
       await fetch(
         `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-date?contractId=${shopifyContractId}&rescheduleFutureOrder=true&nextBillingDate=${encodeURIComponent(dateStr)}`,
         { method: "PUT", headers: { "X-API-Key": apiKey } },

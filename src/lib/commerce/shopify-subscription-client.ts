@@ -693,6 +693,40 @@ export async function shopifyCreateContract(
   return { success: true, contractId: id };
 }
 
+/**
+ * Resolve the billing cycle CONTAINING a given date.
+ *
+ * ⭐ This — not "the earliest past-due cycle" — is how a ShopCX-billed contract finds the cycle to
+ * charge. Shopify anchors a contract's cycle calendar to its `createdAt`, NOT to the
+ * `nextBillingDate` we set, so every MIGRATED contract is born with its calendar up to a full
+ * interval out of step with the customer's real schedule (observed on 35945087149: our date
+ * 2026-10-15, Shopify's first cycle 2026-11-05). Hunting for a past-due cycle finds nothing and
+ * the customer never gets charged.
+ *
+ * The returned `status` doubles as Shopify's own idempotency signal: BILLED means this cycle has
+ * already been charged, whoever did it.
+ */
+export async function getBillingCycleForDate(
+  workspaceId: string,
+  contractId: string,
+  date: string,
+): Promise<{ success: boolean; error?: string; cycle?: { index: number; startAt: string; endAt: string; status: string; skipped: boolean } }> {
+  const env = await gql<{ subscriptionBillingCycle?: { cycleIndex: number; cycleStartAt: string; cycleEndAt: string; status: string; skipped: boolean } }>(
+    workspaceId,
+    `query($id:ID!,$d:DateTime!){
+       subscriptionBillingCycle(billingCycleInput:{ contractId:$id, selector:{ date:$d } }){
+         cycleIndex cycleStartAt cycleEndAt status skipped } }`,
+    { id: contractGid(contractId), d: date },
+  );
+  if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
+  const c = env.data?.subscriptionBillingCycle;
+  if (!c) return { success: false, error: "no billing cycle contains that date" };
+  return {
+    success: true,
+    cycle: { index: c.cycleIndex, startAt: c.cycleStartAt, endAt: c.cycleEndAt, status: c.status, skipped: c.skipped },
+  };
+}
+
 /** Surface a thrown error the same way every caller here reports a failed one. */
 export function asFailure(e: unknown): SubscriptionActionResult {
   return { success: false, error: errText(e) };

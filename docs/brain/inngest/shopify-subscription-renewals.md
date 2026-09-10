@@ -34,13 +34,30 @@ So:
 | step | authority |
 |---|---|
 | pick CANDIDATES | ours (`next_billing_date <= end of today`) — cheap, O(due) |
-| decide what is DUE | **Shopify** — earliest `UNBILLED`, unskipped cycle whose `billingAttemptExpectedDate` has passed |
+| decide what is DUE | **Shopify** — the cycle CONTAINING our date (`selector: { date }`), which must be `UNBILLED` and unskipped |
 | charge | Shopify, targeting that cycle index explicitly |
 | advance | Shopify's next unbilled cycle, not arithmetic on our field |
 
 A wrong local date therefore makes a charge **late** (which the migration audit catches) but never
-**wrong**. `billingAttemptExpectedDate` equals `cycleEndAt`, so "in the past" means the window
-closed with no charge — the correct definition of a missed renewal.
+**wrong**.
+
+### ⭐ Why NOT "the earliest past-due cycle"
+
+That was the original design and it is **wrong for migrated contracts** — the population this
+worker exists for. Shopify anchors a contract's cycle calendar to its **`createdAt`**, not to the
+`nextBillingDate` we set, so a contract created by the migration is born up to a full interval out
+of step with the customer's real schedule. Measured on 35945087149:
+
+```
+our next_billing_date       2026-10-15   (35d out)
+Shopify cycle #1 expected   2026-11-05   (56d out)
+past-due hunt finds:        NOTHING DUE
+```
+
+A customer migrated today and due to renew tomorrow would simply never be charged. Resolving the
+cycle by DATE (`selector: { date: next_billing_date }`) returns the containing cycle regardless of
+where the calendar was anchored, and its `status` doubles as Shopify's own idempotency signal —
+`BILLED` means that cycle already charged, whoever did it.
 
 ## Flow
 
