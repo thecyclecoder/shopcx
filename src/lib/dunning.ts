@@ -780,8 +780,9 @@ export async function cancelForTerminalNoBackup(params: {
 /**
  * Roll a billing date forward by whole intervals until it lands in the FUTURE.
  *
- * ⚠️ Shopify rejects a past next-billing-date outright — on contract create AND on
- * `subscriptionContractSetNextBillingDate` ("Next billing date is invalid", verified 2026-09-10).
+ * ⚠️ Shopify rejects a past next-billing-date outright — both when creating a contract and when
+ * setting the date on an existing one ("Next billing date is invalid", verified 2026-09-10; see
+ * [[docs/brain/libraries/commerce__shopify-subscription-client]]).
  * Dunning routinely produces a past date: the exhaustion path computes
  * `original_billing_date + one interval`, and a cycle that ran for weeks lands before today.
  *
