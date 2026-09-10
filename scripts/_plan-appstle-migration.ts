@@ -16,7 +16,7 @@ const money = (c: number) => `$${(c / 100).toLocaleString("en-US", { minimumFrac
 
 async function main() {
   const { createAdminClient } = await import("../src/lib/supabase/admin");
-  const { loadPricingContext, planMigration } = await import("../src/lib/commerce/shopify-subscription-migrate");
+  const { loadPricingContext, planMigration, shopifyLineMath } = await import("../src/lib/commerce/shopify-subscription-migrate");
   const admin = createAdminClient();
   const one = process.argv.includes("--contract") ? process.argv[process.argv.indexOf("--contract") + 1] : null;
 
@@ -58,8 +58,19 @@ async function main() {
     plan.lines.forEach((l) => { if (l.grandfatherUnitCents > 0) gfLines++; if (l.remappedFrom) remapped++; });
     if (plan.blocked) { blocked[plan.blocked] = (blocked[plan.blocked] || 0) + 1; continue; }
     if (subs.get(String(plan.appstleContractId)) !== "active") continue;
-    cur += plan.currentTotalCents; nw += plan.newTotalCents;
-    const d = plan.newTotalCents - plan.currentTotalCents;
+    // ⚠️ Compare what Shopify ACTUALLY charges — the line total — not unit x qty. The two differ
+    // by `standardLine mod qty`, which is precisely the remainder that lands on the customer, so a
+    // unit-based comparison reports "UP 0" while real customers pay more.
+    let today = 0, after = 0;
+    for (const l of plan.lines) {
+      const codeUnit = l.carriedCodeUnitCents ?? 0;
+      today += (l.currentUnitCents - codeUnit) * l.quantity;
+      after += (l.isProtection || !l.onRule)
+        ? (l.finalUnitCents - codeUnit) * l.quantity
+        : shopifyLineMath(l.baseCents, l.quantity, plan.snsPct, plan.breakPct, l.grandfatherUnitCents).lineTotalCents - codeUnit * l.quantity;
+    }
+    cur += today; nw += after;
+    const d = after - today;
     if (d < -1) down++; else if (d > 1) up++; else unchanged++;
   }
 

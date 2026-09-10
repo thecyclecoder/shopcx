@@ -88,13 +88,46 @@ double charge is not reachable, and `migration_completed_at` stays null for the 
 - **The snapshot plans; the source decides.** `detectDrift` aborts if the contract changed since the
   snapshot — migrating stale state would silently undo a customer's own edit.
 
-## Measured over all 2,477 (2026-09-10)
+## Measured over all 2,478 snapshots (2026-09-10, re-verified after review)
 
 ```
-revenue   $188,983.33 → $183,113.33 per cycle   (−3.1%)
-440 down     1,572 unchanged     0 UP  ← no customer ever pays more
-blocked 12   (11 no payment method, 1 no lines after rules)
+revenue   $188,249.42 → $182,128.50 per cycle   (−3.3%)
+455 down     1,553 unchanged     0 UP
+blocked 14   (11 no payment method, 2 cancelled, 1 no lines after rules)
+grandfather locks 1,883        variant remaps 338        unresolvable lines 0
 ```
+
+⚠️ **The delta is measured on Shopify's real LINE TOTALS, post-code on both sides** — not
+`unit × qty`. Those differ by `standardLine mod qty`, and that remainder lands on the customer: a
+unit-based comparison printed `UP 0` while 42 contracts genuinely paid 1–6¢ more. The planner now
+absorbs the remainder into the grandfather, so the invariant is true of the amount Shopify actually
+charges rather than of our own arithmetic.
+
+⚠️ **`code_allocation_unit_cents` covers ONLY fixed-amount codes** — exactly the ones
+`carryableCodes` re-applies. Including percentage codes added their discount to the baseline and
+never restored it: 94 contracts would have paid more, +$511.47/cycle, worst case $59.96 → $110.34,
+and verify could not see it because both sides were pre-code.
+
+⚠️ **Verify expects `finalUnitCents − carriedCodeUnitCents`** and matches lines by **index**, not
+variant. The plan is pre-code while the live contract already has the carried code allocated; and
+45 contracts carry the same variant on two lines with different grandfathers, so variant-matching
+compared duplicates against the first live line. Both defects aborted the migration — and an abort
+brands the contract permanently via `migrated_to_contract_id`.
+
+## Known-open (measured, not fixed)
+
+- **The Appstle-cancel read-back fails open.** A failed verification fetch (`ok:false` — rate
+  limit, network, Appstle's HTML-for-unknown-route) is treated as a successful cancel. The sweeper's
+  repair path re-cancels with no read-back at all, so a false success is stamped complete on the
+  same false success that produced it.
+- **A create that succeeds server-side but fails client-side leaves an untracked contract.** The
+  marker is written after a *reported* success, so a lost response still allows a duplicate on
+  retry — the `35945087149 + 35945054381` case.
+- **6 contracts resolve to an incomplete shipping address** and are created anyway.
+- **3 partially-consumed limited codes are re-granted in full** (`limit` carried verbatim while
+  `usageCount` resets).
+- **3 rows are PAUSED in Appstle but `active` locally** — no charge risk (the attempt checks live
+  contract status) but permanent no-op churn on a money cron.
 
 ## Related
 

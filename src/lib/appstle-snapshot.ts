@@ -81,9 +81,15 @@ export function normalizeAppstleContract(raw: Record<string, any>): NormalizedSn
   const pm = raw?.customerPaymentMethod ?? null;
   // Contract-level discounts carry the TYPE; the line allocations carry only an id and an amount.
   // Join them so a line can tell "a code the customer applied" from "a discount Appstle baked in".
+  // ⚠️ ONLY fixed-amount codes. The add-back exists so grandfathering is computed against the
+  // price BEFORE a code that the migration will RE-APPLY — so it must cover exactly the codes that
+  // are actually carried. `carryableCodes` can only re-apply fixed amounts (a percentage code has
+  // no `amount.amount`), so including percentage codes here removes their discount from the
+  // baseline and never restores it: measured at 94 contracts paying more, +$511.47/cycle, worst
+  // case $59.96 -> $110.34. Verify cannot catch that, because both sides are pre-code.
   const codeDiscountIds = new Set<string>(
-    ((raw?.discounts?.nodes ?? []) as Record<string, unknown>[])
-      .filter((d) => String(d.type ?? "") === "CODE_DISCOUNT")
+    ((raw?.discounts?.nodes ?? []) as Record<string, any>[])
+      .filter((d) => String(d.type ?? "") === "CODE_DISCOUNT" && d?.value?.amount?.amount != null)
       .map((d) => String(d.id ?? "")),
   );
   const lines: SnapshotLine[] = lineNodes(raw).map((n: any) => {

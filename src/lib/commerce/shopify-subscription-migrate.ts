@@ -87,6 +87,8 @@ export interface PlannedLine {
   finalUnitCents: number;
   isProtection: boolean;
   onRule: boolean;
+  /** Per-unit fixed-code allocation that WILL be re-applied to the new contract. */
+  carriedCodeUnitCents: number;
 }
 
 export interface DroppedLine { sku: string | null; quantity: number; reason: string }
@@ -262,7 +264,7 @@ export function planMigration(
         remappedFrom: l.variant_id && l.variant_id !== variant.shopify_variant_id ? l.variant_id : null,
         quantity: 1, baseCents: currentUnit, currentUnitCents: currentUnit,
         standardUnitCents: currentUnit, grandfatherUnitCents: 0, finalUnitCents: currentUnit,
-        isProtection: true, onRule: false,
+        isProtection: true, onRule: false, carriedCodeUnitCents: 0,
       };
     }
 
@@ -273,13 +275,30 @@ export function planMigration(
       ? shopifyLineMath(base, qty, ctx.snsPct, breakPct).standardUnitCents
       : base;
     // Grandfather only ever REDUCES. Where standard is already cheaper the customer takes it.
-    const grandfather = currentUnit > 0 && currentUnit < standard ? standard - currentUnit : 0;
+    let grandfather = currentUnit > 0 && currentUnit < standard ? standard - currentUnit : 0;
+
+    // ⭐ Absorb the per-line rounding remainder into the grandfather.
+    //
+    // `standardUnitCents` is `trunc(standardLine / qty)`, but Shopify charges the LINE TOTAL — so
+    // `finalUnit x qty` understates the real charge by `standardLine mod qty`, and that remainder
+    // lands on the customer. Measured: 42 contracts paying 1-6c more, invisible to every check
+    // (the reporter compares unit x qty on both sides, and verify's tolerance is 1c per unit).
+    // Rounding the grandfather UP by the shortfall makes the real line total <= what they pay
+    // today, so "no customer pays more" is true of the amount Shopify actually charges.
+    if (qty > 1) {
+      const realLine = shopifyLineMath(base, qty, ctx.snsPct, onRule ? breakPct : 0, grandfather).lineTotalCents;
+      const todayLine = currentUnit * qty;
+      if (currentUnit > 0 && realLine > todayLine) {
+        grandfather += Math.ceil((realLine - todayLine) / qty);
+      }
+    }
     return {
       sku: l.sku, shopifyVariantId: String(variant.shopify_variant_id),
       remappedFrom: l.variant_id && l.variant_id !== variant.shopify_variant_id ? l.variant_id : null,
       quantity: qty, baseCents: base, currentUnitCents: currentUnit,
       standardUnitCents: standard, grandfatherUnitCents: grandfather,
       finalUnitCents: standard - grandfather, isProtection: false, onRule,
+      carriedCodeUnitCents: codeUnit,
     };
   });
 
@@ -649,20 +668,32 @@ export async function executeMigration(
     return { ok: false, stage: "verify", error: verify.error, plan, newContractId };
   }
   const mismatches: string[] = [];
-  for (const l of plan.lines) {
-    const live = verify.contract.lines.find(
-      (x) => String(x.variantId).replace("gid://shopify/ProductVariant/", "") === l.shopifyVariantId,
-    );
-    if (!live) { mismatches.push(`${l.sku}: missing on the created contract`); continue; }
+  // ⭐ Match by INDEX, not variant. `subscriptionContractAtomicCreate` preserves line order, and a
+  // contract can legitimately carry the same variant on two lines with DIFFERENT grandfathers —
+  // 45 contracts do. Matching by variant compares every duplicate against the first live line, so
+  // 10 of them falsely fail verify and get permanently bricked by the marker.
+  const liveLines = verify.contract.lines;
+  for (let i = 0; i < plan.lines.length; i++) {
+    const l = plan.lines[i];
+    const live = liveLines[i];
+    if (!live) { mismatches.push(`${l.sku}: missing on the created contract (index ${i})`); continue; }
+    const liveVariant = String(live.variantId ?? "").replace("gid://shopify/ProductVariant/", "");
+    if (liveVariant !== l.shopifyVariantId) {
+      mismatches.push(`${l.sku}: line ${i} is variant ${liveVariant}, expected ${l.shopifyVariantId}`);
+      continue;
+    }
     const baseCents = Math.round(parseFloat(live.currentPrice ?? "0") * 100);
     if (baseCents !== l.baseCents) mismatches.push(`${l.sku}: base ${baseCents} != planned ${l.baseCents}`);
-    // ⭐ The real check. `lineDiscountedPrice` is a LINE TOTAL, so divide by quantity. This is what
-    // settles whether Shopify stacks two percentage discounts multiplicatively (0.75 x 0.92, what
-    // we planned) or additively (0.67) — undocumented, so it is measured, never assumed.
+
+    // ⭐ The plan's finalUnitCents is PRE-code (that is what grandfathering is computed against),
+    // but the live contract already has the carried code allocated — so the two differ by exactly
+    // the code. Without this the 132 contracts carrying a fixed code ALL abort here, and an abort
+    // brands them permanently via `migrated_to_contract_id`.
     if (live.lineDiscountedPrice != null) {
       const effUnit = Math.round((parseFloat(live.lineDiscountedPrice) * 100) / (live.quantity || 1));
-      if (Math.abs(effUnit - l.finalUnitCents) > 1) {
-        mismatches.push(`${l.sku}: EFFECTIVE ${effUnit} != planned ${l.finalUnitCents} (allocations: ${live.discountAllocationCount})`);
+      const expected = l.finalUnitCents - (l.carriedCodeUnitCents ?? 0);
+      if (Math.abs(effUnit - expected) > 1) {
+        mismatches.push(`${l.sku}: EFFECTIVE ${effUnit} != expected ${expected} (allocations: ${live.discountAllocationCount})`);
       }
     }
   }
