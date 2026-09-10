@@ -470,12 +470,14 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     description: "Daily fan-out of due renewals for subs our Shopify app bills (billing_source='shopcx'). Shopify fires nothing on its own — if this stops, migrated subs stop earning.",
     expectedCadence: "daily (0 10 * * *)",
     livenessWindowMs: 30 * HOUR,
-    // ⭐ renewal-integrity = "overdue subs never advanced". EVERY permanent-stuck failure on this
-    // path (a cycle charged but the date not advanced, a cycle that resolves to nothing, a claim
-    // left in_flight) shows up as exactly that signature. On a worker whose own header says "if it
-    // doesn't run, they don't bill — not late, never", shipping without this assertion means the
-    // first signal is a customer email.
-    outputAssertions: ["renewal-integrity"],
+    // ⚠️ NO `renewal-integrity` here. That assertion is hard-scoped to `is_internal = true`
+    // (countRenewalIntegrityOverdueSubs) and reads its grace window from the INTERNAL cron's
+    // heartbeat — so attaching it made this cron raise the Braintree engine's alert. Measured: it
+    // would have fired red on the first tick with "5 internal subs overdue", double-reporting and
+    // misattributing the health of a path this cron owns none of.
+    //
+    // The signature that matters here — charged-but-never-advanced — still needs its own
+    // shopcx-scoped assertion before this runs at volume. Tracked, not silently skipped.
   },
   {
     id: "shopify-subscription-renewal-attempt",

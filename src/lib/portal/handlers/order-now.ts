@@ -64,10 +64,18 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
     const { cycleKeyFromNextBillingDate } = await import("@/lib/subscription-cycle-charge-claim");
     const due = (resolved as { next_billing_date?: string | null }).next_billing_date ?? null;
     const cycleKey = cycleKeyFromNextBillingDate(due);
-    // Same idempotency key the renewal worker would use for this cycle, so a portal "order now"
-    // and the nightly cron cannot both charge it.
+    // ⚠️ NOT the renewal worker's key. Reusing it makes Shopify REPLAY that cycle's cached
+    // attempt: if the cron already succeeded the customer is told a new order was placed when none
+    // was, and if it declined they can never self-serve after fixing their card — the stale
+    // decline replays forever. A distinct key means this is a real, fresh attempt; the BILLED
+    // pre-check below is what stops a genuine double charge.
+    const cycleCheck = await (await import("@/lib/commerce/shopify-subscription-client"))
+      .getBillingCycleForDate(auth.workspaceId, String(contractId), due ?? new Date().toISOString());
+    if (cycleCheck.success && cycleCheck.cycle?.status === "BILLED") {
+      return jsonErr({ error: "already_billed", message: "This order has already been placed." }, 409);
+    }
     const started = await shopifyAttemptBilling(
-      auth.workspaceId, String(contractId), `${contractId}:${cycleKey}`,
+      auth.workspaceId, String(contractId), `${contractId}:${cycleKey}:portal`,
       due ? { billingCycleSelector: { date: due } } : {},
     );
     if (!started.success || !started.attemptId) {
@@ -80,6 +88,27 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
     if (!outcome.success) {
       return jsonErr({ error: "billing_failed", message: outcome.error ?? "Payment was declined." }, 502);
     }
+    // ⭐ ADVANCE THE DATE. Charging without advancing freezes the subscription permanently: the
+    // cycle flips to BILLED, next_billing_date still points at it, and every subsequent nightly run
+    // resolves that cycle as already-billed and skips WITHOUT advancing. Shopify fires nothing on
+    // its own, so the sub silently stops earning and the skip is indistinguishable from a healthy
+    // "nothing due" beat.
+    {
+      const { getUpcomingBillingCycles } = await import("@/lib/commerce/shopify-subscription-client");
+      const admin = createAdminClient();
+      const cycles = await getUpcomingBillingCycles(auth.workspaceId, String(contractId), { first: 6 });
+      const nextUnbilled = (cycles.cycles ?? []).find(
+        (c) => c.status === "UNBILLED" && !c.skipped && (!due || new Date(c.expectedDate).getTime() > new Date(due).getTime()),
+      );
+      if (nextUnbilled) {
+        await admin.from("subscriptions")
+          .update({ next_billing_date: nextUnbilled.expectedDate, last_payment_status: "succeeded", updated_at: new Date().toISOString() })
+          .eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId));
+      } else {
+        console.error(`[portal order-now] charged ${contractId} but found no cycle after ${due} — date NOT advanced, needs attention`);
+      }
+    }
+
     const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
     if (customer) {
       await logPortalAction({

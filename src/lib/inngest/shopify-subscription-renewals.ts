@@ -120,8 +120,11 @@ export const shopifySubscriptionRenewalCron = inngest.createFunction(
           .from("dunning_cycles")
           .select("subscription_id, next_retry_at")
           .in("subscription_id", pageIds)
-          .in("status", ["retrying", "active"])
-          .not("next_retry_at", "is", null);
+          // ⚠️ `rotating` is the status createDunningCycle INSERTS with, and it carries a NULL
+          // next_retry_at — so filtering on ["retrying","active"] + next_retry_at NOT NULL missed a
+          // freshly-opened cycle entirely, and the cron re-selected the sub every morning during
+          // the whole card-rotation phase. Match getActiveDunningCycle's open set instead.
+          .in("status", ["active", "rotating", "retrying", "skipped", "paused"]);
         all.push(...filterCandidatesByDunningRetryWindow(data, cycles ?? [], now));
 
         if (data.length < 1000) break;
@@ -146,16 +149,26 @@ export const shopifySubscriptionRenewalCron = inngest.createFunction(
       );
     }
 
+    // ⭐ Count the MUTED as well as the due. `.lte("next_billing_date", ...)` excludes NULLs, so a
+    // shopcx sub with no billing date is never selected and never alerted on — the most complete
+    // mute there is, and a bare `due` count cannot tell "nobody due" from "N subs invisible".
+    const muted = await step.run("count-muted", async () => {
+      const { count } = await admin
+        .from("subscriptions").select("id", { count: "exact", head: true })
+        .eq("billing_source", "shopcx").eq("status", "active").is("next_billing_date", null);
+      return count ?? 0;
+    });
+
     await step.run("emit-heartbeat", () =>
       emitCronHeartbeat("shopify-subscription-renewal-cron", {
         // ⭐ Count on the beat, never a bare ok. A cron that "succeeded" having selected ZERO subs
         // looks identical to a healthy quiet day — that is exactly how the close snapshots went a
         // month unwritten behind a green heartbeat.
-        produced: { due: due.length },
+        produced: { due: due.length, muted_null_billing_date: muted },
       }),
     );
 
-    return { due: due.length };
+    return { due: due.length, muted };
   },
 );
 

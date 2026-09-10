@@ -27,7 +27,23 @@ export interface DunningChargeResult {
   attemptId?: string | null;
   /** True when the outcome is not yet settled (3DS). NOT a failure — must not advance dunning. */
   pending?: boolean;
+  /**
+   * ⭐ Whether `success` is the FINAL charge outcome or merely "the vendor accepted the request".
+   *
+   * Appstle: false — acceptance only; the real result arrives later on a webhook, which is why
+   * dunning records those attempts as `pending`.
+   * ShopCX: true — `awaitBillingAttempt` has already polled to a terminal state, so `success`
+   * means the card was actually charged.
+   *
+   * Conflating the two is how a PAYING customer gets treated as a decline: the shopcx charge
+   * succeeds, dunning logs it `pending` and waits for a webhook that can never fire for a contract
+   * Appstle no longer holds, the cycle never reaches `recovered`, the payday ladder burns four more
+   * retries, and cycle 2 CANCELS them.
+   */
+  settled?: boolean;
   orderName?: string | null;
+  /** The cycle was already BILLED — treat as recovered, never as a fresh charge. */
+  alreadyBilled?: boolean;
 }
 
 /**
@@ -37,6 +53,16 @@ export interface DunningChargeResult {
 export async function dunningChargeContract(
   workspaceId: string,
   contractId: string,
+  /**
+   * ⭐ A STABLE, per-cycle attempt ordinal — the rotation index or `payday_retry_count`.
+   *
+   * This was derived from a live `payment_failures` COUNT, which is neither stable nor isolated:
+   * an Inngest step retry re-reads a higher count, builds a NEW key and issues a second real
+   * charge; two concurrent charge sites read the same count, build the SAME key, and Shopify
+   * replays the first attempt's decline so a customer's good new card is never actually presented.
+   * The caller already holds a per-cycle counter — pass it.
+   */
+  attemptOrdinal: number,
 ): Promise<DunningChargeResult> {
   const src = await resolveBillingSource(workspaceId, contractId);
 
@@ -67,6 +93,7 @@ export async function dunningChargeContract(
       const outcome = await awaitBillingAttempt(workspaceId, started.attemptId);
       return {
         success: outcome.success,
+        settled: !(outcome.pending ?? false),
         pending: outcome.pending ?? false,
         error: outcome.error ?? outcome.errorCode ?? undefined,
         attemptId: started.attemptId,
@@ -84,7 +111,8 @@ export async function dunningChargeContract(
   }
   const attemptId = ordersRes.orders[0].id;
   const billingRes = await subscriptionAttemptBilling(workspaceId, attemptId);
-  return { success: billingRes.success, error: billingRes.error, attemptId };
+  // Vendor ACCEPTANCE only — the charge result lands later on the Appstle webhook.
+  return { success: billingRes.success, settled: false, error: billingRes.error, attemptId };
 }
 
 /** Unskip whatever the engine considers skipped. A no-op where the concept doesn't apply. */
