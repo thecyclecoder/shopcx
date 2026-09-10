@@ -582,3 +582,102 @@ test("isNonOrderScopedLoyaltyAction — empty-string / whitespace-only fields do
     true,
   );
 });
+
+// ── Phase 2 (Fix 1) — spec: replacements-must-work-for-internal-non-shopify-renewal-orders ──
+//
+// Security regression: create_replacement_order was being sized from a caller-supplied
+// `amount_cents` / `replacement_amount_cents`, but the executor IGNORES that value (the underlying
+// draft-order build applies a hardcoded 100% discount). A CS-Director verdict could set
+// `amount_cents: 1`, slip the batch sum below the workspace's approval threshold, bypass the
+// founder gate, and still ship a free replacement with REAL product/COGS. Fix: force
+// create_replacement_order to UNKNOWN amount in every sizing helper, so the gate collapses to
+// null → mandatory founder approval. `dollar_replacement` retains normal sizing (it refunds a
+// real dollar amount on the original order and stays inside the amount/refund rail).
+
+test("Fix 1 — create_replacement_order with amount_cents: 1 STILL GATES (caller-supplied value is not trusted)", () => {
+  const g = remedyNeedsFounderApproval(
+    { action_type: "create_replacement_order", payload: { amount_cents: 1 } },
+    5000,
+  );
+  assert.equal(g.gated, true);
+  assert.equal(g.amountCents, null, "amount MUST collapse to null so a tiny value can't dodge the gate");
+  assert.equal(g.actionType, "create_replacement_order");
+});
+
+test("Fix 1 — create_replacement_order with replacement_amount_cents: 1 STILL GATES (caller-supplied value is not trusted)", () => {
+  const g = remedyNeedsFounderApproval(
+    { action_type: "create_replacement_order", payload: { replacement_amount_cents: 1 } },
+    5000,
+  );
+  assert.equal(g.gated, true);
+  assert.equal(g.amountCents, null);
+});
+
+test("Fix 1 — planNeedsFounderApproval: create_replacement_order with amount_cents: 1 collapses the batch to null → gate", () => {
+  const g = planNeedsFounderApproval(
+    [
+      {
+        actionType: "create_replacement_order",
+        actionParams: { order_number: "SHOPCX272", variant_id: "42614433513645", quantity: 2, amount_cents: 1 },
+      },
+    ],
+    5000,
+  );
+  assert.equal(g.gated, true);
+  assert.equal(g.amountCents, null);
+  assert.equal(g.actionType, "create_replacement_order");
+});
+
+test("Fix 1 — planNeedsFounderApproval: a MIXED batch with a paid partial_refund + a tiny-amount create_replacement_order STILL GATES (any unknown collapses the sum)", () => {
+  // Without the fix, this batch would total $30.01 (below the $50 threshold) and slip past the
+  // founder gate; the tiny caller-supplied value on the free replacement would inflate the sum
+  // below threshold and ship a real replacement plus a refund unattended. With the fix, the
+  // free replacement collapses the sum to null → gate.
+  const g = planNeedsFounderApproval(
+    [
+      {
+        actionType: "partial_refund",
+        actionParams: { shopify_order_id: "SC135494", amount_cents: 3000, reason: "shipping" },
+      },
+      {
+        actionType: "create_replacement_order",
+        actionParams: { order_number: "SC135494", variant_id: "42614433513645", quantity: 1, amount_cents: 1 },
+      },
+    ],
+    5000,
+  );
+  assert.equal(g.gated, true);
+  assert.equal(g.amountCents, null);
+});
+
+test("Fix 1 — dollar_replacement RETAINS normal sizing (its replacement_amount_cents is a real refund on the original order)", () => {
+  // dollar_replacement's amount IS honored by the executor (it fires a real refund), so it
+  // must NOT be re-classified as unknown — a $30 dollar_replacement below a $50 threshold
+  // should still run autonomously.
+  const g = remedyNeedsFounderApproval(
+    { action_type: "dollar_replacement", payload: { replacement_amount_cents: 3000 } },
+    5000,
+  );
+  assert.equal(g.gated, false);
+  assert.equal(g.amountCents, 3000);
+  assert.equal(g.actionType, "dollar_replacement");
+});
+
+test("Fix 1 — dollar_replacement OVER threshold GATES on its own amount (rail unchanged)", () => {
+  const g = planNeedsFounderApproval(
+    [
+      {
+        actionType: "dollar_replacement",
+        actionParams: {
+          shopify_order_id: "SC135494",
+          variant_id: "42614433513645",
+          quantity: 1,
+          replacement_amount_cents: 6995,
+        },
+      },
+    ],
+    5000,
+  );
+  assert.equal(g.gated, true);
+  assert.equal(g.amountCents, 6995);
+});

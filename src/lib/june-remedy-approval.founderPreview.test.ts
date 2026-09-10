@@ -36,9 +36,24 @@ test("money action reuses the dollarized summary", () => {
   assert.match(p, /Refund \$48\.00 for Susan/);
 });
 
-test("replacement money action → 'Send a replacement worth'", () => {
+test("replacement money action → 'Send a free replacement' (caller-supplied amount is NOT trusted)", () => {
+  // Fix 1 (spec: replacements-must-work-for-internal-non-shopify-renewal-orders Phase 2) —
+  // create_replacement_order's amount is untrusted (the executor always applies 100% discount
+  // and ignores caller-supplied amount_cents / replacement_amount_cents). The founder preview
+  // shows the intent without a dollar figure, so a verdict that set amount_cents=$25 can't
+  // parade a false "worth $25" line past the CEO.
   const p = buildFounderApprovalPreview({
     remedy: { action_type: "create_replacement_order", payload: { amount_cents: 2500 } },
+  });
+  assert.match(p, /Send a free replacement/);
+  assert.doesNotMatch(p, /\$25\.00/, "caller-supplied $25 must not appear in the preview");
+});
+
+test("dollar_replacement RETAINS the dollarized 'Send a replacement worth $X' preview (its amount is trusted)", () => {
+  // dollar_replacement's executor fires a real refund on the original order, so its amount IS
+  // trustworthy and the preview must keep the dollar figure so the CEO sees the exact spend.
+  const p = buildFounderApprovalPreview({
+    remedy: { action_type: "dollar_replacement", payload: { replacement_amount_cents: 2500 } },
   });
   assert.match(p, /Send a replacement worth \$25\.00/);
 });

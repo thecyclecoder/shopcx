@@ -197,12 +197,34 @@ function extractLoyaltyPayloadValueCents(
  * then — for a loyalty action type — the loyalty-derived signals in
  * `extractLoyaltyPayloadValueCents` (so a $15 LOYALTY-* coupon SUMS into the founder gate as
  * 1500 cents instead of collapsing the batch to an unsizeable/unknown-gate result).
+ *
+ * `create_replacement_order` is DELIBERATELY never sized from a caller-supplied
+ * `amount_cents` / `replacement_amount_cents` — those fields are IGNORED by the underlying
+ * executor (`createReplacementDraftOrder` in shopify-draft-orders.ts + `createReplacementOrder`
+ * in replacement-order.ts always apply a hardcoded 100% discount), so a caller-supplied number
+ * would let a CS-Director verdict pass a tiny finite value (`amount_cents: 1`), sneak the sum
+ * under the workspace's approval threshold, bypass the founder gate, and still ship a free
+ * replacement with REAL product/COGS. Treating the amount as UNKNOWN forces the batch to
+ * collapse to null in the SUM helpers → the gate fires conservatively. The sibling
+ * `dollar_replacement` still reads `replacement_amount_cents` because THAT action refunds a
+ * real dollar amount on the original order (the executor honors the value + writes an
+ * `order_refunds` row), so its sizing is trustworthy. Add a trusted server-side product-value
+ * signal ("COGS × units") if you ever want to size a free replacement — do NOT accept the
+ * caller's number.
+ *
  * Returns null when no signal is present. Pure.
  */
 function extractPayloadAmountCents(
   payload: Record<string, unknown>,
   actionType?: string,
 ): number | null {
+  // spec: replacements-must-work-for-internal-non-shopify-renewal-orders Phase 2 (Fix 1) —
+  // `create_replacement_order` is always a $0-discount free replacement (executor ignores any
+  // caller-supplied amount). Sizing it from `amount_cents` / `replacement_amount_cents` lets a
+  // verdict set `amount_cents: 1` and slip past the founder gate while shipping real COGS.
+  // Force UNKNOWN so `planNeedsFounderApproval` / `remedyNeedsFounderApproval` gate every
+  // free replacement. `dollar_replacement` retains normal sizing (its amount IS a real refund).
+  if (actionType === "create_replacement_order") return null;
   const raw = payload.amount_cents ?? payload.replacement_amount_cents;
   if (typeof raw === "number" && Number.isFinite(raw)) return Math.round(raw);
   if (actionType && LOYALTY_ACTION_TYPES.has(actionType)) {
@@ -951,6 +973,13 @@ export function buildFounderApprovalPreview(input: {
   if (money != null) {
     const verb = actionType === "create_replacement_order" || actionType === "dollar_replacement" ? "Send a replacement worth" : "Refund";
     action = `${verb} $${(money / 100).toFixed(2)}${who}`;
+  } else if (actionType === "create_replacement_order") {
+    // spec: replacements-must-work-for-internal-non-shopify-renewal-orders Phase 2 Fix 1 —
+    // `create_replacement_order` is always sized as UNKNOWN (the executor's discount is 100%
+    // and the caller-supplied number is not trusted for the founder gate). Preview the intent
+    // without an untrusted dollar figure; the sizing rail already ensures the founder sees the
+    // decision, this line just tells them what June intends to do.
+    action = `Send a free replacement${who}`;
   } else if (actionType === "add_one_time_gift") {
     const free = payload.free !== false;
     action = `${free ? "Comp a FREE one-time gift" : "Add a one-time item"}${who} on their next order`;
