@@ -1,6 +1,7 @@
 // Inngest dunning functions: payment-failed orchestration, new-card recovery, billing-success cleanup
 
 import { inngest } from "./client";
+import { dunningChargeContract, dunningUnskip } from "@/lib/dunning-charge";
 import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
@@ -285,14 +286,15 @@ export const dunningPaymentFailed = inngest.createFunction(
           return;
         }
 
-        const ordersRes = await subscriptionGetUpcomingOrders(workspace_id, shopify_contract_id);
-        if (!ordersRes.success || !ordersRes.orders?.length) {
-          console.log(`[Dunning] No upcoming orders for ${shopify_contract_id}: ${ordersRes.error || "empty"}`);
+        // ⭐ Engine-aware. A shopcx contract has no Appstle upcoming orders, so the old
+        // lookup-then-bill flow found nothing, treated every card as failed, burned the retry cap
+        // and let the cycle-2 ladder CANCEL a customer whose card was never actually charged.
+        const billingRes = await dunningChargeContract(workspace_id, shopify_contract_id);
+        const attemptId = billingRes.attemptId ?? null;
+        if (billingRes.pending) {
+          console.log(`[Dunning] ${shopify_contract_id}: attempt unresolved (3DS) — leaving the cycle open`);
           return;
         }
-
-        const attemptId = ordersRes.orders[0].id;
-        const billingRes = await subscriptionAttemptBilling(workspace_id, attemptId);
 
         // Log the attempt — includes whether Appstle accepted or rejected it
         await logPaymentFailure({
@@ -505,13 +507,14 @@ export const dunningNewCardRecovery = inngest.createFunction(
           }
 
           // Attempt billing
-          const ordersRes = await subscriptionGetUpcomingOrders(workspace_id, cancelled.contractId);
+          const billingRes0 = await dunningChargeContract(workspace_id, cancelled.contractId);
+          const ordersRes = { success: billingRes0.success, orders: billingRes0.attemptId ? [{ id: billingRes0.attemptId }] : [], error: billingRes0.error } as { success: boolean; orders?: { id: string }[]; error?: string };
           if (!ordersRes.success || !ordersRes.orders?.length) {
             return { contractId: cancelled.contractId, recovered: true, error: "Reactivated but no upcoming orders to bill" };
           }
 
           const attemptId = ordersRes.orders[0].id;
-          const billingRes = await subscriptionAttemptBilling(workspace_id, attemptId);
+          const billingRes = billingRes0;
 
           await logPaymentFailure({
             workspaceId: workspace_id,
@@ -547,7 +550,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
         try {
           // Unskip the order if it was skipped or retrying
           if ((cycle.status === "skipped" || cycle.status === "retrying") && cycle.billing_attempt_id) {
-            await subscriptionUnskipOrder(workspace_id, cycle.billing_attempt_id);
+            await dunningUnskip(workspace_id, cycle.shopify_contract_id, cycle.billing_attempt_id);
           }
 
           // If subscription was cancelled (dunning exhausted), reactivate
@@ -571,13 +574,14 @@ export const dunningNewCardRecovery = inngest.createFunction(
           }
 
           // Get upcoming order and trigger billing
-          const ordersRes = await subscriptionGetUpcomingOrders(workspace_id, cycle.shopify_contract_id);
+          const billingRes1 = await dunningChargeContract(workspace_id, cycle.shopify_contract_id);
+          const ordersRes = { success: billingRes1.success, orders: billingRes1.attemptId ? [{ id: billingRes1.attemptId }] : [], error: billingRes1.error } as { success: boolean; orders?: { id: string }[]; error?: string };
           if (!ordersRes.success || !ordersRes.orders?.length) {
             return { contractId: cycle.shopify_contract_id, recovered: false, error: "No upcoming orders" };
           }
 
           const attemptId = ordersRes.orders[0].id;
-          const billingRes = await subscriptionAttemptBilling(workspace_id, attemptId);
+          const billingRes = billingRes1;
 
           await logPaymentFailure({
             workspaceId: workspace_id,
@@ -997,20 +1001,27 @@ export const dunningPaydayRetryCron = inngest.createFunction(
   async ({ step }) => {
     const admin = createAdminClient();
 
-    // Find cycles ready to retry. Exclude internal-* contracts — Braintree-billed
-    // subs don't go through the Appstle card-rotation path (their initial failure
-    // is routed to handleInternalDunningFailure above), but the legacy retrying
-    // rows that still carry an internal-* shopify_contract_id would otherwise be
-    // fed back into subscriptionAttemptBilling with a synthetic billing-attempt id and
-    // 400 against Appstle. Signature vercel:cdfbac68e30a91f9.
+    // Find cycles ready to retry. Exclude internal-* contracts — Braintree-billed subs don't go
+    // through this card-rotation path (their initial failure is routed to
+    // handleInternalDunningFailure above), and a legacy retrying row carrying an internal-*
+    // contract id would be billed with a synthetic attempt id. Signature vercel:cdfbac68e30a91f9.
+    //
+    // ⭐ ShopCX-billed subs DO belong here — their contract ids are numeric, so this filter keeps
+    // them, and `dunningChargeContract` resolves the engine at charge time. Before that existed
+    // they were selected but unbillable: the Appstle lookup found no upcoming orders, every card
+    // read as failed, the retry cap burned, and the cycle-2 ladder CANCELLED a customer whose card
+    // was never actually charged.
     const cycles = await step.run("find-retryable-cycles", async () => {
-      const { data } = await admin
+      const { data, error } = await admin
         .from("dunning_cycles")
         .select("id, workspace_id, shopify_contract_id, subscription_id, customer_id, cycle_number, cards_tried, billing_attempt_id, payday_retry_count")
         .eq("status", "retrying")
         .not("shopify_contract_id", "ilike", "internal-%")
         .lte("next_retry_at", new Date().toISOString());
 
+      // Never swallow: a discarded error reads as "no cycles due" and the hour's retries simply
+      // do not happen, with a green heartbeat over the top.
+      if (error) throw new Error(`find-retryable-cycles failed: ${error.message}`);
       return data || [];
     });
 
@@ -1119,11 +1130,12 @@ export const dunningPaydayRetryCron = inngest.createFunction(
           try {
             await subscriptionSwitchPaymentMethod(cycle.workspace_id, cycle.shopify_contract_id, card.id);
 
-            const ordersRes = await subscriptionGetUpcomingOrders(cycle.workspace_id, cycle.shopify_contract_id);
+            const paydayRes = await dunningChargeContract(cycle.workspace_id, cycle.shopify_contract_id);
+            const ordersRes = { success: paydayRes.success, orders: paydayRes.attemptId ? [{ id: paydayRes.attemptId }] : [], error: paydayRes.error } as { success: boolean; orders?: { id: string }[]; error?: string };
             if (!ordersRes.success || !ordersRes.orders?.length) continue;
 
             const attemptId = ordersRes.orders[0].id;
-            await subscriptionAttemptBilling(cycle.workspace_id, attemptId);
+            // already charged by dunningChargeContract above
 
             await logPaymentFailure({
               workspaceId: cycle.workspace_id,
