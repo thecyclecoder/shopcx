@@ -24,6 +24,8 @@ import {
   getSubscriptionContract,
   shopifyAddDraftDiscount,
   shopifyRemoveDraftLine,
+  shopifyUpdateDraftLine,
+  shopifyAddDraftLine,
   shopifyRemoveStructuralDiscounts,
   type ManualDiscountInput,
 } from "@/lib/commerce/shopify-subscription-client";
@@ -168,6 +170,98 @@ export async function shopcxRemoveItem(
     return withDraft(workspaceId, contractId, async (draftId) => {
       const r = await shopifyRemoveDraftLine(workspaceId, draftId, line.id);
       if (!r.success) return r;
+      return rewriteStructuralDiscounts(workspaceId, contractId, draftId);
+    });
+  } catch (err) { return { success: false, error: errText(err) }; }
+}
+
+/**
+ * Swap a line's variant — a flavour change.
+ *
+ * ⭐ Done as a DRAFT line update rather than `subscriptionContractProductChange`, so the swap and
+ * the discount recompute commit together. Split across two operations there is a window where the
+ * new variant is priced on the old line's discounts.
+ *
+ * The new line is created at the new variant's catalog MSRP; `rewriteStructuralDiscounts` then
+ * applies S&S and the tier. A grandfathered rate does NOT carry across a swap — it was negotiated
+ * on a specific product, which is exactly why it is stored per-line and variant-scoped.
+ */
+export async function shopcxSwapVariant(
+  workspaceId: string, contractId: string, oldVariantId: string, newVariantId: string, quantity?: number,
+): Promise<LineOpResult> {
+  try {
+    const { line, error } = await findLine(workspaceId, contractId, oldVariantId);
+    if (error) return { success: false, error };
+    if (!line) return { success: false, error: "variant not on this contract" };
+
+    const ruleId = await activePricingRuleId(workspaceId);
+    if (!ruleId) return { success: false, error: "no active pricing rule" };
+    const ctx = await loadPricingContext(workspaceId, ruleId);
+    const bare = String(newVariantId).replace("gid://shopify/ProductVariant/", "");
+    const target = ctx.variantByShopifyId.get(bare);
+    if (!target) return { success: false, error: `variant ${bare} is not in the catalog` };
+
+    return withDraft(workspaceId, contractId, async (draftId) => {
+      const u = await shopifyUpdateDraftLine(workspaceId, draftId, line.id, {
+        productVariantId: bare,
+        ...(quantity != null ? { quantity } : {}),
+        currentPrice: (target.price_cents / 100).toFixed(2),   // MSRP; discounts do the rest
+      });
+      if (!u.success) return u;
+      return rewriteStructuralDiscounts(workspaceId, contractId, draftId);
+    });
+  } catch (err) { return { success: false, error: errText(err) }; }
+}
+
+/** Add a line at catalog MSRP, then recompute — a new line can change the quantity tier. */
+export async function shopcxAddItem(
+  workspaceId: string, contractId: string, variantId: string, quantity = 1,
+): Promise<LineOpResult> {
+  try {
+    const ruleId = await activePricingRuleId(workspaceId);
+    if (!ruleId) return { success: false, error: "no active pricing rule" };
+    const ctx = await loadPricingContext(workspaceId, ruleId);
+    const bare = String(variantId).replace("gid://shopify/ProductVariant/", "");
+    const target = ctx.variantByShopifyId.get(bare);
+    if (!target) return { success: false, error: `variant ${bare} is not in the catalog` };
+
+    const { line } = await findLine(workspaceId, contractId, bare);
+    if (line) {
+      // Already present — adding a second line for the same variant would split the quantity
+      // across two lines and make every by-variant lookup ambiguous. Raise the quantity instead.
+      return shopcxChangeQuantity(workspaceId, contractId, bare, (line.quantity || 1) + quantity);
+    }
+    return withDraft(workspaceId, contractId, async (draftId) => {
+      const a = await shopifyAddDraftLine(workspaceId, draftId, bare, quantity, (target.price_cents / 100).toFixed(2));
+      if (!a.success) return a;
+      // A new line changes the mix-and-match total, so every line's tier may move.
+      return rewriteStructuralDiscounts(workspaceId, contractId, draftId);
+    });
+  } catch (err) { return { success: false, error: errText(err) }; }
+}
+
+/**
+ * Pin a line's pre-discount BASE price — the grandfathering primitive.
+ *
+ * `basePriceCents` is the strikethrough base, not the charged amount: S&S and the quantity break
+ * still apply on top, matching `price_override_cents` on the internal path. The recompute then
+ * re-derives the grandfather against it.
+ */
+export async function shopcxUpdateLineItemPrice(
+  workspaceId: string, contractId: string, variantId: string, basePriceCents: number,
+): Promise<LineOpResult> {
+  try {
+    const { line, error } = await findLine(workspaceId, contractId, variantId);
+    if (error) return { success: false, error };
+    if (!line) return { success: false, error: "variant not on this contract" };
+    if (!Number.isFinite(basePriceCents) || basePriceCents < 0) {
+      return { success: false, error: `invalid base price ${basePriceCents}` };
+    }
+    return withDraft(workspaceId, contractId, async (draftId) => {
+      const u = await shopifyUpdateDraftLine(workspaceId, draftId, line.id, {
+        currentPrice: (basePriceCents / 100).toFixed(2),
+      });
+      if (!u.success) return u;
       return rewriteStructuralDiscounts(workspaceId, contractId, draftId);
     });
   } catch (err) { return { success: false, error: errText(err) }; }

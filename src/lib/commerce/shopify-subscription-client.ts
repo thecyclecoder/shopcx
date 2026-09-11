@@ -743,6 +743,59 @@ export async function shopifyUpdateLineQuantityInDraft(
   return toResult(env as never, "subscriptionDraftLineUpdate");
 }
 
+/**
+ * Update a line inside an OPEN draft — variant, price, or both.
+ *
+ * ⭐ `SubscriptionLineUpdateInput` accepts `productVariantId`, so a FLAVOUR SWAP can happen inside
+ * the draft rather than via the separate `subscriptionContractProductChange` mutation. That matters:
+ * the swap and its discount recompute then commit together, instead of leaving a window where the
+ * new variant is priced on the old line's discounts.
+ */
+export async function shopifyUpdateDraftLine(
+  workspaceId: string,
+  draftId: string,
+  lineId: string,
+  input: { productVariantId?: string; quantity?: number; currentPrice?: string },
+): Promise<SubscriptionActionResult> {
+  const payload: Record<string, unknown> = {};
+  if (input.productVariantId) {
+    payload.productVariantId = String(input.productVariantId).startsWith("gid://")
+      ? input.productVariantId
+      : `gid://shopify/ProductVariant/${input.productVariantId}`;
+  }
+  if (input.quantity != null) payload.quantity = input.quantity;
+  if (input.currentPrice != null) payload.currentPrice = input.currentPrice;
+  const env = await gql(
+    workspaceId,
+    `mutation($d:ID!,$l:ID!,$in:SubscriptionLineUpdateInput!){ subscriptionDraftLineUpdate(draftId:$d, lineId:$l, input:$in){ lineUpdated { id quantity } userErrors { message } } }`,
+    { d: draftId, l: lineId, in: payload },
+  );
+  return toResult(env as never, "subscriptionDraftLineUpdate");
+}
+
+/** Add a line inside an OPEN draft. Payload field is `lineAdded`, not `lineUpdated`. */
+export async function shopifyAddDraftLine(
+  workspaceId: string,
+  draftId: string,
+  variantId: string,
+  quantity: number,
+  currentPrice: string,
+): Promise<SubscriptionActionResult> {
+  const env = await gql(
+    workspaceId,
+    `mutation($d:ID!,$in:SubscriptionLineInput!){ subscriptionDraftLineAdd(draftId:$d, input:$in){ lineAdded { id } userErrors { message } } }`,
+    {
+      d: draftId,
+      in: {
+        productVariantId: String(variantId).startsWith("gid://") ? variantId : `gid://shopify/ProductVariant/${variantId}`,
+        quantity,
+        currentPrice,
+      },
+    },
+  );
+  return toResult(env as never, "subscriptionDraftLineAdd");
+}
+
 /** Remove a line from an OPEN draft. Call inside `withDraft`. Payload field is `lineRemoved`. */
 export async function shopifyRemoveDraftLine(
   workspaceId: string,

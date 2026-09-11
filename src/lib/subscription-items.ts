@@ -923,6 +923,13 @@ export async function subAddItem(
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubAddItem(workspaceId, contractId, variantId, quantity);
   }
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+      const { shopcxAddItem } = await import("@/lib/commerce/shopcx-line-ops");
+      return shopcxAddItem(workspaceId, contractId, variantId, quantity);
+    }
+  }
   await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
@@ -1220,6 +1227,13 @@ export async function subUpdateLineItemPrice(
   basePriceCents: number,
   lineGid?: string,
 ): Promise<{ success: boolean; error?: string }> {
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+      const { shopcxUpdateLineItemPrice } = await import("@/lib/commerce/shopcx-line-ops");
+      return shopcxUpdateLineItemPrice(workspaceId, contractId, variantId, basePriceCents);
+    }
+  }
   if (await isInternalSubscription(workspaceId, contractId)) {
     // lineGid only matters for Appstle's contract.line GID indirection;
     // our DB items array is keyed by variant_id directly.
@@ -1532,6 +1546,13 @@ export async function subSwapVariant(
 ): Promise<{ success: boolean; error?: string; newLineGid?: string; permanent?: boolean; declineErrorKey?: string; priceGuardRefusal?: PriceGuardRefusal }> {
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
+  }
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+      const { shopcxSwapVariant } = await import("@/lib/commerce/shopcx-line-ops");
+      return shopcxSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
+    }
   }
   await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);

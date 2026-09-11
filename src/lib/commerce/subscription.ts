@@ -608,9 +608,6 @@ export async function subscriptionAddItem(
   variantId: string,
   quantity: number = 1,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopcxUnsupported("add line item");
-  }
   return subAddItem(workspaceId, contractId, variantId, quantity);
 }
 
@@ -638,9 +635,6 @@ export async function subscriptionSwapVariant(
   newVariantId: string,
   quantity: number = 1,
 ): Promise<OpResult & { newLineGid?: string }> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopcxUnsupported("swap variant");
-  }
   return subSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
 }
 
@@ -651,9 +645,6 @@ export async function subscriptionUpdateLineItemPrice(
   basePriceCents: number,
   lineGid?: string,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopcxUnsupported("update line price");
-  }
   return subUpdateLineItemPrice(workspaceId, contractId, variantId, basePriceCents, lineGid);
 }
 
@@ -865,7 +856,12 @@ export async function subscriptionSwapProduct(
 ): Promise<OpResult> {
   const srcSwap = await resolveBillingSource(workspaceId, contractId);
   if (srcSwap === "internal") return internalSwapProduct(workspaceId, contractId, oldVariantId, newVariantId);
-  if (srcSwap === "shopcx") return shopcxUnsupported("swap product");
+  if (srcSwap === "shopcx") {
+    // Same operation as subSwapVariant, different entry point — one implementation, so the
+    // discount recompute and the atomic-draft guarantee apply identically whichever door is used.
+    const { shopcxSwapVariant } = await import("@/lib/commerce/shopcx-line-ops");
+    return shopcxSwapVariant(workspaceId, contractId, oldVariantId, newVariantId);
+  }
   return appstleSwapProduct(workspaceId, contractId, oldVariantId, newVariantId);
 }
 
