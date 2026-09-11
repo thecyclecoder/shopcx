@@ -54,6 +54,21 @@ const ACTION_TYPES = new Set([
   "direct_action", "journey", "playbook", "workflow", "macro", "kb_response", "ai_response", "escalate",
 ]);
 
+/**
+ * Direct-action types Sol's cheap-execution queue MUST refuse to enqueue, even though a handler
+ * exists in `directActionHandlers`. These are actions that can only fire through a
+ * founder-approval path (a `june_remedy` card via `executeParkedRemedy`); the executor's own
+ * `_founderApprovedFullOrderRefund` gate is the last line of defence, and this deny-list stops
+ * the request from ever entering the runnable queue.
+ *
+ * `full_order_refund` — refunds `orders.total_cents` verbatim (no caller-supplied amount);
+ * the whole class must be founder-signed. See Fix-1 phase of
+ * docs/brain/specs/a-clamped-refund-must-never-report-success.md.
+ */
+export const QUEUE_DENIED_DIRECT_ACTIONS: ReadonlySet<string> = new Set<string>([
+  "full_order_refund",
+]);
+
 export interface DecisionValidation { ok: boolean; error?: string }
 
 /**
@@ -80,6 +95,12 @@ export async function validateDecision(decision: unknown): Promise<DecisionValid
       const t = (a as { type?: unknown })?.type;
       if (typeof t !== "string") return { ok: false, error: "each action needs a string 'type'" };
       if (!known.has(t)) return { ok: false, error: `unknown action type "${t}" — not in the executor's handler registry` };
+      if (QUEUE_DENIED_DIRECT_ACTIONS.has(t)) {
+        return {
+          ok: false,
+          error: `action type "${t}" is founder-approval-only and cannot be enqueued through Sol's cheap-execution — it must be routed through a june_remedy card that the founder approves`,
+        };
+      }
     }
   }
   if ((at === "journey" || at === "playbook" || at === "workflow") && !d.handler_name) {
