@@ -941,3 +941,41 @@ export function advanceDate(base: Date, interval: string, count: number): Date {
   else d.setUTCDate(d.getUTCDate() + count * 28);  // fallback ~ monthly
   return d;
 }
+
+/**
+ * Which engine owns this subscription's writes.
+ *
+ * ⭐ `isInternalSubscription` answers a two-valued question that stopped being sufficient the
+ * moment the Appstle→ShopCX migration existed. A migrated sub is `is_internal = false` — it is a
+ * Shopify contract WE own, not a Braintree sub — so every caller that branched on
+ * `isInternal ? internal : appstle` sent its writes to Appstle for a contract Appstle no longer
+ * has. A cancel would fail at the vendor and return BEFORE the local `status='cancelled'` write,
+ * leaving the row active and the renewal cron billing a customer who cancelled.
+ *
+ * Falls back to `is_internal` when `billing_source` is absent so a read cannot silently resolve to
+ * the wrong engine mid-deploy.
+ */
+export type BillingSource = "internal" | "shopcx" | "appstle";
+
+export async function resolveBillingSource(
+  workspaceId: string,
+  contractId: string,
+): Promise<BillingSource> {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("subscriptions")
+    .select("is_internal, billing_source")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (error) {
+    // Never guess an engine on a read failure — routing a write to the wrong vendor is worse than
+    // failing the call, and 'appstle' is the historical default that would silently be chosen.
+    throw new Error(`resolveBillingSource(${contractId}) failed: ${error.message}`);
+  }
+  const row = data as { is_internal: boolean | null; billing_source: string | null } | null;
+  if (!row) return "appstle";
+  if (row.billing_source === "shopcx") return "shopcx";
+  if (row.billing_source === "internal" || row.is_internal) return "internal";
+  return "appstle";
+}

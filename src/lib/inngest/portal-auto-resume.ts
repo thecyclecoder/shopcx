@@ -10,10 +10,18 @@ import { inngest } from "./client";
 import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
-import { appstleSubscriptionAction } from "@/lib/appstle";
+import { subscriptionAction } from "@/lib/commerce/subscription";
 
+/**
+ * ⭐ Routes through the commerce SDK, NOT appstleSubscriptionAction directly.
+ *
+ * This called the vendor wrapper straight, so it never saw the engine at all. A subscription
+ * migrated to a ShopCX-owned Shopify contract would try to resume against a contract Appstle no
+ * longer holds, fail, and stay PAUSED FOREVER — 438 paused subs carry a resume date, 265 of them
+ * inside 30 days. The SDK resolves billing_source and also applies the local status truth.
+ */
 async function appstleResume(workspaceId: string, contractId: string) {
-  const result = await appstleSubscriptionAction(workspaceId, contractId, "resume");
+  const result = await subscriptionAction(workspaceId, contractId, "resume");
   if (!result.success) {
     throw new Error(`Appstle API error: ${result.error ?? "unknown"}`);
   }

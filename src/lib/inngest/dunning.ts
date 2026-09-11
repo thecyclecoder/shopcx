@@ -1,6 +1,7 @@
 // Inngest dunning functions: payment-failed orchestration, new-card recovery, billing-success cleanup
 
 import { inngest } from "./client";
+import { dunningChargeContract, dunningUnskip } from "@/lib/dunning-charge";
 import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
@@ -20,6 +21,7 @@ import {
   dunningInternalNote,
   isTerminalErrorCode,
   shouldHaltRetryForSubStatus,
+  rollForwardToFutureBillingDate,
   shouldExhaustForRetryCap,
   resolveCycleAction,
 } from "@/lib/dunning";
@@ -284,14 +286,66 @@ export const dunningPaymentFailed = inngest.createFunction(
           return;
         }
 
-        const ordersRes = await subscriptionGetUpcomingOrders(workspace_id, shopify_contract_id);
-        if (!ordersRes.success || !ordersRes.orders?.length) {
-          console.log(`[Dunning] No upcoming orders for ${shopify_contract_id}: ${ordersRes.error || "empty"}`);
+        // ⭐ Engine-aware. A shopcx contract has no Appstle upcoming orders, so the old
+        // lookup-then-bill flow found nothing, treated every card as failed, burned the retry cap
+        // and let the cycle-2 ladder CANCEL a customer whose card was never actually charged.
+        const billingRes = await dunningChargeContract(workspace_id, shopify_contract_id, i);
+        const attemptId = billingRes.attemptId ?? null;
+
+        if (billingRes.pending) {
+          console.log(`[Dunning] ${shopify_contract_id}: attempt unresolved (3DS) — leaving the cycle open`);
           return;
         }
 
-        const attemptId = ordersRes.orders[0].id;
-        const billingRes = await subscriptionAttemptBilling(workspace_id, attemptId);
+        // ⚠️ A LOOKUP miss is not a decline. Folding lookup+charge into one result deleted this
+        // guard, so an Appstle "no upcoming orders" (a documented transient — e.g. right after its
+        // own scheduler bills) fell through and logged a payment FAILURE against a card that was
+        // never charged, burned that card out of the rotation, overwrote last_attempted_last4 with
+        // a card that never went out, and NULLED billing_attempt_id — erasing the id that
+        // resolveByBillingAttemptId, dunningUnskip and the recovery branch all key on.
+        // Declines are what the terminal-card and cycle-ladder logic count, so a phantom one is
+        // not cosmetic. Exit without recording anything, exactly as before.
+        if (!billingRes.success && !attemptId) {
+          console.log(`[Dunning] No chargeable attempt for ${shopify_contract_id}: ${billingRes.error || "empty"} — not counting a decline`);
+          return;
+        }
+
+        // ⭐ A SETTLED success is a real recovery, and must be acted on here.
+        //
+        // The Appstle model is "accepted now, outcome by webhook later", which is why the row below
+        // is written `pending`. A ShopCX charge is already settled — and no webhook will ever
+        // resolve it, because `dunning/billing-success` is fired only by the Appstle webhook and a
+        // migrated contract is cancelled there. Left as `pending` the cycle never reaches
+        // `recovered`: rotation "fails", the payday ladder burns four more retries — each a REAL
+        // charge attempt — and cycle 2 cancels a customer who has already paid.
+        if (billingRes.settled && billingRes.success) {
+          await logPaymentFailure({
+            workspaceId: workspace_id,
+            customerId: customer_id,
+            subscriptionId: subscription_id,
+            shopifyContractId: shopify_contract_id,
+            billingAttemptId: attemptId,
+            paymentMethodLast4: card.last4,
+            paymentMethodId: card.id,
+            attemptNumber,
+            attemptType: "card_rotation",
+            succeeded: true,
+          });
+          await updateDunningCycle(cycleCheck.id, {
+            status: "recovered",
+            recovered_at: new Date().toISOString(),
+            billing_attempt_id: attemptId,
+            last_attempted_last4: card.last4,
+            next_retry_at: null,
+          });
+          await resetBillingDateAfterDunning(workspace_id, shopify_contract_id, cycleCheck.id, true);
+          await postDunningNote(workspace_id, customer_id, dunningInternalNote(
+            `Payment recovered on card ${card.last4} for subscription ${shopify_contract_id}. Dunning cycle closed.`
+          ));
+          await tagCustomerTickets(workspace_id, customer_id, "dunning:recovered");
+          console.log(`[Dunning] ${shopify_contract_id} RECOVERED on card ${card.last4} (settled charge)`);
+          return;
+        }
 
         // Log the attempt — includes whether Appstle accepted or rejected it
         await logPaymentFailure({
@@ -504,13 +558,18 @@ export const dunningNewCardRecovery = inngest.createFunction(
           }
 
           // Attempt billing
-          const ordersRes = await subscriptionGetUpcomingOrders(workspace_id, cancelled.contractId);
+          const billingRes0 = await dunningChargeContract(workspace_id, cancelled.contractId, 0);
+          // ⚠️ `ordersRes.success` must mean "we had something to charge", NOT "the charge worked".
+          // Wiring the charge outcome into it made a DECLINE take the no-orders early-return, which
+          // reports recovered:true, leaves the sub cancelled, and emails the customer a recovery
+          // notice for a card that was just declined.
+          const ordersRes = { success: !!billingRes0.attemptId, orders: billingRes0.attemptId ? [{ id: billingRes0.attemptId }] : [], error: billingRes0.error } as { success: boolean; orders?: { id: string }[]; error?: string };
           if (!ordersRes.success || !ordersRes.orders?.length) {
             return { contractId: cancelled.contractId, recovered: true, error: "Reactivated but no upcoming orders to bill" };
           }
 
           const attemptId = ordersRes.orders[0].id;
-          const billingRes = await subscriptionAttemptBilling(workspace_id, attemptId);
+          const billingRes = billingRes0;
 
           await logPaymentFailure({
             workspaceId: workspace_id,
@@ -546,7 +605,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
         try {
           // Unskip the order if it was skipped or retrying
           if ((cycle.status === "skipped" || cycle.status === "retrying") && cycle.billing_attempt_id) {
-            await subscriptionUnskipOrder(workspace_id, cycle.billing_attempt_id);
+            await dunningUnskip(workspace_id, cycle.shopify_contract_id, cycle.billing_attempt_id);
           }
 
           // If subscription was cancelled (dunning exhausted), reactivate
@@ -570,13 +629,15 @@ export const dunningNewCardRecovery = inngest.createFunction(
           }
 
           // Get upcoming order and trigger billing
-          const ordersRes = await subscriptionGetUpcomingOrders(workspace_id, cycle.shopify_contract_id);
+          const billingRes1 = await dunningChargeContract(workspace_id, cycle.shopify_contract_id, 0);
+          // See above: lookup-success, not charge-success. A decline must reach logPaymentFailure.
+          const ordersRes = { success: !!billingRes1.attemptId, orders: billingRes1.attemptId ? [{ id: billingRes1.attemptId }] : [], error: billingRes1.error } as { success: boolean; orders?: { id: string }[]; error?: string };
           if (!ordersRes.success || !ordersRes.orders?.length) {
             return { contractId: cycle.shopify_contract_id, recovered: false, error: "No upcoming orders" };
           }
 
           const attemptId = ordersRes.orders[0].id;
-          const billingRes = await subscriptionAttemptBilling(workspace_id, attemptId);
+          const billingRes = billingRes1;
 
           await logPaymentFailure({
             workspaceId: workspace_id,
@@ -836,11 +897,19 @@ async function resetBillingDateAfterDunning(
     .select("original_billing_date")
     .eq("id", cycleId).single();
 
-  const { data: sub } = await admin.from("subscriptions")
-    .select("billing_interval, billing_interval_count")
+  const { data: sub, error: subErr } = await admin.from("subscriptions")
+    .select("billing_interval, billing_interval_count, billing_source")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", shopifyContractId).single();
 
+  // ⚠️ Log, never swallow. Discarding this made a missing column (PostgREST 42703) read as
+  // `sub === null` and silently no-op the WHOLE function — no local write, no vendor write — for
+  // every subscription, with no log line. Deploying ahead of the billing_source migration would
+  // have disabled dunning's date reset entirely and looked completely healthy.
+  if (subErr) {
+    console.error(`[Dunning] resetBillingDateAfterDunning could not read ${shopifyContractId}: ${subErr.message}`);
+    return;
+  }
   if (!sub) return;
 
   const interval = sub.billing_interval || "month";
@@ -858,11 +927,28 @@ async function resetBillingDateAfterDunning(
   else if (interval === "year") nextDate.setFullYear(nextDate.getFullYear() + count);
   else if (interval === "day") nextDate.setDate(nextDate.getDate() + count);
 
+  // ⭐ Shopify REJECTS a past next-billing-date, and this function routinely computes one: the
+  // exhaustion path is `original_billing_date + one interval`, which for a cycle that ran for
+  // weeks lands before today. Roll forward by whole intervals so the customer's cadence anchor
+  // survives and the date is one Shopify will accept.
+  const safeDate = rollForwardToFutureBillingDate(nextDate, interval, count);
+
   // Update locally
   await admin.from("subscriptions")
-    .update({ next_billing_date: nextDate.toISOString(), updated_at: new Date().toISOString() })
+    .update({ next_billing_date: safeDate.toISOString(), updated_at: new Date().toISOString() })
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", shopifyContractId);
+
+  // ⭐ ShopCX-billed subs are NOT in Appstle any more — their contract is ours. Push the date to
+  // Shopify and return; touching Appstle would 404 (or worse, hit a stale contract).
+  if ((sub as { billing_source?: string }).billing_source === "shopcx") {
+    const { shopifySetNextBillingDate } = await import("@/lib/commerce/shopify-subscription-client");
+    const r = await shopifySetNextBillingDate(workspaceId, shopifyContractId, safeDate.toISOString());
+    if (!r.success) {
+      console.error(`[Dunning] shopcx setNextBillingDate failed for ${shopifyContractId}: ${r.error}`);
+    }
+    return;
+  }
 
   // Update in Appstle via billing date change endpoint
   try {
@@ -872,7 +958,7 @@ async function resetBillingDateAfterDunning(
       await healOnTouch(workspaceId, shopifyContractId);
       const { decrypt } = await import("@/lib/crypto");
       const apiKey = decrypt(ws.appstle_api_key_encrypted);
-      const dateStr = nextDate.toISOString().split("T")[0]; // YYYY-MM-DD
+      const dateStr = safeDate.toISOString().split("T")[0]; // YYYY-MM-DD
       await fetch(
         `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-billing-date?contractId=${shopifyContractId}&rescheduleFutureOrder=true&nextBillingDate=${encodeURIComponent(dateStr)}`,
         { method: "PUT", headers: { "X-API-Key": apiKey } },
@@ -971,20 +1057,27 @@ export const dunningPaydayRetryCron = inngest.createFunction(
   async ({ step }) => {
     const admin = createAdminClient();
 
-    // Find cycles ready to retry. Exclude internal-* contracts — Braintree-billed
-    // subs don't go through the Appstle card-rotation path (their initial failure
-    // is routed to handleInternalDunningFailure above), but the legacy retrying
-    // rows that still carry an internal-* shopify_contract_id would otherwise be
-    // fed back into subscriptionAttemptBilling with a synthetic billing-attempt id and
-    // 400 against Appstle. Signature vercel:cdfbac68e30a91f9.
+    // Find cycles ready to retry. Exclude internal-* contracts — Braintree-billed subs don't go
+    // through this card-rotation path (their initial failure is routed to
+    // handleInternalDunningFailure above), and a legacy retrying row carrying an internal-*
+    // contract id would be billed with a synthetic attempt id. Signature vercel:cdfbac68e30a91f9.
+    //
+    // ⭐ ShopCX-billed subs DO belong here — their contract ids are numeric, so this filter keeps
+    // them, and `dunningChargeContract` resolves the engine at charge time. Before that existed
+    // they were selected but unbillable: the Appstle lookup found no upcoming orders, every card
+    // read as failed, the retry cap burned, and the cycle-2 ladder CANCELLED a customer whose card
+    // was never actually charged.
     const cycles = await step.run("find-retryable-cycles", async () => {
-      const { data } = await admin
+      const { data, error } = await admin
         .from("dunning_cycles")
         .select("id, workspace_id, shopify_contract_id, subscription_id, customer_id, cycle_number, cards_tried, billing_attempt_id, payday_retry_count")
         .eq("status", "retrying")
         .not("shopify_contract_id", "ilike", "internal-%")
         .lte("next_retry_at", new Date().toISOString());
 
+      // Never swallow: a discarded error reads as "no cycles due" and the hour's retries simply
+      // do not happen, with a green heartbeat over the top.
+      if (error) throw new Error(`find-retryable-cycles failed: ${error.message}`);
       return data || [];
     });
 
@@ -1093,11 +1186,13 @@ export const dunningPaydayRetryCron = inngest.createFunction(
           try {
             await subscriptionSwitchPaymentMethod(cycle.workspace_id, cycle.shopify_contract_id, card.id);
 
-            const ordersRes = await subscriptionGetUpcomingOrders(cycle.workspace_id, cycle.shopify_contract_id);
+            const paydayRes = await dunningChargeContract(cycle.workspace_id, cycle.shopify_contract_id, (cycle.payday_retry_count ?? 0) + 1);
+            // See above: lookup-success, not charge-success — a decline must still record the attempt.
+            const ordersRes = { success: !!paydayRes.attemptId, orders: paydayRes.attemptId ? [{ id: paydayRes.attemptId }] : [], error: paydayRes.error } as { success: boolean; orders?: { id: string }[]; error?: string };
             if (!ordersRes.success || !ordersRes.orders?.length) continue;
 
             const attemptId = ordersRes.orders[0].id;
-            await subscriptionAttemptBilling(cycle.workspace_id, attemptId);
+            // already charged by dunningChargeContract above
 
             await logPaymentFailure({
               workspaceId: cycle.workspace_id,

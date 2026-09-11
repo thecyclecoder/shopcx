@@ -463,6 +463,32 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 30 * HOUR,
   },
   {
+    id: "shopify-subscription-renewal-cron",
+    kind: "cron",
+    owner: "retention",
+    label: "Shopify subscription renewals",
+    description: "Daily fan-out of due renewals for subs our Shopify app bills (billing_source='shopcx'). Shopify fires nothing on its own — if this stops, migrated subs stop earning.",
+    expectedCadence: "daily (0 10 * * *)",
+    livenessWindowMs: 30 * HOUR,
+    // ⚠️ NO `renewal-integrity` here. That assertion is hard-scoped to `is_internal = true`
+    // (countRenewalIntegrityOverdueSubs) and reads its grace window from the INTERNAL cron's
+    // heartbeat — so attaching it made this cron raise the Braintree engine's alert. Measured: it
+    // would have fired red on the first tick with "5 internal subs overdue", double-reporting and
+    // misattributing the health of a path this cron owns none of.
+    //
+    // The signature that matters here — charged-but-never-advanced — still needs its own
+    // shopcx-scoped assertion before this runs at volume. Tracked, not silently skipped.
+  },
+  {
+    id: "shopify-subscription-renewal-attempt",
+    kind: "reactive",
+    owner: "retention",
+    label: "Shopify subscription renewal — attempt",
+    description: "Per-subscription charge attempt for shopcx-billed subs. Registered so its kill switch actually resolves — an UNREGISTERED node resolves to {off:false}, i.e. a switch that silently can never fire.",
+    expectedCadence: "event-driven (shopify-subscription/renewal-attempt)",
+    livenessWindowMs: 30 * HOUR,
+  },
+  {
     id: "internal-subscription-renewal-cron",
     kind: "cron",
     owner: "retention",

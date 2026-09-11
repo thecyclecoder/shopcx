@@ -173,15 +173,27 @@ async function handleSubscriptionEvent(
     // shopify_contract_id — without the migrated_from lookup the handler below
     // would INSERT a fresh dead cancelled row. is_internal filter keeps this to
     // the migrated row even if a legacy dead shell still shares the numeric id.
+    // ⭐ Match on `migrated_from_contract_id` ALONE — engine-agnostic and unambiguous.
+    //
+    // This previously filtered `.eq("is_internal", true)`, which silently missed the
+    // Appstle→ShopCX migration: those rows keep `is_internal = false` (they are Shopify contracts
+    // we own, not Braintree subs), so the guard did not fire, the handler fell through, and the
+    // migration's OWN cancel webhook INSERTed a fresh dead `status='cancelled'` row carrying the
+    // old contract id. `resolveSub` then ordered `is_internal DESC, created_at DESC` — with both
+    // rows non-internal the newest won, i.e. the dead shell — which is precisely the Ellyn /
+    // ticket 183d28b9 incident, at migration scale.
+    //
+    // Keying on `migrated_from_contract_id` cannot match the live pre-migration row (that row
+    // carries the id in `shopify_contract_id`), so a genuine customer cancellation still passes
+    // through, while any contract we migrated AWAY from is recognised whichever engine it moved to.
     const { data: existingSub } = await admin.from("subscriptions")
-      .select("is_internal")
+      .select("id, is_internal, billing_source")
       .eq("workspace_id", workspaceId)
-      .eq("is_internal", true)
-      .or(`shopify_contract_id.eq.${contractId},migrated_from_contract_id.eq.${contractId}`)
+      .eq("migrated_from_contract_id", contractId)
       .limit(1)
       .maybeSingle();
-    if (existingSub?.is_internal) {
-      console.log(`[Appstle webhook] contract ${contractId} migrated to internal — ignoring ${eventType}`);
+    if (existingSub) {
+      console.log(`[Appstle webhook] contract ${contractId} was migrated (billing_source=${(existingSub as { billing_source?: string }).billing_source ?? "internal"}) — ignoring ${eventType}`);
       return;
     }
   }

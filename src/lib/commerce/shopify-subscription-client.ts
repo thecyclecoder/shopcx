@@ -527,6 +527,9 @@ export interface ContractLine {
   variantId: string | null;
   sku: string | null;
   currentPrice: string | null;
+  /** LINE TOTAL after discount allocations. Divide by quantity for the effective unit rate. */
+  lineDiscountedPrice: string | null;
+  discountAllocationCount: number;
   sellingPlanName: string | null;
 }
 
@@ -538,7 +541,7 @@ export async function getSubscriptionContract(
   success: boolean;
   error?: string;
   contract?: {
-    id: string; status: string; nextBillingDate: string | null;
+    id: string; status: string; nextBillingDate: string | null; createdAt: string | null;
     interval: string | null; intervalCount: number | null;
     paymentMethodId: string | null; lines: ContractLine[];
   };
@@ -546,20 +549,22 @@ export async function getSubscriptionContract(
   const env = await gql<{ subscriptionContract?: Record<string, unknown> }>(
     workspaceId,
     `query($id:ID!){ subscriptionContract(id:$id){
-        id status nextBillingDate
+        id status nextBillingDate createdAt
         billingPolicy { interval intervalCount }
         customerPaymentMethod { id }
         lines(first:50){ pageInfo { hasNextPage } edges { node { id title quantity sellingPlanName sku
           variantId
-          currentPrice { amount } } } } } }`,
+          currentPrice { amount }
+          lineDiscountedPrice { amount }
+          discountAllocations { amount { amount } } } } } } }`,
     { id: contractGid(contractId) },
   );
   if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
   const k = env.data?.subscriptionContract as never as {
-    id: string; status: string; nextBillingDate: string | null;
+    id: string; status: string; nextBillingDate: string | null; createdAt: string | null;
     billingPolicy?: { interval: string; intervalCount: number };
     customerPaymentMethod?: { id: string };
-    lines: { edges: { node: { id: string; title: string; quantity: number; sellingPlanName: string | null; variantId: string | null; sku: string | null; currentPrice?: { amount: string } } }[] };
+    lines: { edges: { node: { id: string; title: string; quantity: number; sellingPlanName: string | null; variantId: string | null; sku: string | null; currentPrice?: { amount: string }; lineDiscountedPrice?: { amount: string }; discountAllocations?: unknown[] } }[] };
   } | undefined;
   if (!k) return { success: false, error: "contract not found (or not owned by this app)" };
   return {
@@ -568,6 +573,7 @@ export async function getSubscriptionContract(
       id: k.id,
       status: k.status,
       nextBillingDate: k.nextBillingDate,
+      createdAt: k.createdAt ?? null,
       interval: k.billingPolicy?.interval ?? null,
       intervalCount: k.billingPolicy?.intervalCount ?? null,
       paymentMethodId: k.customerPaymentMethod?.id ?? null,
@@ -578,6 +584,8 @@ export async function getSubscriptionContract(
         variantId: e.node.variantId,
         sku: e.node.sku,
         currentPrice: e.node.currentPrice?.amount ?? null,
+        lineDiscountedPrice: e.node.lineDiscountedPrice?.amount ?? null,
+        discountAllocationCount: Array.isArray(e.node.discountAllocations) ? e.node.discountAllocations.length : 0,
         sellingPlanName: e.node.sellingPlanName,
       })),
     },
@@ -615,6 +623,108 @@ export async function getUpcomingBillingCycles(
       skipped: e.node.skipped,
       status: e.node.status,
     })),
+  };
+}
+
+
+// ── manual discounts ───────────────────────────────────────────────────────────────────────
+
+/**
+ * A manual discount on a subscription draft.
+ *
+ * ⚠️ `percentage` is an **Int** — 25 means 25%, and there are no fractional percentages.
+ * `fixedAmount.appliesOnEachItem` decides per-unit vs per-line; grandfathering wants `true`.
+ * `entitledLines.lines.add` scopes a discount to specific line ids — that is what makes a
+ * grandfathered rate variant-specific rather than an order-level giveaway.
+ */
+export interface ManualDiscountInput {
+  title: string;
+  value:
+    | { percentage: number }
+    | { fixedAmount: { amount: number; appliesOnEachItem?: boolean } };
+  /** Number of cycles the discount survives. Omit for "forever". */
+  recurringCycleLimit?: number;
+  entitledLines?: { all: boolean } | { lines: { add: string[]; remove?: string[] } };
+}
+
+/** Add one manual discount to an OPEN draft. Call inside `withDraft`. */
+export async function shopifyAddDraftDiscount(
+  workspaceId: string,
+  draftId: string,
+  input: ManualDiscountInput,
+): Promise<SubscriptionActionResult> {
+  const env = await gql(
+    workspaceId,
+    `mutation($d:ID!,$in:SubscriptionManualDiscountInput!){
+       subscriptionDraftDiscountAdd(draftId:$d, input:$in){ discountAdded { id } userErrors { message } } }`,
+    { d: draftId, in: input },
+  );
+  return toResult(env as never, "subscriptionDraftDiscountAdd");
+}
+
+/**
+ * Create a subscription contract in one shot.
+ *
+ * `subscriptionContractAtomicCreate` takes lines but NOT manual discounts, so a migrated contract
+ * is created at MSRP and the discounts are added in a follow-up draft. That ordering matters: a
+ * contract that exists at MSRP with no discounts yet would OVERCHARGE if anything billed it in
+ * between — which is why the migrator leaves `billing_source` on the old engine until the whole
+ * swap verifies, so nothing of ours will bill the half-built contract.
+ */
+export async function shopifyCreateContract(
+  workspaceId: string,
+  input: {
+    customerId: string;
+    nextBillingDate: string;
+    currencyCode: string;
+    contract: Record<string, unknown>;
+    lines: Record<string, unknown>[];
+  },
+): Promise<{ success: boolean; error?: string; contractId?: string }> {
+  const env = await gql<{ subscriptionContractAtomicCreate: { contract?: { id: string }; userErrors: { message: string }[] } }>(
+    workspaceId,
+    `mutation($in:SubscriptionContractAtomicCreateInput!){
+       subscriptionContractAtomicCreate(input:$in){ contract { id } userErrors { message } } }`,
+    { in: input },
+  );
+  const base = toResult(env as never, "subscriptionContractAtomicCreate");
+  if (!base.success) return base;
+  const id = env.data?.subscriptionContractAtomicCreate?.contract?.id;
+  if (!id) return { success: false, error: "atomicCreate returned no contract" };
+  return { success: true, contractId: id };
+}
+
+/**
+ * Resolve the billing cycle CONTAINING a given date.
+ *
+ * ⭐ This — not "the earliest past-due cycle" — is how a ShopCX-billed contract finds the cycle to
+ * charge. Shopify anchors a contract's cycle calendar to its `createdAt`, NOT to the
+ * `nextBillingDate` we set, so every MIGRATED contract is born with its calendar up to a full
+ * interval out of step with the customer's real schedule (observed on 35945087149: our date
+ * 2026-10-15, Shopify's first cycle 2026-11-05). Hunting for a past-due cycle finds nothing and
+ * the customer never gets charged.
+ *
+ * The returned `status` doubles as Shopify's own idempotency signal: BILLED means this cycle has
+ * already been charged, whoever did it.
+ */
+export async function getBillingCycleForDate(
+  workspaceId: string,
+  contractId: string,
+  date: string,
+): Promise<{ success: boolean; error?: string; cycle?: { index: number; startAt: string; endAt: string; status: string; skipped: boolean } }> {
+  const env = await gql<{ subscriptionBillingCycle?: { cycleIndex: number; cycleStartAt: string; cycleEndAt: string; status: string; skipped: boolean } }>(
+    workspaceId,
+    `query($id:ID!,$d:DateTime!){
+       subscriptionBillingCycle(billingCycleInput:{ contractId:$id, selector:{ date:$d } }){
+         cycleIndex cycleStartAt cycleEndAt status skipped } }`,
+    { id: contractGid(contractId), d: date },
+  );
+  if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
+  const c = env.data?.subscriptionBillingCycle;
+  if (!c) return { success: false, error: "no billing cycle contains that date" };
+  return {
+    success: true,
+    cycle: { index: c.cycleIndex, startAt: c.cycleStartAt, endAt: c.cycleEndAt, status: c.status, skipped: c.skipped },
   };
 }
 

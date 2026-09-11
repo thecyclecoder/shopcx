@@ -1,7 +1,11 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { appstleUpdateNextBillingDate } from "@/lib/appstle";
+// ⭐ Vendor writes go through the commerce SDK, never the Appstle wrapper directly. Calling the
+// vendor straight bypasses billing_source resolution, so a migrated subscription's change would
+// hit Appstle for a contract it no longer holds — failing there and returning BEFORE the local
+// write, leaving the customer's change silently unapplied.
+import { subscriptionUpdateNextBillingDate } from "@/lib/commerce/subscription";
 import { shouldBlockForFailedPayment } from "@/lib/portal/failed-payment-guard";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
@@ -42,7 +46,7 @@ export const changeDate: RouteHandler = async ({ auth, route, req }) => {
   }
 
   // Route through the internal-aware wrapper (handles is_internal vs Appstle).
-  const dateResult = await appstleUpdateNextBillingDate(auth.workspaceId, String(contractId), nextBillingDate);
+  const dateResult = await subscriptionUpdateNextBillingDate(auth.workspaceId, String(contractId), nextBillingDate);
   if (!dateResult.success) {
     return handleAppstleError(new Error(dateResult.error || "Date update failed"), { route: "changeDate", payload: { contractId, nextBillingDate } });
   }

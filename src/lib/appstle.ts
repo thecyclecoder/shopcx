@@ -46,7 +46,7 @@ async function resolveContractIdForAppstle(
   };
 }
 
-async function getAppstleCredentials(workspaceId: string): Promise<{ apiKey: string; shop: string } | null> {
+export async function getAppstleCredentials(workspaceId: string): Promise<{ apiKey: string; shop: string } | null> {
   const admin = createAdminClient();
   const { data: workspace } = await admin
     .from("workspaces")
@@ -827,6 +827,42 @@ export async function appstleSwapProduct(
     return { success: true };
   } catch (err) {
     console.error("Appstle swap failed:", err);
+    return { success: false, error: errText(err) };
+  }
+}
+
+/**
+ * Cancel an Appstle contract at the VENDOR ONLY — no local writes at all.
+ *
+ * ⚠️ Deliberately NOT `appstleSubscriptionAction`. That function also runs `applyCancelTruth`,
+ * `endDunningForSubscription` and the `subscriptions.status` / `customers.subscription_status`
+ * rollups — correct when a customer cancels, catastrophic during migration. The subscription is
+ * NOT ending: it is changing engines. Marking it cancelled locally would stop the ShopCX renewal
+ * worker from ever billing it, which is precisely the "billed by nobody" failure the whole
+ * migration ordering is designed to avoid.
+ *
+ * Used only by the Appstle→ShopCX migration, after the replacement contract is created and its
+ * pricing verified.
+ */
+export async function appstleCancelContractVendorOnly(
+  workspaceId: string,
+  contractId: string,
+): Promise<{ success: boolean; error?: string }> {
+  const creds = await getAppstleCredentials(workspaceId);
+  if (!creds) return { success: false, error: "Appstle not configured" };
+  try {
+    const res = await fetch(
+      `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts-update-status?contractId=${contractId}&status=CANCELLED`,
+      { method: "PUT", headers: { "X-API-Key": creds.apiKey } },
+    );
+    const text = await res.text();
+    // Appstle answers unknown routes with HTTP 200 + its admin SPA's HTML, so res.ok proves nothing.
+    if (text.trimStart().startsWith("<")) {
+      return { success: false, error: `Appstle returned HTML (HTTP ${res.status}) — route miss` };
+    }
+    if (!res.ok) return { success: false, error: `Appstle HTTP ${res.status}: ${text.slice(0, 200)}` };
+    return { success: true };
+  } catch (err) {
     return { success: false, error: errText(err) };
   }
 }

@@ -131,6 +131,11 @@ export async function resolveSub(
   }
   const { data } = await base
     .or(`shopify_contract_id.eq.${id},migrated_from_contract_id.eq.${id}`)
+    // ⭐ A LIVE row must always beat a dead one. Ordering by `is_internal, created_at` alone hands
+    // the customer the most RECENT match — and a stray cancelled shell inserted by a vendor
+    // webhook is by definition newer than the subscription it shadows (Ellyn / ticket 183d28b9).
+    // `cancelled_at IS NULL` first makes that impossible regardless of which engine owns the sub.
+    .order("cancelled_at", { ascending: true, nullsFirst: true })
     .order("is_internal", { ascending: false })
     .order("created_at", { ascending: false })
     .limit(1)
