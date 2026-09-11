@@ -1,0 +1,1 @@
+- **Full Order Refund Must Bind Ticket Customer** · verified 2026-09-11 · → [[../libraries/action-executor]]
