@@ -4,7 +4,6 @@ import type { PriceGuardRefusal } from "@/lib/swap-price-assertion";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { enrichItemTitles, subSwapVariant, subAddItem, subChangeQuantity, subRemoveItem } from "@/lib/subscription-items";
-import { isInternalSubscription } from "@/lib/internal-subscription";
 // Server-side "not selectable for new choice" gate — the UI catalog filter in
 // [[bootstrap]] hides these, but a crafted request that names a suppressed
 // variant directly must still be rejected. See [[../mutation-guard]].
@@ -151,7 +150,12 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
     return jsonErr({ error: "would_remove_all_regular_products" }, 400);
   }
 
-  const isInternal = await isInternalSubscription(auth.workspaceId, String(contractId));
+  // ShopCX takes the same branch as internal: both decompose the replace into the engine-aware
+  // item mutations in `subscription-items.ts`, which dispatch per contract. Only the Appstle arm
+  // needs the vendor's replace-variants-v3 endpoint and its line-id quirks.
+  const { resolveBillingSource } = await import("@/lib/internal-subscription");
+  const engine = await resolveBillingSource(auth.workspaceId, String(contractId));
+  const isInternal = engine !== "appstle";
 
   const body: Record<string, unknown> = { shop, contractId, eventSource: "CUSTOMER_PORTAL", stopSwapEmails };
   if (carryForwardDiscount) body.carryForwardDiscount = carryForwardDiscount;
@@ -167,7 +171,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   // subscriptions.items and send the reliable oldVariants path instead — the
   // same approach subSwapVariant already uses successfully. Fall back to the
   // synthesized line GID only when we genuinely can't resolve a variant id.
-  if (oldLineId && !isInternal) {
+  if (oldLineId && engine === "appstle") {
     if (safeStartsWith(oldLineId, "gid://shopify/SubscriptionLine/")) {
       // Already a real Shopify line GID — trust it.
       body.oldLineId = oldLineId;
@@ -302,7 +306,16 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
       }
     }
     if (r.success) for (const [nv, nq] of oneTimeEntries) {
-      r = await subAddItem(auth.workspaceId, String(contractId), nv, nq);
+      // ⚠️ On ShopCX a one-time item is a BILLING-CYCLE-scoped edit. `subAddItem` would add a
+      // RECURRING contract line, so a customer's one-off add-on would ship on every renewal
+      // forever. (The internal engine carries one-time on the item row itself, so it keeps
+      // using subAddItem here.)
+      if (engine === "shopcx") {
+        const { shopcxAddOneTimeLine } = await import("@/lib/commerce/shopcx-line-ops");
+        r = await shopcxAddOneTimeLine(auth.workspaceId, String(contractId), nv, nq);
+      } else {
+        r = await subAddItem(auth.workspaceId, String(contractId), nv, nq);
+      }
       if (!r.success) break;
     }
     if (!r.success) {
@@ -442,7 +455,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
         .eq("shopify_contract_id", String(contractId));
     }
   } else if (isInternal) {
-    // Internal mutations already wrote subscriptions.items — surface the fresh lines.
+    // Internal + ShopCX mutations already wrote subscriptions.items — surface the fresh lines.
     const adminDb = createAdminClient();
     const { data: fresh } = await adminDb.from("subscriptions").select("items").eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId)).single();
     patch.lines = (fresh?.items as unknown[]) || [];

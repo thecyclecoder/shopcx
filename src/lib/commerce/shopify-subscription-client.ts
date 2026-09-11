@@ -902,6 +902,91 @@ export async function withBillingCycleDraft(
   return toResult(commit as never, "subscriptionBillingCycleContractDraftCommit");
 }
 
+/**
+ * Change the contract's shipping address. Mirrors the Appstle
+ * `subscription-contracts-update-shipping-address` PUT.
+ *
+ * ⚠️ `deliveryMethod.shipping` REPLACES the whole shipping method, and the address object inside
+ * it replaces wholesale too — an omitted field is CLEARED, not left alone. Observed live: an
+ * update that did not mention `phone` wiped a real phone number off the contract, and one that did
+ * not mention `shippingOption` would drop the customer's "Economy" rate, leaving the renewal order
+ * with nothing to build from. So the current address + option are read and merged UNDER the
+ * caller's values; only what the caller actually supplies changes.
+ *
+ * ⚠️ `MailingAddressInput` takes `countryCode` / `provinceCode`, not `country` / `province` —
+ * passing full names silently produces an address Shopify cannot geocode. The read below asks for
+ * the CODE fields for exactly that reason.
+ */
+export async function shopifyUpdateShippingAddress(
+  workspaceId: string,
+  contractId: string,
+  address: {
+    address1: string; address2?: string | null; city: string; zip: string;
+    /** ISO country CODE, e.g. "US". */ country: string;
+    /** Province CODE, e.g. "CA". */ province: string;
+    firstName: string; lastName: string; phone?: string | null; company?: string | null;
+  },
+): Promise<SubscriptionActionResult> {
+  const cur = await gql<{ subscriptionContract?: { deliveryMethod?: {
+    address?: { address1?: string; address2?: string; city?: string; zip?: string; countryCodeV2?: string; provinceCode?: string; firstName?: string; lastName?: string; phone?: string; company?: string };
+    shippingOption?: { title?: string; presentmentTitle?: string; description?: string; code?: string };
+  } } }>(
+    workspaceId,
+    `query($id:ID!){ subscriptionContract(id:$id){ deliveryMethod {
+       ... on SubscriptionDeliveryMethodShipping {
+         address { address1 address2 city zip countryCodeV2 provinceCode firstName lastName phone company }
+         shippingOption { title presentmentTitle description code } } } } }`,
+    { id: contractGid(contractId) },
+  );
+  if (cur.errors?.length) return { success: false, error: cur.errors.map((e) => e.message).join("; ") };
+  const opt = cur.data?.subscriptionContract?.deliveryMethod?.shippingOption;
+  const prev = cur.data?.subscriptionContract?.deliveryMethod?.address;
+
+  /** Caller's value wins; `undefined`/`null` falls back to what the contract already holds. */
+  const keep = <T,>(supplied: T | null | undefined, existing: T | undefined): T | undefined =>
+    supplied === undefined || supplied === null ? existing : supplied;
+
+  return withDraft(workspaceId, contractId, async (draftId) => {
+    const env = await gql(
+      workspaceId,
+      `mutation($d:ID!,$in:SubscriptionDraftInput!){
+         subscriptionDraftUpdate(draftId:$d, input:$in){ draft { id } userErrors { message } } }`,
+      {
+        d: draftId,
+        in: {
+          deliveryMethod: {
+            shipping: {
+              address: {
+                address1: keep(address.address1, prev?.address1),
+                address2: keep(address.address2, prev?.address2) ?? "",
+                city: keep(address.city, prev?.city),
+                zip: keep(address.zip, prev?.zip),
+                countryCode: keep(address.country, prev?.countryCodeV2),
+                provinceCode: keep(address.province, prev?.provinceCode),
+                firstName: keep(address.firstName, prev?.firstName),
+                lastName: keep(address.lastName, prev?.lastName),
+                // An EMPTY phone means "the caller had none to send", not "clear it" — the portal
+                // sends `phone || ""` and most customers have no phone on file there.
+                ...(address.phone || prev?.phone ? { phone: address.phone || prev?.phone } : {}),
+                ...(address.company || prev?.company ? { company: address.company || prev?.company } : {}),
+              },
+              ...(opt
+                ? { shippingOption: {
+                    ...(opt.title ? { title: opt.title } : {}),
+                    ...(opt.presentmentTitle ? { presentmentTitle: opt.presentmentTitle } : {}),
+                    ...(opt.description ? { description: opt.description } : {}),
+                    ...(opt.code ? { code: opt.code } : {}),
+                  } }
+                : {}),
+            },
+          },
+        },
+      },
+    );
+    return toResult(env as never, "subscriptionDraftUpdate");
+  });
+}
+
 /** Drop every edit made to one billing cycle — the undo for `withBillingCycleDraft`. */
 export async function shopifyDeleteBillingCycleEdit(
   workspaceId: string,

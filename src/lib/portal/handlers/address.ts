@@ -2,7 +2,6 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { isInternalSubscription } from "@/lib/internal-subscription";
 
 function s(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
@@ -91,11 +90,27 @@ export const address: RouteHandler = async ({ auth, route, req }) => {
   }
 
   const admin = createAdminClient();
-  const isInternal = await isInternalSubscription(auth.workspaceId, String(contractId));
+  const { resolveBillingSource } = await import("@/lib/internal-subscription");
+  const engine = await resolveBillingSource(auth.workspaceId, String(contractId));
 
-  // Appstle subs: push the address to Appstle. Internal subs aren't on
-  // Appstle — the local subscriptions row below is the source of truth.
-  if (!isInternal) {
+  // ⭐ ShopCX: the address must round-trip to SHOPIFY — Shopify builds the renewal order from the
+  // contract, so a mirror-only write ships the next order to the OLD address while the portal
+  // shows the new one. Through the SDK, which also preserves the contract's shipping option.
+  if (engine === "shopcx") {
+    const { subscriptionUpdateShippingAddress } = await import("@/lib/commerce/subscription");
+    const r = await subscriptionUpdateShippingAddress(auth.workspaceId, String(contractId), {
+      address1, address2: address2 || "", city, zip,
+      country: countryCode, province: provinceCode,
+      firstName, lastName, phone: phone || "",
+    });
+    if (!r.success) {
+      return jsonErr({ error: "address_update_failed", message: r.error }, 502);
+    }
+  }
+
+  // Appstle subs: push the address to Appstle. Internal + ShopCX subs aren't on
+  // Appstle — the local subscriptions row below is the source of truth / mirror.
+  if (engine === "appstle") {
     try {
       const { healOnTouch } = await import("@/lib/appstle-pricing");
       await healOnTouch(auth.workspaceId, String(contractId));

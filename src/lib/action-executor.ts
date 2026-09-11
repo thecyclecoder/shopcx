@@ -2380,14 +2380,15 @@ export const directActionHandlers: Record<
       }
     };
 
-    // Internal subs aren't on the external vendor — restore the grandfathered
-    // base by writing price_override_cents directly. Route here FIRST, before
-    // the vendor config / live-contract fetch below (which would fail with
-    // "vendor not configured" for an internal sub). subUpdateLineItemPrice
-    // delegates to internalSubUpdateLineItemPrice for these.
-    const { isInternalSubscription } = await import("@/lib/internal-subscription");
-    if (await isInternalSubscription(ctx.workspaceId, p.contract_id)) {
-      if (!p.variant_id) return { success: false, error: "Internal subscription requires a variant_id to restore price" };
+    // Neither internal nor ShopCX subs are on the external vendor — restore the grandfathered
+    // base through the chokepoint instead. Route here FIRST, before the vendor config /
+    // live-contract fetch below, which would fail with "vendor not configured" for either.
+    // `subUpdateLineItemPrice` dispatches: internal → price_override_cents,
+    // ShopCX → a draft base-price pin with the discounts recomputed in the same commit.
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    const priceEngine = await resolveBillingSource(ctx.workspaceId, p.contract_id);
+    if (priceEngine !== "appstle") {
+      if (!p.variant_id) return { success: false, error: `${priceEngine} subscription requires a variant_id to restore price` };
       const variantId = String(p.variant_id);
       const derived = await decide(variantId);
       if (!derived.ok) {
@@ -2396,13 +2397,13 @@ export const directActionHandlers: Record<
       }
       if (Math.abs(derived.base - agentBase) > 100) {
         console.log(
-          `update_line_item_price: overriding agent-supplied base $${(agentBase / 100).toFixed(2)} with signal-computed $${(derived.base / 100).toFixed(2)} on contract ${p.contract_id} variant ${variantId} (internal)`,
+          `update_line_item_price: overriding agent-supplied base $${(agentBase / 100).toFixed(2)} with signal-computed $${(derived.base / 100).toFixed(2)} on contract ${p.contract_id} variant ${variantId} (${priceEngine})`,
         );
       }
       const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, variantId, derived.base);
       if (r.success) await logPriceCorrection(variantId, derived);
       return r.success
-        ? { ...r, summary: `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${p.variant_id} (internal price_override_cents)${derived.note}` }
+        ? { ...r, summary: `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${p.variant_id} (${priceEngine})${derived.note}` }
         : r;
     }
 

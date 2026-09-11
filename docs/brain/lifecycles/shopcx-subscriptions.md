@@ -291,11 +291,26 @@ engine rather than assuming "not internal ⇒ Appstle":
 | cancel-flow save offers · journey remedies | [[../libraries/commerce__subscription]] `applyCoupon` | same as above |
 | retention gift | `subscriptionAddFreeProduct` → `shopcxAddOneTimeLine` | **cycle-scoped** edit, not a contract line |
 | order now | `subscriptionOrderNow` | fires the renewal-attempt event, which claims the cycle |
+| shipping address | `portal/handlers/address.ts` → `subscriptionUpdateShippingAddress` | draft `deliveryMethod` update, then the mirror |
+| portal replace-variants | `portal/handlers/replace-variants.ts` | decomposed into the engine-aware item mutations; one-time adds go cycle-scoped |
+| agent price restore | `action-executor.ts` `update_line_item_price` | `subUpdateLineItemPrice` → base-price pin |
 | pause · cancel · resume · skip · dates | [[../libraries/commerce__subscription]] | direct Shopify mutations |
 
 Each of the coupon surfaces previously read the workspace's Appstle key and, without one, either
 refused with *"Appstle not configured"* or silently applied nothing. On a migrated contract that
 turns an **accepted save offer into a cancellation**.
+
+### ⚠️ Shopify's address object REPLACES — it does not merge
+
+`deliveryMethod.shipping` replaces the whole shipping method, and the address inside it replaces
+wholesale too: an omitted field is CLEARED. Observed live — an update that did not mention `phone`
+wiped a real number off the contract, and one that omits `shippingOption` drops the customer's
+"Economy" rate, leaving the renewal order with no rate to build from. `shopifyUpdateShippingAddress`
+reads the current address + option and merges them UNDER the caller's values. The portal sends
+`phone || ""`, so an empty phone means "none to send", never "clear it".
+
+`MailingAddressInput` also takes `countryCode` / `provinceCode`, not the full names — passing names
+silently produces an address Shopify cannot geocode.
 
 **Still refusing for ShopCX (1 op):** `subscriptionSendPaymentUpdateEmail` — no Shopify equivalent;
 needs our own Resend flow. It refuses loudly (`shopcxUnsupported`), never silently.

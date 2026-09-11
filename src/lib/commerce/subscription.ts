@@ -714,6 +714,18 @@ export async function subscriptionGetLiveContract(
  */
 export interface UpdateShippingAddressDeps {
   isInternal(workspaceId: string, contractId: string): Promise<boolean>;
+  /**
+   * Three-way engine resolution. OPTIONAL so the existing injected-fake tests keep working —
+   * when absent the old internal-vs-Appstle branch stands, which is what those tests exercise.
+   * Production always supplies it.
+   */
+  resolveEngine?(workspaceId: string, contractId: string): Promise<string>;
+  /** Shopify-side write, for ShopCX-billed contracts. */
+  writeShopify?(
+    workspaceId: string,
+    contractId: string,
+    address: ShippingAddressInput,
+  ): Promise<{ success: boolean; error?: string }>;
   getVendorApiKey(workspaceId: string): Promise<string | null>;
   vendorFetch(url: string, init: RequestInit): Promise<Response>;
   writeLocal(
@@ -727,6 +739,11 @@ export interface UpdateShippingAddressDeps {
 export function defaultUpdateShippingAddressDeps(): UpdateShippingAddressDeps {
   return {
     isInternal: isInternalSubscription,
+    resolveEngine: resolveBillingSource,
+    async writeShopify(workspaceId, contractId, address) {
+      const { shopifyUpdateShippingAddress } = await import("@/lib/commerce/shopify-subscription-client");
+      return shopifyUpdateShippingAddress(workspaceId, contractId, address);
+    },
     async getVendorApiKey(workspaceId: string) {
       const admin = createAdminClient();
       const { data: ws } = await admin
@@ -758,6 +775,26 @@ export async function subscriptionUpdateShippingAddress(
     if (!w.success) return { success: false, error: w.error };
     return { success: true };
   }
+
+  // ⭐ ShopCX: the address must round-trip to SHOPIFY, because Shopify builds the renewal order
+  // from the contract. A mirror-only write leaves the next order shipping to the OLD address with
+  // the portal showing the new one — a silent mis-ship, not a visible failure.
+  if (deps.resolveEngine && deps.writeShopify) {
+    if ((await deps.resolveEngine(workspaceId, contractId)) === "shopcx") {
+      const r = await deps.writeShopify(workspaceId, contractId, address);
+      if (!r.success) return { success: false, error: r.error };
+      // Same ordering rule as the vendor branch below: mirror only AFTER the authority accepted,
+      // and a mirror failure does not flip the result — it really did change where it ships from.
+      const local = await deps.writeLocal(workspaceId, contractId, address);
+      if (!local.success) {
+        console.error(
+          `[subscriptionUpdateShippingAddress] Shopify accepted but local row write failed for contract ${contractId}: ${local.error ?? "unknown"}`,
+        );
+      }
+      return { success: true };
+    }
+  }
+
   const apiKey = await deps.getVendorApiKey(workspaceId);
   if (!apiKey) return { success: false, error: "Subscription vendor not configured" };
   const res = await deps.vendorFetch(
