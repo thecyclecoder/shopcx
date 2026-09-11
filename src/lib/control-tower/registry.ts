@@ -124,6 +124,12 @@ export type OutputAssertionId =
   | "spec-test-persisted"
   | "renewal-integrity"
   | "renewal-outcome-distribution"
+  // Phase 3 of docs/brain/specs/a-declined-renewal-must-not-wedge-the-cycle-forever.md — count
+  // active subscriptions whose CURRENT cycle_key has a non-succeeded subscription_cycle_charges
+  // row that has persisted past the SDK's reclaim threshold (a fresh in_flight is a legitimate
+  // in-progress charge and NOT wedged). Post-Phase-1 this reads zero; the assertion exists to
+  // catch the next variant of the same class rather than only the exact 2026-10-04 shape.
+  | "renewal-wedged-cycles"
   | "stuck-dunning"
   | "migration-drift"
   | "segment-coverage";
@@ -145,16 +151,23 @@ export type RenewalOutcome =
   | "declined_to_dunning"
   | "comp_shipped"
   | "comp_blocked"
-  | "skipped_other";
+  | "skipped_other"
+  // Phase 2 of docs/brain/specs/a-declined-renewal-must-not-wedge-the-cycle-forever.md — a
+  // refusal whose existing claim on the (subscription_id, cycle_key) row is NOT `succeeded`
+  // means a customer cannot be billed for THIS cycle and the state must be alertable, not
+  // blended into normal skip volume. `succeeded` refusals stay `skipped_other` (benign — a
+  // real Braintree sale already resolved this cycle). See RENEWAL_BAD_OUTCOMES below.
+  | "refused_wedged_cycle";
 
 /** loop_heartbeats.loop_id the per-sub renewal outcome beats are written under (kind 'reactive' so the cron/agent-kind beats RPC skips them). NOT a monitored tile — a data channel for the outcome-distribution assertion. */
 export const RENEWAL_OUTCOME_LOOP_ID = "internal-subscription-renewal-outcome";
 
-/** Outcomes that count as "anomalous" for the outcome-distribution spike/floor check (vs the benign charged / comp_shipped / zero-total / other-skip outcomes). */
+/** Outcomes that count as "anomalous" for the outcome-distribution spike/floor check (vs the benign charged / comp_shipped / zero-total / other-skip outcomes). `refused_wedged_cycle` is included so a wedged-cycle refusal alerts through the same channel rather than blending into `skipped_other` (Phase 2 of a-declined-renewal-must-not-wedge-the-cycle-forever). */
 export const RENEWAL_BAD_OUTCOMES: RenewalOutcome[] = [
   "skipped_no_payment_method",
   "declined_to_dunning",
   "comp_blocked",
+  "refused_wedged_cycle",
 ];
 
 /**
@@ -497,8 +510,11 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "daily (0 9 * * *)",
     livenessWindowMs: 30 * HOUR,
     // renewal-integrity (overdue subs never advanced) + outcome-distribution (the cron ran +
-    // each decline "routed correctly" but the per-cycle outcome mix is systemically broken / spiking).
-    outputAssertions: ["renewal-integrity", "renewal-outcome-distribution"],
+    // each decline "routed correctly" but the per-cycle outcome mix is systemically broken /
+    // spiking) + renewal-wedged-cycles (active subs whose CURRENT cycle_key has a persistent
+    // non-succeeded subscription_cycle_charges row — Phase 3 of a-declined-renewal-must-not-
+    // wedge-the-cycle-forever).
+    outputAssertions: ["renewal-integrity", "renewal-outcome-distribution", "renewal-wedged-cycles"],
   },
   {
     id: "social-scheduler-plan",
