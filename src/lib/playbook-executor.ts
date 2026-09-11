@@ -2700,12 +2700,12 @@ async function handleCancelSubscription(
   }
 
   // Cancel via Appstle
-  const { appstleSubscriptionAction } = await import("@/lib/appstle");
+  const { subscriptionAction } = await import("@/lib/commerce/subscription");
   const cancelled: string[] = [];
   const failed: string[] = [];
 
   for (const contractId of allToCancel) {
-    const result = await appstleSubscriptionAction(wsId, contractId, "cancel", "Customer requested via playbook", "AI Playbook");
+    const result = await subscriptionAction(wsId, contractId, "cancel", "Customer requested via playbook", "AI Playbook");
     if (result.success) cancelled.push(contractId);
     else failed.push(contractId);
   }
@@ -2769,8 +2769,8 @@ async function handlePauseSubscription(
     };
   }
 
-  const { appstleSubscriptionAction } = await import("@/lib/appstle");
-  const result = await appstleSubscriptionAction(
+  const { subscriptionAction } = await import("@/lib/commerce/subscription");
+  const result = await subscriptionAction(
     wsId, decision.contractId, "pause", "Customer requested via playbook", "AI Playbook",
   );
 
@@ -4034,8 +4034,8 @@ async function handleAdjustSubscription(
   const newDateFormatted = newDate.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
 
   try {
-    const { appstleUpdateNextBillingDate } = await import("@/lib/appstle");
-    await appstleUpdateNextBillingDate(wsId, sub.shopify_contract_id, newDateStr);
+    const { subscriptionUpdateNextBillingDate } = await import("@/lib/commerce/subscription");
+    await subscriptionUpdateNextBillingDate(wsId, sub.shopify_contract_id, newDateStr);
 
     // Update local
     await admin.from("subscriptions").update({

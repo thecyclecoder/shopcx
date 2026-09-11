@@ -120,8 +120,8 @@ export const deliveryNightlyAudit = inngest.createFunction(
                     .eq("id", order.subscription_id).single();
 
                   if (sub?.status === "active" && sub.shopify_contract_id) {
-                    const { appstleSubscriptionAction } = await import("@/lib/appstle");
-                    await appstleSubscriptionAction(
+                    const { subscriptionAction } = await import("@/lib/commerce/subscription");
+                    await subscriptionAction(
                       workspaceId, sub.shopify_contract_id, "cancel",
                       "Shipment Refused - Auto Cancel", "Delivery Audit",
                     );

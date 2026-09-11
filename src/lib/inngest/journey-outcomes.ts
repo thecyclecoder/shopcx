@@ -104,8 +104,8 @@ export const journeySessionCompleted = inngest.createFunction(
             .single();
 
           if (subData?.shopify_contract_id) {
-            const { appstleSubscriptionAction } = await import("@/lib/appstle");
-            await appstleSubscriptionAction(
+            const { subscriptionAction } = await import("@/lib/commerce/subscription");
+            await subscriptionAction(
               workspace_id,
               subData.shopify_contract_id,
               "cancel",
@@ -153,8 +153,8 @@ export const journeySessionCompleted = inngest.createFunction(
             .single();
 
           if (subData?.shopify_contract_id) {
-            const { appstleSubscriptionAction } = await import("@/lib/appstle");
-            await appstleSubscriptionAction(workspace_id, subData.shopify_contract_id, "pause");
+            const { subscriptionAction } = await import("@/lib/commerce/subscription");
+            await subscriptionAction(workspace_id, subData.shopify_contract_id, "pause");
           } else {
             await admin.from("subscriptions").update({ status: "paused" }).eq("id", session.subscription_id);
           }
@@ -197,8 +197,8 @@ export const journeySessionCompleted = inngest.createFunction(
             .single();
 
           if (subData?.shopify_contract_id) {
-            const { appstleSkipNextOrder } = await import("@/lib/appstle");
-            await appstleSkipNextOrder(workspace_id, subData.shopify_contract_id);
+            const { subscriptionSkipNextOrder } = await import("@/lib/commerce/subscription");
+            await subscriptionSkipNextOrder(workspace_id, subData.shopify_contract_id);
           }
         }
         if (ticketId) {

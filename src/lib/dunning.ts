@@ -752,7 +752,10 @@ export async function cancelForTerminalNoBackup(params: {
   }
 
   try {
-    await appstleSubscriptionAction(
+    // Dynamic import: the SDK reaches back into this module via subscription-status-truth
+    // (endDunningForSubscription), so a static import would close the cycle.
+    const { subscriptionAction } = await import("@/lib/commerce/subscription");
+    await subscriptionAction(
       workspaceId, contractId, "cancel", "dunning",
       `Cancelled by ShopCX — terminal billing error: ${errorCode} (${errorMessage || "no details"}), no other payment methods available`,
     );

@@ -686,8 +686,8 @@ export async function POST(
         const { data: sub } = await admin.from("subscriptions")
           .select("shopify_contract_id").eq("id", subscriptionId).single();
         if (sub?.shopify_contract_id) {
-          const { appstleSubscriptionAction } = await import("@/lib/appstle");
-          await appstleSubscriptionAction(wsId, sub.shopify_contract_id, "pause", "Crisis — out of stock pause");
+          const { subscriptionAction } = await import("@/lib/commerce/subscription");
+          await subscriptionAction(wsId, sub.shopify_contract_id, "pause", "Crisis — out of stock pause");
         }
         await admin.from("crisis_customer_actions").update({
           tier3_response: "accepted_pause",
@@ -1011,8 +1011,8 @@ export async function POST(
 
     if (outcome === "cancelled" && selectedSub) {
       // Cancel via Appstle API
-      const { appstleSubscriptionAction } = await import("@/lib/appstle");
-      const result = await appstleSubscriptionAction(
+      const { subscriptionAction } = await import("@/lib/commerce/subscription");
+      const result = await subscriptionAction(
         wsId,
         selectedSub.contractId,
         "cancel",
@@ -1081,16 +1081,16 @@ export async function POST(
       }
 
       if (selectedSub && actionType !== "unknown") {
-        const { appstleSubscriptionAction, appstleSkipNextOrder, appstleUpdateBillingInterval } = await import("@/lib/appstle");
+        const { subscriptionAction, subscriptionSkipNextOrder, subscriptionUpdateBillingInterval } = await import("@/lib/commerce/subscription");
 
         if (actionType === "pause") {
-          const result = await appstleSubscriptionAction(wsId, selectedSub.contractId, "pause");
+          const result = await subscriptionAction(wsId, selectedSub.contractId, "pause");
           actionLog.push(result.success ? `Paused subscription ${selectedSub.contractId}` : `Failed to pause: ${result.error}`);
         } else if (actionType === "skip") {
-          const result = await appstleSkipNextOrder(wsId, selectedSub.contractId);
+          const result = await subscriptionSkipNextOrder(wsId, selectedSub.contractId);
           actionLog.push(result.success ? `Skipped next order for ${selectedSub.contractId}` : `Failed to skip: ${result.error}`);
         } else if (actionType === "frequency_change") {
-          const result = await appstleUpdateBillingInterval(wsId, selectedSub.contractId, "MONTH", 2);
+          const result = await subscriptionUpdateBillingInterval(wsId, selectedSub.contractId, "MONTH", 2);
           actionLog.push(result.success ? `Changed frequency to every 2 months for ${selectedSub.contractId}` : `Failed to change frequency: ${result.error}`);
         } else if (actionType === "coupon") {
           // Apply coupon via shared helper (removes existing, applies new, updates local DB)

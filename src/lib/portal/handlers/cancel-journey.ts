@@ -64,8 +64,7 @@ async function executeRemedyAction(
   remedyType: string,
   config: RemedyConfig,
 ): Promise<{ success: boolean; error?: string; patch?: Record<string, unknown>; savedAction?: string }> {
-  const { appstleSubscriptionAction, appstleSkipNextOrder, appstleUpdateBillingInterval, appstleAddFreeProduct } =
-    await import("@/lib/appstle");
+  const { subscriptionAction, subscriptionSkipNextOrder, subscriptionUpdateBillingInterval, subscriptionAddFreeProduct } = await import("@/lib/commerce/subscription");
   const admin = createAdminClient();
 
   switch (remedyType) {
@@ -94,7 +93,7 @@ async function executeRemedyAction(
 
     case "pause": {
       const pauseDays = Number(config.pause_days) || 30;
-      const result = await appstleSubscriptionAction(workspaceId, contractId, "pause");
+      const result = await subscriptionAction(workspaceId, contractId, "pause");
       if (!result.success) return { success: false, error: result.error };
 
       const resumeAt = new Date(Date.now() + pauseDays * 86400000).toISOString();
@@ -115,7 +114,7 @@ async function executeRemedyAction(
     }
 
     case "skip": {
-      const result = await appstleSkipNextOrder(workspaceId, contractId);
+      const result = await subscriptionSkipNextOrder(workspaceId, contractId);
       if (!result.success) return { success: false, error: result.error };
       return { success: true, savedAction: "skipped your next order", patch: {} };
     }
@@ -127,7 +126,7 @@ async function executeRemedyAction(
         quarterly: { interval: "MONTH", count: 3 },
       };
       const freq = freqMap[config.frequency_interval as string] || { interval: "MONTH" as const, count: 2 };
-      const result = await appstleUpdateBillingInterval(workspaceId, contractId, freq.interval, freq.count);
+      const result = await subscriptionUpdateBillingInterval(workspaceId, contractId, freq.interval, freq.count);
       if (!result.success) return { success: false, error: result.error };
       const label = config.frequency_interval === "monthly" ? "monthly" : config.frequency_interval === "bimonthly" ? "every 2 months" : "every 3 months";
       return { success: true, savedAction: `changed your delivery to ${label}`, patch: {} };
@@ -136,7 +135,7 @@ async function executeRemedyAction(
     case "free_product": {
       const variantId = config.product_variant_id as string;
       if (!variantId) return { success: false, error: "No product configured for this remedy" };
-      const result = await appstleAddFreeProduct(workspaceId, contractId, variantId, 1);
+      const result = await subscriptionAddFreeProduct(workspaceId, contractId, variantId, 1);
       if (!result.success) return { success: false, error: result.error };
       const title = (config.product_title as string) || "a free product";
       return { success: true, savedAction: `added ${title} free to your next order`, patch: {} };
@@ -692,8 +691,8 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
     const ticketId = payload?.ticketId ? String(payload.ticketId) : null;
     const sessionId = payload?.sessionId ? String(payload.sessionId) : null;
 
-    const { appstleSubscriptionAction } = await import("@/lib/appstle");
-    const result = await appstleSubscriptionAction(
+    const { subscriptionAction } = await import("@/lib/commerce/subscription");
+    const result = await subscriptionAction(
       auth.workspaceId, contractId, "cancel", reason, "Portal"
     );
 
