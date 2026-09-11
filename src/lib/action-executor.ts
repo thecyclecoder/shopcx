@@ -2901,9 +2901,21 @@ export const directActionHandlers: Record<
       };
     }
 
-    const { refundOrder, hashActionRefundKey } = await import("@/lib/refund");
-    const reason = p.reason || "Full order refund — founder-authorised";
-
+    // ⭐ Ticket-customer binding — spec:
+    // full-order-refund-must-bind-ticket-customer. Even a founder-approved
+    // parked remedy on ticket T (customerId A) MUST NOT refund an order that
+    // happens to sit in the same workspace but is owned by customer B: the
+    // remedy payload is spec-authored input and a valid same-workspace order
+    // number from a different customer cannot become authority to move that
+    // customer's money. Bind the order lookup to `ctx.customerId` and bail
+    // BEFORE the refund module is even loaded, so no network side effect can
+    // fire on a cross-customer refusal.
+    if (!ctx.customerId) {
+      return {
+        success: false,
+        error: `Refusing full_order_refund on order ${p.shopify_order_id ?? "(no order)"}: no ticket customer bound to this action context — an unbound remedy cannot be authorised.`,
+      };
+    }
     if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
 
     const oid = String(p.shopify_order_id);
@@ -2913,8 +2925,17 @@ export const directActionHandlers: Record<
       .select("id, total_cents")
       .eq(orderMatch.col, orderMatch.val)
       .eq("workspace_id", ctx.workspaceId)
+      .eq("customer_id", ctx.customerId)
       .maybeSingle();
-    if (!ord?.id) return { success: false, error: `Order not found for ${oid}` };
+    if (!ord?.id) {
+      return {
+        success: false,
+        error: `Order not found for ${oid} on the ticket customer — a full_order_refund can only refund an order owned by the ticket customer.`,
+      };
+    }
+
+    const { refundOrder, hashActionRefundKey } = await import("@/lib/refund");
+    const reason = p.reason || "Full order refund — founder-authorised";
 
     const refundCents = Number((ord as { total_cents?: number | null }).total_cents ?? 0);
     if (!refundCents || refundCents <= 0) {
