@@ -82,6 +82,7 @@
     "test:creative-qa-multi-packshot": "tsx --test src/lib/ads/creative-qa.multi-packshot.test.ts",
     "test:subscription-order-link": "tsx --test src/lib/subscription-order-link.test.ts",
     "test:subscription-duplicate-renewal-detector": "tsx --test src/lib/subscription-duplicate-renewal-detector.test.ts",
+    "test:subscription-cycle-charge-claim": "tsx --test src/lib/subscription-cycle-charge-claim.test.ts",
     "test:specs-table-verify-phases-contained-by-merges": "tsx --test src/lib/specs-table.verify-phases-contained-by-merges.test.ts",
     "test:specs-table-squash-merge-provenance": "tsx --test src/lib/specs-table.squash-merge-provenance.test.ts",
     "test:pr-create-diagnostic": "tsx --test src/lib/pr-create-diagnostic.test.ts",
