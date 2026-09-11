@@ -1433,7 +1433,7 @@ export async function subscriptionApplyCoupon(
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("customer_id, status")
+    .select("id, customer_id, status")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", contractId)
     .maybeSingle();
@@ -1441,7 +1441,10 @@ export async function subscriptionApplyCoupon(
     return { success: false, error: "subscription_not_active" };
   }
 
-  if (await isInternalSubscription(workspaceId, contractId)) {
+  const { resolveBillingSource } = await import("@/lib/internal-subscription");
+  const engine = await resolveBillingSource(workspaceId, contractId);
+
+  if (engine === "internal" || engine === "shopcx") {
     // LOYALTY-* codes must be internal-native on internal subs so
     // renewal-time `resolveCoupon` step 1 (internal wins) can durably
     // re-resolve them — independent of the Shopify discount lifetime, which
@@ -1476,6 +1479,25 @@ export async function subscriptionApplyCoupon(
     // a self-sufficient applied_discounts entry (type + value + source), and
     // pass the contract owner so the post-write real-value verify uses the
     // same customerId `resolveRenewalDiscount` will pass at renewal.
+    // ShopCX diverges only at the WRITE. Everything above — materialization, the
+    // owner check, internal-wins resolution — is identical for both engines and must
+    // stay that way: a loyalty code has to mean the same thing whoever bills it.
+    if (engine === "shopcx") {
+      const { shopcxApplyCoupon } = await import("@/lib/commerce/shopcx-discount-ops");
+      const r = await shopcxApplyCoupon(workspaceId, contractId, resolved);
+      // Burn the code at APPLY time, not at charge time as the internal engine does. Shopify
+      // consumes the discount on its own schedule — we only ever learn after the fact — so
+      // waiting for the charge leaves a window in which the same single-use loyalty code can
+      // be applied to a second subscription. Burning early can at worst deny a customer a code
+      // they have already spent; burning late hands out the discount twice.
+      if (r.success) {
+        const { recordCouponRedemption } = await import("@/lib/coupons");
+        await recordCouponRedemption(workspaceId, resolved, (sub?.customer_id as string | null) ?? null, {
+          subscriptionId: sub?.id as string | undefined,
+        });
+      }
+      return r;
+    }
     return internalSubApplyDiscount(workspaceId, contractId, resolved.code, {
       resolved: {
         code: resolved.code,
@@ -1514,8 +1536,16 @@ export async function subscriptionRemoveCoupon(
   contractId: string,
   discountIdOrCode: string,
 ): Promise<{ success: boolean; error?: string }> {
-  if (await isInternalSubscription(workspaceId, contractId)) {
-    return internalSubRemoveDiscount(workspaceId, contractId, discountIdOrCode);
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    const engine = await resolveBillingSource(workspaceId, contractId);
+    if (engine === "internal") {
+      return internalSubRemoveDiscount(workspaceId, contractId, discountIdOrCode);
+    }
+    if (engine === "shopcx") {
+      const { shopcxRemoveCoupon } = await import("@/lib/commerce/shopcx-discount-ops");
+      return shopcxRemoveCoupon(workspaceId, contractId);
+    }
   }
 
   await healOnTouch(workspaceId, contractId);

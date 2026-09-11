@@ -27,6 +27,8 @@ import {
   shopifyUpdateDraftLine,
   shopifyAddDraftLine,
   shopifyRemoveStructuralDiscounts,
+  getSubscriptionDraft,
+  STRUCTURAL_DISCOUNT_TITLES,
   type ManualDiscountInput,
 } from "@/lib/commerce/shopify-subscription-client";
 import { loadPricingContext, breakPctForQty, shopifyLineMath } from "@/lib/commerce/shopify-subscription-migrate";
@@ -42,82 +44,103 @@ async function activePricingRuleId(workspaceId: string): Promise<string | null> 
   return (data as { id: string } | null)?.id ?? null;
 }
 
-/** Read the contract's current discounts so we can tell ours from the customer's. */
-async function currentDiscounts(
-  workspaceId: string,
-  contractId: string,
-): Promise<{ id: string; title: string | null; type: string | null }[]> {
-  const { getShopifyCredentials } = await import("@/lib/shopify-sync");
-  const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
-  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
-  const gid = String(contractId).startsWith("gid://")
-    ? contractId : `gid://shopify/SubscriptionContract/${contractId}`;
-  const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
-    method: "POST",
-    headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      query: `query($id:ID!){ subscriptionContract(id:$id){ discounts(first:25){ nodes{ id type title } } } }`,
-      variables: { id: gid },
-    }),
-  });
-  const j = await res.json().catch(() => null) as
-    | { data?: { subscriptionContract?: { discounts?: { nodes?: { id: string; type: string | null; title: string | null }[] } } } }
-    | null;
-  return j?.data?.subscriptionContract?.discounts?.nodes ?? [];
-}
-
 /**
- * Recompute the structural discounts for the contract's CURRENT lines, inside an open draft.
+ * The grandfathered per-unit concession each line carries TODAY, measured against what the rules
+ * say that line should cost at its CURRENT quantity.
  *
- * Grandfathering is preserved: each line's existing effective rate is compared against what the
- * rules now say, and the shortfall is re-minted as a per-unit line discount. Without this a
- * quantity change would quietly promote a grandfathered customer to standard pricing.
+ * Captured from the committed contract BEFORE the draft opens, because it is a property of the
+ * rate the customer already has — not of the edit being made. Measured after the edit it would be
+ * compared against a tier the line has only just moved to, and the concession would grow or
+ * vanish with every quantity change.
+ *
+ * Only OUR allocations are subtracted: a customer's coupon sits on the same line, and inferring a
+ * rate from a price their one-use code reduced would re-mint that code as a permanent discount.
  */
-async function rewriteStructuralDiscounts(
+async function captureGrandfatherByLine(
   workspaceId: string,
   contractId: string,
-  draftId: string,
-): Promise<LineOpResult> {
-  const ruleId = await activePricingRuleId(workspaceId);
-  if (!ruleId) return { success: false, error: "no active pricing rule" };
-  const ctx = await loadPricingContext(workspaceId, ruleId);
-
+  ctx: Awaited<ReturnType<typeof loadPricingContext>>,
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
   const live = await getSubscriptionContract(workspaceId, contractId);
-  if (!live.success || !live.contract) return { success: false, error: live.error ?? "contract unreadable" };
+  if (!live.success || !live.contract) return out;
 
-  const existing = await currentDiscounts(workspaceId, contractId);
-  const cleared = await shopifyRemoveStructuralDiscounts(workspaceId, draftId, existing);
-  if (!cleared.success) return cleared;
-
-  // Mix-and-match tier over rule lines only — protection never counts toward it.
   const resolved = live.contract.lines.map((l) => ({
-    l,
-    v: l.sku ? ctx.variantBySku.get(String(l.sku).toLowerCase()) : undefined,
+    l, v: l.sku ? ctx.variantBySku.get(String(l.sku).toLowerCase()) : undefined,
   }));
-  const isProt = (pid?: string) => /protection/i.test(ctx.productTitle.get(pid ?? "") ?? "");
   const mixQty = resolved
-    .filter((r) => r.v && ctx.ruleProducts.has(r.v.product_id) && !isProt(r.v.product_id))
+    .filter((r) => r.v && ctx.ruleProducts.has(r.v.product_id) && !isProtection(ctx, r.v.product_id))
     .reduce((a, r) => a + (r.l.quantity || 1), 0);
   const breakPct = breakPctForQty(ctx.breaks, mixQty);
 
   for (const { l, v } of resolved) {
-    if (!v || !ctx.ruleProducts.has(v.product_id) || isProt(v.product_id)) continue;
+    if (!v || !ctx.ruleProducts.has(v.product_id) || isProtection(ctx, v.product_id)) continue;
     const qty = l.quantity || 1;
-    const effectiveNow = l.lineDiscountedPrice != null
-      ? Math.round((parseFloat(l.lineDiscountedPrice) * 100) / qty)
-      : null;
-    const standard = shopifyLineMath(v.price_cents, qty, ctx.snsPct, breakPct).standardUnitCents;
-    const grandfather = effectiveNow != null && effectiveNow > 0 && effectiveNow < standard
-      ? standard - effectiveNow
-      : 0;
+    if (l.currentPrice == null) continue;
+    const unitBase = Math.round(parseFloat(l.currentPrice) * 100);
+
+    // ⚠️ Measure against what the rules make of THIS LINE'S OWN base, not catalog MSRP. The
+    // recompute applies its percentages to the line's `currentPrice`, so a line already pinned
+    // BELOW MSRP (`shopcxUpdateLineItemPrice`, the internal `price_override_cents` equivalent)
+    // would otherwise look like it carried a concession equal to the whole MSRP gap — and the
+    // rewrite would take that off a base that already reflected it, discounting twice.
+    const standardLine = shopifyLineMath(unitBase, qty, ctx.snsPct, breakPct).lineTotalCents;
+    const effectiveLine = unitBase * qty - l.structuralDiscountCents;
+    const shortfall = standardLine - effectiveLine;
+    if (effectiveLine > 0 && shortfall > 0) out.set(l.id, Math.round(shortfall / qty));
+  }
+  return out;
+}
+
+function isProtection(ctx: Awaited<ReturnType<typeof loadPricingContext>>, productId?: string): boolean {
+  return /protection/i.test(ctx.productTitle.get(productId ?? "") ?? "");
+}
+
+/**
+ * Recompute the structural discounts for the draft's POST-EDIT lines, inside that same draft.
+ *
+ * ⭐ Reads the DRAFT, not the contract. Mid-edit the contract still holds the old quantities, and
+ * recomputing from it prices the new state on the old tier — then prices the next edit's old
+ * state on the new tier. Both halves were observed live on 35945087149.
+ *
+ * `grandfather` is the per-unit concession captured before the edit; it is re-applied at the new
+ * quantity so the tier follows the line while the negotiated rate follows the customer.
+ */
+async function rewriteStructuralDiscounts(
+  workspaceId: string,
+  draftId: string,
+  ctx: Awaited<ReturnType<typeof loadPricingContext>>,
+  grandfather: Map<string, number>,
+): Promise<LineOpResult> {
+  const draft = await getSubscriptionDraft(workspaceId, draftId);
+  if (!draft.success || !draft.lines) return { success: false, error: draft.error ?? "draft unreadable" };
+
+  const structural = (draft.discounts ?? []).filter(
+    (d) => d.type === "MANUAL" && STRUCTURAL_DISCOUNT_TITLES.includes(String(d.title ?? "")),
+  );
+  const cleared = await shopifyRemoveStructuralDiscounts(workspaceId, draftId, structural);
+  if (!cleared.success) return cleared;
+
+  // Mix-and-match tier over rule lines only — protection never counts toward it.
+  const resolved = draft.lines.map((l) => ({
+    l, v: l.sku ? ctx.variantBySku.get(String(l.sku).toLowerCase()) : undefined,
+  }));
+  const mixQty = resolved
+    .filter((r) => r.v && ctx.ruleProducts.has(r.v.product_id) && !isProtection(ctx, r.v.product_id))
+    .reduce((a, r) => a + (r.l.quantity || 1), 0);
+  const breakPct = breakPctForQty(ctx.breaks, mixQty);
+
+  for (const { l, v } of resolved) {
+    if (!v || !ctx.ruleProducts.has(v.product_id) || isProtection(ctx, v.product_id)) continue;
+    const grandfatherUnit = grandfather.get(l.id) ?? 0;
 
     const discounts: ManualDiscountInput[] = [];
     if (ctx.snsPct > 0) discounts.push({ title: "Subscribe & Save", value: { percentage: ctx.snsPct }, entitledLines: { lines: { add: [l.id] } } });
     if (breakPct > 0) discounts.push({ title: "Volume discount", value: { percentage: breakPct }, entitledLines: { lines: { add: [l.id] } } });
-    if (grandfather > 0) {
+    if (grandfatherUnit > 0) {
       discounts.push({
         title: "Legacy rate",
-        value: { fixedAmount: { amount: grandfather / 100, appliesOnEachItem: true } },
+        value: { fixedAmount: { amount: grandfatherUnit / 100, appliesOnEachItem: true } },
         entitledLines: { lines: { add: [l.id] } },
       });
     }
@@ -127,6 +150,17 @@ async function rewriteStructuralDiscounts(
     }
   }
   return { success: true };
+}
+
+/** Load the pricing rule + each line's existing concession, before anything is edited. */
+async function preparePricing(
+  workspaceId: string,
+  contractId: string,
+): Promise<{ ctx: Awaited<ReturnType<typeof loadPricingContext>>; grandfather: Map<string, number> } | { error: string }> {
+  const ruleId = await activePricingRuleId(workspaceId);
+  if (!ruleId) return { error: "no active pricing rule" };
+  const ctx = await loadPricingContext(workspaceId, ruleId);
+  return { ctx, grandfather: await captureGrandfatherByLine(workspaceId, contractId, ctx) };
 }
 
 /** Find a line on the contract by variant id. */
@@ -147,12 +181,14 @@ export async function shopcxChangeQuantity(
     const { line, error } = await findLine(workspaceId, contractId, variantId);
     if (error) return { success: false, error };
     if (!line) return { success: false, error: "variant not on this contract" };
+    const prep = await preparePricing(workspaceId, contractId);
+    if ("error" in prep) return { success: false, error: prep.error };
     return withDraft(workspaceId, contractId, async (draftId) => {
       const { shopifyUpdateLineQuantityInDraft } = await import("@/lib/commerce/shopify-subscription-client");
       const q = await shopifyUpdateLineQuantityInDraft(workspaceId, draftId, line.id, quantity);
       if (!q.success) return q;
       // SAME draft — a separate commit would leave a window at the old tier.
-      return rewriteStructuralDiscounts(workspaceId, contractId, draftId);
+      return rewriteStructuralDiscounts(workspaceId, draftId, prep.ctx, prep.grandfather);
     });
   } catch (err) { return { success: false, error: errText(err) }; }
 }
@@ -167,10 +203,12 @@ export async function shopcxRemoveItem(
     if ((contract?.lines.length ?? 0) <= 1) {
       return { success: false, error: "refusing to remove the last line — cancel the subscription instead" };
     }
+    const prep = await preparePricing(workspaceId, contractId);
+    if ("error" in prep) return { success: false, error: prep.error };
     return withDraft(workspaceId, contractId, async (draftId) => {
       const r = await shopifyRemoveDraftLine(workspaceId, draftId, line.id);
       if (!r.success) return r;
-      return rewriteStructuralDiscounts(workspaceId, contractId, draftId);
+      return rewriteStructuralDiscounts(workspaceId, draftId, prep.ctx, prep.grandfather);
     });
   } catch (err) { return { success: false, error: errText(err) }; }
 }
@@ -194,9 +232,11 @@ export async function shopcxSwapVariant(
     if (error) return { success: false, error };
     if (!line) return { success: false, error: "variant not on this contract" };
 
-    const ruleId = await activePricingRuleId(workspaceId);
-    if (!ruleId) return { success: false, error: "no active pricing rule" };
-    const ctx = await loadPricingContext(workspaceId, ruleId);
+    const prep = await preparePricing(workspaceId, contractId);
+    if ("error" in prep) return { success: false, error: prep.error };
+    const { ctx } = prep;
+    // A swap does NOT carry the concession — it was negotiated on the outgoing product.
+    prep.grandfather.delete(line.id);
     const bare = String(newVariantId).replace("gid://shopify/ProductVariant/", "");
     const target = ctx.variantByShopifyId.get(bare);
     if (!target) return { success: false, error: `variant ${bare} is not in the catalog` };
@@ -208,7 +248,7 @@ export async function shopcxSwapVariant(
         currentPrice: (target.price_cents / 100).toFixed(2),   // MSRP; discounts do the rest
       });
       if (!u.success) return u;
-      return rewriteStructuralDiscounts(workspaceId, contractId, draftId);
+      return rewriteStructuralDiscounts(workspaceId, draftId, prep.ctx, prep.grandfather);
     });
   } catch (err) { return { success: false, error: errText(err) }; }
 }
@@ -218,9 +258,9 @@ export async function shopcxAddItem(
   workspaceId: string, contractId: string, variantId: string, quantity = 1,
 ): Promise<LineOpResult> {
   try {
-    const ruleId = await activePricingRuleId(workspaceId);
-    if (!ruleId) return { success: false, error: "no active pricing rule" };
-    const ctx = await loadPricingContext(workspaceId, ruleId);
+    const prep = await preparePricing(workspaceId, contractId);
+    if ("error" in prep) return { success: false, error: prep.error };
+    const { ctx } = prep;
     const bare = String(variantId).replace("gid://shopify/ProductVariant/", "");
     const target = ctx.variantByShopifyId.get(bare);
     if (!target) return { success: false, error: `variant ${bare} is not in the catalog` };
@@ -235,7 +275,7 @@ export async function shopcxAddItem(
       const a = await shopifyAddDraftLine(workspaceId, draftId, bare, quantity, (target.price_cents / 100).toFixed(2));
       if (!a.success) return a;
       // A new line changes the mix-and-match total, so every line's tier may move.
-      return rewriteStructuralDiscounts(workspaceId, contractId, draftId);
+      return rewriteStructuralDiscounts(workspaceId, draftId, prep.ctx, prep.grandfather);
     });
   } catch (err) { return { success: false, error: errText(err) }; }
 }
@@ -257,12 +297,17 @@ export async function shopcxUpdateLineItemPrice(
     if (!Number.isFinite(basePriceCents) || basePriceCents < 0) {
       return { success: false, error: `invalid base price ${basePriceCents}` };
     }
+    const prep = await preparePricing(workspaceId, contractId);
+    if ("error" in prep) return { success: false, error: prep.error };
+    // The caller is REDEFINING this line's base, so the concession is re-derived from the new
+    // base by the recompute below — carrying the old one forward would double-count it.
+    prep.grandfather.delete(line.id);
     return withDraft(workspaceId, contractId, async (draftId) => {
       const u = await shopifyUpdateDraftLine(workspaceId, draftId, line.id, {
         currentPrice: (basePriceCents / 100).toFixed(2),
       });
       if (!u.success) return u;
-      return rewriteStructuralDiscounts(workspaceId, contractId, draftId);
+      return rewriteStructuralDiscounts(workspaceId, draftId, prep.ctx, prep.grandfather);
     });
   } catch (err) { return { success: false, error: errText(err) }; }
 }

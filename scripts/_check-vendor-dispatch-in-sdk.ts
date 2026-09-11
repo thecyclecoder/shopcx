@@ -33,10 +33,11 @@ const DISPATCHED_VENDOR_FNS = [
   "appstleSendPaymentUpdateEmail",
   "appstleAddFreeProduct",
   "appstleSwapProduct",
+  "appstleOrderNowByContract",
 ];
 
 /** Vendor modules, which must stay dispatch-free. */
-const VENDOR_MODULES = ["src/lib/appstle.ts"];
+const VENDOR_MODULES = ["src/lib/appstle.ts", "src/lib/appstle-discount.ts"];
 
 /**
  * Files allowed to call a dispatching vendor function directly. Keep this SHORT and justified —
@@ -65,8 +66,16 @@ for (const vm of VENDOR_MODULES) {
   let src = "";
   try { src = readFileSync(vm, "utf8"); } catch { continue; }
   src.split("\n").forEach((line, i) => {
-    if (/\b(isInternalSubscription|resolveBillingSource)\b/.test(line) && !line.trim().startsWith("*") && !line.trim().startsWith("//")) {
-      violations.push(`   ${vm}:${i + 1}  vendor module resolves the engine — dispatch belongs in the commerce SDK\n      ${line.trim().slice(0, 110)}`);
+    // The helper names AND the raw columns behind them — `appstle-discount.ts` dispatched by
+    // selecting `is_internal` inline, which the helper-name check alone would have missed.
+    if (
+      /\b(isInternalSubscription|resolveBillingSource)\b/.test(line) ||
+      /["'`](is_internal|billing_source)["'`]/.test(line) ||
+      /\bis_internal\b\s*[),?]/.test(line)
+    ) {
+      const t = line.trim();
+      if (t.startsWith("*") || t.startsWith("//")) return;
+      violations.push(`   ${vm}:${i + 1}  vendor module resolves the engine — dispatch belongs in the commerce SDK\n      ${t.slice(0, 110)}`);
     }
   });
 }

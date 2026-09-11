@@ -315,7 +315,8 @@
     "test:one-time-charge": "tsx --test src/lib/one-time-charge.test.ts",
     "test:analyzer-evidence-gate": "tsx --test src/lib/ticket-analyzer.evidence-gate.test.ts",
     "test:dunning-rollforward": "tsx --test src/lib/dunning.rollforward.test.ts",
-    "check:vendor-dispatch-in-sdk": "tsx scripts/_check-vendor-dispatch-in-sdk.ts"
+    "check:vendor-dispatch-in-sdk": "tsx scripts/_check-vendor-dispatch-in-sdk.ts",
+    "test:shopcx-discount-shape": "tsx --test src/lib/commerce/shopcx-discount-shape.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.165",

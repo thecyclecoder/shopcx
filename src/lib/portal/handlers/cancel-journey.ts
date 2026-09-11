@@ -64,7 +64,7 @@ async function executeRemedyAction(
   remedyType: string,
   config: RemedyConfig,
 ): Promise<{ success: boolean; error?: string; patch?: Record<string, unknown>; savedAction?: string }> {
-  const { subscriptionAction, subscriptionSkipNextOrder, subscriptionUpdateBillingInterval, subscriptionAddFreeProduct } = await import("@/lib/commerce/subscription");
+  const { subscriptionAction, subscriptionSkipNextOrder, subscriptionUpdateBillingInterval, subscriptionAddFreeProduct, applyCoupon } = await import("@/lib/commerce/subscription");
   const admin = createAdminClient();
 
   switch (remedyType) {
@@ -76,16 +76,10 @@ async function executeRemedyAction(
         .select("code").eq("id", couponMappingId).single();
       if (!mapping?.code) return { success: false, error: "Coupon not found" };
 
-      const { data: wsData } = await admin.from("workspaces")
-        .select("appstle_api_key_encrypted").eq("id", workspaceId).single();
-      if (!wsData?.appstle_api_key_encrypted) return { success: false, error: "Appstle not configured" };
-
-      const { decrypt } = await import("@/lib/crypto");
-      const apiKey = decrypt(wsData.appstle_api_key_encrypted);
-
-      // Remove existing discounts first, then apply (only 1 coupon per subscription)
-      const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-      const result = await applyDiscountWithReplace(workspaceId, apiKey, contractId, mapping.code);
+      // Through the SDK: the save offer has to land whichever engine bills this sub. The old
+      // path refused with "Appstle not configured" for anything else, which on a migrated
+      // contract turns an accepted save offer into a cancellation.
+      const result = await applyCoupon(workspaceId, contractId, mapping.code);
       if (!result.success) return { success: false, error: result.error };
 
       return { success: true, savedAction: `saved with coupon ${mapping.code}`, patch: {} };

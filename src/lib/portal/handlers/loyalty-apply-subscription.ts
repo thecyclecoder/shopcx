@@ -2,7 +2,7 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
-import { isInternalSubscription } from "@/lib/internal-subscription";
+
 import {
   getLoyaltySettings,
   getMember,
@@ -171,7 +171,10 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
     }
   }
 
-  const isInternalLoyalty = await isInternalSubscription(auth.workspaceId, String(contractId));
+  // ShopCX joins the internal arm — `applyCouponToSub` dispatches by engine and writes the
+  // discount to the Shopify contract. The Appstle arm below is vendor-specific.
+  const { resolveBillingSource } = await import("@/lib/internal-subscription");
+  const isInternalLoyalty = (await resolveBillingSource(auth.workspaceId, String(contractId))) !== "appstle";
   if (isInternalLoyalty) {
     // Internal sub — apply the loyalty code (a real Shopify discount code) via
     // the coupon engine (resolves through the Shopify lookup, writes

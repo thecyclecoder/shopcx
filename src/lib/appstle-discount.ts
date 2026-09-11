@@ -7,6 +7,12 @@
  *
  * Reads discount IDs from local DB (synced via webhook), not from Appstle API.
  * Writes to both Appstle (mutation) and local DB (immediate update, don't wait for webhook).
+ *
+ * ⭐ PURE VENDOR CLIENT — it does not decide which engine owns a contract. Every caller has
+ * already resolved that; reaching here means Appstle is genuinely the target. This module used
+ * to carry an `is_internal` fast path, which was sound while "not internal ⇒ Appstle" held and
+ * silently wrong the moment a third engine existed. `scripts/_check-vendor-dispatch-in-sdk.ts`
+ * keeps the dispatch out.
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -110,41 +116,6 @@ export async function applyDiscountWithReplace(
   rolledBack?: boolean;
 }> {
   const { logAppstleCall } = await import("@/lib/appstle-call-log");
-  // Internal sub fast path — skip Appstle entirely. We look up the
-  // workspace from the contract since this helper takes apiKey, not
-  // workspaceId. Mirrors the "remove existing then apply new" semantics
-  // via applied_discounts JSONB mutations.
-  {
-    const admin = createAdminClient();
-    const { data: sub } = await admin
-      .from("subscriptions")
-      .select("workspace_id, is_internal")
-      .eq("workspace_id", workspaceId)
-      .eq("shopify_contract_id", contractId)
-      .maybeSingle();
-    if (sub?.is_internal && sub.workspace_id) {
-      const { internalSubApplyDiscount } = await import("@/lib/internal-subscription");
-      // Clear only the CODE_DISCOUNT rows before adding — AUTOMATIC_DISCOUNT
-      // and MANUAL rows stack on top of a code and must survive the replace.
-      const { data: existingSub } = await admin
-        .from("subscriptions")
-        .select("applied_discounts")
-        .eq("workspace_id", workspaceId)
-        .eq("shopify_contract_id", contractId)
-        .single();
-      const existing = (existingSub?.applied_discounts as StoredDiscount[]) || [];
-      const preserved = existing.filter(d => d.type !== "CODE_DISCOUNT");
-      if (existing.length !== preserved.length) {
-        await admin
-          .from("subscriptions")
-          .update({ applied_discounts: preserved, updated_at: new Date().toISOString() })
-          .eq("workspace_id", workspaceId)
-          .eq("shopify_contract_id", contractId);
-      }
-      const r = await internalSubApplyDiscount(sub.workspace_id, contractId, discountCode);
-      return { success: r.success, removed: [], error: r.error };
-    }
-  }
 
   // Step 1: Remove existing CODE_DISCOUNT rows. `snapshot` is the exact
   // pre-call applied_discounts array; `removedRows` are the CODE rows the

@@ -527,9 +527,18 @@ export interface ContractLine {
   variantId: string | null;
   sku: string | null;
   currentPrice: string | null;
-  /** LINE TOTAL after discount allocations. Divide by quantity for the effective unit rate. */
+  /** LINE TOTAL after ALL discount allocations — a customer's coupon included. */
   lineDiscountedPrice: string | null;
   discountAllocationCount: number;
+  /**
+   * Cents allocated to this line by OUR OWN discounts only (the structural titles).
+   *
+   * `lineDiscountedPrice` is net of everything, so a line carrying a $15 loyalty coupon reads
+   * $15 cheaper than the pricing rules say it should be. Anything inferring a grandfathered
+   * rate from that gap would mint the coupon into a permanent per-unit discount — turning a
+   * one-use code into a forever rate. Subtract THIS from `currentPrice * quantity` instead.
+   */
+  structuralDiscountCents: number;
   sellingPlanName: string | null;
 }
 
@@ -556,7 +565,10 @@ export async function getSubscriptionContract(
           variantId
           currentPrice { amount }
           lineDiscountedPrice { amount }
-          discountAllocations { amount { amount } } } } } } }`,
+          discountAllocations { amount { amount }
+            discount {
+              ... on SubscriptionManualDiscount { id title }
+              ... on SubscriptionAppliedCodeDiscount { id } } } } } } } }`,
     { id: contractGid(contractId) },
   );
   if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
@@ -564,7 +576,7 @@ export async function getSubscriptionContract(
     id: string; status: string; nextBillingDate: string | null; createdAt: string | null;
     billingPolicy?: { interval: string; intervalCount: number };
     customerPaymentMethod?: { id: string };
-    lines: { edges: { node: { id: string; title: string; quantity: number; sellingPlanName: string | null; variantId: string | null; sku: string | null; currentPrice?: { amount: string }; lineDiscountedPrice?: { amount: string }; discountAllocations?: unknown[] } }[] };
+    lines: { edges: { node: { id: string; title: string; quantity: number; sellingPlanName: string | null; variantId: string | null; sku: string | null; currentPrice?: { amount: string }; lineDiscountedPrice?: { amount: string }; discountAllocations?: { amount?: { amount: string }; discount?: { title?: string } }[] } }[] };
   } | undefined;
   if (!k) return { success: false, error: "contract not found (or not owned by this app)" };
   return {
@@ -586,6 +598,16 @@ export async function getSubscriptionContract(
         currentPrice: e.node.currentPrice?.amount ?? null,
         lineDiscountedPrice: e.node.lineDiscountedPrice?.amount ?? null,
         discountAllocationCount: Array.isArray(e.node.discountAllocations) ? e.node.discountAllocations.length : 0,
+        // A code discount's union member has no `title`, so it can never match a structural
+        // title and is excluded here by construction — the same way it is excluded from the
+        // structural clear.
+        structuralDiscountCents: (e.node.discountAllocations ?? []).reduce(
+          (sum, a) =>
+            STRUCTURAL_DISCOUNT_TITLES.includes(String(a?.discount?.title ?? ""))
+              ? sum + Math.round(parseFloat(a?.amount?.amount ?? "0") * 100)
+              : sum,
+          0,
+        ),
         sellingPlanName: e.node.sellingPlanName,
       })),
     },
@@ -647,6 +669,19 @@ export interface ManualDiscountInput {
   entitledLines?: { all: boolean } | { lines: { add: string[]; remove?: string[] } };
 }
 
+/**
+ * `SubscriptionManualDiscountEntitledLinesInput` requires `all` to be PRESENT, even when the
+ * discount is scoped to specific lines: sending `{lines:{add:[…]}}` alone is rejected with
+ * "Entitled lines all may not be empty" — a message that reads like the line list is empty when
+ * it is the `all` flag that is missing. Normalizing here rather than at each call site means the
+ * next discount someone adds cannot reintroduce the bug.
+ */
+function normalizeEntitledLines(e: ManualDiscountInput["entitledLines"]) {
+  if (!e) return undefined;
+  if ("all" in e) return e;
+  return { all: false, lines: e.lines };
+}
+
 /** Add one manual discount to an OPEN draft. Call inside `withDraft`. */
 export async function shopifyAddDraftDiscount(
   workspaceId: string,
@@ -657,7 +692,7 @@ export async function shopifyAddDraftDiscount(
     workspaceId,
     `mutation($d:ID!,$in:SubscriptionManualDiscountInput!){
        subscriptionDraftDiscountAdd(draftId:$d, input:$in){ discountAdded { id } userErrors { message } } }`,
-    { d: draftId, in: input },
+    { d: draftId, in: { ...input, entitledLines: normalizeEntitledLines(input.entitledLines) } },
   );
   return toResult(env as never, "subscriptionDraftDiscountAdd");
 }
@@ -825,6 +860,89 @@ export async function shopifyRemoveDraftLine(
  */
 export const STRUCTURAL_DISCOUNT_TITLES = ["Subscribe & Save", "Volume discount", "Legacy rate"];
 
+export interface DraftLine {
+  id: string;
+  quantity: number;
+  sku: string | null;
+  variantId: string | null;
+  /** Per-unit price BEFORE any discount. */
+  currentPrice: string | null;
+  /** Cents allocated to this line by OUR discounts only — see `ContractLine.structuralDiscountCents`. */
+  structuralDiscountCents: number;
+}
+
+/**
+ * Read an OPEN draft's post-edit state.
+ *
+ * ⭐ Mid-edit, the DRAFT is the truth and the contract is stale. Recomputing discounts from the
+ * contract after changing a quantity in the draft reads the OLD quantity: the commit then lands
+ * the new quantity priced at the old tier, and the NEXT edit prices the old quantity at the new
+ * tier. Observed live on 35945087149 — 1→2 committed with no volume discount at all, then 2→1
+ * committed an 8% two-unit discount onto a single unit.
+ */
+export async function getSubscriptionDraft(
+  workspaceId: string,
+  draftId: string,
+): Promise<{ success: boolean; error?: string; lines?: DraftLine[]; discounts?: { id: string; title: string | null; type: string | null }[] }> {
+  const env = await gql<{ node?: Record<string, unknown> }>(
+    workspaceId,
+    `query($id:ID!){ node(id:$id){ ... on SubscriptionDraft {
+        lines(first:50){ pageInfo { hasNextPage } nodes { id quantity sku variantId
+          currentPrice { amount }
+          discountAllocations { amount { amount }
+            discount {
+              ... on SubscriptionManualDiscount { id title }
+              ... on SubscriptionAppliedCodeDiscount { id } } } } }
+        discounts(first:25){ nodes {
+          ... on SubscriptionManualDiscount { id title type }
+          ... on SubscriptionAppliedCodeDiscount { id } } } } } }`,
+    { id: draftId },
+  );
+  if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
+  const n = env.data?.node as never as {
+    lines?: { nodes?: { id: string; quantity: number; sku: string | null; variantId: string | null;
+      currentPrice?: { amount: string };
+      discountAllocations?: { amount?: { amount: string }; discount?: { title?: string } }[] }[] };
+    discounts?: { nodes?: { id: string; title?: string | null; type?: string | null }[] };
+  } | undefined;
+  if (!n) return { success: false, error: "draft not found" };
+  return {
+    success: true,
+    lines: (n.lines?.nodes ?? []).map((l) => ({
+      id: l.id,
+      quantity: l.quantity,
+      sku: l.sku,
+      variantId: l.variantId,
+      currentPrice: l.currentPrice?.amount ?? null,
+      structuralDiscountCents: (l.discountAllocations ?? []).reduce(
+        (sum, a) =>
+          STRUCTURAL_DISCOUNT_TITLES.includes(String(a?.discount?.title ?? ""))
+            ? sum + Math.round(parseFloat(a?.amount?.amount ?? "0") * 100)
+            : sum,
+        0,
+      ),
+    })),
+    // A code discount has no `title`; it can never match a structural title, so it is excluded
+    // from the structural clear by construction.
+    discounts: (n.discounts?.nodes ?? []).map((d) => ({ id: d.id, title: d.title ?? null, type: d.type ?? null })),
+  };
+}
+
+/** Remove ONE discount from an OPEN draft, by id. Call inside `withDraft`. */
+export async function shopifyRemoveDraftDiscount(
+  workspaceId: string,
+  draftId: string,
+  discountId: string,
+): Promise<SubscriptionActionResult> {
+  const env = await gql(
+    workspaceId,
+    `mutation($d:ID!,$x:ID!){ subscriptionDraftDiscountRemove(draftId:$d, discountId:$x){
+         discountRemoved { __typename } userErrors { message } } }`,
+    { d: draftId, x: discountId },
+  );
+  return toResult(env as never, "subscriptionDraftDiscountRemove");
+}
+
 export async function shopifyRemoveStructuralDiscounts(
   workspaceId: string,
   draftId: string,
@@ -835,7 +953,8 @@ export async function shopifyRemoveStructuralDiscounts(
     if (!STRUCTURAL_DISCOUNT_TITLES.includes(String(d.title ?? ""))) continue;
     const env = await gql(
       workspaceId,
-      `mutation($d:ID!,$x:ID!){ subscriptionDraftDiscountRemove(draftId:$d, discountId:$x){ discountRemoved { id } userErrors { message } } }`,
+      `mutation($d:ID!,$x:ID!){ subscriptionDraftDiscountRemove(draftId:$d, discountId:$x){
+         discountRemoved { __typename } userErrors { message } } }`,
       { d: draftId, x: d.id },
     );
     const r = toResult(env as never, "subscriptionDraftDiscountRemove");

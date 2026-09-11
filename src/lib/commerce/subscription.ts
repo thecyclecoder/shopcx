@@ -93,7 +93,7 @@ import {
   appstleSkipUpcomingOrder,
   appstleUnskipOrder,
   appstleGetUpcomingOrders,
-  orderNowByContract,
+  appstleOrderNowByContract,
 } from "@/lib/appstle";
 import {
   subAddItem,
@@ -889,19 +889,54 @@ export async function subscriptionAttemptBilling(
 }
 
 /**
- * Flavor-aware "order now" (bill_now) for a sub identified by contract id.
+ * "Order now" (bill_now) for a sub identified by contract id — bills the UPCOMING order
+ * immediately, on whichever engine owns the contract.
  *
- * Preserves the Angel-precedent Braintree-vs-Appstle branch: internal subs
- * fire the `internal-subscription/renewal-attempt` Inngest event (async
- * Braintree charge → order → Avalara → advance next_billing_date); Appstle
- * subs go through get-upcoming → attempt-billing. See
- * docs/brain/libraries/appstle.md § orderNowByContract + § Gotchas.
+ * Preserves the Angel-precedent Braintree branch: internal subs fire the
+ * `internal-subscription/renewal-attempt` Inngest event (async Braintree charge → order →
+ * Avalara → advance next_billing_date). ShopCX subs fire the structurally identical
+ * `shopify-subscription/renewal-attempt`, which resolves the due cycle against Shopify and
+ * claims it before charging — so an order-now racing the nightly cron cannot double-bill.
+ * Appstle subs go through get-upcoming → attempt-billing.
+ *
+ * Both async events pass `expected_next_billing_date: null` deliberately: the stale guard exists
+ * to drop a fan-out whose cycle someone else already took, and an order-now IS the someone else.
+ * See docs/brain/libraries/appstle.md § Gotchas.
  */
 export async function subscriptionOrderNow(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult & { summary?: string; internal?: boolean }> {
-  return orderNowByContract(workspaceId, contractId);
+  const admin = createAdminClient();
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("id, status, billing_source")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (!sub) return { success: false, error: "subscription_not_found" };
+
+  const src = await resolveBillingSource(workspaceId, contractId);
+
+  if (src === "internal" || src === "shopcx") {
+    if (sub.status !== "active") return { success: false, error: `not_active (${sub.status})` };
+    const { inngest } = await import("@/lib/inngest/client");
+    if (src === "shopcx") {
+      const { RENEWAL_ATTEMPT_EVENT } = await import("@/lib/inngest/shopify-subscription-renewals");
+      await inngest.send({
+        name: RENEWAL_ATTEMPT_EVENT,
+        data: { subscription_id: sub.id, workspace_id: workspaceId, expected_next_billing_date: null },
+      });
+      return { success: true, summary: "Triggered ShopCX renewal (order now)" };
+    }
+    await inngest.send({
+      name: "internal-subscription/renewal-attempt",
+      data: { subscription_id: sub.id, workspace_id: workspaceId },
+    });
+    return { success: true, internal: true, summary: "Triggered internal renewal (order now)" };
+  }
+
+  return appstleOrderNowByContract(workspaceId, contractId);
 }
 
 // ── Create ─────────────────────────────────────────────────────────
