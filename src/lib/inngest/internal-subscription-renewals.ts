@@ -1068,10 +1068,14 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       };
     });
     if (!claim.ok) {
-      // Another claimant already holds this (subscription_id, cycle_key). Refuse the second
-      // charge — either the first is still in flight (concurrent race) or it already resolved
-      // for this cycle. Dunning drives a fresh cycle_key on decline, so a legitimate retry is
-      // NOT blocked by this refusal.
+      // Another claimant already holds this (subscription_id, cycle_key) with status
+      // `in_flight` or `succeeded`. Refuse the second charge — either the first is still in
+      // flight (concurrent race) or a real Braintree sale already resolved for this cycle.
+      // A prior `failed` claim on the SAME cycle_key does NOT reach this branch: the SDK's
+      // [[../subscription-cycle-charge-claim]] `claimCycleCharge` atomically resets a failed
+      // row to a fresh `in_flight` under the new claimant (the wedge case where dunning
+      // re-anchored next_billing_date onto the failed cycle_key — spec:
+      // failed-cycle-charge-claim-must-not-wedge-order-now-and-renewal-retries).
       await step.run("emit-outcome-refused-duplicate", () =>
         emitRenewalOutcomeHeartbeat("skipped_other"),
       );

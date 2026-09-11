@@ -2387,8 +2387,34 @@ export const directActionHandlers: Record<
     // delegates to internalSubUpdateLineItemPrice for these.
     const { isInternalSubscription } = await import("@/lib/internal-subscription");
     if (await isInternalSubscription(ctx.workspaceId, p.contract_id)) {
-      if (!p.variant_id) return { success: false, error: "Internal subscription requires a variant_id to restore price" };
-      const variantId = String(p.variant_id);
+      // Prefer the agent-supplied variant_id, but fall back to the sole real (non
+      // shipping-protection) line on the sub — an internal sub with one item has an
+      // unambiguous restore target and blocking on a missing variant_id here has stranded
+      // customer lines at $0.00 (spec:
+      // failed-cycle-charge-claim-must-not-wedge-order-now-and-renewal-retries).
+      let variantId = p.variant_id ? String(p.variant_id) : "";
+      if (!variantId) {
+        const items = Array.isArray(subRow?.items)
+          ? (subRow!.items as Array<{ variant_id?: unknown; title?: unknown }>)
+          : [];
+        const real = items.filter(
+          (i) => !String(i.title ?? "").toLowerCase().includes("shipping protection"),
+        );
+        if (real.length === 1 && real[0]?.variant_id) {
+          variantId = String(real[0].variant_id);
+          console.log(
+            `update_line_item_price: internal sub ${p.contract_id} — inferred variant_id ${variantId} from sole real line (agent omitted variant_id)`,
+          );
+        } else {
+          return {
+            success: false,
+            error:
+              real.length === 0
+                ? "Internal subscription has no restore-eligible line (no non-shipping-protection items)"
+                : `Internal subscription has ${real.length} real lines — variant_id is required to pick one`,
+          };
+        }
+      }
       const derived = await decide(variantId);
       if (!derived.ok) {
         await escalateRaiseAttempt(variantId, derived);
@@ -2402,7 +2428,7 @@ export const directActionHandlers: Record<
       const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, variantId, derived.base);
       if (r.success) await logPriceCorrection(variantId, derived);
       return r.success
-        ? { ...r, summary: `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${p.variant_id} (internal price_override_cents)${derived.note}` }
+        ? { ...r, summary: `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${variantId} (internal price_override_cents)${derived.note}` }
         : r;
     }
 

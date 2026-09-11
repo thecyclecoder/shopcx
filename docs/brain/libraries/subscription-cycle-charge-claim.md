@@ -14,13 +14,22 @@ The unique index on `(subscription_id, cycle_key)` is the actual guard — this 
 1. cycleKeyFromNextBillingDate(sub.next_billing_date)  // pure — YYYY-MM-DD
 2. claimCycleCharge(admin, { … })                       // INSERT status='in_flight'
    ├─ ok:true  resumed:false → fresh claim, proceed to charge
+   │                            (fresh insert OR the atomic reset of a prior `status='failed'`
+   │                             row — see "Failed rows are re-claimable" below)
    ├─ ok:true  resumed:true  → same-run Inngest step retry, proceed
-   └─ ok:false               → another claimant holds the key, REFUSE
+   └─ ok:false               → another claimant holds the key AND its status is `in_flight`
+                                 or `succeeded`, REFUSE
 3. Braintree sale + orders/transactions rows
 4. resolveCycleCharge(admin, id, { status: 'succeeded' | 'failed', … })
 ```
 
-The `claimant` field carries the Inngest `event.id` so a step re-run after a partial post-INSERT failure recognizes its own row instead of double-refusing itself. A DIFFERENT claimant on the same `(subscription_id, cycle_key)` is the actual double-charge case — refused.
+The `claimant` field carries the Inngest `event.id` so a step re-run after a partial post-INSERT failure recognizes its own row instead of double-refusing itself. A DIFFERENT claimant with an `in_flight` or `succeeded` existing row is the actual double-charge case — refused.
+
+### Failed rows are re-claimable
+
+A prior claim with `status='failed'` means **no Braintree sale occurred for that cycle** — the row must NOT be a permanent block. On a 23505 conflict where the existing row is `failed`, `claimCycleCharge` atomically resets+re-owns it (`status='in_flight'`, new `claimant`, `resolved_at=null`, `transaction_id=null`, `order_id=null`) and returns `{ ok: true, resumed: false }`. The UPDATE is compare-and-set on `status='failed'` so a concurrent thread that already reset it does NOT get double-reset, and any concurrent `succeeded`/`in_flight` outcome that landed between the SELECT and the UPDATE stops the reset (the caller falls through to the normal refusal).
+
+This is the fix for the wedge case in [[../specs/failed-cycle-charge-claim-must-not-wedge-order-now-and-renewal-retries]] (ticket `cce7d76b`): dunning's `resetBillingDateAfterDunning` re-anchored `next_billing_date` onto the SAME date whose failed claim was still on the ledger, so every subsequent portal order-now (fresh claimant deriving the same cycle_key) collided on the failed row and surfaced `renewal_refused_duplicate_cycle` — the sub was permanently wedged and the next scheduled renewal would have failed the same way. The reset makes the ledger self-healing for the no-money-moved outcome without weakening the against-double-charge guarantee for `succeeded` / `in_flight`.
 
 ## Exports
 
@@ -28,11 +37,11 @@ The `claimant` field carries the Inngest `event.id` so a step re-run after a par
 - `interface CycleChargeRow` — the shape returned by `readCycleCharge` / the `existing` branch of `claimCycleCharge`.
 - `interface ClaimInput { workspace_id; subscription_id; cycle_key; claimant; amount_cents?; source? }`.
 - `type ClaimResult` — discriminated union:
-  - `{ ok: true; id; resumed: false }` — fresh insert.
+  - `{ ok: true; id; resumed: false }` — fresh insert OR atomic reset of a prior `status='failed'` row (see "Failed rows are re-claimable" above).
   - `{ ok: true; id; resumed: true; existing }` — same `claimant` already holds the key (a resumed Inngest step run).
-  - `{ ok: false; existing }` — a DIFFERENT `claimant` holds the key. Caller MUST refuse the charge.
+  - `{ ok: false; existing }` — a DIFFERENT `claimant` holds the key AND its status is `in_flight` or `succeeded`. Caller MUST refuse the charge.
 - `cycleKeyFromNextBillingDate(nextBillingDate: string | null | undefined): string` — pure. `YYYY-MM-DD` derived from the sub's pre-charge `next_billing_date`. Falls back to `'unknown-cycle'` on a garbage / missing input (the caller MUST short-circuit those rather than claim under a colliding key).
-- `claimCycleCharge(admin, input): Promise<ClaimResult>` — INSERTs `status='in_flight'`. On unique-violation (`23505`), looks up the existing row and returns the typed refusal / resume above. Every other DB error propagates (a service failure while claiming is NOT silently treated as "safe to charge").
+- `claimCycleCharge(admin, input): Promise<ClaimResult>` — INSERTs `status='in_flight'`. On unique-violation (`23505`), looks up the existing row: same-claimant → resumed; different-claimant on a `failed` row → compare-and-set reset back to `in_flight` under the new claimant (fresh claim); different-claimant on `in_flight`/`succeeded` → refusal. Every other DB error propagates (a service failure while claiming is NOT silently treated as "safe to charge").
 - `readCycleCharge(admin, subscription_id, cycle_key): Promise<CycleChargeRow | null>` — the read-only lookup used inside `claimCycleCharge`'s 23505 branch and exposed for diagnostics.
 - `resolveCycleCharge(admin, id, { status, transaction_id?, order_id?, amount_cents? }): Promise<{ updated: boolean }>` — compare-and-set on `status='in_flight'` so a stale duplicate cannot overwrite a real outcome. `updated=false` means the row was already resolved by a concurrent step (safe; skip the second stamp).
 

@@ -73,12 +73,19 @@ export function cycleKeyFromNextBillingDate(nextBillingDate: string | null | und
 
 /**
  * Try to claim (subscription_id, cycle_key). Returns:
- *   - { ok: true, resumed: false } on a fresh insert.
+ *   - { ok: true, resumed: false } on a fresh insert OR after atomically re-owning an existing
+ *     `status='failed'` row (no Braintree sale occurred for that claim, so the cycle must remain
+ *     re-claimable — see the wedge case in
+ *     [[../specs/failed-cycle-charge-claim-must-not-wedge-order-now-and-renewal-retries]]).
  *   - { ok: true, resumed: true, existing } when the row already exists AND its claimant matches
  *     — an Inngest step re-run after a partial write, safe to proceed.
- *   - { ok: false, existing } when a DIFFERENT claimant already holds the key — the caller MUST
- *     refuse the charge (either the other claimant is still in flight, or already succeeded /
- *     failed for this cycle).
+ *   - { ok: false, existing } when a DIFFERENT claimant already holds the key AND its status is
+ *     `in_flight` or `succeeded` — the caller MUST refuse (either the other claimant is still
+ *     running, or a real charge already resolved for this cycle).
+ *
+ * A `status='failed'` row is NEVER a permanent block: the compare-and-set reset below flips it
+ * back to `in_flight` under the new claimant so the SAME cycle_key (e.g. dunning re-anchored
+ * `next_billing_date` back onto it after skipping the failed order) is chargeable again.
  *
  * Errors from the DB other than the 23505 unique violation propagate — a service failure while
  * claiming should NOT be silently treated as "safe to charge".
@@ -127,6 +134,50 @@ export async function claimCycleCharge(
   }
   if (existing.claimant === input.claimant) {
     return { ok: true, id: existing.id, resumed: true, existing };
+  }
+  // A prior FAILED claim (Braintree decline / never-charged) means no money moved and the cycle
+  // must remain re-claimable. Atomically reset+re-own the row so the new caller (portal
+  // order-now, the next renewal cron, etc.) can proceed. Compare-and-set on `status='failed'` so
+  // a concurrent thread that already re-owned it does NOT get double-reset, and any concurrent
+  // `succeeded`/`in_flight` outcome that landed between the SELECT and the UPDATE stops the
+  // reset — the caller falls through to the normal refusal.
+  if (existing.status === "failed") {
+    const reset = await admin
+      .from("subscription_cycle_charges")
+      .update({
+        status: "in_flight",
+        claimant: input.claimant,
+        amount_cents: input.amount_cents ?? null,
+        source: input.source ?? null,
+        transaction_id: null,
+        order_id: null,
+        resolved_at: null,
+        claimed_at: new Date().toISOString(),
+      })
+      .eq("id", existing.id)
+      .eq("status", "failed")
+      .select("id");
+    if (!reset.error && Array.isArray(reset.data) && reset.data.length > 0) {
+      return { ok: true, id: existing.id, resumed: false };
+    }
+    if (reset.error) {
+      throw new Error(
+        `claim_cycle_charge_reset_failed_row_failed: ${reset.error.message} ` +
+          `(sub=${input.subscription_id} cycle=${input.cycle_key} row=${existing.id})`,
+      );
+    }
+    // The CAS lost — someone else advanced the row past `failed` between our SELECT and UPDATE.
+    // Re-read and route through the normal same-claimant / refuse branches.
+    const nextExisting = await readCycleCharge(admin, input.subscription_id, input.cycle_key);
+    if (!nextExisting) {
+      throw new Error(
+        `claim_cycle_charge_reset_race_row_not_found: sub=${input.subscription_id} cycle=${input.cycle_key}`,
+      );
+    }
+    if (nextExisting.claimant === input.claimant) {
+      return { ok: true, id: nextExisting.id, resumed: true, existing: nextExisting };
+    }
+    return { ok: false, existing: nextExisting };
   }
   return { ok: false, existing };
 }
