@@ -87,3 +87,25 @@ test("a date exactly equal to now advances one whole interval", () => {
   const out = rollForwardToFutureBillingDate(new Date(NOW), "week", 4, NOW);
   assert.equal(out.toISOString(), new Date(NOW.getTime() + 28 * 86_400_000).toISOString());
 });
+
+// ⭐ The renewal worker's advance. Shopify anchors a contract's cycle calendar to its createdAt,
+// so a MIGRATED contract charges early inside cycle 1 and that cycle's END is most of an extra
+// interval away. Measured on 35945087149: charged 2026-09-11, next cycle ended 2026-12-31 — a
+// 111-day gap on a 56-day cadence, i.e. ~one whole interval of revenue deferred per migrated sub.
+// Advancing by the customer's own cadence from the date they were DUE is what keeps them on rhythm.
+test("advancing by cadence keeps a migrated sub on its own schedule, not Shopify's calendar", () => {
+  const due = new Date("2026-09-11T14:29:00Z");
+  const out = rollForwardToFutureBillingDate(due, "week", 8, new Date("2026-09-11T14:30:00Z"));
+  assert.equal(out.toISOString().slice(0, 10), "2026-11-06", "56 days on, not the cycle end (2026-12-31)");
+});
+
+// A LATE charge must not drag the customer's whole schedule forward: anchor to the scheduled date,
+// then roll by WHOLE intervals to the next future occurrence on that same rhythm.
+test("a late charge keeps the original anchor rather than restarting from now", () => {
+  const out = rollForwardToFutureBillingDate(
+    new Date("2026-07-01T08:00:00Z"), "week", 8, new Date("2026-09-11T14:30:00Z"),
+  );
+  assert.equal(out.toISOString().slice(0, 10), "2026-10-21");
+  const daysFromAnchor = Math.round((out.getTime() - new Date("2026-07-01T08:00:00Z").getTime()) / 86_400_000);
+  assert.equal(daysFromAnchor % 56, 0, "must land on a multiple of the cadence from the original anchor");
+});
