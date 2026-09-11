@@ -1115,6 +1115,14 @@ export async function subRemoveItem(
     }
     return internalSubRemoveItem(workspaceId, contractId, arg.variantId);
   }
+  // ⭐ ShopCX-billed: a Shopify contract Appstle no longer holds. Routing here rather than at each
+  // of the nine callers — this module IS the chokepoint every line mutation already goes through.
+  const { resolveBillingSource } = await import("@/lib/internal-subscription");
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    if (!arg.variantId) return { success: false, error: "ShopCX subscription requires a variantId to remove a line item" };
+    const { shopcxRemoveItem } = await import("@/lib/commerce/shopcx-line-ops");
+    return shopcxRemoveItem(workspaceId, contractId, arg.variantId);
+  }
   // Use dedicated remove-line-item endpoint (not replaceVariants)
   return appstleRemoveLineItem(workspaceId, contractId, arg);
 }
@@ -1143,6 +1151,18 @@ export async function subChangeQuantity(
     await admin.from("subscriptions").update({ items, updated_at: new Date().toISOString() }).eq("id", sub.id);
     return { success: true };
   }
+  // ⭐ ShopCX-billed: check BEFORE healOnTouch, which repairs APPSTLE-side pricing and would reach
+  // a contract the vendor no longer has. The shopcx path changes the quantity and rewrites the
+  // structural discounts in ONE draft — a 2 -> 3 change moves the customer from the 8% tier to 12%
+  // and nothing in Shopify re-evaluates that on its own.
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+      const { shopcxChangeQuantity } = await import("@/lib/commerce/shopcx-line-ops");
+      return shopcxChangeQuantity(workspaceId, contractId, variantId, quantity);
+    }
+  }
+
   await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };

@@ -609,9 +609,6 @@ export async function subscriptionRemoveItem(
   contractId: string,
   variantOrLine: string | { variantId?: string; lineGid?: string },
 ): Promise<OpResult & { alreadyAbsent?: boolean }> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopcxUnsupported("remove line item");
-  }
   return subRemoveItem(workspaceId, contractId, variantOrLine);
 }
 
@@ -621,9 +618,6 @@ export async function subscriptionChangeQuantity(
   variantId: string,
   quantity: number,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopcxUnsupported("change quantity");
-  }
   return subChangeQuantity(workspaceId, contractId, variantId, quantity);
 }
 

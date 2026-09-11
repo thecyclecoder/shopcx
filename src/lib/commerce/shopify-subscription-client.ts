@@ -728,6 +728,69 @@ export async function getBillingCycleForDate(
   };
 }
 
+/** Set a line's quantity inside an OPEN draft. Call within `withDraft` so related edits commit together. */
+export async function shopifyUpdateLineQuantityInDraft(
+  workspaceId: string,
+  draftId: string,
+  lineId: string,
+  quantity: number,
+): Promise<SubscriptionActionResult> {
+  const env = await gql(
+    workspaceId,
+    `mutation($d:ID!,$l:ID!,$in:SubscriptionLineUpdateInput!){ subscriptionDraftLineUpdate(draftId:$d, lineId:$l, input:$in){ lineUpdated { id quantity } userErrors { message } } }`,
+    { d: draftId, l: lineId, in: { quantity } },
+  );
+  return toResult(env as never, "subscriptionDraftLineUpdate");
+}
+
+/** Remove a line from an OPEN draft. Call inside `withDraft`. Payload field is `lineRemoved`. */
+export async function shopifyRemoveDraftLine(
+  workspaceId: string,
+  draftId: string,
+  lineId: string,
+): Promise<SubscriptionActionResult> {
+  const env = await gql(
+    workspaceId,
+    `mutation($d:ID!,$l:ID!){ subscriptionDraftLineRemove(draftId:$d, lineId:$l){ lineRemoved { id } userErrors { message } } }`,
+    { d: draftId, l: lineId },
+  );
+  return toResult(env as never, "subscriptionDraftLineRemove");
+}
+
+/**
+ * Rewrite the STRUCTURAL discounts on a contract to match its current lines.
+ *
+ * ⭐ The discount set is a pure function of (lines, quantities, grandfather locks, rule) — so every
+ * mutation recomputes the WHOLE set rather than patching it. A quantity change from 2 to 3 moves
+ * the customer from the 8% tier to 12%, and a pinned percentage does not follow; recomputing from
+ * scratch is idempotent and cannot drift into a wrong tier.
+ *
+ * ⚠️ Only discounts WE own are touched. A customer's loyalty or promo code is a `CODE_DISCOUNT`
+ * they applied, is one-use by design, and must survive untouched — wiping it would silently take
+ * back something they were given. Ours are identified by title; a customer can never apply an S&S
+ * or a quantity break, so anything carrying those titles is ours by construction.
+ */
+export const STRUCTURAL_DISCOUNT_TITLES = ["Subscribe & Save", "Volume discount", "Legacy rate"];
+
+export async function shopifyRemoveStructuralDiscounts(
+  workspaceId: string,
+  draftId: string,
+  existing: { id: string; title: string | null; type?: string | null }[],
+): Promise<SubscriptionActionResult> {
+  for (const d of existing) {
+    if (d.type && d.type !== "MANUAL") continue;                      // never a customer code
+    if (!STRUCTURAL_DISCOUNT_TITLES.includes(String(d.title ?? ""))) continue;
+    const env = await gql(
+      workspaceId,
+      `mutation($d:ID!,$x:ID!){ subscriptionDraftDiscountRemove(draftId:$d, discountId:$x){ discountRemoved { id } userErrors { message } } }`,
+      { d: draftId, x: d.id },
+    );
+    const r = toResult(env as never, "subscriptionDraftDiscountRemove");
+    if (!r.success) return r;
+  }
+  return { success: true };
+}
+
 /** Surface a thrown error the same way every caller here reports a failed one. */
 export function asFailure(e: unknown): SubscriptionActionResult {
   return { success: false, error: errText(e) };
