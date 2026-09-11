@@ -1272,11 +1272,50 @@ async function executeParkedRemedy(
   admin: Admin,
   input: { workspaceId: string; ticketId: string; remedy: Record<string, unknown>; reasoning: string },
 ): Promise<boolean> {
-  const { planRemedyExecution, buildRemedySonnetDecision, parseBatchEvent, summarizeRemedyBatchOutcome } =
-    await import("@/lib/cs-director");
+  const {
+    planRemedyExecution,
+    buildRemedySonnetDecision,
+    parseBatchEvent,
+    summarizeRemedyBatchOutcome,
+    loadRemedyStatesForPlan,
+    verifyPlanAgainstRemedyStates,
+  } = await import("@/lib/cs-director");
   const planned = planRemedyExecution(input.remedy);
   if (!planned.ok) {
     await postInternalNote(admin, input.ticketId, `[cs-director] Founder approved, but the parked remedy was malformed (${planned.reason}) — not fired. Needs a human.`);
+    return false;
+  }
+
+  // ⭐ LIVE REMEDY-STATE RE-VERIFICATION AT SWEEP TIME (Fix-2 phase of
+  // a-clamped-refund-must-never-report-success). The card's stored `remedy_states` is audit
+  // context frozen at card-creation time; between raising the card and this sweep the order can
+  // acquire a partial refund, an open return, or a headroom-degraded ledger read. Re-run the
+  // pure guard against a FRESH prefetch so the founder-approved path enforces the same
+  // producer-storage-consumer invariant `handleApproveRemedy` uses (§ 3⁰ live remedy-state
+  // hard-reject). A refusal here posts a human-visible internal note and returns false — the
+  // sweep stamps the approval with `execute_failed`, the customer hears nothing, and a human
+  // decides next steps. Also sizes `full_order_refund` against the fresh `total_cents` so an
+  // over-refund on a partially-refunded order (remaining_refundable < total_cents) fails the
+  // ceiling check — the exact class of double-pay the security review flagged.
+  try {
+    const remedyStates = await loadRemedyStatesForPlan(admin, input.workspaceId, planned.plan.actions);
+    const guard = verifyPlanAgainstRemedyStates(planned.plan.actions, remedyStates);
+    if (!guard.ok) {
+      await postInternalNote(
+        admin,
+        input.ticketId,
+        `[cs-director] Founder-approved remedy REFUSED at execution time — live remedy-state guard rejected: ${guard.violation.reason} on ${guard.violation.actionType} @ order ${guard.violation.orderKey}. ${guard.violation.detail}. No money moved. Needs a human.`,
+      );
+      return false;
+    }
+  } catch (e) {
+    // Fail closed on a state-read error — the founder-approved sweep must NEVER trust stale
+    // audit context to execute money. Same shape as the executor's own catch below.
+    await postInternalNote(
+      admin,
+      input.ticketId,
+      `[cs-director] Founder-approved remedy REFUSED — live remedy-state re-check threw (${e instanceof Error ? e.message : e}). No money moved. Needs a human.`,
+    );
     return false;
   }
   const { data: ticket } = await admin
