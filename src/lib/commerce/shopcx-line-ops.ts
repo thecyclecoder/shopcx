@@ -163,11 +163,20 @@ async function preparePricing(
   return { ctx, grandfather: await captureGrandfatherByLine(workspaceId, contractId, ctx) };
 }
 
-/** Find a line on the contract by variant id. */
-async function findLine(workspaceId: string, contractId: string, variantId: string) {
+/**
+ * Find a line on the contract by variant id — or by its `SubscriptionLine` gid.
+ *
+ * The gid form is checked FIRST and only for a value that actually looks like one, so a numeric
+ * variant id can never be mistaken for a line id.
+ */
+async function findLine(workspaceId: string, contractId: string, variantOrLineGid: string) {
   const c = await getSubscriptionContract(workspaceId, contractId);
   if (!c.success || !c.contract) return { error: c.error ?? "contract unreadable" as string };
-  const bare = String(variantId).replace("gid://shopify/ProductVariant/", "");
+  const raw = String(variantOrLineGid);
+  if (raw.startsWith("gid://shopify/SubscriptionLine/")) {
+    return { line: c.contract.lines.find((l) => l.id === raw), contract: c.contract };
+  }
+  const bare = raw.replace("gid://shopify/ProductVariant/", "");
   const line = c.contract.lines.find(
     (l) => String(l.variantId ?? "").replace("gid://shopify/ProductVariant/", "") === bare,
   );
@@ -193,11 +202,19 @@ export async function shopcxChangeQuantity(
   } catch (err) { return { success: false, error: errText(err) }; }
 }
 
+/**
+ * Remove a line, addressed by variant id OR by its real Shopify `SubscriptionLine` gid.
+ *
+ * Both are accepted because a ShopCX contract genuinely HAS line gids — unlike an internal sub,
+ * whose "line id" is really the variant id, and unlike many Appstle lines, which carry no real
+ * gid at all. The portal sends whichever it has; refusing a valid gid would strand the
+ * remove-line-item surface on exactly the contracts that can support it best.
+ */
 export async function shopcxRemoveItem(
-  workspaceId: string, contractId: string, variantId: string,
+  workspaceId: string, contractId: string, variantOrLineGid: string,
 ): Promise<LineOpResult> {
   try {
-    const { line, contract, error } = await findLine(workspaceId, contractId, variantId);
+    const { line, contract, error } = await findLine(workspaceId, contractId, variantOrLineGid);
     if (error) return { success: false, error };
     if (!line) return { success: true, alreadyAbsent: true };
     if ((contract?.lines.length ?? 0) <= 1) {

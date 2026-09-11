@@ -1133,9 +1133,12 @@ export async function subRemoveItem(
   // of the nine callers — this module IS the chokepoint every line mutation already goes through.
   const { resolveBillingSource } = await import("@/lib/internal-subscription");
   if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    if (!arg.variantId) return { success: false, error: "ShopCX subscription requires a variantId to remove a line item" };
+    // Either addressing mode works here: a ShopCX contract really does have Shopify line gids, so
+    // a lineGid-only call (what the portal sends when it has one) must not be refused.
+    const target = arg.variantId || arg.lineGid;
+    if (!target) return { success: false, error: "ShopCX subscription requires a variantId or lineGid to remove a line item" };
     const { shopcxRemoveItem } = await import("@/lib/commerce/shopcx-line-ops");
-    return shopcxRemoveItem(workspaceId, contractId, arg.variantId);
+    return shopcxRemoveItem(workspaceId, contractId, target);
   }
   // Use dedicated remove-line-item endpoint (not replaceVariants)
   return appstleRemoveLineItem(workspaceId, contractId, arg);

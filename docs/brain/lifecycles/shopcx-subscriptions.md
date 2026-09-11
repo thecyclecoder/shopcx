@@ -293,6 +293,7 @@ engine rather than assuming "not internal ⇒ Appstle":
 | order now | `subscriptionOrderNow` | fires the renewal-attempt event, which claims the cycle |
 | shipping address | `portal/handlers/address.ts` → `subscriptionUpdateShippingAddress` | draft `deliveryMethod` update, then the mirror |
 | portal replace-variants | `portal/handlers/replace-variants.ts` | decomposed into the engine-aware item mutations; one-time adds go cycle-scoped |
+| remove line item | `subRemoveItem` | addressed by variant id **or** real `SubscriptionLine` gid |
 | agent price restore | `action-executor.ts` `update_line_item_price` | `subUpdateLineItemPrice` → base-price pin |
 | reactivate (resume) | `portal/handlers/reactivate.ts` | sets the date on the CONTRACT, then resumes |
 | agent goodwill gift | `subAddOneTimeGift` | standalone `$0` order — unchanged, see below |
@@ -324,6 +325,19 @@ reads the current address + option and merges them UNDER the caller's values. Th
 
 `MailingAddressInput` also takes `countryCode` / `provinceCode`, not the full names — passing names
 silently produces an address Shopify cannot geocode.
+
+### Known gaps (NOT regressions — an Appstle customer has these today too)
+
+These portal surfaces are **internal-only** and return a 400/null for anything else, ShopCX
+included. A migrating customer is no worse off than they are on Appstle right now, but the gap is
+real and closes when someone needs it:
+
+`shipping-protection` · `price-quote` · `subscription-tax` · `set-subscription-payment-method`.
+
+`payment-method-update` pins a newly-saved card onto `is_internal` subs only — that is **correct**,
+not a gap: ShopCX charges Shopify's `customerPaymentMethod` on the contract, so pinning our
+Braintree `payment_method_id` to one would be wrong. Rotating a ShopCX card is
+`subscriptionSwitchPaymentMethod`, which belongs to the dunning cutover work below.
 
 **Still refusing for ShopCX (1 op):** `subscriptionSendPaymentUpdateEmail` — no Shopify equivalent;
 needs our own Resend flow. It refuses loudly (`shopcxUnsupported`), never silently.
