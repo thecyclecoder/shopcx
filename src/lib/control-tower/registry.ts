@@ -145,16 +145,23 @@ export type RenewalOutcome =
   | "declined_to_dunning"
   | "comp_shipped"
   | "comp_blocked"
-  | "skipped_other";
+  | "skipped_other"
+  // Phase 2 of docs/brain/specs/a-declined-renewal-must-not-wedge-the-cycle-forever.md — a
+  // refusal whose existing claim on the (subscription_id, cycle_key) row is NOT `succeeded`
+  // means a customer cannot be billed for THIS cycle and the state must be alertable, not
+  // blended into normal skip volume. `succeeded` refusals stay `skipped_other` (benign — a
+  // real Braintree sale already resolved this cycle). See RENEWAL_BAD_OUTCOMES below.
+  | "refused_wedged_cycle";
 
 /** loop_heartbeats.loop_id the per-sub renewal outcome beats are written under (kind 'reactive' so the cron/agent-kind beats RPC skips them). NOT a monitored tile — a data channel for the outcome-distribution assertion. */
 export const RENEWAL_OUTCOME_LOOP_ID = "internal-subscription-renewal-outcome";
 
-/** Outcomes that count as "anomalous" for the outcome-distribution spike/floor check (vs the benign charged / comp_shipped / zero-total / other-skip outcomes). */
+/** Outcomes that count as "anomalous" for the outcome-distribution spike/floor check (vs the benign charged / comp_shipped / zero-total / other-skip outcomes). `refused_wedged_cycle` is included so a wedged-cycle refusal alerts through the same channel rather than blending into `skipped_other` (Phase 2 of a-declined-renewal-must-not-wedge-the-cycle-forever). */
 export const RENEWAL_BAD_OUTCOMES: RenewalOutcome[] = [
   "skipped_no_payment_method",
   "declined_to_dunning",
   "comp_blocked",
+  "refused_wedged_cycle",
 ];
 
 /**

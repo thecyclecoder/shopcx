@@ -31,6 +31,7 @@ import {
   claimChargeIdempotency,
   chargeIdempotencyKeyFromNextBillingDate,
   resolveChargeIdempotency,
+  renewalRefusalOutcomeLabel,
 } from "@/lib/subscription-cycle-charge-claim";
 import { runDuplicateRenewalSweep } from "@/lib/subscription-duplicate-renewal-detector";
 
@@ -1068,16 +1069,24 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       };
     });
     if (!claim.ok) {
-      // Another claimant already holds this (subscription_id, cycle_key) with status
-      // `in_flight` or `succeeded`. Refuse the second charge — either the first is still in
-      // flight (concurrent race) or a real Braintree sale already resolved for this cycle.
-      // A prior `failed` claim on the SAME cycle_key does NOT reach this branch: the SDK's
-      // [[../subscription-cycle-charge-claim]] `claimCycleCharge` atomically resets a failed
-      // row to a fresh `in_flight` under the new claimant (the wedge case where dunning
-      // re-anchored next_billing_date onto the failed cycle_key — spec:
-      // failed-cycle-charge-claim-must-not-wedge-order-now-and-renewal-retries).
+      // Another claimant already holds this (subscription_id, cycle_key) — refuse. Phase 1 of
+      // [[../../../docs/brain/specs/a-declined-renewal-must-not-wedge-the-cycle-forever]] set
+      // the actual reclaim rule: a `succeeded` claim refuses (money already moved) and a
+      // FRESH `in_flight` claim refuses (a concurrent attempt may still land), while a prior
+      // `failed` claim OR a stale `in_flight` claim is atomically taken over by the SDK — so
+      // those never reach this branch. `cycle_key` is the UTC date slice of `next_billing_date`
+      // and a decline does not move that date; the self-healing reclaim in
+      // [[../subscription-cycle-charge-claim]] `claimCycleCharge` is the retry path, not any
+      // dunning-side minting of a new key.
+      //
+      // Split the outcome heartbeat so a "customer cannot be billed for THIS cycle" refusal
+      // (existing_status !== 'succeeded') is distinguishable from the benign case (a real
+      // Braintree sale already resolved this cycle). `refused_wedged_cycle` is in
+      // RENEWAL_BAD_OUTCOMES so it alerts through the outcome-distribution assertion instead
+      // of blending into normal `skipped_other` volume — Phase 2 of the spec above.
+      const refusalOutcome = renewalRefusalOutcomeLabel(claim.existing_status);
       await step.run("emit-outcome-refused-duplicate", () =>
-        emitRenewalOutcomeHeartbeat("skipped_other"),
+        emitRenewalOutcomeHeartbeat(refusalOutcome),
       );
       await step.run("log-refused-duplicate-event", async () => {
         const { logCustomerEvent } = await import("@/lib/customer-events");

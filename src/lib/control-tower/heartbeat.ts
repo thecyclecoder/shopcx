@@ -133,6 +133,10 @@ export interface RenewalOutcomeCounts {
   comp_shipped: number;
   comp_blocked: number;
   skipped_other: number;
+  /** Phase 2 of a-declined-renewal-must-not-wedge-the-cycle-forever — refusal whose existing
+   * claim is NOT `succeeded` (customer cannot be billed for THIS cycle). Broken out from
+   * `skipped_other` so it can be alerted on rather than blended into normal skip volume. */
+  refused_wedged_cycle: number;
 }
 
 function emptyRenewalOutcomeCounts(): RenewalOutcomeCounts {
@@ -145,6 +149,7 @@ function emptyRenewalOutcomeCounts(): RenewalOutcomeCounts {
     comp_shipped: 0,
     comp_blocked: 0,
     skipped_other: 0,
+    refused_wedged_cycle: 0,
   };
 }
 

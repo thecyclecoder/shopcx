@@ -24,6 +24,7 @@ import assert from "node:assert/strict";
 import {
   STALE_IN_FLIGHT_RECLAIM_MS,
   isReclaimable,
+  renewalRefusalOutcomeLabel,
   type CycleChargeRow,
 } from "./subscription-cycle-charge-claim";
 
@@ -68,4 +69,24 @@ test("stale threshold constant is at least a minute — reviewers can widen with
     STALE_IN_FLIGHT_RECLAIM_MS >= 60_000,
     "STALE_IN_FLIGHT_RECLAIM_MS must be > 1 minute; a Braintree sale can genuinely take that long",
   );
+});
+
+// ── Phase 2 — refusal outcome label split ────────────────────────────
+// A refusal whose existing claim is `succeeded` is benign (the real charge already resolved
+// this cycle) and stays under `skipped_other`. A refusal on any other status means a
+// customer cannot be billed for THIS cycle and must be distinguishable so the outcome-
+// distribution assertion can alert on it instead of blending into skip volume.
+test("succeeded refusal → skipped_other (benign, no double-alert)", () => {
+  assert.equal(renewalRefusalOutcomeLabel("succeeded"), "skipped_other");
+});
+
+test("in_flight refusal → refused_wedged_cycle (alertable)", () => {
+  assert.equal(renewalRefusalOutcomeLabel("in_flight"), "refused_wedged_cycle");
+});
+
+test("failed refusal (CAS-race fall-through) → refused_wedged_cycle (alertable)", () => {
+  // A `failed` row is normally reclaimed by the SDK; the only way this branch reaches the
+  // refusal is a CAS race where the reset lost. That is exactly the case that needs to
+  // surface — the row is still on the ledger AND the customer cannot be billed.
+  assert.equal(renewalRefusalOutcomeLabel("failed"), "refused_wedged_cycle");
 });

@@ -65,6 +65,20 @@ export interface CycleChargeRow {
  */
 export const STALE_IN_FLIGHT_RECLAIM_MS = 10 * 60 * 1000;
 
+/**
+ * Map a refusal's existing-claim status to the renewal-outcome heartbeat label. A `succeeded`
+ * refusal means a real Braintree sale already resolved this cycle — benign, folds into normal
+ * `skipped_other` volume. Any other status means a customer cannot be billed for THIS cycle
+ * (fresh in_flight racing, or a race where the SDK's reclaim CAS lost mid-flight) and must
+ * surface distinctly so the outcome-distribution assertion can alert on it. Phase 2 of
+ * [[../specs/a-declined-renewal-must-not-wedge-the-cycle-forever]].
+ */
+export function renewalRefusalOutcomeLabel(
+  existingStatus: CycleChargeStatus,
+): "skipped_other" | "refused_wedged_cycle" {
+  return existingStatus === "succeeded" ? "skipped_other" : "refused_wedged_cycle";
+}
+
 export interface ClaimInput {
   workspace_id: string;
   subscription_id: string;
