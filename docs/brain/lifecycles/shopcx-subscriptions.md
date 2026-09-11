@@ -294,6 +294,19 @@ engine rather than assuming "not internal ⇒ Appstle":
 | shipping address | `portal/handlers/address.ts` → `subscriptionUpdateShippingAddress` | draft `deliveryMethod` update, then the mirror |
 | portal replace-variants | `portal/handlers/replace-variants.ts` | decomposed into the engine-aware item mutations; one-time adds go cycle-scoped |
 | agent price restore | `action-executor.ts` `update_line_item_price` | `subUpdateLineItemPrice` → base-price pin |
+| reactivate (resume) | `portal/handlers/reactivate.ts` | sets the date on the CONTRACT, then resumes |
+| agent goodwill gift | `subAddOneTimeGift` | standalone `$0` order — unchanged, see below |
+
+**Two different one-time paths, deliberately.** `subAddOneTimeGift` (the agent's goodwill gift from
+a ticket) ships its own `$0` order and makes no vendor call at all, so it was already correct for
+ShopCX — a gift offered in a ticket means "we're sending this out", and a cycle-scoped line would
+sit unshipped for up to a full interval. `shopcxAddOneTimeLine` is for gifts attached to a
+**renewal** — the portal's one-time add-ons and the cancel-flow save offer — where shipping with
+the order is the intent. Its `backend` label was `"appstle"` for a path that never touches Appstle;
+now `"gift_order"`.
+
+Setting a next-billing-date on a PAUSED contract is allowed and survives the resume (verified), so
+reactivate's set-date-then-resume ordering is sound.
 | pause · cancel · resume · skip · dates | [[../libraries/commerce__subscription]] | direct Shopify mutations |
 
 Each of the coupon surfaces previously read the workspace's Appstle key and, without one, either
