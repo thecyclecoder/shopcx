@@ -979,3 +979,95 @@ export async function resolveBillingSource(
   if (row.billing_source === "internal" || row.is_internal) return "internal";
   return "appstle";
 }
+
+// ─── Extracted from appstle.ts ─────────────────────────────────────────────────
+//
+// ⭐ These were inline `if (isInternalSubscription)` branches INSIDE the Appstle wrappers, which
+// made `appstle.ts` the de-facto dispatcher rather than a vendor client. That worked perfectly for
+// two engines — "not internal ⇒ Appstle" is exhaustive — which is why every direct
+// `appstleUpdateNextBillingDate(...)` call across the portal was CORRECT, not sloppy.
+//
+// A third engine breaks the assumption: a ShopCX-owned contract arriving at an `appstle*` function
+// has no right branch to take. Extracting the internal halves here lets the commerce SDK own the
+// dispatch and leaves `appstle.ts` a pure vendor wrapper — so the next engine needs one new branch
+// in one place, and a stray direct vendor call becomes detectable instead of silently correct.
+
+/** Internal subs have no upcoming-orders ledger — `next_billing_date` IS the upcoming order. */
+export async function internalSubGetUpcomingOrders(
+  workspaceId: string,
+  contractId: string,
+): Promise<{ success: boolean; orders?: { id: string; billingDate: string; status: string }[]; error?: string }> {
+  const admin = createAdminClient();
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("next_billing_date, status")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (!sub?.next_billing_date) return { success: true, orders: [] };
+  // Synthesised single-item list so the existing UI works unchanged.
+  return {
+    success: true,
+    orders: [{ id: `internal-${contractId}`, billingDate: sub.next_billing_date, status: sub.status || "active" }],
+  };
+}
+
+/**
+ * For an internal sub the "paymentMethodId" IS our braintree_payment_method_token — mark it the
+ * customer's default so the next renewal picks it up.
+ */
+export async function internalSubSwitchPaymentMethod(
+  workspaceId: string,
+  contractId: string,
+  paymentMethodId: string,
+): Promise<{ success: boolean; error?: string }> {
+  const admin = createAdminClient();
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("customer_id")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (!sub?.customer_id) return { success: false, error: "Internal subscription not found" };
+  // Demote the old default, promote the new token.
+  await admin
+    .from("customer_payment_methods")
+    .update({ is_default: false, updated_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", sub.customer_id)
+    .eq("is_default", true);
+  const { error } = await admin
+    .from("customer_payment_methods")
+    .update({ is_default: true, status: "active", updated_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", sub.customer_id)
+    .eq("braintree_payment_method_token", paymentMethodId);
+  if (error) return { success: false, error: error.message };
+  return { success: true };
+}
+
+/** Same DB shape as add_item, with price_cents forced to 0. */
+export async function internalSubAddFreeProduct(
+  workspaceId: string,
+  contractId: string,
+  variantId: string,
+  quantity: number = 1,
+): Promise<{ success: boolean; error?: string }> {
+  const r = await internalSubAddItem(workspaceId, contractId, variantId, quantity);
+  if (!r.success) return r;
+  const admin = createAdminClient();
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("id, items")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (sub) {
+    type Item = { variant_id?: string | number; price_cents?: number };
+    const items = ((sub.items as Item[]) || []).map((i: Item) =>
+      String(i.variant_id) === String(variantId) ? { ...i, price_cents: 0 } : i,
+    );
+    await admin.from("subscriptions").update({ items, updated_at: new Date().toISOString() }).eq("id", sub.id);
+  }
+  return { success: true };
+}

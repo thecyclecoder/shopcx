@@ -54,6 +54,12 @@ import type {
 import {
   isInternalSubscription,
   resolveBillingSource,
+  internalSubGetUpcomingOrders,
+  internalSubSwitchPaymentMethod,
+  internalSubAddFreeProduct,
+  internalSubSkipNextOrder as internalSkipUpcoming,
+  internalSubNotYetSupported,
+  internalSubSwapVariant as internalSwapProduct,
   internalSubscriptionAction,
   internalSubSkipNextOrder,
   internalSubUpdateBillingInterval,
@@ -487,9 +493,9 @@ export async function subscriptionSkipUpcomingOrder(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopifySkipBillingCycle(workspaceId, contractId);
-  }
+  const src = await resolveBillingSource(workspaceId, contractId);
+  if (src === "internal") return internalSkipUpcoming(workspaceId, contractId);
+  if (src === "shopcx") return shopifySkipBillingCycle(workspaceId, contractId);
   return appstleSkipUpcomingOrder(workspaceId, contractId);
 }
 
@@ -520,7 +526,9 @@ export async function subscriptionGetUpcomingOrders(
   orders?: { id: string; billingDate: string; status: string }[];
   error?: string;
 }> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+  const srcUpcoming = await resolveBillingSource(workspaceId, contractId);
+  if (srcUpcoming === "internal") return internalSubGetUpcomingOrders(workspaceId, contractId);
+  if (srcUpcoming === "shopcx") {
     const cy = await getUpcomingBillingCycles(workspaceId, contractId, { first: 6 });
     if (!cy.success) return { success: false, error: cy.error };
     // Shape-compatible with the Appstle response, but note the `id` is a CYCLE INDEX, not an
@@ -573,9 +581,9 @@ export async function subscriptionSwitchPaymentMethod(
   // token → customer_payment_methods.is_default flip). Delegate to preserve
   // that path exactly; the wrapper top-guards with healOnTouch on the
   // Appstle branch.
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopifySwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
-  }
+  const srcPm = await resolveBillingSource(workspaceId, contractId);
+  if (srcPm === "internal") return internalSubSwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
+  if (srcPm === "shopcx") return shopifySwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
   return appstleSwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
 }
 
@@ -583,7 +591,9 @@ export async function subscriptionSendPaymentUpdateEmail(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+  const srcEmail = await resolveBillingSource(workspaceId, contractId);
+  if (srcEmail === "internal") return internalSubNotYetSupported("send_payment_update_email");
+  if (srcEmail === "shopcx") {
     // Vendor-email feature with no Shopify equivalent; needs our own Resend flow.
     return shopcxUnsupported("send payment-update email");
   }
@@ -836,7 +846,12 @@ export async function subscriptionAddFreeProduct(
   variantId: string,
   quantity: number = 1,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+  const srcGift = await resolveBillingSource(workspaceId, contractId);
+  if (srcGift === "internal") return internalSubAddFreeProduct(workspaceId, contractId, variantId, quantity);
+  if (srcGift === "shopcx") {
+    // ⚠️ subscriptionDraftLineAdd creates a RECURRING line; Appstle sends isOneTimeProduct. Wiring
+    // the Shopify add-line here would ship a retention gift free on EVERY renewal, forever. A real
+    // one-time line needs the per-cycle billing-cycle contract edit, which is not built.
     return shopcxUnsupported("add free product");
   }
   return appstleAddFreeProduct(workspaceId, contractId, variantId, quantity);
@@ -848,9 +863,9 @@ export async function subscriptionSwapProduct(
   oldVariantId: string,
   newVariantId: string,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopcxUnsupported("swap product");
-  }
+  const srcSwap = await resolveBillingSource(workspaceId, contractId);
+  if (srcSwap === "internal") return internalSwapProduct(workspaceId, contractId, oldVariantId, newVariantId);
+  if (srcSwap === "shopcx") return shopcxUnsupported("swap product");
   return appstleSwapProduct(workspaceId, contractId, oldVariantId, newVariantId);
 }
 
