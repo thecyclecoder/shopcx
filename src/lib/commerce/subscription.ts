@@ -25,12 +25,14 @@
  * local `status='cancelled'` write, leaving the row active while the renewal cron kept billing a
  * customer who had cancelled.
  *
- * Ops with no ShopCX equivalent yet return `shopcxUnsupported(...)` — LOUD, never a silent
- * fall-through to Appstle. A visible refusal is recoverable; a write that vanishes is not.
+ * Every op routes for all three engines; none refuses. An op that gains no equivalent on a future
+ * engine must return a LOUD refusal, never a silent fall-through to a vendor that does not hold
+ * the contract. A visible refusal is recoverable; a write that vanishes is not.
  *
- * Each op branches on isInternalSubscription() — internal → internalSub*
- * handlers; else → the existing appstleX / subX wrappers, which top-guard
- * with healOnTouch and handle the Appstle boundary.
+ * Each op resolves `billing_source` — internal → internalSub* handlers, shopcx → the Shopify
+ * client / shopcx-* ops, appstle → the appstleX / subX wrappers, which top-guard with healOnTouch
+ * and handle the Appstle boundary. `scripts/_check-vendor-dispatch-in-sdk.ts` keeps that
+ * resolution here and out of the vendor modules.
  *
  * Ships with zero call-site consumers — the M3 harness compares parity before
  * any surface migrates. Phase 3 flips src/lib/appstle.ts and
@@ -58,7 +60,6 @@ import {
   internalSubSwitchPaymentMethod,
   internalSubAddFreeProduct,
   internalSubSkipNextOrder as internalSkipUpcoming,
-  internalSubNotYetSupported,
   internalSubSwapVariant as internalSwapProduct,
   internalSubscriptionAction,
   internalSubSkipNextOrder,
@@ -69,7 +70,6 @@ import {
 } from "@/lib/internal-subscription";
 import {
   applySubscriptionStatusTruth,
-  shopcxUnsupported,
 } from "@/lib/commerce/subscription-status-truth";
 import {
   shopifySubscriptionAction,
@@ -587,17 +587,45 @@ export async function subscriptionSwitchPaymentMethod(
   return appstleSwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
 }
 
+/**
+ * "Update your payment method" email.
+ *
+ * ⭐ For every engine except Appstle this sends OUR recovery email, and that is a deliberate
+ * product choice rather than a fallback: the magic link lands on our own update-payment flow,
+ * which vaults a Braintree card and MIGRATES the subscription onto internal rails. A payment
+ * failure is the one moment a customer is already reaching for their card, so it is the best
+ * conversion opportunity we get — anywhere we can move someone to internal, we do.
+ *
+ * That is also why this does NOT use Shopify's `customerPaymentMethodGetUpdateUrl` for a ShopCX
+ * contract, even though it exists and works: it would fix the card on the Shopify contract and
+ * leave the customer on Shopify's rails, trading a conversion for a repair. (It stays the right
+ * tool if we ever need to fix a card WITHOUT converting — its URL expires in ~24h, so it can only
+ * ever be minted at send time.)
+ *
+ * Appstle keeps its own vendor email: that path has no migration step attached, and Appstle's
+ * hosted page is the only thing that can update a card it holds.
+ */
 export async function subscriptionSendPaymentUpdateEmail(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
   const srcEmail = await resolveBillingSource(workspaceId, contractId);
-  if (srcEmail === "internal") return internalSubNotYetSupported("send_payment_update_email");
-  if (srcEmail === "shopcx") {
-    // Vendor-email feature with no Shopify equivalent; needs our own Resend flow.
-    return shopcxUnsupported("send payment-update email");
-  }
-  return appstleSendPaymentUpdateEmail(workspaceId, contractId);
+  if (srcEmail === "appstle") return appstleSendPaymentUpdateEmail(workspaceId, contractId);
+
+  const admin = createAdminClient();
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("id, customer_id")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (!sub?.customer_id) return { success: false, error: "subscription_or_customer_not_found" };
+
+  const { sendPaymentRecoveryEmail } = await import("@/lib/payment-recovery-email");
+  const r = await sendPaymentRecoveryEmail(workspaceId, String(sub.customer_id), {
+    subscriptionId: String(sub.id),
+  });
+  return r.sent ? { success: true } : { success: false, error: r.error };
 }
 
 // ── Line items ──────────────────────────────────────────────────────

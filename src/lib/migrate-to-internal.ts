@@ -115,6 +115,59 @@ async function findBillableCustomer(
  * (returned in `droppedLines`) rather than left as a dangling Shopify-id line that
  * fails the `items_on_uuids` audit forever — Therese's out-of-stock ACV Gummies.
  */
+/**
+ * Read a ShopCX (Shopify-held) contract and present it in the SAME shape the Appstle reader
+ * returns, so one translation path serves both engines.
+ *
+ * The mapping that matters is `pricingPolicy.basePrice`. On a ShopCX contract a line's
+ * `currentPrice` is its PRE-discount base and the structural discounts (S&S %, volume %, the
+ * `Legacy rate` per-unit concession) sit on top as allocations. The internal engine re-derives
+ * S&S and the volume tier from the pricing rules itself, so those must NOT be folded into the
+ * base or they apply twice. The concession has no other representation and would simply be lost,
+ * so it — and only it — is subtracted:
+ *
+ *     basePrice = currentPrice − (legacyRateCents / quantity)
+ *
+ * Supplying `pricingPolicy` also means `inferAppstleLineBase` uses that base DIRECTLY instead of
+ * reverse-engineering one from the realized price. That matters: the reverse-engineering path
+ * divides only by (1 − sns) and knows nothing about quantity breaks, so a customer on the 12%
+ * tier would come out with a base ~12% too low and be undercharged from then on.
+ */
+async function readShopcxContractAsLine(
+  workspaceId: string,
+  contractId: string,
+): Promise<Record<string, unknown> | null> {
+  const { getSubscriptionContract } = await import("@/lib/commerce/shopify-subscription-client");
+  const c = await getSubscriptionContract(workspaceId, contractId);
+  if (!c.success || !c.contract) return null;
+  const k = c.contract;
+  return {
+    status: k.status === "CANCELLED" ? "CANCELLED" : k.status,
+    billingPolicy: { interval: k.interval ?? "MONTH", intervalCount: k.intervalCount ?? 1 },
+    nextBillingDate: k.nextBillingDate,
+    lines: {
+      nodes: k.lines.map((l) => {
+        const qty = l.quantity || 1;
+        const unitBase = l.currentPrice != null ? Math.round(parseFloat(l.currentPrice) * 100) : 0;
+        const baseCents = Math.max(0, unitBase - Math.round(l.legacyRateCents / qty));
+        return {
+          title: l.title,
+          variantTitle: null,
+          sku: l.sku,
+          variantId: l.variantId,
+          quantity: qty,
+          // What they actually pay per unit today — used only by the shipping-protection capture
+          // and the dropped-line report; the base above is what prices the internal sub.
+          currentPrice: {
+            amount: (Math.round((unitBase * qty - l.structuralDiscountCents) / qty) / 100).toFixed(2),
+          },
+          pricingPolicy: { basePrice: { amount: (baseCents / 100).toFixed(2) } },
+        };
+      }),
+    },
+  };
+}
+
 async function appstleLinesToInternalItems(
   admin: Admin,
   workspaceId: string,
@@ -229,7 +282,10 @@ export async function ensureGroupMigratedIfBillable(workspaceId: string, custome
     .select("id", { count: "exact", head: true })
     .eq("workspace_id", workspaceId)
     .in("customer_id", groupIds)
-    .eq("is_internal", false)
+    // `billing_source`, NOT `is_internal=false` — the latter is not a class any more (it also
+    // matches ShopCX). Both external engines are convertible: moving someone onto internal rails
+    // is always the preferred outcome, so both are swept.
+    .in("billing_source", ["appstle", "shopcx"])
     .neq("status", "expired");
   if (!appstleCount) return 0;
 
@@ -272,7 +328,7 @@ export async function migrateContractToInternalComp(
   // Find the sub by its Appstle/Shopify contract id within the workspace.
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, status, is_internal, comp, customer_id, items, billing_interval, billing_interval_count, next_billing_date")
+    .select("id, shopify_contract_id, status, is_internal, comp, customer_id, items, billing_interval, billing_interval_count, next_billing_date, billing_source")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", contractId)
     .maybeSingle();
@@ -283,19 +339,31 @@ export async function migrateContractToInternalComp(
     return { ok: true, subId: String(sub.id), internalContractId: String(sub.shopify_contract_id) };
   }
 
+  const compEngine = String(sub.billing_source || "appstle");
+
   const cfg = await getAppstleConfig(workspaceId);
-  if (!cfg) return { ok: false, error: "Appstle not configured" };
+  if (compEngine === "appstle" && !cfg) return { ok: false, error: "Appstle not configured" };
 
   const isCancelled = sub.status === "cancelled";
   try {
-    // Read the LIVE Appstle contract — source of truth for items/cadence/next date.
-    const live = await (
-      await fetch(
-        `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${cfg.apiKey}`,
-        { headers: { "X-API-Key": cfg.apiKey }, cache: "no-store" },
-      )
-    ).json();
-    const liveUsable = !!live && live.status !== "CANCELLED";
+    // Read the LIVE contract from whichever engine holds it — source of truth for
+    // items/cadence/next date.
+    const live = compEngine === "shopcx"
+      ? await readShopcxContractAsLine(workspaceId, contractId)
+      : await (
+          await fetch(
+            `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${cfg!.apiKey}`,
+            { headers: { "X-API-Key": cfg!.apiKey }, cache: "no-store" },
+          )
+        ).json();
+    // See the sweep path: an Appstle 400 returns a PARSEABLE problem+json body whose `status` is
+    // 400, so "not CANCELLED" is not usability. Require the shape of a real contract.
+    const liveUsable =
+      !!live &&
+      !live.errorKey &&
+      live.status !== "CANCELLED" &&
+      !!live.billingPolicy &&
+      Array.isArray(live.lines?.nodes);
 
     let items: Array<Record<string, unknown>>;
     let interval: string;
@@ -392,12 +460,17 @@ export async function migrateCustomerAppstleSubsToInternal(
 
   // ALL Appstle subs across the link group — active, paused, AND cancelled.
   // Adding a payment method sweeps the customer's whole book onto internal rails.
+  //
+  // Scoped by `billing_source`, NOT `is_internal=false` — the latter also matches ShopCX, and is
+  // not a meaningful class once there are three engines. BOTH external engines are swept: moving
+  // a customer onto internal rails is always the preferred outcome, whichever engine they are on.
+  // Each has its own source of truth below; they must never share one.
   const { data: subs } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, status, is_internal, items, billing_interval, billing_interval_count, next_billing_date")
+    .select("id, shopify_contract_id, status, is_internal, items, billing_interval, billing_interval_count, next_billing_date, billing_source")
     .eq("workspace_id", workspaceId)
     .in("customer_id", groupIds)
-    .eq("is_internal", false);
+    .in("billing_source", ["appstle", "shopcx"]);
   if (!subs?.length) return result;
 
   // HARD RULE: a migration must be billable — no PM anywhere in the link group → skip all.
@@ -415,17 +488,32 @@ export async function migrateCustomerAppstleSubsToInternal(
   for (const sub of subs) {
     const contractId = String(sub.shopify_contract_id);
     const isCancelled = sub.status === "cancelled";
-    if (!cfg) { result.failed.push({ contractId, error: "Appstle not configured" }); continue; }
+    const engine = String(sub.billing_source || "appstle");
+    if (engine === "appstle" && !cfg) { result.failed.push({ contractId, error: "Appstle not configured" }); continue; }
     try {
-      // Read the LIVE Appstle contract — source of truth for current
+      // Read the LIVE contract from WHICHEVER engine holds it — source of truth for current
       // (grandfathered) prices, cadence, and next billing date.
-      const live = await (
-        await fetch(
-          `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${cfg.apiKey}`,
-          { headers: { "X-API-Key": cfg.apiKey }, cache: "no-store" },
-        )
-      ).json();
-      const liveUsable = !!live && live.status !== "CANCELLED";
+      const live = engine === "shopcx"
+        ? await readShopcxContractAsLine(workspaceId, contractId)
+        : await (
+            await fetch(
+              `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${cfg!.apiKey}`,
+              { headers: { "X-API-Key": cfg!.apiKey }, cache: "no-store" },
+            )
+          ).json();
+
+      // ⚠️ "Parsed, and not CANCELLED" is NOT usable. Appstle answers an unknown or bad contract
+      // id with HTTP 400 and an `application/problem+json` BODY — `{errorKey,type,title,
+      // status:400,message,params}` — which parses cleanly and whose `status` is 400, not
+      // "CANCELLED". The old check passed it, and the code below then cancelled the live contract
+      // and flipped the row to internal with ZERO items, weekly, billing immediately. Require the
+      // shape of a real contract instead: a billing policy AND a lines array.
+      const liveUsable =
+        !!live &&
+        !live.errorKey &&
+        live.status !== "CANCELLED" &&
+        !!live.billingPolicy &&
+        Array.isArray(live.lines?.nodes);
 
       let items: Array<Record<string, unknown>>;
       let interval: string;
@@ -446,9 +534,11 @@ export async function migrateCustomerAppstleSubsToInternal(
         intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
         nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();
 
-        // Cancel Appstle FIRST (safe failure mode: a later flip failure stops the
-        // sub rather than letting both systems bill it). Already-cancelled subs
-        // have nothing to cancel.
+        // Cancel the OLD engine FIRST (safe failure mode: a later flip failure stops the sub
+        // rather than letting both systems bill it). `subscriptionAction` dispatches, so this
+        // cancels the Appstle contract or the Shopify one depending on who holds it — and it
+        // still reads the PRE-flip billing_source here, which is what makes that correct.
+        // Already-cancelled subs have nothing to cancel.
         if (!isCancelled) {
           const cancelR = await subscriptionAction(workspaceId, contractId, "cancel", "migrated to shopcx", "ShopCX migration");
           if (!cancelR.success) { result.failed.push({ contractId, error: `Appstle cancel failed: ${cancelR.error}` }); continue; }
@@ -457,7 +547,7 @@ export async function migrateCustomerAppstleSubsToInternal(
         // No usable live Appstle data. Only safe for cancelled subs (they won't
         // bill) — migrate them onto internal rails using the local row. An
         // active/paused sub we can't read is left alone (re-runnable).
-        if (!isCancelled) { result.skipped.push({ contractId, reason: "appstle_unavailable" }); continue; }
+        if (!isCancelled) { result.skipped.push({ contractId, reason: `${engine}_unavailable` }); continue; }
         items = (sub.items as Array<Record<string, unknown>>) || [];
         interval = String(sub.billing_interval || "week").toLowerCase();
         intervalCount = Number(sub.billing_interval_count || 1);

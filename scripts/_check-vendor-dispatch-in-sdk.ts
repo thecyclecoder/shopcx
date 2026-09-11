@@ -88,6 +88,32 @@ for (const vm of VENDOR_MODULES) {
   });
 }
 
+/**
+ * Rule 3: `is_internal = false` is not a class of subscription any more.
+ *
+ * It used to mean "Appstle", because there were two engines. A ShopCX-billed sub is not internal
+ * either, so every such SELECTOR silently widened to include it. `migrateCustomerAppstleSubsToInternal`
+ * picked its whole working set this way and ran on PORTAL PAGE LOAD for any customer with a default
+ * Braintree card — it would have read the live Appstle contract for a contract Appstle never held,
+ * and a flip would have left the row carrying `is_internal=true` AND `billing_source='shopcx'`:
+ * billable by the internal renewal cron AND the ShopCX one. A double charge, not a failed migration.
+ *
+ * `billing_source` is the real predicate and is fully populated (0 NULLs). Writes
+ * (`is_internal: true/false`) and reads of an already-loaded row are fine — only the SELECTOR is banned.
+ */
+for (const file of SCAN_ROOTS.flatMap((r) => walk(r))) {
+  const rel = file.replace(/\\/g, "/");
+  // storefront_sessions.is_internal is unrelated — it means internal TRAFFIC.
+  if (rel.includes("/storefront/")) continue;
+  const src = readFileSync(file, "utf8");
+  src.split("\n").forEach((line, i) => {
+    if (!/\.eq\(\s*["']is_internal["']\s*,\s*false\s*\)/.test(line)) return;
+    violations.push(
+      `   ${rel}:${i + 1}  selects on is_internal=false — that set now includes ShopCX subs; filter on billing_source instead\n      ${line.trim().slice(0, 110)}`,
+    );
+  });
+}
+
 for (const file of SCAN_ROOTS.flatMap((r) => walk(r))) {
   const rel = file.replace(/\\/g, "/");
   if (VENDOR_MODULES.includes(rel)) continue;

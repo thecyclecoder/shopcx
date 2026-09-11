@@ -314,6 +314,48 @@ Each of the coupon surfaces previously read the workspace's Appstle key and, wit
 refused with *"Appstle not configured"* or silently applied nothing. On a migrated contract that
 turns an **accepted save offer into a cancellation**.
 
+### ⭐ A payment failure is a conversion opportunity, not just a repair
+
+`subscriptionSendPaymentUpdateEmail` sends our own magic-link recovery email for ShopCX (and for
+internal), NOT a vendor email. The link lands on our update-payment flow, which vaults a Braintree
+card and **migrates the subscription onto internal rails**. A failed payment is the one moment a
+customer is already reaching for their card, so anywhere we can move someone to internal, we do.
+
+Shopify's `customerPaymentMethodGetUpdateUrl` exists and works (probed live — it returns a
+`shop.app/pay/external/...` URL). We deliberately do **not** use it: it would fix the card on the
+Shopify contract and leave the customer on Shopify's rails, trading a conversion for a repair. It
+remains the right tool if we ever need to fix a card WITHOUT converting — note its token carries
+`exp` about **24 hours** out, so it can only ever be minted at send time, never stored or reused
+across a multi-day dunning ladder. Appstle keeps its own vendor email: that path has no migration
+step attached, and Appstle's hosted page is the only thing that can update a card Appstle holds.
+
+### ⚠️ Converting a ShopCX sub to internal reads SHOPIFY, and `liveUsable` was a landmine
+
+[[../libraries/migrate-to-internal]] sweeps `billing_source IN ('appstle','shopcx')` — never
+`is_internal = false`, which is not a class once there are three engines. Each engine has its own
+source of truth: `readShopcxContractAsLine` reads the Shopify contract and presents it in the shape
+the Appstle reader returns, so one translation path serves both.
+
+The mapping that matters is `pricingPolicy.basePrice = currentPrice − (legacyRateCents / qty)`.
+S&S and the volume tier are re-derived by the internal engine from the pricing rules, so folding
+them into the base applies them twice; the `Legacy rate` concession has no other representation and
+would simply be lost. Supplying a real `pricingPolicy` also stops `inferAppstleLineBase`
+reverse-engineering one — that path divides only by `(1 − sns)` and knows nothing about quantity
+breaks, so a customer on the 12% tier would come out ~12% under-based and be undercharged forever.
+
+**The landmine:** `liveUsable` was `!!live && live.status !== "CANCELLED"`. Appstle answers an
+unknown or bad contract id with **HTTP 400 and an `application/problem+json` body** —
+`{errorKey,type,title,status:400,message,params}` — which parses cleanly and whose `status` is
+`400`, not `"CANCELLED"`. So it evaluated **true** on an error object, and the code then cancelled
+the live contract and flipped the row to internal with **zero items, weekly, billing immediately**.
+Verified against the live API. It now requires the shape of a real contract (no `errorKey`, a
+`billingPolicy`, and a `lines.nodes` array). This protected Appstle subs too — any contract that
+400s for any reason was exposed.
+
+Rounding note: Shopify truncates a discount allocation where the internal engine rounds, so a
+converted line can differ by 1¢ per unit. The audit's `pricing_preserved` tolerance is 2¢ per line,
+so this is inside it.
+
 ### ⚠️ Shopify's address object REPLACES — it does not merge
 
 `deliveryMethod.shipping` replaces the whole shipping method, and the address inside it replaces
@@ -339,8 +381,8 @@ not a gap: ShopCX charges Shopify's `customerPaymentMethod` on the contract, so 
 Braintree `payment_method_id` to one would be wrong. Rotating a ShopCX card is
 `subscriptionSwitchPaymentMethod`, which belongs to the dunning cutover work below.
 
-**Still refusing for ShopCX (1 op):** `subscriptionSendPaymentUpdateEmail` — no Shopify equivalent;
-needs our own Resend flow. It refuses loudly (`shopcxUnsupported`), never silently.
+**Nothing refuses any more.** `subscriptionSendPaymentUpdateEmail` sends OUR recovery email
+([[../libraries/payment-recovery-email]]) for every engine except Appstle — see below.
 
 ### Dispatch now lives in ONE place, enforced
 

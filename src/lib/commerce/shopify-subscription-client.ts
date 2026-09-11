@@ -539,6 +539,15 @@ export interface ContractLine {
    * one-use code into a forever rate. Subtract THIS from `currentPrice * quantity` instead.
    */
   structuralDiscountCents: number;
+  /**
+   * Cents allocated by the `Legacy rate` discount alone — the negotiated concession.
+   *
+   * Split out because it is the ONLY structural discount that belongs in a line's BASE when
+   * converting to the internal engine: S&S and the volume tier are re-derived there from the
+   * pricing rules, so folding them into the base would apply them twice, while the concession
+   * has no other representation and would simply be lost.
+   */
+  legacyRateCents: number;
   sellingPlanName: string | null;
 }
 
@@ -604,6 +613,13 @@ export async function getSubscriptionContract(
         structuralDiscountCents: (e.node.discountAllocations ?? []).reduce(
           (sum, a) =>
             STRUCTURAL_DISCOUNT_TITLES.includes(String(a?.discount?.title ?? ""))
+              ? sum + Math.round(parseFloat(a?.amount?.amount ?? "0") * 100)
+              : sum,
+          0,
+        ),
+        legacyRateCents: (e.node.discountAllocations ?? []).reduce(
+          (sum, a) =>
+            String(a?.discount?.title ?? "") === LEGACY_RATE_TITLE
               ? sum + Math.round(parseFloat(a?.amount?.amount ?? "0") * 100)
               : sum,
           0,
@@ -858,7 +874,10 @@ export async function shopifyRemoveDraftLine(
  * back something they were given. Ours are identified by title; a customer can never apply an S&S
  * or a quantity break, so anything carrying those titles is ours by construction.
  */
-export const STRUCTURAL_DISCOUNT_TITLES = ["Subscribe & Save", "Volume discount", "Legacy rate"];
+/** The grandfathered per-unit concession. Named separately — it is the one structural discount
+ *  that carries into an internal sub's BASE price rather than being re-derived from the rules. */
+export const LEGACY_RATE_TITLE = "Legacy rate";
+export const STRUCTURAL_DISCOUNT_TITLES = ["Subscribe & Save", "Volume discount", LEGACY_RATE_TITLE];
 
 /**
  * Open a draft scoped to ONE billing cycle, run `mutate`, commit.
