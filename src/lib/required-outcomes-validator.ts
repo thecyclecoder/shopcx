@@ -58,7 +58,14 @@ export const ALLOWED_OUTCOME_KINDS: ReadonlySet<string> = new Set<string>([
   "add_bag_to_next_order",
   // order-scoped
   "partial_refund",
-  "full_order_refund",
+  // `full_order_refund` is DELIBERATELY excluded — it refunds the order's whole
+  // collected total, a class of movement that must go through a founder-approved
+  // `june_remedy` card (see `_founderApprovedFullOrderRefund` on ActionContext).
+  // Sol's honor-step dispatch is autonomous, so allowlisting it here would let a
+  // required-outcome slip past every gate and refund a full order without CEO
+  // sign-off. Sol emits it → this validator rejects with `unknown_kind` → the box
+  // session escalates instead. Fix-1 phase of
+  // docs/brain/specs/a-clamped-refund-must-never-report-success.md.
   "redeem_points_as_refund",
   "create_return",
   "create_replacement",
@@ -97,7 +104,10 @@ const KIND_TARGET_SHAPE: Record<string, TargetShape> = {
   update_line_item_price: { needs_contract: true },
   add_bag_to_next_order: { needs_contract: true },
   partial_refund: { needs_order: true },
-  full_order_refund: { needs_order: true },
+  // full_order_refund is intentionally absent — see the ALLOWED_OUTCOME_KINDS
+  // comment above. A stray target-shape entry would let a future refactor
+  // silently accept the kind again; keeping both maps consistent forces the
+  // review to consider the founder-approval requirement.
   redeem_points_as_refund: { needs_order: true },
   create_return: { needs_order: true },
   create_replacement: { needs_order: true },

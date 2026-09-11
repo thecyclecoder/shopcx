@@ -213,6 +213,17 @@ export interface ActionContext {
   // (the Melissa-class return-label bug, ticket eca3f43b). Empty/undefined when
   // no direct_action ran.
   _lastActionResults?: { action: ActionParams; result: ActionResult }[];
+  /**
+   * ⭐ The ONLY caller-side authorisation the `full_order_refund` handler recognises.
+   * Set true by [[june-remedy-approval]] `executeParkedRemedy` after a `june_remedy`
+   * god_mode_approvals card has been founder-approved; unset everywhere else (Sol's
+   * cheap-execution, a raw Sonnet direct_action, journeys/playbooks/workflows). Without
+   * this flag, the handler refuses with a money-integrity error even if the action
+   * somehow reaches the executor — the belt-and-braces guard on top of the
+   * MONEY_ACTION_TYPES rail + agent-action-queue deny-list + required-outcomes
+   * removal. See Fix-1 phase of a-clamped-refund-must-never-report-success.
+   */
+  _founderApprovedFullOrderRefund?: boolean;
 }
 
 type SendFn = (msg: string, sandbox: boolean) => Promise<void>;
@@ -2872,6 +2883,24 @@ export const directActionHandlers: Record<
   // the SC137733 incident ended in). Reuses the same order_refunds
   // idempotency mirror as partial_refund.
   full_order_refund: async (ctx, p) => {
+    // ⭐ Non-autonomous by construction. `full_order_refund` refunds the WHOLE
+    // collected total on an order — a class of cash movement the CEO must sign
+    // off on, no exceptions. The only sanctioned path is a founder-approved
+    // `june_remedy` card via `executeParkedRemedy`, which sets
+    // `_founderApprovedFullOrderRefund: true` on the ActionContext. Any other
+    // caller (Sol cheap-execution, a raw Sonnet direct_action, a journey /
+    // playbook / workflow) reaches this handler with the flag unset, and we
+    // refuse. `success:false` puts the reply path in the escalate branch, so
+    // no customer-facing message can ship on the back of an unapproved full
+    // refund. This is the belt on top of the MONEY_ACTION_TYPES gate, the
+    // agent-action-queue deny-list, and the required-outcomes removal.
+    if (!ctx._founderApprovedFullOrderRefund) {
+      return {
+        success: false,
+        error: `Refusing full_order_refund on order ${p.shopify_order_id ?? "(no order)"}: this action is founder-approval-only. It must be routed through a june_remedy card that the founder has approved; direct dispatch is not permitted.`,
+      };
+    }
+
     const { refundOrder, hashActionRefundKey } = await import("@/lib/refund");
     const reason = p.reason || "Full order refund — founder-authorised";
 

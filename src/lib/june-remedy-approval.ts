@@ -40,6 +40,14 @@ type Admin = ReturnType<typeof createAdminClient>;
  */
 export const MONEY_ACTION_TYPES = new Set<string>([
   "partial_refund",
+  // full_order_refund refunds `orders.total_cents` verbatim; its payload carries no
+  // `amount_cents`, so `extractPayloadAmountCents` returns null → the sum collapses
+  // to null → the founder gate always fires. Combined with the handler's
+  // `_founderApprovedFullOrderRefund` refusal, an approved june_remedy card is the
+  // only path that can execute this action — Sol's cheap-execution + a raw Sonnet
+  // direct_action both stop short of the flag being set. See the Fix-1 phase of
+  // docs/brain/specs/a-clamped-refund-must-never-report-success.md.
+  "full_order_refund",
   "redeem_points_as_refund",
   "create_replacement_order",
   "dollar_replacement",
@@ -1308,7 +1316,21 @@ async function executeParkedRemedy(
     if (parsed) batchEvents.push(parsed);
     await postInternalNote(admin, input.ticketId, `[cs-director/founder-approved] ${msg}`);
   };
-  const ctx = { admin, workspaceId: input.workspaceId, ticketId: input.ticketId, customerId, channel, sandbox };
+  // The `_founderApprovedFullOrderRefund` flag is the ONLY caller-side authorisation the
+  // `full_order_refund` handler recognises. This path runs only after a `june_remedy` card
+  // has been approved by the founder (`handleApproveRemedy` / the founder-approved sweep),
+  // so setting it here is the sanctioned route the Fix-1 phase requires. Every other caller
+  // (Sol's cheap-execution, a raw Sonnet direct_action, an ordinary journey/playbook) leaves
+  // this flag unset and the handler refuses with an explicit money-integrity error.
+  const ctx = {
+    admin,
+    workspaceId: input.workspaceId,
+    ticketId: input.ticketId,
+    customerId,
+    channel,
+    sandbox,
+    _founderApprovedFullOrderRefund: true,
+  };
   let res: { escalated: boolean };
   try {
     res = await executeSonnetDecision(ctx as never, decision, null, suppressedSend, sysNote);
