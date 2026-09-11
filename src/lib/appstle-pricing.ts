@@ -24,7 +24,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { loggedAppstleFetch } from "@/lib/appstle-call-log";
-import { isInternalSubscription } from "@/lib/internal-subscription";
+import { resolveBillingSource } from "@/lib/internal-subscription";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -117,8 +117,12 @@ async function catalogForVariant(admin: Admin, workspaceId: string, shopifyVaria
  */
 export async function healAppstleContract(workspaceId: string, contractId: string): Promise<HealResult> {
   const result: HealResult = { healedLines: 0, alreadyStructured: 0, failed: 0, skippedNoCatalog: 0 };
-  // Internal subs aren't on Appstle.
-  if (await isInternalSubscription(workspaceId, contractId)) return result;
+  // Only Appstle holds these contracts. This is a DECLINE, not a dispatch — it returns an empty
+  // result and routes nowhere, so a fourth engine is safe here by default rather than silently
+  // sent to a vendor that does not hold it. (`isInternalSubscription` was the old guard; a
+  // ShopCX-billed contract is not internal either, so it fell through and burned a metered
+  // Appstle call on every portal touch — heal is dropped at the top of SEVEN surfaces.)
+  if ((await resolveBillingSource(workspaceId, contractId)) !== "appstle") return result;
   const apiKey = await getAppstleKey(workspaceId);
   if (!apiKey) return result;
   const admin = createAdminClient();

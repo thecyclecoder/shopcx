@@ -36,7 +36,15 @@ const DISPATCHED_VENDOR_FNS = [
   "appstleOrderNowByContract",
 ];
 
-/** Vendor modules, which must stay dispatch-free. */
+/**
+ * Vendor modules, which must stay dispatch-free.
+ *
+ * The line is DISPATCH, not engine-awareness: a vendor may DECLINE work that is not its own
+ * (return an empty/no-op result and route nowhere) — that is safe for an engine nobody has
+ * written yet. What it may not do is hand the call to another engine, because then "not mine ⇒
+ * theirs" is baked in and the next engine silently takes someone else's path.
+ * `healAppstleContract` in appstle-pricing.ts is a decline and is deliberately NOT listed.
+ */
 const VENDOR_MODULES = ["src/lib/appstle.ts", "src/lib/appstle-discount.ts"];
 
 /**

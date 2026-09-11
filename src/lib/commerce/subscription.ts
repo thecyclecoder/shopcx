@@ -840,10 +840,12 @@ export async function subscriptionAddFreeProduct(
   const srcGift = await resolveBillingSource(workspaceId, contractId);
   if (srcGift === "internal") return internalSubAddFreeProduct(workspaceId, contractId, variantId, quantity);
   if (srcGift === "shopcx") {
-    // ⚠️ subscriptionDraftLineAdd creates a RECURRING line; Appstle sends isOneTimeProduct. Wiring
-    // the Shopify add-line here would ship a retention gift free on EVERY renewal, forever. A real
-    // one-time line needs the per-cycle billing-cycle contract edit, which is not built.
-    return shopcxUnsupported("add free product");
+    // A cycle-scoped edit, NOT subscriptionDraftLineAdd on the contract — that creates a
+    // RECURRING line and would ship the gift free on every renewal, forever. Appstle expresses
+    // this with its own `isOneTimeProduct` flag; Shopify's equivalent is editing one billing
+    // cycle. See shopcxAddOneTimeLine.
+    const { shopcxAddOneTimeLine } = await import("@/lib/commerce/shopcx-line-ops");
+    return shopcxAddOneTimeLine(workspaceId, contractId, variantId, quantity, 0);
   }
   return appstleAddFreeProduct(workspaceId, contractId, variantId, quantity);
 }

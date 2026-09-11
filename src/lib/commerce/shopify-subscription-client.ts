@@ -860,6 +860,63 @@ export async function shopifyRemoveDraftLine(
  */
 export const STRUCTURAL_DISCOUNT_TITLES = ["Subscribe & Save", "Volume discount", "Legacy rate"];
 
+/**
+ * Open a draft scoped to ONE billing cycle, run `mutate`, commit.
+ *
+ * ⭐ This is what makes a line genuinely ONE-TIME. `subscriptionDraftLineAdd` on a contract draft
+ * creates a RECURRING line — a retention gift added that way ships free on every renewal, forever
+ * (Appstle avoids this with its own `isOneTimeProduct` flag, which has no Shopify equivalent).
+ * A cycle-scoped edit exists only on the cycle it was made against.
+ *
+ * The draft is the SAME `SubscriptionDraft` type a contract edit produces, so every draft helper
+ * here works on it unchanged — but it MUST be committed with
+ * `subscriptionBillingCycleContractDraftCommit`, not `subscriptionDraftCommit`.
+ *
+ * Reversible: `subscriptionBillingCycleEditDelete` drops the whole edit for that cycle.
+ */
+export async function withBillingCycleDraft(
+  workspaceId: string,
+  contractId: string,
+  selector: { index: number } | { date: string },
+  mutate: (draftId: string) => Promise<SubscriptionActionResult>,
+): Promise<SubscriptionActionResult> {
+  const open = await gql<{ subscriptionBillingCycleContractEdit: { draft?: { id: string }; userErrors: { message: string }[] } }>(
+    workspaceId,
+    `mutation($in:SubscriptionBillingCycleInput!){
+       subscriptionBillingCycleContractEdit(billingCycleInput:$in){ draft { id } userErrors { message } } }`,
+    { in: { contractId: contractGid(contractId), selector } },
+  );
+  const opened = toResult(open as never, "subscriptionBillingCycleContractEdit");
+  if (!opened.success) return opened;
+  const draftId = open.data?.subscriptionBillingCycleContractEdit?.draft?.id;
+  if (!draftId) return { success: false, error: "billing-cycle edit returned no draft" };
+
+  const edited = await mutate(draftId);
+  if (!edited.success) return edited; // abort before commit — the cycle is untouched
+
+  const commit = await gql(
+    workspaceId,
+    `mutation($id:ID!){ subscriptionBillingCycleContractDraftCommit(draftId:$id){ userErrors { message } } }`,
+    { id: draftId },
+  );
+  return toResult(commit as never, "subscriptionBillingCycleContractDraftCommit");
+}
+
+/** Drop every edit made to one billing cycle — the undo for `withBillingCycleDraft`. */
+export async function shopifyDeleteBillingCycleEdit(
+  workspaceId: string,
+  contractId: string,
+  selector: { index: number } | { date: string },
+): Promise<SubscriptionActionResult> {
+  const env = await gql(
+    workspaceId,
+    `mutation($in:SubscriptionBillingCycleInput!){
+       subscriptionBillingCycleEditDelete(billingCycleInput:$in){ userErrors { message } } }`,
+    { in: { contractId: contractGid(contractId), selector } },
+  );
+  return toResult(env as never, "subscriptionBillingCycleEditDelete");
+}
+
 export interface DraftLine {
   id: string;
   quantity: number;

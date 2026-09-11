@@ -311,3 +311,57 @@ export async function shopcxUpdateLineItemPrice(
     });
   } catch (err) { return { success: false, error: errText(err) }; }
 }
+
+/**
+ * Add a ONE-TIME line — the retention gift.
+ *
+ * ⭐ Scoped to a single billing cycle, never to the contract. `shopcxAddItem` would make the gift
+ * RECURRING: free on every renewal, forever. That is the whole reason this is a separate function
+ * rather than `shopcxAddItem(…, price 0)`.
+ *
+ * Targets the cycle the customer's NEXT charge falls in, which is when the gift ships. The
+ * structural recompute deliberately does NOT run: a gift is not a rule line, it must not move
+ * anyone into a quantity tier, and being cycle-scoped it never appears among the contract's lines
+ * to be counted anyway — which is also why it does not violate the no-$0-consumable-lines rule.
+ */
+export async function shopcxAddOneTimeLine(
+  workspaceId: string,
+  contractId: string,
+  variantId: string,
+  quantity = 1,
+  priceCents = 0,
+): Promise<LineOpResult> {
+  try {
+    const live = await getSubscriptionContract(workspaceId, contractId);
+    if (!live.success || !live.contract) return { success: false, error: live.error ?? "contract unreadable" };
+    if (live.contract.status !== "ACTIVE") {
+      return { success: false, error: `contract is ${live.contract.status.toLowerCase()}` };
+    }
+    const due = live.contract.nextBillingDate;
+    if (!due) return { success: false, error: "contract has no next billing date" };
+
+    // ⚠️ Shopify rejects a selector date before the contract's createdAt ("Billing cycle start
+    // date out of range"), and a MIGRATED contract is created today while its next billing date
+    // may already be past. Clamp into the first cycle — that is the cycle the charge belongs to.
+    // Same clamp the renewal worker applies; see shopify-subscription-renewals.ts.
+    const created = live.contract.createdAt ? new Date(live.contract.createdAt).getTime() : 0;
+    const date = created && new Date(due).getTime() < created
+      ? new Date(created + 1000).toISOString()
+      : new Date(due).toISOString();
+
+    // ⚠️ Refuse LOUDLY on a cycle that cannot ship the gift. Shopify accepts an edit to an
+    // already-BILLED or skipped cycle and reports success, but that order has shipped (or won't),
+    // so the customer never receives what a retention flow just promised them — the worst shape of
+    // failure: the save offer is recorded as honoured and silently isn't.
+    const { withBillingCycleDraft, getBillingCycleForDate } = await import("@/lib/commerce/shopify-subscription-client");
+    const cyc = await getBillingCycleForDate(workspaceId, contractId, date);
+    if (!cyc.success || !cyc.cycle) return { success: false, error: cyc.error ?? "cycle_unresolvable" };
+    if (cyc.cycle.status === "BILLED") return { success: false, error: "next cycle already billed — gift would never ship" };
+    if (cyc.cycle.skipped) return { success: false, error: "next cycle is skipped — gift would never ship" };
+
+    const bare = String(variantId).replace("gid://shopify/ProductVariant/", "");
+    return withBillingCycleDraft(workspaceId, contractId, { date }, (draftId) =>
+      shopifyAddDraftLine(workspaceId, draftId, bare, quantity, (priceCents / 100).toFixed(2)),
+    );
+  } catch (err) { return { success: false, error: errText(err) }; }
+}

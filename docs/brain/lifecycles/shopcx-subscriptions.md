@@ -278,6 +278,42 @@ Reading it would silently reconstruct everyone at list. Exclude $0.00 gift lines
 - product line under $25 → manual review (21 lines, all Sleep Gummies — the floor must exclude
   Shipping Protection, whose normal price is $3.95–$6.66)
 
+## Portal + retention surface — whole as of 2026-09-11 ✅
+
+A migrated customer must not be stranded with an uneditable subscription, and a retention flow must
+not promise something that silently never lands. Every portal and save-offer path now resolves the
+engine rather than assuming "not internal ⇒ Appstle":
+
+| Surface | Where the branch lives | ShopCX behaviour |
+|---|---|---|
+| quantity · remove · add · swap · price-pin | `subscription-items.ts` → [[../libraries/commerce__shopcx-line-ops]] | draft edit + full structural recompute, one commit |
+| coupon apply/remove · loyalty | `subscriptionApplyCoupon` / [[../libraries/coupons]] → [[../libraries/commerce__shopcx-discount-ops]] | manual discount minted from `resolveCoupon`; burns at apply |
+| cancel-flow save offers · journey remedies | [[../libraries/commerce__subscription]] `applyCoupon` | same as above |
+| retention gift | `subscriptionAddFreeProduct` → `shopcxAddOneTimeLine` | **cycle-scoped** edit, not a contract line |
+| order now | `subscriptionOrderNow` | fires the renewal-attempt event, which claims the cycle |
+| pause · cancel · resume · skip · dates | [[../libraries/commerce__subscription]] | direct Shopify mutations |
+
+Each of the coupon surfaces previously read the workspace's Appstle key and, without one, either
+refused with *"Appstle not configured"* or silently applied nothing. On a migrated contract that
+turns an **accepted save offer into a cancellation**.
+
+**Still refusing for ShopCX (1 op):** `subscriptionSendPaymentUpdateEmail` — no Shopify equivalent;
+needs our own Resend flow. It refuses loudly (`shopcxUnsupported`), never silently.
+
+### Dispatch now lives in ONE place, enforced
+
+`scripts/_check-vendor-dispatch-in-sdk.ts` fails the build on (1) a vendor module resolving the
+engine — by helper name **or** by raw `is_internal` / `billing_source` column read — and (2) any
+caller outside the SDK reaching a dispatching vendor function. The raw-column rule found
+`orderNowByContract`, which had been dispatching inside `appstle.ts` unnoticed.
+
+The line the guard draws is **dispatch, not engine-awareness**: a vendor may DECLINE work that is
+not its own (return a no-op and route nowhere — safe for an engine nobody has written yet), but it
+may not hand the call to another engine, because then "not mine ⇒ theirs" is baked in.
+`healAppstleContract` is a decline: it used to guard on `isInternalSubscription`, so a ShopCX
+contract fell through and burned a metered Appstle call on every portal touch, across seven
+surfaces.
+
 ## Open decisions
 
 - **~$9,700/cycle**: 974 lines are priced above the standard ladder because their subs never got a
@@ -322,3 +358,5 @@ code.
 [[../integrations/shopify]] · [[../libraries/pricing]] · [[../tables/subscriptions]] ·
 [[../functions/retention]] · [[../functions/platform]]
 - [[../libraries/commerce__shopify-subscription-client]] — the client itself (exports, gotchas, the guard carve-out)
+- [[../libraries/commerce__shopcx-line-ops]] — line mutations + the structural discount recompute
+- [[../libraries/commerce__shopcx-discount-ops]] — coupons on a ShopCX contract
