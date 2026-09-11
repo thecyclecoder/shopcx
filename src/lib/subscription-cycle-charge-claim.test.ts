@@ -47,14 +47,13 @@ test("fresh in_flight refuses — a concurrent attempt may still land", () => {
   assert.equal(isReclaimable(prior, NOW), null);
 });
 
-test("stale in_flight reclaims — a crashed prior attempt is not a permanent block", () => {
+test("stale in_flight REFUSES — a crashed prior attempt may have settled a Braintree sale before the worker died, so auto-reclaim would double-charge (Fix 1 of a-declined-renewal-must-not-wedge-the-cycle-forever). A stranded in_flight requires an explicit reconciliation/repair path that proves no external Braintree charge settled before any retry; visibility comes from the Control Tower renewal-wedged-cycles assertion, not from auto-reset.", () => {
   const NOW = 1_800_000_000_000;
   const prior = priorRow({
     status: "in_flight",
     claimed_at: new Date(NOW - (STALE_IN_FLIGHT_RECLAIM_MS + 1_000)).toISOString(),
   });
-  const verdict = isReclaimable(prior, NOW);
-  assert.deepEqual(verdict, { reason: "stale_in_flight" });
+  assert.equal(isReclaimable(prior, NOW), null);
 });
 
 test("failed reclaims — the wedge case sub e4e3b82e / cycle_key=2026-10-04", () => {

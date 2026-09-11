@@ -4,15 +4,22 @@
 -- Phase 1 of docs/brain/specs/a-declined-renewal-must-not-wedge-the-cycle-forever.md
 -- (parent: retention "Subscription continuity & billing integrity" mandate).
 --
--- Context: `claimCycleCharge` in src/lib/subscription-cycle-charge-claim.ts already lets a new
--- claimant atomically re-own a row whose prior claim was `status='failed'` (the ledger row is
--- flipped back to `in_flight` under the new claimant so the same cycle_key is chargeable again).
--- This phase extends that to a stale `in_flight` row (a crashed prior claim would wedge the
--- cycle exactly like a failed one), and — as the reset happens — appends a summary of the
--- prior attempt to `superseded_claims` so a repeatedly-declining subscription is visible as
--- such rather than silently overwritten. Ground truth: sub e4e3b82e held one row,
--- cycle_key=2026-10-04 status=failed claimed 2026-09-09, so every retry against the same
+-- Context: `claimCycleCharge` in src/lib/subscription-cycle-charge-claim.ts lets a new
+-- claimant atomically re-own a row whose prior claim was `status='failed'` (the ledger row
+-- is flipped back to `in_flight` under the new claimant so the same cycle_key is chargeable
+-- again). When that reset happens, the SDK appends a summary of the prior attempt to
+-- `superseded_claims` so a repeatedly-declining subscription is visible as such rather than
+-- silently overwritten. Ground truth: sub e4e3b82e held one row, cycle_key=2026-10-04
+-- status=failed claimed 2026-09-09, so every retry against the same
 -- next_billing_date=2026-10-04 derived the same key and was refused.
+--
+-- Reclaim is FAILED-ONLY. A stranded `in_flight` (crashed prior attempt older than
+-- STALE_IN_FLIGHT_RECLAIM_MS) is NOT auto-reclaimed — Fix 1 of the same spec closed the
+-- earlier stale-in_flight reclaim after the pre-merge spec-test flagged it as a billing-
+-- idempotency regression: Braintree could have settled the sale before the worker crashed,
+-- and auto-reclaiming would run a second sale for the same cycle. Stranded rows surface
+-- through the Control Tower renewal-wedged-cycles assertion for explicit reconciliation.
+-- Consequently every element in `superseded_claims` carries `superseded_reason: 'failed'`.
 --
 -- Shape: a jsonb array, prepended (newest-first) on each reset. Each element is a snapshot:
 --   { claimant, status, source, transaction_id, order_id, claimed_at, resolved_at, superseded_at }

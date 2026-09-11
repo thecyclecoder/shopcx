@@ -37,7 +37,7 @@ export interface SupersededClaim {
   claimed_at: string;
   resolved_at: string | null;
   superseded_at: string;
-  superseded_reason: "failed" | "stale_in_flight";
+  superseded_reason: "failed";
 }
 
 export interface CycleChargeRow {
@@ -57,11 +57,20 @@ export interface CycleChargeRow {
 }
 
 /**
- * How long an `in_flight` row can sit unresolved before a new claimant is allowed to take it
- * over. A Braintree sale + the surrounding Inngest step normally settles in seconds; ten
- * minutes is far past any realistic completion, so a row still `in_flight` beyond it must be
- * from a crashed / stranded attempt. Making the number explicit lets it be reviewed rather
- * than buried; nudge it if a caller ever legitimately holds a claim longer.
+ * How long an `in_flight` row can sit unresolved before it is treated as WEDGED by the
+ * Control Tower renewal-wedged-cycles assertion. A Braintree sale + the surrounding Inngest
+ * step normally settles in seconds; ten minutes is far past any realistic completion, so a
+ * row still `in_flight` beyond it is a crashed / stranded attempt.
+ *
+ * ⚠️ NOT an auto-reclaim threshold. `claimCycleCharge` will NOT reset a stranded `in_flight`
+ * row to a new claimant even after this age has elapsed. Rationale (spec Fix 1 of
+ * [[../specs/a-declined-renewal-must-not-wedge-the-cycle-forever]]): if the worker crashed
+ * AFTER Braintree settled the sale but BEFORE `resolveCycleCharge` fired, the row stays
+ * `in_flight` while real money moved — an auto-reclaim would then run a SECOND sale for the
+ * same (subscription_id, cycle_key) and defeat the whole point of the ledger. Stranded
+ * in_flight rows require an explicit reconciliation/repair path that proves no external
+ * Braintree charge settled for that claim before ANY retry is allowed; this constant is the
+ * visibility threshold the monitor uses to escalate that repair, not a signal to auto-retry.
  */
 export const STALE_IN_FLIGHT_RECLAIM_MS = 10 * 60 * 1000;
 
@@ -112,20 +121,27 @@ export function cycleKeyFromNextBillingDate(nextBillingDate: string | null | und
  *   - { ok: true, resumed: false } on a fresh insert OR after atomically re-owning an existing
  *     `status='failed'` row (no Braintree sale occurred for that claim, so the cycle must remain
  *     re-claimable — see the wedge case in
- *     [[../specs/failed-cycle-charge-claim-must-not-wedge-order-now-and-renewal-retries]]) OR a
- *     stale `in_flight` row whose original claimant appears to have crashed
- *     (`STALE_IN_FLIGHT_RECLAIM_MS` past its `claimed_at`).
+ *     [[../specs/failed-cycle-charge-claim-must-not-wedge-order-now-and-renewal-retries]]).
  *   - { ok: true, resumed: true, existing } when the row already exists AND its claimant matches
  *     — an Inngest step re-run after a partial write, safe to proceed.
  *   - { ok: false, existing } when a DIFFERENT claimant already holds the key AND its status is
- *     `in_flight` (still fresh) or `succeeded` — the caller MUST refuse (either the other
- *     claimant is still running, or a real charge already resolved for this cycle).
+ *     `in_flight` (fresh OR stranded) or `succeeded` — the caller MUST refuse (either the other
+ *     claimant is still running, or a real charge already resolved for this cycle, or the prior
+ *     attempt crashed AFTER Braintree settled and only a human-verified reconciliation can
+ *     prove no money moved before a retry is allowed).
  *
- * Neither a `status='failed'` row NOR a stale `in_flight` row is a permanent block: no money
- * moved for the failed path, and a stale `in_flight` is a crashed attempt (a wedge shaped like
- * the failed case). Both trigger the compare-and-set reset below and PREPEND the prior claim to
- * `superseded_claims` so a repeatedly-declining subscription stays visible as such rather than
- * silently overwritten.
+ * Only a `status='failed'` row is auto-reclaimable — no Braintree sale ever settled for it,
+ * so a new attempt cannot double-charge. A stranded `in_flight` (crashed prior attempt) is
+ * NOT auto-reclaimed (Fix 1 of [[../specs/a-declined-renewal-must-not-wedge-the-cycle-forever]]
+ * — the pre-merge spec-test flagged the previous stale-in_flight auto-reset as a high-severity
+ * billing-idempotency regression: Braintree could have settled the sale before the worker
+ * crashed, and reclaiming would run a second sale for the same cycle). Stranded rows surface
+ * through the Control Tower renewal-wedged-cycles assertion for explicit repair.
+ *
+ * The reclaim resets `status='in_flight'` under the new claimant, clears
+ * `resolved_at`/`transaction_id`/`order_id`, and PREPENDS a snapshot of the prior failed claim
+ * to `superseded_claims` so a repeatedly-declining subscription stays visible as such rather
+ * than silently overwritten.
  *
  * Errors from the DB other than the 23505 unique violation propagate — a service failure while
  * claiming should NOT be silently treated as "safe to charge".
@@ -176,14 +192,14 @@ export async function claimCycleCharge(
     return { ok: true, id: existing.id, resumed: true, existing };
   }
 
-  const reclaim = isReclaimable(existing);
-  if (reclaim) {
-    // Atomically reset+re-own the row so the new caller (portal order-now, the next renewal
-    // cron, etc.) can proceed. Compare-and-set on the exact prior status AND the prior
-    // `claimed_at` — a concurrent thread that already reset OR that JUST landed a fresh charge
-    // stops us here (the CAS loses); the caller then falls through to the normal refusal via
+  if (isReclaimable(existing)) {
+    // Atomically reset+re-own a prior FAILED row (no Braintree sale settled → safe to retry)
+    // so the new caller (portal order-now, the next renewal cron, etc.) can proceed. Compare-
+    // and-set on the exact prior status='failed' AND the prior `claimed_at` — a concurrent
+    // thread that already reset OR any concurrent outcome that landed between SELECT and
+    // UPDATE stops us here (CAS loses); the caller falls through to the normal refusal via
     // the re-read.
-    const priorSnapshot = supersedeSnapshot(existing, reclaim.reason);
+    const priorSnapshot = supersedeSnapshot(existing);
     const nextSuperseded: SupersededClaim[] = [priorSnapshot, ...existing.superseded_claims];
     const reset = await admin
       .from("subscription_cycle_charges")
@@ -207,9 +223,8 @@ export async function claimCycleCharge(
     }
     if (reset.error) {
       throw new Error(
-        `claim_cycle_charge_reset_reclaimable_row_failed: ${reset.error.message} ` +
-          `(sub=${input.subscription_id} cycle=${input.cycle_key} row=${existing.id} ` +
-          `reason=${reclaim.reason})`,
+        `claim_cycle_charge_reset_failed_row_failed: ${reset.error.message} ` +
+          `(sub=${input.subscription_id} cycle=${input.cycle_key} row=${existing.id})`,
       );
     }
     // The CAS lost — the row moved between our SELECT and UPDATE. Re-read and route through
@@ -231,29 +246,32 @@ export async function claimCycleCharge(
 }
 
 /**
- * A prior claim is reclaimable when no money-moving action can be in progress against it:
- * either it already DECLINED (no Braintree sale seated) or it is a stranded `in_flight` past
- * `STALE_IN_FLIGHT_RECLAIM_MS` (a crashed attempt would wedge the cycle indistinguishably from
- * a failed one). Anything fresher stays refusable — a concurrent attempt may still land.
+ * A prior claim is reclaimable ONLY when it already DECLINED — `status='failed'` means no
+ * Braintree sale settled for that claim, so a new attempt cannot double-charge. Every other
+ * status refuses:
+ *
+ *  - `succeeded`  — the money already moved.
+ *  - `in_flight`  — a concurrent attempt may still land (fresh) OR the prior attempt crashed
+ *                    after Braintree settled but before `resolveCycleCharge` fired (stranded).
+ *                    Auto-reclaiming a stranded in_flight would risk a SECOND Braintree sale
+ *                    for the same cycle — see `STALE_IN_FLIGHT_RECLAIM_MS`. A stranded row
+ *                    surfaces through the Control Tower renewal-wedged-cycles assertion; the
+ *                    remediation is an explicit reconciliation/repair path that proves no
+ *                    external charge settled before any retry is allowed.
+ *
+ * Fix 1 of [[../specs/a-declined-renewal-must-not-wedge-the-cycle-forever]] narrowed reclaim
+ * to `failed` only after the pre-merge spec-test flagged the stale-in_flight auto-reset as a
+ * high-severity billing-idempotency regression.
  */
 export function isReclaimable(
   existing: Pick<CycleChargeRow, "status" | "claimed_at">,
-  now: number = Date.now(),
-): { reason: "failed" | "stale_in_flight" } | null {
+  _now: number = Date.now(),
+): { reason: "failed" } | null {
   if (existing.status === "failed") return { reason: "failed" };
-  if (existing.status === "in_flight") {
-    const claimedAtMs = new Date(existing.claimed_at).getTime();
-    if (Number.isFinite(claimedAtMs) && now - claimedAtMs > STALE_IN_FLIGHT_RECLAIM_MS) {
-      return { reason: "stale_in_flight" };
-    }
-  }
   return null;
 }
 
-function supersedeSnapshot(
-  prior: CycleChargeRow,
-  reason: "failed" | "stale_in_flight",
-): SupersededClaim {
+function supersedeSnapshot(prior: CycleChargeRow): SupersededClaim {
   return {
     claimant: prior.claimant,
     status: prior.status,
@@ -263,7 +281,7 @@ function supersedeSnapshot(
     claimed_at: prior.claimed_at,
     resolved_at: prior.resolved_at,
     superseded_at: new Date().toISOString(),
-    superseded_reason: reason,
+    superseded_reason: "failed",
   };
 }
 
