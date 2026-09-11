@@ -839,6 +839,12 @@ export async function executeMigration(
         // first-cycle clamp) charged up to months early. This is the date actually written to the
         // contract, so mirror and contract agree from birth.
         next_billing_date: nextBillingDate,
+        // ⭐ Reconcile status from the source in the same write. Appstle is authoritative until the
+        // moment we take over, and a mirror that disagrees survives the migration otherwise — a
+        // PAUSED contract with a local `active` row is selected by the renewal cron every day
+        // forever (harmless, since the attempt re-checks the live contract, but permanent no-op
+        // churn on a money cron). Measured before this: 2 of 2,478 rows disagreed.
+        status: norm.status === "PAUSED" ? "paused" : "active",
         updated_at: new Date().toISOString(),
       })
       .select("id")

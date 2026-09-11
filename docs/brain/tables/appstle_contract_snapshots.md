@@ -67,6 +67,23 @@ it cannot see discount allocations at all.
 | `effective_unit_cents` | ⭐ `discounted_total / quantity` — **the migration's actual input** |
 | `discount_allocation_count` | >0 means `current_price_cents` is misleading |
 
+## ⚠️ A snapshot ages fast — ~0.8% of contracts change status PER DAY
+
+Measured 2026-09-11 against a snapshot taken 2026-09-10: of 21 contracts whose status disagreed
+with our `subscriptions` mirror, **19 were the SNAPSHOT being stale**, not the mirror being wrong.
+Only 2 were genuine mismatches. Customers cancelled, paused and resumed overnight.
+
+Two consequences:
+
+1. **Never diff the mirror against the snapshot and conclude the mirror is wrong.** That comparison
+   measures snapshot age far more than mirror accuracy. Re-read the contested contracts live —
+   19 of 21 "mirror errors" evaporated when we did.
+2. **The mirror is good.** 2 wrong out of 2,478 is 0.08%. It is the *pricing* the mirror cannot be
+   trusted for (it stores `currentPrice`, pre-discount-allocation), not the status.
+
+This is exactly why `executeMigration` re-reads the contract fresh and runs `detectDrift` before
+writing: a plan built on a week-old snapshot would be acting on meaningfully stale state.
+
 ## Gotchas
 
 - **`raw` wins.** The typed columns are a convenience projection, re-derivable from `raw` at any
