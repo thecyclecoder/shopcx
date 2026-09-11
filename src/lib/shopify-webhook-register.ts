@@ -14,6 +14,13 @@ const WEBHOOK_TOPICS = [
   // whether to wire "orders/fulfilled" or the fulfillment_orders/* family.
   "disputes/create",
   "disputes/update",
+  // Vendor-side refund mirror. Without this topic, a refund issued in
+  // the Shopify admin writes nothing to our order_refunds ledger — the
+  // double-refund guard reads that ledger, so it goes blind on those
+  // orders (28 of 69 fully-refunded orders under-reported as of
+  // 2026-09-11). See src/lib/vendor-refund-mirror.ts +
+  // handleRefundCreate in src/lib/shopify-webhooks.ts.
+  "refunds/create",
   // Subscription billing outcomes. REST topic names, NOT the GraphQL enum
   // (SUBSCRIPTION_BILLING_ATTEMPTS_SUCCESS) — a wrong name comes back 422, which the loop
   // below used to count as "already registered". Required before ShopCX can own billing:

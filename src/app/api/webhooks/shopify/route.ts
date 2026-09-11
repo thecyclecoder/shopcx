@@ -6,6 +6,7 @@ import {
   handleOrderEvent,
   handleDisputeEvent,
   handleFulfillmentUpdate,
+  handleRefundCreate,
 } from "@/lib/shopify-webhooks";
 import { handlePaymentMethodEvent } from "@/lib/dunning-webhook";
 import { handleBillingAttemptEvent } from "@/lib/shopify-billing-attempt-webhook";
@@ -66,6 +67,14 @@ export async function POST(request: Request) {
 
       case "fulfillments/update":
         await handleFulfillmentUpdate(workspace.id, payload);
+        break;
+
+      case "refunds/create":
+        // Vendor-side refund mirror. A refund fired in the Shopify admin
+        // (or by any path that does not call refundOrder) writes NOTHING
+        // to order_refunds without this handler; the double-refund guard
+        // is blind on those orders. See src/lib/vendor-refund-mirror.ts.
+        await handleRefundCreate(workspace.id, payload);
         break;
 
       case "disputes/create":

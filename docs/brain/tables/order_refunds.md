@@ -31,7 +31,7 @@ The refund **mirror table** — one row per authoritative refund fired against a
 
 ## Invariants
 
-- **Written from the chokepoint only.** Every code path that fires a refund resolves to [[../libraries/refund]] `refundOrder`; the mirror row is written there and nowhere else, so no path can move money without an audit row.
+- **Live-fire writes come from two chokepoints — never freehand.** Refunds ShopCX itself dispatches resolve to [[../libraries/refund]] `refundOrder`, which writes the mirror row on the success side (`vendor_refund_id` = the vendor's own id). Refunds fired at the vendor (Shopify admin, or any path that does not call `refundOrder`) reach the ledger through [[../libraries/vendor-refund-mirror]] — primarily via the `refunds/create` webhook ([[../libraries/shopify-webhooks]] `handleRefundCreate`), with an `orders/updated` REST reconcile as the fallback for anything the webhook missed. Both paths write the SAME row shape (`vendor` / `amount_cents` / `status` / `vendor_refund_id` / stable `request_key`), so the double-refund guard reads a complete ledger. The vendor path dedupes on `vendor_refund_id` before insert, so an echo of a refund `refundOrder` already mirrored never lands a duplicate.
 - **`vendor` mirrors the dispatch decision.** Internal / Shopify-order-paid-via-dead-Braintree-gateway ⇒ `braintree`; native Shopify REST refund ⇒ `shopify`. Never inferred from the order's `financial_status`.
 - **`request_key` is required and stable.** Same-shape retry ⇒ same key ⇒ the unique index short-circuits it. The default hash covers `(order_id, amount_cents, reason)` — a caller that legitimately fires two same-shape refunds MUST thread an explicit `requestKey` through `RefundOrderOptions`.
 - **Handlers thread an action-scoped key.** `action-executor.ts` `partial_refund`, `redeem_points_as_refund`, and `dollar_replacement` compute `hashActionRefundKey("ticket", ctx.ticketId, order_id, amount_cents, reason)`; `returnsIssueRefund` computes `hashActionRefundKey("return", return_id, order_id, amount_cents, reason)` — see [[../libraries/refund]] Phase 2. Two different tickets legitimately refunding the same shape get distinct keys and both fire; a retry of the same action reuses the key and short-circuits at the pre-dispatch guard.
@@ -74,4 +74,4 @@ order by requested_at desc;
 
 ---
 
-[[../README]] · [[orders]] · [[../libraries/refund]] · [[../libraries/refund-ledger]] · [[../inngest/refund-settlement-reconcile]] · [[../specs/refund-integrity-order-refunds-mirror-verify-by-id-settlement-reconcile]] · [[../../CLAUDE]]
+[[../README]] · [[orders]] · [[../libraries/refund]] · [[../libraries/refund-ledger]] · [[../libraries/vendor-refund-mirror]] · [[../libraries/shopify-webhooks]] · [[../libraries/shopify-webhook-register]] · [[../inngest/refund-settlement-reconcile]] · [[../specs/refund-integrity-order-refunds-mirror-verify-by-id-settlement-reconcile]] · [[../../CLAUDE]]
