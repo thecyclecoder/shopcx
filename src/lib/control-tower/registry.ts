@@ -124,6 +124,12 @@ export type OutputAssertionId =
   | "spec-test-persisted"
   | "renewal-integrity"
   | "renewal-outcome-distribution"
+  // Phase 3 of docs/brain/specs/a-declined-renewal-must-not-wedge-the-cycle-forever.md — count
+  // active subscriptions whose CURRENT cycle_key has a non-succeeded subscription_cycle_charges
+  // row that has persisted past the SDK's reclaim threshold (a fresh in_flight is a legitimate
+  // in-progress charge and NOT wedged). Post-Phase-1 this reads zero; the assertion exists to
+  // catch the next variant of the same class rather than only the exact 2026-10-04 shape.
+  | "renewal-wedged-cycles"
   | "stuck-dunning"
   | "migration-drift"
   | "segment-coverage";
@@ -504,8 +510,11 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "daily (0 9 * * *)",
     livenessWindowMs: 30 * HOUR,
     // renewal-integrity (overdue subs never advanced) + outcome-distribution (the cron ran +
-    // each decline "routed correctly" but the per-cycle outcome mix is systemically broken / spiking).
-    outputAssertions: ["renewal-integrity", "renewal-outcome-distribution"],
+    // each decline "routed correctly" but the per-cycle outcome mix is systemically broken /
+    // spiking) + renewal-wedged-cycles (active subs whose CURRENT cycle_key has a persistent
+    // non-succeeded subscription_cycle_charges row — Phase 3 of a-declined-renewal-must-not-
+    // wedge-the-cycle-forever).
+    outputAssertions: ["renewal-integrity", "renewal-outcome-distribution", "renewal-wedged-cycles"],
   },
   {
     id: "social-scheduler-plan",
