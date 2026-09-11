@@ -2732,14 +2732,24 @@ export const directActionHandlers: Record<
       // requirement so the verification grep can find the clamp point.
       const overchargeDelta = signal.delta;
       if (p.amount_cents > overchargeDelta + 100) {
-        // Over-ask: clamp to the signal-computed delta and log so the
-        // divergence is visible (the r.aycock case: agent asked for
-        // remediation of the order total instead of the per-unit delta).
-        console.log(
-          `partial_refund: clamping agent-proposed $${(p.amount_cents / 100).toFixed(2)} to overchargeDelta $${(overchargeDelta / 100).toFixed(2)} on order ${p.shopify_order_id} (subscription ${orderSubscriptionId})`,
+        // Over-ask: refuse. The old branch was silently clamping
+        // agent-proposed amounts DOWN to overchargeDelta and returning
+        // success, so the caller then shipped a response_message
+        // claiming the ORIGINAL requested figure was on its way
+        // (SC137733: $52.91 requested, $5.01 refunded, customer told
+        // $52.91). A reduced refund reported as success is the worst
+        // shape a money bug can take — surface it as a failure so the
+        // reply path skips response_message and the ticket escalates.
+        // The under-ask branch below still allows partial goodwill, and
+        // `full_order_refund` gives founder-authorised full refunds a
+        // sanctioned route that doesn't invent a number.
+        console.warn(
+          `partial_refund: refusing — would have been silently clamping agent-proposed $${(p.amount_cents / 100).toFixed(2)} to overchargeDelta $${(overchargeDelta / 100).toFixed(2)} on order ${p.shopify_order_id} (subscription ${orderSubscriptionId}); refused instead so no success-shaped reply can ship on a reduced refund.`,
         );
-        overchargeNote = ` (agent-proposed $${(p.amount_cents / 100).toFixed(2)} clamped to signal-computed overchargeDelta $${(overchargeDelta / 100).toFixed(2)})`;
-        refundCents = overchargeDelta;
+        return {
+          success: false,
+          error: `Refusing partial_refund on order ${p.shopify_order_id}: requested $${(p.amount_cents / 100).toFixed(2)} exceeds the signal-computed overchargeDelta $${(overchargeDelta / 100).toFixed(2)} — a downward correction of a caller-supplied amount can't be reported as success. Use full_order_refund for a founder-authorised refund of the order's collected total.`,
+        };
       } else if (overchargeDelta - p.amount_cents >= 100) {
         // Under-ask: allowed as partial goodwill, but recorded — a systematic
         // under-refund is how customers end up owed money with the ticket
@@ -2848,6 +2858,80 @@ export const directActionHandlers: Record<
       // 8203dfe0 (May 5), Amanda Lederman's $6.95 shipping refund. Reports
       // the actually-executed cents (post-clamp) so downstream copy matches
       // what moved.
+      refundAmountCents: r.success ? refundCents : undefined,
+    };
+  },
+
+  // Sanctioned route for a founder-authorised full-order refund. The
+  // amount refunded is the order's own collected total (`orders.total_cents`)
+  // — a verifiable, non-invented number — so the handler doesn't need
+  // (or accept) an agent-supplied `amount_cents`. This exists so a
+  // legitimate "refund what you charged me" case isn't forced through
+  // `partial_refund`, where the caller either has to invent a figure the
+  // overcharge clamp would refuse OR try to bypass the guard (the shape
+  // the SC137733 incident ended in). Reuses the same order_refunds
+  // idempotency mirror as partial_refund.
+  full_order_refund: async (ctx, p) => {
+    const { refundOrder, hashActionRefundKey } = await import("@/lib/refund");
+    const reason = p.reason || "Full order refund — founder-authorised";
+
+    if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
+
+    const oid = String(p.shopify_order_id);
+    const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
+    const { data: ord } = await ctx.admin
+      .from("orders")
+      .select("id, total_cents")
+      .eq(orderMatch.col, orderMatch.val)
+      .eq("workspace_id", ctx.workspaceId)
+      .maybeSingle();
+    if (!ord?.id) return { success: false, error: `Order not found for ${oid}` };
+
+    const refundCents = Number((ord as { total_cents?: number | null }).total_cents ?? 0);
+    if (!refundCents || refundCents <= 0) {
+      return { success: false, error: `Order ${oid} has no collected total to refund` };
+    }
+    const amountDecimal = (refundCents / 100).toFixed(2);
+
+    const requestKey = hashActionRefundKey("ticket", ctx.ticketId, ord.id, refundCents, reason);
+    const { data: existing } = await ctx.admin
+      .from("order_refunds")
+      .select("id, vendor_refund_id, status, amount_cents")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("order_id", ord.id)
+      .eq("request_key", requestKey)
+      .in("status", ["succeeded", "settled"])
+      .maybeSingle();
+    if (existing) {
+      return {
+        success: true,
+        summary: `Full order refund of $${amountDecimal} already fired (${reason})${existing.vendor_refund_id ? ` — txn ${existing.vendor_refund_id}` : ""}`,
+        refundAmountCents: existing.amount_cents ?? refundCents,
+      };
+    }
+
+    const r = await refundOrder(ctx.workspaceId, ord.id, refundCents, reason, {
+      source: "ai",
+      customerId: ctx.customerId,
+      eventProperties: { ticket_id: ctx.ticketId, full_order: true },
+      requestKey,
+    });
+    if (r.success) {
+      await notifySlack(ctx, { ...p, amount_cents: refundCents }, amountDecimal);
+    }
+    let methodNote = "";
+    if (r.success && r.method === "braintree") {
+      methodNote = ` — refunded directly via Braintree${r.refund_id ? ` (txn ${r.refund_id})` : ""}${r.needsManualShopifyRecord ? "; Shopify record needs manual reconciliation" : ", recorded on the Shopify order"}`;
+    }
+    return {
+      success: r.success,
+      error: r.error,
+      alreadyPending: r.alreadyPending,
+      summary: r.success
+        ? `Full order refund of $${amountDecimal} issued (${reason})${methodNote}`
+        : r.alreadyPending
+          ? `Refund already in progress on this order — ${r.error}`
+          : undefined,
       refundAmountCents: r.success ? refundCents : undefined,
     };
   },
@@ -4678,6 +4762,7 @@ export async function verifyActionInDB(
       return data?.status === "active";
     }
     case "partial_refund":
+    case "full_order_refund":
     case "redeem_points_as_refund": {
       // Check if order financial_status changed
       if (!action.shopify_order_id) return true;

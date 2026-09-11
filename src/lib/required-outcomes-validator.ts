@@ -58,6 +58,7 @@ export const ALLOWED_OUTCOME_KINDS: ReadonlySet<string> = new Set<string>([
   "add_bag_to_next_order",
   // order-scoped
   "partial_refund",
+  "full_order_refund",
   "redeem_points_as_refund",
   "create_return",
   "create_replacement",
@@ -96,6 +97,7 @@ const KIND_TARGET_SHAPE: Record<string, TargetShape> = {
   update_line_item_price: { needs_contract: true },
   add_bag_to_next_order: { needs_contract: true },
   partial_refund: { needs_order: true },
+  full_order_refund: { needs_order: true },
   redeem_points_as_refund: { needs_order: true },
   create_return: { needs_order: true },
   create_replacement: { needs_order: true },
