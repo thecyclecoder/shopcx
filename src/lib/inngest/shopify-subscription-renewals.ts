@@ -39,6 +39,7 @@ import {
   awaitBillingAttempt,
 } from "@/lib/commerce/shopify-subscription-client";
 import { enforceSwitch } from "@/lib/control-tower/enforce-switch";
+import { rollForwardToFutureBillingDate } from "@/lib/dunning";
 import { errText } from "@/lib/error-text";
 
 /** A cycle whose expected date has passed by less than this is still "due now", not overdue. */
@@ -193,13 +194,14 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
     const sub = await step.run("load-subscription", async () => {
       const { data } = await admin
         .from("subscriptions")
-        .select("id, workspace_id, shopify_contract_id, status, next_billing_date, billing_source, customer_id, shopify_customer_id")
+        .select("id, workspace_id, shopify_contract_id, status, next_billing_date, billing_source, customer_id, shopify_customer_id, billing_interval, billing_interval_count")
         .eq("id", subscription_id)
         .maybeSingle();
       return data as {
         id: string; workspace_id: string; shopify_contract_id: string; status: string;
         next_billing_date: string | null; billing_source: string; customer_id: string | null;
         shopify_customer_id: string | null;
+        billing_interval: string | null; billing_interval_count: number | null;
       } | null;
     });
 
@@ -342,29 +344,34 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
         return resolveCycleCharge(admin, claim.id, { status: "succeeded", order_id: orderUuid });
       });
       await step.run("advance-next-billing-date", async () => {
-        const next = await getSubscriptionContract(workspace_id, sub.shopify_contract_id);
-        const cycles = await getUpcomingBillingCycles(workspace_id, sub.shopify_contract_id, { first: 6 });
-        // ⭐ Must be STRICTLY AFTER the cycle we just charged. `now` still sits inside that cycle,
-        // so it comes back in this page — and if its status has not flipped to BILLED yet
-        // (read-after-write lag) a bare `find(UNBILLED)` returns the cycle we just billed. We would
-        // re-arm the same date, resolve BILLED tomorrow, and skip forever.
-        const upcoming = (cycles.cycles ?? []).find(
-          (c) => c.status === "UNBILLED" && !c.skipped && new Date(c.expectedDate).getTime() > new Date(plan.expectedDate).getTime(),
+        // ⭐ Advance by the customer's OWN cadence, anchored to the date they were DUE — never to
+        // Shopify's cycle calendar.
+        //
+        // `billingAttemptExpectedDate` is the cycle END, so advancing to the next cycle's expected
+        // date is only correct if we charged AT the previous cycle's end. A migrated contract's
+        // calendar is re-anchored to its createdAt, so its first charge lands early inside cycle 1
+        // and the next cycle's end is most of an extra interval away. Measured on 35945087149:
+        // charged 2026-09-11, next cycle ended 2026-12-31 — a 111-day gap on a 56-day cadence,
+        // i.e. roughly one whole interval of revenue deferred, per migrated subscription.
+        //
+        // Anchoring to `dueDate` rather than to "now" also means a LATE charge (dunning recovery,
+        // a retried run) does not permanently shift the customer's rhythm forward.
+        //
+        // We resolve cycles BY DATE, so there is no need to sit on Shopify's boundaries — the
+        // selector finds whichever cycle contains whatever date we set.
+        const anchor = new Date(plan.dueDate);
+        const advanceTo = rollForwardToFutureBillingDate(
+          anchor,
+          sub.billing_interval ?? "month",
+          sub.billing_interval_count ?? 1,
         );
-        // ⚠️ NO fallback to contract.nextBillingDate: Shopify never advances it, so that would
-        // write back the very date we just charged. Leaving the date alone is recoverable and
-        // visible to the renewal-integrity assertion; silently re-arming it is neither.
-        const advanceTo = upcoming?.expectedDate ?? null;
-        if (!advanceTo) {
-          console.error(`[shopcx-renewal] charged ${sub.shopify_contract_id} but found no cycle after ${plan.expectedDate} — date NOT advanced, needs attention`);
-          return;
-        }
         await admin
           .from("subscriptions")
           // `succeeded`, not "paid" — the vocabulary the rules engine and the dashboard badge use.
-          .update({ next_billing_date: advanceTo, last_payment_status: "succeeded", updated_at: new Date().toISOString() })
+          .update({ next_billing_date: advanceTo.toISOString(), last_payment_status: "succeeded", updated_at: new Date().toISOString() })
           .eq("id", sub.id);
       });
+
       await step.run("beat-charged", () => emitReactiveHeartbeat(ATTEMPT_FN_ID, { produced: { outcome: "charged" } }));
       return { status: "charged", order: charged.orderName, cycle_key: cycleKey };
     }

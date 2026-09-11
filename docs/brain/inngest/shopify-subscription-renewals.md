@@ -36,7 +36,7 @@ So:
 | pick CANDIDATES | ours (`next_billing_date <= end of today`) — cheap, O(due) |
 | decide what is DUE | **Shopify** — the cycle CONTAINING our date (`selector: { date }`), which must be `UNBILLED` and unskipped |
 | charge | Shopify, targeting that cycle index explicitly |
-| advance | Shopify's next unbilled cycle, not arithmetic on our field |
+| advance | **the customer's own cadence from the date they were DUE** — never Shopify's cycle calendar |
 
 A wrong local date therefore makes a charge **late** (which the migration audit catches) but never
 **wrong**.
@@ -58,6 +58,32 @@ A customer migrated today and due to renew tomorrow would simply never be charge
 cycle by DATE (`selector: { date: next_billing_date }`) returns the containing cycle regardless of
 where the calendar was anchored, and its `status` doubles as Shopify's own idempotency signal —
 `BILLED` means that cycle already charged, whoever did it.
+
+## ⭐ Advancing: cadence, not calendar
+
+`billingAttemptExpectedDate` is the cycle **END**, so advancing to the next cycle's expected date is
+only correct if the charge happened AT the previous cycle's end. A migrated contract's calendar is
+re-anchored to its `createdAt`, so its first charge lands early inside cycle 1 and the next cycle's
+end is most of an extra interval away.
+
+Measured on 35945087149 — the first real end-to-end renewal:
+
+```
+charged      2026-09-11   (cycle 1 runs 09-10 → 11-05)
+cycle-end advance → 2026-12-31    111 days on a 56-day cadence
+cadence advance   → 2026-11-06    +56 days ✅
+```
+
+That is ~**one whole billing interval deferred, per migrated subscription** — invisible in a
+per-cycle revenue figure, because it changes *when* cycles land rather than what they cost.
+
+Two details that matter:
+- **Anchor to `dueDate`, not to `now`.** A late charge (dunning recovery, a retried run) must not
+  permanently drag the customer's rhythm forward; rolling by whole intervals from the scheduled date
+  keeps them on their original days.
+- **We are free to ignore Shopify's boundaries** because cycles are resolved BY DATE — the selector
+  finds whichever cycle contains whatever date we set. Migrated subs renew on scattered days, and
+  carrying each customer's real date across is the entire point.
 
 ## Flow
 

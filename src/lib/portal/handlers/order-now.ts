@@ -94,19 +94,23 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
     // its own, so the sub silently stops earning and the skip is indistinguishable from a healthy
     // "nothing due" beat.
     {
-      const { getUpcomingBillingCycles } = await import("@/lib/commerce/shopify-subscription-client");
+      // ⭐ Advance by the customer's OWN cadence, not to Shopify's next cycle END. Its calendar is
+      // anchored to the contract's createdAt, so the next cycle's end can be most of an extra
+      // interval away — one whole interval of revenue deferred per charge.
+      //
+      // Anchored to `due` (the date they were scheduled for) rather than to now, so an early
+      // "order now" does not permanently pull the customer's whole schedule forward.
+      const { rollForwardToFutureBillingDate } = await import("@/lib/dunning");
       const admin = createAdminClient();
-      const cycles = await getUpcomingBillingCycles(auth.workspaceId, String(contractId), { first: 6 });
-      const nextUnbilled = (cycles.cycles ?? []).find(
-        (c) => c.status === "UNBILLED" && !c.skipped && (!due || new Date(c.expectedDate).getTime() > new Date(due).getTime()),
+      const r = resolved as { billing_interval?: string | null; billing_interval_count?: number | null };
+      const advanceTo = rollForwardToFutureBillingDate(
+        new Date(due ?? new Date().toISOString()),
+        r.billing_interval ?? "month",
+        r.billing_interval_count ?? 1,
       );
-      if (nextUnbilled) {
-        await admin.from("subscriptions")
-          .update({ next_billing_date: nextUnbilled.expectedDate, last_payment_status: "succeeded", updated_at: new Date().toISOString() })
-          .eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId));
-      } else {
-        console.error(`[portal order-now] charged ${contractId} but found no cycle after ${due} — date NOT advanced, needs attention`);
-      }
+      await admin.from("subscriptions")
+        .update({ next_billing_date: advanceTo.toISOString(), last_payment_status: "succeeded", updated_at: new Date().toISOString() })
+        .eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId));
     }
 
     const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
