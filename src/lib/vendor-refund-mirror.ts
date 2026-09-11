@@ -78,6 +78,49 @@ export function parseShopifyRefundPayload(
   };
 }
 
+// Stable request_key for a backfill-from-financial-status insert.
+// Keyed on the internal order id (one gap-fill row per order at most),
+// so re-running the backfill collides on the unique index and is a
+// no-op — that's the SC137733 idempotency proof the spec cites.
+export function backfillFromFinancialStatusRequestKey(orderId: string): string {
+  return `backfill:financial_status:${orderId}`;
+}
+
+export interface BackfillGapInputs {
+  financialStatus: string | null;
+  totalCents: number | null;
+  mirroredSuccessSettledCents: number | null;
+}
+
+export type BackfillGapDecision =
+  | { skip: false; gapCents: number }
+  | { skip: true; reason: "not_fully_refunded" | "no_total" | "already_covered" | "over_total" };
+
+/**
+ * Per-order backfill decision. Pure — no I/O. The spec's exact rule:
+ *   - Only `financial_status = 'refunded'` (case-insensitive) qualifies;
+ *     `partially_refunded` is skipped (no unambiguous expected value).
+ *   - `gap = total_cents - sum(succeeded/settled order_refunds)`; skip
+ *     when the ledger already covers the total.
+ *   - Refuse to write a row that would exceed `total_cents` (defensive
+ *     — impossible under `gap = total - sum` arithmetic, but the check
+ *     is explicit per the spec: "the backfill must refuse to write a
+ *     row that would exceed total_cents").
+ */
+export function decideFinancialStatusBackfill(
+  input: BackfillGapInputs,
+): BackfillGapDecision {
+  const status = String(input.financialStatus ?? "").toLowerCase();
+  if (status !== "refunded") return { skip: true, reason: "not_fully_refunded" };
+  const total = Number(input.totalCents ?? 0);
+  if (!Number.isFinite(total) || total <= 0) return { skip: true, reason: "no_total" };
+  const existing = Math.max(0, Number(input.mirroredSuccessSettledCents ?? 0) | 0);
+  const gap = total - existing;
+  if (gap <= 0) return { skip: true, reason: "already_covered" };
+  if (existing + gap > total) return { skip: true, reason: "over_total" };
+  return { skip: false, gapCents: gap };
+}
+
 // Stable, vendor-scoped request_key for a Shopify refund. Using the
 // refund id (unique per refund at Shopify) keeps a re-delivered webhook
 // idempotent via the (order_id, request_key) unique index. Distinct from

@@ -46,16 +46,34 @@ function shopifyRefundRequestKey(shopifyRefundId: string) : string
 
 Returns `shopify_refund:${shopifyRefundId}`. Distinct from [[refund]] `hashRefundRequestKey` (which keys on `(order_id, amount, reason)`) on purpose — the webhook carries the vendor's own refund id, and keying on that id is what makes a re-delivered webhook idempotent.
 
+### `decideFinancialStatusBackfill` — function
+
+```ts
+function decideFinancialStatusBackfill(input) : BackfillGapDecision
+```
+
+Pure predicate that drives `scripts/_backfill-order-refunds-from-financial-status.ts`. Given `financial_status` + `total_cents` + the current `succeeded/settled` mirror sum, returns either the gap to write or a `skip` reason (`not_fully_refunded` | `no_total` | `already_covered` | `over_total`). Only `financial_status='refunded'` (case-insensitive) qualifies — `partially_refunded` is legitimately below its total, so it has no unambiguous gap to infer. Refuses to compute a gap that would push the ledger past `total_cents`.
+
+### `backfillFromFinancialStatusRequestKey` — function
+
+```ts
+function backfillFromFinancialStatusRequestKey(orderId: string) : string
+```
+
+Returns `backfill:financial_status:${orderId}`. Stable per order, so a re-run of the backfill collides on the `(order_id, request_key)` unique index and is a no-op — the SC137733 idempotency proof the spec cites.
+
 ## Callers
 
 - `src/lib/shopify-webhooks.ts` — `handleRefundCreate` + the `handleOrderEvent` fallback reconcile.
+- `scripts/_backfill-order-refunds-from-financial-status.ts` — the Phase 2 historical gap-closer.
 
 ## Invariants
 
 - **Records only refunds the vendor already completed.** No `hasSuccessfulTransaction` ⇒ no row. Pending-only refunds are picked up when they land as a follow-up `refunds/create` with a succeeded transaction (or by the T+3d [[../inngest/refund-settlement-reconcile]]).
 - **Money never moves here.** This module is ledger-only.
-- **`source='live'`** — every row this file writes counts as a live-fire mirror, indistinguishable in shape from [[refund]] `refundOrder`'s own writes. `source='backfill'` rows come from the `scripts/backfill-order-refunds-*` scripts (see [[../specs/backfill-order-refunds-ledger-from-history]]).
+- **`source='live'` for the webhook + reconcile paths.** Rows this file writes on the runtime paths (`insertShopifyRefundMirror`, `reconcileShopifyRefundsForOrder`) are indistinguishable in shape from [[refund]] `refundOrder`'s own writes. `source='backfill'` rows come from the `scripts/backfill-order-refunds-*` / `scripts/_backfill-order-refunds-*` scripts (see [[../specs/backfill-order-refunds-ledger-from-history]] and the Phase-2 gap-closer `scripts/_backfill-order-refunds-from-financial-status.ts`).
 - **`status='succeeded'`.** Terminal Phase-1 state. Phase 3 T+3d reconcile ([[../inngest/refund-settlement-reconcile]]) is what flips `succeeded → settled` and catches `reversed`.
+- **Backfill only from an unambiguous expected value.** `decideFinancialStatusBackfill` returns a gap ONLY on `financial_status='refunded'` — never on `partially_refunded`, where the vendor has legitimately refunded some portion and the true expected value is unknown. Every backfilled row lands with `status='settled'` (historical refund; already landed) and `vendor_refund_id=null` (the order's status is the evidence, but the specific vendor id is not derivable from the order alone).
 
 ## Gotchas
 

@@ -111,8 +111,13 @@ moduleAny._cache[require.resolve("@/lib/supabase/admin")] = {
 };
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { parseShopifyRefundPayload, insertShopifyRefundMirror, shopifyRefundRequestKey } =
-  require("@/lib/vendor-refund-mirror") as typeof import("./vendor-refund-mirror");
+const {
+  parseShopifyRefundPayload,
+  insertShopifyRefundMirror,
+  shopifyRefundRequestKey,
+  decideFinancialStatusBackfill,
+  backfillFromFinancialStatusRequestKey,
+} = require("@/lib/vendor-refund-mirror") as typeof import("./vendor-refund-mirror");
 
 test("parseShopifyRefundPayload sums only succeeded/pending refund transactions", () => {
   const parsed = parseShopifyRefundPayload({
@@ -226,4 +231,96 @@ test("insertShopifyRefundMirror refuses to write a zero-amount row (vendor didn'
   const result = await insertShopifyRefundMirror(WORKSPACE_ID, parsed!);
   assert.equal(result.inserted, false);
   assert.equal(ledger.length, 0);
+});
+
+// ── Phase 2: backfill decision predicate ─────────────────────────────
+
+test("decideFinancialStatusBackfill: writes the gap for a fully-refunded order with no ledger record", () => {
+  const decision = decideFinancialStatusBackfill({
+    financialStatus: "refunded",
+    totalCents: 3000,
+    mirroredSuccessSettledCents: 0,
+  });
+  assert.equal(decision.skip, false);
+  if (!decision.skip) assert.equal(decision.gapCents, 3000);
+});
+
+test("decideFinancialStatusBackfill: writes the gap when the ledger is partial", () => {
+  const decision = decideFinancialStatusBackfill({
+    financialStatus: "refunded",
+    totalCents: 3000,
+    mirroredSuccessSettledCents: 1000,
+  });
+  assert.equal(decision.skip, false);
+  if (!decision.skip) assert.equal(decision.gapCents, 2000);
+});
+
+test("decideFinancialStatusBackfill: SC137733 idempotency proof — a hand-reconciled order is skipped", () => {
+  // The spec explicitly names SC137733 as reconciled by hand on 2026-09-11.
+  // After reconciliation, its mirrored sum matches total_cents, so the
+  // decision predicate must skip it with `already_covered` — that's the
+  // proof the backfill is idempotent on a row it already covered.
+  const decision = decideFinancialStatusBackfill({
+    financialStatus: "refunded",
+    totalCents: 4500,
+    mirroredSuccessSettledCents: 4500,
+  });
+  assert.equal(decision.skip, true);
+  if (decision.skip) assert.equal(decision.reason, "already_covered");
+});
+
+test("decideFinancialStatusBackfill: skips partially_refunded (no unambiguous expected value)", () => {
+  const decision = decideFinancialStatusBackfill({
+    financialStatus: "partially_refunded",
+    totalCents: 3000,
+    mirroredSuccessSettledCents: 0,
+  });
+  assert.equal(decision.skip, true);
+  if (decision.skip) assert.equal(decision.reason, "not_fully_refunded");
+});
+
+test("decideFinancialStatusBackfill: accepts mixed-case 'REFUNDED' (Shopify's raw casing)", () => {
+  const decision = decideFinancialStatusBackfill({
+    financialStatus: "REFUNDED",
+    totalCents: 1000,
+    mirroredSuccessSettledCents: 0,
+  });
+  assert.equal(decision.skip, false);
+  if (!decision.skip) assert.equal(decision.gapCents, 1000);
+});
+
+test("decideFinancialStatusBackfill: skips an over-mirrored order (defensive over_total guard)", () => {
+  const decision = decideFinancialStatusBackfill({
+    financialStatus: "refunded",
+    totalCents: 1000,
+    mirroredSuccessSettledCents: 1500,
+  });
+  assert.equal(decision.skip, true);
+  if (decision.skip) assert.equal(decision.reason, "already_covered");
+});
+
+test("decideFinancialStatusBackfill: skips when total_cents is 0 or missing", () => {
+  assert.equal(
+    decideFinancialStatusBackfill({
+      financialStatus: "refunded",
+      totalCents: 0,
+      mirroredSuccessSettledCents: 0,
+    }).skip,
+    true,
+  );
+  assert.equal(
+    decideFinancialStatusBackfill({
+      financialStatus: "refunded",
+      totalCents: null,
+      mirroredSuccessSettledCents: 0,
+    }).skip,
+    true,
+  );
+});
+
+test("backfillFromFinancialStatusRequestKey is stable per order_id (idempotent re-runs)", () => {
+  const a = backfillFromFinancialStatusRequestKey("22222222-2222-2222-2222-222222222222");
+  const b = backfillFromFinancialStatusRequestKey("22222222-2222-2222-2222-222222222222");
+  assert.equal(a, b);
+  assert.equal(a, "backfill:financial_status:22222222-2222-2222-2222-222222222222");
 });
