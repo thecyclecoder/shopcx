@@ -9,7 +9,7 @@ Phase 2 of [[../specs/confidence-gated-problem-lockin-and-selective-clarify]]. W
 ## Exports
 
 - `DEFAULT_CLARIFY_CONFIDENCE_THRESHOLD` — `0.7`, aligned with the problem-lockin default on [[../tables/ai_channel_config]] so the two thresholds move together.
-- `DEFAULT_IRREVERSIBLE_SET` — `{partial_refund, cancel, bill_now, subscriptionOrderNow}`. Actions whose blast radius is real money / a broken subscription / a lost billing cycle.
+- `DEFAULT_IRREVERSIBLE_SET` — `{partial_refund, full_order_refund, cancel, bill_now, subscriptionOrderNow}`. Actions whose blast radius is real money / a broken subscription / a lost billing cycle. `full_order_refund` refunds the order's collected total and requires founder approval; it is irreversible and high-stakes.
 - `shouldClarify(input, opts?)` — pure predicate: `true` iff confidence < threshold AND at least one action's `type` is in the irreversible set. Non-triggers pinned by unit test: null/absent confidence, reversible-only batch, high confidence on an irreversible action.
 - `buildClarificationMessage(actions)` — plain-text confirmation copy ("Just to confirm before I refund $X, is that right?"). No markdown (CLAUDE.md AI response rule).
 - `loadIrreversibleSet(admin, workspaceId)` — reads the `policies` row where `slug='irreversible_actions'` (rules JSONB: `[{action: "type"}, ...]`) so a workspace can override the default without a code change. Missing / malformed → the default set (a broken policy edit can never disable the gate).
@@ -21,7 +21,7 @@ Phase 2 of [[../specs/confidence-gated-problem-lockin-and-selective-clarify]]. W
 
 ## Tests
 
-`src/lib/selective-clarify.test.ts` pins the spec's Phase-2 verification pair: low-confidence × irreversible partial_refund → clarify; low-confidence × reversible apply_coupon → execute. Run: `npx tsx --test src/lib/selective-clarify.test.ts`.
+`src/lib/selective-clarify.test.ts` pins the spec's Phase-2 verification pair: low-confidence × irreversible `partial_refund` or `full_order_refund` → clarify; low-confidence × reversible `apply_coupon` → execute. Run: `npx tsx --test src/lib/selective-clarify.test.ts`.
 
 ## Related
 
