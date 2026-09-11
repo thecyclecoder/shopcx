@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Replacements must work for internally-billed (non-Shopify) subscription renewal orders** · verified 2026-09-10 · → [[../libraries/replacement-order]]
 - **A fraud ban must not manufacture a ticket arguing to reverse it** · verified 2026-09-08 · → [[../lifecycles/fraud-detection]] + [[../libraries/portal__route]] + [[../libraries/cs-director]]
 - **Confirming fraud must ban the whole linked cluster, not one account** · verified 2026-09-08 · → [[lifecycles/fraud-detection]]
 - **Mario's failed-build source must skip specs already owned by an init_loop_guard escalation** · verified 2026-09-08 · → [[../lifecycles/mario-pipeline-plumbing]]
