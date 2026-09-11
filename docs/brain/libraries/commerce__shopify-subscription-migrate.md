@@ -114,20 +114,45 @@ variant. The plan is pre-code while the live contract already has the carried co
 compared duplicates against the first live line. Both defects aborted the migration — and an abort
 brands the contract permanently via `migrated_to_contract_id`.
 
-## Known-open (measured, not fixed)
+## Hard-won invariants (each of these was a real defect first)
 
-- **The Appstle-cancel read-back fails open.** A failed verification fetch (`ok:false` — rate
-  limit, network, Appstle's HTML-for-unknown-route) is treated as a successful cancel. The sweeper's
-  repair path re-cancels with no read-back at all, so a false success is stamped complete on the
-  same false success that produced it.
-- **A create that succeeds server-side but fails client-side leaves an untracked contract.** The
-  marker is written after a *reported* success, so a lost response still allows a duplicate on
-  retry — the `35945087149 + 35945054381` case.
-- **6 contracts resolve to an incomplete shipping address** and are created anyway.
-- **3 partially-consumed limited codes are re-granted in full** (`limit` carried verbatim while
-  `usageCount` resets).
-- **3 rows are PAUSED in Appstle but `active` locally** — no charge risk (the attempt checks live
-  contract status) but permanent no-op churn on a money cron.
+- **The Appstle-cancel verification fails CLOSED.** It once read `after.ok && status !== "CANCELLED"`,
+  so a verification we could not *perform* (rate limit, network, Appstle's HTML-for-unknown-route)
+  counted as one that passed. The sweeper's repair path had no read-back at all, so a false success
+  was stamped complete on the same false success that produced it — and a stamped row leaves the
+  sweeper's query forever. Both now verify, and refuse to stamp when they cannot.
+- **The create attempt is stamped BEFORE the call.** `migrated_to_contract_id` is written after a
+  *reported* success, so a create Shopify committed whose response was lost left no trace and a
+  retry duplicated it (35945087149 + 35945054381). With `migration_attempted_at`, a retry queries
+  the customer's contracts created since that stamp and ADOPTS the orphan — or refuses if more than
+  one is found. Marker write failures now abort rather than being discarded.
+- **An incomplete shipping address BLOCKS, at plan time.** `MailingAddressInput` requires nothing,
+  so Shopify accepts a half-address and the box has nowhere to go. Validated by ONE resolver shared
+  by planner and executor — when only the executor checked, the planner counted those contracts as
+  migratable and they failed at write time.
+- **A partially-consumed code carries its REMAINING cycles.** `usageCount` resets to 0 on a new
+  contract, so copying `recurringCycleLimit` verbatim re-granted the whole run — a code at 2 of 3
+  gave 3 more cycles instead of 1.
+
+## Blocked population (19 of 2,478)
+
+```
+no_payment_method                            11
+contract_cancelled                            2
+incomplete_address:lastName                   3
+incomplete_address:city+lastName              1
+incomplete_address:address1+city+lastName     1
+no_lines_after_rules                          1
+```
+
+## Still open
+
+- **3 rows are PAUSED in Appstle but `active` locally.** No charge risk — the renewal attempt checks
+  the live contract status — but permanent no-op churn on a money cron.
+- **13 protection lines carry a source discount allocation**, baked into `baseCents`; a carried
+  contract-level code then allocates to that line again. Cents-scale.
+- **Structural discounts have no `recurringCycleLimit`**, so they persist — intended, but nothing
+  re-verifies pricing over a contract's life.
 
 ## Related
 

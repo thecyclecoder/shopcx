@@ -138,6 +138,31 @@ export function shopifyLineMath(
   };
 }
 
+/**
+ * Resolve the shipping address a migrated contract will use, and say whether it can actually ship.
+ *
+ * Shared by the planner and the executor ON PURPOSE. When only the executor validated, the planner
+ * reported these contracts as migratable and they failed at write time — so the population count
+ * was a lie and the failure surfaced at the worst moment.
+ *
+ * Falls back to the payment method's BILLING address: a subscription with no shipping address
+ * ships to the billing address (CEO, 2026-09-10), which resolves 15 of the 20 contracts Appstle
+ * returns no deliveryMethod for.
+ */
+export const REQUIRED_ADDRESS_FIELDS = ["address1", "city", "countryCode", "zip", "lastName"] as const;
+
+export function resolveShippingAddress(raw: Record<string, any> | null): {
+  address: Record<string, unknown> | null;
+  missing: string[];
+} {
+  const dmAddr = raw?.deliveryMethod?.address as Record<string, unknown> | undefined;
+  const billing = raw?.customerPaymentMethod?.instrument?.billingAddress as Record<string, unknown> | undefined;
+  const src = dmAddr && Object.keys(dmAddr).length ? dmAddr : billing;
+  if (!src) return { address: null, missing: [...REQUIRED_ADDRESS_FIELDS] };
+  const missing = REQUIRED_ADDRESS_FIELDS.filter((k) => !src[k]);
+  return { address: src, missing };
+}
+
 export function breakPctForQty(breaks: { quantity: number; discount_pct: number }[], qty: number): number {
   if (!breaks?.length) return 0;
   const exact = breaks.find((b) => b.quantity === qty);
@@ -212,6 +237,8 @@ export function planMigration(
     payment_method_id: string | null;
     payment_method_revoked: boolean | null;
     lines: SnapshotLineIn[];
+    /** The untouched Appstle payload — used to resolve the shipping address. */
+    raw?: Record<string, unknown> | null;
   },
   ctx: PricingContext,
 ): MigrationPlan {
@@ -316,6 +343,12 @@ export function planMigration(
   else if (!snapshot.payment_method_id) blocked = "no_payment_method";
   else if (snapshot.payment_method_revoked) blocked = "payment_method_revoked";
   else if (!lines.length) blocked = "no_lines_after_rules";
+  else {
+    // A contract that cannot ship must never be created. MailingAddressInput requires nothing, so
+    // Shopify happily accepts a half-address and the customer's box has nowhere to go.
+    const addr = resolveShippingAddress((snapshot.raw ?? null) as Record<string, any> | null);
+    if (addr.missing.length) blocked = `incomplete_address:${addr.missing.join("+")}`;
+  }
 
   return {
     appstleContractId: snapshot.appstle_contract_id,
@@ -470,7 +503,10 @@ export function carryableCodes(raw: Record<string, unknown> | null): { title: st
       title: String(d.title ?? "code"),
       amount: amt,
       appliesOnEachItem: !!value?.appliesOnEachItem,
-      recurringCycleLimit: limit,
+      // ⚠️ Carry the REMAINING cycles, not the original limit. `usageCount` resets to 0 on a new
+      // contract, so copying `limit` verbatim re-grants the whole run: a code at 2 of 3 used would
+      // give 3 more cycles instead of 1. 3 contracts are in that state today.
+      recurringCycleLimit: limit != null ? Math.max(1, limit - used) : null,
     });
   }
   return out;
@@ -533,6 +569,7 @@ export async function executeMigration(
       payment_method_id: norm.payment_method_id,
       payment_method_revoked: norm.payment_method_revoked,
       lines: norm.lines as unknown as SnapshotLineIn[],
+      raw: fresh.raw as Record<string, unknown>,
     },
     ctx,
   );
@@ -546,14 +583,12 @@ export async function executeMigration(
   // MailingAddressInput accepts only these fields; the Appstle payload also carries __typename,
   // country, countryCodeV2, name and province, every one of which is rejected.
   const dm = norm.delivery_method as { address?: Record<string, unknown>; shippingOption?: Record<string, unknown> } | null;
+  const resolvedAddr = resolveShippingAddress(fresh.raw as Record<string, any>);
   // ⭐ 20 migratable contracts have NO deliveryMethod from Appstle and no shipping_address in our
   // mirror. They still ship — to the payment method's BILLING address, which is what Shopify falls
   // back to when a subscription has no shipping address (CEO, 2026-09-10). So use it rather than
   // blocking a live subscription over a missing field.
-  const billingAddr = (fresh.raw as {
-    customerPaymentMethod?: { instrument?: { billingAddress?: Record<string, unknown> } };
-  }).customerPaymentMethod?.instrument?.billingAddress;
-  const addrSource = dm?.address && Object.keys(dm.address).length ? dm.address : billingAddr;
+  const addrSource = resolvedAddr.address ?? undefined;
   const pick = (o: Record<string, unknown> | undefined, keys: string[]) =>
     Object.fromEntries(keys.filter((k) => o?.[k] != null && o[k] !== "").map((k) => [k, (o as Record<string, unknown>)[k]]));
 
@@ -581,6 +616,64 @@ export async function executeMigration(
       return { ok: false, stage: "next-billing-date", error: `next billing date is ${Math.floor(daysPast)}d in the past — needs review`, plan };
     }
     if (t <= Date.now()) nextBillingDate = new Date(Date.now() + 86_400_000).toISOString();
+  }
+
+  // ⭐ Stamp the attempt BEFORE the create, and on a retry go LOOKING rather than creating again.
+  //
+  // The marker is written after a REPORTED success, so a create Shopify committed whose response we
+  // lost leaves no trace and a retry duplicates it — the 35945087149 + 35945054381 pair. With an
+  // attempt timestamp we can tell "never tried" from "tried, outcome unknown" and adopt the
+  // contract the previous attempt actually made.
+  const attemptedAt = (snap as { migration_attempted_at: string | null }).migration_attempted_at;
+  if (attemptedAt) {
+    const { getShopifyCredentials } = await import("@/lib/shopify-sync");
+    const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
+    const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+    const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+      method: "POST",
+      headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: `query($id:ID!){ customer(id:$id){ subscriptionContracts(first:25){ nodes{ id status createdAt } } } }`,
+        variables: { id: customerId },
+      }),
+    });
+    const j = await res.json().catch(() => null) as { data?: { customer?: { subscriptionContracts?: { nodes?: { id: string; status: string; createdAt: string }[] } } } } | null;
+    const since = new Date(attemptedAt).getTime() - 60_000; // a minute of clock slack
+    const candidates = (j?.data?.customer?.subscriptionContracts?.nodes ?? [])
+      .filter((c) => new Date(c.createdAt).getTime() >= since && c.status !== "CANCELLED");
+    if (candidates.length === 1) {
+      const adopted = candidates[0].id;
+      await admin.from("appstle_contract_snapshots")
+        .update({ migrated_to_contract_id: adopted, migrated_at: new Date().toISOString() })
+        .eq("workspace_id", workspaceId).eq("appstle_contract_id", appstleContractId);
+      return { ok: false, stage: "adopted-orphan", error: `a previous attempt already created ${adopted} — adopted it rather than creating a duplicate; re-run to continue`, plan, newContractId: adopted };
+    }
+    if (candidates.length > 1) {
+      return { ok: false, stage: "ambiguous-orphan", error: `${candidates.length} contracts created for this customer since the last attempt — needs a human before another is made`, plan };
+    }
+  }
+  {
+    const { error: attErr } = await admin.from("appstle_contract_snapshots")
+      .update({ migration_attempted_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId).eq("appstle_contract_id", appstleContractId);
+    if (attErr) return { ok: false, stage: "attempt-marker", error: `could not stamp the attempt marker: ${attErr.message}`, plan };
+  }
+
+  // ⚠️ An incomplete address must BLOCK. MailingAddressInput requires nothing, and `pick()` simply
+  // omits empty keys, so the create SUCCEEDS with a half-address and the customer's box has nowhere
+  // to go. 6 contracts resolve this way even after the billing-address fallback (missing lastName,
+  // city, address1 or provinceCode). The brain page already said these "need manual handling, not
+  // a guess" — this is the guard that makes that true.
+  {
+    const missing = resolvedAddr.missing;
+    if (missing.length) {
+      return {
+        ok: false,
+        stage: "address",
+        error: `shipping address is missing ${missing.join(", ")} — refusing to create a contract that cannot ship`,
+        plan,
+      };
+    }
   }
 
   const created = await shopifyCreateContract(workspaceId, {
@@ -631,11 +724,19 @@ export async function executeMigration(
 
   // Record the new contract IMMEDIATELY — before discounts, before anything else can fail — so a
   // crash from here on leaves a findable half-migration instead of an orphan nobody knows about.
-  await admin
-    .from("appstle_contract_snapshots")
-    .update({ migrated_to_contract_id: newContractId, migrated_at: new Date().toISOString() })
-    .eq("workspace_id", workspaceId)
-    .eq("appstle_contract_id", appstleContractId);
+  {
+    // ⚠️ Never discard this. A silent failure here restores the duplicate-create hazard while the
+    // run reports normally — the marker is the ONLY thing standing between a retry and a second
+    // live contract.
+    const { error: markErr } = await admin
+      .from("appstle_contract_snapshots")
+      .update({ migrated_to_contract_id: newContractId, migrated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
+      .eq("appstle_contract_id", appstleContractId);
+    if (markErr) {
+      return { ok: false, stage: "marker", error: `created ${newContractId} but could not record it: ${markErr.message} — DO NOT retry blind`, plan, newContractId };
+    }
+  }
 
   // 4. Line ids for entitledLines scoping.
   const readBack = await getSubscriptionContract(workspaceId, newContractId);
@@ -760,7 +861,21 @@ export async function executeMigration(
   // engines would bill every migrated customer. A read-back is one metered call against that risk.
   if (cancelled.success) {
     const after = await fetchAppstleContract(workspaceId, appstleContractId);
-    const stillActive = after.ok && (after.raw as { status?: string }).status !== "CANCELLED";
+    // ⚠️ FAIL CLOSED. This previously read `after.ok && status !== "CANCELLED"`, so a failed
+    // VERIFICATION (rate limit, network, Appstle's HTML-for-unknown-route — all of which return
+    // ok:false) made `stillActive` false and the run stamped completion. A verification we could
+    // not perform is not a verification that passed: if Appstle ignored the status we would have
+    // both engines billing the same customer, with the row dropped from the sweeper's view.
+    if (!after.ok) {
+      return {
+        ok: false,
+        stage: "appstle-cancel-unverified",
+        error: `could not verify the Appstle cancel (${after.error}) — refusing to stamp complete; both engines may own this contract`,
+        plan,
+        newContractId,
+      };
+    }
+    const stillActive = (after.raw as { status?: string }).status !== "CANCELLED";
     if (stillActive) {
       return {
         ok: false,
@@ -855,16 +970,27 @@ export async function sweepIncompleteMigrations(
 
     if (halfSwapped && opts.apply) {
       const c = await appstleCancelContractVendorOnly(workspaceId, r.appstle_contract_id);
+      // ⚠️ Verify, exactly as executeMigration does. Stamping on the bare vendor response would
+      // clear the row on the SAME false success that produced the half-swap — and a stamped row
+      // leaves this query forever, so the one state the module calls "double-charge reachable"
+      // would become invisible.
+      let verified = false;
       if (c.success) {
+        const after = await fetchAppstleContract(workspaceId, r.appstle_contract_id);
+        verified = after.ok && (after.raw as { status?: string }).status === "CANCELLED";
+      }
+      if (verified) {
         await admin
           .from("appstle_contract_snapshots")
           .update({ migration_completed_at: new Date().toISOString() })
           .eq("workspace_id", workspaceId)
           .eq("appstle_contract_id", r.appstle_contract_id);
         row.state = "complete";
-        row.action = "cancelled Appstle, stamped complete";
+        row.action = "cancelled Appstle (verified), stamped complete";
       } else {
-        row.action = `cancel FAILED: ${c.error}`;
+        row.action = c.success
+          ? "cancel reported success but could NOT be verified — left half_swapped"
+          : `cancel FAILED: ${c.error}`;
       }
     }
     rows.push(row);
