@@ -12,6 +12,10 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **A clamped refund must never report success** · verified 2026-09-11 · → [[../libraries/action-executor]] + [[../libraries/june-remedy-approval]] + [[../libraries/agent-action-queue]] + [[../libraries/required-outcomes-validator]] + [[../libraries/selective-clarify]]
+- **A declined renewal must not wedge the subscription forever** · verified 2026-09-11 · → [[lifecycles/subscription-billing]]
+- **A failed subscription_cycle_charges claim must not block later order-now / renewal charges for the same cycle_key** · verified 2026-09-11 · → [[../libraries/subscription-cycle-charge-claim]]
+- **Full Order Refund Must Bind Ticket Customer** · verified 2026-09-11 · → [[../libraries/action-executor]]
 - **Replacements must work for internally-billed (non-Shopify) subscription renewal orders** · verified 2026-09-10 · → [[../libraries/replacement-order]]
 - **A fraud ban must not manufacture a ticket arguing to reverse it** · verified 2026-09-08 · → [[../lifecycles/fraud-detection]] + [[../libraries/portal__route]] + [[../libraries/cs-director]]
 - **Confirming fraud must ban the whole linked cluster, not one account** · verified 2026-09-08 · → [[lifecycles/fraud-detection]]
