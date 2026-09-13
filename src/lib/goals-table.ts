@@ -184,6 +184,90 @@ function goalRowFromDb(db: GoalRowDb, milestones: GoalMilestoneRow[]): GoalRow {
 }
 
 /**
+ * db-reduce-calls-goals — very-short-TTL in-process cache for `listGoals(workspaceId, filter)` reads.
+ *
+ * The pooled `listGoalsWithMilestones` query (see [[pg-pool]] `listGoalsWithMilestones`) was the top
+ * DB-call-volume driver in the box's `pg_stat_statements` sample (167,265 calls, 4ms mean, 602s total).
+ * Per-call cost is already fine (bitmap-index scan on `goal_milestones_goal_idx`) — the win is FEWER
+ * calls. Many code paths call `listGoals(workspaceId)` multiple times within one request or tick
+ * ([[brain-roadmap]] board/roadmap render, [[spec-drift]] drift + guard pass, [[spec-review-gate]] on
+ * every spec author, [[agent-jobs]] `promoteCompleteGoalsToMain`). This module-level cache collapses
+ * those tight-window duplicates without lengthening the freshness window meaningfully — same shape as
+ * [[specs-table]] `getSpec` / `listSpecs` caches.
+ *
+ * Design invariants:
+ *  - **Keyed by `workspaceId` only.** `listGoals` already applies `{ status, owner, parent_goal_id }`
+ *    filters in-memory over the bounded workspace set (see the pooled path in [[listGoals]] below), so
+ *    caching the whole-workspace snapshot is safe and lets a filtered call reuse an unfiltered entry.
+ *  - **TTL bounds staleness at any path this SDK cannot see** (a raw SQL migration, an admin script
+ *    outside this module). All in-module writers below invalidate proactively; the TTL is the belt.
+ *  - **Every writer in this file calls `invalidateGoalsCache(workspaceId)` on success.** Writers that
+ *    only know a `goalId` (or `specId`) call `invalidateAllGoalsCache()` — workspace-scoped writes are
+ *    much rarer than reads (a goal changes a few times/day; `listGoals` runs 167k times per sample), so
+ *    the whole-cache drop on those paths still cuts the read hammer by orders of magnitude.
+ *  - **`clearGoalsCacheForTests()` is exported** so tests that share process state can reset.
+ *
+ * Held short (15s) so an ephemeral `claude -p` subprocess never serves egregiously stale rows. The
+ * warm long-lived worker can lift this via `setGoalsCacheTTLMs` (symmetric to [[specs-table]]
+ * `setSpecCacheTTLMs`) if a follow-up phase wires up a `goal_changed` LISTEN/NOTIFY invalidation rail.
+ */
+let GOALS_CACHE_TTL_MS = 15_000;
+
+export function setGoalsCacheTTLMs(ms: number): void {
+  const CAP_MS = 60 * 60 * 1000; // 1 hour hard cap
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  GOALS_CACHE_TTL_MS = Math.min(ms, CAP_MS);
+}
+
+/** Read the current TTL — used by tests + parity with [[specs-table]] `getSpecCacheTTLMs`. */
+export function getGoalsCacheTTLMs(): number {
+  return GOALS_CACHE_TTL_MS;
+}
+
+type GoalsCacheEntry = { rows: GoalRow[]; expiresAt: number };
+const goalsCache = new Map<string, GoalsCacheEntry>();
+
+function readGoalsCache(workspaceId: string): GoalRow[] | null {
+  const entry = goalsCache.get(workspaceId);
+  if (!entry) return null;
+  if (Date.now() >= entry.expiresAt) {
+    goalsCache.delete(workspaceId);
+    return null;
+  }
+  return entry.rows;
+}
+
+function writeGoalsCache(workspaceId: string, rows: GoalRow[]): void {
+  goalsCache.set(workspaceId, { rows, expiresAt: Date.now() + GOALS_CACHE_TTL_MS });
+}
+
+/**
+ * Evict a cached workspace entry. Called by every workspace-scoped writer in this module on success
+ * so a read-after-write inside the TTL sees fresh rows.
+ */
+export function invalidateGoalsCache(workspaceId: string): void {
+  goalsCache.delete(workspaceId);
+}
+
+/**
+ * Evict EVERY cached workspace entry. Called by writers that only know a `goalId` and can't resolve
+ * `workspaceId` without an extra round-trip (`setGoalStatus`, `stampGoalPromotedToMain`,
+ * `stampGoalPromotionHeld`, `reparentGoal`). Writes are rare vs. reads (167k reads / sample), so a
+ * full drop on a rare write still cuts the read hammer by orders of magnitude — and never serves
+ * stale data to another workspace. (`attachSpecToMilestone` writes `public.specs.milestone_id`, not
+ * a `goals`/`goal_milestones` row, so it does NOT invalidate this cache — the milestone→specs join
+ * lives on the [[specs-table]] side and is invalidated there.)
+ */
+export function invalidateAllGoalsCache(): void {
+  goalsCache.clear();
+}
+
+/** Test-only cache reset. Never called by production code paths. */
+export function clearGoalsCacheForTests(): void {
+  goalsCache.clear();
+}
+
+/**
  * One goal by `(workspace, slug)` — the parent `goals` row joined with its `goal_milestones` ordered by
  * position. Returns `null` when no row matches.
  */
@@ -212,49 +296,59 @@ export async function getGoal(workspaceId: string, slug: string): Promise<GoalRo
  * by `goal_id`. Sorted client-side by slug for a stable order.
  */
 export async function listGoals(workspaceId: string, filter: ListGoalsFilter = {}): Promise<GoalRow[]> {
-  // spec-read-eff-pool — Phase 2 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
-  // Pooled straggler read: ONE pooled query returns every workspace goal + its milestones (jsonb
-  // aggregated), retiring the TWO PostgREST round-trips (goals + goal_milestones IN ids) each with
-  // its own set_config preamble. Filters are applied in-memory over the bounded workspace set —
-  // behavior-preserving vs the DB-level filter (same rows, same sort). `null` = pool unavailable /
-  // query error → fall through to the supabase-js two-call path (same fail-open contract as
-  // [[pg-pool]] `getSpecWithPhases`).
+  // db-reduce-calls-goals — serve the whole-workspace snapshot from cache when inside TTL. Filters
+  // apply in-memory below (already how the pooled path worked) so a filtered call still reuses an
+  // unfiltered entry. Copy the array before filtering so a downstream mutation of the returned array
+  // (splice/sort) can never reorder another reader's cache entry — same trust model as
+  // [[specs-table]] `listSpecs` (`.filter` returns a fresh array; goal-row objects themselves are
+  // treated as read-only, matching the specs-table convention).
+  const cached = readGoalsCache(workspaceId);
+  const goalRows: GoalRow[] = cached !== null ? [...cached] : await fetchAndCacheGoals(workspaceId);
+  let out = goalRows;
+  if (filter.status) out = out.filter((r) => r.status === filter.status);
+  if (filter.owner) out = out.filter((r) => r.owner === filter.owner);
+  if (filter.parent_goal_id !== undefined) {
+    const wanted = filter.parent_goal_id;
+    out =
+      wanted === null
+        ? out.filter((r) => r.parent_goal_id === null)
+        : out.filter((r) => r.parent_goal_id === wanted);
+  }
+  return out;
+}
+
+/**
+ * db-reduce-calls-goals — the raw whole-workspace fetch behind [[listGoals]], caching the result.
+ *
+ * spec-read-eff-pool — Phase 2 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
+ * Pooled straggler read: ONE pooled query returns every workspace goal + its milestones (jsonb
+ * aggregated), retiring the TWO PostgREST round-trips (goals + goal_milestones IN ids) each with
+ * its own set_config preamble. `null` = pool unavailable / query error → fall through to the
+ * supabase-js two-call path (same fail-open contract as [[pg-pool]] `getSpecWithPhases`).
+ */
+async function fetchAndCacheGoals(workspaceId: string): Promise<GoalRow[]> {
   try {
     const { listGoalsWithMilestones } = await import("@/lib/pg-pool");
     const pooled = await listGoalsWithMilestones<GoalRowDb, GoalMilestoneRow>(workspaceId);
     if (pooled !== null) {
-      let goalPairs = pooled;
-      if (filter.status) goalPairs = goalPairs.filter((p) => p.goal.status === filter.status);
-      if (filter.owner) goalPairs = goalPairs.filter((p) => p.goal.owner === filter.owner);
-      if (filter.parent_goal_id !== undefined) {
-        const wanted = filter.parent_goal_id;
-        goalPairs =
-          wanted === null
-            ? goalPairs.filter((p) => p.goal.parent_goal_id === null)
-            : goalPairs.filter((p) => p.goal.parent_goal_id === wanted);
-      }
-      return goalPairs
+      const rows = pooled
         .map((p) => goalRowFromDb(p.goal, [...p.milestones].sort((a, b) => a.position - b.position)))
         .sort((a, b) => a.slug.localeCompare(b.slug));
+      writeGoalsCache(workspaceId, rows);
+      return rows;
     }
   } catch {
     /* fall through to the supabase-js two-call path */
   }
   const admin = createAdminClient();
-  let q = admin.from("goals").select(GOAL_COLUMNS).eq("workspace_id", workspaceId);
-  if (filter.status) q = q.eq("status", filter.status);
-  if (filter.owner) q = q.eq("owner", filter.owner);
-  if (filter.parent_goal_id !== undefined) {
-    q =
-      filter.parent_goal_id === null
-        ? q.is("parent_goal_id", null)
-        : q.eq("parent_goal_id", filter.parent_goal_id);
-  }
-  const { data: goals, error } = await q;
+  const { data: goals, error } = await admin.from("goals").select(GOAL_COLUMNS).eq("workspace_id", workspaceId);
   if (error) throw error;
-  const goalRows = (goals ?? []) as GoalRowDb[];
-  if (!goalRows.length) return [];
-  const ids = goalRows.map((g) => g.id);
+  const goalRowsDb = (goals ?? []) as GoalRowDb[];
+  if (!goalRowsDb.length) {
+    writeGoalsCache(workspaceId, []);
+    return [];
+  }
+  const ids = goalRowsDb.map((g) => g.id);
   const { data: milestones, error: mErr } = await admin
     .from("goal_milestones")
     .select(MILESTONE_COLUMNS)
@@ -267,9 +361,11 @@ export async function listGoals(workspaceId: string, filter: ListGoalsFilter = {
     list.push(m);
     byId.set(m.goal_id, list);
   }
-  return goalRows
+  const rows = goalRowsDb
     .map((g) => goalRowFromDb(g, byId.get(g.id) ?? []))
     .sort((a, b) => a.slug.localeCompare(b.slug));
+  writeGoalsCache(workspaceId, rows);
+  return rows;
 }
 
 /**
@@ -378,6 +474,7 @@ export async function upsertGoal(
     }
   }
 
+  invalidateGoalsCache(workspaceId);
   return { goal_id: goalId, milestone_ids: milestoneIds };
 }
 
@@ -404,6 +501,7 @@ export async function setGoalStatus(
     .update({ status, updated_at: new Date().toISOString() })
     .eq("id", goalId);
   if (error) throw error;
+  invalidateAllGoalsCache();
 }
 
 /**
@@ -440,6 +538,7 @@ export async function stampGoalPromotedToMain(
   if (!data || data.length !== 1) {
     throw new Error(`stampGoalPromotedToMain: expected 1 row transitioned for goalId=${goalId}, got ${data?.length ?? 0}`);
   }
+  invalidateAllGoalsCache();
 }
 
 /**
@@ -476,6 +575,7 @@ export async function stampGoalPromotionHeld(
   if (!data || data.length !== 1) {
     throw new Error(`stampGoalPromotionHeld: expected 1 row transitioned for goalId=${goalId}, got ${data?.length ?? 0}`);
   }
+  invalidateAllGoalsCache();
 }
 
 /**
@@ -544,6 +644,7 @@ export async function reparentGoal(goalId: string, parentGoalId: string | null):
     .update({ parent_goal_id: parentGoalId, updated_at: new Date().toISOString() })
     .eq("id", goalId);
   if (error) throw error;
+  invalidateAllGoalsCache();
 }
 
 /**
@@ -560,6 +661,7 @@ export async function setGoalIsParent(workspaceId: string, slug: string, isParen
     .eq("workspace_id", workspaceId)
     .eq("slug", slug);
   if (error) throw error;
+  invalidateGoalsCache(workspaceId);
 }
 
 /** spec-goal-branch-pm-flow M5 — does this goal HAVE child goals (≥1 other goal names it as parent_goal_id)?
