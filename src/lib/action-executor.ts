@@ -1758,6 +1758,22 @@ export const directActionHandlers: Record<
     const { subscriptionGetLiveContract } = await import("@/lib/commerce/subscription");
     const contract = await subscriptionGetLiveContract(ctx.workspaceId, String(p.contract_id!));
     if (!contract.ok) return { success: false, error: contract.error || "Contract fetch failed" };
+
+    // Internal subs manage lines directly on `subscriptions.items` by variant_id
+    // — the vendor-side nodes array is EMPTY by design (subscriptionGetLiveContract
+    // returns `{ internal: true, lines: { nodes: [] } }`). Delegate straight to
+    // subRemoveItem which filters `subscriptions.items` by variant_id. Without
+    // this branch the empty nodes array proxied as "variant not on contract" even
+    // when the local row still carried the variant (ticket c13fbad1, Kristy
+    // Teague's bundled split — Vanilla Creamer 88f725ad was literally present in
+    // subscriptions.items but remove_item bounced "No lines matching variant …").
+    if (contract.internal) {
+      const r = await subRemoveItem(ctx.workspaceId, p.contract_id, { variantId });
+      return r.success
+        ? { success: true, summary: `Removed variant ${variantId}` }
+        : { success: false, error: r.error };
+    }
+
     const lines = ((contract.lines?.nodes || []) as Line[])
       .filter((l) => {
         const vid = String(l.variantId || "").split("/").pop();
