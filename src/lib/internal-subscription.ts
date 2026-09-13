@@ -225,7 +225,7 @@ type Item = {
 
 const VARIANT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-interface ResolvedVariant {
+export interface ResolvedVariant {
   id: string;
   product_id: string;
   title: string;
@@ -237,8 +237,14 @@ interface ResolvedVariant {
  * Resolve a variant the catalog way: accept either our UUID (`product_variants.id`)
  * or a legacy Shopify variant id, and always return the canonical UUID + catalog
  * metadata. Internal sub items reference the UUID — never the Shopify id.
+ *
+ * Also called by `commerce/subscription.createSubscription` to hydrate incoming
+ * items with product_id/title/sku before persisting, so an under-specified item
+ * (variant_id only) can never land as a malformed "ghost" line — the defect the
+ * `assisted-subscription-purchase-variant-resolution-and-split-repair` spec
+ * closes (ticket c13fbad1).
  */
-async function resolveVariant(variantIdOrShopify: string): Promise<ResolvedVariant | null> {
+export async function resolveVariant(variantIdOrShopify: string): Promise<ResolvedVariant | null> {
   const admin = createAdminClient();
   const raw = String(variantIdOrShopify || "");
   if (!raw) return null;

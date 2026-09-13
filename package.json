@@ -284,6 +284,7 @@
     "test:no-uuid-like": "tsx --test scripts/_check-no-uuid-like.test.ts",
     "test:commerce-order-create": "tsx --test src/lib/commerce/order.create.test.ts",
     "test:commerce-subscription-create": "tsx --test src/lib/commerce/subscription.create.test.ts",
+    "test:commerce-subscription-create-hydrate": "tsx --test src/lib/commerce/subscription.create-hydrate.test.ts",
     "test:commerce-subscription-update-shipping-address": "tsx --test src/lib/commerce/subscription.updateShippingAddress.test.ts",
     "test:commerce-refund": "tsx --test src/lib/commerce/refund.test.ts",
     "test:commerce-price-freeship": "tsx --test src/lib/commerce/price.freeship.test.ts",
