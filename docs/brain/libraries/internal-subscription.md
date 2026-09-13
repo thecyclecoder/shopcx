@@ -34,6 +34,14 @@ stubbed for now — the renewal scheduler lands in a future commit.
 async function isInternalSubscription(workspaceId: string, contractId: string) : Promise<boolean>
 ```
 
+### `resolveVariant` — function
+
+```ts
+async function resolveVariant(workspaceId: string, variantIdOrShopify: string) : Promise<ResolvedVariant | null>
+```
+
+Workspace-scoped variant resolver used by [[../libraries/commerce__subscription]] `createSubscription` to hydrate item records BEFORE persistence. Resolves both UUID (`product_variants.id`) and Shopify numeric (`product_variants.shopify_variant_id`) via pattern matching. Returns `{ id, product_id, title, variant_title, sku }` or null on miss. **Tenant-boundary critical:** filters BOTH the `product_variants` lookup AND the follow-up `products` title lookup with `.eq("workspace_id", workspaceId)` — a foreign-workspace variant UUID cannot resolve, preventing cross-tenant line injection via AI/user-controlled input at [[../libraries/action-executor]] `executeSonnetDecision` → `create_subscription` (Phase 2 / Fix 1 of [[../specs/assisted-subscription-purchase-variant-resolution-and-split-repair]]). Product title is resolved via direct lookup (not embed) for reliability — the embed intermittently returned null, causing one-time-gift lines to display bare "Gift".
+
 ### `internalSubscriptionAction` — function
 
 ```ts

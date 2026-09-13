@@ -1,0 +1,1 @@
+- **Fix assisted-subscription-purchase variant resolution** · verified 2026-09-13 · → [[../lifecycles/subscription-billing]]
