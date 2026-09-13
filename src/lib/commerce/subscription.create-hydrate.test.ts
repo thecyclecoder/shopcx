@@ -136,9 +136,30 @@ test("hydrateCreateSubscriptionItems: empty variant_id is refused (never allowed
 
 test("CreateSubscriptionDeps interface is exported (assert on a value that satisfies its shape)", () => {
   const deps: CreateSubscriptionDeps = {
-    async resolveVariant(_id: string) {
+    async resolveVariant(_workspaceId: string, _id: string) {
       return null;
     },
   };
   assert.equal(typeof deps.resolveVariant, "function");
+});
+
+// ── Cross-tenant authz regression (Phase 2 / Fix 1) ───────────────────
+// Pre-fix, `createSubscription` called `deps.resolveVariant(vid)` and the
+// default resolver looked up product_variants without a workspace filter — so
+// a variant UUID from another workspace resolved and got persisted into the
+// current workspace's subscription. The new contract threads `workspaceId`
+// through; a resolver that only returns variants for the caller's workspace
+// (as the default one now does via .eq("workspace_id", workspaceId)) will
+// return null for a foreign UUID and hydrate refuses the whole batch.
+
+test("CreateSubscriptionDeps.resolveVariant receives workspaceId as its FIRST argument (cross-tenant boundary)", async () => {
+  const calls: Array<{ workspaceId: string; variantId: string }> = [];
+  const deps: CreateSubscriptionDeps = {
+    async resolveVariant(workspaceId: string, variantId: string) {
+      calls.push({ workspaceId, variantId });
+      return null;
+    },
+  };
+  await deps.resolveVariant("ws-current", "vid-1");
+  assert.deepEqual(calls, [{ workspaceId: "ws-current", variantId: "vid-1" }]);
 });

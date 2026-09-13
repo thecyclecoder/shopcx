@@ -238,29 +238,51 @@ export interface ResolvedVariant {
  * or a legacy Shopify variant id, and always return the canonical UUID + catalog
  * metadata. Internal sub items reference the UUID — never the Shopify id.
  *
+ * ⭐ Workspace-scoped (Phase 2 / Fix 1 of
+ * `assisted-subscription-purchase-variant-resolution-and-split-repair`):
+ * BOTH the `product_variants` lookup AND the follow-up `products` title lookup
+ * carry `.eq("workspace_id", workspaceId)`. `createSubscription`'s hydration
+ * path receives an AI/user-controlled `items[].variant_id` (see
+ * `src/lib/action-executor.ts` `create_subscription`) and persists the hydrated
+ * line into the current workspace's subscriptions row — without the workspace
+ * filter, a variant UUID from another tenant would resolve here and cross the
+ * tenant boundary. Refusing on a cross-workspace miss keeps unresolved items on
+ * the existing `success:false` refusal path in `hydrateCreateSubscriptionItems`.
+ *
  * Also called by `commerce/subscription.createSubscription` to hydrate incoming
  * items with product_id/title/sku before persisting, so an under-specified item
  * (variant_id only) can never land as a malformed "ghost" line — the defect the
  * `assisted-subscription-purchase-variant-resolution-and-split-repair` spec
  * closes (ticket c13fbad1).
  */
-export async function resolveVariant(variantIdOrShopify: string): Promise<ResolvedVariant | null> {
+export async function resolveVariant(
+  workspaceId: string,
+  variantIdOrShopify: string,
+): Promise<ResolvedVariant | null> {
   const admin = createAdminClient();
   const raw = String(variantIdOrShopify || "");
-  if (!raw) return null;
+  if (!raw || !workspaceId) return null;
   const col = VARIANT_UUID_RE.test(raw) ? "id" : "shopify_variant_id";
   const { data: v } = await admin
     .from("product_variants")
     .select("id, product_id, title, sku")
+    .eq("workspace_id", workspaceId)
     .eq(col, raw)
     .maybeSingle();
   if (!v) return null;
   // Resolve the product title with a direct lookup rather than a PostgREST
   // embed — the `products(title)` embed intermittently returned null (the gift
   // line then displayed as a bare "Gift"), so a two-step read is more reliable.
+  // Same workspace filter as the variants lookup — a foreign-workspace product
+  // row can never surface its title through this resolver.
   let productTitle: string | undefined;
   if (v.product_id) {
-    const { data: p } = await admin.from("products").select("title").eq("id", v.product_id).maybeSingle();
+    const { data: p } = await admin
+      .from("products")
+      .select("title")
+      .eq("workspace_id", workspaceId)
+      .eq("id", v.product_id)
+      .maybeSingle();
     productTitle = (p?.title as string) || undefined;
   }
   return {
@@ -283,7 +305,7 @@ export async function internalSubAddItem(
   if (!sub) return { success: false, error: "Internal subscription not found" };
 
   // Normalize the incoming id to the canonical variant UUID up front.
-  const resolved = await resolveVariant(String(variantId));
+  const resolved = await resolveVariant(workspaceId, String(variantId));
   const canonicalId = resolved?.id || String(variantId);
 
   const items: Item[] = (sub.items as Item[]) || [];
@@ -376,7 +398,7 @@ export async function internalSubAddOneTimeGift(
   if (!sub) return { success: false, error: "Internal subscription not found" };
   if (sub.status !== "active") return { success: false, error: `Subscription is ${sub.status}, not active` };
 
-  const resolved = await resolveVariant(String(variantId));
+  const resolved = await resolveVariant(workspaceId, String(variantId));
   const items: Item[] = (sub.items as Item[]) || [];
   const giftItem = buildOneTimeGiftItem(resolved, String(variantId), quantity, opts);
   const nextItems = [...items, giftItem];
@@ -396,7 +418,7 @@ export async function internalSubRemoveItem(
   const sub = await loadInternalSub(workspaceId, contractId);
   if (!sub) return { success: false, error: "Internal subscription not found" };
 
-  const resolved = await resolveVariant(String(variantId));
+  const resolved = await resolveVariant(workspaceId, String(variantId));
   const key = resolved?.id || String(variantId);
   const items: Item[] = (sub.items as Item[]) || [];
   const nextItems = items.filter((i) => String(i.variant_id) !== key && String(i.variant_id) !== String(variantId));
@@ -433,7 +455,7 @@ export async function internalSubSwapVariant(
   if (!sub) return { success: false, error: "Internal subscription not found" };
 
   // Match the old line by canonical UUID or (transitional) whatever id it stored.
-  const oldResolved = await resolveVariant(String(oldVariantId));
+  const oldResolved = await resolveVariant(workspaceId, String(oldVariantId));
   const oldKey = oldResolved?.id || String(oldVariantId);
   const items: Item[] = (sub.items as Item[]) || [];
   const oldItem = items.find((i) => String(i.variant_id) === oldKey || String(i.variant_id) === String(oldVariantId));
@@ -477,7 +499,7 @@ export async function internalSubSwapVariant(
   }
 
   // Resolve the NEW variant to its canonical UUID + catalog metadata.
-  const resolved = await resolveVariant(String(newVariantId));
+  const resolved = await resolveVariant(workspaceId, String(newVariantId));
   const newVariantKey = resolved?.id || String(newVariantId);
   let newItem: Item = {
     ...oldItem,
@@ -601,7 +623,7 @@ export async function internalSubUpdateLineItemPrice(
   // Grandfather lock: store the override BASE (pre-discount). The pricing engine
   // applies the quantity break + S&S on top — so we keep the locked base, not a
   // baked post-discount value (which is what the old Appstle-mirroring code did).
-  const resolved = await resolveVariant(String(variantId));
+  const resolved = await resolveVariant(workspaceId, String(variantId));
   const key = resolved?.id || String(variantId);
   const items: Item[] = (sub.items as Item[]) || [];
   const nextItems = items.map((i) =>

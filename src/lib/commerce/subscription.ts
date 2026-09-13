@@ -1025,9 +1025,17 @@ export function hydrateCreateSubscriptionItems(
 }
 
 /** Deps injected into `createSubscription`. Extracted so tests can pin the
- *  hydration + refusal behavior without standing up a Supabase client. */
+ *  hydration + refusal behavior without standing up a Supabase client.
+ *  Workspace-scoped by contract (Phase 2 / Fix 1): `workspaceId` is threaded
+ *  into every resolver call so a variant UUID from another tenant cannot
+ *  resolve here and land on the current workspace's subscription — the
+ *  cross-tenant authz regression the pre-merge spec-test flagged on the
+ *  Phase 1 diff. `defaultCreateSubscriptionDeps` uses `resolveVariant` from
+ *  [[../internal-subscription]] which now requires workspaceId and filters
+ *  BOTH the `product_variants` lookup AND the follow-up `products` title
+ *  lookup by `workspace_id`. */
 export interface CreateSubscriptionDeps {
-  resolveVariant(variantId: string): Promise<ResolvedVariant | null>;
+  resolveVariant(workspaceId: string, variantId: string): Promise<ResolvedVariant | null>;
 }
 
 export function defaultCreateSubscriptionDeps(): CreateSubscriptionDeps {
@@ -1114,7 +1122,7 @@ export async function createSubscription(
     // to escalate rather than ship a malformed subscription.
     const uniqueVariantIds = Array.from(new Set(input.items.map((it) => String(it.variant_id || "")).filter(Boolean)));
     const resolvedEntries = await Promise.all(
-      uniqueVariantIds.map(async (vid) => [vid, await deps.resolveVariant(vid)] as const),
+      uniqueVariantIds.map(async (vid) => [vid, await deps.resolveVariant(workspaceId, vid)] as const),
     );
     const resolvedByVariant = new Map<string, ResolvedVariant | null>(resolvedEntries);
     const hydration = hydrateCreateSubscriptionItems(input.items, resolvedByVariant);
