@@ -14,7 +14,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { classifyPortalFailure, frequencySelfResolved, healPortalAction, type FailureContext, type TicketRow } from "./remediation";
+import { classifyPortalFailure, frequencySelfResolved, healPortalAction, swapSelfResolved, type FailureContext, type TicketRow } from "./remediation";
 
 const ctx = (error: string, extra: Partial<FailureContext> = {}): FailureContext => ({
   route: "removeLineItem",
@@ -311,5 +311,158 @@ test("frequencySelfResolved — event for a DIFFERENT contract does not count (m
     subscriptions: [],
   });
   const r = await frequencySelfResolved(admin, "ws_1", FREQ_CTX, TICKET);
+  assert.equal(r.resolved, false);
+});
+
+// ── swapSelfResolved (portal-replaceVariants-self-resolved-auto-dismiss spec) ──
+//
+// Originating ticket c19bd92b: the first `replaceVariants` call 400'd on a
+// stale `oldLineId`, spawning a portal-action-failed ticket; the retry landed
+// and the sub line is now the requested variant. A generic Appstle 400 on
+// replaceVariants classifies as `human` (no replay in `healPortalAction`), so
+// like cancel the guard runs BEFORE the disposition acts. Assert both signals
+// (a) a `portal.items.swapped` event for this contract after the failure, and
+// (b) the local `subscriptions.items[]` already contains the target variant —
+// return `resolved: true`. The negative case (no event + old items) → not
+// resolved so the ticket keeps its normal path to `human`.
+const SWAP_TICKET: TicketRow = {
+  id: "t_swap",
+  workspace_id: "ws_1",
+  customer_id: "c_1",
+  subject: "Portal action needs help: replacevariants",
+  created_at: "2026-07-09T15:00:00Z",
+  assigned_to: null,
+  escalated_to: null,
+  escalated_at: null,
+  tags: ["portal-action-failed"],
+};
+const SWAP_CTX_MAP: FailureContext = {
+  route: "replacevariants",
+  error: "Unrecognized Appstle 400 on replaceVariants",
+  status: 502,
+  payload: {
+    contractId: CONTRACT,
+    oldLineId: "96cf0252",
+    // The record shape the customer's payload uses when a browser sends the
+    // object form (Peach Mango): { "12345": 1 }.
+    newVariants: { "12345": 1 },
+  },
+};
+const SWAP_CTX_ARR: FailureContext = {
+  ...SWAP_CTX_MAP,
+  payload: {
+    contractId: CONTRACT,
+    oldLineId: "96cf0252",
+    // The array shape { variantId, quantity } — the alternate accepted form.
+    newVariants: [{ variantId: "12345", quantity: 1 }],
+  },
+};
+
+test("swapSelfResolved — signal (a): portal.items.swapped event AFTER the failure → resolved", async () => {
+  const admin = stubDb({
+    customer_events: [{
+      workspace_id: "ws_1",
+      customer_id: "c_1",
+      event_type: "portal.items.swapped",
+      created_at: "2026-07-09T15:00:30Z",
+      properties: { shopify_contract_id: CONTRACT, newVariants: { "12345": 1 } },
+    }],
+    subscriptions: [],
+  });
+  const r = await swapSelfResolved(admin, "ws_1", SWAP_CTX_MAP, SWAP_TICKET);
+  assert.equal(r.resolved, true);
+  assert.match(r.reason || "", /customer successfully swapped the subscription items herself/);
+});
+
+test("swapSelfResolved — signal (b): subscriptions.items already contains the target variant → resolved", async () => {
+  // The robust signal — the retry landed regardless of event source.
+  const admin = stubDb({
+    customer_events: [],
+    subscriptions: [{
+      workspace_id: "ws_1",
+      shopify_contract_id: CONTRACT,
+      items: [{ variant_id: "12345", title: "Peach Mango" }],
+    }],
+  });
+  const r = await swapSelfResolved(admin, "ws_1", SWAP_CTX_MAP, SWAP_TICKET);
+  assert.equal(r.resolved, true);
+  assert.match(r.reason || "", /already contains the requested variant \(12345\)/);
+});
+
+test("swapSelfResolved — signal (b) works with the array-shaped newVariants payload too", async () => {
+  // The handler accepts both `{ id: qty }` and `[{ variantId, quantity }]`.
+  // The self-resolved detector normalizes both, so an already-landed swap
+  // matches regardless of which shape the customer's client sent.
+  const admin = stubDb({
+    customer_events: [],
+    subscriptions: [{
+      workspace_id: "ws_1",
+      shopify_contract_id: CONTRACT,
+      items: [{ variant_id: "12345", title: "Peach Mango" }],
+    }],
+  });
+  const r = await swapSelfResolved(admin, "ws_1", SWAP_CTX_ARR, SWAP_TICKET);
+  assert.equal(r.resolved, true);
+});
+
+test("swapSelfResolved — no event + sub items still on the OLD variant → not resolved (falls through to human)", async () => {
+  // Negative half: the failure was NOT self-resolved. Guard bails so the
+  // normal remediatePortalTicket branch (human, since there's no replay) runs.
+  const admin = stubDb({
+    customer_events: [],
+    subscriptions: [{
+      workspace_id: "ws_1",
+      shopify_contract_id: CONTRACT,
+      items: [{ variant_id: "99999", title: "Original Superfood Tabs" }],
+    }],
+  });
+  const r = await swapSelfResolved(admin, "ws_1", SWAP_CTX_MAP, SWAP_TICKET);
+  assert.equal(r.resolved, false);
+});
+
+test("swapSelfResolved — event BEFORE the failure does not count (must be after)", async () => {
+  // Guard #1 (gte failTime) — an earlier swap event isn't this ticket's retry.
+  const admin = stubDb({
+    customer_events: [{
+      workspace_id: "ws_1",
+      customer_id: "c_1",
+      event_type: "portal.items.swapped",
+      created_at: "2026-06-01T00:00:00Z", // long before the failure
+      properties: { shopify_contract_id: CONTRACT, newVariants: { "12345": 1 } },
+    }],
+    subscriptions: [{
+      workspace_id: "ws_1",
+      shopify_contract_id: CONTRACT,
+      items: [{ variant_id: "99999" }],
+    }],
+  });
+  const r = await swapSelfResolved(admin, "ws_1", SWAP_CTX_MAP, SWAP_TICKET);
+  assert.equal(r.resolved, false);
+});
+
+test("swapSelfResolved — event for a DIFFERENT contract does not count (must match)", async () => {
+  // Guard #2 (shopify_contract_id equality) — a resolved swap on another sub
+  // shouldn't close this contract's ticket.
+  const admin = stubDb({
+    customer_events: [{
+      workspace_id: "ws_1",
+      customer_id: "c_1",
+      event_type: "portal.items.swapped",
+      created_at: "2026-07-09T15:00:30Z",
+      properties: { shopify_contract_id: "gid://shopify/SubscriptionContract/other", newVariants: { "12345": 1 } },
+    }],
+    subscriptions: [{
+      workspace_id: "ws_1",
+      shopify_contract_id: CONTRACT,
+      items: [{ variant_id: "99999" }],
+    }],
+  });
+  const r = await swapSelfResolved(admin, "ws_1", SWAP_CTX_MAP, SWAP_TICKET);
+  assert.equal(r.resolved, false);
+});
+
+test("swapSelfResolved — missing contractId → not resolved (bail cleanly)", async () => {
+  const admin = stubDb({ customer_events: [], subscriptions: [] });
+  const r = await swapSelfResolved(admin, "ws_1", { ...SWAP_CTX_MAP, payload: {} }, SWAP_TICKET);
   assert.equal(r.resolved, false);
 });
