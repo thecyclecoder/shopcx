@@ -84,6 +84,25 @@ Items reference the **variant UUID** (`product_variants.id`), never the Shopify 
 - **Double-discount trap (fixed 2026-06):** if a variant isn't found in the catalog, `base` falls back to the item's baked price — which is already post-discount — then S&S applies again. The cause was a variant stored as a Shopify id while the engine only looked up by `shopify_variant_id`. The dual-shape resolver closes this; the real fix is items storing the UUID. The grandfathered-lock path above (`hasBakedUnit` branch) also avoids this by short-circuiting rule decomposition entirely.
 - **Never bill above the configured price.** A pre-charge overcharge guard runs at the renewal junction ([[subscription-renewal-guard]] `checkRenewalOverchargeGuard` in [[../inngest/internal-subscription-renewals]]): if the engine's computed unit exceeds an item's configured ceiling (`price_cents` / `price_override_cents`), the renewal is **held**, not billed at the higher amount. `next_billing_date` is not advanced so a fix + re-run picks it back up. See the [[../specs/subscription-renewal-honors-configured-grandfathered-price-never-bills-standard]] spec for the shape.
 
+## Storefront tier % ALREADY include Subscribe & Save (2026-09-04)
+
+A storefront "supply tier" percentage is **S&S compounded with the quantity break**, not a standalone bulk discount. For Amazing Coffee (rule `ed8ae5b4`: `subscribe_discount_pct` 25, `quantity_breaks` 0/8/12%):
+
+| Bags | Qty break | `1 − 0.75 × (1−break)` | Storefront label |
+|---|---|---|---|
+| 1 | 0% | 25% | "30-day supply, 25% off" |
+| 2 | 8% | 31% | "60-day supply, 31% off" |
+| 3 | 12% | 34% | "90-day supply, 34% off" |
+
+So the advertised 3-bag **$158.30** (`239.85 × 0.88 × 0.75`) is **unreachable one-time** — one-time gets the quantity break only, `239.85 × 0.88 = $211.07`. `loadOffer` in [[product-intelligence]] computes this as `maxCompound` and its comment calls it "the real cart math."
+
+**The three surfaces disagree, and that is the trap:**
+- **Storefront cart** — compounds both. $158.30.
+- **Appstle subscription** — [[appstle-pricing]] writes `basePrice` + a *single* PERCENTAGE cycle = the S&S pct only, so the policy alone bills 3 × $59.96 = $179.88. The quantity break arrives separately as an automatic discount **CODE** on the contract (`subscriptions.applied_discounts`, e.g. `"Buy 3 Discount_juTrb" PERCENTAGE 12` → $158.29). **Always read `applied_discounts` before quoting a recurring per-bag price** — the policy and the code together are the real number.
+- **`resolveSubscriptionPricing`** (this file) models the INTERNAL path and does **not** see Appstle contract discounts. On an Appstle sub it under-reports (returned `product_subtotal_cents: 17988` for a contract that actually renews at ~$158.29) while still emitting a `"12% OFF Buy 3"` pill. Do not quote it as the renewal total for `is_internal: false` subs.
+
+Ground truth: ticket `b28e7744` (Juana). An approved orchestrator rule asserted the tier percentages were one-time prices — the exact inversion — which produced a wrong QC "inaccuracy" finding against a *correct* agent reply and two founder escalations. Superseded by `sonnet_prompts` `2af0c4cd`.
+
 ---
 
 [[../README]] · [[../lifecycles/commerce-sdk]] · [[../lifecycles/subscription-billing]] · [[../lifecycles/customer-portal]] · [[subscription-renewal-guard]]
