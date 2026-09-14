@@ -32,6 +32,10 @@ import { subscriptionUpdateNextBillingDate, subscriptionUpdateBillingInterval } 
 const PORTAL_FAIL_TAG = "portal-action-failed";
 // Route slugs the portal uses for a cancel (see src/lib/portal/handlers/index.ts).
 const CANCEL_ROUTES = new Set(["cancel", "canceljourney", "cancelJourney", "cancel_journey"]);
+// Route slugs for the replaceVariants (item swap) handler. Portal route.ts
+// lowercases the incoming ?route= before storing it, so ctx.route arrives as
+// "replacevariants" or "replace_variants" — see [[../../app/api/portal/route.ts]].
+const REPLACE_VARIANTS_ROUTES = new Set(["replacevariants", "replace_variants"]);
 const MAX_HEAL_ATTEMPTS = 3;
 const HEAL_NOTE_PREFIX = "[Auto-heal attempt";
 
@@ -475,6 +479,108 @@ async function cancelSelfResolved(
   return { resolved: false };
 }
 
+/**
+ * Did the customer already get the swap they wanted — without us?
+ * The real case (ticket c19bd92b): the first `replaceVariants` call 400'd on a
+ * stale `oldLineId`, spawning a portal-action-failed ticket; the retry landed
+ * and the sub line is now the requested variant. A generic Appstle 400 on
+ * replaceVariants classifies as `human` (there's no `healPortalAction` replay),
+ * so — like cancel — this guard must run BEFORE the disposition acts.
+ *
+ * Two signals, both scoped to the exact subscription:
+ *   (a) a `portal.items.swapped` customer_event for this contract at or after
+ *       the ticket was created (the customer's successful retry — the handler
+ *       logs this event on every successful swap), or
+ *   (b) the robust one — the local `subscriptions.items[]` line for this
+ *       contract already contains a line whose `variant_id` equals one of the
+ *       failed payload's `newVariants` keys (landed by any path: portal retry,
+ *       webhook, or an internal fix).
+ */
+export async function swapSelfResolved(
+  admin: SupabaseClient,
+  workspaceId: string,
+  ctx: FailureContext,
+  ticket: TicketRow,
+): Promise<{ resolved: boolean; reason?: string }> {
+  const contractId = String(ctx.payload?.contractId || "");
+  if (!contractId) return { resolved: false };
+  const failTime = ticket.created_at;
+
+  // Extract target variant ids from the failed payload's newVariants. Supports
+  // both shapes the portal handler accepts: `{ "123": 2 }` and
+  // `[{ variantId: "123", quantity: 2 }]`. Strip an optional GID prefix so a
+  // "gid://shopify/ProductVariant/123" matches the stored numeric variant_id.
+  function normVariant(raw: string): string {
+    const t = raw.trim();
+    if (!t) return "";
+    return t.includes("/") ? (t.split("/").pop() || t) : t;
+  }
+  const nv = ctx.payload?.newVariants;
+  const targetVariantIds: string[] = [];
+  if (Array.isArray(nv)) {
+    for (const item of nv) {
+      if (item && typeof item === "object") {
+        const o = item as Record<string, unknown>;
+        const norm = normVariant(String(o.variantId ?? o.id ?? ""));
+        if (norm) targetVariantIds.push(norm);
+      } else {
+        const norm = normVariant(String(item ?? ""));
+        if (norm) targetVariantIds.push(norm);
+      }
+    }
+  } else if (nv && typeof nv === "object") {
+    for (const k of Object.keys(nv as Record<string, unknown>)) {
+      const norm = normVariant(k);
+      if (norm) targetVariantIds.push(norm);
+    }
+  }
+
+  // (a) Customer re-did the swap successfully after the error.
+  if (ticket.customer_id) {
+    const { data: swapped } = await admin
+      .from("customer_events")
+      .select("created_at, properties")
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", ticket.customer_id)
+      .eq("event_type", "portal.items.swapped")
+      .gte("created_at", failTime)
+      .limit(20);
+    const reDid = ((swapped || []) as { created_at: string; properties: Record<string, unknown> }[]).find(
+      (e) => String(e.properties?.shopify_contract_id || "") === contractId,
+    );
+    if (reDid) {
+      return {
+        resolved: true,
+        reason: `customer successfully swapped the subscription items herself after the error (${String(reDid.created_at).slice(0, 10)})`,
+      };
+    }
+  }
+
+  // (b) The subscription's stored items[] already contains one of the target
+  // variants. Robust to path — a retry, a webhook, or an internal fix all land
+  // in `subscriptions.items` (see replace-variants handler's post-Appstle
+  // write) and this guard closes the ticket without any API call.
+  if (targetVariantIds.length) {
+    const { data: sub } = await admin
+      .from("subscriptions")
+      .select("items")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    const items = (sub?.items as { variant_id?: string | number | null }[] | null | undefined) || [];
+    const present = new Set(items.map((i) => String(i?.variant_id ?? "")).filter(Boolean));
+    const landed = targetVariantIds.find((v) => present.has(v));
+    if (landed) {
+      return {
+        resolved: true,
+        reason: `the subscription already contains the requested variant (${landed}) — the swap landed without us`,
+      };
+    }
+  }
+
+  return { resolved: false };
+}
+
 async function sysNote(admin: SupabaseClient, ticketId: string, body: string) {
   await admin.from("ticket_messages").insert({
     ticket_id: ticketId,
@@ -569,6 +675,20 @@ export async function remediatePortalTicket(
   // escalate) and an unrecognized error that classifies as `human`.
   if (CANCEL_ROUTES.has(ctx.route)) {
     const sr = await cancelSelfResolved(admin, ticket.workspace_id, ctx, ticket);
+    if (sr.resolved) {
+      await sysNote(admin, ticket.id, `[Auto-resolve] Self-resolved — ${sr.reason}. Closing without escalating.`);
+      await addTag(admin, ticket, "auto-dismissed");
+      await closeTicket(admin, ticket.id);
+      return { action: "dismissed", reason: sr.reason || "self-resolved" };
+    }
+  }
+  // Same shape for replaceVariants (item swap): a generic Appstle 400 on the
+  // first attempt classifies as `human` (no replay in `healPortalAction`), so
+  // this guard must run BEFORE the disposition acts — exactly like cancel.
+  // Real case: ticket c19bd92b, first replaceVariants 400'd on a stale
+  // oldLineId; the retry landed and the sub line is now the requested variant.
+  if (REPLACE_VARIANTS_ROUTES.has(ctx.route)) {
+    const sr = await swapSelfResolved(admin, ticket.workspace_id, ctx, ticket);
     if (sr.resolved) {
       await sysNote(admin, ticket.id, `[Auto-resolve] Self-resolved — ${sr.reason}. Closing without escalating.`);
       await addTag(admin, ticket, "auto-dismissed");
