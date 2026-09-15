@@ -317,7 +317,8 @@
     "test:dunning-rollforward": "tsx --test src/lib/dunning.rollforward.test.ts",
     "check:vendor-dispatch-in-sdk": "tsx scripts/_check-vendor-dispatch-in-sdk.ts",
     "test:shopcx-discount-shape": "tsx --test src/lib/commerce/shopcx-discount-shape.test.ts",
-    "test:shopify-one-time-charge": "tsx --test src/lib/commerce/shopify-one-time-charge.test.ts"
+    "test:shopify-one-time-charge": "tsx --test src/lib/commerce/shopify-one-time-charge.test.ts",
+    "test:dunning-charge-ordinal": "tsx --test src/lib/dunning-charge.ordinal.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.165",
