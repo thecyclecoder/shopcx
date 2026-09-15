@@ -124,3 +124,58 @@ test("a named shopify method skips the Braintree rail", () => {
     "a caller-named Shopify method must bypass the Braintree preference",
   );
 });
+
+test("retryOneTimeCharge only reopens a `failed` row, via compare-and-set", () => {
+  // The retry claim is what stops two operators (or an operator + a cron sweeping stuck rows)
+  // from concurrently reopening the same row: it must be a CAS on status='failed', and the row
+  // count is again the only signal because PostgREST returns no error on a zero-row update.
+  const fn = SRC.slice(SRC.indexOf("export async function retryOneTimeCharge"));
+  const body = fn.slice(0, fn.indexOf("\n}\n") + 3);
+  assert.match(body, /if \(row\.status !== "failed"\) return \{ success: false, error: `not_failed/,
+    "the initial check must gate on failed status");
+  assert.match(body, /\.eq\("status", "failed"\)/,
+    "the update must be a compare-and-set on status='failed'");
+  assert.match(body, /if \(!data\?\.length\) return \{ success: false, error: "not_failed" \}/,
+    "a zero-row update means another actor already reopened this row — refuse loudly");
+});
+
+test("retryOneTimeCharge refuses the same method that just declined", () => {
+  // Every blind retry against the same instrument is a real decline on the customer's account.
+  // The truth of "what just declined" is the payment_method_id ACTUALLY billed; fall back to
+  // shopify_payment_method_id only when the executor failed before stamping the truth.
+  const fn = SRC.slice(SRC.indexOf("export async function retryOneTimeCharge"));
+  const body = fn.slice(0, fn.indexOf("\n}\n") + 3);
+  assert.match(body, /same_method_as_last_decline/, "the same-method retry must be refused with a distinct reason");
+  assert.match(
+    body,
+    /const lastBilled =[\s\S]*?row\.payment_method_id[\s\S]*?\?\?[\s\S]*?row\.shopify_payment_method_id/,
+    "the guard compares against the method actually billed (payment_method_id), not just the caller-chosen field",
+  );
+});
+
+test("retryOneTimeCharge appends prior attempt to attempt_history before reopening", () => {
+  // The whole point of retrying on the SAME row is to preserve the decline history without a
+  // duplicate charge row. The prior attempt's signature must be captured BEFORE the row is
+  // reopened (fields cleared), so the human deciding what to try next sees the full history.
+  const fn = SRC.slice(SRC.indexOf("export async function retryOneTimeCharge"));
+  const body = fn.slice(0, fn.indexOf("\n}\n") + 3);
+  const historyIdx = body.indexOf("attempt_history: nextHistory");
+  const updateIdx = body.indexOf('status: "pending"');
+  assert.ok(historyIdx > 0, "the update must set attempt_history to the appended history");
+  assert.ok(updateIdx > 0, "the update must reopen the row to pending");
+  const priorAppend = body.indexOf("const nextHistory = [");
+  assert.ok(priorAppend > 0 && priorAppend < updateIdx,
+    "attempt_history must be built BEFORE the reopen update, not after");
+  assert.match(body, /payment_method_id: \(row\.payment_method_id [^,]*\) \?\? null/,
+    "the appended entry must carry the payment method that just declined");
+});
+
+test("the attempt_history migration exists and is nullable-safe for existing rows", () => {
+  const HIST_MIGRATION = readFileSync(
+    join(__dirname, "../../../supabase/migrations/20261231120001_one_time_charges_attempt_history.sql"),
+    "utf8",
+  );
+  assert.match(HIST_MIGRATION, /ADD COLUMN IF NOT EXISTS attempt_history jsonb/);
+  assert.match(HIST_MIGRATION, /DEFAULT '\[\]'::jsonb/,
+    "existing rows must read as an empty array — no NULL surprises when the column is scanned");
+});

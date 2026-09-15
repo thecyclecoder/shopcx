@@ -115,10 +115,29 @@ decline — an agent picking up the ticket had no way to see it. The throwaway c
 correctly, which is the safety property holding under a real decline for the first time in
 production.
 
-**Nothing retries a declined charge.** `failed` is terminal and the cron only picks up `pending`, by
-design — a declined card should not auto-retry. Recovering the sale means a NEW charge row, ideally
-after the customer vaults a different card (which also promotes them to internal — see
-[[../lifecycles/shopcx-subscriptions]] § Engine preference order).
+**A declined charge does not auto-retry.** `failed` is terminal for the cron — the cron only picks up
+`pending`, by design, so nothing re-drives a decline without a human decision. To recover the sale,
+an operator (or an agent flow) calls `retryOneTimeCharge(workspaceId, chargeId, newShopifyPaymentMethodId)`:
+it appends the prior attempt to `attempt_history`, clears the last-attempt outcome fields on the
+row, reopens the row from `failed` to `pending` via a compare-and-set on `status='failed'`, and
+sets `shopify_payment_method_id` to the new choice. Same intent, same row, no duplicate charge —
+recovering via a second `one_time_charges` row would risk a double bill if the first row is later
+re-executed by hand.
+
+Refused conditions:
+
+| refusal | what it means |
+|---|---|
+| `not_failed (<status>)` | the row is not in `failed` (only failed rows can retry) |
+| `not_failed` | zero-row CAS — another actor reopened the row first |
+| `same_method_as_last_decline` | the new method equals the one that just declined — a real decline for no diagnostic gain, refused |
+| `payment_method_required` | the new method id is empty |
+| `charge_not_found` | no such row for this workspace |
+
+⚠️ The same-method guard checks against `payment_method_id` (the method the executor actually
+billed), not `shopify_payment_method_id` (the caller's chosen field), because the caller may not
+have named a method — the executor picked `live[0]` and stamped it — and the truth of "what just
+declined" lives on the billed field.
 
 ## Columns
 
@@ -126,7 +145,8 @@ after the customer vaults a different card (which also promotes them to internal
 throwaway contract; NULL before the run, a *cancelled* contract after) ·
 `shopify_payment_method_id` (INPUT — the caller-chosen method to bill; NULL preserves the
 first-non-revoked default) · `payment_method_id` (OUTPUT — the method the executor actually
-billed) ·
+billed) · `attempt_history` (jsonb array of prior attempt signatures, appended by
+`retryOneTimeCharge` — see below) ·
 `status` · `items` (jsonb, **internal variant UUIDs** — never `shopify_variant_id`) ·
 `amount_cents` · `currency` · `charge_at` · `reason` · `created_by` · `order_id` ·
 `shopify_order_name` · `billing_attempt_id` · `rail` (`braintree` | `shopify`) · `error` ·

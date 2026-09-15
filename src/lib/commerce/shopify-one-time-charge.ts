@@ -127,6 +127,106 @@ export async function createOneTimeCharge(
   return { success: true, chargeId: (data as { id: string }).id };
 }
 
+/**
+ * Retry a declined charge on a DIFFERENT stored payment method — same row, no duplicate charge.
+ *
+ * ⭐ WHY THIS EXISTS. A `failed` charge is otherwise terminal (see the table header). Recovery
+ * used to mean creating a second `one_time_charges` row for the same intent, which risked a
+ * double bill if the first row was re-executed by hand (a `pending` charge is not distinguishable
+ * from an un-retried one). Retrying on the SAME row against a different `shopify_payment_method_id`
+ * keeps the intent unique and preserves the audit trail on the row that already carries it.
+ *
+ * ⭐ SAME-METHOD REFUSAL. Re-running against the same method that just declined is refused: it
+ * would produce a second real decline against the customer's account for no diagnostic gain,
+ * exactly what this rail exists to avoid. The truth of "what just declined" is the
+ * `payment_method_id` actually billed (the executor stamps it before the contract call, even
+ * when the caller didn't name one), so that is what the guard checks.
+ *
+ * ⭐ CLAIM SEMANTICS INTACT. The retry claim is a compare-and-set on `status='failed'` — atomic,
+ * distinct from the pending→charging claim that stops a cron + operator from concurrently
+ * charging. A retry that loses the CAS (row is no longer `failed`) returns not_failed and
+ * cannot reopen a row someone else is already re-driving.
+ *
+ * ⭐ ATTEMPT HISTORY PRESERVED. The prior attempt's decline signature is appended to
+ * `attempt_history` before the row is reopened, so the human deciding which card to try next
+ * can see 'this card declined, that one is untried' on the row itself.
+ */
+export async function retryOneTimeCharge(
+  workspaceId: string,
+  chargeId: string,
+  newShopifyPaymentMethodId: string,
+): Promise<OneTimeChargeResult> {
+  if (!newShopifyPaymentMethodId?.trim()) return { success: false, error: "payment_method_required" };
+  const admin = createAdminClient();
+
+  const { data: row } = await admin
+    .from("one_time_charges")
+    .select(
+      "id, status, shopify_payment_method_id, payment_method_id, billing_attempt_id, error, rail, attempts, attempt_history, failed_at",
+    )
+    .eq("workspace_id", workspaceId)
+    .eq("id", chargeId)
+    .maybeSingle();
+  if (!row) return { success: false, error: "charge_not_found" };
+  if (row.status !== "failed") return { success: false, error: `not_failed (${row.status})` };
+
+  // ⚠️ Match by the METHOD ACTUALLY BILLED, not the caller-chosen field. When the caller did not
+  // name a method, `shopify_payment_method_id` on the row is NULL and the executor picked
+  // `live[0]`; the truth of "what just declined" lives on `payment_method_id`. Falling back to
+  // the chosen field covers the case where the executor failed before stamping.
+  const lastBilled = (row.payment_method_id as string | null) ?? (row.shopify_payment_method_id as string | null);
+  if (lastBilled && lastBilled === newShopifyPaymentMethodId.trim()) {
+    return { success: false, error: "same_method_as_last_decline" };
+  }
+
+  // Preserve the decline signature BEFORE reopening. This is the human-facing breadcrumb: 'this
+  // card declined, that one is untried' — without joining payment_failures / customer_events.
+  const prior = Array.isArray(row.attempt_history) ? (row.attempt_history as unknown[]) : [];
+  const nextHistory = [
+    ...prior,
+    {
+      payment_method_id: (row.payment_method_id as string | null) ?? null,
+      rail: (row.rail as string | null) ?? null,
+      error: (row.error as string | null) ?? null,
+      billing_attempt_id: (row.billing_attempt_id as string | null) ?? null,
+      attempts_at_failure: (row.attempts as number | null) ?? null,
+      failed_at: (row.failed_at as string | null) ?? null,
+    },
+  ];
+
+  // Compare-and-set on `failed`. If another actor already reopened the row (or it was pulled
+  // through some other path), the update matches zero rows and we refuse — PostgREST returns no
+  // error for a zero-row update, so ROW COUNT is again the only signal (same rule as claim()).
+  const { error, data } = await admin
+    .from("one_time_charges")
+    .update({
+      status: "pending",
+      shopify_payment_method_id: newShopifyPaymentMethodId.trim(),
+      // Clear last-attempt outcome fields so a stale value from the prior run is not misread as
+      // the new attempt's. The prior decline is preserved on attempt_history, not on these.
+      payment_method_id: null,
+      billing_attempt_id: null,
+      error: null,
+      rail: null,
+      failed_at: null,
+      charging_since: null,
+      // The prior throwaway contract is already CANCELLED (see the finally block); clearing the
+      // reference so a future sweep does not read it as "the current attempt's contract".
+      shopify_contract_id: null,
+      attempt_history: nextHistory,
+      // Re-queue for the next cron tick — same treatment as any freshly-created charge.
+      charge_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("workspace_id", workspaceId)
+    .eq("id", chargeId)
+    .eq("status", "failed")
+    .select("id");
+  if (error) return { success: false, error: error.message };
+  if (!data?.length) return { success: false, error: "not_failed" };
+  return { success: true, chargeId };
+}
+
 /** Pull a queued charge. Only a `pending` row can be cancelled — one already charging or charged cannot. */
 export async function cancelOneTimeCharge(
   workspaceId: string,
