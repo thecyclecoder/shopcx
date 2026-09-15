@@ -1096,6 +1096,11 @@ export function buildCreateSubscriptionRow(
     shopify_contract_id: opts.shopify_contract_id ?? input.shopify_contract_id ?? null,
     status: input.status ?? "active",
     is_internal: input.is_internal ?? (input.vendor === "internal"),
+    // ⚠️ Set it EXPLICITLY. The column defaults to 'appstle', so an omitted value makes a brand-new
+    // INTERNAL subscription look Appstle-billed to every selector that filters on billing_source —
+    // including `migrateCustomerAppstleSubsToInternal`, which then re-migrates an already-internal
+    // sub (and, on a cancelled one, rotates its contract id and reassigns its customer).
+    billing_source: (input.is_internal ?? (input.vendor === "internal")) ? "internal" : input.vendor,
     comp: Boolean(input.comp),
     billing_interval: input.billing_interval,
     billing_interval_count: input.billing_interval_count,

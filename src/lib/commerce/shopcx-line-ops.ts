@@ -164,6 +164,87 @@ async function preparePricing(
 }
 
 /**
+ * Rebuild `subscriptions.items` from the LIVE contract after a committed edit.
+ *
+ * ⭐ Without this the mirror is frozen at migration time and every non-Shopify reader shows the
+ * PRE-EDIT subscription — forever, because nothing else syncs it back (there is no
+ * `subscription_contracts/update` webhook). A customer swaps a flavour and the portal still
+ * renders the old one; `commerce/price.ts` returns these items verbatim for a non-internal sub, so
+ * the price shown is the pre-edit price; the cancel flow offers to save a box that is no longer in
+ * the subscription; and `migrate-to-internal` would build the internal sub from the stale line-up.
+ *
+ * Rebuilt FROM the contract rather than mutated locally: on ShopCX the contract IS the charge, so
+ * a diff-based local edit can drift from it, and the premise of this engine is that Shopify wins.
+ *
+ * ⚠️ Written in the APPSTLE item shape (`variant_id` = the Shopify variant id, `price_cents` = the
+ * realized per-unit price), NOT the internal UUID shape. A ShopCX sub has `is_internal = false`,
+ * and every reader that branches on that flag already expects this shape. Internal UUIDs here
+ * would satisfy the join convention and break the readers.
+ */
+async function mirrorContractToItems(workspaceId: string, contractId: string): Promise<void> {
+  try {
+    const live = await getSubscriptionContract(workspaceId, contractId);
+    if (!live.success || !live.contract) {
+      console.error(`[shopcx-line-ops] mirror skipped — contract ${contractId} unreadable: ${live.error}`);
+      return;
+    }
+    const admin = createAdminClient();
+    const items: Record<string, unknown>[] = [];
+    for (const l of live.contract.lines) {
+      const bare = String(l.variantId ?? "").replace("gid://shopify/ProductVariant/", "");
+      const { data: v } = await admin
+        .from("product_variants")
+        .select("title, shopify_product_id")
+        .eq("workspace_id", workspaceId)
+        .eq("shopify_variant_id", bare)
+        .maybeSingle();
+      const qty = l.quantity || 1;
+      const unitBase = l.currentPrice != null ? Math.round(parseFloat(l.currentPrice) * 100) : 0;
+      // What they actually pay per unit — base less OUR discounts. A customer coupon is excluded
+      // deliberately: it is not part of the line's standing price, and including it would show a
+      // one-use code as the permanent rate.
+      const realized = Math.round((unitBase * qty - l.structuralDiscountCents) / qty);
+      items.push({
+        line_id: l.id.replace("gid://shopify/SubscriptionLine/", ""),
+        variant_id: bare,
+        product_id: (v as { shopify_product_id?: string } | null)?.shopify_product_id ?? null,
+        sku: l.sku,
+        title: l.title,
+        variant_title: (v as { title?: string } | null)?.title ?? null,
+        quantity: qty,
+        price_cents: realized,
+        selling_plan: l.sellingPlanName,
+      });
+    }
+    // ⚠️ Scope BOTH by workspace. `shopify_contract_id` is minted externally and is not globally
+    // unique, so filtering on it alone can overwrite ANOTHER tenant's items — the exact
+    // cross-tenant write `syncItemsAfterMutation` was fixed for on 2026-08-11.
+    const { error } = await admin
+      .from("subscriptions")
+      .update({ items, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId);
+    if (error) {
+      console.error(`[shopcx-line-ops] mirror WRITE FAILED for ${contractId} — portal will show stale lines: ${error.message}`);
+    }
+  } catch (err) {
+    // Never fail the customer's edit because the mirror lagged; the edit itself already committed.
+    console.error(`[shopcx-line-ops] mirror threw for ${contractId}:`, errText(err));
+  }
+}
+
+/** Await a committed line op, then bring `subscriptions.items` back in step with the contract. */
+async function mirrored(
+  workspaceId: string,
+  contractId: string,
+  op: Promise<LineOpResult>,
+): Promise<LineOpResult> {
+  const r = await op;
+  if (r.success) await mirrorContractToItems(workspaceId, contractId);
+  return r;
+}
+
+/**
  * Find a line on the contract by variant id — or by its `SubscriptionLine` gid.
  *
  * The gid form is checked FIRST and only for a value that actually looks like one, so a numeric
@@ -192,13 +273,13 @@ export async function shopcxChangeQuantity(
     if (!line) return { success: false, error: "variant not on this contract" };
     const prep = await preparePricing(workspaceId, contractId);
     if ("error" in prep) return { success: false, error: prep.error };
-    return withDraft(workspaceId, contractId, async (draftId) => {
+    return mirrored(workspaceId, contractId, withDraft(workspaceId, contractId, async (draftId) => {
       const { shopifyUpdateLineQuantityInDraft } = await import("@/lib/commerce/shopify-subscription-client");
       const q = await shopifyUpdateLineQuantityInDraft(workspaceId, draftId, line.id, quantity);
       if (!q.success) return q;
       // SAME draft — a separate commit would leave a window at the old tier.
       return rewriteStructuralDiscounts(workspaceId, draftId, prep.ctx, prep.grandfather);
-    });
+    }));
   } catch (err) { return { success: false, error: errText(err) }; }
 }
 
@@ -222,11 +303,11 @@ export async function shopcxRemoveItem(
     }
     const prep = await preparePricing(workspaceId, contractId);
     if ("error" in prep) return { success: false, error: prep.error };
-    return withDraft(workspaceId, contractId, async (draftId) => {
+    return mirrored(workspaceId, contractId, withDraft(workspaceId, contractId, async (draftId) => {
       const r = await shopifyRemoveDraftLine(workspaceId, draftId, line.id);
       if (!r.success) return r;
       return rewriteStructuralDiscounts(workspaceId, draftId, prep.ctx, prep.grandfather);
-    });
+    }));
   } catch (err) { return { success: false, error: errText(err) }; }
 }
 
@@ -258,7 +339,7 @@ export async function shopcxSwapVariant(
     const target = ctx.variantByShopifyId.get(bare);
     if (!target) return { success: false, error: `variant ${bare} is not in the catalog` };
 
-    return withDraft(workspaceId, contractId, async (draftId) => {
+    return mirrored(workspaceId, contractId, withDraft(workspaceId, contractId, async (draftId) => {
       const u = await shopifyUpdateDraftLine(workspaceId, draftId, line.id, {
         productVariantId: bare,
         ...(quantity != null ? { quantity } : {}),
@@ -266,7 +347,7 @@ export async function shopcxSwapVariant(
       });
       if (!u.success) return u;
       return rewriteStructuralDiscounts(workspaceId, draftId, prep.ctx, prep.grandfather);
-    });
+    }));
   } catch (err) { return { success: false, error: errText(err) }; }
 }
 
@@ -288,12 +369,12 @@ export async function shopcxAddItem(
       // across two lines and make every by-variant lookup ambiguous. Raise the quantity instead.
       return shopcxChangeQuantity(workspaceId, contractId, bare, (line.quantity || 1) + quantity);
     }
-    return withDraft(workspaceId, contractId, async (draftId) => {
+    return mirrored(workspaceId, contractId, withDraft(workspaceId, contractId, async (draftId) => {
       const a = await shopifyAddDraftLine(workspaceId, draftId, bare, quantity, (target.price_cents / 100).toFixed(2));
       if (!a.success) return a;
       // A new line changes the mix-and-match total, so every line's tier may move.
       return rewriteStructuralDiscounts(workspaceId, draftId, prep.ctx, prep.grandfather);
-    });
+    }));
   } catch (err) { return { success: false, error: errText(err) }; }
 }
 
@@ -319,13 +400,13 @@ export async function shopcxUpdateLineItemPrice(
     // The caller is REDEFINING this line's base, so the concession is re-derived from the new
     // base by the recompute below — carrying the old one forward would double-count it.
     prep.grandfather.delete(line.id);
-    return withDraft(workspaceId, contractId, async (draftId) => {
+    return mirrored(workspaceId, contractId, withDraft(workspaceId, contractId, async (draftId) => {
       const u = await shopifyUpdateDraftLine(workspaceId, draftId, line.id, {
         currentPrice: (basePriceCents / 100).toFixed(2),
       });
       if (!u.success) return u;
       return rewriteStructuralDiscounts(workspaceId, draftId, prep.ctx, prep.grandfather);
-    });
+    }));
   } catch (err) { return { success: false, error: errText(err) }; }
 }
 

@@ -489,6 +489,11 @@ export async function migrateCustomerAppstleSubsToInternal(
     const contractId = String(sub.shopify_contract_id);
     const isCancelled = sub.status === "cancelled";
     const engine = String(sub.billing_source || "appstle");
+    // ⚠️ Belt-and-braces on the billing_source filter. Rows written before `billing_source` was set
+    // explicitly carry the column DEFAULT 'appstle' while being internal already; migrating one
+    // rotates its contract id, reassigns its customer and resets its billing date — for nothing.
+    // The selector is the fix; this is the guard that makes a missed row harmless.
+    if (sub.is_internal) { result.skipped.push({ contractId, reason: "already_internal" }); continue; }
     if (engine === "appstle" && !cfg) { result.failed.push({ contractId, error: "Appstle not configured" }); continue; }
     try {
       // Read the LIVE contract from WHICHEVER engine holds it — source of truth for current

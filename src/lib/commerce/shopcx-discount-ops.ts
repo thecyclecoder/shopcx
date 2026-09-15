@@ -57,9 +57,19 @@ async function splitDiscounts(
     }),
   });
   const j = (await res.json().catch(() => null)) as
-    | { data?: { subscriptionContract?: { discounts?: { nodes?: { id: string; type: string | null; title: string | null }[] } } } }
+    | { errors?: { message: string }[]; data?: { subscriptionContract?: { discounts?: { nodes?: { id: string; type: string | null; title: string | null }[] } } } }
     | null;
-  const nodes = j?.data?.subscriptionContract?.discounts?.nodes ?? [];
+  // ⚠️ A failed read is NOT an empty discount set, and conflating them corrupts the contract.
+  // A 5xx, a throttle (`errors` with no `data`), or an expired token yields no nodes — which the
+  // caller would read as "this contract has no discounts": apply then REMOVES NOTHING and adds the
+  // new code, so the contract carries BOTH, stacked order-wide on every renewal; remove reports
+  // `coupon_not_found` and leaves a discount that was supposed to be revoked. Throw instead.
+  if (!res.ok || j?.errors?.length || !j?.data) {
+    throw new Error(
+      `could not read contract discounts: HTTP ${res.status}${j?.errors?.length ? ` ${j.errors.map((e) => e.message).join("; ")}` : ""}`,
+    );
+  }
+  const nodes = j.data.subscriptionContract?.discounts?.nodes ?? [];
   const isStructural = (d: { type: string | null; title: string | null }) =>
     d.type === "MANUAL" && STRUCTURAL_DISCOUNT_TITLES.includes(String(d.title ?? ""));
   return {
@@ -75,18 +85,34 @@ async function writeMirror(
   coupon: AppliedDiscount | null,
 ): Promise<void> {
   const admin = createAdminClient();
-  const { data } = await admin
+  const { data, error: readErr } = await admin
     .from("subscriptions").select("applied_discounts")
     .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
-  const existing = ((data?.applied_discounts as AppliedDiscount[] | null) ?? []).filter(
+  // ⚠️ A read error (or two matching rows) makes `maybeSingle` return null, and treating that as
+  // "no existing discounts" would WIPE the mirrored structural rows on the next write.
+  if (readErr || !data) {
+    console.error(
+      `[shopcx-discount-ops] mirror read failed for ${contractId} — leaving applied_discounts untouched: ${readErr?.message ?? "no row"}`,
+    );
+    return;
+  }
+  const existing = ((data.applied_discounts as AppliedDiscount[] | null) ?? []).filter(
     (d) => STRUCTURAL_DISCOUNT_TITLES.includes(String(d.title ?? "")),
   );
-  await admin.from("subscriptions")
+  const { data: wrote, error: writeErr } = await admin.from("subscriptions")
     .update({
       applied_discounts: coupon ? [...existing, coupon] : existing,
       updated_at: new Date().toISOString(),
     })
-    .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId);
+    .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId)
+    .select("id");
+  // A zero-row update returns NO error — e.g. a GID-form contractId that matches nothing. The
+  // mirror would then drift from the contract permanently and silently.
+  if (writeErr || !wrote?.length) {
+    console.error(
+      `[shopcx-discount-ops] mirror WRITE failed for ${contractId}: ${writeErr?.message ?? "matched 0 rows"}`,
+    );
+  }
 }
 
 /**

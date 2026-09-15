@@ -155,17 +155,31 @@ async function claim(workspaceId: string, chargeId: string): Promise<boolean> {
   return !!data?.length;
 }
 
+/**
+ * Write a state transition.
+ *
+ * ⚠️ READS its error. Every transition in this module funnels through here, and a swallowed
+ * failure on the settle-to-`charged` leaves a customer who WAS charged sitting in `charging` —
+ * which the sweeper then reconciles as a crash. PostgREST also returns no error when an update
+ * matches zero rows, so the row count is checked too.
+ */
 async function settle(
   workspaceId: string,
   chargeId: string,
   patch: Record<string, unknown>,
 ): Promise<void> {
   const admin = createAdminClient();
-  await admin
+  const { data, error } = await admin
     .from("one_time_charges")
     .update({ ...patch, updated_at: new Date().toISOString() })
     .eq("workspace_id", workspaceId)
-    .eq("id", chargeId);
+    .eq("id", chargeId)
+    .select("id");
+  if (error || !data?.length) {
+    console.error(
+      `[one-time-charge] settle FAILED for ${chargeId} (${JSON.stringify(patch)}): ${error?.message ?? "matched 0 rows"}`,
+    );
+  }
 }
 
 /**
@@ -226,23 +240,44 @@ async function resolveShopifyContext(
     headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
     body: JSON.stringify({
       query: `query($id:ID!){ customer(id:$id){
-        paymentMethods(first:10){ nodes { id revokedAt instrument { __typename } } }
+        paymentMethods(first:10){ nodes { id revokedAt } }
         defaultAddress { address1 address2 city zip provinceCode countryCodeV2 firstName lastName phone company } } }`,
       variables: { id: `gid://shopify/Customer/${String(shopifyCustomerId).replace("gid://shopify/Customer/", "")}` },
     }),
   });
   const j = (await res.json().catch(() => null)) as {
+    errors?: { message: string }[];
     data?: { customer?: {
       paymentMethods?: { nodes?: { id: string; revokedAt: string | null }[] };
       defaultAddress?: Record<string, unknown> | null;
     } };
   } | null;
-  const cust = j?.data?.customer;
+  // ⚠️ Distinguish "we could not reach Shopify" from "this customer has no card". A 5xx, a 429,
+  // a throttle (which returns `errors` with no `data`), or a non-JSON body all produce
+  // `customer === undefined` — and reporting that as not-found settles the row terminally
+  // `failed`, so revenue silently never happens. Throwing lets Inngest retry, which is what the
+  // billing-attempt call two steps later already does.
+  if (!res.ok || j?.errors?.length || !j?.data) {
+    throw new Error(
+      `transient Shopify failure reading customer: HTTP ${res.status}${j?.errors?.length ? ` ${j.errors.map((e) => e.message).join("; ")}` : ""}`,
+    );
+  }
+  const cust = j.data.customer;
   if (!cust) return { error: "shopify_customer_not_found" };
 
   // A revoked method still appears in the list and would fail the attempt with an opaque decline.
-  const pm = (cust.paymentMethods?.nodes ?? []).find((p) => !p.revokedAt);
+  // ⚠️ `paymentMethods` is NOT ordered by default-ness and Shopify exposes no "default payment
+  // method" on Customer, so "the first non-revoked one" is genuinely the best available signal —
+  // but it can be an old card the customer has replaced. Recorded on the row so a wrong-instrument
+  // charge is traceable rather than mysterious.
+  const live = (cust.paymentMethods?.nodes ?? []).filter((p) => !p.revokedAt);
+  const pm = live[0];
   if (!pm) return { error: "no_vaulted_shopify_payment_method" };
+  if (live.length > 1) {
+    console.warn(
+      `[one-time-charge] customer has ${live.length} live Shopify payment methods; charging ${pm.id} (first non-revoked — Shopify exposes no default)`,
+    );
+  }
   const a = cust.defaultAddress;
   if (!a?.address1) return { error: "customer_has_no_shipping_address" };
 
@@ -337,11 +372,32 @@ export async function executeOneTimeCharge(
   };
 
   let contractId: string | undefined;
+  let leftPending = false;
   try {
     // ⭐ BRAINTREE FIRST. A vaulted Braintree card charges directly — no throwaway contract, no
     // Shopify order-source ambiguity, and the customer stays on internal rails. The Shopify path
     // is the fallback for customers we cannot reach any other way.
-    const braintree = await chargeViaBraintreeIfPossible(workspaceId, row);
+    // ⚠️ A throw out of the Braintree rail is INDETERMINATE, never a retry. `transaction.sale`
+    // carries no idempotency key, so a settled sale whose response timed out is indistinguishable
+    // from one that never happened — and the generic catch below would hand the row back to
+    // `pending`, where the hourly cron re-fans it out and charges the card AGAIN, without limit
+    // (`attempts` is not incremented on throw paths). Terminal + loud is the only safe direction:
+    // a human reconciles one charge, rather than the system silently making several.
+    let braintree: Awaited<ReturnType<typeof chargeViaBraintreeIfPossible>>;
+    try {
+      braintree = await chargeViaBraintreeIfPossible(workspaceId, row);
+    } catch (e) {
+      const detail = errText(e);
+      console.error(`[one-time-charge] INDETERMINATE Braintree outcome for ${chargeId} — may or may not have charged: ${detail}`);
+      await settle(workspaceId, chargeId, {
+        status: "failed",
+        error: `braintree_indeterminate:${detail}`,
+        failed_at: new Date().toISOString(),
+        rail: "braintree",
+        attempts: (row.attempts as number) + 1,
+      });
+      return { status: "failed", error: "braintree_indeterminate" };
+    }
     if (braintree) {
       if (!braintree.success) return fail(braintree.error ?? "braintree_declined");
       await settle(workspaceId, chargeId, {
@@ -406,7 +462,8 @@ export async function executeOneTimeCharge(
     if (outcome.pending) {
       // 3DS or a poll timeout — NOT settled. Leave it `charging` so nothing double-charges, and
       // let the sweeper reconcile it against Shopify rather than guessing here.
-      await settle(workspaceId, chargeId, { billing_attempt_id: started.attemptId });
+      leftPending = true;
+      await settle(workspaceId, chargeId, { billing_attempt_id: started.attemptId, rail: "shopify" });
       return { status: "pending" };
     }
     if (!outcome.success) {
@@ -439,8 +496,13 @@ export async function executeOneTimeCharge(
     await settle(workspaceId, chargeId, { status: "pending", charging_since: null });
     throw err;
   } finally {
-    // ⭐ Cancel on EVERY settled path. This — not maxCycles — is what makes the charge one-time.
-    if (contractId) {
+    // ⭐ Cancel on every SETTLED path — this, not maxCycles, is what makes the charge one-time.
+    //
+    // ⚠️ But NOT while an attempt is still in flight. A `pending` outcome (3DS, or a poll timeout)
+    // means Shopify may still charge this contract; cancelling it mid-attempt would destroy the
+    // thing the sweeper is supposed to reconcile against. That row stays `charging` and the sweep
+    // cancels the contract once it resolves.
+    if (contractId && !leftPending) {
       const c = await shopifySubscriptionAction(workspaceId, contractId, "cancel").catch(
         (e: unknown) => ({ success: false, error: errText(e) }),
       );
@@ -448,7 +510,15 @@ export async function executeOneTimeCharge(
         // A live contract attached to a customer who agreed to ONE charge. Loud, and recorded on
         // the row so the sweeper can retry rather than leaving it to a log nobody reads.
         console.error(`[one-time-charge] LEFT CONTRACT OPEN ${contractId} for charge ${chargeId}: ${c.error}`);
-        await settle(workspaceId, chargeId, { error: `contract_not_cancelled:${contractId}:${c.error ?? ""}` });
+        // ⚠️ APPEND, never overwrite. `fail()` has usually just written the decline reason here,
+        // and clobbering it destroys the only record of WHY the charge failed.
+        const admin2 = createAdminClient();
+        const { data: cur } = await admin2
+          .from("one_time_charges").select("error").eq("id", chargeId).maybeSingle();
+        const prior = (cur as { error?: string | null } | null)?.error;
+        await settle(workspaceId, chargeId, {
+          error: `contract_not_cancelled:${contractId}:${c.error ?? ""}${prior ? ` | ${prior}` : ""}`,
+        });
       }
     }
   }
@@ -526,12 +596,14 @@ export async function sweepOneTimeCharges(workspaceId: string): Promise<{ reconc
   let cancelled = 0;
   const linked = await backfillOrderLinks(workspaceId);
 
+  // ⚠️ `.lt("charging_since", …)` EXCLUDES NULLs, so a `charging` row that never got a timestamp
+  // would be invisible here forever. Ask for those explicitly.
   const { data: stuck } = await admin
     .from("one_time_charges")
     .select("id, shopify_contract_id, billing_attempt_id, charging_since, attempts")
     .eq("workspace_id", workspaceId)
     .eq("status", "charging")
-    .lt("charging_since", new Date(Date.now() - 30 * 60 * 1000).toISOString())
+    .or(`charging_since.lt.${new Date(Date.now() - 30 * 60 * 1000).toISOString()},charging_since.is.null`)
     .limit(100);
 
   for (const row of stuck ?? []) {
@@ -557,5 +629,42 @@ export async function sweepOneTimeCharges(workspaceId: string): Promise<{ reconc
       if (r.success) cancelled++;
     }
   }
+  cancelled += await cancelLeakedContracts(workspaceId);
   return { reconciled, cancelled, linked };
+}
+
+/**
+ * Cancel contracts a failed cleanup left ACTIVE.
+ *
+ * ⭐ These are NOT in the `charging` scan above and never were: the cancel runs in a `finally`,
+ * by which time the row is already terminal (`charged` or `failed`). Until this existed, the
+ * executor recorded `contract_not_cancelled:…` "so the sweeper can retry" and nothing ever did —
+ * leaving a live monthly billing instrument attached to a customer who consented to ONE charge.
+ */
+async function cancelLeakedContracts(workspaceId: string): Promise<number> {
+  const admin = createAdminClient();
+  const { data: leaked } = await admin
+    .from("one_time_charges")
+    .select("id, shopify_contract_id, error")
+    .eq("workspace_id", workspaceId)
+    .like("error", "contract_not_cancelled:%")
+    .limit(100);
+
+  let cancelled = 0;
+  for (const row of leaked ?? []) {
+    const cid = row.shopify_contract_id as string | null;
+    if (!cid) continue;
+    const c = await getSubscriptionContract(workspaceId, cid);
+    if (c.contract && c.contract.status === "CANCELLED") {
+      // Already gone (someone cancelled it by hand) — clear the marker so it stops being scanned.
+      await settle(workspaceId, String(row.id), { error: null });
+      continue;
+    }
+    const r = await shopifySubscriptionAction(workspaceId, cid, "cancel");
+    if (r.success) {
+      await settle(workspaceId, String(row.id), { error: null });
+      cancelled++;
+    }
+  }
+  return cancelled;
 }
