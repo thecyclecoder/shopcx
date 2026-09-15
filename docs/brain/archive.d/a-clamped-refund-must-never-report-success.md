@@ -1,0 +1,1 @@
+- **A clamped refund must never report success** · verified 2026-09-11 · → [[../libraries/action-executor]] + [[../libraries/june-remedy-approval]] + [[../libraries/agent-action-queue]] + [[../libraries/required-outcomes-validator]] + [[../libraries/selective-clarify]]

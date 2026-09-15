@@ -750,14 +750,27 @@ export function verifyPlanAgainstRemedyStates(
     // amounts (collapses the batch to null → gates), but we treat an unknown amount here as
     // "cannot verify the ceiling" and skip the arithmetic check. The unsizeable case falls
     // through to the founder gate which will still refuse to auto-execute it.
-    const rawAmount = step.actionParams.amount_cents ?? step.actionParams.replacement_amount_cents;
-    if (typeof rawAmount !== "number" || !Number.isFinite(rawAmount)) {
+    //
+    // `full_order_refund` is a special case: its payload carries no caller-supplied amount —
+    // the handler refunds `orders.total_cents` verbatim, so we size the step against the
+    // prefetched state's live `total_cents`. Without this override the step would fall into
+    // `orderKeysWithUnknownAmount` and the ceiling arithmetic below would never run, so an
+    // order with even $1 already partially refunded could take a full-total refund on top
+    // of it (Fix-2 phase of a-clamped-refund-must-never-report-success — the money-integrity
+    // gap the security review flagged).
+    let stepAmountCents: number | null;
+    if (step.actionType === "full_order_refund") {
+      stepAmountCents = state.total_cents;
+    } else {
+      const rawAmount = step.actionParams.amount_cents ?? step.actionParams.replacement_amount_cents;
+      stepAmountCents = typeof rawAmount === "number" && Number.isFinite(rawAmount) ? Math.round(rawAmount) : null;
+    }
+    if (stepAmountCents === null) {
       orderKeysWithUnknownAmount.add(ref.key);
       continue;
     }
     const prev = sumByOrder.get(ref.key) ?? 0;
-    const next = prev + Math.round(rawAmount);
-    sumByOrder.set(ref.key, next);
+    sumByOrder.set(ref.key, prev + stepAmountCents);
   }
 
   for (const [key, sum] of sumByOrder) {

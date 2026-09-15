@@ -33,6 +33,10 @@ import {
 import { aggregateRenewalOutcomes, type RenewalOutcomeCounts } from "@/lib/control-tower/heartbeat";
 import { buildCoverageAudit, type CoverageAudit } from "@/lib/control-tower/self-audit";
 import { SPEC_TEST_FIXTURES } from "@/lib/spec-test-sandbox";
+import {
+  cycleKeyFromNextBillingDate,
+  STALE_IN_FLIGHT_RECLAIM_MS,
+} from "@/lib/subscription-cycle-charge-claim";
 
 // The permanent spec-test sandbox tenant (is_test=true). Its seeded fixtures are deliberately stuck
 // (e.g. SPEC_TEST_FIXTURES.subscriptionCompId is a comp sub whose customer has no comp_role, so the
@@ -1623,6 +1627,17 @@ export interface AssertionInputs {
   renewalBaseline: RenewalOutcomeCounts;
   /** dunning_cycles still 'retrying' more than the grace past next_retry_at (stuck). */
   stuckDunningCycles: number;
+  /**
+   * Phase 3 of [[../specs/a-declined-renewal-must-not-wedge-the-cycle-forever]]. Count of
+   * ACTIVE internal subscriptions whose CURRENT cycle_key (= cycleKeyFromNextBillingDate of
+   * their live `next_billing_date`) has a `subscription_cycle_charges` row that is NOT
+   * `succeeded` AND has persisted past the SDK's `STALE_IN_FLIGHT_RECLAIM_MS` reclaim threshold.
+   * The threshold gate excludes a legitimately-in-progress fresh `in_flight` claim (seconds-
+   * long transient); a `failed` row on the current cycle_key OR a stranded `in_flight` older
+   * than the SDK-reclaim window is precisely the wedge shape Phase 1 self-heals — this
+   * assertion catches the NEXT variant of the class rather than the exact 2026-10-04 shape.
+   */
+  wedgedCycleSubs: number;
   /** SMS-subscribed customers (segment-coverage assertion): total in the book. */
   smsSubscribedTotal: number;
   /** SMS-subscribed customers with segments_refreshed_at within 26h (fresh cohort). */
@@ -1851,6 +1866,25 @@ export function evalOutputAssertion(
         violation: {
           reason: "renewal_outcome_distribution",
           detail: `Renewal cycle outcome ${tripped === "systemic" ? "break" : "spike"}: ${bad}/${cur.total} outcomes anomalous (${pct}%${baselineNote}) — ${cur.declined_to_dunning} declined→dunning (${declinePct}% decline rate), ${cur.skipped_no_payment_method} skipped no-payment-method, ${cur.comp_blocked} comp-blocked. The renewal cron ran and each decline routed correctly, but the per-cycle mix signals a systemic break (e.g. bad Braintree creds, a no-payment-method spike).`,
+        },
+      };
+    }
+    case "renewal-wedged-cycles": {
+      // Wedged current-cycle: active internal subs whose CURRENT cycle_key still has a
+      // non-succeeded subscription_cycle_charges row that has persisted past the SDK's
+      // reclaim threshold. After Phase 1 this count should be zero — any attempt reclaims a
+      // failed / stale in_flight row atomically — so a positive count means either a variant
+      // of the same class has emerged (a new state the reclaim doesn't cover) or the retry
+      // path stopped firing entirely. Phase 3 of
+      // [[../../../docs/brain/specs/a-declined-renewal-must-not-wedge-the-cycle-forever]].
+      if (inputs.wedgedCycleSubs <= 0) return null;
+      const n = inputs.wedgedCycleSubs;
+      const graceMin = Math.round(STALE_IN_FLIGHT_RECLAIM_MS / 60_000);
+      return {
+        statusText: `${n} sub${n === 1 ? "" : "s"} wedged on current cycle`,
+        violation: {
+          reason: "renewal_wedged_cycles",
+          detail: `${n} active internal subscription${n === 1 ? " has" : "s have"} a persistent (older than ${graceMin} min) non-succeeded subscription_cycle_charges row on the cycle_key their current next_billing_date derives — the SDK reclaim should have taken those rows over on the next attempt but did not, so the next scheduled charge and any customer-initiated order will refuse. See [[../specs/a-declined-renewal-must-not-wedge-the-cycle-forever]] Phase 3.`,
         },
       };
     }
@@ -2132,6 +2166,87 @@ export async function countSegmentStaleTail(
   return count ?? 0;
 }
 
+/**
+ * Pure predicate: is this (charge, sub) pair a wedged current-cycle claim?
+ *
+ * A wedge means: the row exists AND is not `succeeded` AND has persisted long enough that any
+ * legitimate in-progress attempt would already have resolved it. The threshold matches the
+ * SDK's own `STALE_IN_FLIGHT_RECLAIM_MS` — a fresh `in_flight` claim is a real ongoing charge
+ * (seconds long), never wedged; anything older on a non-succeeded status is the class Phase 1
+ * self-heals via reclaim, and its continued presence means the reclaim's trigger (a new claim
+ * attempt) has not fired.
+ *
+ * Deliberately not scoped to `status='failed'` — the point of the assertion is to catch the
+ * NEXT variant of the same class, not only the 2026-10-04 sub e4e3b82e shape.
+ */
+export function isWedgedCycleCharge(
+  charge: { cycle_key: string; status: string; claimed_at: string },
+  sub: { next_billing_date: string | null },
+  now: number = Date.now(),
+): boolean {
+  if (charge.status === "succeeded") return false;
+  const currentCycleKey = cycleKeyFromNextBillingDate(sub.next_billing_date);
+  if (currentCycleKey === "unknown-cycle") return false;
+  if (currentCycleKey !== charge.cycle_key) return false;
+  const claimedAtMs = new Date(charge.claimed_at).getTime();
+  if (!Number.isFinite(claimedAtMs)) return false;
+  return now - claimedAtMs > STALE_IN_FLIGHT_RECLAIM_MS;
+}
+
+/**
+ * READ-ONLY: count active internal subscriptions whose CURRENT cycle_key has a non-succeeded
+ * `subscription_cycle_charges` row that has persisted past `STALE_IN_FLIGHT_RECLAIM_MS`. Phase
+ * 3 of [[../specs/a-declined-renewal-must-not-wedge-the-cycle-forever]].
+ *
+ * Live probe (never a cached heartbeat value — the spec explicitly asks for the decision to
+ * live-probe so a stale beat cannot hide it). Two indexed queries: (1) all not-succeeded claim
+ * rows outside the sandbox, (2) the ACTIVE internal subs among that candidate id-set. The
+ * match — the sub's live `next_billing_date` derives the SAME cycle_key held by a persistent
+ * non-succeeded row — is where the wedge lives. Fresh in_flight rows (< STALE_IN_FLIGHT_RECLAIM_MS)
+ * are excluded so a legitimately-in-progress charge cannot false-fire the tile.
+ *
+ * The spec-test sandbox is excluded on BOTH sides so a seeded stuck-wedge fixture cannot
+ * inflate the real count.
+ */
+export async function countRenewalWedgedCycles(admin: Admin, now: number = Date.now()): Promise<number> {
+  const { data: nonSucceededRows } = await admin
+    .from("subscription_cycle_charges")
+    .select("subscription_id, cycle_key, status, claimed_at")
+    .neq("status", "succeeded")
+    .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID);
+  if (!nonSucceededRows || nonSucceededRows.length === 0) return 0;
+
+  const persistentBySub = new Map<string, Array<{ cycle_key: string; status: string; claimed_at: string }>>();
+  for (const row of nonSucceededRows as Array<{ subscription_id: string; cycle_key: string; status: string; claimed_at: string }>) {
+    const claimedAtMs = new Date(row.claimed_at).getTime();
+    if (!Number.isFinite(claimedAtMs)) continue;
+    if (now - claimedAtMs <= STALE_IN_FLIGHT_RECLAIM_MS) continue; // fresh — legitimately in progress
+    const list = persistentBySub.get(row.subscription_id) ?? [];
+    list.push({ cycle_key: row.cycle_key, status: row.status, claimed_at: row.claimed_at });
+    persistentBySub.set(row.subscription_id, list);
+  }
+  if (persistentBySub.size === 0) return 0;
+
+  const candidateIds = Array.from(persistentBySub.keys());
+  const { data: subs } = await admin
+    .from("subscriptions")
+    .select("id, next_billing_date")
+    .in("id", candidateIds)
+    .eq("is_internal", true)
+    .eq("status", "active")
+    .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID);
+  if (!subs || subs.length === 0) return 0;
+
+  let wedged = 0;
+  for (const sub of subs as Array<{ id: string; next_billing_date: string | null }>) {
+    const currentCycleKey = cycleKeyFromNextBillingDate(sub.next_billing_date);
+    if (currentCycleKey === "unknown-cycle") continue;
+    const rows = persistentBySub.get(sub.id) ?? [];
+    if (rows.some((r) => r.cycle_key === currentCycleKey)) wedged += 1;
+  }
+  return wedged;
+}
+
 export async function countStuckDunningCycles(admin: Admin, stuckBeforeIso: string): Promise<number> {
   const { count } = await admin
     .from("dunning_cycles")
@@ -2178,7 +2293,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   const latestRenewalCronBeatIso = (renewalCronBeatData as { ran_at: string } | null)?.ran_at ?? null;
   const latestSegmentsCronBeatIso = (segmentsCronBeatData as { ran_at: string } | null)?.ran_at ?? null;
 
-  const [escalated, oldestEscalated, triageJob, specTestJob, overdueInternalSubsUncovered, stuckDunningCount, smsTotal, smsFresh, smsStale] = await Promise.all([
+  const [escalated, oldestEscalated, triageJob, specTestJob, overdueInternalSubsUncovered, stuckDunningCount, smsTotal, smsFresh, smsStale, wedgedCycleSubs] = await Promise.all([
     // Routine-owned escalated tickets still open — mirrors triage-escalations-cron's query.
     admin
       .from("tickets")
@@ -2244,6 +2359,11 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     // gate (segment-coverage-ignore-post-cron-opt-ins Phase 1 —
     // SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE) both applied inside the helper.
     countSegmentStaleTail(admin, { staleCutoffIso: segStaleCutoffIso, latestSegmentsCronBeatIso }).then((count) => ({ count })),
+    // Wedged current-cycle probe (Phase 3 of a-declined-renewal-must-not-wedge-the-cycle-forever).
+    // Live-probes each monitor tick — a stale cron heartbeat can't hide a wedge because this decision
+    // never reads from a cached beat value. Excludes fresh in_flight (< STALE_IN_FLIGHT_RECLAIM_MS)
+    // so a legitimately in-progress charge can't false-fire the tile.
+    countRenewalWedgedCycles(admin),
   ]);
 
   // Renewal outcome distribution: current cycle (since the last cron beat, or a 26h fallback) vs a
@@ -2267,6 +2387,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     smsSubscribedTotal: smsTotal.count ?? 0,
     smsSubscribedFresh26h: smsFresh.count ?? 0,
     smsSubscribedStale48h: smsStale.count ?? 0,
+    wedgedCycleSubs,
   };
 }
 

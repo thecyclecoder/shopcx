@@ -213,6 +213,17 @@ export interface ActionContext {
   // (the Melissa-class return-label bug, ticket eca3f43b). Empty/undefined when
   // no direct_action ran.
   _lastActionResults?: { action: ActionParams; result: ActionResult }[];
+  /**
+   * ⭐ The ONLY caller-side authorisation the `full_order_refund` handler recognises.
+   * Set true by [[june-remedy-approval]] `executeParkedRemedy` after a `june_remedy`
+   * god_mode_approvals card has been founder-approved; unset everywhere else (Sol's
+   * cheap-execution, a raw Sonnet direct_action, journeys/playbooks/workflows). Without
+   * this flag, the handler refuses with a money-integrity error even if the action
+   * somehow reaches the executor — the belt-and-braces guard on top of the
+   * MONEY_ACTION_TYPES rail + agent-action-queue deny-list + required-outcomes
+   * removal. See Fix-1 phase of a-clamped-refund-must-never-report-success.
+   */
+  _founderApprovedFullOrderRefund?: boolean;
 }
 
 type SendFn = (msg: string, sandbox: boolean) => Promise<void>;
@@ -1747,6 +1758,22 @@ export const directActionHandlers: Record<
     const { subscriptionGetLiveContract } = await import("@/lib/commerce/subscription");
     const contract = await subscriptionGetLiveContract(ctx.workspaceId, String(p.contract_id!));
     if (!contract.ok) return { success: false, error: contract.error || "Contract fetch failed" };
+
+    // Internal subs manage lines directly on `subscriptions.items` by variant_id
+    // — the vendor-side nodes array is EMPTY by design (subscriptionGetLiveContract
+    // returns `{ internal: true, lines: { nodes: [] } }`). Delegate straight to
+    // subRemoveItem which filters `subscriptions.items` by variant_id. Without
+    // this branch the empty nodes array proxied as "variant not on contract" even
+    // when the local row still carried the variant (ticket c13fbad1, Kristy
+    // Teague's bundled split — Vanilla Creamer 88f725ad was literally present in
+    // subscriptions.items but remove_item bounced "No lines matching variant …").
+    if (contract.internal) {
+      const r = await subRemoveItem(ctx.workspaceId, p.contract_id, { variantId });
+      return r.success
+        ? { success: true, summary: `Removed variant ${variantId}` }
+        : { success: false, error: r.error };
+    }
+
     const lines = ((contract.lines?.nodes || []) as Line[])
       .filter((l) => {
         const vid = String(l.variantId || "").split("/").pop();
@@ -2388,8 +2415,33 @@ export const directActionHandlers: Record<
     const { resolveBillingSource } = await import("@/lib/internal-subscription");
     const priceEngine = await resolveBillingSource(ctx.workspaceId, p.contract_id);
     if (priceEngine !== "appstle") {
-      if (!p.variant_id) return { success: false, error: `${priceEngine} subscription requires a variant_id to restore price` };
-      const variantId = String(p.variant_id);
+      // Prefer the agent-supplied variant_id, but fall back to the sole real (non
+      // shipping-protection) line on the sub — a sub with one item has an unambiguous restore
+      // target, and blocking on a missing variant_id here has stranded customer lines at $0.00
+      // (spec: failed-cycle-charge-claim-must-not-wedge-order-now-and-renewal-retries).
+      let variantId = p.variant_id ? String(p.variant_id) : "";
+      if (!variantId) {
+        const items = Array.isArray(subRow?.items)
+          ? (subRow!.items as Array<{ variant_id?: unknown; title?: unknown }>)
+          : [];
+        const real = items.filter(
+          (i) => !String(i.title ?? "").toLowerCase().includes("shipping protection"),
+        );
+        if (real.length === 1 && real[0]?.variant_id) {
+          variantId = String(real[0].variant_id);
+          console.log(
+            `update_line_item_price: ${priceEngine} sub ${p.contract_id} — inferred variant_id ${variantId} from sole real line (agent omitted variant_id)`,
+          );
+        } else {
+          return {
+            success: false,
+            error:
+              real.length === 0
+                ? `${priceEngine} subscription has no restore-eligible line (no non-shipping-protection items)`
+                : `${priceEngine} subscription has ${real.length} real lines — variant_id is required to pick one`,
+          };
+        }
+      }
       const derived = await decide(variantId);
       if (!derived.ok) {
         await escalateRaiseAttempt(variantId, derived);
@@ -2403,7 +2455,7 @@ export const directActionHandlers: Record<
       const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, variantId, derived.base);
       if (r.success) await logPriceCorrection(variantId, derived);
       return r.success
-        ? { ...r, summary: `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${p.variant_id} (${priceEngine})${derived.note}` }
+        ? { ...r, summary: `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${variantId} (${priceEngine})${derived.note}` }
         : r;
     }
 
@@ -2707,14 +2759,24 @@ export const directActionHandlers: Record<
       // requirement so the verification grep can find the clamp point.
       const overchargeDelta = signal.delta;
       if (p.amount_cents > overchargeDelta + 100) {
-        // Over-ask: clamp to the signal-computed delta and log so the
-        // divergence is visible (the r.aycock case: agent asked for
-        // remediation of the order total instead of the per-unit delta).
-        console.log(
-          `partial_refund: clamping agent-proposed $${(p.amount_cents / 100).toFixed(2)} to overchargeDelta $${(overchargeDelta / 100).toFixed(2)} on order ${p.shopify_order_id} (subscription ${orderSubscriptionId})`,
+        // Over-ask: refuse. The old branch was silently clamping
+        // agent-proposed amounts DOWN to overchargeDelta and returning
+        // success, so the caller then shipped a response_message
+        // claiming the ORIGINAL requested figure was on its way
+        // (SC137733: $52.91 requested, $5.01 refunded, customer told
+        // $52.91). A reduced refund reported as success is the worst
+        // shape a money bug can take — surface it as a failure so the
+        // reply path skips response_message and the ticket escalates.
+        // The under-ask branch below still allows partial goodwill, and
+        // `full_order_refund` gives founder-authorised full refunds a
+        // sanctioned route that doesn't invent a number.
+        console.warn(
+          `partial_refund: refusing — would have been silently clamping agent-proposed $${(p.amount_cents / 100).toFixed(2)} to overchargeDelta $${(overchargeDelta / 100).toFixed(2)} on order ${p.shopify_order_id} (subscription ${orderSubscriptionId}); refused instead so no success-shaped reply can ship on a reduced refund.`,
         );
-        overchargeNote = ` (agent-proposed $${(p.amount_cents / 100).toFixed(2)} clamped to signal-computed overchargeDelta $${(overchargeDelta / 100).toFixed(2)})`;
-        refundCents = overchargeDelta;
+        return {
+          success: false,
+          error: `Refusing partial_refund on order ${p.shopify_order_id}: requested $${(p.amount_cents / 100).toFixed(2)} exceeds the signal-computed overchargeDelta $${(overchargeDelta / 100).toFixed(2)} — a downward correction of a caller-supplied amount can't be reported as success. Use full_order_refund for a founder-authorised refund of the order's collected total.`,
+        };
       } else if (overchargeDelta - p.amount_cents >= 100) {
         // Under-ask: allowed as partial goodwill, but recorded — a systematic
         // under-refund is how customers end up owed money with the ticket
@@ -2823,6 +2885,119 @@ export const directActionHandlers: Record<
       // 8203dfe0 (May 5), Amanda Lederman's $6.95 shipping refund. Reports
       // the actually-executed cents (post-clamp) so downstream copy matches
       // what moved.
+      refundAmountCents: r.success ? refundCents : undefined,
+    };
+  },
+
+  // Sanctioned route for a founder-authorised full-order refund. The
+  // amount refunded is the order's own collected total (`orders.total_cents`)
+  // — a verifiable, non-invented number — so the handler doesn't need
+  // (or accept) an agent-supplied `amount_cents`. This exists so a
+  // legitimate "refund what you charged me" case isn't forced through
+  // `partial_refund`, where the caller either has to invent a figure the
+  // overcharge clamp would refuse OR try to bypass the guard (the shape
+  // the SC137733 incident ended in). Reuses the same order_refunds
+  // idempotency mirror as partial_refund.
+  full_order_refund: async (ctx, p) => {
+    // ⭐ Non-autonomous by construction. `full_order_refund` refunds the WHOLE
+    // collected total on an order — a class of cash movement the CEO must sign
+    // off on, no exceptions. The only sanctioned path is a founder-approved
+    // `june_remedy` card via `executeParkedRemedy`, which sets
+    // `_founderApprovedFullOrderRefund: true` on the ActionContext. Any other
+    // caller (Sol cheap-execution, a raw Sonnet direct_action, a journey /
+    // playbook / workflow) reaches this handler with the flag unset, and we
+    // refuse. `success:false` puts the reply path in the escalate branch, so
+    // no customer-facing message can ship on the back of an unapproved full
+    // refund. This is the belt on top of the MONEY_ACTION_TYPES gate, the
+    // agent-action-queue deny-list, and the required-outcomes removal.
+    if (!ctx._founderApprovedFullOrderRefund) {
+      return {
+        success: false,
+        error: `Refusing full_order_refund on order ${p.shopify_order_id ?? "(no order)"}: this action is founder-approval-only. It must be routed through a june_remedy card that the founder has approved; direct dispatch is not permitted.`,
+      };
+    }
+
+    // ⭐ Ticket-customer binding — spec:
+    // full-order-refund-must-bind-ticket-customer. Even a founder-approved
+    // parked remedy on ticket T (customerId A) MUST NOT refund an order that
+    // happens to sit in the same workspace but is owned by customer B: the
+    // remedy payload is spec-authored input and a valid same-workspace order
+    // number from a different customer cannot become authority to move that
+    // customer's money. Bind the order lookup to `ctx.customerId` and bail
+    // BEFORE the refund module is even loaded, so no network side effect can
+    // fire on a cross-customer refusal.
+    if (!ctx.customerId) {
+      return {
+        success: false,
+        error: `Refusing full_order_refund on order ${p.shopify_order_id ?? "(no order)"}: no ticket customer bound to this action context — an unbound remedy cannot be authorised.`,
+      };
+    }
+    if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
+
+    const oid = String(p.shopify_order_id);
+    const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
+    const { data: ord } = await ctx.admin
+      .from("orders")
+      .select("id, total_cents")
+      .eq(orderMatch.col, orderMatch.val)
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("customer_id", ctx.customerId)
+      .maybeSingle();
+    if (!ord?.id) {
+      return {
+        success: false,
+        error: `Order not found for ${oid} on the ticket customer — a full_order_refund can only refund an order owned by the ticket customer.`,
+      };
+    }
+
+    const { refundOrder, hashActionRefundKey } = await import("@/lib/refund");
+    const reason = p.reason || "Full order refund — founder-authorised";
+
+    const refundCents = Number((ord as { total_cents?: number | null }).total_cents ?? 0);
+    if (!refundCents || refundCents <= 0) {
+      return { success: false, error: `Order ${oid} has no collected total to refund` };
+    }
+    const amountDecimal = (refundCents / 100).toFixed(2);
+
+    const requestKey = hashActionRefundKey("ticket", ctx.ticketId, ord.id, refundCents, reason);
+    const { data: existing } = await ctx.admin
+      .from("order_refunds")
+      .select("id, vendor_refund_id, status, amount_cents")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("order_id", ord.id)
+      .eq("request_key", requestKey)
+      .in("status", ["succeeded", "settled"])
+      .maybeSingle();
+    if (existing) {
+      return {
+        success: true,
+        summary: `Full order refund of $${amountDecimal} already fired (${reason})${existing.vendor_refund_id ? ` — txn ${existing.vendor_refund_id}` : ""}`,
+        refundAmountCents: existing.amount_cents ?? refundCents,
+      };
+    }
+
+    const r = await refundOrder(ctx.workspaceId, ord.id, refundCents, reason, {
+      source: "ai",
+      customerId: ctx.customerId,
+      eventProperties: { ticket_id: ctx.ticketId, full_order: true },
+      requestKey,
+    });
+    if (r.success) {
+      await notifySlack(ctx, { ...p, amount_cents: refundCents }, amountDecimal);
+    }
+    let methodNote = "";
+    if (r.success && r.method === "braintree") {
+      methodNote = ` — refunded directly via Braintree${r.refund_id ? ` (txn ${r.refund_id})` : ""}${r.needsManualShopifyRecord ? "; Shopify record needs manual reconciliation" : ", recorded on the Shopify order"}`;
+    }
+    return {
+      success: r.success,
+      error: r.error,
+      alreadyPending: r.alreadyPending,
+      summary: r.success
+        ? `Full order refund of $${amountDecimal} issued (${reason})${methodNote}`
+        : r.alreadyPending
+          ? `Refund already in progress on this order — ${r.error}`
+          : undefined,
       refundAmountCents: r.success ? refundCents : undefined,
     };
   },
@@ -4653,6 +4828,7 @@ export async function verifyActionInDB(
       return data?.status === "active";
     }
     case "partial_refund":
+    case "full_order_refund":
     case "redeem_points_as_refund": {
       // Check if order financial_status changed
       if (!action.shopify_order_id) return true;

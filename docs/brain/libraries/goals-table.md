@@ -32,6 +32,19 @@ The canonical read/write surface for the DB-resident goal hierarchy — [[../tab
 
 All writers route through `createAdminClient()` (service-role; the RLS policies `goals_service` / `goal_milestones_service` grant full access). No client-side writes.
 
+## `listGoals` cache (db-reduce-calls-goals)
+
+`listGoals(workspaceId, filter?)` was the top DB-call-volume driver in the box's `pg_stat_statements` sample — the pooled `listGoalsWithMilestones` query ([[pg-pool]]) ran **167,265 calls / 4ms mean / 602s total**. Per-call cost is already fine (bitmap-index scan on `goal_milestones_goal_idx`); the win is FEWER calls, not a faster call. Many code paths call `listGoals(workspaceId)` multiple times per request or tick — [[brain-roadmap]] board/roadmap render, [[spec-drift]] drift pass + guard pass, [[spec-review-gate]] on every spec author, [[agent-jobs]] `promoteCompleteGoalsToMain`.
+
+A module-level TTL cache (default **15s**, cap 1h) in `src/lib/goals-table.ts` collapses those tight-window duplicates. Same shape as [[specs-table]] `getSpec` / `listSpecs` caches:
+
+- **Keyed by `workspaceId` only** — `listGoals` already applies `{ status, owner, parent_goal_id }` filters in-memory over the bounded workspace set (the pooled path never pushed filters to Postgres), so caching the whole-workspace snapshot lets a filtered call reuse an unfiltered entry.
+- **Every writer in this file invalidates on success.** Workspace-scoped writers (`upsertGoal`, `setGoalIsParent`) call `invalidateGoalsCache(workspaceId)`; id-only writers that can't resolve `workspaceId` without an extra round-trip (`setGoalStatus`, `stampGoalPromotedToMain`, `stampGoalPromotionHeld`, `reparentGoal`) call `invalidateAllGoalsCache()`. Writes are rare vs. reads, so the full drop still cuts the read hammer by orders of magnitude — and never serves stale data cross-workspace. `greenlightGoal` is a slug-resolved wrapper over `setGoalStatus`, so its invalidation is inherited.
+- **`attachSpecToMilestone` does not invalidate** — it writes `public.specs.milestone_id`, not any `goals` / `goal_milestones` row, so the goals snapshot is unaffected (the derived milestone→specs join lives on the [[specs-table]] side).
+- **TTL bounds staleness at any path this SDK cannot see** (raw SQL migration, admin script outside this module). Held short (15s) so an ephemeral `claude -p` subprocess never serves egregiously stale rows.
+- **`setGoalsCacheTTLMs(ms)`** — symmetric to [[specs-table]] `setSpecCacheTTLMs`. A future phase can wire up a `goal_changed` LISTEN/NOTIFY rail (parallel to the existing `spec_changed` rail in [[pg-pool]]) and lift the TTL on the warm long-lived worker; ephemeral subprocesses keep the default.
+- **`clearGoalsCacheForTests()`** — exported for tests that share process state.
+
 ## The CEO-greenlight rail
 
 `goals.status` holds the greenlight INPUT (`proposed` / `greenlit` / `folded`); the `complete` state is DERIVED by the reader ([[brain-roadmap]] `goalRowToCard`) — there is no rollup trigger anymore. A `proposed` goal can ONLY become `greenlit` via an explicit `setGoalStatus(id, 'greenlit', actor)` write (the CEO's call in [[../specs/goal-greenlight-button-and-author-writes-db]]); the reader then surfaces a `greenlit` goal as `complete` once every milestone is complete (each linked-spec completion ≥ 1), but a `proposed` goal NEVER surfaces complete. This guards the [[../goals/db-driven-specs]] outcome — "the CEO literally had no surface to approve the goal" — at the read rail.

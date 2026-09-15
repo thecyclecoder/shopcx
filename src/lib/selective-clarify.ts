@@ -29,6 +29,7 @@ export const DEFAULT_CLARIFY_CONFIDENCE_THRESHOLD = 0.7;
 // because a wrong reversible action is a cheap undo, not a customer harm.
 export const DEFAULT_IRREVERSIBLE_SET: ReadonlySet<string> = new Set([
   "partial_refund",
+  "full_order_refund",
   "cancel",
   "bill_now",
   // `order_now` is the customer-facing name for the same charge — registered

@@ -2189,6 +2189,7 @@ function baselineAssertionInputs(overrides: Partial<AssertionInputs>): Assertion
       comp_shipped: 0,
       comp_blocked: 0,
       skipped_other: 0,
+      refused_wedged_cycle: 0,
     },
     renewalBaseline: {
       total: 0,
@@ -2199,11 +2200,13 @@ function baselineAssertionInputs(overrides: Partial<AssertionInputs>): Assertion
       comp_shipped: 0,
       comp_blocked: 0,
       skipped_other: 0,
+      refused_wedged_cycle: 0,
     },
     stuckDunningCycles: 0,
     smsSubscribedTotal: 0,
     smsSubscribedFresh26h: 0,
     smsSubscribedStale48h: 0,
+    wedgedCycleSubs: 0,
     ...overrides,
   };
 }
@@ -2292,5 +2295,90 @@ test("monitor.ts stuck-dunning helper mirrors dunning-payday-retry-cron's find-r
   assert.ok(
     cronSrc.includes(FINGERPRINT),
     "src/lib/inngest/dunning.ts find-retryable-cycles must still carry the internal-% exclusion the monitor mirrors",
+  );
+});
+
+// ── Phase 3 of a-declined-renewal-must-not-wedge-the-cycle-forever ─────────────
+// Pin the wedged-cycle predicate + assertion output. The point of the tile is to catch the
+// NEXT variant of the class, not only the exact 2026-10-04 shape — so the tests cover both
+// status axes (failed / in_flight) and the age axis (fresh / stale) against a matching
+// current cycle_key. Also pin the loop registration so the tile is guaranteed wired.
+import { isWedgedCycleCharge } from "./monitor";
+import { STALE_IN_FLIGHT_RECLAIM_MS } from "../subscription-cycle-charge-claim";
+
+const RENEWAL_CRON_LOOP = MONITORED_LOOPS.find((l) => l.id === "internal-subscription-renewal-cron")!;
+assert.ok(RENEWAL_CRON_LOOP, "internal-subscription-renewal-cron must be a registered monitored loop");
+assert.ok(
+  (RENEWAL_CRON_LOOP.outputAssertions ?? []).includes("renewal-wedged-cycles"),
+  "renewal-wedged-cycles must be wired onto internal-subscription-renewal-cron (Phase 3 of a-declined-renewal-must-not-wedge-the-cycle-forever)",
+);
+
+test("isWedgedCycleCharge: failed on the current cycle_key is wedged (ground truth: sub e4e3b82e / cycle_key=2026-10-04)", () => {
+  const NOW = new Date("2026-10-04T12:00:00Z").getTime();
+  const charge = { cycle_key: "2026-10-04", status: "failed", claimed_at: "2026-09-09T00:00:00Z" };
+  const sub = { next_billing_date: "2026-10-04" };
+  assert.equal(isWedgedCycleCharge(charge, sub, NOW), true);
+});
+
+test("isWedgedCycleCharge: succeeded on the current cycle_key is NEVER wedged (real charge already resolved)", () => {
+  const NOW = new Date("2026-10-04T12:00:00Z").getTime();
+  const charge = { cycle_key: "2026-10-04", status: "succeeded", claimed_at: "2026-10-04T00:00:00Z" };
+  const sub = { next_billing_date: "2026-10-04" };
+  assert.equal(isWedgedCycleCharge(charge, sub, NOW), false);
+});
+
+test("isWedgedCycleCharge: fresh in_flight is a legitimately-in-progress charge (not wedged)", () => {
+  const NOW = Date.now();
+  const charge = {
+    cycle_key: "2026-10-04",
+    status: "in_flight",
+    claimed_at: new Date(NOW - (STALE_IN_FLIGHT_RECLAIM_MS - 10_000)).toISOString(),
+  };
+  const sub = { next_billing_date: "2026-10-04" };
+  assert.equal(isWedgedCycleCharge(charge, sub, NOW), false);
+});
+
+test("isWedgedCycleCharge: stale in_flight on the current cycle is wedged (catches the crashed-attempt variant)", () => {
+  const NOW = Date.now();
+  const charge = {
+    cycle_key: "2026-10-04",
+    status: "in_flight",
+    claimed_at: new Date(NOW - (STALE_IN_FLIGHT_RECLAIM_MS + 10_000)).toISOString(),
+  };
+  const sub = { next_billing_date: "2026-10-04" };
+  assert.equal(isWedgedCycleCharge(charge, sub, NOW), true);
+});
+
+test("isWedgedCycleCharge: cycle_key that does NOT match the sub's current next_billing_date is not wedged (dunning moved the calendar forward already)", () => {
+  const NOW = new Date("2026-11-01T12:00:00Z").getTime();
+  // Sub's live next_billing_date advanced to a later cycle; the older failed row is orphaned
+  // history, not a wedge — the next attempt will derive the new cycle_key.
+  const charge = { cycle_key: "2026-10-04", status: "failed", claimed_at: "2026-09-09T00:00:00Z" };
+  const sub = { next_billing_date: "2026-11-06" };
+  assert.equal(isWedgedCycleCharge(charge, sub, NOW), false);
+});
+
+test("evalOutputAssertion renewal-wedged-cycles: zero count returns null (Phase 1 self-heals the wedge, the tile stays green)", () => {
+  const verdict = evalOutputAssertion(
+    "renewal-wedged-cycles",
+    RENEWAL_CRON_LOOP,
+    null,
+    baselineAssertionInputs({ wedgedCycleSubs: 0 }),
+  );
+  assert.equal(verdict, null);
+});
+
+test("evalOutputAssertion renewal-wedged-cycles: a positive count reds the tile with the class-catching reason", () => {
+  const verdict = evalOutputAssertion(
+    "renewal-wedged-cycles",
+    RENEWAL_CRON_LOOP,
+    null,
+    baselineAssertionInputs({ wedgedCycleSubs: 3 }),
+  );
+  assert.ok(verdict, "wedgedCycleSubs > 0 must flip the tile red");
+  assert.equal(verdict!.violation.reason, "renewal_wedged_cycles");
+  assert.ok(
+    /wedged/i.test(verdict!.statusText),
+    `statusText should surface the wedge count: ${verdict!.statusText}`,
   );
 });

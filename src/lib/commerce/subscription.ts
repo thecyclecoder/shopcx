@@ -66,6 +66,8 @@ import {
   internalSubUpdateBillingInterval,
   internalSubUpdateNextBillingDate,
   internalSubUpdateShippingAddress,
+  resolveVariant,
+  type ResolvedVariant,
   type ShippingAddressInput,
 } from "@/lib/internal-subscription";
 import {
@@ -698,9 +700,14 @@ export async function subscriptionUpdateLineItemPrice(
 export async function subscriptionGetLiveContract(
   workspaceId: string,
   contractId: string,
-): Promise<{ ok: boolean; error?: string; lines?: { nodes: Array<{ id?: string; variantId?: string; title?: string }> } }> {
+): Promise<{ ok: boolean; error?: string; internal?: boolean; lines?: { nodes: Array<{ id?: string; variantId?: string; title?: string }> } }> {
   if (await isInternalSubscription(workspaceId, contractId)) {
-    return { ok: true, lines: { nodes: [] } };
+    // Internal subs manage lines directly on `subscriptions.items` by variant_id.
+    // Return `internal: true` so variant-driven callers (action-executor's
+    // remove_item) can skip the vendor-line lookup and delegate to the internal
+    // path — otherwise the empty nodes array proxies as "variant not on contract"
+    // even though the local items row still carries the variant (ticket c13fbad1).
+    return { ok: true, internal: true, lines: { nodes: [] } };
   }
   const { getAppstleConfig } = await import("@/lib/subscription-items");
   const cfg = await getAppstleConfig(workspaceId);
@@ -1064,6 +1071,85 @@ export function synthesizeInternalContractId(): string {
 }
 
 /**
+ * Pure: hydrate a `CreateSubscriptionInput.items` array with catalog metadata
+ * (product_id, title, variant_title, sku) resolved from `product_variants` +
+ * `products`. Given a `resolvedByVariant` lookup — `variant_id → ResolvedVariant`
+ * — returns either the hydrated items or a refusal listing every variant that
+ * could not be resolved.
+ *
+ * A caller-supplied field on the incoming item (product_id, title, variant_title,
+ * sku, or price_override_cents) is TRUSTED and passes through unchanged; the
+ * resolver only fills the fields the caller left blank. `variant_id` is
+ * normalized to the canonical UUID (`ResolvedVariant.id`) so a legacy Shopify id
+ * on the input still lands as a UUID on the persisted line, matching the
+ * `subscriptions.items` shape internal ops expect.
+ *
+ * Why this gate exists: ticket c13fbad1 (Kristy Teague) hit the create path with
+ * only `variant_id` set → the pre-fix path wrote `{title:"", product_id:null,
+ * price_override_cents:null}` as a "ghost" line that would bill $0 or error at
+ * renewal. Refusing at persistence is safer than repairing a malformed row
+ * after the fact — the caller (assisted-purchase) can escalate to a human on
+ * `success:false` where a silent write cannot be caught.
+ */
+export function hydrateCreateSubscriptionItems(
+  items: CreateSubscriptionItem[],
+  resolvedByVariant: Map<string, ResolvedVariant | null>,
+): { success: true; items: CreateSubscriptionItem[] } | { success: false; error: string; missing: string[] } {
+  const hydrated: CreateSubscriptionItem[] = [];
+  const missing: string[] = [];
+  for (const it of items) {
+    const key = String(it.variant_id || "");
+    if (!key) {
+      missing.push("(empty variant_id)");
+      continue;
+    }
+    const resolved = resolvedByVariant.get(key) ?? null;
+    if (!resolved) {
+      missing.push(key);
+      continue;
+    }
+    hydrated.push({
+      // Normalize the incoming id to the canonical UUID — a legacy Shopify id
+      // on the input still lands as our UUID on the persisted line.
+      variant_id: resolved.id,
+      product_id: it.product_id ?? resolved.product_id,
+      title: it.title ?? resolved.title,
+      variant_title: it.variant_title ?? resolved.variant_title ?? null,
+      sku: it.sku ?? resolved.sku ?? null,
+      quantity: it.quantity,
+      is_gift: it.is_gift,
+      price_override_cents: it.price_override_cents ?? null,
+    });
+  }
+  if (missing.length > 0) {
+    return {
+      success: false,
+      error: `createSubscription: variant(s) could not be resolved to a product_variants row — refusing to persist malformed line(s): ${missing.join(", ")}`,
+      missing,
+    };
+  }
+  return { success: true, items: hydrated };
+}
+
+/** Deps injected into `createSubscription`. Extracted so tests can pin the
+ *  hydration + refusal behavior without standing up a Supabase client.
+ *  Workspace-scoped by contract (Phase 2 / Fix 1): `workspaceId` is threaded
+ *  into every resolver call so a variant UUID from another tenant cannot
+ *  resolve here and land on the current workspace's subscription — the
+ *  cross-tenant authz regression the pre-merge spec-test flagged on the
+ *  Phase 1 diff. `defaultCreateSubscriptionDeps` uses `resolveVariant` from
+ *  [[../internal-subscription]] which now requires workspaceId and filters
+ *  BOTH the `product_variants` lookup AND the follow-up `products` title
+ *  lookup by `workspace_id`. */
+export interface CreateSubscriptionDeps {
+  resolveVariant(workspaceId: string, variantId: string): Promise<ResolvedVariant | null>;
+}
+
+export function defaultCreateSubscriptionDeps(): CreateSubscriptionDeps {
+  return { resolveVariant };
+}
+
+/**
  * Pure: turn a `CreateSubscriptionInput` into the `subscriptions`-row shape.
  * Extracted so the shape (defaults, item normalization, next_billing_date
  * coercion) can be pinned in `node:test` without standing up a Supabase
@@ -1135,14 +1221,33 @@ export function buildCreateSubscriptionRow(
 export async function createSubscription(
   workspaceId: string,
   input: CreateSubscriptionInput,
+  deps: CreateSubscriptionDeps = defaultCreateSubscriptionDeps(),
 ): Promise<CreateSubscriptionResult> {
   const admin = createAdminClient();
 
   if (input.vendor === "internal") {
+    // Resolve every incoming item's variant to catalog metadata BEFORE persisting.
+    // The assisted-subscription-purchase caller sometimes passes only `variant_id`
+    // (Sonnet's create action) — persisting that as-is would write a "ghost" line
+    // with empty title / null product_id / null price that bills $0 or errors at
+    // renewal (ticket c13fbad1, Kristy Teague). Refusing here forces the caller
+    // to escalate rather than ship a malformed subscription.
+    const uniqueVariantIds = Array.from(new Set(input.items.map((it) => String(it.variant_id || "")).filter(Boolean)));
+    const resolvedEntries = await Promise.all(
+      uniqueVariantIds.map(async (vid) => [vid, await deps.resolveVariant(workspaceId, vid)] as const),
+    );
+    const resolvedByVariant = new Map<string, ResolvedVariant | null>(resolvedEntries);
+    const hydration = hydrateCreateSubscriptionItems(input.items, resolvedByVariant);
+    if (!hydration.success) {
+      return { success: false, error: hydration.error };
+    }
+
     const contractId = input.shopify_contract_id ?? synthesizeInternalContractId();
-    const row = buildCreateSubscriptionRow(workspaceId, input, {
-      shopify_contract_id: contractId,
-    });
+    const row = buildCreateSubscriptionRow(
+      workspaceId,
+      { ...input, items: hydration.items },
+      { shopify_contract_id: contractId },
+    );
     const { data, error } = await admin
       .from("subscriptions")
       .insert(row)

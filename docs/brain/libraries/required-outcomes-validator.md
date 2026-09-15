@@ -6,7 +6,7 @@
 
 | Symbol | Signature | Purpose |
 |---|---|---|
-| `ALLOWED_OUTCOME_KINDS` | `ReadonlySet<string>` | Static allowlist of the required-outcome kinds Sol may enqueue. Grouped by shape: subscription-scoped (`cancel`, `pause`, `resume`, `apply_coupon`, `swap_variant`, …), order-scoped (`partial_refund`, `create_return`, `create_replacement`, …), customer-scoped (`unsubscribe_*`), plus the Judy-canonical `add_bag_to_next_order`. A grep answers "what can Sol dispatch?" — no config table sleight-of-hand. |
+| `ALLOWED_OUTCOME_KINDS` | `ReadonlySet<string>` | Static allowlist of the required-outcome kinds Sol may enqueue. Grouped by shape: subscription-scoped (`cancel`, `pause`, `resume`, `apply_coupon`, `swap_variant`, …), order-scoped (`partial_refund`, `create_return`, `create_replacement`, …), customer-scoped (`unsubscribe_*`), plus the Judy-canonical `add_bag_to_next_order`. **`full_order_refund` is intentionally absent** — it requires founder approval via `june_remedy` card and must NEVER be dispatched as a required outcome (spec [[../specs/a-clamped-refund-must-never-report-success]] Phase 2). The founder-approval route gates it, then `executeParkedRemedy` sets the ActionContext flag. A grep answers "what can Sol dispatch?" — no config table sleight-of-hand. |
 | `requiredTargetIdsFor(kind)` | pure | Which target-id fields (`needs_contract`, `needs_order`, `needs_product`) an allowed kind requires. |
 | `validateRequiredOutcomes(ctx)` | wire-in | The Phase-1 gate — walks items, checks allowlist, re-reads each target by `(workspace_id, customer_id)` via `.maybeSingle()`, returns `{ok:true}` when everything passes or `{ok:false, blocked[], reason}` when ANY item is disallowed. One bad item blocks the whole send. |
 

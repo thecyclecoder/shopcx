@@ -1,0 +1,1 @@
+- **Reduce call volume / cache the hot query on goals** · verified 2026-09-13 · → [[../libraries/goals-table]]
