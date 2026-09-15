@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Auto-dismiss self-resolved portal replaceVariants (swap) failures** · verified 2026-09-14 · → [[../libraries/portal__remediation]]
 - **Fix assisted-subscription-purchase variant resolution** · verified 2026-09-13 · → [[../lifecycles/subscription-billing]]
 - **Reduce call volume / cache the hot query on goals** · verified 2026-09-13 · → [[../libraries/goals-table]]
 - **A clamped refund must never report success** · verified 2026-09-11 · → [[../libraries/action-executor]] + [[../libraries/june-remedy-approval]] + [[../libraries/agent-action-queue]] + [[../libraries/required-outcomes-validator]] + [[../libraries/selective-clarify]]
