@@ -49,7 +49,7 @@ export async function handlePaymentMethodEvent(
   if (paymentMethodId) {
     const { data: activeSubs } = await admin
       .from("subscriptions")
-      .select("shopify_contract_id")
+      .select("shopify_contract_id, billing_source")
       .eq("workspace_id", workspaceId)
       .eq("customer_id", customer.id)
       .in("status", ["active", "paused"]);
@@ -57,9 +57,27 @@ export async function handlePaymentMethodEvent(
     if (activeSubs?.length) {
       const { subscriptionSwitchPaymentMethod } = await import("@/lib/commerce/subscription");
       for (const sub of activeSubs) {
+        // ⚠️ `paymentMethodId` here is a BRAINTREE payment-method id. A ShopCX sub is billed by
+        // Shopify, whose contract references a `gid://shopify/CustomerPaymentMethod/…` — wrapping
+        // a Braintree id in that shape produces a gid for a method that does not exist, and the
+        // mutation's userError was being discarded by the bare `await` below. So "customer added
+        // a card, we repointed their subscriptions" silently did not happen for ShopCX subs, and
+        // nothing said so. A ShopCX card change goes through Shopify's own update flow instead.
+        if (sub.billing_source === "shopcx") {
+          console.warn(
+            `Payment method webhook: sub ${sub.shopify_contract_id} is ShopCX-billed — a Braintree method cannot be attached to a Shopify contract; skipping`,
+          );
+          continue;
+        }
         try {
-          await subscriptionSwitchPaymentMethod(workspaceId, sub.shopify_contract_id, paymentMethodId);
-          console.log(`Payment method webhook: switched sub ${sub.shopify_contract_id} to ${paymentMethodId}`);
+          // ⚠️ READ the result. This returns {success:false,error} rather than throwing, so a
+          // bare await reports success for every failure.
+          const r = await subscriptionSwitchPaymentMethod(workspaceId, sub.shopify_contract_id, paymentMethodId);
+          if (r.success) {
+            console.log(`Payment method webhook: switched sub ${sub.shopify_contract_id}`);
+          } else {
+            console.error(`Payment method webhook: switch REFUSED for ${sub.shopify_contract_id}: ${r.error}`);
+          }
         } catch (err) {
           console.error(`Payment method webhook: failed to switch sub ${sub.shopify_contract_id}:`, err);
         }

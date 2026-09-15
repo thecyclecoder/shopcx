@@ -50,6 +50,8 @@ interface OrderNowVerifyEventData {
   contract_id: string;
   fired_at: string;
   is_internal: boolean;
+  /** Which engine billed it. Absent on events enqueued before this field existed. */
+  billing_source?: string | null;
   resolution_event_id: string | null;
   ticket_id: string | null;
   customer_id: string | null;
@@ -71,9 +73,13 @@ export const orderNowVerify = inngest.createFunction(
     // First attempt uses the flavor-specific delay. Retries use the shorter
     // NEXT_ATTEMPT_DELAY — by then the vendor has usually finalized, we
     // just need one more read.
-    const delay = attempt === 1
-      ? (data.is_internal ? INTERNAL_DELAY : APPSTLE_DELAY)
-      : NEXT_ATTEMPT_DELAY;
+    // ⚠️ Three engines. ShopCX settles like the internal path — our own worker drives the charge
+    // and the outcome is known as soon as the billing attempt resolves — so it takes the SHORT
+    // delay. Giving it the Appstle delay (which exists because Appstle finalizes asynchronously
+    // on its own webhook) just makes every ShopCX order-now verification needlessly slow.
+    const firstDelay =
+      data.billing_source === "shopcx" || data.is_internal ? INTERNAL_DELAY : APPSTLE_DELAY;
+    const delay = attempt === 1 ? firstDelay : NEXT_ATTEMPT_DELAY;
 
     await step.sleep(`wait-attempt-${attempt}`, delay);
 
@@ -96,6 +102,7 @@ export const orderNowVerify = inngest.createFunction(
           contract_id: data.contract_id,
           fired_at: data.fired_at,
           is_internal: data.is_internal,
+          billing_source: data.billing_source ?? null,
           resolution_event_id: data.resolution_event_id ?? undefined,
           ticket_id: data.ticket_id ?? undefined,
           customer_id: data.customer_id ?? undefined,

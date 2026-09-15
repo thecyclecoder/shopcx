@@ -35,6 +35,7 @@ function makeSignal(line: {
     subscription_id: "sub-1",
     shopify_contract_id: CONTRACT,
     is_internal: false,
+    billing_source: "appstle",
     order_id: "order-1",
     shopify_order_id: "5555",
     order_number: "R1000",

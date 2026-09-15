@@ -57,6 +57,39 @@ const ALLOW: ReadonlyArray<{ path: string; reason: string }> = [
   { path: "src/lib/migration-fix.ts", reason: "same — heals a contract the subscriptions row no longer points at" },
 ];
 
+/**
+ * Rule 4: engine resolution belongs to the DISPATCH LAYER, not to feature code.
+ *
+ * The SDK header claims this checker "keeps that resolution here and out of the vendor modules",
+ * but resolution legitimately lives in a handful of chokepoints the SDK delegates to — and
+ * NOTHING stopped it spreading further. It has already reached seven portal handlers. Each new
+ * site is another place a fourth engine must be remembered, which is the failure mode this whole
+ * check exists to prevent.
+ *
+ * So: resolving the engine is allowed ONLY in the files below. Anything else must call a
+ * chokepoint that dispatches for it. Adding a file here should feel like a decision.
+ */
+const ENGINE_RESOLVERS: ReadonlyArray<{ path: string; reason: string }> = [
+  { path: "src/lib/commerce/subscription.ts", reason: "the SDK — it IS the dispatcher" },
+  { path: "src/lib/subscription-items.ts", reason: "the line-op + coupon chokepoint the SDK delegates to" },
+  { path: "src/lib/coupons.ts", reason: "applyCouponToSub / removeCouponFromSub — the coupon chokepoint" },
+  { path: "src/lib/internal-subscription.ts", reason: "defines resolveBillingSource itself" },
+  { path: "src/lib/dunning-charge.ts", reason: "the dunning charge chokepoint" },
+  { path: "src/lib/migrate-to-internal.ts", reason: "converts BETWEEN engines; must read the source engine" },
+  { path: "src/lib/appstle-pricing.ts", reason: "declines non-Appstle work (a decline, not a dispatch — see VENDOR_MODULES)" },
+  // Portal handlers + surfaces that legitimately branch. Each is a place a FOURTH engine must be
+  // remembered — prefer pushing new branches down into a chokepoint over extending this list.
+  { path: "src/lib/portal/handlers/address.ts", reason: "ShopCX address must round-trip to Shopify" },
+  { path: "src/lib/portal/handlers/coupon.ts", reason: "Appstle arm has vendor-specific self-heal" },
+  { path: "src/lib/portal/handlers/loyalty-apply-subscription.ts", reason: "same Appstle self-heal" },
+  { path: "src/lib/portal/handlers/reactivate.ts", reason: "date must reach the contract" },
+  { path: "src/lib/portal/handlers/replace-variants.ts", reason: "Appstle arm uses replace-variants-v3" },
+  { path: "src/lib/portal/handlers/order-now.ts", reason: "ShopCX charges by cycle key" },
+  { path: "src/lib/action-executor.ts", reason: "agent price restore routes before the vendor fetch" },
+  { path: "src/lib/dunning-webhook.ts", reason: "a Braintree method cannot attach to a Shopify contract" },
+  { path: "src/lib/commerce/shopify-one-time-charge.ts", reason: "picks the Braintree vs Shopify rail" },
+];
+
 const SCAN_ROOTS = ["src"];
 function walk(dir: string, out: string[] = []): string[] {
   for (const e of readdirSync(dir)) {
@@ -110,6 +143,22 @@ for (const file of SCAN_ROOTS.flatMap((r) => walk(r))) {
     if (!/\.eq\(\s*["']is_internal["']\s*,\s*false\s*\)/.test(line)) return;
     violations.push(
       `   ${rel}:${i + 1}  selects on is_internal=false — that set now includes ShopCX subs; filter on billing_source instead\n      ${line.trim().slice(0, 110)}`,
+    );
+  });
+}
+
+for (const file of SCAN_ROOTS.flatMap((r) => walk(r))) {
+  const rel = file.replace(/\\/g, "/");
+  if (rel.endsWith(".test.ts") || rel.endsWith(".test.tsx")) continue;
+  if (ENGINE_RESOLVERS.some((e) => rel === e.path)) continue;
+  if (VENDOR_MODULES.includes(rel)) continue;
+  const src4 = readFileSync(file, "utf8");
+  src4.split("\n").forEach((line, i) => {
+    const t = line.trim();
+    if (t.startsWith("*") || t.startsWith("//")) return;
+    if (!/\bresolveBillingSource\s*\(/.test(line)) return;
+    violations.push(
+      `   ${rel}:${i + 1}  resolves the engine outside the dispatch layer — call a chokepoint instead\n      ${t.slice(0, 110)}`,
     );
   });
 }

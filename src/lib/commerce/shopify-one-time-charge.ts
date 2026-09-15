@@ -585,6 +585,30 @@ async function backfillOrderLinks(workspaceId: string): Promise<number> {
   return linked;
 }
 
+/** The order a contract's billing attempt produced — needed to link a crash-recovered charge. */
+async function orderNameForCycle(workspaceId: string, contractId: string): Promise<string | null> {
+  try {
+    const { getShopifyCredentials } = await import("@/lib/shopify-sync");
+    const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
+    const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+    const gid = String(contractId).startsWith("gid://")
+      ? contractId : `gid://shopify/SubscriptionContract/${contractId}`;
+    const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+      method: "POST",
+      headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query: `query($id:ID!){ subscriptionContract(id:$id){ orders(first:5){ nodes { name } } } }`,
+        variables: { id: gid },
+      }),
+    });
+    const j = (await res.json().catch(() => null)) as
+      | { data?: { subscriptionContract?: { orders?: { nodes?: { name: string }[] } } } } | null;
+    return j?.data?.subscriptionContract?.orders?.nodes?.[0]?.name ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Reconcile rows the executor could not finish: a crashed run stuck in `charging`, and any
  * contract left ACTIVE after a failed cancel. Both are states where Shopify holds something we
@@ -619,7 +643,17 @@ export async function sweepOneTimeCharges(workspaceId: string): Promise<{ reconc
     const created = c.contract?.createdAt;
     const cyc = created ? await getBillingCycleForDate(workspaceId, cid, new Date(new Date(created).getTime() + 1000).toISOString()) : null;
     if (cyc?.cycle?.status === "BILLED") {
-      await settle(workspaceId, String(row.id), { status: "charged", charged_at: new Date().toISOString() });
+      // ⚠️ Recover `shopify_order_name` too. `backfillOrderLinks` requires it to be non-null, so a
+      // crash-recovered charge settled without it is NEVER linked — and its Shopify order keeps
+      // `order_type='recurring'`, defeating the whole reason these rows live outside
+      // `subscriptions`. The order name comes from the cycle's own billing attempts.
+      const orderName = await orderNameForCycle(workspaceId, cid);
+      await settle(workspaceId, String(row.id), {
+        status: "charged",
+        charged_at: new Date().toISOString(),
+        rail: "shopify",
+        ...(orderName ? { shopify_order_name: orderName } : {}),
+      });
     } else {
       await settle(workspaceId, String(row.id), { status: "failed", error: "unresolved_after_crash", failed_at: new Date().toISOString() });
     }

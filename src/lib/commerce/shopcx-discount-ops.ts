@@ -52,12 +52,12 @@ async function splitDiscounts(
     method: "POST",
     headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
     body: JSON.stringify({
-      query: `query($id:ID!){ subscriptionContract(id:$id){ discounts(first:25){ nodes{ id type title } } } }`,
+      query: `query($id:ID!){ subscriptionContract(id:$id){ discounts(first:250){ pageInfo { hasNextPage } nodes{ id type title } } } }`,
       variables: { id: gid },
     }),
   });
   const j = (await res.json().catch(() => null)) as
-    | { errors?: { message: string }[]; data?: { subscriptionContract?: { discounts?: { nodes?: { id: string; type: string | null; title: string | null }[] } } } }
+    | { errors?: { message: string }[]; data?: { subscriptionContract?: { discounts?: { pageInfo?: { hasNextPage?: boolean }; nodes?: { id: string; type: string | null; title: string | null }[] } } } }
     | null;
   // ⚠️ A failed read is NOT an empty discount set, and conflating them corrupts the contract.
   // A 5xx, a throttle (`errors` with no `data`), or an expired token yields no nodes — which the
@@ -68,6 +68,10 @@ async function splitDiscounts(
     throw new Error(
       `could not read contract discounts: HTTP ${res.status}${j?.errors?.length ? ` ${j.errors.map((e) => e.message).join("; ")}` : ""}`,
     );
+  }
+  // A truncated read would leave a coupon behind on apply-with-replace, stacking two codes.
+  if (j.data.subscriptionContract?.discounts?.pageInfo?.hasNextPage) {
+    throw new Error("contract has more discounts than one page — refusing to modify them");
   }
   const nodes = j.data.subscriptionContract?.discounts?.nodes ?? [];
   const isStructural = (d: { type: string | null; title: string | null }) =>

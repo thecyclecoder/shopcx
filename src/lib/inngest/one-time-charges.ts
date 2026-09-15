@@ -93,12 +93,28 @@ export const oneTimeChargeCron = inngest.createFunction(
     // `due` would leave it unlinked and still classified `recurring` forever.
     const swept = await step.run("sweep", async () => {
       const admin = createAdminClient();
-      const { data: needy } = await admin
-        .from("one_time_charges")
-        .select("workspace_id, status, order_id")
-        .or("status.eq.charging,and(status.eq.charged,order_id.is.null)")
-        .limit(1000);
-      const workspaces = [...new Set((needy ?? []).map((r) => String(r.workspace_id)))];
+      // ⚠️ Keyset-paginate + ORDER. A bare `.limit(1000)` silently drops the overflow — the trap
+      // this function's own fan-out comment explains — and an unordered read makes which rows get
+      // dropped nondeterministic. Low volume today; the point is that it cannot rot into a
+      // silently-partial sweep.
+      const needy: { id: string; workspace_id: string }[] = [];
+      let cursor: string | null = null;
+      for (;;) {
+        let q = admin
+          .from("one_time_charges")
+          .select("id, workspace_id")
+          .or("status.eq.charging,and(status.eq.charged,order_id.is.null)")
+          .order("id", { ascending: true })
+          .limit(1000);
+        if (cursor) q = q.gt("id", cursor);
+        const { data, error } = await q;
+        if (error) throw new Error(`sweep_scan_failed: ${error.message}`);
+        const batch = (data ?? []) as { id: string; workspace_id: string }[];
+        needy.push(...batch);
+        if (batch.length < 1000) break;
+        cursor = batch[batch.length - 1].id;
+      }
+      const workspaces = [...new Set(needy.map((r) => String(r.workspace_id)))];
       let reconciled = 0;
       let cancelled = 0;
       let linked = 0;

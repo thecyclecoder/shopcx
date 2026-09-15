@@ -570,7 +570,7 @@ export async function getSubscriptionContract(
         id status nextBillingDate createdAt
         billingPolicy { interval intervalCount }
         customerPaymentMethod { id }
-        lines(first:50){ pageInfo { hasNextPage } edges { node { id title quantity sellingPlanName sku
+        lines(first:250){ pageInfo { hasNextPage } edges { node { id title quantity sellingPlanName sku
           variantId
           currentPrice { amount }
           lineDiscountedPrice { amount }
@@ -1044,31 +1044,41 @@ export interface DraftLine {
 export async function getSubscriptionDraft(
   workspaceId: string,
   draftId: string,
-): Promise<{ success: boolean; error?: string; lines?: DraftLine[]; discounts?: { id: string; title: string | null; type: string | null }[] }> {
+): Promise<{
+  success: boolean; error?: string; lines?: DraftLine[];
+  discounts?: { id: string; title: string | null; type: string | null }[];
+  /** True when Shopify had MORE lines or discounts than this read returned. See `truncated` below. */
+  truncated?: boolean;
+}> {
   const env = await gql<{ node?: Record<string, unknown> }>(
     workspaceId,
     `query($id:ID!){ node(id:$id){ ... on SubscriptionDraft {
-        lines(first:50){ pageInfo { hasNextPage } nodes { id quantity sku variantId
+        lines(first:250){ pageInfo { hasNextPage } nodes { id quantity sku variantId
           currentPrice { amount }
           discountAllocations { amount { amount }
             discount {
               ... on SubscriptionManualDiscount { id title }
               ... on SubscriptionAppliedCodeDiscount { id } } } } }
-        discounts(first:25){ nodes {
+        discounts(first:250){ pageInfo { hasNextPage } nodes {
           ... on SubscriptionManualDiscount { id title type }
           ... on SubscriptionAppliedCodeDiscount { id } } } } } }`,
     { id: draftId },
   );
   if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
   const n = env.data?.node as never as {
-    lines?: { nodes?: { id: string; quantity: number; sku: string | null; variantId: string | null;
+    lines?: { pageInfo?: { hasNextPage?: boolean }; nodes?: { id: string; quantity: number; sku: string | null; variantId: string | null;
       currentPrice?: { amount: string };
       discountAllocations?: { amount?: { amount: string }; discount?: { title?: string } }[] }[] };
-    discounts?: { nodes?: { id: string; title?: string | null; type?: string | null }[] };
+    discounts?: { pageInfo?: { hasNextPage?: boolean }; nodes?: { id: string; title?: string | null; type?: string | null }[] };
   } | undefined;
   if (!n) return { success: false, error: "draft not found" };
   return {
     success: true,
+    // ⚠️ Load-bearing for `rewriteStructuralDiscounts`, which CLEARS the structural discounts it
+    // can see and re-adds up to 3 per rule line. If the read was truncated it clears fewer than it
+    // adds, and the surplus survives every edit — each one a real percentage off, compounding.
+    // Surfaced so the caller refuses; a refusal is recoverable, a compounding discount is not.
+    truncated: Boolean(n.lines?.pageInfo?.hasNextPage || n.discounts?.pageInfo?.hasNextPage),
     lines: (n.lines?.nodes ?? []).map((l) => ({
       id: l.id,
       quantity: l.quantity,
