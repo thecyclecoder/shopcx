@@ -16,7 +16,7 @@
  * whose card we hold in Braintree, use the internal path instead; this is for the ones we don't.
  *
  * ⭐ WHY IT IS NOT A SUBSCRIPTION. See the migration header
- * (`20261229120000_one_time_charges.sql`): `subscriptions` is read by analytics, the portal, the
+ * (`20261229120001_one_time_charges.sql`): `subscriptions` is read by analytics, the portal, the
  * cancel flow, dunning and the Appstle→internal sweeps, and a row excluded from those only by a
  * predicate every reader must remember is the `is_internal = false` mistake again. A separate
  * table cannot silently widen.

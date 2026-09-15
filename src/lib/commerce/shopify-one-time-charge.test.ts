@@ -23,7 +23,7 @@ import { join } from "node:path";
 
 const SRC = readFileSync(join(__dirname, "shopify-one-time-charge.ts"), "utf8");
 const MIGRATION = readFileSync(
-  join(__dirname, "../../../supabase/migrations/20261229120000_one_time_charges.sql"),
+  join(__dirname, "../../../supabase/migrations/20261229120001_one_time_charges.sql"),
   "utf8",
 );
 
