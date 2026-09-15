@@ -1,0 +1,1 @@
+- **Mario's failed-build init_loop_guard dedupe anchors lookback to failure time** · verified 2026-09-15 · → [[../libraries/mario]]
