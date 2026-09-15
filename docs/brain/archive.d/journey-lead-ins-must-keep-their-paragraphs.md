@@ -1,0 +1,1 @@
+- **Journey lead-ins must keep their paragraphs** · verified 2026-09-15 · → [[../libraries/journey-delivery]] § Lead-in shares the ticket-delivery paragraph shaper
