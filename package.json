@@ -155,6 +155,7 @@
     "test:storefront-optimizer-reask": "tsx --test src/lib/storefront-optimizer-reask.test.ts",
     "test:mario-terminal-spec-guard": "tsx --test src/lib/mario.terminal-spec-enqueue-guard.test.ts",
     "test:mario-build-started-no-build-done": "tsx --test src/lib/mario.build-started-no-build-done.test.ts",
+    "test:mario-failed-build-escalation-anchor": "tsx --test src/lib/mario.failed-build-escalation-anchor.test.ts",
     "test:agent-jobs-columns": "tsx --test src/lib/agent-jobs-columns.test.ts",
     "test:build-lifecycle": "tsx --test src/lib/build-lifecycle.test.ts",
     "test:box-auth-refresh": "tsx --test scripts/builder-worker.auth-refresh.test.ts",
