@@ -63,6 +63,7 @@ import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
 import type { CxOrderRemedyState, CxOrderRemedyStateRef } from "@/lib/cx-agent-sdk";
 import { MONEY_ACTION_TYPES, isNonOrderScopedLoyaltyAction, isNonRefundReplacementAction } from "@/lib/june-remedy-approval";
 import { getAgentPolicyPackage, formatAgentPolicyPackage } from "@/lib/policies";
+import { linkGroupIds } from "@/lib/customer-links";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -2578,6 +2579,24 @@ export async function applyBoxCsDirectorCall(
  * base brief still renders (June is instructed in the prompt to escalate rather than guess
  * when the policy block is missing, mirroring how Sol treats an empty catalog).
  * --------------------------------------------------------------------------------------------- */
+
+/**
+ * Widen a ticket customer_id to every customer UUID in the same link group so June's
+ * context reads (subscriptions, orders, refund ledgers, cancellation timelines, shipment
+ * fact packs) resolve across a linked person's whole history — not just the record the
+ * message happened to land on. Ground truth: ticket a4e79e9d, customers affcdc47/40c66b13
+ * linked 2026-06-15, 29 orders and 3 subscriptions rendered as 0 to June until the reads
+ * widened through `linkGroupIds`. Returns `[customerId]` when there is no link group so it
+ * is a safe drop-in for an `.eq("customer_id", …)` call.
+ * See [[../libraries/customer-links]] · [[../specs/ticket-surfaces-must-read-the-whole-linked-customer]].
+ */
+export async function linkedCustomerIdsForDirectorContext(
+  admin: Admin,
+  workspaceId: string,
+  customerId: string,
+): Promise<string[]> {
+  return linkGroupIds(admin, workspaceId, customerId);
+}
 
 /**
  * Returns the CURRENT POLICIES block June's brief embeds — the same shared package Sol reads
