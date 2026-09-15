@@ -55,10 +55,10 @@ export async function handlePaymentMethodEvent(
       .in("status", ["active", "paused"]);
 
     if (activeSubs?.length) {
-      const { appstleSwitchPaymentMethod } = await import("@/lib/appstle");
+      const { subscriptionSwitchPaymentMethod } = await import("@/lib/commerce/subscription");
       for (const sub of activeSubs) {
         try {
-          await appstleSwitchPaymentMethod(workspaceId, sub.shopify_contract_id, paymentMethodId);
+          await subscriptionSwitchPaymentMethod(workspaceId, sub.shopify_contract_id, paymentMethodId);
           console.log(`Payment method webhook: switched sub ${sub.shopify_contract_id} to ${paymentMethodId}`);
         } catch (err) {
           console.error(`Payment method webhook: failed to switch sub ${sub.shopify_contract_id}:`, err);

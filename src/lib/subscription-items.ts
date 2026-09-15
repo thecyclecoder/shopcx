@@ -923,6 +923,13 @@ export async function subAddItem(
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubAddItem(workspaceId, contractId, variantId, quantity);
   }
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+      const { shopcxAddItem } = await import("@/lib/commerce/shopcx-line-ops");
+      return shopcxAddItem(workspaceId, contractId, variantId, quantity);
+    }
+  }
   await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
@@ -1008,7 +1015,7 @@ export async function subAddOneTimeGift(
   variantId: string,
   quantity: number = 1,
   opts: { free?: boolean; priceCents?: number | null } = {},
-): Promise<{ success: boolean; error?: string; free_confirmed?: boolean; backend?: "internal" | "appstle" }> {
+): Promise<{ success: boolean; error?: string; free_confirmed?: boolean; backend?: "internal" | "gift_order" }> {
   const free = opts.free !== false;
   const qty = Math.max(1, Math.floor(quantity || 1));
 
@@ -1019,25 +1026,32 @@ export async function subAddOneTimeGift(
     return { ...r, free_confirmed: r.success && free, backend: "internal" };
   }
 
-  // Appstle sub → a standalone $0 GIFT ORDER (issueReplacement). Appstle's true
-  // one-off endpoint lives on membership-admin.appstle.com and 401s our Subscriptions
-  // API key, and replace-variants-v3 `newOneTimeVariants` adds a RECURRING $0 line
-  // (the ticket 6a8ddfd9 double-frother incident). So an Appstle sub's one-time gift
-  // ships as its OWN $0 order — reliable, never recurs, never charges. FREE only.
+  // Everything else → a standalone $0 GIFT ORDER (issueReplacement). This path makes NO vendor
+  // call at all: it creates its own Shopify order, so it is correct for an Appstle contract and a
+  // ShopCX one alike. (It was written for Appstle, whose true one-off endpoint lives on
+  // membership-admin.appstle.com and 401s our Subscriptions key, and whose
+  // replace-variants-v3 `newOneTimeVariants` adds a RECURRING $0 line — the ticket 6a8ddfd9
+  // double-frother incident.)
+  //
+  // ⭐ ShopCX deliberately does NOT use `shopcxAddOneTimeLine` here even though it could. A gift
+  // offered from a TICKET means "we're sending this out" — a cycle-scoped line would sit unshipped
+  // until the next renewal, up to a full interval away, which is not what the agent promised.
+  // The cycle-scoped path is for gifts attached to a renewal (the portal's one-time add-ons and
+  // the cancel-flow save offer), where shipping with the order IS the intent.
   if (!free) {
-    return { success: false, error: "Paid one-time add-ons aren't supported on Appstle subs — use an internal sub or a charged order.", backend: "appstle" };
+    return { success: false, error: "Paid one-time add-ons need an internal sub or a charged order.", backend: "gift_order" };
   }
   const shopifyVariantId = await resolveShopifyVariantId(variantId);
   if (!shopifyVariantId) {
-    return { success: false, error: `Could not resolve a Shopify variant id for "${variantId}"`, backend: "appstle" };
+    return { success: false, error: `Could not resolve a Shopify variant id for "${variantId}"`, backend: "gift_order" };
   }
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions").select("id, customer_id").eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
-  if (!sub?.customer_id) return { success: false, error: "Could not resolve the customer for this subscription", backend: "appstle" };
+  if (!sub?.customer_id) return { success: false, error: "Could not resolve the customer for this subscription", backend: "gift_order" };
   const { data: cust } = await admin
     .from("customers").select("shopify_customer_id, first_name, last_name, default_address").eq("id", sub.customer_id).maybeSingle();
-  if (!cust?.shopify_customer_id) return { success: false, error: "Customer has no Shopify id — can't create a gift order", backend: "appstle" };
+  if (!cust?.shopify_customer_id) return { success: false, error: "Customer has no Shopify id — can't create a gift order", backend: "gift_order" };
 
   // IDEMPOTENCY — a self-heal retry must NOT create a SECOND gift order. A successful
   // gift lands as `status='created'` with `replacement_order_id` STILL NULL (that UUID
@@ -1051,11 +1065,11 @@ export async function subAddOneTimeGift(
     .gte("created_at", new Date(Date.now() - 60 * 60 * 1000).toISOString());
   const alreadyGifted = (priorGifts || []).some((g) =>
     Array.isArray(g.items) && (g.items as Array<Record<string, unknown>>).some((it) => String(it.variantId ?? it.variant_id) === shopifyVariantId));
-  if (alreadyGifted) return { success: true, free_confirmed: true, backend: "appstle" };
+  if (alreadyGifted) return { success: true, free_confirmed: true, backend: "gift_order" };
 
   const resolvedAddr = await (await import("@/lib/customer-shipping-address")).resolveCustomerShippingAddress(admin, workspaceId, sub.customer_id, {});
   const a = resolvedAddr?.address;
-  if (!a?.address1) return { success: false, error: "No shipping address on file — can't create a gift order", backend: "appstle" };
+  if (!a?.address1) return { success: false, error: "No shipping address on file — can't create a gift order", backend: "gift_order" };
 
   // Gift line title (product name) for the order + note.
   const { data: pv } = await admin.from("product_variants").select("product_id").eq("workspace_id", workspaceId).eq("shopify_variant_id", shopifyVariantId).maybeSingle();
@@ -1092,8 +1106,8 @@ export async function subAddOneTimeGift(
     initiatedBy: "script",
     shopifyNote: `Complimentary one-time gift (${giftTitle} × ${qty}) — goodwill, $0, ships as its own order alongside the next renewal.`,
   });
-  if (!r.success) return { success: false, error: r.error, backend: "appstle" };
-  return { success: true, free_confirmed: true, backend: "appstle" };
+  if (!r.success) return { success: false, error: r.error, backend: "gift_order" };
+  return { success: true, free_confirmed: true, backend: "gift_order" };
 }
 
 /** Short reason tag for a one-time goodwill gift order (Shopify draft-order tags cap at 40 chars). */
@@ -1114,6 +1128,17 @@ export async function subRemoveItem(
       return { success: false, error: "Internal subscription requires a variantId to remove a line item" };
     }
     return internalSubRemoveItem(workspaceId, contractId, arg.variantId);
+  }
+  // ⭐ ShopCX-billed: a Shopify contract Appstle no longer holds. Routing here rather than at each
+  // of the nine callers — this module IS the chokepoint every line mutation already goes through.
+  const { resolveBillingSource } = await import("@/lib/internal-subscription");
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    // Either addressing mode works here: a ShopCX contract really does have Shopify line gids, so
+    // a lineGid-only call (what the portal sends when it has one) must not be refused.
+    const target = arg.variantId || arg.lineGid;
+    if (!target) return { success: false, error: "ShopCX subscription requires a variantId or lineGid to remove a line item" };
+    const { shopcxRemoveItem } = await import("@/lib/commerce/shopcx-line-ops");
+    return shopcxRemoveItem(workspaceId, contractId, target);
   }
   // Use dedicated remove-line-item endpoint (not replaceVariants)
   return appstleRemoveLineItem(workspaceId, contractId, arg);
@@ -1143,6 +1168,18 @@ export async function subChangeQuantity(
     await admin.from("subscriptions").update({ items, updated_at: new Date().toISOString() }).eq("id", sub.id);
     return { success: true };
   }
+  // ⭐ ShopCX-billed: check BEFORE healOnTouch, which repairs APPSTLE-side pricing and would reach
+  // a contract the vendor no longer has. The shopcx path changes the quantity and rewrites the
+  // structural discounts in ONE draft — a 2 -> 3 change moves the customer from the 8% tier to 12%
+  // and nothing in Shopify re-evaluates that on its own.
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+      const { shopcxChangeQuantity } = await import("@/lib/commerce/shopcx-line-ops");
+      return shopcxChangeQuantity(workspaceId, contractId, variantId, quantity);
+    }
+  }
+
   await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
@@ -1200,6 +1237,13 @@ export async function subUpdateLineItemPrice(
   basePriceCents: number,
   lineGid?: string,
 ): Promise<{ success: boolean; error?: string }> {
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+      const { shopcxUpdateLineItemPrice } = await import("@/lib/commerce/shopcx-line-ops");
+      return shopcxUpdateLineItemPrice(workspaceId, contractId, variantId, basePriceCents);
+    }
+  }
   if (await isInternalSubscription(workspaceId, contractId)) {
     // lineGid only matters for Appstle's contract.line GID indirection;
     // our DB items array is keyed by variant_id directly.
@@ -1399,7 +1443,7 @@ export async function subscriptionApplyCoupon(
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("customer_id, status")
+    .select("id, customer_id, status")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", contractId)
     .maybeSingle();
@@ -1407,7 +1451,10 @@ export async function subscriptionApplyCoupon(
     return { success: false, error: "subscription_not_active" };
   }
 
-  if (await isInternalSubscription(workspaceId, contractId)) {
+  const { resolveBillingSource } = await import("@/lib/internal-subscription");
+  const engine = await resolveBillingSource(workspaceId, contractId);
+
+  if (engine === "internal" || engine === "shopcx") {
     // LOYALTY-* codes must be internal-native on internal subs so
     // renewal-time `resolveCoupon` step 1 (internal wins) can durably
     // re-resolve them — independent of the Shopify discount lifetime, which
@@ -1442,6 +1489,25 @@ export async function subscriptionApplyCoupon(
     // a self-sufficient applied_discounts entry (type + value + source), and
     // pass the contract owner so the post-write real-value verify uses the
     // same customerId `resolveRenewalDiscount` will pass at renewal.
+    // ShopCX diverges only at the WRITE. Everything above — materialization, the
+    // owner check, internal-wins resolution — is identical for both engines and must
+    // stay that way: a loyalty code has to mean the same thing whoever bills it.
+    if (engine === "shopcx") {
+      const { shopcxApplyCoupon } = await import("@/lib/commerce/shopcx-discount-ops");
+      const r = await shopcxApplyCoupon(workspaceId, contractId, resolved);
+      // Burn the code at APPLY time, not at charge time as the internal engine does. Shopify
+      // consumes the discount on its own schedule — we only ever learn after the fact — so
+      // waiting for the charge leaves a window in which the same single-use loyalty code can
+      // be applied to a second subscription. Burning early can at worst deny a customer a code
+      // they have already spent; burning late hands out the discount twice.
+      if (r.success) {
+        const { recordCouponRedemption } = await import("@/lib/coupons");
+        await recordCouponRedemption(workspaceId, resolved, (sub?.customer_id as string | null) ?? null, {
+          subscriptionId: sub?.id as string | undefined,
+        });
+      }
+      return r;
+    }
     return internalSubApplyDiscount(workspaceId, contractId, resolved.code, {
       resolved: {
         code: resolved.code,
@@ -1480,8 +1546,16 @@ export async function subscriptionRemoveCoupon(
   contractId: string,
   discountIdOrCode: string,
 ): Promise<{ success: boolean; error?: string }> {
-  if (await isInternalSubscription(workspaceId, contractId)) {
-    return internalSubRemoveDiscount(workspaceId, contractId, discountIdOrCode);
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    const engine = await resolveBillingSource(workspaceId, contractId);
+    if (engine === "internal") {
+      return internalSubRemoveDiscount(workspaceId, contractId, discountIdOrCode);
+    }
+    if (engine === "shopcx") {
+      const { shopcxRemoveCoupon } = await import("@/lib/commerce/shopcx-discount-ops");
+      return shopcxRemoveCoupon(workspaceId, contractId);
+    }
   }
 
   await healOnTouch(workspaceId, contractId);
@@ -1512,6 +1586,13 @@ export async function subSwapVariant(
 ): Promise<{ success: boolean; error?: string; newLineGid?: string; permanent?: boolean; declineErrorKey?: string; priceGuardRefusal?: PriceGuardRefusal }> {
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
+  }
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+      const { shopcxSwapVariant } = await import("@/lib/commerce/shopcx-line-ops");
+      return shopcxSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
+    }
   }
   await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);

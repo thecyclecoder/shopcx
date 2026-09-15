@@ -527,9 +527,27 @@ export interface ContractLine {
   variantId: string | null;
   sku: string | null;
   currentPrice: string | null;
-  /** LINE TOTAL after discount allocations. Divide by quantity for the effective unit rate. */
+  /** LINE TOTAL after ALL discount allocations — a customer's coupon included. */
   lineDiscountedPrice: string | null;
   discountAllocationCount: number;
+  /**
+   * Cents allocated to this line by OUR OWN discounts only (the structural titles).
+   *
+   * `lineDiscountedPrice` is net of everything, so a line carrying a $15 loyalty coupon reads
+   * $15 cheaper than the pricing rules say it should be. Anything inferring a grandfathered
+   * rate from that gap would mint the coupon into a permanent per-unit discount — turning a
+   * one-use code into a forever rate. Subtract THIS from `currentPrice * quantity` instead.
+   */
+  structuralDiscountCents: number;
+  /**
+   * Cents allocated by the `Legacy rate` discount alone — the negotiated concession.
+   *
+   * Split out because it is the ONLY structural discount that belongs in a line's BASE when
+   * converting to the internal engine: S&S and the volume tier are re-derived there from the
+   * pricing rules, so folding them into the base would apply them twice, while the concession
+   * has no other representation and would simply be lost.
+   */
+  legacyRateCents: number;
   sellingPlanName: string | null;
 }
 
@@ -556,7 +574,10 @@ export async function getSubscriptionContract(
           variantId
           currentPrice { amount }
           lineDiscountedPrice { amount }
-          discountAllocations { amount { amount } } } } } } }`,
+          discountAllocations { amount { amount }
+            discount {
+              ... on SubscriptionManualDiscount { id title }
+              ... on SubscriptionAppliedCodeDiscount { id } } } } } } } }`,
     { id: contractGid(contractId) },
   );
   if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
@@ -564,7 +585,7 @@ export async function getSubscriptionContract(
     id: string; status: string; nextBillingDate: string | null; createdAt: string | null;
     billingPolicy?: { interval: string; intervalCount: number };
     customerPaymentMethod?: { id: string };
-    lines: { edges: { node: { id: string; title: string; quantity: number; sellingPlanName: string | null; variantId: string | null; sku: string | null; currentPrice?: { amount: string }; lineDiscountedPrice?: { amount: string }; discountAllocations?: unknown[] } }[] };
+    lines: { edges: { node: { id: string; title: string; quantity: number; sellingPlanName: string | null; variantId: string | null; sku: string | null; currentPrice?: { amount: string }; lineDiscountedPrice?: { amount: string }; discountAllocations?: { amount?: { amount: string }; discount?: { title?: string } }[] } }[] };
   } | undefined;
   if (!k) return { success: false, error: "contract not found (or not owned by this app)" };
   return {
@@ -586,6 +607,23 @@ export async function getSubscriptionContract(
         currentPrice: e.node.currentPrice?.amount ?? null,
         lineDiscountedPrice: e.node.lineDiscountedPrice?.amount ?? null,
         discountAllocationCount: Array.isArray(e.node.discountAllocations) ? e.node.discountAllocations.length : 0,
+        // A code discount's union member has no `title`, so it can never match a structural
+        // title and is excluded here by construction — the same way it is excluded from the
+        // structural clear.
+        structuralDiscountCents: (e.node.discountAllocations ?? []).reduce(
+          (sum, a) =>
+            STRUCTURAL_DISCOUNT_TITLES.includes(String(a?.discount?.title ?? ""))
+              ? sum + Math.round(parseFloat(a?.amount?.amount ?? "0") * 100)
+              : sum,
+          0,
+        ),
+        legacyRateCents: (e.node.discountAllocations ?? []).reduce(
+          (sum, a) =>
+            String(a?.discount?.title ?? "") === LEGACY_RATE_TITLE
+              ? sum + Math.round(parseFloat(a?.amount?.amount ?? "0") * 100)
+              : sum,
+          0,
+        ),
         sellingPlanName: e.node.sellingPlanName,
       })),
     },
@@ -647,6 +685,19 @@ export interface ManualDiscountInput {
   entitledLines?: { all: boolean } | { lines: { add: string[]; remove?: string[] } };
 }
 
+/**
+ * `SubscriptionManualDiscountEntitledLinesInput` requires `all` to be PRESENT, even when the
+ * discount is scoped to specific lines: sending `{lines:{add:[…]}}` alone is rejected with
+ * "Entitled lines all may not be empty" — a message that reads like the line list is empty when
+ * it is the `all` flag that is missing. Normalizing here rather than at each call site means the
+ * next discount someone adds cannot reintroduce the bug.
+ */
+function normalizeEntitledLines(e: ManualDiscountInput["entitledLines"]) {
+  if (!e) return undefined;
+  if ("all" in e) return e;
+  return { all: false, lines: e.lines };
+}
+
 /** Add one manual discount to an OPEN draft. Call inside `withDraft`. */
 export async function shopifyAddDraftDiscount(
   workspaceId: string,
@@ -657,7 +708,7 @@ export async function shopifyAddDraftDiscount(
     workspaceId,
     `mutation($d:ID!,$in:SubscriptionManualDiscountInput!){
        subscriptionDraftDiscountAdd(draftId:$d, input:$in){ discountAdded { id } userErrors { message } } }`,
-    { d: draftId, in: input },
+    { d: draftId, in: { ...input, entitledLines: normalizeEntitledLines(input.entitledLines) } },
   );
   return toResult(env as never, "subscriptionDraftDiscountAdd");
 }
@@ -726,6 +777,351 @@ export async function getBillingCycleForDate(
     success: true,
     cycle: { index: c.cycleIndex, startAt: c.cycleStartAt, endAt: c.cycleEndAt, status: c.status, skipped: c.skipped },
   };
+}
+
+/** Set a line's quantity inside an OPEN draft. Call within `withDraft` so related edits commit together. */
+export async function shopifyUpdateLineQuantityInDraft(
+  workspaceId: string,
+  draftId: string,
+  lineId: string,
+  quantity: number,
+): Promise<SubscriptionActionResult> {
+  const env = await gql(
+    workspaceId,
+    `mutation($d:ID!,$l:ID!,$in:SubscriptionLineUpdateInput!){ subscriptionDraftLineUpdate(draftId:$d, lineId:$l, input:$in){ lineUpdated { id quantity } userErrors { message } } }`,
+    { d: draftId, l: lineId, in: { quantity } },
+  );
+  return toResult(env as never, "subscriptionDraftLineUpdate");
+}
+
+/**
+ * Update a line inside an OPEN draft — variant, price, or both.
+ *
+ * ⭐ `SubscriptionLineUpdateInput` accepts `productVariantId`, so a FLAVOUR SWAP can happen inside
+ * the draft rather than via the separate `subscriptionContractProductChange` mutation. That matters:
+ * the swap and its discount recompute then commit together, instead of leaving a window where the
+ * new variant is priced on the old line's discounts.
+ */
+export async function shopifyUpdateDraftLine(
+  workspaceId: string,
+  draftId: string,
+  lineId: string,
+  input: { productVariantId?: string; quantity?: number; currentPrice?: string },
+): Promise<SubscriptionActionResult> {
+  const payload: Record<string, unknown> = {};
+  if (input.productVariantId) {
+    payload.productVariantId = String(input.productVariantId).startsWith("gid://")
+      ? input.productVariantId
+      : `gid://shopify/ProductVariant/${input.productVariantId}`;
+  }
+  if (input.quantity != null) payload.quantity = input.quantity;
+  if (input.currentPrice != null) payload.currentPrice = input.currentPrice;
+  const env = await gql(
+    workspaceId,
+    `mutation($d:ID!,$l:ID!,$in:SubscriptionLineUpdateInput!){ subscriptionDraftLineUpdate(draftId:$d, lineId:$l, input:$in){ lineUpdated { id quantity } userErrors { message } } }`,
+    { d: draftId, l: lineId, in: payload },
+  );
+  return toResult(env as never, "subscriptionDraftLineUpdate");
+}
+
+/** Add a line inside an OPEN draft. Payload field is `lineAdded`, not `lineUpdated`. */
+export async function shopifyAddDraftLine(
+  workspaceId: string,
+  draftId: string,
+  variantId: string,
+  quantity: number,
+  currentPrice: string,
+): Promise<SubscriptionActionResult> {
+  const env = await gql(
+    workspaceId,
+    `mutation($d:ID!,$in:SubscriptionLineInput!){ subscriptionDraftLineAdd(draftId:$d, input:$in){ lineAdded { id } userErrors { message } } }`,
+    {
+      d: draftId,
+      in: {
+        productVariantId: String(variantId).startsWith("gid://") ? variantId : `gid://shopify/ProductVariant/${variantId}`,
+        quantity,
+        currentPrice,
+      },
+    },
+  );
+  return toResult(env as never, "subscriptionDraftLineAdd");
+}
+
+/** Remove a line from an OPEN draft. Call inside `withDraft`. Payload field is `lineRemoved`. */
+export async function shopifyRemoveDraftLine(
+  workspaceId: string,
+  draftId: string,
+  lineId: string,
+): Promise<SubscriptionActionResult> {
+  const env = await gql(
+    workspaceId,
+    `mutation($d:ID!,$l:ID!){ subscriptionDraftLineRemove(draftId:$d, lineId:$l){ lineRemoved { id } userErrors { message } } }`,
+    { d: draftId, l: lineId },
+  );
+  return toResult(env as never, "subscriptionDraftLineRemove");
+}
+
+/**
+ * Rewrite the STRUCTURAL discounts on a contract to match its current lines.
+ *
+ * ⭐ The discount set is a pure function of (lines, quantities, grandfather locks, rule) — so every
+ * mutation recomputes the WHOLE set rather than patching it. A quantity change from 2 to 3 moves
+ * the customer from the 8% tier to 12%, and a pinned percentage does not follow; recomputing from
+ * scratch is idempotent and cannot drift into a wrong tier.
+ *
+ * ⚠️ Only discounts WE own are touched. A customer's loyalty or promo code is a `CODE_DISCOUNT`
+ * they applied, is one-use by design, and must survive untouched — wiping it would silently take
+ * back something they were given. Ours are identified by title; a customer can never apply an S&S
+ * or a quantity break, so anything carrying those titles is ours by construction.
+ */
+/** The grandfathered per-unit concession. Named separately — it is the one structural discount
+ *  that carries into an internal sub's BASE price rather than being re-derived from the rules. */
+export const LEGACY_RATE_TITLE = "Legacy rate";
+export const STRUCTURAL_DISCOUNT_TITLES = ["Subscribe & Save", "Volume discount", LEGACY_RATE_TITLE];
+
+/**
+ * Open a draft scoped to ONE billing cycle, run `mutate`, commit.
+ *
+ * ⭐ This is what makes a line genuinely ONE-TIME. `subscriptionDraftLineAdd` on a contract draft
+ * creates a RECURRING line — a retention gift added that way ships free on every renewal, forever
+ * (Appstle avoids this with its own `isOneTimeProduct` flag, which has no Shopify equivalent).
+ * A cycle-scoped edit exists only on the cycle it was made against.
+ *
+ * The draft is the SAME `SubscriptionDraft` type a contract edit produces, so every draft helper
+ * here works on it unchanged — but it MUST be committed with
+ * `subscriptionBillingCycleContractDraftCommit`, not `subscriptionDraftCommit`.
+ *
+ * Reversible: `subscriptionBillingCycleEditDelete` drops the whole edit for that cycle.
+ */
+export async function withBillingCycleDraft(
+  workspaceId: string,
+  contractId: string,
+  selector: { index: number } | { date: string },
+  mutate: (draftId: string) => Promise<SubscriptionActionResult>,
+): Promise<SubscriptionActionResult> {
+  const open = await gql<{ subscriptionBillingCycleContractEdit: { draft?: { id: string }; userErrors: { message: string }[] } }>(
+    workspaceId,
+    `mutation($in:SubscriptionBillingCycleInput!){
+       subscriptionBillingCycleContractEdit(billingCycleInput:$in){ draft { id } userErrors { message } } }`,
+    { in: { contractId: contractGid(contractId), selector } },
+  );
+  const opened = toResult(open as never, "subscriptionBillingCycleContractEdit");
+  if (!opened.success) return opened;
+  const draftId = open.data?.subscriptionBillingCycleContractEdit?.draft?.id;
+  if (!draftId) return { success: false, error: "billing-cycle edit returned no draft" };
+
+  const edited = await mutate(draftId);
+  if (!edited.success) return edited; // abort before commit — the cycle is untouched
+
+  const commit = await gql(
+    workspaceId,
+    `mutation($id:ID!){ subscriptionBillingCycleContractDraftCommit(draftId:$id){ userErrors { message } } }`,
+    { id: draftId },
+  );
+  return toResult(commit as never, "subscriptionBillingCycleContractDraftCommit");
+}
+
+/**
+ * Change the contract's shipping address. Mirrors the Appstle
+ * `subscription-contracts-update-shipping-address` PUT.
+ *
+ * ⚠️ `deliveryMethod.shipping` REPLACES the whole shipping method, and the address object inside
+ * it replaces wholesale too — an omitted field is CLEARED, not left alone. Observed live: an
+ * update that did not mention `phone` wiped a real phone number off the contract, and one that did
+ * not mention `shippingOption` would drop the customer's "Economy" rate, leaving the renewal order
+ * with nothing to build from. So the current address + option are read and merged UNDER the
+ * caller's values; only what the caller actually supplies changes.
+ *
+ * ⚠️ `MailingAddressInput` takes `countryCode` / `provinceCode`, not `country` / `province` —
+ * passing full names silently produces an address Shopify cannot geocode. The read below asks for
+ * the CODE fields for exactly that reason.
+ */
+export async function shopifyUpdateShippingAddress(
+  workspaceId: string,
+  contractId: string,
+  address: {
+    address1: string; address2?: string | null; city: string; zip: string;
+    /** ISO country CODE, e.g. "US". */ country: string;
+    /** Province CODE, e.g. "CA". */ province: string;
+    firstName: string; lastName: string; phone?: string | null; company?: string | null;
+  },
+): Promise<SubscriptionActionResult> {
+  const cur = await gql<{ subscriptionContract?: { deliveryMethod?: {
+    address?: { address1?: string; address2?: string; city?: string; zip?: string; countryCodeV2?: string; provinceCode?: string; firstName?: string; lastName?: string; phone?: string; company?: string };
+    shippingOption?: { title?: string; presentmentTitle?: string; description?: string; code?: string };
+  } } }>(
+    workspaceId,
+    `query($id:ID!){ subscriptionContract(id:$id){ deliveryMethod {
+       ... on SubscriptionDeliveryMethodShipping {
+         address { address1 address2 city zip countryCodeV2 provinceCode firstName lastName phone company }
+         shippingOption { title presentmentTitle description code } } } } }`,
+    { id: contractGid(contractId) },
+  );
+  if (cur.errors?.length) return { success: false, error: cur.errors.map((e) => e.message).join("; ") };
+  const opt = cur.data?.subscriptionContract?.deliveryMethod?.shippingOption;
+  const prev = cur.data?.subscriptionContract?.deliveryMethod?.address;
+
+  /** Caller's value wins; `undefined`/`null` falls back to what the contract already holds. */
+  const keep = <T,>(supplied: T | null | undefined, existing: T | undefined): T | undefined =>
+    supplied === undefined || supplied === null ? existing : supplied;
+
+  return withDraft(workspaceId, contractId, async (draftId) => {
+    const env = await gql(
+      workspaceId,
+      `mutation($d:ID!,$in:SubscriptionDraftInput!){
+         subscriptionDraftUpdate(draftId:$d, input:$in){ draft { id } userErrors { message } } }`,
+      {
+        d: draftId,
+        in: {
+          deliveryMethod: {
+            shipping: {
+              address: {
+                address1: keep(address.address1, prev?.address1),
+                address2: keep(address.address2, prev?.address2) ?? "",
+                city: keep(address.city, prev?.city),
+                zip: keep(address.zip, prev?.zip),
+                countryCode: keep(address.country, prev?.countryCodeV2),
+                provinceCode: keep(address.province, prev?.provinceCode),
+                firstName: keep(address.firstName, prev?.firstName),
+                lastName: keep(address.lastName, prev?.lastName),
+                // An EMPTY phone means "the caller had none to send", not "clear it" — the portal
+                // sends `phone || ""` and most customers have no phone on file there.
+                ...(address.phone || prev?.phone ? { phone: address.phone || prev?.phone } : {}),
+                ...(address.company || prev?.company ? { company: address.company || prev?.company } : {}),
+              },
+              ...(opt
+                ? { shippingOption: {
+                    ...(opt.title ? { title: opt.title } : {}),
+                    ...(opt.presentmentTitle ? { presentmentTitle: opt.presentmentTitle } : {}),
+                    ...(opt.description ? { description: opt.description } : {}),
+                    ...(opt.code ? { code: opt.code } : {}),
+                  } }
+                : {}),
+            },
+          },
+        },
+      },
+    );
+    return toResult(env as never, "subscriptionDraftUpdate");
+  });
+}
+
+/** Drop every edit made to one billing cycle — the undo for `withBillingCycleDraft`. */
+export async function shopifyDeleteBillingCycleEdit(
+  workspaceId: string,
+  contractId: string,
+  selector: { index: number } | { date: string },
+): Promise<SubscriptionActionResult> {
+  const env = await gql(
+    workspaceId,
+    `mutation($in:SubscriptionBillingCycleInput!){
+       subscriptionBillingCycleEditDelete(billingCycleInput:$in){ userErrors { message } } }`,
+    { in: { contractId: contractGid(contractId), selector } },
+  );
+  return toResult(env as never, "subscriptionBillingCycleEditDelete");
+}
+
+export interface DraftLine {
+  id: string;
+  quantity: number;
+  sku: string | null;
+  variantId: string | null;
+  /** Per-unit price BEFORE any discount. */
+  currentPrice: string | null;
+  /** Cents allocated to this line by OUR discounts only — see `ContractLine.structuralDiscountCents`. */
+  structuralDiscountCents: number;
+}
+
+/**
+ * Read an OPEN draft's post-edit state.
+ *
+ * ⭐ Mid-edit, the DRAFT is the truth and the contract is stale. Recomputing discounts from the
+ * contract after changing a quantity in the draft reads the OLD quantity: the commit then lands
+ * the new quantity priced at the old tier, and the NEXT edit prices the old quantity at the new
+ * tier. Observed live on 35945087149 — 1→2 committed with no volume discount at all, then 2→1
+ * committed an 8% two-unit discount onto a single unit.
+ */
+export async function getSubscriptionDraft(
+  workspaceId: string,
+  draftId: string,
+): Promise<{ success: boolean; error?: string; lines?: DraftLine[]; discounts?: { id: string; title: string | null; type: string | null }[] }> {
+  const env = await gql<{ node?: Record<string, unknown> }>(
+    workspaceId,
+    `query($id:ID!){ node(id:$id){ ... on SubscriptionDraft {
+        lines(first:50){ pageInfo { hasNextPage } nodes { id quantity sku variantId
+          currentPrice { amount }
+          discountAllocations { amount { amount }
+            discount {
+              ... on SubscriptionManualDiscount { id title }
+              ... on SubscriptionAppliedCodeDiscount { id } } } } }
+        discounts(first:25){ nodes {
+          ... on SubscriptionManualDiscount { id title type }
+          ... on SubscriptionAppliedCodeDiscount { id } } } } } }`,
+    { id: draftId },
+  );
+  if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
+  const n = env.data?.node as never as {
+    lines?: { nodes?: { id: string; quantity: number; sku: string | null; variantId: string | null;
+      currentPrice?: { amount: string };
+      discountAllocations?: { amount?: { amount: string }; discount?: { title?: string } }[] }[] };
+    discounts?: { nodes?: { id: string; title?: string | null; type?: string | null }[] };
+  } | undefined;
+  if (!n) return { success: false, error: "draft not found" };
+  return {
+    success: true,
+    lines: (n.lines?.nodes ?? []).map((l) => ({
+      id: l.id,
+      quantity: l.quantity,
+      sku: l.sku,
+      variantId: l.variantId,
+      currentPrice: l.currentPrice?.amount ?? null,
+      structuralDiscountCents: (l.discountAllocations ?? []).reduce(
+        (sum, a) =>
+          STRUCTURAL_DISCOUNT_TITLES.includes(String(a?.discount?.title ?? ""))
+            ? sum + Math.round(parseFloat(a?.amount?.amount ?? "0") * 100)
+            : sum,
+        0,
+      ),
+    })),
+    // A code discount has no `title`; it can never match a structural title, so it is excluded
+    // from the structural clear by construction.
+    discounts: (n.discounts?.nodes ?? []).map((d) => ({ id: d.id, title: d.title ?? null, type: d.type ?? null })),
+  };
+}
+
+/** Remove ONE discount from an OPEN draft, by id. Call inside `withDraft`. */
+export async function shopifyRemoveDraftDiscount(
+  workspaceId: string,
+  draftId: string,
+  discountId: string,
+): Promise<SubscriptionActionResult> {
+  const env = await gql(
+    workspaceId,
+    `mutation($d:ID!,$x:ID!){ subscriptionDraftDiscountRemove(draftId:$d, discountId:$x){
+         discountRemoved { __typename } userErrors { message } } }`,
+    { d: draftId, x: discountId },
+  );
+  return toResult(env as never, "subscriptionDraftDiscountRemove");
+}
+
+export async function shopifyRemoveStructuralDiscounts(
+  workspaceId: string,
+  draftId: string,
+  existing: { id: string; title: string | null; type?: string | null }[],
+): Promise<SubscriptionActionResult> {
+  for (const d of existing) {
+    if (d.type && d.type !== "MANUAL") continue;                      // never a customer code
+    if (!STRUCTURAL_DISCOUNT_TITLES.includes(String(d.title ?? ""))) continue;
+    const env = await gql(
+      workspaceId,
+      `mutation($d:ID!,$x:ID!){ subscriptionDraftDiscountRemove(draftId:$d, discountId:$x){
+         discountRemoved { __typename } userErrors { message } } }`,
+      { d: draftId, x: d.id },
+    );
+    const r = toResult(env as never, "subscriptionDraftDiscountRemove");
+    if (!r.success) return r;
+  }
+  return { success: true };
 }
 
 /** Surface a thrown error the same way every caller here reports a failed one. */

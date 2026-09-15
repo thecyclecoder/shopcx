@@ -25,12 +25,14 @@
  * local `status='cancelled'` write, leaving the row active while the renewal cron kept billing a
  * customer who had cancelled.
  *
- * Ops with no ShopCX equivalent yet return `shopcxUnsupported(...)` — LOUD, never a silent
- * fall-through to Appstle. A visible refusal is recoverable; a write that vanishes is not.
+ * Every op routes for all three engines; none refuses. An op that gains no equivalent on a future
+ * engine must return a LOUD refusal, never a silent fall-through to a vendor that does not hold
+ * the contract. A visible refusal is recoverable; a write that vanishes is not.
  *
- * Each op branches on isInternalSubscription() — internal → internalSub*
- * handlers; else → the existing appstleX / subX wrappers, which top-guard
- * with healOnTouch and handle the Appstle boundary.
+ * Each op resolves `billing_source` — internal → internalSub* handlers, shopcx → the Shopify
+ * client / shopcx-* ops, appstle → the appstleX / subX wrappers, which top-guard with healOnTouch
+ * and handle the Appstle boundary. `scripts/_check-vendor-dispatch-in-sdk.ts` keeps that
+ * resolution here and out of the vendor modules.
  *
  * Ships with zero call-site consumers — the M3 harness compares parity before
  * any surface migrates. Phase 3 flips src/lib/appstle.ts and
@@ -54,6 +56,11 @@ import type {
 import {
   isInternalSubscription,
   resolveBillingSource,
+  internalSubGetUpcomingOrders,
+  internalSubSwitchPaymentMethod,
+  internalSubAddFreeProduct,
+  internalSubSkipNextOrder as internalSkipUpcoming,
+  internalSubSwapVariant as internalSwapProduct,
   internalSubscriptionAction,
   internalSubSkipNextOrder,
   internalSubUpdateBillingInterval,
@@ -65,7 +72,6 @@ import {
 } from "@/lib/internal-subscription";
 import {
   applySubscriptionStatusTruth,
-  shopcxUnsupported,
 } from "@/lib/commerce/subscription-status-truth";
 import {
   shopifySubscriptionAction,
@@ -89,7 +95,7 @@ import {
   appstleSkipUpcomingOrder,
   appstleUnskipOrder,
   appstleGetUpcomingOrders,
-  orderNowByContract,
+  appstleOrderNowByContract,
 } from "@/lib/appstle";
 import {
   subAddItem,
@@ -489,9 +495,9 @@ export async function subscriptionSkipUpcomingOrder(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopifySkipBillingCycle(workspaceId, contractId);
-  }
+  const src = await resolveBillingSource(workspaceId, contractId);
+  if (src === "internal") return internalSkipUpcoming(workspaceId, contractId);
+  if (src === "shopcx") return shopifySkipBillingCycle(workspaceId, contractId);
   return appstleSkipUpcomingOrder(workspaceId, contractId);
 }
 
@@ -522,7 +528,9 @@ export async function subscriptionGetUpcomingOrders(
   orders?: { id: string; billingDate: string; status: string }[];
   error?: string;
 }> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+  const srcUpcoming = await resolveBillingSource(workspaceId, contractId);
+  if (srcUpcoming === "internal") return internalSubGetUpcomingOrders(workspaceId, contractId);
+  if (srcUpcoming === "shopcx") {
     const cy = await getUpcomingBillingCycles(workspaceId, contractId, { first: 6 });
     if (!cy.success) return { success: false, error: cy.error };
     // Shape-compatible with the Appstle response, but note the `id` is a CYCLE INDEX, not an
@@ -575,21 +583,51 @@ export async function subscriptionSwitchPaymentMethod(
   // token → customer_payment_methods.is_default flip). Delegate to preserve
   // that path exactly; the wrapper top-guards with healOnTouch on the
   // Appstle branch.
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopifySwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
-  }
+  const srcPm = await resolveBillingSource(workspaceId, contractId);
+  if (srcPm === "internal") return internalSubSwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
+  if (srcPm === "shopcx") return shopifySwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
   return appstleSwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
 }
 
+/**
+ * "Update your payment method" email.
+ *
+ * ⭐ For every engine except Appstle this sends OUR recovery email, and that is a deliberate
+ * product choice rather than a fallback: the magic link lands on our own update-payment flow,
+ * which vaults a Braintree card and MIGRATES the subscription onto internal rails. A payment
+ * failure is the one moment a customer is already reaching for their card, so it is the best
+ * conversion opportunity we get — anywhere we can move someone to internal, we do.
+ *
+ * That is also why this does NOT use Shopify's `customerPaymentMethodGetUpdateUrl` for a ShopCX
+ * contract, even though it exists and works: it would fix the card on the Shopify contract and
+ * leave the customer on Shopify's rails, trading a conversion for a repair. (It stays the right
+ * tool if we ever need to fix a card WITHOUT converting — its URL expires in ~24h, so it can only
+ * ever be minted at send time.)
+ *
+ * Appstle keeps its own vendor email: that path has no migration step attached, and Appstle's
+ * hosted page is the only thing that can update a card it holds.
+ */
 export async function subscriptionSendPaymentUpdateEmail(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    // Vendor-email feature with no Shopify equivalent; needs our own Resend flow.
-    return shopcxUnsupported("send payment-update email");
-  }
-  return appstleSendPaymentUpdateEmail(workspaceId, contractId);
+  const srcEmail = await resolveBillingSource(workspaceId, contractId);
+  if (srcEmail === "appstle") return appstleSendPaymentUpdateEmail(workspaceId, contractId);
+
+  const admin = createAdminClient();
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("id, customer_id")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (!sub?.customer_id) return { success: false, error: "subscription_or_customer_not_found" };
+
+  const { sendPaymentRecoveryEmail } = await import("@/lib/payment-recovery-email");
+  const r = await sendPaymentRecoveryEmail(workspaceId, String(sub.customer_id), {
+    subscriptionId: String(sub.id),
+  });
+  return r.sent ? { success: true } : { success: false, error: r.error };
 }
 
 // ── Line items ──────────────────────────────────────────────────────
@@ -600,9 +638,6 @@ export async function subscriptionAddItem(
   variantId: string,
   quantity: number = 1,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopcxUnsupported("add line item");
-  }
   return subAddItem(workspaceId, contractId, variantId, quantity);
 }
 
@@ -611,9 +646,6 @@ export async function subscriptionRemoveItem(
   contractId: string,
   variantOrLine: string | { variantId?: string; lineGid?: string },
 ): Promise<OpResult & { alreadyAbsent?: boolean }> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopcxUnsupported("remove line item");
-  }
   return subRemoveItem(workspaceId, contractId, variantOrLine);
 }
 
@@ -623,9 +655,6 @@ export async function subscriptionChangeQuantity(
   variantId: string,
   quantity: number,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopcxUnsupported("change quantity");
-  }
   return subChangeQuantity(workspaceId, contractId, variantId, quantity);
 }
 
@@ -636,9 +665,6 @@ export async function subscriptionSwapVariant(
   newVariantId: string,
   quantity: number = 1,
 ): Promise<OpResult & { newLineGid?: string }> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopcxUnsupported("swap variant");
-  }
   return subSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
 }
 
@@ -649,9 +675,6 @@ export async function subscriptionUpdateLineItemPrice(
   basePriceCents: number,
   lineGid?: string,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopcxUnsupported("update line price");
-  }
   return subUpdateLineItemPrice(workspaceId, contractId, variantId, basePriceCents, lineGid);
 }
 
@@ -726,6 +749,18 @@ export async function subscriptionGetLiveContract(
  */
 export interface UpdateShippingAddressDeps {
   isInternal(workspaceId: string, contractId: string): Promise<boolean>;
+  /**
+   * Three-way engine resolution. OPTIONAL so the existing injected-fake tests keep working —
+   * when absent the old internal-vs-Appstle branch stands, which is what those tests exercise.
+   * Production always supplies it.
+   */
+  resolveEngine?(workspaceId: string, contractId: string): Promise<string>;
+  /** Shopify-side write, for ShopCX-billed contracts. */
+  writeShopify?(
+    workspaceId: string,
+    contractId: string,
+    address: ShippingAddressInput,
+  ): Promise<{ success: boolean; error?: string }>;
   getVendorApiKey(workspaceId: string): Promise<string | null>;
   vendorFetch(url: string, init: RequestInit): Promise<Response>;
   writeLocal(
@@ -739,6 +774,11 @@ export interface UpdateShippingAddressDeps {
 export function defaultUpdateShippingAddressDeps(): UpdateShippingAddressDeps {
   return {
     isInternal: isInternalSubscription,
+    resolveEngine: resolveBillingSource,
+    async writeShopify(workspaceId, contractId, address) {
+      const { shopifyUpdateShippingAddress } = await import("@/lib/commerce/shopify-subscription-client");
+      return shopifyUpdateShippingAddress(workspaceId, contractId, address);
+    },
     async getVendorApiKey(workspaceId: string) {
       const admin = createAdminClient();
       const { data: ws } = await admin
@@ -770,6 +810,26 @@ export async function subscriptionUpdateShippingAddress(
     if (!w.success) return { success: false, error: w.error };
     return { success: true };
   }
+
+  // ⭐ ShopCX: the address must round-trip to SHOPIFY, because Shopify builds the renewal order
+  // from the contract. A mirror-only write leaves the next order shipping to the OLD address with
+  // the portal showing the new one — a silent mis-ship, not a visible failure.
+  if (deps.resolveEngine && deps.writeShopify) {
+    if ((await deps.resolveEngine(workspaceId, contractId)) === "shopcx") {
+      const r = await deps.writeShopify(workspaceId, contractId, address);
+      if (!r.success) return { success: false, error: r.error };
+      // Same ordering rule as the vendor branch below: mirror only AFTER the authority accepted,
+      // and a mirror failure does not flip the result — it really did change where it ships from.
+      const local = await deps.writeLocal(workspaceId, contractId, address);
+      if (!local.success) {
+        console.error(
+          `[subscriptionUpdateShippingAddress] Shopify accepted but local row write failed for contract ${contractId}: ${local.error ?? "unknown"}`,
+        );
+      }
+      return { success: true };
+    }
+  }
+
   const apiKey = await deps.getVendorApiKey(workspaceId);
   if (!apiKey) return { success: false, error: "Subscription vendor not configured" };
   const res = await deps.vendorFetch(
@@ -849,8 +909,15 @@ export async function subscriptionAddFreeProduct(
   variantId: string,
   quantity: number = 1,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopcxUnsupported("add free product");
+  const srcGift = await resolveBillingSource(workspaceId, contractId);
+  if (srcGift === "internal") return internalSubAddFreeProduct(workspaceId, contractId, variantId, quantity);
+  if (srcGift === "shopcx") {
+    // A cycle-scoped edit, NOT subscriptionDraftLineAdd on the contract — that creates a
+    // RECURRING line and would ship the gift free on every renewal, forever. Appstle expresses
+    // this with its own `isOneTimeProduct` flag; Shopify's equivalent is editing one billing
+    // cycle. See shopcxAddOneTimeLine.
+    const { shopcxAddOneTimeLine } = await import("@/lib/commerce/shopcx-line-ops");
+    return shopcxAddOneTimeLine(workspaceId, contractId, variantId, quantity, 0);
   }
   return appstleAddFreeProduct(workspaceId, contractId, variantId, quantity);
 }
@@ -861,8 +928,13 @@ export async function subscriptionSwapProduct(
   oldVariantId: string,
   newVariantId: string,
 ): Promise<OpResult> {
-  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    return shopcxUnsupported("swap product");
+  const srcSwap = await resolveBillingSource(workspaceId, contractId);
+  if (srcSwap === "internal") return internalSwapProduct(workspaceId, contractId, oldVariantId, newVariantId);
+  if (srcSwap === "shopcx") {
+    // Same operation as subSwapVariant, different entry point — one implementation, so the
+    // discount recompute and the atomic-draft guarantee apply identically whichever door is used.
+    const { shopcxSwapVariant } = await import("@/lib/commerce/shopcx-line-ops");
+    return shopcxSwapVariant(workspaceId, contractId, oldVariantId, newVariantId);
   }
   return appstleSwapProduct(workspaceId, contractId, oldVariantId, newVariantId);
 }
@@ -891,19 +963,54 @@ export async function subscriptionAttemptBilling(
 }
 
 /**
- * Flavor-aware "order now" (bill_now) for a sub identified by contract id.
+ * "Order now" (bill_now) for a sub identified by contract id — bills the UPCOMING order
+ * immediately, on whichever engine owns the contract.
  *
- * Preserves the Angel-precedent Braintree-vs-Appstle branch: internal subs
- * fire the `internal-subscription/renewal-attempt` Inngest event (async
- * Braintree charge → order → Avalara → advance next_billing_date); Appstle
- * subs go through get-upcoming → attempt-billing. See
- * docs/brain/libraries/appstle.md § orderNowByContract + § Gotchas.
+ * Preserves the Angel-precedent Braintree branch: internal subs fire the
+ * `internal-subscription/renewal-attempt` Inngest event (async Braintree charge → order →
+ * Avalara → advance next_billing_date). ShopCX subs fire the structurally identical
+ * `shopify-subscription/renewal-attempt`, which resolves the due cycle against Shopify and
+ * claims it before charging — so an order-now racing the nightly cron cannot double-bill.
+ * Appstle subs go through get-upcoming → attempt-billing.
+ *
+ * Both async events pass `expected_next_billing_date: null` deliberately: the stale guard exists
+ * to drop a fan-out whose cycle someone else already took, and an order-now IS the someone else.
+ * See docs/brain/libraries/appstle.md § Gotchas.
  */
 export async function subscriptionOrderNow(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult & { summary?: string; internal?: boolean }> {
-  return orderNowByContract(workspaceId, contractId);
+  const admin = createAdminClient();
+  const { data: sub } = await admin
+    .from("subscriptions")
+    .select("id, status, billing_source")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", contractId)
+    .maybeSingle();
+  if (!sub) return { success: false, error: "subscription_not_found" };
+
+  const src = await resolveBillingSource(workspaceId, contractId);
+
+  if (src === "internal" || src === "shopcx") {
+    if (sub.status !== "active") return { success: false, error: `not_active (${sub.status})` };
+    const { inngest } = await import("@/lib/inngest/client");
+    if (src === "shopcx") {
+      const { RENEWAL_ATTEMPT_EVENT } = await import("@/lib/inngest/shopify-subscription-renewals");
+      await inngest.send({
+        name: RENEWAL_ATTEMPT_EVENT,
+        data: { subscription_id: sub.id, workspace_id: workspaceId, expected_next_billing_date: null },
+      });
+      return { success: true, summary: "Triggered ShopCX renewal (order now)" };
+    }
+    await inngest.send({
+      name: "internal-subscription/renewal-attempt",
+      data: { subscription_id: sub.id, workspace_id: workspaceId },
+    });
+    return { success: true, internal: true, summary: "Triggered internal renewal (order now)" };
+  }
+
+  return appstleOrderNowByContract(workspaceId, contractId);
 }
 
 // ── Create ─────────────────────────────────────────────────────────
@@ -1075,6 +1182,11 @@ export function buildCreateSubscriptionRow(
     shopify_contract_id: opts.shopify_contract_id ?? input.shopify_contract_id ?? null,
     status: input.status ?? "active",
     is_internal: input.is_internal ?? (input.vendor === "internal"),
+    // ⚠️ Set it EXPLICITLY. The column defaults to 'appstle', so an omitted value makes a brand-new
+    // INTERNAL subscription look Appstle-billed to every selector that filters on billing_source —
+    // including `migrateCustomerAppstleSubsToInternal`, which then re-migrates an already-internal
+    // sub (and, on a cancelled one, rotates its contract id and reassigns its customer).
+    billing_source: (input.is_internal ?? (input.vendor === "internal")) ? "internal" : input.vendor,
     comp: Boolean(input.comp),
     billing_interval: input.billing_interval,
     billing_interval_count: input.billing_interval_count,

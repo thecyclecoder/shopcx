@@ -2407,18 +2407,18 @@ export const directActionHandlers: Record<
       }
     };
 
-    // Internal subs aren't on the external vendor — restore the grandfathered
-    // base by writing price_override_cents directly. Route here FIRST, before
-    // the vendor config / live-contract fetch below (which would fail with
-    // "vendor not configured" for an internal sub). subUpdateLineItemPrice
-    // delegates to internalSubUpdateLineItemPrice for these.
-    const { isInternalSubscription } = await import("@/lib/internal-subscription");
-    if (await isInternalSubscription(ctx.workspaceId, p.contract_id)) {
+    // Neither internal nor ShopCX subs are on the external vendor — restore the grandfathered
+    // base through the chokepoint instead. Route here FIRST, before the vendor config /
+    // live-contract fetch below, which would fail with "vendor not configured" for either.
+    // `subUpdateLineItemPrice` dispatches: internal → price_override_cents,
+    // ShopCX → a draft base-price pin with the discounts recomputed in the same commit.
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    const priceEngine = await resolveBillingSource(ctx.workspaceId, p.contract_id);
+    if (priceEngine !== "appstle") {
       // Prefer the agent-supplied variant_id, but fall back to the sole real (non
-      // shipping-protection) line on the sub — an internal sub with one item has an
-      // unambiguous restore target and blocking on a missing variant_id here has stranded
-      // customer lines at $0.00 (spec:
-      // failed-cycle-charge-claim-must-not-wedge-order-now-and-renewal-retries).
+      // shipping-protection) line on the sub — a sub with one item has an unambiguous restore
+      // target, and blocking on a missing variant_id here has stranded customer lines at $0.00
+      // (spec: failed-cycle-charge-claim-must-not-wedge-order-now-and-renewal-retries).
       let variantId = p.variant_id ? String(p.variant_id) : "";
       if (!variantId) {
         const items = Array.isArray(subRow?.items)
@@ -2430,15 +2430,15 @@ export const directActionHandlers: Record<
         if (real.length === 1 && real[0]?.variant_id) {
           variantId = String(real[0].variant_id);
           console.log(
-            `update_line_item_price: internal sub ${p.contract_id} — inferred variant_id ${variantId} from sole real line (agent omitted variant_id)`,
+            `update_line_item_price: ${priceEngine} sub ${p.contract_id} — inferred variant_id ${variantId} from sole real line (agent omitted variant_id)`,
           );
         } else {
           return {
             success: false,
             error:
               real.length === 0
-                ? "Internal subscription has no restore-eligible line (no non-shipping-protection items)"
-                : `Internal subscription has ${real.length} real lines — variant_id is required to pick one`,
+                ? `${priceEngine} subscription has no restore-eligible line (no non-shipping-protection items)`
+                : `${priceEngine} subscription has ${real.length} real lines — variant_id is required to pick one`,
           };
         }
       }
@@ -2449,13 +2449,13 @@ export const directActionHandlers: Record<
       }
       if (Math.abs(derived.base - agentBase) > 100) {
         console.log(
-          `update_line_item_price: overriding agent-supplied base $${(agentBase / 100).toFixed(2)} with signal-computed $${(derived.base / 100).toFixed(2)} on contract ${p.contract_id} variant ${variantId} (internal)`,
+          `update_line_item_price: overriding agent-supplied base $${(agentBase / 100).toFixed(2)} with signal-computed $${(derived.base / 100).toFixed(2)} on contract ${p.contract_id} variant ${variantId} (${priceEngine})`,
         );
       }
       const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, variantId, derived.base);
       if (r.success) await logPriceCorrection(variantId, derived);
       return r.success
-        ? { ...r, summary: `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${variantId} (internal price_override_cents)${derived.note}` }
+        ? { ...r, summary: `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${variantId} (${priceEngine})${derived.note}` }
         : r;
     }
 

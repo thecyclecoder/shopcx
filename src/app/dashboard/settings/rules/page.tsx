@@ -70,7 +70,7 @@ const FIELD_OPTIONS = [
   { value: "customer.ltv_cents", label: "LTV (cents)", type: "number" },
   { value: "customer.tags", label: "Customer Tags", type: "array" },
   { value: "order.total_cents", label: "Order Total (cents)", type: "number" },
-  { value: "order.order_type", label: "Order Type", type: "select", options: ["checkout", "recurring", "replacement"] },
+  { value: "order.order_type", label: "Order Type", type: "select", options: ["checkout", "recurring", "replacement", "one_time"] },
   { value: "order.financial_status", label: "Payment Status", type: "text" },
   { value: "subscription.status", label: "Sub Status", type: "select", options: ["active", "paused", "cancelled", "expired", "failed"] },
   { value: "subscription.last_payment_status", label: "Last Payment", type: "select", options: ["succeeded", "failed", "skipped"] },

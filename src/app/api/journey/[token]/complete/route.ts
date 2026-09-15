@@ -634,21 +634,17 @@ export async function POST(
             actionLog.push(`Base price preserved at $${(priceRec.preserved_base_price_cents / 100).toFixed(2)}`);
           }
 
-          // Apply coupon if configured — removes existing coupons first
+          // Apply coupon if configured — replaces any existing coupon. Through the commerce
+          // SDK so the retention offer lands whichever engine bills this sub; the old path
+          // read the workspace's Appstle key and silently applied NOTHING without one, which
+          // would drop the save offer for every migrated customer.
           const couponCode = metadata.tier2CouponCode as string;
           if (couponCode) {
             try {
-              const { decrypt } = await import("@/lib/crypto");
-              const { data: wsCreds } = await admin.from("workspaces")
-                .select("appstle_api_key_encrypted").eq("id", wsId).single();
-              if (wsCreds?.appstle_api_key_encrypted) {
-                const appstleKey = decrypt(wsCreds.appstle_api_key_encrypted);
-                const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-                const result = await applyDiscountWithReplace(wsId, appstleKey, sub.shopify_contract_id, couponCode);
-                if (result.removed.length > 0) actionLog.push(`Removed ${result.removed.length} existing coupon(s)`);
-                if (result.success) actionLog.push(`Coupon ${couponCode} applied`);
-                else actionLog.push(`Coupon ${couponCode} failed: ${result.error}`);
-              }
+              const { applyCoupon } = await import("@/lib/commerce/subscription");
+              const result = await applyCoupon(wsId, sub.shopify_contract_id, couponCode);
+              if (result.success) actionLog.push(`Coupon ${couponCode} applied`);
+              else actionLog.push(`Coupon ${couponCode} failed: ${result.error}`);
             } catch { /* non-fatal */ }
           }
         }
@@ -686,8 +682,8 @@ export async function POST(
         const { data: sub } = await admin.from("subscriptions")
           .select("shopify_contract_id").eq("id", subscriptionId).single();
         if (sub?.shopify_contract_id) {
-          const { appstleSubscriptionAction } = await import("@/lib/appstle");
-          await appstleSubscriptionAction(wsId, sub.shopify_contract_id, "pause", "Crisis — out of stock pause");
+          const { subscriptionAction } = await import("@/lib/commerce/subscription");
+          await subscriptionAction(wsId, sub.shopify_contract_id, "pause", "Crisis — out of stock pause");
         }
         await admin.from("crisis_customer_actions").update({
           tier3_response: "accepted_pause",
@@ -1011,8 +1007,8 @@ export async function POST(
 
     if (outcome === "cancelled" && selectedSub) {
       // Cancel via Appstle API
-      const { appstleSubscriptionAction } = await import("@/lib/appstle");
-      const result = await appstleSubscriptionAction(
+      const { subscriptionAction } = await import("@/lib/commerce/subscription");
+      const result = await subscriptionAction(
         wsId,
         selectedSub.contractId,
         "cancel",
@@ -1081,33 +1077,28 @@ export async function POST(
       }
 
       if (selectedSub && actionType !== "unknown") {
-        const { appstleSubscriptionAction, appstleSkipNextOrder, appstleUpdateBillingInterval } = await import("@/lib/appstle");
+        const { subscriptionAction, subscriptionSkipNextOrder, subscriptionUpdateBillingInterval } = await import("@/lib/commerce/subscription");
 
         if (actionType === "pause") {
-          const result = await appstleSubscriptionAction(wsId, selectedSub.contractId, "pause");
+          const result = await subscriptionAction(wsId, selectedSub.contractId, "pause");
           actionLog.push(result.success ? `Paused subscription ${selectedSub.contractId}` : `Failed to pause: ${result.error}`);
         } else if (actionType === "skip") {
-          const result = await appstleSkipNextOrder(wsId, selectedSub.contractId);
+          const result = await subscriptionSkipNextOrder(wsId, selectedSub.contractId);
           actionLog.push(result.success ? `Skipped next order for ${selectedSub.contractId}` : `Failed to skip: ${result.error}`);
         } else if (actionType === "frequency_change") {
-          const result = await appstleUpdateBillingInterval(wsId, selectedSub.contractId, "MONTH", 2);
+          const result = await subscriptionUpdateBillingInterval(wsId, selectedSub.contractId, "MONTH", 2);
           actionLog.push(result.success ? `Changed frequency to every 2 months for ${selectedSub.contractId}` : `Failed to change frequency: ${result.error}`);
         } else if (actionType === "coupon") {
-          // Apply coupon via shared helper (removes existing, applies new, updates local DB)
+          // Apply coupon through the commerce SDK — engine-aware, removes existing, mirrors locally.
           const couponCode = responses?.remedy_coupon?.value;
           if (couponCode) {
             try {
-              const { data: wsData } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", wsId).single();
-              if (wsData?.appstle_api_key_encrypted) {
-                const { decrypt } = await import("@/lib/crypto");
-                const apiKey = decrypt(wsData.appstle_api_key_encrypted);
-                const { applyDiscountWithReplace } = await import("@/lib/appstle-discount");
-                const result = await applyDiscountWithReplace(wsId, apiKey, selectedSub.contractId, couponCode);
-                if (result.success) {
-                  actionLog.push(`Applied coupon ${couponCode} to subscription ${selectedSub.contractId}`);
-                } else {
-                  actionLog.push(`Failed to apply coupon: ${result.error}`);
-                }
+              const { applyCoupon } = await import("@/lib/commerce/subscription");
+              const result = await applyCoupon(wsId, selectedSub.contractId, couponCode);
+              if (result.success) {
+                actionLog.push(`Applied coupon ${couponCode} to subscription ${selectedSub.contractId}`);
+              } else {
+                actionLog.push(`Failed to apply coupon: ${result.error}`);
               }
             } catch (err) {
               actionLog.push(`Failed to apply coupon: ${err}`);

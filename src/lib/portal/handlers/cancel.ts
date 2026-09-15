@@ -81,8 +81,8 @@ export const cancel: RouteHandler = async ({ auth, route, req }) => {
   }
 
   // No cancel journey configured — fall back to hard cancel
-  const { appstleSubscriptionAction } = await import("@/lib/appstle");
-  const result = await appstleSubscriptionAction(
+  const { subscriptionAction } = await import("@/lib/commerce/subscription");
+  const result = await subscriptionAction(
     auth.workspaceId, String(contractId), "cancel", "Customer cancelled via portal", "Portal"
   );
 

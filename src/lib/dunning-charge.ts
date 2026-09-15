@@ -79,11 +79,18 @@ export async function dunningChargeContract(
       // ⚠️ The idempotency key is deliberately DISTINCT from the renewal worker's
       // `${contract}:${cycleKey}`. Dunning is retrying a cycle the worker already attempted; reusing
       // that key makes Shopify replay the cached FAILED attempt instead of trying the card again,
-      // so a rotation to a good card could never succeed. The retry counter makes each try unique.
-      const { count } = await admin
-        .from("payment_failures").select("id", { count: "exact", head: true })
-        .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId);
-      const key = `${contractId}:${cycleKeyFromNextBillingDate(due)}:r${count ?? 0}`;
+      // so a rotation to a good card could never succeed. The attempt ordinal makes each try unique.
+      //
+      // ⭐ It MUST be the caller's `attemptOrdinal`, never a live COUNT of `payment_failures`.
+      // This read the count until 2026-09-15 — the exact bug the parameter was added to fix, with
+      // the parameter accepted and then ignored:
+      //   · an Inngest step retry re-reads a HIGHER count, builds a NEW key, and issues a SECOND
+      //     REAL CHARGE against the same cycle;
+      //   · two concurrent charge sites read the SAME count, build the SAME key, and Shopify
+      //     replays the first decline — so a customer's freshly-rotated good card is never
+      //     actually presented and recovery silently cannot succeed.
+      // The caller already holds a stable per-cycle counter (rotation index / payday_retry_count).
+      const key = `${contractId}:${cycleKeyFromNextBillingDate(due)}:r${attemptOrdinal}`;
 
       const started = await shopifyAttemptBilling(workspaceId, contractId, key,
         due ? { billingCycleSelector: { date: due } } : {});

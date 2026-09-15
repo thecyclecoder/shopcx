@@ -508,14 +508,14 @@ export async function runImproveActions(
           // Indefinite pause (no auto-resume). Kept bespoke: the registry `pause`
           // handler only supports 30/60-day timed pauses, whereas Improve allows
           // an open-ended pause. Use pause_timed for a specific resume date.
-          const { appstleSubscriptionAction } = await import("@/lib/appstle");
-          const r = await appstleSubscriptionAction(workspaceId, a.contract_id, "pause");
+          const { subscriptionAction } = await import("@/lib/commerce/subscription");
+          const r = await subscriptionAction(workspaceId, a.contract_id, "pause");
           results.push(r.success ? "Subscription paused" : `Pause failed: ${r.error}`);
           break;
         }
         case "cancel": {
-          const { appstleSubscriptionAction } = await import("@/lib/appstle");
-          const r = await appstleSubscriptionAction(workspaceId, a.contract_id, "cancel", a.reason);
+          const { subscriptionAction } = await import("@/lib/commerce/subscription");
+          const r = await subscriptionAction(workspaceId, a.contract_id, "cancel", a.reason);
           results.push(r.success ? "Subscription cancelled" : `Cancel failed: ${r.error}`);
           break;
         }

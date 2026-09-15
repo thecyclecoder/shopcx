@@ -278,6 +278,126 @@ Reading it would silently reconstruct everyone at list. Exclude $0.00 gift lines
 - product line under $25 → manual review (21 lines, all Sleep Gummies — the floor must exclude
   Shipping Protection, whose normal price is $3.95–$6.66)
 
+## Portal + retention surface — whole as of 2026-09-11 ✅
+
+A migrated customer must not be stranded with an uneditable subscription, and a retention flow must
+not promise something that silently never lands. Every portal and save-offer path now resolves the
+engine rather than assuming "not internal ⇒ Appstle":
+
+| Surface | Where the branch lives | ShopCX behaviour |
+|---|---|---|
+| quantity · remove · add · swap · price-pin | `subscription-items.ts` → [[../libraries/commerce__shopcx-line-ops]] | draft edit + full structural recompute, one commit |
+| coupon apply/remove · loyalty | `subscriptionApplyCoupon` / [[../libraries/coupons]] → [[../libraries/commerce__shopcx-discount-ops]] | manual discount minted from `resolveCoupon`; burns at apply |
+| cancel-flow save offers · journey remedies | [[../libraries/commerce__subscription]] `applyCoupon` | same as above |
+| retention gift | `subscriptionAddFreeProduct` → `shopcxAddOneTimeLine` | **cycle-scoped** edit, not a contract line |
+| order now | `subscriptionOrderNow` | fires the renewal-attempt event, which claims the cycle |
+| shipping address | `portal/handlers/address.ts` → `subscriptionUpdateShippingAddress` | draft `deliveryMethod` update, then the mirror |
+| portal replace-variants | `portal/handlers/replace-variants.ts` | decomposed into the engine-aware item mutations; one-time adds go cycle-scoped |
+| remove line item | `subRemoveItem` | addressed by variant id **or** real `SubscriptionLine` gid |
+| agent price restore | `action-executor.ts` `update_line_item_price` | `subUpdateLineItemPrice` → base-price pin |
+| reactivate (resume) | `portal/handlers/reactivate.ts` | sets the date on the CONTRACT, then resumes |
+| agent goodwill gift | `subAddOneTimeGift` | standalone `$0` order — unchanged, see below |
+
+**Two different one-time paths, deliberately.** `subAddOneTimeGift` (the agent's goodwill gift from
+a ticket) ships its own `$0` order and makes no vendor call at all, so it was already correct for
+ShopCX — a gift offered in a ticket means "we're sending this out", and a cycle-scoped line would
+sit unshipped for up to a full interval. `shopcxAddOneTimeLine` is for gifts attached to a
+**renewal** — the portal's one-time add-ons and the cancel-flow save offer — where shipping with
+the order is the intent. Its `backend` label was `"appstle"` for a path that never touches Appstle;
+now `"gift_order"`.
+
+Setting a next-billing-date on a PAUSED contract is allowed and survives the resume (verified), so
+reactivate's set-date-then-resume ordering is sound.
+| pause · cancel · resume · skip · dates | [[../libraries/commerce__subscription]] | direct Shopify mutations |
+
+Each of the coupon surfaces previously read the workspace's Appstle key and, without one, either
+refused with *"Appstle not configured"* or silently applied nothing. On a migrated contract that
+turns an **accepted save offer into a cancellation**.
+
+### ⭐ A payment failure is a conversion opportunity, not just a repair
+
+`subscriptionSendPaymentUpdateEmail` sends our own magic-link recovery email for ShopCX (and for
+internal), NOT a vendor email. The link lands on our update-payment flow, which vaults a Braintree
+card and **migrates the subscription onto internal rails**. A failed payment is the one moment a
+customer is already reaching for their card, so anywhere we can move someone to internal, we do.
+
+Shopify's `customerPaymentMethodGetUpdateUrl` exists and works (probed live — it returns a
+`shop.app/pay/external/...` URL). We deliberately do **not** use it: it would fix the card on the
+Shopify contract and leave the customer on Shopify's rails, trading a conversion for a repair. It
+remains the right tool if we ever need to fix a card WITHOUT converting — note its token carries
+`exp` about **24 hours** out, so it can only ever be minted at send time, never stored or reused
+across a multi-day dunning ladder. Appstle keeps its own vendor email: that path has no migration
+step attached, and Appstle's hosted page is the only thing that can update a card Appstle holds.
+
+### ⚠️ Converting a ShopCX sub to internal reads SHOPIFY, and `liveUsable` was a landmine
+
+[[../libraries/migrate-to-internal]] sweeps `billing_source IN ('appstle','shopcx')` — never
+`is_internal = false`, which is not a class once there are three engines. Each engine has its own
+source of truth: `readShopcxContractAsLine` reads the Shopify contract and presents it in the shape
+the Appstle reader returns, so one translation path serves both.
+
+The mapping that matters is `pricingPolicy.basePrice = currentPrice − (legacyRateCents / qty)`.
+S&S and the volume tier are re-derived by the internal engine from the pricing rules, so folding
+them into the base applies them twice; the `Legacy rate` concession has no other representation and
+would simply be lost. Supplying a real `pricingPolicy` also stops `inferAppstleLineBase`
+reverse-engineering one — that path divides only by `(1 − sns)` and knows nothing about quantity
+breaks, so a customer on the 12% tier would come out ~12% under-based and be undercharged forever.
+
+**The landmine:** `liveUsable` was `!!live && live.status !== "CANCELLED"`. Appstle answers an
+unknown or bad contract id with **HTTP 400 and an `application/problem+json` body** —
+`{errorKey,type,title,status:400,message,params}` — which parses cleanly and whose `status` is
+`400`, not `"CANCELLED"`. So it evaluated **true** on an error object, and the code then cancelled
+the live contract and flipped the row to internal with **zero items, weekly, billing immediately**.
+Verified against the live API. It now requires the shape of a real contract (no `errorKey`, a
+`billingPolicy`, and a `lines.nodes` array). This protected Appstle subs too — any contract that
+400s for any reason was exposed.
+
+Rounding note: Shopify truncates a discount allocation where the internal engine rounds, so a
+converted line can differ by 1¢ per unit. The audit's `pricing_preserved` tolerance is 2¢ per line,
+so this is inside it.
+
+### ⚠️ Shopify's address object REPLACES — it does not merge
+
+`deliveryMethod.shipping` replaces the whole shipping method, and the address inside it replaces
+wholesale too: an omitted field is CLEARED. Observed live — an update that did not mention `phone`
+wiped a real number off the contract, and one that omits `shippingOption` drops the customer's
+"Economy" rate, leaving the renewal order with no rate to build from. `shopifyUpdateShippingAddress`
+reads the current address + option and merges them UNDER the caller's values. The portal sends
+`phone || ""`, so an empty phone means "none to send", never "clear it".
+
+`MailingAddressInput` also takes `countryCode` / `provinceCode`, not the full names — passing names
+silently produces an address Shopify cannot geocode.
+
+### Known gaps (NOT regressions — an Appstle customer has these today too)
+
+These portal surfaces are **internal-only** and return a 400/null for anything else, ShopCX
+included. A migrating customer is no worse off than they are on Appstle right now, but the gap is
+real and closes when someone needs it:
+
+`shipping-protection` · `price-quote` · `subscription-tax` · `set-subscription-payment-method`.
+
+`payment-method-update` pins a newly-saved card onto `is_internal` subs only — that is **correct**,
+not a gap: ShopCX charges Shopify's `customerPaymentMethod` on the contract, so pinning our
+Braintree `payment_method_id` to one would be wrong. Rotating a ShopCX card is
+`subscriptionSwitchPaymentMethod`, which belongs to the dunning cutover work below.
+
+**Nothing refuses any more.** `subscriptionSendPaymentUpdateEmail` sends OUR recovery email
+([[../libraries/payment-recovery-email]]) for every engine except Appstle — see below.
+
+### Dispatch now lives in ONE place, enforced
+
+`scripts/_check-vendor-dispatch-in-sdk.ts` fails the build on (1) a vendor module resolving the
+engine — by helper name **or** by raw `is_internal` / `billing_source` column read — and (2) any
+caller outside the SDK reaching a dispatching vendor function. The raw-column rule found
+`orderNowByContract`, which had been dispatching inside `appstle.ts` unnoticed.
+
+The line the guard draws is **dispatch, not engine-awareness**: a vendor may DECLINE work that is
+not its own (return a no-op and route nowhere — safe for an engine nobody has written yet), but it
+may not hand the call to another engine, because then "not mine ⇒ theirs" is baked in.
+`healAppstleContract` is a decline: it used to guard on `isInternalSubscription`, so a ShopCX
+contract fell through and burned a metered Appstle call on every portal touch, across seven
+surfaces.
+
 ## Open decisions
 
 - **~$9,700/cycle**: 974 lines are priced above the standard ladder because their subs never got a
@@ -322,3 +442,5 @@ code.
 [[../integrations/shopify]] · [[../libraries/pricing]] · [[../tables/subscriptions]] ·
 [[../functions/retention]] · [[../functions/platform]]
 - [[../libraries/commerce__shopify-subscription-client]] — the client itself (exports, gotchas, the guard carve-out)
+- [[../libraries/commerce__shopcx-line-ops]] — line mutations + the structural discount recompute
+- [[../libraries/commerce__shopcx-discount-ops]] — coupons on a ShopCX contract

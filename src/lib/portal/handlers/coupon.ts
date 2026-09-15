@@ -2,7 +2,7 @@ import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch, safeStartsWith } from "@/lib/portal/helpers";
 import { decrypt } from "@/lib/crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { isInternalSubscription } from "@/lib/internal-subscription";
+
 import { applyCouponToSub, removeCouponFromSub } from "@/lib/coupons";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
@@ -39,7 +39,11 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
   const discountId = s(payload?.discountId);
   if (mode === "apply" && !discountCode) return jsonErr({ error: "missing_discountCode" }, 400);
 
-  const isInternal = await isInternalSubscription(auth.workspaceId, String(contractId));
+  // ShopCX takes the same arm as internal: both route through the coupon SDK, which owns the
+  // engine dispatch. Only the Appstle arm below is vendor-specific (its self-healing code
+  // regeneration and status-code mapping have no meaning off Appstle).
+  const { resolveBillingSource } = await import("@/lib/internal-subscription");
+  const isInternal = (await resolveBillingSource(auth.workspaceId, String(contractId))) !== "appstle";
 
   // If remove mode with no discountId, resolve from Appstle contract (Appstle only).
   let resolvedRemoveId = discountId;

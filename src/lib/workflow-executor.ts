@@ -558,8 +558,8 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
             .single();
 
           if (sub && sub.status === "active" && sub.shopify_contract_id) {
-            const { appstleSubscriptionAction } = await import("@/lib/appstle");
-            const result = await appstleSubscriptionAction(
+            const { subscriptionAction } = await import("@/lib/commerce/subscription");
+            const result = await subscriptionAction(
               ctx.workspaceId,
               sub.shopify_contract_id,
               "cancel",
@@ -816,8 +816,8 @@ async function executeCancelRequest(admin: Admin, config: Record<string, unknown
 
   if (config.auto_cancel_via_appstle && ctx.subscription.shopify_contract_id) {
     try {
-      const { appstleSubscriptionAction } = await import("@/lib/appstle");
-      await appstleSubscriptionAction(ctx.workspaceId, ctx.subscription.shopify_contract_id as string, "cancel");
+      const { subscriptionAction } = await import("@/lib/commerce/subscription");
+      await subscriptionAction(ctx.workspaceId, ctx.subscription.shopify_contract_id as string, "cancel");
       await sendReply(admin, ctx, (config.reply_cancelled as string) || "Hi {{customer.first_name}}, your subscription has been cancelled as requested. If you change your mind, just let us know!", config.reply_cancelled_status as string);
       return;
     } catch {

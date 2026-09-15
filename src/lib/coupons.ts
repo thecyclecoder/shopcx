@@ -513,6 +513,20 @@ export async function applyCouponToSub(
     return { success: false, error: "subscription_not_active" };
   }
 
+  // ShopCX-billed subs need the discount ON THE SHOPIFY CONTRACT — Shopify computes the
+  // renewal charge, so an applied_discounts row alone discounts nothing. The redemption is
+  // still recorded here, identically for every engine.
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    if ((await resolveBillingSource(workspaceId, String(contractId))) === "shopcx") {
+      const { shopcxApplyCoupon } = await import("@/lib/commerce/shopcx-discount-ops");
+      const r = await shopcxApplyCoupon(workspaceId, String(contractId), resolved);
+      if (!r.success) return r;
+      await recordCouponRedemption(workspaceId, resolved, customerId, { subscriptionId: sub.id });
+      return { success: true };
+    }
+  }
+
   const existing = (sub.applied_discounts as AppliedDiscount[]) || [];
   const kept = existing.filter((d) => (d.code || d.title) !== resolved.code);
   const entry: AppliedDiscount = {
@@ -746,6 +760,15 @@ export async function removeCouponFromSub(
     .eq("shopify_contract_id", String(contractId))
     .single();
   if (!sub) return { success: false, error: "subscription_not_found" };
+  // On ShopCX the discount lives on the Shopify contract; dropping the mirror row alone would
+  // leave the customer still discounted at renewal while the portal shows no coupon.
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    if ((await resolveBillingSource(workspaceId, String(contractId))) === "shopcx") {
+      const { shopcxRemoveCoupon } = await import("@/lib/commerce/shopcx-discount-ops");
+      return shopcxRemoveCoupon(workspaceId, String(contractId));
+    }
+  }
   const existing = (sub.applied_discounts as AppliedDiscount[]) || [];
   const remaining = existing.filter((d) => d.code !== codeOrId && d.title !== codeOrId && d.id !== codeOrId);
   await admin

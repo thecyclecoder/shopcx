@@ -1,6 +1,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub } from "@/lib/portal/helpers";
-import { appstleGetUpcomingOrders, appstleAttemptBilling } from "@/lib/appstle";
+import { appstleAttemptBilling } from "@/lib/appstle";
+import { subscriptionGetUpcomingOrders } from "@/lib/commerce/subscription";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { guardAppstleOrderNow } from "@/lib/portal/order-now-guard";
 
@@ -126,7 +127,10 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
     return jsonOk({ ok: true, order: outcome.orderName ?? null });
   }
 
-  const ordersRes = await appstleGetUpcomingOrders(auth.workspaceId, String(contractId));
+  // ⭐ Through the SDK: guardAppstleOrderNow returns `proceed` for INTERNAL subs, so they reach
+  // this line too. It only worked because appstle.ts dispatched internally; once that is a pure
+  // vendor wrapper an internal-* contract id would be sent straight to Appstle.
+  const ordersRes = await subscriptionGetUpcomingOrders(auth.workspaceId, String(contractId));
   if (!ordersRes.success || !ordersRes.orders?.length) {
     return jsonErr({ error: "no_upcoming_orders", message: "No upcoming orders found to bill." }, 400);
   }

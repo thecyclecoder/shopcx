@@ -169,3 +169,50 @@ any other file still fails the guard red.
 
 Client only. **No caller is wired yet** — the `billing_source` routing layer is the next step, and
 until it lands every mutation still goes through [[appstle]].
+
+
+## ⚠️ Three Shopify shapes that fail in ways tsc cannot see
+
+All three were live on `35945087149`; two of them made every ShopCX line mutation impossible while
+returning errors that read like data problems on the contract. Pinned by
+`src/lib/commerce/shopcx-discount-shape.test.ts`.
+
+1. **`entitledLines` requires `all` to be PRESENT**, even when scoping to specific lines.
+   `{lines:{add:[id]}}` alone → *"Entitled lines all may not be empty"* — a message that blames the
+   line list, which is populated. `normalizeEntitledLines` fills it in inside
+   `shopifyAddDraftDiscount`, so no call site can reintroduce it.
+2. **`discountRemoved` is the `SubscriptionDiscount` UNION.** `discountRemoved { id }` is a schema
+   error (*"Selections can't be made directly on unions"*), which silently failed the structural
+   clear so the recompute never ran. Select `__typename`. Note `discountAdded` is the CONCRETE
+   `SubscriptionManualDiscount`, so a bare field selection there is fine — the asymmetry is real.
+3. **Introspection hides the entire subscription draft surface.** `subscriptionDraftDiscountAdd`,
+   `subscriptionDraftCommit` and `subscriptionContractUpdate` are all absent from
+   `__schema.mutationType.fields` (439 mutations, zero `subscriptionDraft*`) yet all work. Probe a
+   candidate by CALLING it with a bogus id — *"Field doesn't exist on type 'Mutation'"* means
+   absent, a `userErrors` reply means present. Never conclude a mutation is unavailable from
+   introspection here.
+
+## Billing-cycle-scoped edits — how a line becomes ONE-TIME
+
+`withBillingCycleDraft(ws, contractId, {index|date}, mutate)` opens a draft scoped to a single
+cycle via `subscriptionBillingCycleContractEdit`, and commits with
+`subscriptionBillingCycleContractDraftCommit` (**not** `subscriptionDraftCommit`). The draft is the
+same `SubscriptionDraft` type, so every helper here works on it unchanged.
+
+This is the only way to add a line that does not recur: `subscriptionDraftLineAdd` on a *contract*
+draft creates a RECURRING line, so a retention gift added that way ships free on every renewal
+forever. Appstle expresses this with its own `isOneTimeProduct` flag, which has no Shopify
+equivalent. `shopifyDeleteBillingCycleEdit` is the undo. Verified: the edited cycle's
+`editedContract` carried the paid line plus a `$0.00` line; neighbouring cycles were untouched.
+
+## `ContractLine.structuralDiscountCents` / `DraftLine.structuralDiscountCents`
+
+Cents allocated to a line by **our own** discounts only (the `STRUCTURAL_DISCOUNT_TITLES`).
+`lineDiscountedPrice` is net of everything including the customer's coupon, so anything inferring a
+grandfathered rate from that gap would mint a one-use code into a permanent per-unit discount.
+Subtract this from `currentPrice * quantity` instead. A code discount's union member exposes no
+`title`, so it is excluded by construction. Verified live:
+`currentPrice*qty − structuralDiscountCents == lineDiscountedPrice` exactly.
+
+`getSubscriptionDraft(ws, draftId)` is the draft-side equivalent — **mid-edit the draft is the
+truth and the contract is stale**; see [[commerce__shopcx-line-ops]] § failure mode 1.

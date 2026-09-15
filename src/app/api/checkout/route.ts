@@ -865,6 +865,10 @@ export async function POST(request: NextRequest) {
         delivery_price_cents: subDeliveryCents,
         applied_discounts: [],
         is_internal: true,
+        // ⚠️ Explicit: the column defaults to 'appstle', and an omitted value makes this brand-new
+        // INTERNAL sub look Appstle-billed to every billing_source selector — including the
+        // migrate-to-internal sweep, which runs on portal page load.
+        billing_source: "internal",
         shipping_protection_added: protectionAdded,
         shipping_protection_amount_cents: protectionAdded ? protectionCents : null,
         shipping_method_code: shippingMethodCode,

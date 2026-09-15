@@ -29,14 +29,20 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
   try {
     // 1) Set next billing date — Appstle subs go through the Appstle API; internal
     //    subs get their date from the DB update below (no Appstle contract exists).
-    if (!resolved?.is_internal) {
-      // healOnTouch repairs APPSTLE-side pricing; a ShopCX-billed contract isn't in Appstle at
-      // all, so calling it would reach a contract the vendor no longer has.
-      const { resolveBillingSource } = await import("@/lib/internal-subscription");
-      if ((await resolveBillingSource(auth.workspaceId, String(contractId))) === "appstle") {
-        const { healOnTouch } = await import("@/lib/appstle-pricing");
-        await healOnTouch(auth.workspaceId, String(contractId));
-      }
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    const engine = await resolveBillingSource(auth.workspaceId, String(contractId));
+
+    // ShopCX: the date has to reach the CONTRACT, not just our mirror — the portal and every
+    // Shopify-sourced view read it from there. Through the SDK; the DB update below still runs.
+    if (engine === "shopcx") {
+      const { subscriptionUpdateNextBillingDate } = await import("@/lib/commerce/subscription");
+      const d = await subscriptionUpdateNextBillingDate(auth.workspaceId, String(contractId), nextBillingDate);
+      if (!d.success) throw new Error(d.error || "Could not set next billing date");
+    }
+
+    if (engine === "appstle") {
+      const { healOnTouch } = await import("@/lib/appstle-pricing");
+      await healOnTouch(auth.workspaceId, String(contractId));
       const admin = createAdminClient();
       const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", auth.workspaceId).single();
       if (!ws?.appstle_api_key_encrypted) throw new Error("Appstle not configured");

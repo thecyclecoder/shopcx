@@ -208,8 +208,8 @@ async function appstleAction(workspaceId: string, params: Record<string, unknown
   if (!action || !contractId) return;
 
   // Dynamic import to avoid circular deps
-  const { appstleSubscriptionAction } = await import("@/lib/appstle");
-  await appstleSubscriptionAction(workspaceId, contractId, action as "pause" | "cancel" | "resume");
+  const { subscriptionAction } = await import("@/lib/commerce/subscription");
+  await subscriptionAction(workspaceId, contractId, action as "pause" | "cancel" | "resume");
 }
 
 // ── Template resolution ──
