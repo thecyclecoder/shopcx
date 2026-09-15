@@ -1,0 +1,1 @@
+- **A one-time charge must be able to name the card it charges** · verified 2026-09-15 · → [[../tables/one_time_charges]]

@@ -21,6 +21,7 @@ second rail would risk a double charge.
 | Export | Notes |
 |---|---|
 | `createOneTimeCharge(ws, {customerId, items, reason, createdBy, chargeAt?, currency?})` | records intent ONLY — no Shopify object is created, so a queued charge can be pulled with one UPDATE and leaves nothing behind |
+| `retryOneTimeCharge(workspaceId, chargeId, newShopifyPaymentMethodId)` | reopens a `failed` charge from `failed` to `pending` under a new payment method, preserving the prior attempt in `attempt_history` and refusing if the new method equals the one that declined |
 | `cancelOneTimeCharge(ws, chargeId)` | only a `pending` row can be pulled |
 | `executeOneTimeCharge(ws, chargeId)` | claim → contract → bill → cancel |
 | `sweepOneTimeCharges(ws)` | reconcile crashed runs, cancel leaked contracts, link + reclassify orders |
