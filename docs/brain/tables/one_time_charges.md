@@ -97,6 +97,29 @@ the only signal that the claim lost.
 **A decline is NOT handed to dunning.** A one-time charge is not a subscription at risk — rotating
 the customer's card and emailing them about a subscription they do not have would be wrong.
 
+### Where a decline shows up
+
+The row is the source of truth, but **nothing reads it**, so a decline also lands in two places:
+
+| | what for |
+|---|---|
+| [[payment_failures]] (`attempt_type='one_time'`, `subscription_id` NULL) | the canonical decline ledger — decline-rate analytics by card and error code |
+| [[customer_events]] (`one_time_charge.declined`) | the customer timeline agents and tickets actually read |
+
+`subscription_id` stays NULL, which is also the mechanism that keeps dunning from adopting the row:
+dunning selects on it. The `one_time` attempt_type makes that explicit to anyone reading a query.
+
+⚠️ The gap was real, not theoretical. On 2026-09-15 a live customer was declined **$196.08**
+(`PAYMENT_METHOD_DECLINED`, Amex •1002) and their timeline showed 27 events, none of them the
+decline — an agent picking up the ticket had no way to see it. The throwaway contract WAS cancelled
+correctly, which is the safety property holding under a real decline for the first time in
+production.
+
+**Nothing retries a declined charge.** `failed` is terminal and the cron only picks up `pending`, by
+design — a declined card should not auto-retry. Recovering the sale means a NEW charge row, ideally
+after the customer vaults a different card (which also promotes them to internal — see
+[[../lifecycles/shopcx-subscriptions]] § Engine preference order).
+
 ## Columns
 
 `id` · `workspace_id` · `customer_id` · `shopify_customer_id` · `shopify_contract_id` (the
