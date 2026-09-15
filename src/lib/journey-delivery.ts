@@ -18,6 +18,7 @@ import { sendJourneyCTA } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { markFirstTouch } from "@/lib/first-touch";
 import { getDeliveryChannel } from "@/lib/delivery-channel";
+import { toHtml } from "@/lib/ticket-delivery";
 import crypto from "crypto";
 import { HAIKU_MODEL } from "@/lib/ai-models";
 import { emitInlineAgentHeartbeat } from "@/lib/control-tower/heartbeat";
@@ -356,7 +357,7 @@ async function launchJourneyForTicketInner(params: LaunchParams): Promise<boolea
     // email get the proper CTA. Inline styles only so it survives
     // the dashboard's prose render + the mail client.
     const ctaButton = `<a href="${journeyUrlForPreview}" style="display:inline-block;margin:8px 0;padding:12px 24px;background:${buttonColor};color:#ffffff !important;text-decoration:none;border-radius:8px;font-size:15px;font-weight:600;line-height:1;">${cleanCta} &rsaquo;</a>`;
-    const ticketMsgBody = `${emailLabel}<p>${leadIn}</p><p>${ctaButton}</p>${expiryNote}`;
+    const ticketMsgBody = `${emailLabel}${toHtml(leadIn)}<p>${ctaButton}</p>${expiryNote}`;
 
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId,
@@ -398,7 +399,7 @@ async function launchJourneyForTicketInner(params: LaunchParams): Promise<boolea
     // pending-send Inngest function still parse `<!--JOURNEY:{...}-->`
     // tags for backward compatibility with tickets already in flight,
     // but new sessions never produce them.
-    const ctaHtml = `<p>${leadIn}</p><p><a href="${journeyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
+    const ctaHtml = `${toHtml(leadIn)}<p><a href="${journeyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId, direction: "outbound", visibility: "external",
       author_type: "system", body: ctaHtml,
@@ -413,7 +414,7 @@ async function launchJourneyForTicketInner(params: LaunchParams): Promise<boolea
     // submitter isn't necessarily watching the thread, so the email is
     // the guaranteed delivery. The plain <a> button HTML renders fine in
     // that email.
-    const ctaHtml = `<p>${leadIn}</p><p><a href="${journeyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
+    const ctaHtml = `${toHtml(leadIn)}<p><a href="${journeyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${ws?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">${ctaText}</a></p>`;
     const { data: inserted } = await admin.from("ticket_messages").insert({
       ticket_id: ticketId, direction: "outbound", visibility: "external",
       author_type: "system", body: ctaHtml,
@@ -596,7 +597,7 @@ export async function nudgeJourney(
     const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
     const nudgeJourneyUrl = `${siteUrl}/journey/${token}`;
     const { data: wsNudge } = await admin.from("workspaces").select("help_primary_color").eq("id", workspaceId).single();
-    const nudgeCtaHtml = `<p>${nudgeText}</p><p><a href="${nudgeJourneyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${wsNudge?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">Complete ${journeyEntry.journey_name} →</a></p>`;
+    const nudgeCtaHtml = `${toHtml(nudgeText)}<p><a href="${nudgeJourneyUrl}" style="display:inline-block;margin:15px 0;padding:10px 20px;background:${wsNudge?.help_primary_color || "#4f46e5"};color:#ffffff !important;text-decoration:none;border-radius:8px;font-weight:600;">Complete ${journeyEntry.journey_name} →</a></p>`;
     await admin.from("ticket_messages").insert({
       ticket_id: ticketId, direction: "outbound", visibility: "external", author_type: "system",
       body: nudgeCtaHtml,
