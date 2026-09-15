@@ -985,6 +985,38 @@ export function advanceDate(base: Date, interval: string, count: number): Date {
  */
 export type BillingSource = "internal" | "shopcx" | "appstle";
 
+/**
+ * ⭐ ENGINE PREFERENCE ORDER — CEO rule, 2026-09-15.
+ *
+ *   internal (Braintree)  >  shopcx (our own Shopify app)  >  appstle (vendor)
+ *
+ * Lower number is better. This is a RANKING, not a routing decision: an existing subscription is
+ * always billed by whichever engine currently holds it (`resolveBillingSource`). The ranking says
+ * which way a subscription should MOVE when it can move at all.
+ *
+ * What acts on it today:
+ *   · vaulting a Braintree card promotes a customer's appstle AND shopcx subs to internal
+ *     (`vaultAndMigratePaymentMethod` → `migrateCustomerAppstleSubsToInternal`);
+ *   · the payment-update recovery email deliberately routes to OUR flow rather than Shopify's
+ *     hosted card page, because ours converts and Shopify's only repairs;
+ *   · the one-time charge queue tries the Braintree rail before building a Shopify contract.
+ *
+ * ⚠️ Nothing may move a subscription DOWN this list. Appstle is being retired; a shopcx sub going
+ * back to Appstle, or an internal sub going back to either, is a bug — which is why
+ * `migrateCustomerAppstleSubsToInternal` refuses a row that is already internal rather than
+ * re-migrating it.
+ */
+export const ENGINE_RANK: Readonly<Record<BillingSource, number>> = {
+  internal: 1,
+  shopcx: 2,
+  appstle: 3,
+};
+
+/** True when `to` is a strict improvement over `from` — the only direction a migration may go. */
+export function isEnginePromotion(from: BillingSource, to: BillingSource): boolean {
+  return ENGINE_RANK[to] < ENGINE_RANK[from];
+}
+
 export async function resolveBillingSource(
   workspaceId: string,
   contractId: string,
