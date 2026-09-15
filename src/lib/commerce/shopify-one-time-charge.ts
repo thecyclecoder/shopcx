@@ -363,11 +363,26 @@ export async function executeOneTimeCharge(
     return { status: "skipped", error: "claimed_by_another_run" };
   }
 
-  const fail = async (error: string): Promise<ExecuteResult> => {
+  /**
+   * Settle terminally, and make the failure VISIBLE.
+   *
+   * ⭐ The row alone is not enough. A decline that lives only on `one_time_charges` is durable and
+   * unread: on 2026-09-15 a real customer was declined $196.08 and their timeline showed 27 events,
+   * none of them the decline — an agent picking up the ticket could not see it. So it also lands on
+   * the canonical decline ledger (`payment_failures`, for decline-rate analytics) and on the
+   * customer timeline (`customer_events`, which is what agents and tickets actually read).
+   *
+   * ⚠️ `payment_failures.subscription_id` stays NULL and the attempt_type is `one_time`, so dunning
+   * — which selects on subscription_id — cannot pick these up. A one-time charge is not a
+   * subscription at risk, and rotating the customer's card would be wrong.
+   */
+  const fail = async (error: string, ctx?: { rail?: "braintree" | "shopify"; errorCode?: string | null; attemptId?: string | null; last4?: string | null }): Promise<ExecuteResult> => {
     await settle(workspaceId, chargeId, {
       status: "failed", error, failed_at: new Date().toISOString(),
       attempts: (row.attempts as number) + 1,
+      ...(ctx?.rail ? { rail: ctx.rail } : {}),
     });
+    await recordDecline(workspaceId, chargeId, String(row.customer_id), error, ctx);
     return { status: "failed", error };
   };
 
@@ -399,7 +414,7 @@ export async function executeOneTimeCharge(
       return { status: "failed", error: "braintree_indeterminate" };
     }
     if (braintree) {
-      if (!braintree.success) return fail(braintree.error ?? "braintree_declined");
+      if (!braintree.success) return fail(braintree.error ?? "braintree_declined", { rail: "braintree" });
       await settle(workspaceId, chargeId, {
         status: "charged",
         charged_at: new Date().toISOString(),
@@ -455,7 +470,7 @@ export async function executeOneTimeCharge(
         await settle(workspaceId, chargeId, { status: "pending", charging_since: null });
         throw new Error(`transient Shopify failure, retrying: ${msg}`);
       }
-      return fail(msg);
+      return fail(msg, { rail: "shopify" });
     }
 
     const outcome = await awaitBillingAttempt(workspaceId, started.attemptId);
@@ -470,7 +485,9 @@ export async function executeOneTimeCharge(
       // Declined. Deliberately NOT dispatched to dunning: this is not a subscription at risk, and
       // rotating the card / emailing about a subscription the customer does not have would be wrong.
       await settle(workspaceId, chargeId, { billing_attempt_id: started.attemptId });
-      return fail(outcome.error ?? outcome.errorCode ?? "declined");
+      return fail(outcome.error ?? outcome.errorCode ?? "declined", {
+        rail: "shopify", errorCode: outcome.errorCode ?? null, attemptId: started.attemptId,
+      });
     }
 
     let orderUuid: string | undefined;
@@ -583,6 +600,68 @@ async function backfillOrderLinks(workspaceId: string): Promise<number> {
     linked++;
   }
   return linked;
+}
+
+/**
+ * Record a decline where people will actually find it.
+ *
+ * Best-effort on purpose: the charge already failed, and losing the audit trail is bad but losing
+ * the RESULT would be worse — so a failure here is logged, never thrown.
+ */
+async function recordDecline(
+  workspaceId: string,
+  chargeId: string,
+  customerId: string,
+  error: string,
+  ctx?: { rail?: "braintree" | "shopify"; errorCode?: string | null; attemptId?: string | null; last4?: string | null },
+): Promise<void> {
+  try {
+    const admin = createAdminClient();
+    const { data: row } = await admin
+      .from("one_time_charges")
+      .select("shopify_contract_id, payment_method_id, amount_cents, reason, created_by")
+      .eq("id", chargeId).maybeSingle();
+
+    await admin.from("payment_failures").insert({
+      workspace_id: workspaceId,
+      customer_id: customerId,
+      // NULL — there is no subscription, which is also what keeps dunning from adopting this row.
+      subscription_id: null,
+      // NOT NULL on this table. The Braintree rail builds no Shopify contract, so the charge id
+      // stands in — still unique, still traceable back to the row that owns the failure.
+      shopify_contract_id: (row?.shopify_contract_id as string | null) ?? `one-time:${chargeId}`,
+      billing_attempt_id: ctx?.attemptId ?? null,
+      payment_method_id: (row?.payment_method_id as string | null) ?? null,
+      payment_method_last4: ctx?.last4 ?? null,
+      error_code: ctx?.errorCode ?? null,
+      error_message: error,
+      attempt_number: 1,
+      attempt_type: "one_time",
+      succeeded: false,
+      result: "failed",
+    });
+
+    const { logCustomerEvent } = await import("@/lib/customer-events");
+    const amount = row?.amount_cents ? `$${((row.amount_cents as number) / 100).toFixed(2)}` : "a one-time charge";
+    await logCustomerEvent({
+      workspaceId,
+      customerId,
+      eventType: "one_time_charge.declined",
+      source: "commerce",
+      summary: `One-time charge of ${amount} was declined — ${ctx?.errorCode ?? error}`,
+      properties: {
+        one_time_charge_id: chargeId,
+        rail: ctx?.rail ?? null,
+        error_code: ctx?.errorCode ?? null,
+        error_message: error,
+        amount_cents: row?.amount_cents ?? null,
+        reason: row?.reason ?? null,
+        requested_by: row?.created_by ?? null,
+      },
+    });
+  } catch (e) {
+    console.error(`[one-time-charge] could not record decline for ${chargeId}:`, errText(e));
+  }
 }
 
 /** The order a contract's billing attempt produced — needed to link a crash-recovered charge. */
