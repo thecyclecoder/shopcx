@@ -22,6 +22,7 @@ import { randomUUID } from "node:crypto";
 import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAppstleConfig } from "@/lib/subscription-items";
+import { isEnginePromotion, type BillingSource } from "@/lib/internal-subscription";
 import { subscriptionAction } from "@/lib/commerce/subscription";
 import { inferAppstleLineBase, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
 
@@ -494,6 +495,12 @@ export async function migrateCustomerAppstleSubsToInternal(
     // rotates its contract id, reassigns its customer and resets its billing date — for nothing.
     // The selector is the fix; this is the guard that makes a missed row harmless.
     if (sub.is_internal) { result.skipped.push({ contractId, reason: "already_internal" }); continue; }
+    // ⭐ Only ever move UP the engine ranking (internal > shopcx > appstle). A migration that
+    // demotes is a bug by definition — Appstle is being retired, so nothing may go back to it.
+    if (!isEnginePromotion(engine as BillingSource, "internal")) {
+      result.skipped.push({ contractId, reason: `not_a_promotion_from_${engine}` });
+      continue;
+    }
     if (engine === "appstle" && !cfg) { result.failed.push({ contractId, error: "Appstle not configured" }); continue; }
     try {
       // Read the LIVE contract from WHICHEVER engine holds it — source of truth for current

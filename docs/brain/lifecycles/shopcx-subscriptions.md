@@ -398,6 +398,41 @@ may not hand the call to another engine, because then "not mine ⇒ theirs" is b
 contract fell through and burned a metered Appstle call on every portal touch, across seven
 surfaces.
 
+## ⭐ Engine preference order (CEO, 2026-09-15)
+
+    internal (Braintree)  >  shopcx (our own Shopify app)  >  appstle (vendor)
+
+A RANKING, not a routing rule: an existing subscription is always billed by whichever engine holds
+it (`resolveBillingSource`). The ranking says which way a sub may **move**. Encoded as
+`ENGINE_RANK` / `isEnginePromotion` in [[../libraries/internal-subscription]], pinned by
+`src/lib/engine-ranking.test.ts`.
+
+**Nothing may move a sub DOWN the list.** Appstle is being retired, so a shopcx sub going back to
+it — or an internal sub going back to either — is a bug by definition.
+`migrateCustomerAppstleSubsToInternal` asserts the promotion and refuses anything else, on top of
+already refusing a row that is `is_internal`.
+
+What acts on it:
+
+| Trigger | Effect |
+|---|---|
+| customer vaults a Braintree card | their **appstle AND shopcx** subs are promoted to internal (`vaultAndMigratePaymentMethod`) |
+| payment-update / recovery email | routes to OUR flow, not Shopify's hosted card page — ours converts, Shopify's only repairs |
+| one-time charge | tries the Braintree rail before building a Shopify contract |
+
+### ⚠️ The Shopify card webhook cannot promote — and it is easy to invert
+
+`handlePaymentMethodEvent` is the Shopify `customer_payment_methods` webhook. Its
+`paymentMethodId` is `payload.admin_graphql_api_id`, a `gid://shopify/CustomerPaymentMethod/…`, so
+it is meaningful to the two **Shopify-billed** engines and meaningless to the internal one —
+`internalSubSwitchPaymentMethod` treats its argument as a Braintree token and would promote a
+Shopify gid to the customer's default card. Internal subs are therefore skipped there.
+
+A pre-merge review read this backwards and had ShopCX skipped instead — i.e. skipping the one
+engine the call works for — and that landed briefly before being corrected. The handler has
+exactly one caller (`api/webhooks/shopify/route.ts`), so the id's provenance is not ambiguous; check
+the caller, not the parameter name.
+
 ## Open decisions
 
 - **~$9,700/cycle**: 974 lines are priced above the standard ladder because their subs never got a

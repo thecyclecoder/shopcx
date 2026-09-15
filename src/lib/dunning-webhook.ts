@@ -57,16 +57,21 @@ export async function handlePaymentMethodEvent(
     if (activeSubs?.length) {
       const { subscriptionSwitchPaymentMethod } = await import("@/lib/commerce/subscription");
       for (const sub of activeSubs) {
-        // ⚠️ `paymentMethodId` here is a BRAINTREE payment-method id. A ShopCX sub is billed by
-        // Shopify, whose contract references a `gid://shopify/CustomerPaymentMethod/…` — wrapping
-        // a Braintree id in that shape produces a gid for a method that does not exist, and the
-        // mutation's userError was being discarded by the bare `await` below. So "customer added
-        // a card, we repointed their subscriptions" silently did not happen for ShopCX subs, and
-        // nothing said so. A ShopCX card change goes through Shopify's own update flow instead.
-        if (sub.billing_source === "shopcx") {
-          console.warn(
-            `Payment method webhook: sub ${sub.shopify_contract_id} is ShopCX-billed — a Braintree method cannot be attached to a Shopify contract; skipping`,
-          );
+        // ⭐ ENGINE RANKING: internal (Braintree) > shopcx (our Shopify app) > appstle. Promotion
+        // to internal happens on the BRAINTREE side — `vaultAndMigratePaymentMethod` sweeps a
+        // customer's appstle AND shopcx subs onto internal rails the moment they vault a card.
+        // This webhook is the other direction and cannot promote anything.
+        //
+        // ⚠️ This is the SHOPIFY `customer_payment_methods` webhook: `paymentMethodId` is
+        // `payload.admin_graphql_api_id`, i.e. a `gid://shopify/CustomerPaymentMethod/…`. So it is
+        // meaningful to the two Shopify-billed engines and MEANINGLESS to the internal one —
+        // `internalSubSwitchPaymentMethod` treats its argument as a `customer_payment_methods`
+        // row / Braintree token and would promote a Shopify gid to the customer's default card.
+        //
+        // (A pre-merge review read this the other way round and had ShopCX skipped here — i.e.
+        // skipping the engine it actually works for. Corrected 2026-09-15; the handler has exactly
+        // one caller, `api/webhooks/shopify/route.ts`, so the id's provenance is not ambiguous.)
+        if (sub.billing_source === "internal") {
           continue;
         }
         try {
