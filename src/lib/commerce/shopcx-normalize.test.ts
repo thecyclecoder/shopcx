@@ -44,3 +44,21 @@ test("it is idempotent — a contract already in our shape is left alone", () =>
 test("a cancelled or expired contract is never touched", () => {
   assert.match(fn, /status !== "ACTIVE" && live\.contract\.status !== "PAUSED"/);
 });
+
+test("shop-wide AUTOMATIC discounts are never treated as the customer's coupon", () => {
+  // Shopify copies shop automatics onto the contract at checkout — verified on 36020289709, which
+  // carries "Free Shipping on Subscriptions" and "Buy 2 Discount" as AUTOMATIC_DISCOUNT entities.
+  // `shopcxApplyCoupon` removes existing coupons before adding, so misclassifying these meant
+  // applying ANY coupon to a ShopCX sub silently stripped the customer's FREE SHIPPING.
+  const ops = readFileSync(join(__dirname, "shopcx-discount-ops.ts"), "utf8");
+  assert.match(ops, /const isAutomatic = \(d: \{ type: string \| null \}\) => d\.type === "AUTOMATIC_DISCOUNT"/);
+  assert.match(ops, /!isStructural\(d\) && !isAutomatic\(d\)/);
+});
+
+test("an inert automatic on the contract cannot double-count with our own discount", () => {
+  // Both entities coexist after normalization (Buy 2 AUTOMATIC + our Volume discount MANUAL), and
+  // the line still nets $96.54 because the automatic allocates $0. `structuralDiscountCents` counts
+  // only allocations carrying OUR titles, so the arithmetic cannot pick the automatic up.
+  const client = readFileSync(join(__dirname, "shopify-subscription-client.ts"), "utf8");
+  assert.match(client, /STRUCTURAL_DISCOUNT_TITLES\.includes\(String\(a\?\.discount\?\.title \?\? ""\)\)/);
+});
