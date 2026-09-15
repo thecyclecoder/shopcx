@@ -1,0 +1,1 @@
+- **Auto-dismiss self-resolved portal replaceVariants (swap) failures** · verified 2026-09-14 · → [[../libraries/portal__remediation]]
