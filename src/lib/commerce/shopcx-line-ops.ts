@@ -471,3 +471,75 @@ export async function shopcxAddOneTimeLine(
     );
   } catch (err) { return { success: false, error: errText(err) }; }
 }
+
+/**
+ * Bring a contract created by SHOPIFY'S CHECKOUT into our pricing shape.
+ *
+ * ⭐ A PDP purchase and a migration produce structurally DIFFERENT contracts, and only one of them
+ * our engine can price. Measured on contract 36020093101 (order SC138756):
+ *
+ *   PDP:       currentPrice $52.46/unit, ZERO discount allocations  — the selling plan's 25% is
+ *              baked INTO the unit price
+ *   migrated:  currentPrice $69.95/unit (catalog MSRP) + allocations "Subscribe & Save" 25%,
+ *              "Volume discount" 8%
+ *
+ * `rewriteStructuralDiscounts` treats `currentPrice` as the PRE-discount base. Left alone, the
+ * first line edit on a PDP contract would apply 25% + 8% to an already-discounted $52.46 and bill
+ * $36.20/unit instead of $48.27 — a double discount, on every renewal, forever.
+ *
+ * It also restores the quantity break, which never reaches the contract at all: Shopify's
+ * AUTOMATIC discounts are a CHECKOUT mechanism and do not run on an app-led billing attempt. That
+ * is the same gap Appstle papered over by stamping a coupon at creation — and then never
+ * recomputing it when the customer changed quantity, which is why 386 Appstle contracts sit on the
+ * wrong tier today. Our recompute maintains it from here on.
+ *
+ * Idempotent, and SAFE to re-run: a contract already in our shape has its base at MSRP and its
+ * grandfathered concession captured before anything is rewritten.
+ */
+export async function shopcxNormalizeNewContract(
+  workspaceId: string,
+  contractId: string,
+): Promise<LineOpResult & { normalized?: boolean }> {
+  try {
+    const prep = await preparePricing(workspaceId, contractId);
+    if ("error" in prep) return { success: false, error: prep.error };
+    const { ctx } = prep;
+
+    const live = await getSubscriptionContract(workspaceId, contractId);
+    if (!live.success || !live.contract) return { success: false, error: live.error ?? "contract unreadable" };
+    if (live.contract.status !== "ACTIVE" && live.contract.status !== "PAUSED") {
+      return { success: true, normalized: false };
+    }
+
+    // Which lines are priced BELOW their catalog MSRP with no allocation explaining it? That is
+    // the selling-plan-baked signature. A line already at MSRP needs no rebasing, and a line
+    // carrying allocations is already in our shape.
+    const toRebase: { lineId: string; msrpCents: number }[] = [];
+    for (const l of live.contract.lines) {
+      const v = l.sku ? ctx.variantBySku.get(String(l.sku).toLowerCase()) : undefined;
+      if (!v || !ctx.ruleProducts.has(v.product_id)) continue;
+      const unit = l.currentPrice != null ? Math.round(parseFloat(l.currentPrice) * 100) : 0;
+      if (unit > 0 && unit < v.price_cents && l.structuralDiscountCents === 0) {
+        toRebase.push({ lineId: l.id, msrpCents: v.price_cents });
+      }
+    }
+    if (!toRebase.length) return { success: true, normalized: false };
+
+    // ⚠️ Rebase and recompute in the SAME draft. Committed separately, a charge landing between
+    // them bills the customer at full MSRP with no discounts at all.
+    const r = await mirrored(workspaceId, contractId,
+      withDraft(workspaceId, contractId, async (draftId) => {
+        for (const { lineId, msrpCents } of toRebase) {
+          const u = await shopifyUpdateDraftLine(workspaceId, draftId, lineId, {
+            currentPrice: (msrpCents / 100).toFixed(2),
+          });
+          if (!u.success) return u;
+        }
+        // The concession map is empty for a PDP contract by construction (no allocations), so
+        // nothing is carried — the discounts are derived fresh from the rules.
+        return rewriteStructuralDiscounts(workspaceId, draftId, ctx, prep.grandfather);
+      }),
+    );
+    return r.success ? { ...r, normalized: true } : r;
+  } catch (err) { return { success: false, error: errText(err) }; }
+}
