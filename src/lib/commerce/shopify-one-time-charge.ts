@@ -57,6 +57,15 @@ export interface CreateOneTimeChargeInput {
   /** Defaults to now — the next cron tick picks it up. */
   chargeAt?: string;
   currency?: string;
+  /**
+   * Optional Shopify payment method to bill (a `gid://shopify/CustomerPaymentMethod/...` id).
+   * NULL/omitted preserves the first-non-revoked default. When set, the executor validates it
+   * against the customer's live method list at charge time and refuses if revoked or absent —
+   * a stale id fails loudly rather than silently falling back to a different card than the one
+   * authorised. Selection is by method id, never by last four digits: one card can appear as
+   * multiple methods (e.g. a raw card plus a wallet agreement on the same PAN).
+   */
+  shopifyPaymentMethodId?: string | null;
 }
 
 export interface OneTimeChargeResult {
@@ -110,6 +119,7 @@ export async function createOneTimeCharge(
       reason: input.reason.trim(),
       created_by: input.createdBy,
       status: "pending",
+      ...(input.shopifyPaymentMethodId ? { shopify_payment_method_id: input.shopifyPaymentMethodId } : {}),
     })
     .select("id")
     .single();
@@ -227,10 +237,19 @@ async function chargeViaBraintreeIfPossible(
   };
 }
 
-/** The customer's default vaulted Shopify payment method, and the delivery details to ship to. */
+/**
+ * The vaulted Shopify payment method to bill, and the delivery details to ship to.
+ *
+ * When `chosenPaymentMethodId` is provided, that id is validated against the customer's live
+ * (non-revoked) methods and used. If it is revoked or absent from the list, this returns an
+ * error rather than silently falling back to a different card than the one the caller
+ * authorised — a stale id must fail LOUDLY. When it is null/undefined, the first non-revoked
+ * method wins (Shopify's Customer type has no "default payment method" on GraphQL).
+ */
 async function resolveShopifyContext(
   workspaceId: string,
   shopifyCustomerId: string,
+  chosenPaymentMethodId?: string | null,
 ): Promise<{ paymentMethodId: string; address: Record<string, unknown>; currency: string } | { error: string }> {
   const { getShopifyCredentials } = await import("@/lib/shopify-sync");
   const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
@@ -271,6 +290,38 @@ async function resolveShopifyContext(
   // but it can be an old card the customer has replaced. Recorded on the row so a wrong-instrument
   // charge is traceable rather than mysterious.
   const live = (cust.paymentMethods?.nodes ?? []).filter((p) => !p.revokedAt);
+
+  // Caller-chosen instrument: validate against the LIVE list. A stale/revoked/absent id must fail
+  // loudly here rather than silently falling back to `live[0]` — that fallback is precisely how
+  // the 2026-09-15 decline happened, and executing on the wrong card is a real decline on the
+  // customer's account (issuer fraud checks) even if we know the intended card was different.
+  if (chosenPaymentMethodId) {
+    const named = live.find((p) => p.id === chosenPaymentMethodId);
+    if (!named) {
+      const revokedButPresent = (cust.paymentMethods?.nodes ?? []).some(
+        (p) => p.id === chosenPaymentMethodId && p.revokedAt,
+      );
+      return {
+        error: revokedButPresent
+          ? "chosen_payment_method_revoked"
+          : "chosen_payment_method_not_found",
+      };
+    }
+    const a0 = cust.defaultAddress;
+    if (!a0?.address1) return { error: "customer_has_no_shipping_address" };
+    return {
+      paymentMethodId: named.id,
+      currency: "USD",
+      address: {
+        address1: a0.address1, address2: a0.address2 || "", city: a0.city, zip: a0.zip,
+        countryCode: a0.countryCodeV2, provinceCode: a0.provinceCode,
+        firstName: a0.firstName, lastName: a0.lastName,
+        ...(a0.phone ? { phone: a0.phone } : {}),
+        ...(a0.company ? { company: a0.company } : {}),
+      },
+    };
+  }
+
   const pm = live[0];
   if (!pm) return { error: "no_vaulted_shopify_payment_method" };
   if (live.length > 1) {
@@ -352,7 +403,7 @@ export async function executeOneTimeCharge(
   const admin = createAdminClient();
   const { data: row } = await admin
     .from("one_time_charges")
-    .select("id, customer_id, shopify_customer_id, items, currency, status, reason, attempts")
+    .select("id, customer_id, shopify_customer_id, items, currency, status, reason, attempts, shopify_payment_method_id")
     .eq("workspace_id", workspaceId)
     .eq("id", chargeId)
     .maybeSingle();
@@ -386,12 +437,16 @@ export async function executeOneTimeCharge(
     return { status: "failed", error };
   };
 
+  const chosenShopifyMethodId = (row.shopify_payment_method_id as string | null) ?? null;
   let contractId: string | undefined;
   let leftPending = false;
   try {
-    // ⭐ BRAINTREE FIRST. A vaulted Braintree card charges directly — no throwaway contract, no
-    // Shopify order-source ambiguity, and the customer stays on internal rails. The Shopify path
-    // is the fallback for customers we cannot reach any other way.
+    // ⭐ BRAINTREE FIRST — unless the caller NAMED a Shopify payment method. A named
+    // `shopify_payment_method_id` is an explicit authorisation to bill that specific card via the
+    // Shopify contract rail; silently routing to a Braintree card would charge a different
+    // instrument than the caller asked for. When no method is named the current behaviour holds:
+    // vaulted Braintree card wins so the customer stays on internal rails.
+    //
     // ⚠️ A throw out of the Braintree rail is INDETERMINATE, never a retry. `transaction.sale`
     // carries no idempotency key, so a settled sale whose response timed out is indistinguishable
     // from one that never happened — and the generic catch below would hand the row back to
@@ -400,7 +455,7 @@ export async function executeOneTimeCharge(
     // a human reconciles one charge, rather than the system silently making several.
     let braintree: Awaited<ReturnType<typeof chargeViaBraintreeIfPossible>>;
     try {
-      braintree = await chargeViaBraintreeIfPossible(workspaceId, row);
+      braintree = chosenShopifyMethodId ? null : await chargeViaBraintreeIfPossible(workspaceId, row);
     } catch (e) {
       const detail = errText(e);
       console.error(`[one-time-charge] INDETERMINATE Braintree outcome for ${chargeId} — may or may not have charged: ${detail}`);
@@ -427,11 +482,17 @@ export async function executeOneTimeCharge(
       return { status: "charged", orderName: braintree.order_number ?? null };
     }
 
-    const ctx = await resolveShopifyContext(workspaceId, String(row.shopify_customer_id));
-    if ("error" in ctx) return fail(ctx.error);
+    const ctx = await resolveShopifyContext(workspaceId, String(row.shopify_customer_id), chosenShopifyMethodId);
+    if ("error" in ctx) return fail(ctx.error, { rail: "shopify" });
+
+    // ⭐ Record the method actually resolved BEFORE the contract call, so a decline (or a
+    // contract-create failure) that lands next is diagnosable — the current log line names the
+    // instrument but nothing persists it until after the contract is created, which is too late
+    // for anything that fails first.
+    await settle(workspaceId, chargeId, { payment_method_id: ctx.paymentMethodId });
 
     const resolved = await resolveLines(workspaceId, row.items as QueuedChargeItem[]);
-    if ("error" in resolved) return fail(resolved.error);
+    if ("error" in resolved) return fail(resolved.error, { rail: "shopify" });
 
     // Far enough out that the create cannot race midnight; we bill by explicit selector anyway.
     const nextBillingDate = new Date(Date.now() + 86400000 * 30).toISOString();

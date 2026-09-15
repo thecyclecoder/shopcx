@@ -123,7 +123,10 @@ after the customer vaults a different card (which also promotes them to internal
 ## Columns
 
 `id` · `workspace_id` · `customer_id` · `shopify_customer_id` · `shopify_contract_id` (the
-throwaway contract; NULL before the run, a *cancelled* contract after) · `payment_method_id` ·
+throwaway contract; NULL before the run, a *cancelled* contract after) ·
+`shopify_payment_method_id` (INPUT — the caller-chosen method to bill; NULL preserves the
+first-non-revoked default) · `payment_method_id` (OUTPUT — the method the executor actually
+billed) ·
 `status` · `items` (jsonb, **internal variant UUIDs** — never `shopify_variant_id`) ·
 `amount_cents` · `currency` · `charge_at` · `reason` · `created_by` · `order_id` ·
 `shopify_order_name` · `billing_attempt_id` · `rail` (`braintree` | `shopify`) · `error` ·
@@ -132,6 +135,25 @@ throwaway contract; NULL before the run, a *cancelled* contract after) · `payme
 
 `reason` and `created_by` are required at create time — a charge nobody can explain is a
 chargeback.
+
+### Naming the card
+
+`shopify_payment_method_id` on the row (input on `CreateOneTimeChargeInput.shopifyPaymentMethodId`)
+is optional and holds a `gid://shopify/CustomerPaymentMethod/…` id. When set, the executor
+validates it against the customer's live method list at charge time and refuses if the id is
+revoked (`chosen_payment_method_revoked`) or absent (`chosen_payment_method_not_found`) — a stale
+id fails **loudly** rather than silently falling back to a different card than the one authorised.
+A caller-named Shopify method also bypasses the Braintree-first preference, because the
+authorisation names the Shopify rail specifically. When it is NULL, behaviour is unchanged: the
+first non-revoked method wins.
+
+Selection is by method id, never by last four digits. One underlying card can appear as multiple
+methods on the same customer (e.g. a raw card and a wallet agreement on the same PAN), which is
+precisely how the 2026-09-15 decline surfaced.
+
+`payment_method_id` records the id the executor actually billed and is stamped **before** the
+Shopify contract call, so a contract-create or attempt failure is still attributable to a specific
+instrument afterwards.
 
 ## Verified live
 
