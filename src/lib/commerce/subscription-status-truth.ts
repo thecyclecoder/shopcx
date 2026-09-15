@@ -15,10 +15,65 @@ import { endDunningForSubscription } from "@/lib/dunning";
 
 const LOCAL_STATUS: Record<string, string> = { pause: "paused", cancel: "cancelled", resume: "active" };
 
+/**
+ * Record WHY a subscription was cancelled.
+ *
+ * ⚠️ `subscriptions` has no cancel-reason column. Only the APPSTLE path ever preserved a reason,
+ * and it preserved it inside the vendor — so on the internal and ShopCX engines every
+ * portal/journey/playbook cancel silently discarded it, and churn analysis on those subs has no
+ * reason at all. `customer_events` is durable, queryable, and already where the rest of the
+ * subscription lifecycle is recorded.
+ *
+ * Separate from `applySubscriptionStatusTruth` because the internal engine applies its own local
+ * truth and only needs THIS half; running the whole thing again would re-close dunning and
+ * re-run the customer rollup.
+ */
+export async function recordCancelReason(
+  workspaceId: string,
+  contractId: string,
+  opts?: { cancelReason?: string; cancelledBy?: string },
+): Promise<void> {
+  if (!opts?.cancelReason && !opts?.cancelledBy) return;
+  try {
+    const admin = createAdminClient();
+    const { logCustomerEvent } = await import("@/lib/customer-events");
+    const { data: row } = await admin
+      .from("subscriptions").select("id, customer_id")
+      .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
+    if (!row?.customer_id) return;
+    await logCustomerEvent({
+      workspaceId,
+      customerId: String(row.customer_id),
+      eventType: "subscription.cancelled",
+      source: "commerce",
+      summary: opts.cancelReason ? `Subscription cancelled — ${opts.cancelReason}` : "Subscription cancelled",
+      properties: {
+        shopify_contract_id: contractId,
+        subscription_id: row.id,
+        cancel_reason: opts.cancelReason ?? null,
+        cancelled_by: opts.cancelledBy ?? null,
+      },
+    });
+  } catch (e) {
+    // Never fail the cancel because the audit note did — the customer asked to stop.
+    console.error(`[status-truth] cancel-reason note failed for ${contractId}:`, e instanceof Error ? e.message : e);
+  }
+}
+
 export async function applySubscriptionStatusTruth(
   workspaceId: string,
   contractId: string,
   action: "pause" | "cancel" | "resume",
+  /**
+   * Why, and who asked. Recorded on a cancel.
+   *
+   * ⚠️ `subscriptions` has no cancel-reason column: only the APPSTLE path ever preserved a reason,
+   * and it preserved it inside the vendor. So on the internal and ShopCX engines every
+   * portal/journey/playbook cancel silently discarded it — and churn analysis on those subs has no
+   * reason at all. Written to `customer_events`, which is durable, queryable, and already the
+   * place the rest of the subscription lifecycle is recorded.
+   */
+  opts?: { cancelReason?: string; cancelledBy?: string },
 ): Promise<void> {
   const admin = createAdminClient();
   const localUpdate: Record<string, unknown> = {
@@ -33,6 +88,10 @@ export async function applySubscriptionStatusTruth(
   // card update would resume + charge a subscription they deliberately stopped.
   if (action === "pause" || action === "cancel") {
     await endDunningForSubscription(workspaceId, contractId, action === "pause" ? "paused" : "cancelled");
+  }
+
+  if (action === "cancel") {
+    await recordCancelReason(workspaceId, contractId, opts);
   }
 
   const { data: sub } = await admin

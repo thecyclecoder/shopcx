@@ -455,7 +455,15 @@ export async function subscriptionAction(
 ): Promise<OpResult> {
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
-    return internalSubscriptionAction(workspaceId, contractId, action);
+    const r = await internalSubscriptionAction(workspaceId, contractId, action);
+    // ⚠️ The reason has nowhere else to go on this engine — only Appstle preserved one, inside the
+    // vendor. Without this, every internal cancel discards why the customer left.
+    if (r.success && action === "cancel") {
+      // Only the NOTE — internalSubscriptionAction already applied its own local truth.
+      const { recordCancelReason } = await import("@/lib/commerce/subscription-status-truth");
+      await recordCancelReason(workspaceId, contractId, { cancelReason, cancelledBy });
+    }
+    return r;
   }
   if (src === "shopcx") {
     // ⭐ The vendor call is the easy half. The LOCAL half — cancel-truth, ending dunning, the
@@ -464,7 +472,7 @@ export async function subscriptionAction(
     // open dunning cycle, and the renewal cron went on billing a customer who had cancelled.
     const r = await shopifySubscriptionAction(workspaceId, contractId, action);
     if (!r.success) return r;
-    await applySubscriptionStatusTruth(workspaceId, contractId, action);
+    await applySubscriptionStatusTruth(workspaceId, contractId, action, { cancelReason, cancelledBy });
     return { success: true };
   }
   return appstleSubscriptionAction(workspaceId, contractId, action, cancelReason, cancelledBy);

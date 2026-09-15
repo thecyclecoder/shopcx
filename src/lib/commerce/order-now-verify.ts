@@ -172,6 +172,8 @@ export async function scheduleOrderNowVerify(input: {
   contract_id: string;
   fired_at: string;
   is_internal: boolean;
+  /** Which engine billed it — `is_internal` alone cannot tell ShopCX from Appstle. */
+  billing_source?: string | null;
   attempt?: number;
 } & OrderNowVerifyContext): Promise<void> {
   await inngest.send({
@@ -182,6 +184,7 @@ export async function scheduleOrderNowVerify(input: {
       contract_id: input.contract_id,
       fired_at: input.fired_at,
       is_internal: input.is_internal,
+      billing_source: input.billing_source ?? null,
       resolution_event_id: input.resolution_event_id ?? null,
       ticket_id: input.ticket_id ?? null,
       customer_id: input.customer_id ?? null,
@@ -231,7 +234,7 @@ export async function subscriptionOrderNowVerified(
 
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, is_internal, status")
+    .select("id, is_internal, status, billing_source")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", contractId)
     .maybeSingle();
@@ -247,6 +250,7 @@ export async function subscriptionOrderNowVerified(
   }
 
   const isInternal = Boolean(sub.is_internal);
+  const billingSource = (sub as { billing_source?: string | null }).billing_source ?? null;
 
   // Fire the underlying order-now. Preserves the Braintree-vs-Appstle branch
   // in the shared `subscriptionOrderNow` — this wrapper only adds the verify.
@@ -274,6 +278,7 @@ export async function subscriptionOrderNowVerified(
       contract_id: contractId,
       fired_at: firedAt,
       is_internal: isInternal,
+      billing_source: billingSource,
       resolution_event_id: ctx.resolution_event_id,
       ticket_id: ctx.ticket_id,
       customer_id: ctx.customer_id,

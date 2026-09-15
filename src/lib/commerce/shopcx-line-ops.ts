@@ -114,6 +114,14 @@ async function rewriteStructuralDiscounts(
 ): Promise<LineOpResult> {
   const draft = await getSubscriptionDraft(workspaceId, draftId);
   if (!draft.success || !draft.lines) return { success: false, error: draft.error ?? "draft unreadable" };
+  // ⚠️ REFUSE on a truncated read. This function clears the structural discounts it can SEE and
+  // re-adds up to three per rule line; if the read missed some, it adds more than it cleared and
+  // the surplus survives — compounding a real percentage discount on every subsequent edit.
+  // Aborting here leaves the draft uncommitted (`withDraft` never commits on a failure), so the
+  // contract is untouched.
+  if (draft.truncated) {
+    return { success: false, error: "contract has more lines or discounts than one page — refusing to recompute" };
+  }
 
   const structural = (draft.discounts ?? []).filter(
     (d) => d.type === "MANUAL" && STRUCTURAL_DISCOUNT_TITLES.includes(String(d.title ?? "")),

@@ -87,6 +87,8 @@ export interface OverchargeSignal {
   subscription_id: string;
   shopify_contract_id: string | null;
   is_internal: boolean;
+  /** Which engine bills this sub — `is_internal` alone cannot tell ShopCX from Appstle. */
+  billing_source: string | null;
   /** The renewal order that overcharged. */
   order_id: string;
   shopify_order_id: string | null;
@@ -121,6 +123,7 @@ interface SubRow {
   shopify_contract_id: string | null;
   status: string;
   is_internal: boolean | null;
+  billing_source: string | null;
   items: Array<{ title?: string; variant_id?: string | number }> | null;
 }
 
@@ -141,7 +144,7 @@ export async function detectOverchargesForCustomer(
 
   const { data: subs } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, status, is_internal, items")
+    .select("id, shopify_contract_id, status, is_internal, billing_source, items")
     .eq("workspace_id", workspaceId)
     .eq("customer_id", customerId)
     .in("status", ["active", "paused"]);
@@ -181,7 +184,7 @@ export async function detectOvercharge(
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, status, is_internal, items")
+    .select("id, shopify_contract_id, status, is_internal, billing_source, items")
     .eq("workspace_id", workspaceId)
     .eq("id", subscriptionId)
     .maybeSingle();
@@ -384,6 +387,7 @@ async function detectForSubscription(
     subscription_id: sub.id,
     shopify_contract_id: sub.shopify_contract_id,
     is_internal: !!sub.is_internal,
+    billing_source: sub.billing_source ?? null,
     order_id: current.id,
     shopify_order_id: current.shopify_order_id,
     order_number: current.order_number,
@@ -617,10 +621,23 @@ export function formatOverchargeForAgent(signal: OverchargeSignal): string {
     )
     .join("; ");
 
+  // ⚠️ Three engines. `is_internal ? internal : Appstle` sent a ShopCX contract an instruction
+  // naming a vendor that does not hold it — fed straight to an autonomous remediation path, which
+  // would then try to heal on Appstle or be told "NEVER migrate-to-internal" about a sub where
+  // that advice is meaningless.
+  const engineLabel = (sig: { is_internal: boolean; billing_source: string | null }): string =>
+    sig.billing_source === "shopcx" ? "ShopCX" : sig.is_internal ? "internal" : "Appstle";
+  const restoreHint = (sig: { is_internal: boolean; billing_source: string | null }): string =>
+    sig.billing_source === "shopcx"
+      ? "ShopCX — a draft base-price pin, discounts recomputed in the same commit"
+      : sig.is_internal
+        ? "internal price_override_cents"
+        : "Appstle — NEVER migrate-to-internal";
+
   const out: string[] = [];
   out.push(
     `⚠️ OVERCHARGE DETECTED on sub ${signal.shopify_contract_id || signal.subscription_id} (${
-      signal.is_internal ? "internal" : "Appstle"
+      engineLabel(signal)
     }): renewal #${signal.order_number} charged ${dollars(signal.charged)}, expected ${dollars(
       signal.expected,
     )}, delta ${dollars(signal.delta)}${signal.dropped_base ? ", dropped_base=true" : ""}. ${signal.reason}.`,
@@ -631,7 +648,7 @@ export function formatOverchargeForAgent(signal: OverchargeSignal): string {
       [
         plan.refund ? `partial_refund ${dollars(plan.refund.amount_cents)} on shopify_order_id ${plan.refund.shopify_order_id}` : null,
         plan.restore.length
-          ? `update_line_item_price to restore the base (heals on ${signal.is_internal ? "internal price_override_cents" : "Appstle — NEVER migrate-to-internal"})`
+          ? `update_line_item_price to restore the base (heals on ${restoreHint(signal)})`
           : null,
         "then a customer_reply: caught the pricing error, refunded the difference, fixed the sub, no cancel needed.",
       ]
