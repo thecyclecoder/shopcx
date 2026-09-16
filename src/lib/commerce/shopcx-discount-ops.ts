@@ -76,9 +76,20 @@ async function splitDiscounts(
   const nodes = j.data.subscriptionContract?.discounts?.nodes ?? [];
   const isStructural = (d: { type: string | null; title: string | null }) =>
     d.type === "MANUAL" && STRUCTURAL_DISCOUNT_TITLES.includes(String(d.title ?? ""));
+  // ⚠️ An AUTOMATIC_DISCOUNT is the SHOP's, not the customer's, and must never be swept up as a
+  // coupon. Shopify copies shop-wide automatics onto the contract at checkout — verified on
+  // 36020289709, which carries "Free Shipping on Subscriptions" and "Buy 2 Discount" as
+  // AUTOMATIC_DISCOUNT entities. Treating those as coupons meant applying ANY coupon to a ShopCX
+  // sub removed them first — silently stripping the customer's free shipping.
+  //
+  // (They are inert on the contract: both produce a zero allocation, which is why the quantity
+  // break does not survive to renewal and the normalizer has to write a real one.)
+  const isAutomatic = (d: { type: string | null }) => d.type === "AUTOMATIC_DISCOUNT";
   return {
     structural: nodes.filter(isStructural).map((d) => ({ id: d.id })),
-    coupons: nodes.filter((d) => !isStructural(d)).map((d) => ({ id: d.id, title: d.title })),
+    coupons: nodes
+      .filter((d) => !isStructural(d) && !isAutomatic(d))
+      .map((d) => ({ id: d.id, title: d.title })),
   };
 }
 
