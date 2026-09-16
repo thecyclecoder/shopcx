@@ -57,6 +57,11 @@ import {
   type ReviewRequestTrigger,
   type ReviewRequestWindow,
 } from "@/lib/review-request-compose";
+import {
+  deriveCxSurfacePersonalization,
+  personalizationContradictsSurface,
+  type ProductIdentityFingerprint,
+} from "@/lib/review-request-cx-surface";
 import { getActiveReviewRubric } from "@/lib/review-message-rubric";
 import { saveReviewMessageDraft } from "@/lib/review-message-drafts";
 import {
@@ -213,13 +218,57 @@ export async function applyReviewRequest(
   const token = mintReviewRequestToken();
   const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://shopcx.ai").trim();
   const reviewUrl = `${siteUrl}/review/${token}`;
-  const tenureDays =
-    typeof customer.created_at === "string"
-      ? Math.floor(
-          (Date.now() - Date.parse(customer.created_at as string)) /
-            (24 * 60 * 60 * 1000),
-        )
+
+  // CX-surface personalization — the fix for ticket 7e3ee827. The upstream
+  // detector's per-order first-time flag and the account-created tenure both
+  // ignored the customer's full purchase history across linked identities +
+  // subscription contracts. We recompute both from the merged surface here
+  // and withhold any claim we cannot positively verify. `null` window /
+  // `null` tenureDays fall through to the composer's neutral opening. Only
+  // the post-order trigger uses these — the ticket opening does not.
+  const cxSurface =
+    trigger === "post-order"
+      ? await resolvePostOrderCxSurface(admin, {
+          workspaceId: input.workspaceId,
+          customerId: input.customerId,
+          productId: input.productId,
+          anchorOrderId:
+            input.context.type === "post-order"
+              ? input.context.orderId ?? null
+              : null,
+        })
       : null;
+
+  const composerWindow: ReviewRequestWindow =
+    input.context.type === "post-order"
+      ? cxSurface?.window ?? null
+      : null;
+  const composerTenureDays: number | null =
+    input.context.type === "post-order"
+      ? cxSurface?.tenureDays ?? null
+      : null;
+
+  // Guard-before-mutation: if the upstream detector labelled this candidate
+  // `first-time` but the CX surface shows a prior purchase of this product,
+  // hard-refuse to ship the first-time claim. The composer's `first-time`
+  // string is the exact copy that would fabricate the personalization; the
+  // derivation already sets `window='repeat'` in that case, so this is a
+  // final integrity assertion — a code change that ever passes a contradicting
+  // window through this line throws before send.
+  if (
+    input.context.type === "post-order" &&
+    cxSurface &&
+    personalizationContradictsSurface({
+      claim: cxSurface,
+      proposedWindow: composerWindow,
+    })
+  ) {
+    throw new Error(
+      "review-request-sender: post-order composer window contradicts the CX surface " +
+        "(customer has prior purchases of this product) — refusing to ship the first-time claim",
+    );
+  }
+
   const composed = composeReviewRequestFirstTouchBody({
     trigger,
     channel,
@@ -227,9 +276,24 @@ export async function applyReviewRequest(
     productName: (product.title as string) || "",
     customerFirstName: (customer.first_name as string | null) ?? null,
     reviewUrl,
-    window: input.context.type === "post-order" ? input.context.window : null,
-    tenureDays,
+    window: composerWindow,
+    tenureDays: composerTenureDays,
   });
+
+  // Validator input — the CX-surface tenure is the truthful one to feed the
+  // validator's `tenure_degenerate_zero_days` rail too. Post-order uses the
+  // surface directly; the ticket trigger falls back to account-created (the
+  // ticket path does not read subscriptions yet, but its opening never
+  // renders a tenure phrase so a slightly wide claim is harmless).
+  const tenureDays =
+    composerTenureDays !== null
+      ? composerTenureDays
+      : typeof customer.created_at === "string"
+        ? Math.floor(
+            (Date.now() - Date.parse(customer.created_at as string)) /
+              (24 * 60 * 60 * 1000),
+          )
+        : null;
 
   // Step 7 — VALIDATE. Every draft goes through the shared deterministic
   // validator; both allow and BLOCK verdicts persist to
@@ -386,4 +450,106 @@ export async function createPostOrderAnchorTicket(
     throw new Error("createPostOrderAnchorTicket: insert returned no id");
   }
   return data.id as string;
+}
+
+/**
+ * Build the CX-surface derivation the post-order composer keys personalization
+ * off. Expands to the linked customer group (`resolve_customer_link_group`
+ * RPC), pulls every order (line_items) + subscription (items) across the
+ * group, and fingerprints the target product from `product_variants` so the
+ * membership check catches every id shape the two tables ever store (Shopify
+ * numeric ids, internal UUIDs, SKUs). Kept small — this is the exact set of
+ * probes the ticket-`7e3ee827` fix requires, no more.
+ *
+ * The `null` returns fall through to the composer's neutral opening (which
+ * asserts nothing) — the "withhold when unverifiable" contract.
+ */
+async function resolvePostOrderCxSurface(
+  admin: SupabaseClient,
+  input: {
+    workspaceId: string;
+    customerId: string;
+    productId: string;
+    anchorOrderId: string | null;
+  },
+): Promise<Awaited<ReturnType<typeof deriveCxSurfacePersonalization>> | null> {
+  // 1) Merge linked customer ids — the failing case (Joanne) had prior
+  //    Amazing Coffee purchases on other rows of the same person.
+  let linkedIds: string[] = [input.customerId];
+  try {
+    const { data } = await admin.rpc("resolve_customer_link_group", {
+      p_customer_id: input.customerId,
+    });
+    if (Array.isArray(data) && data.length > 0) {
+      linkedIds = (data as string[]).filter(Boolean);
+      if (!linkedIds.includes(input.customerId)) linkedIds.push(input.customerId);
+    }
+  } catch {
+    // RPC absent locally / permission miss — fall back to the anchor only.
+    linkedIds = [input.customerId];
+  }
+
+  // 2) Fingerprint the product — every variant uuid + shopify id + sku that
+  //    resolves to this product, so any of the three line-item shapes matches.
+  const { data: productRow } = await admin
+    .from("products")
+    .select("id, shopify_product_id")
+    .eq("id", input.productId)
+    .eq("workspace_id", input.workspaceId)
+    .maybeSingle();
+  const { data: variantRows } = await admin
+    .from("product_variants")
+    .select("id, shopify_variant_id, sku")
+    .eq("workspace_id", input.workspaceId)
+    .eq("product_id", input.productId);
+  const product: ProductIdentityFingerprint = {
+    internalProductId: input.productId,
+    shopifyProductId:
+      (productRow?.shopify_product_id as string | null | undefined) ?? null,
+    variantUuids: new Set<string>(),
+    shopifyVariantIds: new Set<string>(),
+    skus: new Set<string>(),
+  };
+  for (const v of (variantRows || []) as Array<{
+    id: string | null;
+    shopify_variant_id: string | null;
+    sku: string | null;
+  }>) {
+    if (v.id) product.variantUuids.add(v.id);
+    if (v.shopify_variant_id) product.shopifyVariantIds.add(v.shopify_variant_id);
+    if (v.sku) product.skus.add(v.sku);
+  }
+
+  // 3) Pull orders + subscriptions across the merged identity. Both reads
+  //    scope to workspace_id so a cross-workspace row cannot leak into the
+  //    surface.
+  const [{ data: orderRows }, { data: subRows }] = await Promise.all([
+    admin
+      .from("orders")
+      .select("id, created_at, line_items")
+      .eq("workspace_id", input.workspaceId)
+      .in("customer_id", linkedIds),
+    admin
+      .from("subscriptions")
+      .select("id, subscription_created_at, created_at, items")
+      .eq("workspace_id", input.workspaceId)
+      .in("customer_id", linkedIds),
+  ]);
+
+  return deriveCxSurfacePersonalization({
+    orders: (orderRows || []) as Array<{
+      id: string;
+      created_at: string | null;
+      line_items: unknown;
+    }>,
+    subscriptions: (subRows || []) as Array<{
+      id: string;
+      subscription_created_at: string | null;
+      created_at: string | null;
+      items: unknown;
+    }>,
+    product,
+    anchorOrderId: input.anchorOrderId,
+    now: Date.now(),
+  });
 }
