@@ -24,6 +24,7 @@ import { loadEnv, createAdminClient } from "./_bootstrap";
 loadEnv();
 import { investigateTicket } from "../src/lib/tickets-read";
 import { classifyEscalationHealth } from "../src/lib/escalation-health";
+import { linkGroupIds } from "../src/lib/customer-links";
 
 const WS = "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 
@@ -186,9 +187,14 @@ async function show(idOrUrl: string) {
   }
 
   // ── The customer's live commerce state — the data points to VERIFY the claims against ──
+  // Reads widen across the customer's link group (customer-links) so a linked person's whole
+  // history renders regardless of which record the ticket happened to land on — ground truth:
+  // ticket a4e79e9d (Jay), records affcdc47/40c66b13 linked 2026-06-15, 29 orders were invisible
+  // when the surface bare-.eq'd on one customer_id.
   if (cust?.id) {
+    const custIds = await linkGroupIds(admin, WS, cust.id);
     const { data: subs } = await admin.from("subscriptions")
-      .select("id, status, next_billing_date, last_payment_status, items").eq("customer_id", cust.id);
+      .select("id, status, next_billing_date, last_payment_status, items").in("customer_id", custIds);
     console.log(`\n── SUBSCRIPTIONS (${(subs ?? []).length}) ────────────────────────────────`);
     for (const s of (subs ?? []) as Array<{ id: string; status: string; next_billing_date: string | null; last_payment_status: string | null; items: Array<{ title?: string; variant_title?: string; variant_id?: string; quantity?: number; price_cents?: number }> | null }>) {
       console.log(`  ${s.id.slice(0, 8)} ${s.status} next=${String(s.next_billing_date ?? "—").slice(0, 10)} lastPay=${s.last_payment_status ?? "—"}`);
@@ -197,7 +203,7 @@ async function show(idOrUrl: string) {
 
     const { data: orders } = await admin.from("orders")
       .select("order_number, financial_status, fulfillment_status, total_cents, created_at, delivery_status, delivered_at, amplifier_status, amplifier_tracking_number, line_items")
-      .eq("customer_id", cust.id).order("created_at", { ascending: false }).limit(6);
+      .in("customer_id", custIds).order("created_at", { ascending: false }).limit(6);
     console.log(`\n── RECENT ORDERS (${(orders ?? []).length}) ──────────────────────────────`);
     for (const o of (orders ?? []) as Array<Record<string, unknown>>) {
       const li = ((o.line_items as Array<{ title?: string; variant_title?: string; quantity?: number }>) ?? [])
@@ -208,7 +214,7 @@ async function show(idOrUrl: string) {
     }
 
     const { data: rets } = await admin.from("returns")
-      .select("id, status, tracking_number, net_refund_cents, created_at, updated_at").eq("customer_id", cust.id)
+      .select("id, status, tracking_number, net_refund_cents, created_at, updated_at").in("customer_id", custIds)
       .order("created_at", { ascending: false }).limit(6);
     if ((rets ?? []).length) {
       console.log(`\n── RETURNS (${(rets ?? []).length}) ─────────────────────────────────────`);

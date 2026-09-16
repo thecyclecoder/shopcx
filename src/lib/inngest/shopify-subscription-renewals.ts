@@ -254,7 +254,26 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
       // BILLED is Shopify's own idempotency signal — this cycle already charged, whoever did it.
       if (cyc.cycle.status === "BILLED") return { ok: false as const, reason: "cycle_already_billed" };
       if (cyc.cycle.skipped) return { ok: false as const, reason: "cycle_skipped" };
-      return { ok: true as const, cycleIndex: cyc.cycle.index, expectedDate: cyc.cycle.endAt, dueDate: selectorDate };
+      // ⚠️ TWO DATES, and conflating them drifts the customer's anniversary.
+      //
+      //   selectorDate — clamped forward so Shopify will accept the cycle selector. Correct for
+      //                  CHOOSING which cycle to bill, and meaningless outside that.
+      //   scheduledFor — the date the customer was actually DUE. The only valid anchor for the
+      //                  next billing date.
+      //
+      // Reusing the clamp as the advance anchor shifts the schedule by however overdue the sub
+      // was. Measured on 2026-09-16: cohort sub 36018618541 was due 09-12 on a 2-month cadence
+      // and advanced to 11-15 instead of 11-12 — because its due date preceded the contract's
+      // createdAt, which is the NORMAL case for a migrated sub that was already overdue on
+      // migration day. A sub three weeks overdue would lose three weeks of anniversary, every
+      // time, compounding on each renewal.
+      return {
+        ok: true as const,
+        cycleIndex: cyc.cycle.index,
+        expectedDate: cyc.cycle.endAt,
+        dueDate: selectorDate,
+        scheduledFor: due,
+      };
     });
 
     if (!plan.ok) {
@@ -354,12 +373,15 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
         // charged 2026-09-11, next cycle ended 2026-12-31 — a 111-day gap on a 56-day cadence,
         // i.e. roughly one whole interval of revenue deferred, per migrated subscription.
         //
-        // Anchoring to `dueDate` rather than to "now" also means a LATE charge (dunning recovery,
-        // a retried run) does not permanently shift the customer's rhythm forward.
+        // Anchoring to the SCHEDULED date rather than to "now" also means a LATE charge (dunning
+        // recovery, a retried run, or a migrated sub that was overdue on migration day) does not
+        // permanently shift the customer's rhythm forward.
         //
         // We resolve cycles BY DATE, so there is no need to sit on Shopify's boundaries — the
         // selector finds whichever cycle contains whatever date we set.
-        const anchor = new Date(plan.dueDate);
+        // ⭐ Anchor to what the customer was DUE, never to the clamped selector — see the two-dates
+        // note where `plan` is built. `scheduledFor` is the un-clamped `next_billing_date`.
+        const anchor = new Date(plan.scheduledFor);
         const advanceTo = rollForwardToFutureBillingDate(
           anchor,
           sub.billing_interval ?? "month",

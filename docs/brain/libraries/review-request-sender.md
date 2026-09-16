@@ -28,7 +28,7 @@ The trigger-agnostic apply pipeline. Returns a discriminated `ApplyReviewRequest
 3. **Workspace-scoped customer + product loads** — a cross-workspace id in the input cannot leak because each read carries `.eq('workspace_id', workspaceId)`.
 4. **Channel pick** — `pickReviewRequestChannel` from [[review-request-delivery]] on the customer's marketing status. Neither channel reachable ⇒ `skipped_unreachable`.
 5. **Rubric load** — `getActiveReviewRubric` from [[review-message-rubric]]. Missing ⇒ `skipped_no_rubric`. The spec's "the rubric with its self-score and revise-once" reuse contract fails at THIS SDK if the rubric row is missing.
-6. **Body compose** — `composeReviewRequestFirstTouchBody` from [[review-request-compose]] with the trigger label so the copy shapes differ (post-order has no thread to lean on) while the rubric, validator, and downstream pipeline stay identical.
+6. **Body compose** — `composeReviewRequestFirstTouchBody` from [[review-request-compose]] with the trigger label so the copy shapes differ (post-order has no thread to lean on) while the rubric, validator, and downstream pipeline stay identical. On the post-order branch the composer's `window` + `tenureDays` come from [[review-request-cx-surface]] `deriveCxSurfacePersonalization` — the "first-time vs repeat" flag and the tenure fact are recomputed from the merged order + subscription surface across every linked customer id (RPC `resolve_customer_link_group`), NOT from `customers.created_at`. A pre-compose `personalizationContradictsSurface` guard throws before send if a proposed `first-time` window ever contradicts a surface that shows a prior purchase. Ticket 7e3ee827 is the ground-truth failing case this branch fixes.
 7. **Pre-send validator** — `validateReviewRequest` from [[review-request-validator]] — the deterministic hard-block rails.
 8. **Draft persist** — `saveReviewMessageDraft` from [[review-message-drafts]]. Every ask lands here even if the validator BLOCKED, so the block is auditable (`outcome='blocked_by_validator'`).
 9. **Shared ladder row** — `insertReviewRequestRow` from [[review-request-delivery]] only when the validator allowed. The ladder-row angle carries the trigger prefix `post-order:<angle>` (or the raw angle for ticket) so a later analyze can split repeat/first-time asks against ticket asks without a schema change — the validator's `unapproved_pretext` rail reads `draft.angle`, not the ladder-row's label.
@@ -48,4 +48,4 @@ Every step above pre-existed in the review-request SDKs; what did NOT exist was 
 
 ---
 
-[[../README]] · [[../../CLAUDE]] · [[../specs/review-request-post-order-ask]] · [[review-request-delivery]] · [[review-request-compose]]
+[[../README]] · [[../../CLAUDE]] · [[../specs/review-request-post-order-ask]] · [[review-request-delivery]] · [[review-request-compose]] · [[review-request-cx-surface]]

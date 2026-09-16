@@ -232,7 +232,7 @@ const MARIO_FAILED_BUILD_GRACE_MS = 20 * 60 * 1000;
  * through the SAME (b)/(c)/(d) drop filters as the timecard candidates, so a blocked / terminal / phantom
  * spec is still dropped.
  */
-async function readFailedBuildStalls(
+export async function readFailedBuildStalls(
   admin: Admin,
   workspace_id: string,
   graceMs: number,
@@ -275,7 +275,19 @@ async function readFailedBuildStalls(
   // surface unchanged. Mirrors the shape of `readPromoteGateHeldStalls`: read the escalation
   // signal, then re-confirm current state before acting on it.
   const slugs = aged.map((a) => a.spec_slug);
-  const sinceIso = new Date(now - MARIO_PROMOTE_GATE_LOOKBACK_MS).toISOString();
+  // Anchor the escalation lookback to the OLDEST aged failure's own timestamp — not a fixed
+  // now-minus-7d window. An init_loop_guard escalation always lands JUST AFTER the failure it
+  // covers, so scanning from the failure's own timestamp (minus a 60s epsilon for clock skew)
+  // is guaranteed to find the covering escalation regardless of the failure's age. The prior
+  // now-relative floor silently dropped an escalation once the whole incident aged past 7 days,
+  // and Mario re-fired on the same already-owned spec (close-snapshot-coverage-guard, ~3.5 min
+  // outside the window). The read is still bounded by .in('spec_slug', slugs) and .limit(500),
+  // so widening the time floor stays bounded.
+  const earliestFailedAtMs = aged.reduce(
+    (min, a) => Math.min(min, Date.parse(a.failed_at)),
+    Number.POSITIVE_INFINITY,
+  );
+  const sinceIso = new Date(earliestFailedAtMs - 60_000).toISOString();
   const { data: escRows } = await admin
     .from("director_activity")
     .select("spec_slug, created_at")

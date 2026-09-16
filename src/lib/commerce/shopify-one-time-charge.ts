@@ -57,6 +57,15 @@ export interface CreateOneTimeChargeInput {
   /** Defaults to now — the next cron tick picks it up. */
   chargeAt?: string;
   currency?: string;
+  /**
+   * Optional Shopify payment method to bill (a `gid://shopify/CustomerPaymentMethod/...` id).
+   * NULL/omitted preserves the first-non-revoked default. When set, the executor validates it
+   * against the customer's live method list at charge time and refuses if revoked or absent —
+   * a stale id fails loudly rather than silently falling back to a different card than the one
+   * authorised. Selection is by method id, never by last four digits: one card can appear as
+   * multiple methods (e.g. a raw card plus a wallet agreement on the same PAN).
+   */
+  shopifyPaymentMethodId?: string | null;
 }
 
 export interface OneTimeChargeResult {
@@ -110,11 +119,112 @@ export async function createOneTimeCharge(
       reason: input.reason.trim(),
       created_by: input.createdBy,
       status: "pending",
+      ...(input.shopifyPaymentMethodId ? { shopify_payment_method_id: input.shopifyPaymentMethodId } : {}),
     })
     .select("id")
     .single();
   if (error) return { success: false, error: error.message };
   return { success: true, chargeId: (data as { id: string }).id };
+}
+
+/**
+ * Retry a declined charge on a DIFFERENT stored payment method — same row, no duplicate charge.
+ *
+ * ⭐ WHY THIS EXISTS. A `failed` charge is otherwise terminal (see the table header). Recovery
+ * used to mean creating a second `one_time_charges` row for the same intent, which risked a
+ * double bill if the first row was re-executed by hand (a `pending` charge is not distinguishable
+ * from an un-retried one). Retrying on the SAME row against a different `shopify_payment_method_id`
+ * keeps the intent unique and preserves the audit trail on the row that already carries it.
+ *
+ * ⭐ SAME-METHOD REFUSAL. Re-running against the same method that just declined is refused: it
+ * would produce a second real decline against the customer's account for no diagnostic gain,
+ * exactly what this rail exists to avoid. The truth of "what just declined" is the
+ * `payment_method_id` actually billed (the executor stamps it before the contract call, even
+ * when the caller didn't name one), so that is what the guard checks.
+ *
+ * ⭐ CLAIM SEMANTICS INTACT. The retry claim is a compare-and-set on `status='failed'` — atomic,
+ * distinct from the pending→charging claim that stops a cron + operator from concurrently
+ * charging. A retry that loses the CAS (row is no longer `failed`) returns not_failed and
+ * cannot reopen a row someone else is already re-driving.
+ *
+ * ⭐ ATTEMPT HISTORY PRESERVED. The prior attempt's decline signature is appended to
+ * `attempt_history` before the row is reopened, so the human deciding which card to try next
+ * can see 'this card declined, that one is untried' on the row itself.
+ */
+export async function retryOneTimeCharge(
+  workspaceId: string,
+  chargeId: string,
+  newShopifyPaymentMethodId: string,
+): Promise<OneTimeChargeResult> {
+  if (!newShopifyPaymentMethodId?.trim()) return { success: false, error: "payment_method_required" };
+  const admin = createAdminClient();
+
+  const { data: row } = await admin
+    .from("one_time_charges")
+    .select(
+      "id, status, shopify_payment_method_id, payment_method_id, billing_attempt_id, error, rail, attempts, attempt_history, failed_at",
+    )
+    .eq("workspace_id", workspaceId)
+    .eq("id", chargeId)
+    .maybeSingle();
+  if (!row) return { success: false, error: "charge_not_found" };
+  if (row.status !== "failed") return { success: false, error: `not_failed (${row.status})` };
+
+  // ⚠️ Match by the METHOD ACTUALLY BILLED, not the caller-chosen field. When the caller did not
+  // name a method, `shopify_payment_method_id` on the row is NULL and the executor picked
+  // `live[0]`; the truth of "what just declined" lives on `payment_method_id`. Falling back to
+  // the chosen field covers the case where the executor failed before stamping.
+  const lastBilled = (row.payment_method_id as string | null) ?? (row.shopify_payment_method_id as string | null);
+  if (lastBilled && lastBilled === newShopifyPaymentMethodId.trim()) {
+    return { success: false, error: "same_method_as_last_decline" };
+  }
+
+  // Preserve the decline signature BEFORE reopening. This is the human-facing breadcrumb: 'this
+  // card declined, that one is untried' — without joining payment_failures / customer_events.
+  const prior = Array.isArray(row.attempt_history) ? (row.attempt_history as unknown[]) : [];
+  const nextHistory = [
+    ...prior,
+    {
+      payment_method_id: (row.payment_method_id as string | null) ?? null,
+      rail: (row.rail as string | null) ?? null,
+      error: (row.error as string | null) ?? null,
+      billing_attempt_id: (row.billing_attempt_id as string | null) ?? null,
+      attempts_at_failure: (row.attempts as number | null) ?? null,
+      failed_at: (row.failed_at as string | null) ?? null,
+    },
+  ];
+
+  // Compare-and-set on `failed`. If another actor already reopened the row (or it was pulled
+  // through some other path), the update matches zero rows and we refuse — PostgREST returns no
+  // error for a zero-row update, so ROW COUNT is again the only signal (same rule as claim()).
+  const { error, data } = await admin
+    .from("one_time_charges")
+    .update({
+      status: "pending",
+      shopify_payment_method_id: newShopifyPaymentMethodId.trim(),
+      // Clear last-attempt outcome fields so a stale value from the prior run is not misread as
+      // the new attempt's. The prior decline is preserved on attempt_history, not on these.
+      payment_method_id: null,
+      billing_attempt_id: null,
+      error: null,
+      rail: null,
+      failed_at: null,
+      charging_since: null,
+      // The prior throwaway contract is already CANCELLED (see the finally block); clearing the
+      // reference so a future sweep does not read it as "the current attempt's contract".
+      shopify_contract_id: null,
+      attempt_history: nextHistory,
+      // Re-queue for the next cron tick — same treatment as any freshly-created charge.
+      charge_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("workspace_id", workspaceId)
+    .eq("id", chargeId)
+    .eq("status", "failed")
+    .select("id");
+  if (error) return { success: false, error: error.message };
+  if (!data?.length) return { success: false, error: "not_failed" };
+  return { success: true, chargeId };
 }
 
 /** Pull a queued charge. Only a `pending` row can be cancelled — one already charging or charged cannot. */
@@ -227,10 +337,19 @@ async function chargeViaBraintreeIfPossible(
   };
 }
 
-/** The customer's default vaulted Shopify payment method, and the delivery details to ship to. */
+/**
+ * The vaulted Shopify payment method to bill, and the delivery details to ship to.
+ *
+ * When `chosenPaymentMethodId` is provided, that id is validated against the customer's live
+ * (non-revoked) methods and used. If it is revoked or absent from the list, this returns an
+ * error rather than silently falling back to a different card than the one the caller
+ * authorised — a stale id must fail LOUDLY. When it is null/undefined, the first non-revoked
+ * method wins (Shopify's Customer type has no "default payment method" on GraphQL).
+ */
 async function resolveShopifyContext(
   workspaceId: string,
   shopifyCustomerId: string,
+  chosenPaymentMethodId?: string | null,
 ): Promise<{ paymentMethodId: string; address: Record<string, unknown>; currency: string } | { error: string }> {
   const { getShopifyCredentials } = await import("@/lib/shopify-sync");
   const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
@@ -271,6 +390,38 @@ async function resolveShopifyContext(
   // but it can be an old card the customer has replaced. Recorded on the row so a wrong-instrument
   // charge is traceable rather than mysterious.
   const live = (cust.paymentMethods?.nodes ?? []).filter((p) => !p.revokedAt);
+
+  // Caller-chosen instrument: validate against the LIVE list. A stale/revoked/absent id must fail
+  // loudly here rather than silently falling back to `live[0]` — that fallback is precisely how
+  // the 2026-09-15 decline happened, and executing on the wrong card is a real decline on the
+  // customer's account (issuer fraud checks) even if we know the intended card was different.
+  if (chosenPaymentMethodId) {
+    const named = live.find((p) => p.id === chosenPaymentMethodId);
+    if (!named) {
+      const revokedButPresent = (cust.paymentMethods?.nodes ?? []).some(
+        (p) => p.id === chosenPaymentMethodId && p.revokedAt,
+      );
+      return {
+        error: revokedButPresent
+          ? "chosen_payment_method_revoked"
+          : "chosen_payment_method_not_found",
+      };
+    }
+    const a0 = cust.defaultAddress;
+    if (!a0?.address1) return { error: "customer_has_no_shipping_address" };
+    return {
+      paymentMethodId: named.id,
+      currency: "USD",
+      address: {
+        address1: a0.address1, address2: a0.address2 || "", city: a0.city, zip: a0.zip,
+        countryCode: a0.countryCodeV2, provinceCode: a0.provinceCode,
+        firstName: a0.firstName, lastName: a0.lastName,
+        ...(a0.phone ? { phone: a0.phone } : {}),
+        ...(a0.company ? { company: a0.company } : {}),
+      },
+    };
+  }
+
   const pm = live[0];
   if (!pm) return { error: "no_vaulted_shopify_payment_method" };
   if (live.length > 1) {
@@ -352,7 +503,7 @@ export async function executeOneTimeCharge(
   const admin = createAdminClient();
   const { data: row } = await admin
     .from("one_time_charges")
-    .select("id, customer_id, shopify_customer_id, items, currency, status, reason, attempts")
+    .select("id, customer_id, shopify_customer_id, items, currency, status, reason, attempts, shopify_payment_method_id")
     .eq("workspace_id", workspaceId)
     .eq("id", chargeId)
     .maybeSingle();
@@ -363,20 +514,39 @@ export async function executeOneTimeCharge(
     return { status: "skipped", error: "claimed_by_another_run" };
   }
 
-  const fail = async (error: string): Promise<ExecuteResult> => {
+  /**
+   * Settle terminally, and make the failure VISIBLE.
+   *
+   * ⭐ The row alone is not enough. A decline that lives only on `one_time_charges` is durable and
+   * unread: on 2026-09-15 a real customer was declined $196.08 and their timeline showed 27 events,
+   * none of them the decline — an agent picking up the ticket could not see it. So it also lands on
+   * the canonical decline ledger (`payment_failures`, for decline-rate analytics) and on the
+   * customer timeline (`customer_events`, which is what agents and tickets actually read).
+   *
+   * ⚠️ `payment_failures.subscription_id` stays NULL and the attempt_type is `one_time`, so dunning
+   * — which selects on subscription_id — cannot pick these up. A one-time charge is not a
+   * subscription at risk, and rotating the customer's card would be wrong.
+   */
+  const fail = async (error: string, ctx?: { rail?: "braintree" | "shopify"; errorCode?: string | null; attemptId?: string | null; last4?: string | null }): Promise<ExecuteResult> => {
     await settle(workspaceId, chargeId, {
       status: "failed", error, failed_at: new Date().toISOString(),
       attempts: (row.attempts as number) + 1,
+      ...(ctx?.rail ? { rail: ctx.rail } : {}),
     });
+    await recordDecline(workspaceId, chargeId, String(row.customer_id), error, ctx);
     return { status: "failed", error };
   };
 
+  const chosenShopifyMethodId = (row.shopify_payment_method_id as string | null) ?? null;
   let contractId: string | undefined;
   let leftPending = false;
   try {
-    // ⭐ BRAINTREE FIRST. A vaulted Braintree card charges directly — no throwaway contract, no
-    // Shopify order-source ambiguity, and the customer stays on internal rails. The Shopify path
-    // is the fallback for customers we cannot reach any other way.
+    // ⭐ BRAINTREE FIRST — unless the caller NAMED a Shopify payment method. A named
+    // `shopify_payment_method_id` is an explicit authorisation to bill that specific card via the
+    // Shopify contract rail; silently routing to a Braintree card would charge a different
+    // instrument than the caller asked for. When no method is named the current behaviour holds:
+    // vaulted Braintree card wins so the customer stays on internal rails.
+    //
     // ⚠️ A throw out of the Braintree rail is INDETERMINATE, never a retry. `transaction.sale`
     // carries no idempotency key, so a settled sale whose response timed out is indistinguishable
     // from one that never happened — and the generic catch below would hand the row back to
@@ -385,7 +555,7 @@ export async function executeOneTimeCharge(
     // a human reconciles one charge, rather than the system silently making several.
     let braintree: Awaited<ReturnType<typeof chargeViaBraintreeIfPossible>>;
     try {
-      braintree = await chargeViaBraintreeIfPossible(workspaceId, row);
+      braintree = chosenShopifyMethodId ? null : await chargeViaBraintreeIfPossible(workspaceId, row);
     } catch (e) {
       const detail = errText(e);
       console.error(`[one-time-charge] INDETERMINATE Braintree outcome for ${chargeId} — may or may not have charged: ${detail}`);
@@ -399,7 +569,7 @@ export async function executeOneTimeCharge(
       return { status: "failed", error: "braintree_indeterminate" };
     }
     if (braintree) {
-      if (!braintree.success) return fail(braintree.error ?? "braintree_declined");
+      if (!braintree.success) return fail(braintree.error ?? "braintree_declined", { rail: "braintree" });
       await settle(workspaceId, chargeId, {
         status: "charged",
         charged_at: new Date().toISOString(),
@@ -412,11 +582,17 @@ export async function executeOneTimeCharge(
       return { status: "charged", orderName: braintree.order_number ?? null };
     }
 
-    const ctx = await resolveShopifyContext(workspaceId, String(row.shopify_customer_id));
-    if ("error" in ctx) return fail(ctx.error);
+    const ctx = await resolveShopifyContext(workspaceId, String(row.shopify_customer_id), chosenShopifyMethodId);
+    if ("error" in ctx) return fail(ctx.error, { rail: "shopify" });
+
+    // ⭐ Record the method actually resolved BEFORE the contract call, so a decline (or a
+    // contract-create failure) that lands next is diagnosable — the current log line names the
+    // instrument but nothing persists it until after the contract is created, which is too late
+    // for anything that fails first.
+    await settle(workspaceId, chargeId, { payment_method_id: ctx.paymentMethodId });
 
     const resolved = await resolveLines(workspaceId, row.items as QueuedChargeItem[]);
-    if ("error" in resolved) return fail(resolved.error);
+    if ("error" in resolved) return fail(resolved.error, { rail: "shopify" });
 
     // Far enough out that the create cannot race midnight; we bill by explicit selector anyway.
     const nextBillingDate = new Date(Date.now() + 86400000 * 30).toISOString();
@@ -455,7 +631,7 @@ export async function executeOneTimeCharge(
         await settle(workspaceId, chargeId, { status: "pending", charging_since: null });
         throw new Error(`transient Shopify failure, retrying: ${msg}`);
       }
-      return fail(msg);
+      return fail(msg, { rail: "shopify" });
     }
 
     const outcome = await awaitBillingAttempt(workspaceId, started.attemptId);
@@ -470,7 +646,9 @@ export async function executeOneTimeCharge(
       // Declined. Deliberately NOT dispatched to dunning: this is not a subscription at risk, and
       // rotating the card / emailing about a subscription the customer does not have would be wrong.
       await settle(workspaceId, chargeId, { billing_attempt_id: started.attemptId });
-      return fail(outcome.error ?? outcome.errorCode ?? "declined");
+      return fail(outcome.error ?? outcome.errorCode ?? "declined", {
+        rail: "shopify", errorCode: outcome.errorCode ?? null, attemptId: started.attemptId,
+      });
     }
 
     let orderUuid: string | undefined;
@@ -583,6 +761,68 @@ async function backfillOrderLinks(workspaceId: string): Promise<number> {
     linked++;
   }
   return linked;
+}
+
+/**
+ * Record a decline where people will actually find it.
+ *
+ * Best-effort on purpose: the charge already failed, and losing the audit trail is bad but losing
+ * the RESULT would be worse — so a failure here is logged, never thrown.
+ */
+async function recordDecline(
+  workspaceId: string,
+  chargeId: string,
+  customerId: string,
+  error: string,
+  ctx?: { rail?: "braintree" | "shopify"; errorCode?: string | null; attemptId?: string | null; last4?: string | null },
+): Promise<void> {
+  try {
+    const admin = createAdminClient();
+    const { data: row } = await admin
+      .from("one_time_charges")
+      .select("shopify_contract_id, payment_method_id, amount_cents, reason, created_by")
+      .eq("id", chargeId).maybeSingle();
+
+    await admin.from("payment_failures").insert({
+      workspace_id: workspaceId,
+      customer_id: customerId,
+      // NULL — there is no subscription, which is also what keeps dunning from adopting this row.
+      subscription_id: null,
+      // NOT NULL on this table. The Braintree rail builds no Shopify contract, so the charge id
+      // stands in — still unique, still traceable back to the row that owns the failure.
+      shopify_contract_id: (row?.shopify_contract_id as string | null) ?? `one-time:${chargeId}`,
+      billing_attempt_id: ctx?.attemptId ?? null,
+      payment_method_id: (row?.payment_method_id as string | null) ?? null,
+      payment_method_last4: ctx?.last4 ?? null,
+      error_code: ctx?.errorCode ?? null,
+      error_message: error,
+      attempt_number: 1,
+      attempt_type: "one_time",
+      succeeded: false,
+      result: "failed",
+    });
+
+    const { logCustomerEvent } = await import("@/lib/customer-events");
+    const amount = row?.amount_cents ? `$${((row.amount_cents as number) / 100).toFixed(2)}` : "a one-time charge";
+    await logCustomerEvent({
+      workspaceId,
+      customerId,
+      eventType: "one_time_charge.declined",
+      source: "commerce",
+      summary: `One-time charge of ${amount} was declined — ${ctx?.errorCode ?? error}`,
+      properties: {
+        one_time_charge_id: chargeId,
+        rail: ctx?.rail ?? null,
+        error_code: ctx?.errorCode ?? null,
+        error_message: error,
+        amount_cents: row?.amount_cents ?? null,
+        reason: row?.reason ?? null,
+        requested_by: row?.created_by ?? null,
+      },
+    });
+  } catch (e) {
+    console.error(`[one-time-charge] could not record decline for ${chargeId}:`, errText(e));
+  }
 }
 
 /** The order a contract's billing attempt produced — needed to link a crash-recovered charge. */

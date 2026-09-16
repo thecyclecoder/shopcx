@@ -15787,11 +15787,17 @@ async function loadCsDirectorCallBrief(
       .eq("id", ticketId)
       .maybeSingle();
     if (ticketRow?.customer_id) {
+      // Widen across the customer's link group so a linked person's WHOLE recent order history
+      // feeds the ledger read — not just the record the ticket happened to land on. Ground
+      // truth: ticket a4e79e9d (Jay) — 29 orders were spread across two linked records and the
+      // ledger surface read zero. See src/lib/cs-director.ts linkedCustomerIdsForDirectorContext.
+      const { linkedCustomerIdsForDirectorContext } = await import("../src/lib/cs-director");
+      const custIds = await linkedCustomerIdsForDirectorContext(db, workspaceId, ticketRow.customer_id);
       const { data: orders } = await db
         .from("orders")
         .select("id, order_number, shopify_order_id")
         .eq("workspace_id", workspaceId)
-        .eq("customer_id", ticketRow.customer_id)
+        .in("customer_id", custIds)
         .order("created_at", { ascending: false })
         .limit(5);
       const shopifyOrders = (orders ?? []).filter((o) => !!o.shopify_order_id);
@@ -15842,11 +15848,15 @@ async function loadCsDirectorCallBrief(
       .eq("id", ticketId)
       .maybeSingle();
     if (ticketRow?.customer_id) {
+      // Cancellation timeline widens across the link group — a subscription lives on one record
+      // and its renewals may live on the sibling, so a bare .eq misses one half of the timeline.
+      const { linkedCustomerIdsForDirectorContext } = await import("../src/lib/cs-director");
+      const custIds = await linkedCustomerIdsForDirectorContext(db, workspaceId, ticketRow.customer_id);
       const { data: subs } = await db
         .from("subscriptions")
         .select("id, shopify_contract_id, status, cancelled_at")
         .eq("workspace_id", workspaceId)
-        .eq("customer_id", ticketRow.customer_id);
+        .in("customer_id", custIds);
       const subRows = subs ?? [];
       const contractIds = subRows
         .map((s) => s.shopify_contract_id)
@@ -15887,7 +15897,7 @@ async function loadCsDirectorCallBrief(
             "order_number, shopify_order_id, created_at, total_cents, financial_status, subscription_id, shopify_contract_id",
           )
           .eq("workspace_id", workspaceId)
-          .eq("customer_id", ticketRow.customer_id)
+          .in("customer_id", custIds)
           .order("created_at", { ascending: true });
         orders = (ordRows ?? []) as typeof orders;
       }
@@ -15958,13 +15968,17 @@ async function loadCsDirectorCallBrief(
       .eq("id", ticketId)
       .maybeSingle();
     if (ticketRow?.customer_id) {
+      // Widen shipment fact-pack targets across the link group — the tracking number the
+      // customer is asking about may live on the sibling record.
+      const { linkedCustomerIdsForDirectorContext } = await import("../src/lib/cs-director");
+      const custIds = await linkedCustomerIdsForDirectorContext(db, workspaceId, ticketRow.customer_id);
       const { data: shipOrders } = await db
         .from("orders")
         .select(
           "id, order_number, fulfillments, amplifier_tracking_number, amplifier_carrier, easypost_status, easypost_detail, easypost_location, easypost_checked_at",
         )
         .eq("workspace_id", workspaceId)
-        .eq("customer_id", ticketRow.customer_id)
+        .in("customer_id", custIds)
         .order("created_at", { ascending: false })
         .limit(5);
       const targets: Array<{

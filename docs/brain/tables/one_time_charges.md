@@ -97,10 +97,56 @@ the only signal that the claim lost.
 **A decline is NOT handed to dunning.** A one-time charge is not a subscription at risk — rotating
 the customer's card and emailing them about a subscription they do not have would be wrong.
 
+### Where a decline shows up
+
+The row is the source of truth, but **nothing reads it**, so a decline also lands in two places:
+
+| | what for |
+|---|---|
+| [[payment_failures]] (`attempt_type='one_time'`, `subscription_id` NULL) | the canonical decline ledger — decline-rate analytics by card and error code |
+| [[customer_events]] (`one_time_charge.declined`) | the customer timeline agents and tickets actually read |
+
+`subscription_id` stays NULL, which is also the mechanism that keeps dunning from adopting the row:
+dunning selects on it. The `one_time` attempt_type makes that explicit to anyone reading a query.
+
+⚠️ The gap was real, not theoretical. On 2026-09-15 a live customer was declined **$196.08**
+(`PAYMENT_METHOD_DECLINED`, Amex •1002) and their timeline showed 27 events, none of them the
+decline — an agent picking up the ticket had no way to see it. The throwaway contract WAS cancelled
+correctly, which is the safety property holding under a real decline for the first time in
+production.
+
+**A declined charge does not auto-retry.** `failed` is terminal for the cron — the cron only picks up
+`pending`, by design, so nothing re-drives a decline without a human decision. To recover the sale,
+an operator (or an agent flow) calls `retryOneTimeCharge(workspaceId, chargeId, newShopifyPaymentMethodId)`:
+it appends the prior attempt to `attempt_history`, clears the last-attempt outcome fields on the
+row, reopens the row from `failed` to `pending` via a compare-and-set on `status='failed'`, and
+sets `shopify_payment_method_id` to the new choice. Same intent, same row, no duplicate charge —
+recovering via a second `one_time_charges` row would risk a double bill if the first row is later
+re-executed by hand.
+
+Refused conditions:
+
+| refusal | what it means |
+|---|---|
+| `not_failed (<status>)` | the row is not in `failed` (only failed rows can retry) |
+| `not_failed` | zero-row CAS — another actor reopened the row first |
+| `same_method_as_last_decline` | the new method equals the one that just declined — a real decline for no diagnostic gain, refused |
+| `payment_method_required` | the new method id is empty |
+| `charge_not_found` | no such row for this workspace |
+
+⚠️ The same-method guard checks against `payment_method_id` (the method the executor actually
+billed), not `shopify_payment_method_id` (the caller's chosen field), because the caller may not
+have named a method — the executor picked `live[0]` and stamped it — and the truth of "what just
+declined" lives on the billed field.
+
 ## Columns
 
 `id` · `workspace_id` · `customer_id` · `shopify_customer_id` · `shopify_contract_id` (the
-throwaway contract; NULL before the run, a *cancelled* contract after) · `payment_method_id` ·
+throwaway contract; NULL before the run, a *cancelled* contract after) ·
+`shopify_payment_method_id` (INPUT — the caller-chosen method to bill; NULL preserves the
+first-non-revoked default) · `payment_method_id` (OUTPUT — the method the executor actually
+billed) · `attempt_history` (jsonb array of prior attempt signatures, appended by
+`retryOneTimeCharge` — see below) ·
 `status` · `items` (jsonb, **internal variant UUIDs** — never `shopify_variant_id`) ·
 `amount_cents` · `currency` · `charge_at` · `reason` · `created_by` · `order_id` ·
 `shopify_order_name` · `billing_attempt_id` · `rail` (`braintree` | `shopify`) · `error` ·
@@ -109,6 +155,25 @@ throwaway contract; NULL before the run, a *cancelled* contract after) · `payme
 
 `reason` and `created_by` are required at create time — a charge nobody can explain is a
 chargeback.
+
+### Naming the card
+
+`shopify_payment_method_id` on the row (input on `CreateOneTimeChargeInput.shopifyPaymentMethodId`)
+is optional and holds a `gid://shopify/CustomerPaymentMethod/…` id. When set, the executor
+validates it against the customer's live method list at charge time and refuses if the id is
+revoked (`chosen_payment_method_revoked`) or absent (`chosen_payment_method_not_found`) — a stale
+id fails **loudly** rather than silently falling back to a different card than the one authorised.
+A caller-named Shopify method also bypasses the Braintree-first preference, because the
+authorisation names the Shopify rail specifically. When it is NULL, behaviour is unchanged: the
+first non-revoked method wins.
+
+Selection is by method id, never by last four digits. One underlying card can appear as multiple
+methods on the same customer (e.g. a raw card and a wallet agreement on the same PAN), which is
+precisely how the 2026-09-15 decline surfaced.
+
+`payment_method_id` records the id the executor actually billed and is stamped **before** the
+Shopify contract call, so a contract-create or attempt failure is still attributable to a specific
+instrument afterwards.
 
 ## Verified live
 

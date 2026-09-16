@@ -67,6 +67,7 @@
     "test:review-candidacy-detector-cron-selection": "tsx --test src/lib/inngest/review-candidacy-detector-cron.selection.test.ts",
     "test:post-order-review-ask-detector-cron-selection": "tsx --test src/lib/inngest/post-order-review-ask-detector-cron.selection.test.ts",
     "test:review-request-compose": "tsx --test src/lib/review-request-compose.test.ts",
+    "test:review-request-cx-surface": "tsx --test src/lib/review-request-cx-surface.test.ts",
     "test:grep-smart-case": "tsx --test src/lib/spec-check-runner.smart-case.test.ts",
     "test:broken-check-escalate": "tsx --test src/lib/roadmap-actions.broken-check-escalate.test.ts",
     "test:specs-table-resolve-branch-ref": "tsx --test src/lib/specs-table.resolve-branch-ref.test.ts",
@@ -155,6 +156,7 @@
     "test:storefront-optimizer-reask": "tsx --test src/lib/storefront-optimizer-reask.test.ts",
     "test:mario-terminal-spec-guard": "tsx --test src/lib/mario.terminal-spec-enqueue-guard.test.ts",
     "test:mario-build-started-no-build-done": "tsx --test src/lib/mario.build-started-no-build-done.test.ts",
+    "test:mario-failed-build-escalation-anchor": "tsx --test src/lib/mario.failed-build-escalation-anchor.test.ts",
     "test:agent-jobs-columns": "tsx --test src/lib/agent-jobs-columns.test.ts",
     "test:build-lifecycle": "tsx --test src/lib/build-lifecycle.test.ts",
     "test:box-auth-refresh": "tsx --test scripts/builder-worker.auth-refresh.test.ts",
@@ -323,7 +325,8 @@
     "test:shopify-one-time-charge": "tsx --test src/lib/commerce/shopify-one-time-charge.test.ts",
     "test:dunning-charge-ordinal": "tsx --test src/lib/dunning-charge.ordinal.test.ts",
     "test:engine-ranking": "tsx --test src/lib/engine-ranking.test.ts",
-    "test:shopcx-normalize": "tsx --test src/lib/commerce/shopcx-normalize.test.ts"
+    "test:shopcx-normalize": "tsx --test src/lib/commerce/shopcx-normalize.test.ts",
+    "test:shopcx-renewal-anchor": "tsx --test src/lib/inngest/shopcx-renewal-anchor.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.165",

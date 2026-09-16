@@ -12,6 +12,10 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **A one-time charge must be able to name the card it charges** · verified 2026-09-15 · → [[../tables/one_time_charges]]
+- **Journey lead-ins must keep their paragraphs** · verified 2026-09-15 · → [[../libraries/journey-delivery]] § Lead-in shares the ticket-delivery paragraph shaper
+- **Mario's failed-build init_loop_guard dedupe anchors lookback to failure time** · verified 2026-09-15 · → [[../libraries/mario]]
+- **Ticket surfaces must read the whole linked customer** · verified 2026-09-15 · → [[../libraries/tickets-read]] · [[../libraries/customer-links]] · [[../recipes/open-tickets-queue]]
 - **Auto-dismiss self-resolved portal replaceVariants (swap) failures** · verified 2026-09-14 · → [[../libraries/portal__remediation]]
 - **Fix assisted-subscription-purchase variant resolution** · verified 2026-09-13 · → [[../lifecycles/subscription-billing]]
 - **Reduce call volume / cache the hot query on goals** · verified 2026-09-13 · → [[../libraries/goals-table]]

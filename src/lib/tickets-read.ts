@@ -13,6 +13,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { resolveMergedTarget } from "@/lib/ticket-merge";
+import { linkGroupIds } from "@/lib/customer-links";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -174,6 +175,102 @@ export async function getTicketHandleJobs(admin: Admin, workspaceId: string, tic
   });
 }
 
+export interface LinkedSubscriptionRow {
+  id: string;
+  customer_id: string | null;
+  status: string | null;
+  next_billing_date: string | null;
+  last_payment_status: string | null;
+  items: Array<{ title?: string; variant_title?: string; variant_id?: string; quantity?: number; price_cents?: number }> | null;
+}
+
+export interface LinkedOrderRow {
+  order_number: string | null;
+  customer_id: string | null;
+  financial_status: string | null;
+  fulfillment_status: string | null;
+  total_cents: number | null;
+  created_at: string | null;
+  delivery_status: string | null;
+  delivered_at: string | null;
+  amplifier_status: string | null;
+  amplifier_tracking_number: string | null;
+  line_items: Array<{ title?: string; variant_title?: string; quantity?: number }> | null;
+}
+
+export interface LinkedReturnRow {
+  id: string;
+  customer_id: string | null;
+  status: string | null;
+  tracking_number: string | null;
+  net_refund_cents: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/**
+ * Subscriptions across the ticket customer's entire link group ([[../libraries/customer-links]] —
+ * a person with two records has both records feed one history). `linkGroupIds` returns
+ * `[customerId]` when there is no group, so this is a safe drop-in for an `.eq`. Ground truth:
+ * ticket a4e79e9d — the customer's records were linked 2026-06-15 and the surface still bare-
+ * .eq'd on the record the email landed on, so 29 orders and 3 subs rendered as 0.
+ */
+export async function getLinkedSubscriptions(
+  admin: Admin,
+  workspaceId: string,
+  customerId: string,
+): Promise<LinkedSubscriptionRow[]> {
+  const ids = await linkGroupIds(admin, workspaceId, customerId);
+  const { data } = await admin
+    .from("subscriptions")
+    .select("id, customer_id, status, next_billing_date, last_payment_status, items")
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", ids);
+  return (data as LinkedSubscriptionRow[]) ?? [];
+}
+
+/**
+ * Recent orders across the ticket customer's entire link group. `limit` caps rows and defaults
+ * to the same 6 the founder queue surface printed (open-tickets.ts) — the widening is what
+ * matters, not the shape. Ordered newest first.
+ */
+export async function getLinkedOrders(
+  admin: Admin,
+  workspaceId: string,
+  customerId: string,
+  limit: number = 6,
+): Promise<LinkedOrderRow[]> {
+  const ids = await linkGroupIds(admin, workspaceId, customerId);
+  const { data } = await admin
+    .from("orders")
+    .select(
+      "order_number, customer_id, financial_status, fulfillment_status, total_cents, created_at, delivery_status, delivered_at, amplifier_status, amplifier_tracking_number, line_items",
+    )
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", ids)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  return (data as LinkedOrderRow[]) ?? [];
+}
+
+/** Returns across the ticket customer's entire link group (newest first, capped). */
+export async function getLinkedReturns(
+  admin: Admin,
+  workspaceId: string,
+  customerId: string,
+  limit: number = 6,
+): Promise<LinkedReturnRow[]> {
+  const ids = await linkGroupIds(admin, workspaceId, customerId);
+  const { data } = await admin
+    .from("returns")
+    .select("id, customer_id, status, tracking_number, net_refund_cents, created_at, updated_at")
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", ids)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  return (data as LinkedReturnRow[]) ?? [];
+}
+
 /** Tickets that were merged INTO this one (reply-duplicates / prior threads absorbed here). */
 export async function getMergedFromTickets(
   admin: Admin,
@@ -195,6 +292,18 @@ export interface TicketInvestigation {
   directions: TicketDirectionRow[];
   handleJobs: HandleJobRow[];
   mergedFrom: Array<{ id: string; subject: string | null; status: string | null; created_at: string | null }>;
+  /**
+   * Every customer UUID in the ticket customer's link group (self included). Populated via
+   * [[customer-links]] `linkGroupIds` so a linked person's whole history renders regardless of
+   * which record the message landed on. `[]` when the ticket has no customer_id.
+   */
+  linkedCustomerIds: string[];
+  /** Subscriptions across the whole link group, not just the ticket's record. */
+  subscriptions: LinkedSubscriptionRow[];
+  /** Recent orders across the whole link group, newest first. */
+  orders: LinkedOrderRow[];
+  /** Returns across the whole link group, newest first. */
+  returns: LinkedReturnRow[];
 }
 
 /** Composite read: assemble a ticket's entire picture in one call (merge-aware). */
@@ -209,15 +318,28 @@ export async function investigateTicket(admin: Admin, idOrUrl: string): Promise<
       directions: [],
       handleJobs: [],
       mergedFrom: [],
+      linkedCustomerIds: [],
+      subscriptions: [],
+      orders: [],
+      returns: [],
     };
   }
-  const [customer, messages, directions, handleJobs, mergedFrom] = await Promise.all([
-    getCustomerLite(admin, ticket.customer_id),
-    getTicketMessages(admin, ticket.id),
-    getTicketDirections(admin, ticket.id),
-    getTicketHandleJobs(admin, ticket.workspace_id, ticket.id),
-    getMergedFromTickets(admin, ticket.id),
-  ]);
+  // Commerce reads widen across the customer's link group so a linked person shows one combined
+  // history regardless of which record the message arrived on. Empty when the ticket has no
+  // customer_id — the loyalty / dunning ticket bodies with no customer entity attached.
+  const cid = ticket.customer_id;
+  const [customer, messages, directions, handleJobs, mergedFrom, linkedCustomerIds, subscriptions, orders, returns] =
+    await Promise.all([
+      getCustomerLite(admin, cid),
+      getTicketMessages(admin, ticket.id),
+      getTicketDirections(admin, ticket.id),
+      getTicketHandleJobs(admin, ticket.workspace_id, ticket.id),
+      getMergedFromTickets(admin, ticket.id),
+      cid ? linkGroupIds(admin, ticket.workspace_id, cid) : Promise.resolve<string[]>([]),
+      cid ? getLinkedSubscriptions(admin, ticket.workspace_id, cid) : Promise.resolve<LinkedSubscriptionRow[]>([]),
+      cid ? getLinkedOrders(admin, ticket.workspace_id, cid) : Promise.resolve<LinkedOrderRow[]>([]),
+      cid ? getLinkedReturns(admin, ticket.workspace_id, cid) : Promise.resolve<LinkedReturnRow[]>([]),
+    ]);
   return {
     ref: { requested: requestedId, resolved: resolvedId, redirected },
     ticket,
@@ -226,6 +348,10 @@ export async function investigateTicket(admin: Admin, idOrUrl: string): Promise<
     directions,
     handleJobs,
     mergedFrom,
+    linkedCustomerIds,
+    subscriptions,
+    orders,
+    returns,
   };
 }
 

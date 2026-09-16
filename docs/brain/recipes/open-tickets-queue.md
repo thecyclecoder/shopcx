@@ -33,8 +33,13 @@ The predicate is [[../libraries/escalation-health]] `classifyEscalationHealth({ 
 
 The reopened case is surfaced (not silently hidden) because a human reading the queue still wants to see a reopened old ticket — it just is not a dropped hand-off. Silently hiding it would trade a false positive for a false negative.
 
+## Linked-customer surfaces
+
+The queue surface reads subscriptions, orders, and returns via [[../libraries/customer-links]] `linkGroupIds` so a customer with multiple linked records (email aliases, re-registrations) shows the combined history in one ticket, not separate empty surfaces per record. A surface showing zeros while the link group has 29 orders is a director-decision failure. Ground truth: ticket a4e79e9d.
+
 ## Related
 
 - Predicate: [[../libraries/escalation-health]]
 - Escalation lifecycle: [[../recipes/escalate-ticket]]
+- Linked-customer expansion: [[../libraries/customer-links]]
 - The dropped-hand-off signal feeds the CS function's [[../functions/cs]] "Escalation triage quality" mandate

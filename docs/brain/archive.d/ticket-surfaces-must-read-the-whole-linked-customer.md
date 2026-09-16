@@ -1,0 +1,1 @@
+- **Ticket surfaces must read the whole linked customer** · verified 2026-09-15 · → [[../libraries/tickets-read]] · [[../libraries/customer-links]] · [[../recipes/open-tickets-queue]]
