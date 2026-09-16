@@ -31,6 +31,8 @@ Compose a first-touch review-request. The `trigger` field is the branch key — 
   - `window='first-time'` ⇒ *"You tried X for the first time — a real read from someone new to it is the most valuable kind."*
   - null / unknown ⇒ *"Hoping to hear how X has been for you."*
 
+The post-order `window` + `tenureDays` are NOT the raw detector's flags — they are derived from the customer's merged order + subscription surface across linked identities by [[review-request-cx-surface]] `deriveCxSurfacePersonalization`. The composer's null-fallthrough branch is the shape that renders when the derivation withholds a claim (blind history, no observable activity, or a surface contradiction), so a caller that cannot verify the fact automatically gets a truthful message.
+
 The angle branch (defend vs fence-sitter) is TRIGGER-INDEPENDENT — both triggers use the same angle-shaped ask line so the validator's `unapproved_pretext` rail sees the same value regardless of trigger.
 
 ## Channel branch
