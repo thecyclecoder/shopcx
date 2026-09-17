@@ -21,6 +21,25 @@ door.
 asked — charging a second rail would risk billing them twice. Only the *absence* of a Braintree
 token falls through.
 
+### `rail_reason` — WHY this rail was picked
+
+`rail` alone is ambiguous on the Shopify side (both a caller-named Shopify method and a Braintree
+miss settle `rail='shopify'`). `rail_reason` distinguishes them so a fall-through is legible on
+the row rather than inferred from a log line — the invariant Phase 2 of
+[[../specs/payment-method-lookups-must-span-linked-accounts]] exists to add.
+
+| `rail_reason` | meaning |
+|---|---|
+| `braintree_preferred` | active Braintree card was found in the customer's link group and used |
+| `braintree_indeterminate` | Braintree threw; outcome unknown. Terminal + loud, never falls through |
+| `shopify_named_instrument` | caller named a specific `shopify_payment_method_id`; Braintree was bypassed because that authorisation names the Shopify rail specifically |
+| `shopify_no_braintree_token` | no active Braintree token in the customer's link group — the fall-through path |
+
+Post-Phase-1 (link-group-spanning lookup, [[../libraries/customer-links]] `linkGroupIds`), a
+`shopify_no_braintree_token` on a customer who plainly has Braintree cards on a linked sibling
+should be rare enough to be suspicious. Stamped at every rail-selection settle site by
+`executeOneTimeCharge`; cleared on retry (see below) and preserved on `attempt_history`.
+
 ## Why the Shopify rail needs a contract at all
 
 A Shop Pay agreement or a Shopify-vaulted card cannot be charged by any Admin API call except
@@ -149,7 +168,9 @@ billed) · `attempt_history` (jsonb array of prior attempt signatures, appended 
 `retryOneTimeCharge` — see below) ·
 `status` · `items` (jsonb, **internal variant UUIDs** — never `shopify_variant_id`) ·
 `amount_cents` · `currency` · `charge_at` · `reason` · `created_by` · `order_id` ·
-`shopify_order_name` · `billing_attempt_id` · `rail` (`braintree` | `shopify`) · `error` ·
+`shopify_order_name` · `billing_attempt_id` · `rail` (`braintree` | `shopify`) ·
+`rail_reason` (`braintree_preferred` | `braintree_indeterminate` | `shopify_named_instrument` |
+`shopify_no_braintree_token` — see § `rail_reason` above) · `error` ·
 `attempts` · `charging_since` ·
 `charged_at` · `failed_at` · `cancelled_at` · `created_at` · `updated_at`
 

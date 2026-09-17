@@ -25,6 +25,33 @@ queued against, not to whichever sibling happens to hold the card. Ground truth:
 `40c66b13` (has `shopify_customer_id`); pre-fix, the narrow lookup missed the card and fell
 through to bill an Amex ••1002 that had already declined.
 
+### `rail_reason` — a rail may not silently swap to another card (Phase 2)
+
+`rail='shopify'` alone is ambiguous: it can mean the caller **named** a Shopify method (explicit
+authorisation for this rail) or Braintree **missed** and we fell through. Post-Phase-1 a miss
+should be rare enough to be suspicious, so the executor stamps `rail_reason` at every
+rail-selection settle site to make the fall-through legible on the row:
+
+- `braintree_preferred` — Braintree ran (its guard found a card in the link group).
+- `braintree_indeterminate` — Braintree threw. Terminal + loud (never falls through — the sale
+  API has no idempotency key, so a settled-then-timed-out response is indistinguishable from one
+  that never happened).
+- `shopify_named_instrument` — `shopify_payment_method_id` was set on the row; Braintree was
+  bypassed.
+- `shopify_no_braintree_token` — Braintree returned null (no active token in the link group).
+
+⭐ **A named-instrument miss REFUSES rather than falls through.** When the caller named a
+Shopify method and `resolveShopifyContext` returns `chosen_payment_method_not_found` /
+`chosen_payment_method_revoked`, the executor forwards the error via `fail(...)` — it must never
+silently fall back to a different card than the one authorised. Charging a different card than
+the one authorised is the failure Phase 2 exists to prevent.
+
+`retryOneTimeCharge` clears `rail_reason` on the reopened row and preserves the prior value on
+`attempt_history` (part of the decline signature the human sees before choosing which card to
+try next). The sweeper's crash-recovery path preserves any pre-crash `rail_reason` and otherwise
+infers `shopify_named_instrument` vs `shopify_no_braintree_token` from the row's
+`shopify_payment_method_id`.
+
 ## Exports
 
 | Export | Notes |

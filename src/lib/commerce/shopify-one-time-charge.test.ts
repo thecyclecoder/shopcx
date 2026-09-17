@@ -180,6 +180,83 @@ test("retryOneTimeCharge refuses the same method that just declined", () => {
   );
 });
 
+test("the rail records WHY it was chosen — rail_reason is stamped at every rail-selection settle (payment-method-lookups-must-span-linked-accounts Phase 2)", () => {
+  // Phase 2's whole point: on the Shopify rail, `rail='shopify'` alone is ambiguous — the caller
+  // may have NAMED a Shopify method (explicit authorisation for this rail) or Braintree may have
+  // MISSED (fell through). rail_reason must distinguish them at settle time so a Braintree miss
+  // is legible on the row rather than inferred from a log line.
+  const exec = SRC.slice(SRC.indexOf("export async function executeOneTimeCharge"));
+  const body = exec.slice(0, exec.indexOf("\n}\n") + 3);
+
+  assert.match(
+    body,
+    /railReason: RailReason \| null = null/,
+    "the executor must carry a rail_reason variable across the flow, resolved at each decision point",
+  );
+  assert.match(
+    body,
+    /railReason = "braintree_preferred"/,
+    "the Braintree branch must stamp rail_reason='braintree_preferred' when it runs",
+  );
+  assert.match(
+    body,
+    /railReason = chosenShopifyMethodId \? "shopify_named_instrument" : "shopify_no_braintree_token"/,
+    "on the Shopify rail, rail_reason must distinguish a caller-named method from a Braintree miss — this is the legibility Phase 2 exists to add",
+  );
+  assert.match(
+    body,
+    /rail_reason: "braintree_indeterminate"/,
+    "a Braintree throw settles as terminal + loud with rail_reason='braintree_indeterminate'",
+  );
+  // The rail_reason value must reach the terminal / pending settle sites.
+  assert.match(body, /rail_reason: railReason/,
+    "railReason must be persisted on the settle patch (the row is the durable legibility surface)");
+});
+
+test("named Shopify instrument miss REFUSES — never falls back to a different card (Phase 2 invariant)", () => {
+  // The whole reason for Phase 2: charging a different card than the one authorised is the
+  // failure this phase exists to prevent. resolveShopifyContext already returns
+  // chosen_payment_method_not_found / chosen_payment_method_revoked; the executor must forward
+  // that error via fail(...) rather than silently falling through to any other lookup.
+  const exec = SRC.slice(SRC.indexOf("export async function executeOneTimeCharge"));
+  const body = exec.slice(0, exec.indexOf("\n}\n") + 3);
+  const resolveCall = body.indexOf("resolveShopifyContext");
+  assert.ok(resolveCall > 0, "the executor must call resolveShopifyContext for the Shopify rail");
+  const after = body.slice(resolveCall);
+  assert.match(
+    after,
+    /if \("error" in ctx\) \{[\s\S]{0,500}?return fail\(ctx\.error, \{ rail: "shopify", railReason \}\)/,
+    "a resolver error (named-instrument miss included) must be forwarded to fail() with the current rail + railReason — never a silent fallback",
+  );
+});
+
+test("rail_reason migration exists and constrains to the enumerated set", () => {
+  const RAIL_REASON_MIGRATION = readFileSync(
+    join(__dirname, "../../../supabase/migrations/20261232120000_one_time_charges_rail_reason.sql"),
+    "utf8",
+  );
+  assert.match(RAIL_REASON_MIGRATION, /ADD COLUMN IF NOT EXISTS rail_reason text/);
+  assert.match(
+    RAIL_REASON_MIGRATION,
+    /rail_reason IS NULL OR rail_reason IN \([\s\S]*?'braintree_preferred'[\s\S]*?'braintree_indeterminate'[\s\S]*?'shopify_named_instrument'[\s\S]*?'shopify_no_braintree_token'/,
+    "the CHECK must enumerate exactly the four allowed values (a fifth would be a silent write nobody notices)",
+  );
+  assert.doesNotMatch(RAIL_REASON_MIGRATION, /NOT NULL/i,
+    "the column must be nullable — existing rows don't need to be backfilled");
+});
+
+test("retryOneTimeCharge clears rail_reason and preserves the prior one on attempt_history", () => {
+  // A retry re-attempts the charge on a new method, so the prior attempt's rail_reason belongs on
+  // attempt_history (part of the decline signature the human sees), and the reopened row's own
+  // rail_reason must be cleared so a stale value can't be misread as this attempt's outcome.
+  const fn = SRC.slice(SRC.indexOf("export async function retryOneTimeCharge"));
+  const body = fn.slice(0, fn.indexOf("\n}\n") + 3);
+  assert.match(body, /rail_reason: \(row\.rail_reason as string \| null\) \?\? null/,
+    "the appended history entry must carry the prior rail_reason");
+  assert.match(body, /rail_reason: null,\s*failed_at: null/,
+    "the reopen update must clear rail_reason on the row itself");
+});
+
 test("retryOneTimeCharge appends prior attempt to attempt_history before reopening", () => {
   // The whole point of retrying on the SAME row is to preserve the decline history without a
   // duplicate charge row. The prior attempt's signature must be captured BEFORE the row is

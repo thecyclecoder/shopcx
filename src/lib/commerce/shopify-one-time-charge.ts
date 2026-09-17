@@ -40,6 +40,19 @@ import { errText } from "@/lib/error-text";
 
 export type OneTimeChargeStatus = "pending" | "charging" | "charged" | "failed" | "cancelled";
 
+/**
+ * Why the executor picked the rail it did — the legibility Phase 2 exists to add. `rail` records
+ * WHICH rail ran; `rail_reason` records WHY. Post-Phase-1 a Braintree miss should be rare, so
+ * distinguishing 'we billed Shopify because the caller named a Shopify method' from 'we billed
+ * Shopify because we could not find a Braintree token' is what makes a real fall-through
+ * suspicious after the fact rather than inferred from a log line.
+ */
+export type RailReason =
+  | "braintree_preferred"
+  | "braintree_indeterminate"
+  | "shopify_named_instrument"
+  | "shopify_no_braintree_token";
+
 export interface QueuedChargeItem {
   /** INTERNAL variant UUID — never a shopify_variant_id (CLAUDE.md § internal joins use UUIDs). */
   variant_id: string;
@@ -162,7 +175,7 @@ export async function retryOneTimeCharge(
   const { data: row } = await admin
     .from("one_time_charges")
     .select(
-      "id, status, shopify_payment_method_id, payment_method_id, billing_attempt_id, error, rail, attempts, attempt_history, failed_at",
+      "id, status, shopify_payment_method_id, payment_method_id, billing_attempt_id, error, rail, rail_reason, attempts, attempt_history, failed_at",
     )
     .eq("workspace_id", workspaceId)
     .eq("id", chargeId)
@@ -187,6 +200,7 @@ export async function retryOneTimeCharge(
     {
       payment_method_id: (row.payment_method_id as string | null) ?? null,
       rail: (row.rail as string | null) ?? null,
+      rail_reason: (row.rail_reason as string | null) ?? null,
       error: (row.error as string | null) ?? null,
       billing_attempt_id: (row.billing_attempt_id as string | null) ?? null,
       attempts_at_failure: (row.attempts as number | null) ?? null,
@@ -208,6 +222,7 @@ export async function retryOneTimeCharge(
       billing_attempt_id: null,
       error: null,
       rail: null,
+      rail_reason: null,
       failed_at: null,
       charging_since: null,
       // The prior throwaway contract is already CANCELLED (see the finally block); clearing the
@@ -535,17 +550,31 @@ export async function executeOneTimeCharge(
    * — which selects on subscription_id — cannot pick these up. A one-time charge is not a
    * subscription at risk, and rotating the customer's card would be wrong.
    */
-  const fail = async (error: string, ctx?: { rail?: "braintree" | "shopify"; errorCode?: string | null; attemptId?: string | null; last4?: string | null }): Promise<ExecuteResult> => {
+  const fail = async (
+    error: string,
+    ctx?: {
+      rail?: "braintree" | "shopify";
+      railReason?: RailReason | null;
+      errorCode?: string | null;
+      attemptId?: string | null;
+      last4?: string | null;
+    },
+  ): Promise<ExecuteResult> => {
     await settle(workspaceId, chargeId, {
       status: "failed", error, failed_at: new Date().toISOString(),
       attempts: (row.attempts as number) + 1,
       ...(ctx?.rail ? { rail: ctx.rail } : {}),
+      ...(ctx?.railReason ? { rail_reason: ctx.railReason } : {}),
     });
     await recordDecline(workspaceId, chargeId, String(row.customer_id), error, ctx);
     return { status: "failed", error };
   };
 
   const chosenShopifyMethodId = (row.shopify_payment_method_id as string | null) ?? null;
+  // ⭐ Rail-selection reason — computed at each decision point so a Braintree miss is legible on
+  // the row rather than inferred from a log line (Phase 2 of payment-method-lookups-must-span-
+  // linked-accounts). Assigned to the row via `settle(...)` on every terminal / pending outcome.
+  let railReason: RailReason | null = null;
   let contractId: string | undefined;
   let leftPending = false;
   try {
@@ -572,16 +601,19 @@ export async function executeOneTimeCharge(
         error: `braintree_indeterminate:${detail}`,
         failed_at: new Date().toISOString(),
         rail: "braintree",
+        rail_reason: "braintree_indeterminate" satisfies RailReason,
         attempts: (row.attempts as number) + 1,
       });
       return { status: "failed", error: "braintree_indeterminate" };
     }
     if (braintree) {
-      if (!braintree.success) return fail(braintree.error ?? "braintree_declined", { rail: "braintree" });
+      railReason = "braintree_preferred";
+      if (!braintree.success) return fail(braintree.error ?? "braintree_declined", { rail: "braintree", railReason });
       await settle(workspaceId, chargeId, {
         status: "charged",
         charged_at: new Date().toISOString(),
         rail: "braintree",
+        rail_reason: railReason,
         amount_cents: braintree.amount_cents ?? null,
         shopify_order_name: braintree.order_number ?? null,
         attempts: (row.attempts as number) + 1,
@@ -590,8 +622,22 @@ export async function executeOneTimeCharge(
       return { status: "charged", orderName: braintree.order_number ?? null };
     }
 
+    // ⭐ We are on the Shopify rail. Distinguish the two reasons: the caller NAMED a Shopify
+    // method (explicit authorisation for this rail), or the Braintree branch returned null (miss —
+    // no active token in the customer's link group). Post-Phase-1, the second should be rare
+    // enough to be suspicious; recording the reason makes it legible on the row.
+    railReason = chosenShopifyMethodId ? "shopify_named_instrument" : "shopify_no_braintree_token";
+
     const ctx = await resolveShopifyContext(workspaceId, String(row.shopify_customer_id), chosenShopifyMethodId);
-    if ("error" in ctx) return fail(ctx.error, { rail: "shopify" });
+    if ("error" in ctx) {
+      // ⭐ REFUSE ON A NAMED-INSTRUMENT MISS. When the caller named a specific Shopify method and
+      // that id is absent/revoked in the live list, `resolveShopifyContext` returns
+      // `chosen_payment_method_not_found` / `chosen_payment_method_revoked`. Failing here (rather
+      // than silently falling back to a different card) is the whole invariant Phase 2 pins:
+      // charging a different card than the one authorised is the failure this phase exists to
+      // prevent.
+      return fail(ctx.error, { rail: "shopify", railReason });
+    }
 
     // ⭐ Record the method actually resolved BEFORE the contract call, so a decline (or a
     // contract-create failure) that lands next is diagnosable — the current log line names the
@@ -600,7 +646,7 @@ export async function executeOneTimeCharge(
     await settle(workspaceId, chargeId, { payment_method_id: ctx.paymentMethodId });
 
     const resolved = await resolveLines(workspaceId, row.items as QueuedChargeItem[]);
-    if ("error" in resolved) return fail(resolved.error, { rail: "shopify" });
+    if ("error" in resolved) return fail(resolved.error, { rail: "shopify", railReason });
 
     // Far enough out that the create cannot race midnight; we bill by explicit selector anyway.
     const nextBillingDate = new Date(Date.now() + 86400000 * 30).toISOString();
@@ -639,7 +685,7 @@ export async function executeOneTimeCharge(
         await settle(workspaceId, chargeId, { status: "pending", charging_since: null });
         throw new Error(`transient Shopify failure, retrying: ${msg}`);
       }
-      return fail(msg, { rail: "shopify" });
+      return fail(msg, { rail: "shopify", railReason });
     }
 
     const outcome = await awaitBillingAttempt(workspaceId, started.attemptId);
@@ -647,7 +693,11 @@ export async function executeOneTimeCharge(
       // 3DS or a poll timeout — NOT settled. Leave it `charging` so nothing double-charges, and
       // let the sweeper reconcile it against Shopify rather than guessing here.
       leftPending = true;
-      await settle(workspaceId, chargeId, { billing_attempt_id: started.attemptId, rail: "shopify" });
+      await settle(workspaceId, chargeId, {
+        billing_attempt_id: started.attemptId,
+        rail: "shopify",
+        rail_reason: railReason,
+      });
       return { status: "pending" };
     }
     if (!outcome.success) {
@@ -655,7 +705,7 @@ export async function executeOneTimeCharge(
       // rotating the card / emailing about a subscription the customer does not have would be wrong.
       await settle(workspaceId, chargeId, { billing_attempt_id: started.attemptId });
       return fail(outcome.error ?? outcome.errorCode ?? "declined", {
-        rail: "shopify", errorCode: outcome.errorCode ?? null, attemptId: started.attemptId,
+        rail: "shopify", railReason, errorCode: outcome.errorCode ?? null, attemptId: started.attemptId,
       });
     }
 
@@ -670,6 +720,7 @@ export async function executeOneTimeCharge(
       status: "charged",
       charged_at: new Date().toISOString(),
       rail: "shopify",
+      rail_reason: railReason,
       billing_attempt_id: started.attemptId,
       shopify_order_name: outcome.orderName ?? null,
       attempts: (row.attempts as number) + 1,
@@ -782,7 +833,13 @@ async function recordDecline(
   chargeId: string,
   customerId: string,
   error: string,
-  ctx?: { rail?: "braintree" | "shopify"; errorCode?: string | null; attemptId?: string | null; last4?: string | null },
+  ctx?: {
+    rail?: "braintree" | "shopify";
+    railReason?: RailReason | null;
+    errorCode?: string | null;
+    attemptId?: string | null;
+    last4?: string | null;
+  },
 ): Promise<void> {
   try {
     const admin = createAdminClient();
@@ -821,6 +878,7 @@ async function recordDecline(
       properties: {
         one_time_charge_id: chargeId,
         rail: ctx?.rail ?? null,
+        rail_reason: ctx?.railReason ?? null,
         error_code: ctx?.errorCode ?? null,
         error_message: error,
         amount_cents: row?.amount_cents ?? null,
@@ -872,7 +930,7 @@ export async function sweepOneTimeCharges(workspaceId: string): Promise<{ reconc
   // would be invisible here forever. Ask for those explicitly.
   const { data: stuck } = await admin
     .from("one_time_charges")
-    .select("id, shopify_contract_id, billing_attempt_id, charging_since, attempts")
+    .select("id, shopify_contract_id, billing_attempt_id, charging_since, attempts, shopify_payment_method_id, rail_reason")
     .eq("workspace_id", workspaceId)
     .eq("status", "charging")
     .or(`charging_since.lt.${new Date(Date.now() - 30 * 60 * 1000).toISOString()},charging_since.is.null`)
@@ -896,10 +954,18 @@ export async function sweepOneTimeCharges(workspaceId: string): Promise<{ reconc
       // `order_type='recurring'`, defeating the whole reason these rows live outside
       // `subscriptions`. The order name comes from the cycle's own billing attempts.
       const orderName = await orderNameForCycle(workspaceId, cid);
+      // Preserve rail_reason if the executor stamped it before crashing; otherwise infer from the
+      // row's `shopify_payment_method_id` — a set value means the caller named a Shopify method
+      // (shopify_named_instrument); null means we fell through from Braintree
+      // (shopify_no_braintree_token). We are here BECAUSE a contract exists, so the rail is Shopify.
+      const inferredReason: RailReason = row.shopify_payment_method_id
+        ? "shopify_named_instrument" : "shopify_no_braintree_token";
+      const railReason: RailReason = (row.rail_reason as RailReason | null) ?? inferredReason;
       await settle(workspaceId, String(row.id), {
         status: "charged",
         charged_at: new Date().toISOString(),
         rail: "shopify",
+        rail_reason: railReason,
         ...(orderName ? { shopify_order_name: orderName } : {}),
       });
     } else {
