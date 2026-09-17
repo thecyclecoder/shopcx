@@ -16695,6 +16695,15 @@ async function runCsDirectorCallJob(job: Job) {
         // reads "Already done by June: …" for the settled work and the Diagnosis/Recommended remedy
         // lines describe the RESIDUE the founder still owns. Null when the verdict carried no
         // `remedy` (plain escalation).
+        //
+        // a-flagged-allergen-order-must-not-ship Phase 2 — load the allergen-hold state on the
+        // customer's most-recent order at card-mint time and thread it in, so the CEO card body
+        // shows a distinguishable line for held / hold refused / never attempted. On a live
+        // allergy escalation, a `null` state renders as an ALERT ("no hold — parcel still
+        // moving"). Read-only + swallowed on error inside `loadAllergenHoldForCard` — the
+        // card-mint MUST NOT fail on this read.
+        const { loadAllergenHoldForCard } = await import("../src/lib/order-holds");
+        const allergenHold = await loadAllergenHoldForCard(db, job.workspace_id, ticketId);
         const row = buildEscalateFounderCard({
           ticketId,
           reasoning: verdict.reasoning,
@@ -16704,6 +16713,7 @@ async function runCsDirectorCallJob(job: Job) {
           blackSwanSource: cls.isBlackSwan ? (cls.source ?? null) : null,
           recommendedRemedy: verdict.recommended_remedy ?? null,
           partialRemedyOutcome: (applyResult?.partial_remedy_outcome ?? null) as Parameters<typeof buildEscalateFounderCard>[0]["partialRemedyOutcome"],
+          allergenHold,
         });
         const { error: notifErr } = await db.from("dashboard_notifications").insert({
           workspace_id: job.workspace_id,

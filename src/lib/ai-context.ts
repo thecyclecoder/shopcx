@@ -232,11 +232,21 @@ export async function assembleTicketContext(
       }
     }
 
-    // Fetch recent orders (across linked profiles)
-    // allCustomerIds already defined above
+    // Fetch recent orders (across linked profiles). Phase 2 of
+    // a-flagged-allergen-order-must-not-ship — pull the hold_* columns off `orders`
+    // so the recent-orders block can render the placed/refused/never-attempted line
+    // via `renderOrderHoldForContext`. The three states MUST render distinguishably
+    // in the handling-agent's system prompt: a null hold on a live allergy ticket
+    // needs to read as "no hold — parcel still moving; do NOT promise a stop"
+    // (the exact false-reassurance mode the spec's ground-truth ticket 0909ec6f
+    // hit — the AI told the customer twice we were stopping the parcel with no
+    // hold actually in place).
     let ordersQuery = admin
       .from("orders")
-      .select("order_number, financial_status, fulfillment_status, total_cents, currency, created_at, fulfillments")
+      .select(
+        "order_number, financial_status, fulfillment_status, total_cents, currency, created_at, fulfillments, " +
+          "hold_status, hold_kind, hold_reason, hold_placed_at, hold_refused_reason",
+      )
       .eq("workspace_id", workspaceId)
       .order("created_at", { ascending: false })
       .limit(3);
@@ -245,16 +255,46 @@ export async function assembleTicketContext(
     } else {
       ordersQuery = ordersQuery.in("customer_id", allCustomerIds);
     }
-    const { data: orders } = await ordersQuery;
+    const { data: ordersRaw } = await ordersQuery;
+
+    // The widened select (Phase 2 hold_* columns) pushes Supabase's inferred row type past its
+    // schema-derived shape; cast once through `unknown` to a local row shape so the loop below
+    // reads the fields ergonomically without spraying casts.
+    type RecentOrderRow = {
+      order_number: string | null;
+      financial_status: string | null;
+      fulfillment_status: string | null;
+      total_cents: number;
+      currency: string;
+      created_at: string;
+      fulfillments:
+        | { trackingInfo?: { number: string; url: string | null; company: string | null }[]; status?: string }[]
+        | null;
+      hold_status: string | null;
+      hold_kind: string | null;
+      hold_reason: string | null;
+      hold_placed_at: string | null;
+      hold_refused_reason: string | null;
+    };
+    const orders = (ordersRaw as unknown as RecentOrderRow[] | null) ?? null;
 
     if (orders?.length) {
+      const { isAllergyEscalation, renderOrderHoldForContext } = await import("@/lib/order-holds");
+      // "Live allergy context" — the ticket has been escalated with an allergy/safety
+      // reason (Phase 1's isAllergyEscalation detector — same predicate that decides
+      // whether escalateTicket fans out to attemptAllergenHold). If the recent order
+      // has NO hold row while the ticket sits under an allergy escalation, that's the
+      // exact ALERT we surface — the parcel is still moving.
+      const isLiveAllergyContext = isAllergyEscalation(
+        (ticket as { escalation_reason?: string | null }).escalation_reason,
+      );
       customerParts.push("\nRecent Orders:");
       for (const o of orders) {
         const total = `$${(o.total_cents / 100).toFixed(2)} ${o.currency}`;
         const date = new Date(o.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" });
         customerParts.push(`  #${o.order_number} — ${total} — ${o.financial_status || "unknown"} / ${o.fulfillment_status || "unfulfilled"} — ${date}`);
         // Include fulfillment tracking if available
-        const fulfillments = o.fulfillments as { trackingInfo?: { number: string; url: string | null; company: string | null }[]; status?: string }[] | null;
+        const fulfillments = o.fulfillments;
         if (fulfillments?.length) {
           for (const f of fulfillments) {
             if (f.trackingInfo?.length) {
@@ -265,6 +305,26 @@ export async function assembleTicketContext(
             if (f.status) customerParts.push(`    Fulfillment status: ${f.status}`);
           }
         }
+        // Phase 2 hold surface — 3 distinguishable states. Silent on non-allergy
+        // tickets with no hold, so the block stays quiet for the 99% of orders where
+        // this is a no-op.
+        const status =
+          o.hold_status === "placed" || o.hold_status === "refused"
+            ? (o.hold_status as "placed" | "refused")
+            : null;
+        const holdLine = renderOrderHoldForContext(
+          {
+            status,
+            kind: o.hold_kind,
+            reason: o.hold_reason,
+            ticketId: null,
+            placedAt: o.hold_placed_at,
+            refusedReason: o.hold_refused_reason,
+          },
+          `#${o.order_number}`,
+          isLiveAllergyContext,
+        );
+        if (holdLine) customerParts.push(`    ${holdLine}`);
       }
     }
 

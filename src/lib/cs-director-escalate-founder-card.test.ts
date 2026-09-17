@@ -216,3 +216,116 @@ test("Phase 2 — empty/malformed recommendation object (no kind + no summary) f
   });
   assert.match(row.body, /Recommended remedy:\s+\(none — CEO to decide the action\)/);
 });
+
+// ── a-flagged-allergen-order-must-not-ship Phase 2 — allergen-hold surface on the founder card ──
+
+test("allergen hold PLACED renders as a labeled 'Fulfilment hold:' line so the founder sees the hold is real", () => {
+  const row = buildEscalateFounderCard({
+    ticketId: "ticket-1",
+    reasoning: "Customer reports hazelnut allergy on an unshipped order.",
+    jobId: "job-1",
+    allergenHold: {
+      status: "placed",
+      kind: "allergen",
+      reason: "customer reports hazelnut allergy",
+      refusedReason: null,
+      orderLabel: "SC138523",
+      isLiveAllergyContext: true,
+    },
+  });
+  assert.match(row.body, /Fulfilment hold:.*PLACED/);
+  assert.match(row.body, /SC138523/);
+  assert.match(row.body, /must not ship/);
+  assert.equal(row.metadata.allergen_hold?.status, "placed");
+});
+
+test("allergen hold REFUSED renders as an ALERT — the founder must not read the escalation as 'stopped'", () => {
+  const row = buildEscalateFounderCard({
+    ticketId: "ticket-1",
+    reasoning: "Customer reports hazelnut allergy but the parcel has already shipped.",
+    jobId: "job-1",
+    allergenHold: {
+      status: "refused",
+      kind: "allergen",
+      reason: "customer reports hazelnut allergy",
+      refusedReason: "already_shipped",
+      orderLabel: "SC138523",
+      isLiveAllergyContext: true,
+    },
+  });
+  assert.match(row.body, /Fulfilment hold:.*REFUSED/);
+  assert.match(row.body, /already_shipped/);
+  assert.match(row.body, /collapsed to a refund/);
+  assert.equal(row.metadata.allergen_hold?.status, "refused");
+});
+
+test("NEVER attempted (null status) on a live allergy escalation renders an ALERT — the exact ticket 0909ec6f failure mode", () => {
+  const row = buildEscalateFounderCard({
+    ticketId: "ticket-1",
+    reasoning: "Customer reports hazelnut allergy; escalated to founder for the remedy call.",
+    jobId: "job-1",
+    allergenHold: {
+      status: null,
+      kind: null,
+      reason: null,
+      refusedReason: null,
+      orderLabel: "SC138523",
+      isLiveAllergyContext: true,
+    },
+  });
+  assert.match(row.body, /Fulfilment hold:.*NO allergen hold/);
+  assert.match(row.body, /parcel is still moving/);
+  assert.equal(row.metadata.allergen_hold?.status, null);
+});
+
+test("three states render distinguishably so the founder can tell placed / refused / never attempted apart", () => {
+  const bodyOf = (state: "placed" | "refused" | null, refusedReason: string | null) =>
+    buildEscalateFounderCard({
+      ticketId: "t",
+      reasoning: "r",
+      jobId: "j",
+      allergenHold: {
+        status: state,
+        kind: state ? "allergen" : null,
+        reason: "r",
+        refusedReason,
+        orderLabel: "SC1",
+        isLiveAllergyContext: true,
+      },
+    }).body;
+  const placed = bodyOf("placed", null);
+  const refused = bodyOf("refused", "already_shipped");
+  const absent = bodyOf(null, null);
+  assert.notEqual(placed, refused, "PLACED and REFUSED must render distinct bodies");
+  assert.notEqual(placed, absent, "PLACED and NEVER-ATTEMPTED must render distinct bodies");
+  assert.notEqual(refused, absent, "REFUSED and NEVER-ATTEMPTED must render distinct bodies");
+});
+
+test("no allergenHold input → NO 'Fulfilment hold:' line, back-compat for non-allergy escalations", () => {
+  const row = buildEscalateFounderCard({
+    ticketId: "ticket-1",
+    reasoning: "Regular overcharge finding — no allergy in play.",
+    jobId: "job-1",
+  });
+  assert.ok(!/Fulfilment hold:/.test(row.body), "body must not include the fulfilment-hold line when no allergenHold is passed");
+  assert.equal(row.metadata.allergen_hold, null);
+});
+
+test("null-status hold on a NON-allergy escalation → renders NOTHING (quiet fallthrough, no false-alert)", () => {
+  const row = buildEscalateFounderCard({
+    ticketId: "ticket-1",
+    reasoning: "Regular finding.",
+    jobId: "job-1",
+    allergenHold: {
+      status: null,
+      kind: null,
+      reason: null,
+      refusedReason: null,
+      orderLabel: "SC1",
+      isLiveAllergyContext: false,
+    },
+  });
+  assert.ok(!/Fulfilment hold:/.test(row.body));
+  // Metadata still records the input so a downstream reader can distinguish "unread" from "absent"
+  assert.notEqual(row.metadata.allergen_hold, undefined);
+});
