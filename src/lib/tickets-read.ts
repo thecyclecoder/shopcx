@@ -196,6 +196,19 @@ export interface LinkedOrderRow {
   amplifier_status: string | null;
   amplifier_tracking_number: string | null;
   line_items: Array<{ title?: string; variant_title?: string; quantity?: number }> | null;
+  /**
+   * a-flagged-allergen-order-must-not-ship Phase 2 — the raise-time protective hold state. Three
+   * distinguishable values ('placed' | 'refused' | null) MUST render on every surface that shows
+   * this order (founder queue, director's investigate context, handling-agent context) so a false
+   * "we're stopping it" reassurance cannot be sent while no hold is in place. See
+   * [[../libraries/order-holds]]. Null on virtually every order — filled only when the raise-time
+   * `attemptAllergenHold` stamped a hold or refusal on it.
+   */
+  hold_status: string | null;
+  hold_kind: string | null;
+  hold_reason: string | null;
+  hold_placed_at: string | null;
+  hold_refused_reason: string | null;
 }
 
 export interface LinkedReturnRow {
@@ -244,13 +257,19 @@ export async function getLinkedOrders(
   const { data } = await admin
     .from("orders")
     .select(
-      "order_number, customer_id, financial_status, fulfillment_status, total_cents, created_at, delivery_status, delivered_at, amplifier_status, amplifier_tracking_number, line_items",
+      "order_number, customer_id, financial_status, fulfillment_status, total_cents, created_at, delivery_status, delivered_at, amplifier_status, amplifier_tracking_number, line_items, " +
+        // a-flagged-allergen-order-must-not-ship Phase 2 — hold columns feed the ticket-context
+        // renderers so every surface that shows this order can print the hold-state line.
+        "hold_status, hold_kind, hold_reason, hold_placed_at, hold_refused_reason",
     )
     .eq("workspace_id", workspaceId)
     .in("customer_id", ids)
     .order("created_at", { ascending: false })
     .limit(limit);
-  return (data as LinkedOrderRow[]) ?? [];
+  // Widened select (Phase 2 hold_* columns) pushes Supabase's inferred row type past its
+  // schema-derived shape; `unknown` cast keeps the caller-facing type honest without
+  // masking a real read failure — a query error still surfaces as `null` → `[]`.
+  return (data as unknown as LinkedOrderRow[]) ?? [];
 }
 
 /** Returns across the ticket customer's entire link group (newest first, capped). */

@@ -57,6 +57,38 @@ export interface EscalateFounderCardInput {
    * (June carried no `remedy`). See [[../../docs/brain/libraries/cs-director]] for the flow.
    */
   partialRemedyOutcome?: PartialRemedyCardInput | null;
+  /**
+   * a-flagged-allergen-order-must-not-ship Phase 2 — the allergen-hold state on the customer's
+   * most-recent order at card-mint time, so the founder card body shows a distinguishable line
+   * for "hold placed / hold REFUSED / never attempted". A REFUSED or ABSENT hold on a live
+   * allergy escalation reads as an alert on the card — the ground-truth incident (ticket
+   * 0909ec6f / order SC138523) is exactly that: an allergy escalation went to the founder
+   * queue while the parcel was still moving and the queue surface gave no distinguishable
+   * signal. Loaded by the runner at card-mint time via [[order-holds]] `getOrderHoldState` on
+   * the customer's most-recent order id, wrapped with `isLiveAllergyContext` from the ticket's
+   * escalation reason. `null` here means "no allergen hold applies AND the ticket is not a
+   * live allergy escalation" — the line is suppressed. On a live allergy escalation the caller
+   * MUST pass a value (even a null-status one) so the card reads the alert.
+   */
+  allergenHold?: AllergenHoldForCard | null;
+}
+
+/**
+ * a-flagged-allergen-order-must-not-ship Phase 2 — the pure-input shape the CEO card body
+ * uses to render the allergen-hold surface. `status='placed'` / `'refused'` / `null` are the
+ * three distinguishable states; `null` on a `isLiveAllergyContext=true` card body is an
+ * alert (the parcel is still moving). Kept local so this module stays pure with no import
+ * from `order-holds.ts` — the runtime shape is duck-typed and mirrors `OrderHoldState`.
+ */
+export interface AllergenHoldForCard {
+  status: "placed" | "refused" | null;
+  kind: string | null;
+  reason: string | null;
+  refusedReason: string | null;
+  /** the order the hold state pertains to — the label the card body prints (e.g. "SC138523"). */
+  orderLabel: string;
+  /** whether the ticket that produced this card is a live allergy/safety escalation. */
+  isLiveAllergyContext: boolean;
 }
 
 /**
@@ -126,6 +158,13 @@ export interface EscalateFounderCardRow {
      */
     partial_remedy_outcome: PartialRemedyCardInput | null;
     /**
+     * a-flagged-allergen-order-must-not-ship Phase 2 — the structured allergen-hold state at
+     * card-mint time. Downstream approvers / bounce-back handlers read this without re-loading
+     * the order. `null` when the caller passed no allergen-hold input (non-allergy escalation
+     * and no hold in play). See {@link AllergenHoldForCard}.
+     */
+    allergen_hold: AllergenHoldForCard | null;
+    /**
      * an-escalation-retires-itself-when-the-condition-it-reported-self-heals Phase 1 — the typed
      * retire_when descriptor the Phase-2 sweep uses to decide whether this card's condition has
      * self-healed. The founder-escalation carries `{ kind: 'ticket_terminal', ticket_id }` since
@@ -177,6 +216,39 @@ export function summarizeRecommendedRemedy(remedy: Record<string, unknown> | nul
  * failed so the residue is complete. On the refusal statuses (loyalty/threshold/malformed) the
  * line names the reason so the founder knows June considered the partial but the rails refused it.
  */
+/**
+ * a-flagged-allergen-order-must-not-ship Phase 2 — pure render of the allergen-hold surface
+ * for the CEO card body. Three distinguishable outcomes:
+ *
+ *   - `status='placed'`  → labeled line: the hold is real, the parcel must not ship
+ *   - `status='refused'` → labeled ALERT line: the parcel already shipped, refund only
+ *   - `status=null` on a live allergy escalation → labeled ALERT line: no hold ever attempted,
+ *     the parcel is still moving; the founder must not read "escalated" as "held"
+ *   - `status=null` on a non-allergy escalation → returns null (nothing to say)
+ *
+ * Returned null suppresses the block entirely. The card body appends nothing in that case.
+ */
+export function summarizeAllergenHoldForCard(hold: AllergenHoldForCard | null | undefined): string | null {
+  if (!hold) return null;
+  const label = hold.orderLabel && hold.orderLabel.trim().length > 0 ? hold.orderLabel.trim() : "(order)";
+  if (hold.status === "placed") {
+    const kind = hold.kind ? `${hold.kind} ` : "";
+    const reason = hold.reason ? ` — reason: ${hold.reason}` : "";
+    return `⛔ ${kind}hold PLACED on ${label} — parcel must not ship${reason}`;
+  }
+  if (hold.status === "refused") {
+    const kind = hold.kind ? `${hold.kind} ` : "";
+    const refused = hold.refusedReason ? ` (${hold.refusedReason})` : "";
+    const reason = hold.reason ? ` — reason on ticket: ${hold.reason}` : "";
+    return `🚨 ${kind}hold REFUSED on ${label}${refused} — the parcel has already shipped; the remedy space has collapsed to a refund${reason}`;
+  }
+  // null status
+  if (hold.isLiveAllergyContext) {
+    return `🚨 NO allergen hold on ${label} — no hold was ever attempted on this order; the parcel is still moving. Do NOT read this escalation as "held".`;
+  }
+  return null;
+}
+
 export function summarizePartialRemedyForCard(outcome: PartialRemedyCardInput): string {
   const list = (arr: string[]) => (arr.length > 0 ? arr.join(", ") : "(none)");
   switch (outcome.status) {
@@ -236,6 +308,7 @@ export function buildEscalateFounderCard(input: EscalateFounderCardInput): Escal
     blackSwanSource,
     recommendedRemedy,
     partialRemedyOutcome,
+    allergenHold,
   } = input;
   const normalizedReason = normalizeReasoning(reasoning);
   const link = `/dashboard/tickets/${ticketId}`;
@@ -251,12 +324,20 @@ export function buildEscalateFounderCard(input: EscalateFounderCardInput): Escal
   // june-does-the-in-leash Phase 1 — when June also fired an in-leash partial remedy before
   // escalating, prepend a labeled "Already done by June" line so the founder sees settled work as
   // settled and the "Diagnosis:" / "Recommended remedy:" lines read as the RESIDUE.
+  //
+  // a-flagged-allergen-order-must-not-ship Phase 2 — when the escalation is against an order
+  // with an allergen hold state OR a live allergy escalation with no hold, prepend a labeled
+  // "Fulfilment hold:" line so the founder queue never reads "held" as a proxy for "escalated".
+  // Three states (placed / refused / never attempted) render distinguishably per the spec's
+  // "Today all three look identical" fault mode.
+  const holdLine = summarizeAllergenHoldForCard(allergenHold ?? null);
+  const holdContextLine = holdLine ? `Fulfilment hold: ${holdLine}` : null;
   const alreadyDoneLine = partialRemedyOutcome
     ? `Already done by June: ${summarizePartialRemedyForCard(partialRemedyOutcome)}`
     : null;
   const diagnosisLine = `Diagnosis: ${normalizedReason}`;
   const remedyLine = `Recommended remedy: ${summarizeRecommendedRemedy(recommendedRemedy)}`;
-  const bodyLines = [alreadyDoneLine, diagnosisLine, remedyLine].filter((v): v is string => v !== null);
+  const bodyLines = [holdContextLine, alreadyDoneLine, diagnosisLine, remedyLine].filter((v): v is string => v !== null);
   const body = bodyLines.join("\n").slice(0, 4000);
 
   // The structured recommendation persists on metadata verbatim so a downstream approver can
@@ -288,6 +369,7 @@ export function buildEscalateFounderCard(input: EscalateFounderCardInput): Escal
       agent_job_id: jobId,
       recommended_remedy: recommendedRemedyMeta,
       partial_remedy_outcome: partialRemedyOutcome ?? null,
+      allergen_hold: allergenHold ?? null,
       // an-escalation-retires-itself-when-the-condition-it-reported-self-heals Phase 1 — a
       // founder-escalation heals when the linked ticket closes resolved and is not escalated.
       // Recorded UNCONDITIONALLY here because ticket_id is the load-bearing input; a card WITHOUT

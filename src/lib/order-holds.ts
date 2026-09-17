@@ -288,6 +288,139 @@ export interface OrderHoldState {
   refusedReason: string | null;
 }
 
+/**
+ * Pure — render a single labeled line the ticket-context surfaces (founder queue,
+ * director's audit note, handling-agent system prompt) print for an order's hold
+ * state. Phase 2 of a-flagged-allergen-order-must-not-ship § Verification:
+ * "hold state is surfaced on ticket context".
+ *
+ * Three values must be distinguishable — before this shipped, all three looked
+ * identical, which is how "we are doing everything we can to stop it" got sent
+ * about an order with no hold on it (ticket 0909ec6f):
+ *
+ *   - `placed` (parcel must not ship)          → informational line
+ *   - `refused` (already shipped — refund only) → ALERT line
+ *   - `null` on a live allergy ticket          → ALERT line ("never attempted, parcel still moving")
+ *   - `null` on a non-allergy ticket           → null (nothing to say — no allergen hold class applies)
+ *
+ * "Live allergy context" is the caller's job to decide — from
+ * `isAllergyEscalation(ticket.escalation_reason)` and/or an allergy tag. On non-
+ * allergy tickets the read stays quiet unless a hold is actually stamped (a
+ * fraud/other hold class would still render its own line if we add one).
+ */
+export function renderOrderHoldForContext(
+  state: OrderHoldState | null,
+  orderLabel: string,
+  isLiveAllergyContext: boolean,
+): string | null {
+  const label = orderLabel && orderLabel.trim().length > 0 ? orderLabel.trim() : "(order)";
+  if (state && state.status === "placed") {
+    const kind = state.kind ? `${state.kind} ` : "";
+    const reason = state.reason ? ` — reason: ${state.reason}` : "";
+    return `⛔ ${kind}hold PLACED on ${label} — parcel must not ship${reason}`;
+  }
+  if (state && state.status === "refused") {
+    const kind = state.kind ? `${state.kind} ` : "";
+    const refused = state.refusedReason ? ` (${state.refusedReason})` : "";
+    const reason = state.reason ? ` — reason on ticket: ${state.reason}` : "";
+    return `🚨 ${kind}hold REFUSED on ${label}${refused} — the parcel has already shipped; the remedy space has collapsed to a refund${reason}`;
+  }
+  // null / no hold
+  if (isLiveAllergyContext) {
+    return `🚨 NO allergen hold on ${label} — no hold was ever attempted on this order; the parcel is still moving. Do NOT promise a stop.`;
+  }
+  return null;
+}
+
+/**
+ * Card-mint helper for Phase 2 — load the allergen-hold state on the ticket's
+ * customer's most-recent order in the shape the founder-card builder consumes.
+ * Called by the runner right before `buildEscalateFounderCard` so the CEO card
+ * body renders a distinguishable line for placed / refused / never-attempted.
+ *
+ * "isLiveAllergyContext" is derived from the ticket's own escalation_reason via
+ * `isAllergyEscalation` — the same predicate the raise-time path uses to decide
+ * whether to fan out to `attemptAllergenHold`. Read-only + swallowed on error —
+ * a card-mint helper must never fail the CEO card insert.
+ *
+ * Returns `null` for:
+ *   - a missing/malformed ticket
+ *   - a ticket with no customer_id or no recent order
+ *   - a non-allergy ticket whose recent order has no hold row at all (nothing
+ *     to render — the card body omits the fulfilment-hold line)
+ *
+ * Returns a filled shape whenever there IS something to say — either a hold
+ * status is stamped OR the ticket is a live allergy escalation and the hold
+ * is missing (the alert case).
+ */
+export async function loadAllergenHoldForCard(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+): Promise<{
+  status: "placed" | "refused" | null;
+  kind: string | null;
+  reason: string | null;
+  refusedReason: string | null;
+  orderLabel: string;
+  isLiveAllergyContext: boolean;
+} | null> {
+  try {
+    const { data: ticketRow } = await admin
+      .from("tickets")
+      .select("customer_id, escalation_reason")
+      .eq("id", ticketId)
+      .maybeSingle();
+    const row =
+      (ticketRow as { customer_id: string | null; escalation_reason: string | null } | null) ?? null;
+    if (!row?.customer_id) return null;
+    const isLiveAllergyContext = isAllergyEscalation(row.escalation_reason);
+
+    const ids = await linkGroupIds(admin, workspaceId, row.customer_id);
+    const { data: orderRow } = await admin
+      .from("orders")
+      .select(
+        "id, order_number, hold_status, hold_kind, hold_reason, hold_refused_reason",
+      )
+      .eq("workspace_id", workspaceId)
+      .in("customer_id", ids)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const order =
+      (orderRow as {
+        id: string;
+        order_number: string | null;
+        hold_status: string | null;
+        hold_kind: string | null;
+        hold_reason: string | null;
+        hold_refused_reason: string | null;
+      } | null) ?? null;
+    if (!order) return null;
+
+    const status =
+      order.hold_status === "placed" || order.hold_status === "refused"
+        ? (order.hold_status as "placed" | "refused")
+        : null;
+    // Suppress entirely on non-allergy tickets that have no hold — nothing to say.
+    if (status === null && !isLiveAllergyContext) return null;
+
+    return {
+      status,
+      kind: order.hold_kind ?? null,
+      reason: order.hold_reason ?? null,
+      refusedReason: order.hold_refused_reason ?? null,
+      orderLabel: order.order_number ?? order.id.slice(0, 8),
+      isLiveAllergyContext,
+    };
+  } catch (err) {
+    console.warn(
+      `[order-holds] loadAllergenHoldForCard failed for ticket=${ticketId}: ${errText(err)}`,
+    );
+    return null;
+  }
+}
+
 export async function getOrderHoldState(
   admin: Admin,
   workspaceId: string,
