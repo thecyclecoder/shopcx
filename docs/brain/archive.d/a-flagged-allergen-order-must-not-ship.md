@@ -1,0 +1,1 @@
+- **A flagged allergen order must not ship** · verified 2026-09-17 · → [[../lifecycles/ticket-lifecycle]]

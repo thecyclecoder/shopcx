@@ -33,6 +33,14 @@ Last-resort strip of any `{{token}}` / `[UPPER_TOKEN]` a composer failed to fill
 async function executeSonnetDecision(ctx: ActionContext, decision: SonnetDecision, personality: { name?: string; tone?: string; sign_off?: string | null } | null, send: SendFn, sysNote: SysNoteFn,) : Promise<
 ```
 
+### `escalateTicket` — function
+
+```ts
+async function escalateTicket(ctx: ActionContext, reason: string): Promise<void>
+```
+
+Stamps `tickets.escalated_at = now()` + `escalated_to = null` (the routine idle-triage cron's "routine-owned" signal) + `escalation_reason = reason`, and sets `ctx._escalatedThisRun = true` so `postExecuteStatusAction` leaves the ticket open. **Phase 1 (a-flagged-allergen-order-must-not-ship): When the reason matches [[../libraries/order-holds]] `isAllergyEscalation` (allergies, anaphylaxis, safety reports), the function fan-outs to `attemptAllergenHold` in the same turn** — a protective hold on the customer's most-recent unshipped order is raised the moment escalation is stamped, separating the reversible protective action from the remedy decision (which stays with a human via the existing allergy override). Ground truth: order SC138523 reached the warehouse 3 hours after the customer reported the allergy, sat there 43 hours, and shipped anyway 46 hours later because holding depended on a human noticing. `attemptAllergenHold` is fire-and-forget (never throws; captures its own errors) so a failed hold cannot block the escalation itself — the escalation is the safety-critical artifact and the hold is a best-effort protective attempt on top of it.
+
 ### `directActionHandlers` — const
 
 ```ts
