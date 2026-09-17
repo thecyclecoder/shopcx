@@ -130,6 +130,21 @@ purpose so "Monthly" is a true 4-week cycle, not a drifting calendar month.
 
 No products attached and no pricing policy on the group — both deliberate, pending decisions.
 
+### ⚠️ Two groups on one product = two frequency selectors on the PDP
+
+`Creatine Prime+` carried BOTH Appstle's `Superfood Subscription` group (`1423343789`, 4
+frequencies) and ours, because the Black Cherry variant (`44649179971757`) had been attached to
+ours for testing. The live PDP rendered **two** frequency pickers.
+
+Removed 2026-09-17 with `sellingPlanGroupRemoveProductVariants` — Appstle is still the production
+storefront engine until the switchover, so ours came off. Verified after: the PDP shows one group,
+and the two contracts already created through our plan (`36020093101`, `36020289709`) still hold
+`SellingPlan/4087021741 "Monthly"` — detaching a variant does not delete the plans or touch existing
+contracts. Reversible with `sellingPlanGroupAddProductVariants`.
+
+**The switchover flips this**: at cutover the PDPs move to our selling plan ids and Appstle's group
+comes off instead. Until then, exactly one group per product.
+
 ## ⭐ Pricing — four independent layers
 
 The target shape (CEO, 2026-09-09): *in a perfect world everyone's base price is MSRP $79.95.*
