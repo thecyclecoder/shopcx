@@ -433,6 +433,26 @@ engine the call works for — and that landed briefly before being corrected. Th
 exactly one caller (`api/webhooks/shopify/route.ts`), so the id's provenance is not ambiguous; check
 the caller, not the parameter name.
 
+## ⭐ How a NEW subscriber arrives — PDP ingestion
+
+Migration moves the existing book. New customers arrive the other way: almost all storefront traffic
+lands on **Shopify PDPs**, and a PDP checkout with a selling plan creates a contract our app owns.
+Shopify announces it on `subscription_contracts/create`, which our webhook route hands to
+[[../inngest/shopcx-contract-ingest]] → [[../libraries/commerce__shopcx-contract-ingest]].
+
+Before that handler existed the topic hit the route's `default:` no-op, so the contract lived on
+Shopify and nowhere here — and since **Shopify charges nothing on its own**, that is a paying
+subscriber who would never be billed, with no error anywhere. Two were found that way
+(36020093101 / 36020289709, 2026-09-15 checkouts) and adopted with the handler.
+
+The ingest is DELAYED 3 minutes on purpose: we create contracts ourselves too (migration, one-time
+charges) and Shopify fires the same topic for those. The delay lets each rail's claim marker land
+before ingestion decides whether the contract is its to adopt.
+
+⚠️ The two topics were registered on the live shop **by hand** and were missing from
+`WEBHOOK_TOPICS` in [[../libraries/shopify-webhook-register]], so a re-install would have silently
+dropped them. Added.
+
 ## ⭐ Dates survive the move — and stay right afterwards
 
 The migrated contract is created today, so Shopify's own cycle calendar (`createdAt + n × interval`)

@@ -631,6 +631,170 @@ export async function getSubscriptionContract(
 }
 
 /**
+ * The WHOLE contract, as a checkout produced it — everything `subscriptions` needs to exist.
+ *
+ * `getSubscriptionContract` is the hot read on the billing path, so it deliberately selects only
+ * what a charge needs. Ingesting a contract born on a PDP needs the rest: who the customer is,
+ * where it ships, what it costs to ship, which discounts ride on it, and which order created it.
+ * One query rather than five, because ingestion runs once per contract and correctness beats
+ * latency here.
+ *
+ * `originOrder` is the checkout that created the contract. It is NOT a reliable
+ * "was this born at checkout" signal — measured 2026-09-17 across all 23 app-owned contracts,
+ * several we created ourselves with `subscriptionContractAtomicCreate` also carry one. Ownership
+ * is decided by our own claim markers, not by this field.
+ */
+export async function getContractForIngest(
+  workspaceId: string,
+  contractId: string,
+): Promise<{ success: boolean; error?: string; contract?: IngestContract }> {
+  const env = await gql<{ subscriptionContract?: Record<string, unknown> }>(
+    workspaceId,
+    `query($id:ID!){ subscriptionContract(id:$id){
+        id status createdAt nextBillingDate
+        billingPolicy { interval intervalCount }
+        customer { id email firstName lastName phone }
+        customerPaymentMethod { id }
+        originOrder { id name }
+        deliveryPrice { amount }
+        deliveryMethod { ... on SubscriptionDeliveryMethodShipping {
+          address { firstName lastName address1 address2 city province provinceCode country countryCode zip phone company }
+          shippingOption { title } } }
+        discounts(first:50){ edges { node {
+          id type title targetType recurringCycleLimit
+          value { __typename
+            ... on SubscriptionDiscountPercentageValue { percentage }
+            ... on SubscriptionDiscountFixedAmountValue { amount { amount } } } } } }
+        lines(first:250){ pageInfo { hasNextPage } edges { node {
+          id title quantity sku variantId productId sellingPlanId sellingPlanName variantTitle
+          currentPrice { amount } lineDiscountedPrice { amount }
+          discountAllocations { amount { amount } discount { ... on SubscriptionManualDiscount { title } } } } } } } }`,
+    { id: contractGid(contractId) },
+  );
+  if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
+  const k = env.data?.subscriptionContract as never as RawIngestContract | undefined;
+  if (!k) return { success: false, error: "contract not found (or not owned by this app)" };
+
+  const addr = k.deliveryMethod?.address ?? null;
+  return {
+    success: true,
+    contract: {
+      id: k.id,
+      status: k.status,
+      createdAt: k.createdAt ?? null,
+      nextBillingDate: k.nextBillingDate ?? null,
+      interval: k.billingPolicy?.interval ?? null,
+      intervalCount: k.billingPolicy?.intervalCount ?? null,
+      customerId: k.customer?.id ? k.customer.id.replace("gid://shopify/Customer/", "") : null,
+      email: k.customer?.email ?? null,
+      firstName: k.customer?.firstName ?? null,
+      lastName: k.customer?.lastName ?? null,
+      phone: k.customer?.phone ?? null,
+      paymentMethodId: k.customerPaymentMethod?.id ?? null,
+      originOrderId: k.originOrder?.id ? k.originOrder.id.replace("gid://shopify/Order/", "") : null,
+      originOrderName: k.originOrder?.name ?? null,
+      deliveryPriceCents: k.deliveryPrice?.amount != null
+        ? Math.round(parseFloat(k.deliveryPrice.amount) * 100) : null,
+      shippingAddress: addr
+        ? {
+            first_name: addr.firstName ?? null, last_name: addr.lastName ?? null,
+            address1: addr.address1 ?? null, address2: addr.address2 ?? null,
+            city: addr.city ?? null,
+            province: addr.province ?? null, province_code: addr.provinceCode ?? null,
+            country: addr.country ?? null, country_code: addr.countryCode ?? null,
+            zip: addr.zip ?? null, phone: addr.phone ?? null, company: addr.company ?? null,
+          }
+        : null,
+      shippingOption: k.deliveryMethod?.shippingOption?.title ?? null,
+      discounts: (k.discounts?.edges ?? []).map((e) => ({
+        id: e.node.id,
+        type: e.node.type ?? null,
+        title: e.node.title ?? null,
+        targetType: e.node.targetType ?? null,
+        recurringCycleLimit: e.node.recurringCycleLimit ?? null,
+        valueType: e.node.value?.__typename === "SubscriptionDiscountPercentageValue"
+          ? "PERCENTAGE" : "FIXED_AMOUNT",
+        value: e.node.value?.percentage != null
+          ? Number(e.node.value.percentage)
+          : Number(e.node.value?.amount?.amount ?? 0),
+      })),
+      truncated: k.lines?.pageInfo?.hasNextPage === true,
+      lines: (k.lines?.edges ?? []).map((e) => ({
+        id: e.node.id,
+        title: e.node.title,
+        quantity: e.node.quantity,
+        sku: e.node.sku ?? null,
+        variantId: e.node.variantId ?? null,
+        productId: e.node.productId ?? null,
+        variantTitle: e.node.variantTitle ?? null,
+        sellingPlanId: e.node.sellingPlanId ?? null,
+        sellingPlanName: e.node.sellingPlanName ?? null,
+        currentPrice: e.node.currentPrice?.amount ?? null,
+        lineDiscountedPrice: e.node.lineDiscountedPrice?.amount ?? null,
+        // Same rule the portal price uses: a customer coupon is NOT part of the line's standing
+        // price, so only our structural titles count toward the realized rate.
+        structuralDiscountCents: (e.node.discountAllocations ?? []).reduce(
+          (sum, a) => STRUCTURAL_DISCOUNT_TITLES.includes(String(a?.discount?.title ?? ""))
+            ? sum + Math.round(parseFloat(a?.amount?.amount ?? "0") * 100) : sum,
+          0,
+        ),
+      })),
+    },
+  };
+}
+
+export interface IngestContract {
+  id: string; status: string; createdAt: string | null; nextBillingDate: string | null;
+  interval: string | null; intervalCount: number | null;
+  customerId: string | null; email: string | null;
+  firstName: string | null; lastName: string | null; phone: string | null;
+  paymentMethodId: string | null;
+  originOrderId: string | null; originOrderName: string | null;
+  deliveryPriceCents: number | null;
+  shippingAddress: Record<string, string | null> | null;
+  shippingOption: string | null;
+  discounts: {
+    id: string; type: string | null; title: string | null; targetType: string | null;
+    recurringCycleLimit: number | null; valueType: string; value: number;
+  }[];
+  truncated: boolean;
+  lines: {
+    id: string; title: string; quantity: number; sku: string | null;
+    variantId: string | null; productId: string | null; variantTitle: string | null;
+    sellingPlanId: string | null; sellingPlanName: string | null;
+    currentPrice: string | null; lineDiscountedPrice: string | null;
+    structuralDiscountCents: number;
+  }[];
+}
+
+interface RawIngestContract {
+  id: string; status: string; createdAt: string | null; nextBillingDate: string | null;
+  billingPolicy?: { interval: string; intervalCount: number };
+  customer?: { id: string; email: string | null; firstName: string | null; lastName: string | null; phone: string | null };
+  customerPaymentMethod?: { id: string };
+  originOrder?: { id: string; name: string | null };
+  deliveryPrice?: { amount: string };
+  deliveryMethod?: {
+    address?: Record<string, string | null>;
+    shippingOption?: { title: string | null };
+  };
+  discounts?: { edges: { node: {
+    id: string; type?: string; title?: string; targetType?: string; recurringCycleLimit?: number;
+    value?: { __typename?: string; percentage?: number; amount?: { amount?: string } };
+  } }[] };
+  lines?: {
+    pageInfo?: { hasNextPage?: boolean };
+    edges: { node: {
+      id: string; title: string; quantity: number; sku?: string | null;
+      variantId?: string | null; productId?: string | null; variantTitle?: string | null;
+      sellingPlanId?: string | null; sellingPlanName?: string | null;
+      currentPrice?: { amount: string }; lineDiscountedPrice?: { amount: string };
+      discountAllocations?: { amount?: { amount: string }; discount?: { title?: string } }[];
+    } }[];
+  };
+}
+
+/**
  * Upcoming billing cycles. Mirrors `appstleGetUpcomingOrders`.
  *
  * Reading the schedule from Shopify rather than deriving it from our `next_billing_date` hands

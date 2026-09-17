@@ -12,7 +12,10 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **A flagged allergen order must not ship** · verified 2026-09-17 · → [[../lifecycles/ticket-lifecycle]]
+- **Payment-method lookups must span linked accounts (Phase 1)** · verified 2026-09-17 · → [[../libraries/one-time-charge]] · [[../libraries/commerce__shopify-one-time-charge]] · [[../libraries/action-executor]]
 - **create_return net_refund must net order-level coupon discounts, not just per-line** · verified 2026-09-17 · → [[../lifecycles/return-pipeline]]
+- **Vendor-side refunds must mirror into the refund ledger** · verified 2026-09-17 · → [[lifecycles/return-pipeline]]
 - **Ground review-request nudge personalization in the CX order+subscription surface** · verified 2026-09-16 · → [[../lifecycles/ticket-lifecycle]]
 - **A one-time charge must be able to name the card it charges** · verified 2026-09-15 · → [[../tables/one_time_charges]]
 - **Journey lead-ins must keep their paragraphs** · verified 2026-09-15 · → [[../libraries/journey-delivery]] § Lead-in shares the ticket-delivery paragraph shaper

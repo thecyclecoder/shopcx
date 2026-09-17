@@ -32,3 +32,11 @@ async function registerShopifyWebhooks(shop: string, accessToken: string, callba
 ---
 
 [[../README]] · [[../../CLAUDE]]
+
+
+## `subscription_contracts/create` + `/update` (added 2026-09-17)
+
+The main way NEW ShopCX subscriptions arrive — a PDP checkout with a selling plan. Both were
+already registered on the live shop by hand but were **missing from `WEBHOOK_TOPICS`**, so a
+re-install would have dropped them silently and every new subscriber would have existed on Shopify
+and nowhere in ShopCX. Handled by [[../inngest/shopcx-contract-ingest]].
