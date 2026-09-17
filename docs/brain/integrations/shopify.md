@@ -60,6 +60,7 @@ Registered via `src/lib/shopify-webhook-register.ts`. Handled in `src/lib/shopif
 - `orders/create`, `orders/updated`, `orders/cancelled`, `orders/fulfilled`
 - `customer_payment_methods/create`, `customer_payment_methods/update` — drive dunning recovery
 - `disputes/create`, `disputes/update` — chargebacks
+- `refunds/create` — vendor-side refund mirror into [[../tables/order_refunds]]. See [[../libraries/vendor-refund-mirror]] + `handleRefundCreate` in [[../libraries/shopify-webhooks]].
 - `app/uninstalled`
 
 Webhook HMAC verified with Client Secret.

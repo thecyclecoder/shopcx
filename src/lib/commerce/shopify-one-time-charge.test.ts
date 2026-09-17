@@ -112,6 +112,33 @@ test("the executor persists the method actually billed BEFORE the contract call"
   );
 });
 
+test("the Braintree branch spans the link group — a linked-sibling card is found (payment-method-lookups-must-span-linked-accounts Phase 1)", () => {
+  // Ground truth: ticket 4ed092c4. MasterCard ••9762 vaulted on customer affcdc47, the charge
+  // required linked sibling 40c66b13 (the one with a shopify_customer_id). A bare
+  // `.eq("customer_id", row.customer_id)` on `customer_payment_methods` missed the card, the
+  // Braintree branch returned null, and the executor silently fell through to the Shopify rail —
+  // billing an Amex ••1002 that had already declined. The widened lookup uses linkGroupIds so
+  // the card is found regardless of which linked record the caller happens to hold.
+  const fn = SRC.slice(SRC.indexOf("async function chargeViaBraintreeIfPossible"));
+  const body = fn.slice(0, fn.indexOf("\n}\n") + 3);
+  assert.match(body, /linkGroupIds/, "the Braintree lookup must call linkGroupIds");
+  assert.match(
+    body,
+    /\.in\("customer_id",\s*groupIds\)/,
+    "the customer_payment_methods lookup must use `.in(customer_id, groupIds)` — not a bare `.eq(customer_id, row.customer_id)` that misses a linked sibling's card",
+  );
+  assert.doesNotMatch(
+    body,
+    /\.eq\("customer_id",\s*row\.customer_id\)/,
+    "the pre-fix bare same-person lookup must be gone — that is the failing state this test pins",
+  );
+  assert.match(
+    body,
+    /customerId: row\.customer_id/,
+    "the CHARGE identity is still the queue row's own customer_id — widening a LOOKUP is correct, re-pointing a CHARGE is not",
+  );
+});
+
 test("a named shopify method skips the Braintree rail", () => {
   // A chosen `shopify_payment_method_id` is an explicit authorisation to bill THAT card via the
   // Shopify contract rail. Routing to a Braintree card would charge a different instrument than

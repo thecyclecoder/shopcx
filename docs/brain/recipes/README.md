@@ -28,6 +28,7 @@ These supplement the [[../libraries]] reference. Libraries describe what a file 
 - [[create-return]] — `createFullReturn`
 - [[issue-refund]] — `partialRefundByAmount`
 - [[partial-refund]] — same as issue-refund but customer-initiated path
+- [[backfill-order-refunds-from-financial-status]] — one-off `scripts/_backfill-*` that closes the historical gap between `orders.financial_status='refunded'` and the `order_refunds` ledger (the Phase-2 backfill behind [[../libraries/vendor-refund-mirror]] `decideFinancialStatusBackfill`)
 
 ## Loyalty
 

@@ -16,6 +16,15 @@ internal rails. It falls through to the Shopify contract dance only when there i
 Braintree token. A Braintree **decline** does not fall through — the card was already asked, and a
 second rail would risk a double charge.
 
+The Braintree guard's `customer_payment_methods` lookup spans the queue row's link group via
+[[customer-links]] `linkGroupIds` (payment-method-lookups-must-span-linked-accounts spec Phase 1)
+so a card vaulted on a linked sibling is still found. The queue row's `customer_id` stays the
+identity for writes — the resulting order + transaction attribute to the person the charge was
+queued against, not to whichever sibling happens to hold the card. Ground truth: ticket
+`4ed092c4` — MasterCard ••9762 vaulted on customer `affcdc47`, charge required linked sibling
+`40c66b13` (has `shopify_customer_id`); pre-fix, the narrow lookup missed the card and fell
+through to bill an Amex ••1002 that had already declined.
+
 ## Exports
 
 | Export | Notes |

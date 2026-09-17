@@ -10,6 +10,11 @@ import { normalizeShopifyShippingAddress, resolveOrderAddresses } from "@/lib/ad
 import { inngest } from "@/lib/inngest/client";
 import { isFirstSubscriptionOrder } from "@/lib/subscription-order-link";
 import { getMemberByCustomerId, deductPoints, getOrCreateMember, calculateEarningPoints, earnPoints, getLoyaltySettings, consumeRedemption } from "@/lib/loyalty";
+import {
+  parseShopifyRefundPayload,
+  insertShopifyRefundMirror,
+  reconcileShopifyRefundsForOrder,
+} from "@/lib/vendor-refund-mirror";
 
 // ── HMAC verification ──
 
@@ -1105,6 +1110,20 @@ export async function handleOrderEvent(workspaceId: string, payload: Record<stri
       } catch (e) {
         console.error("Loyalty deduction on refund error:", e);
       }
+
+      // Vendor-side refund mirror — reconcile fallback. The primary path
+      // is the refunds/create webhook (handleRefundCreate). This branch
+      // catches anything that path missed: a refund fired before we
+      // registered the topic, a webhook delivery dropped, or a hand
+      // reconcile made directly against the Shopify order. Reads
+      // /orders/{id}/refunds.json and inserts one order_refunds row per
+      // refund the vendor has completed. Idempotent — a refund already
+      // mirrored (via refundOrder OR handleRefundCreate) is skipped.
+      try {
+        await reconcileShopifyRefundsForOrder(workspaceId, shopifyOrderId);
+      } catch (e) {
+        console.error("Vendor refund mirror reconcile error:", e);
+      }
     }
 
     // Evaluate rules — only on new orders
@@ -1182,5 +1201,46 @@ export async function handleFulfillmentUpdate(workspaceId: string, payload: Reco
       .update(updates)
       .eq("workspace_id", workspaceId)
       .eq("shopify_order_id", shopifyOrderId);
+  }
+}
+
+// ── Refunds/create handler ──
+
+/**
+ * `refunds/create` Shopify webhook. Fires when a refund is created on
+ * an order — whether the refund was issued through `refundOrder`
+ * (src/lib/refund.ts) or by hand in the Shopify admin. This is the
+ * primary vendor-side path into the `order_refunds` mirror ledger.
+ *
+ * The mirror insert is idempotent on two axes (vendor_refund_id +
+ * unique index on (order_id, request_key)), so this handler is safe to
+ * re-invoke on a retry AND safe to run alongside `refundOrder`, which
+ * writes the row inside its own flow. See
+ * `src/lib/vendor-refund-mirror.ts` for the full contract.
+ *
+ * Money never moves here. This handler only records what already
+ * happened at the vendor.
+ */
+export async function handleRefundCreate(
+  workspaceId: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const parsed = parseShopifyRefundPayload(payload);
+  if (!parsed) {
+    console.warn(`[refunds/create] unparseable payload (workspace ${workspaceId})`);
+    return;
+  }
+  if (!parsed.hasSuccessfulTransaction) {
+    // A refunds/create can carry only-pending transactions in rare
+    // cases (async gateway settlement). Wait for the follow-up webhook
+    // or the T+3d reconcile to flip status. We only record refunds the
+    // vendor has actually completed.
+    return;
+  }
+  const result = await insertShopifyRefundMirror(workspaceId, parsed);
+  if (!result.inserted && result.reason === "insert_failed") {
+    console.error(
+      `[refunds/create] mirror insert failed for shopify_refund_id=${parsed.shopifyRefundId}: ${result.detail}`,
+    );
   }
 }
