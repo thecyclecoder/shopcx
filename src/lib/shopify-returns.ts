@@ -84,6 +84,51 @@ export function computeReturnNetRefundCents(input: {
 }
 
 /**
+ * Clamp a computed `net_refund_cents` down to the live refundable ceiling from the Shopify ledger.
+ * Pure. Returns the clamped amount plus a `clamped` flag so the caller can log the correction.
+ *
+ * Phase 1 of [[../../docs/brain/specs/return-net-refund-must-net-order-level-coupon-discounts]]:
+ * `deriveOrderSubtotalCentsFromLines` sums per-line gross-minus-line-discount but has NO way to see
+ * an ORDER-LEVEL discount (a loyalty coupon in `orders.discount_codes`, applied by Shopify at the
+ * order level rather than allocated per line — `line_items[].total_discount_cents` stays 0). On any
+ * such order the derived subtotal OVERSTATES what the customer actually paid by exactly the
+ * order-level discount, so `computeReturnNetRefundCents` produces a net_refund larger than the live
+ * refundable ceiling and the pre-clamp guard REFUSED the return outright.
+ *
+ * The direct sibling of [[../../docs/brain/specs/return-net-refund-must-net-per-line-discounts]] —
+ * that one fixed per-line discounts in the DERIVATION (Shopify sends `total_discount_cents` per
+ * line, so we can net it exactly). Order-level coupons are DIFFERENT: `public.orders` has NO stored
+ * order-level discount-amount column — only the `discount_codes` text array with the code names —
+ * so the derivation cannot net the coupon at all. Rather than fetch the allocated discount from
+ * Shopify (an extra Shopify call on every return), we clamp the promise at the live ceiling from
+ * `getOrderRefundLedger`, which IS the true customer-paid figure (Shopify's own `sale - refunded -
+ * pending`). A return that promises up to the live ceiling never strands the customer, and the
+ * downstream refund pipeline ([[../inngest/returns]] `returnsIssueRefund`) still enforces its own
+ * cascading caps (local mirror → local ledger → gateway `decideRefundReconcile`) at refund time.
+ *
+ * Live case from derived-from ticket `cc78ad94` (Anne Bergeron SC138816): Strawberry Lemonade
+ * $59.96 × 2 gross = $119.92 with a $15-off order-level loyalty coupon (customer paid $104.92
+ * subtotal + $10.72 tax = $115.64 total). Pre-clamp the derived subtotal was $119.92 → net_refund
+ * $119.92 > live refundable $115.64 → the crisis white-glove return was REFUSED. Post-clamp the
+ * net_refund is clamped to $115.64 (the live ceiling), the return is created, and the pipeline
+ * refunds what the customer actually paid.
+ *
+ * `refundableCents == null` (Shopify ledger unreadable) leaves `netRefundCents` untouched — the
+ * clamp cannot invent a ceiling from a missing signal. The upstream `assertReturnRefundHeadroom`
+ * still refuses on that branch; the clamp only downgrades the CEILING-EXCEEDED case.
+ */
+export function clampNetRefundToLiveCeiling(input: {
+  netRefundCents: number;
+  refundableCents: number | null;
+}): { netRefundCents: number; clamped: boolean } {
+  const net = Number.isFinite(input.netRefundCents) ? Math.max(0, Math.round(input.netRefundCents)) : 0;
+  if (input.refundableCents == null) return { netRefundCents: net, clamped: false };
+  const ceiling = Math.max(0, Math.round(input.refundableCents));
+  if (net <= ceiling) return { netRefundCents: net, clamped: false };
+  return { netRefundCents: ceiling, clamped: true };
+}
+
+/**
  * Derive an order's REFUNDABLE SUBTOTAL from its `line_items` — the sum of
  * `price_cents * quantity - total_discount_cents` EXCLUDING any Shipping Protection line. Pinned in
  * one exported helper so every downstream refund path (return-creation + any future refund path)
@@ -111,6 +156,18 @@ export function computeReturnNetRefundCents(input: {
  * actually paid, so the headroom check sees $147.12 (below the $155.95 ceiling) and clears.
  * `total_discount_cents` floors at 0 and clamps to `qty * price` — a bad row cannot push the line's
  * contribution negative.
+ *
+ * KNOWN LIMITATION — order-level coupons are invisible here. Shopify allocates a per-line discount
+ * into `line_items[].total_discount_cents` when the coupon is applied at the LINE level, but an
+ * ORDER-LEVEL coupon (a loyalty $-off, sitting in `orders.discount_codes` as a text code) is NOT
+ * allocated per line: `total_discount_cents` stays 0 and there is NO stored order-level
+ * discount-amount column on `public.orders`. So the derived subtotal OVERSTATES the customer-paid
+ * figure by exactly the order-level coupon amount. Phase 1 of
+ * [[../../docs/brain/specs/return-net-refund-must-net-order-level-coupon-discounts]] handles this
+ * DOWNSTREAM: `clampNetRefundToLiveCeiling` caps the computed net_refund at the live refundable
+ * ceiling from `getOrderRefundLedger` (the true customer-paid figure), so a coupon-carrying order
+ * no longer over-promises the refund and the return can be created — derived-from ticket
+ * `cc78ad94` (Anne Bergeron SC138816, $15-off loyalty coupon).
  */
 export function deriveOrderSubtotalCentsFromLines(
   lines: OrderLineItemLite[] | null | undefined,
@@ -156,14 +213,16 @@ export function deriveInternalRefundCeilingCents(input: {
 
 /**
  * Discriminated verdict for the creation-time refund-headroom check — the shape the extracted
- * `assertReturnRefundHeadroom` returns. `ok:true` means the return is safe to create for the
- * promised `net_refund_cents`; `ok:false` carries the caller-facing `error` string with the two
- * numbers named. Split into its own type so the callsite reads as a single named check rather than
- * an inline `if / return { success:false, error }` block that can drift out of place.
+ * `assertReturnRefundHeadroom` returns. `ok:true` means the return is safe to create; `ok:false`
+ * carries the caller-facing `error` string. Only the `unreadable_ledger` refusal remains — the
+ * legacy `exceeds_ceiling` refusal was replaced by a clamp (Phase 1 of
+ * [[../../docs/brain/specs/return-net-refund-must-net-order-level-coupon-discounts]]) because it
+ * over-refused legitimate returns on any order with an ORDER-LEVEL coupon (invisible to the
+ * per-line derivation). The clamp lives in `clampNetRefundToLiveCeiling` and runs at the callsite.
  */
 export type ReturnRefundHeadroomVerdict =
   | { ok: true }
-  | { ok: false; reason: "unreadable_ledger" | "exceeds_ceiling"; error: string };
+  | { ok: false; reason: "unreadable_ledger"; error: string };
 
 /**
  * Pure headroom check for return creation — a return that promises MORE than the order can
@@ -176,8 +235,15 @@ export type ReturnRefundHeadroomVerdict =
  *    headroom must refuse, never assume. Internal (SHOPCX*) orders bypass this via
  *    `readReturnCreationRefundLedger`'s `no_shopify_order_id` branch (a local ceiling is
  *    computed), so this branch fires only for a genuine Shopify outage.
- *  - `netRefundCents > refundableCents` — the promised net exceeds the live ceiling; both numbers
- *    are named in the error string.
+ *
+ * The historical `netRefundCents > refundableCents` refusal branch was removed in Phase 1 of
+ * [[../../docs/brain/specs/return-net-refund-must-net-order-level-coupon-discounts]]: order-level
+ * coupons (a loyalty $-off in `orders.discount_codes`) are invisible to
+ * `deriveOrderSubtotalCentsFromLines` and made the derived subtotal overstate the customer-paid
+ * figure by exactly the coupon amount, tripping this branch on every legitimate return of a
+ * coupon-carrying order (derived-from ticket `cc78ad94`, Anne Bergeron SC138816 crisis white-glove
+ * refused). The clamp in `clampNetRefundToLiveCeiling` now caps the promise at the live ceiling so
+ * the return can be created — a return promising up to the live ceiling never strands the customer.
  *
  * `netRefundCents <= 0` is a no-op (there is nothing to promise) and always passes.
  */
@@ -186,6 +252,10 @@ export function assertReturnRefundHeadroom(input: {
   refundableCents: number | null;
   orderNumber: string;
 }): ReturnRefundHeadroomVerdict {
+  // orderNumber is retained in the signature so the caller-facing error string can still name the
+  // order on the unreadable-ledger branch; kept even though the (now-only) refusal path does not
+  // interpolate it — the caller's log line can still cite it via a wrapper if needed.
+  void input.orderNumber;
   const net = Number.isFinite(input.netRefundCents) ? Math.max(0, Math.round(input.netRefundCents)) : 0;
   if (net <= 0) return { ok: true };
   if (input.refundableCents == null) {
@@ -193,13 +263,6 @@ export function assertReturnRefundHeadroom(input: {
       ok: false,
       reason: "unreadable_ledger",
       error: `Refusing to create return: live refund ledger is unreadable so headroom cannot be verified. Promised net_refund $${(net / 100).toFixed(2)} against unknown live refundable ceiling — a refund guard that cannot verify headroom must refuse, never assume.`,
-    };
-  }
-  if (net > input.refundableCents) {
-    return {
-      ok: false,
-      reason: "exceeds_ceiling",
-      error: `Refusing to create return: net_refund $${(net / 100).toFixed(2)} exceeds live refundable ceiling $${(input.refundableCents / 100).toFixed(2)} on order ${input.orderNumber} (Shopify ledger — includes out-of-band refunds). A return that promises more than the order can pay strands the customer.`,
     };
   }
   return { ok: true };
@@ -1254,11 +1317,28 @@ export async function createFullReturn(params: FullReturnParams): Promise<FullRe
     // figure). The downstream pipeline reads net_refund_cents as the contract and never re-derives.
     const orderTotalForAudit = (order?.total_cents as number | null | undefined) ?? 0;
     const finalLabelCostCents = params.freeLabel ? 0 : labelCostCents;
-    const netRefundCents = computeReturnNetRefundCents({
+    const rawNetRefundCents = computeReturnNetRefundCents({
       orderSubtotalCents,
       labelCostCents: finalLabelCostCents,
       refundsSucceededCents: refundLedger.refundedCents,
     });
+    // Phase 1 of [[../../docs/brain/specs/return-net-refund-must-net-order-level-coupon-discounts]] —
+    // clamp to the live refundable ceiling from `getOrderRefundLedger`. `deriveOrderSubtotalCentsFromLines`
+    // has no way to see an ORDER-LEVEL coupon (a loyalty $-off in `orders.discount_codes`), so on any
+    // coupon-carrying order the derived subtotal overstates what the customer actually paid by exactly
+    // the coupon amount. Before the clamp, `assertReturnRefundHeadroom`'s exceeds-ceiling branch refused
+    // the return outright (Anne Bergeron SC138816 crisis). The clamp caps the promise at the live
+    // ceiling so the return is created; the pipeline's own cascading caps still enforce at refund time.
+    const clampVerdict = clampNetRefundToLiveCeiling({
+      netRefundCents: rawNetRefundCents,
+      refundableCents: refundLedger.refundableCents,
+    });
+    if (clampVerdict.clamped) {
+      console.warn(
+        `[createFullReturn] Clamped net_refund on order ${params.orderNumber}: $${(rawNetRefundCents / 100).toFixed(2)} → $${(clampVerdict.netRefundCents / 100).toFixed(2)} (live refundable ceiling). Order likely carries an order-level discount invisible to the per-line subtotal derivation (orders.discount_codes).`,
+      );
+    }
+    const netRefundCents = clampVerdict.netRefundCents;
 
     // Update our DB with EasyPost details + the refund commitment.
     // Status advances to label_created independently of
