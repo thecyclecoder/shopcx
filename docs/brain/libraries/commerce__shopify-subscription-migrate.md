@@ -67,6 +67,24 @@ prevent. This way a failure between the two leaves both engines owning it for a 
 is survivable: Shopify fires nothing on its own and our renewal cron runs daily, so a same-day
 double charge is not reachable, and `migration_completed_at` stays null for the sweeper.
 
+## ⭐ Carrying the customer's dates across
+
+A new contract's cycle calendar starts at *its* `createdAt`, so a migrated sub would otherwise be
+re-based onto migration day. Two things preserve the real dates, and only the second one holds:
+
+1. **`anchorsForSchedule()` on create** — sets `billingPolicy.anchors` so the contract is at least
+   born phased. This is the weaker half: an anchor is a day-of-month / day-of-week, so it phases
+   `MONTH` correctly and **cannot phase `WEEK`/n at all** — and 96% of this book is `WEEK`/4 or
+   `WEEK`/8.
+2. **`shopifySyncBillingSchedule()` immediately after create** — walks the customer's own cadence
+   forward from their real next billing date, pinning each cycle with
+   `subscriptionBillingCycleScheduleEdit`. Works for every cadence. Verified end to end: a `WEEK`/8
+   contract went from `11-12 / 01-07 / 03-04 / 04-29` to `09-21 / 11-16 / 01-11 / 03-08`.
+
+Non-fatal and dry-run-aware — a migration whose schedule sync fails is still a correctly-priced,
+correctly-dated contract in our own records, and the next renewal re-pins it. Full mechanism table:
+[[commerce__shopify-subscription-client]] § "Keeping a customer's own dates".
+
 ## Gotchas
 
 - **Not idempotent without the marker.** The first real run created TWO live contracts for one

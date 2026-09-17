@@ -44,6 +44,7 @@ import { fetchAppstleContract, normalizeAppstleContract } from "@/lib/appstle-sn
 import { appstleCancelContractVendorOnly } from "@/lib/appstle";
 import {
   shopifyCreateContract,
+  shopifySyncBillingSchedule,
   shopifyAddDraftDiscount,
   withDraft,
   getSubscriptionContract,
@@ -721,21 +722,10 @@ export async function executeMigration(
       // the contract is briefly active and billable.
       status: norm.status === "PAUSED" ? "PAUSED" : "ACTIVE",
       paymentMethodId: norm.payment_method_id,
-      // ⭐ ANCHOR the cycle calendar to the customer's OWN billing day.
-      //
-      // Shopify computes its cycles as `createdAt + n × interval` and that calendar is IMMUTABLE:
-      // `setNextBillingDate` moves only the display field (verified — cycles unchanged), and
-      // `subscriptionBillingCycleScheduleEdit` refuses any date outside a cycle's own window
-      // (OUT_OF_BOUNDS). An anchor is the only lever, and it only exists at CREATE.
-      //
-      // Without it a migrated contract's cycles fall on its migration date, so the customer's real
-      // billing day is lost — and worse, our cadence-advanced date can land INSIDE the cycle we
-      // already billed, which the worker reads as `cycle_already_billed` and skips FOREVER.
-      // Measured on the 2026-09-16 cohort: 2 of 3 subs were silently dead one renewal after their
-      // first successful charge, one of them by eight minutes.
-      //
-      // Verified: a contract created on the 17th with MONTHDAY=20 produced cycles on 09-20,
-      // 10-20, 11-20, 12-20 — the customer's day, from the first cycle.
+      // The anchor phases a MONTH cadence correctly but CANNOT phase a WEEK/n one — an anchor
+      // says "Mondays", not "starting the 21st", and 96% of this book is WEEK/4 or WEEK/8. It is
+      // kept because it costs nothing and gets the weekday right beyond the pinned horizon; the
+      // REAL sync is `shopifySyncBillingSchedule` immediately after the create.
       billingPolicy: {
         interval: norm.billing_interval,
         intervalCount: norm.billing_interval_count,
@@ -746,16 +736,6 @@ export async function executeMigration(
         intervalCount: norm.billing_interval_count,
         ...anchorsForSchedule(norm.billing_interval, nextBillingDate),
       },
-      // ⭐ CARRY the customer's existing shipping charge — do NOT zero it.
-      //
-      // The pricing rule grants free shipping, but that rule governs NEW subscriptions. 1,620
-      // active contracts pay $4.95 from a period when free shipping was not offered on all subs
-      // (CEO, 2026-09-10), and a legacy shipping term is a term of their subscription exactly like
-      // a legacy unit price — which this migration preserves in 1,916 places. Zeroing it here
-      // would hand those customers an unrequested ~$8,019/cycle upgrade on a migration that is
-      // supposed to be structural, and would be inconsistent with how every other legacy term is
-      // treated. New subscriptions still get free shipping from the rule; migrated ones keep what
-      // they have.
       deliveryPrice: ((norm.delivery_price_cents ?? 0) / 100).toFixed(2),
       deliveryMethod: {
         shipping: {
@@ -777,6 +757,31 @@ export async function executeMigration(
     return { ok: false, stage: "create", error: created.error, plan };
   }
   const newContractId = created.contractId;
+
+  // ⭐ SYNC THE SCHEDULE to the customer's own dates.
+  //
+  // Shopify computes cycles as `createdAt + n × interval`, so a freshly migrated contract's
+  // schedule sits on MIGRATION day, not the customer's anniversary. Verified on a real migration:
+  // a WEEK/8 sub due 09-21 produced cycles `11-09 / 01-04 / 03-01` — 49 days out.
+  //
+  // `setNextBillingDate` cannot fix it (Shopify staff: it is "essentially a storage field for
+  // apps, not actually tied to billing cycle recalculation"), and an anchor cannot phase a WEEK/n
+  // cadence. Pinning each cycle can, and does: the same contract went to
+  // `09-21 / 11-16 / 01-11 / 03-08`.
+  //
+  // Non-fatal by design. The customer is billed by explicit cycle selector, so an unsynced
+  // schedule is a DISPLAY problem on Shopify's account page and emails — not a billing one. A
+  // failure here must not undo a migration that otherwise succeeded.
+  if (!opts.dryRun && nextBillingDate) {
+    try {
+      const sync = await shopifySyncBillingSchedule(workspaceId, newContractId, { firstDate: nextBillingDate });
+      if (sync.stoppedAt) {
+        console.log(`[migrate] ${newContractId}: pinned ${sync.pinned} cycle(s), stopped at ${sync.stoppedAt}`);
+      }
+    } catch (e) {
+      console.error(`[migrate] ${newContractId}: schedule sync threw (non-fatal):`, e instanceof Error ? e.message : e);
+    }
+  }
 
   // Record the new contract IMMEDIATELY — before discounts, before anything else can fail — so a
   // crash from here on leaves a findable half-migration instead of an orphan nobody knows about.

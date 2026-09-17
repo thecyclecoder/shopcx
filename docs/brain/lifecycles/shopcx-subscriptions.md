@@ -433,6 +433,32 @@ engine the call works for — and that landed briefly before being corrected. Th
 exactly one caller (`api/webhooks/shopify/route.ts`), so the id's provenance is not ambiguous; check
 the caller, not the parameter name.
 
+## ⭐ Dates survive the move — and stay right afterwards
+
+The migrated contract is created today, so Shopify's own cycle calendar (`createdAt + n × interval`)
+would re-base every customer onto migration day. That is the single biggest customer-visible risk in
+the whole cutover, and it is solved, not worked around:
+
+- **at create** — anchors phase the contract (works for `MONTH`, cannot express `WEEK`/n).
+- **right after create** — `shopifySyncBillingSchedule` pins each cycle to the customer's own dates
+  with `subscriptionBillingCycleScheduleEdit`, which works for every cadence. Verified: a `WEEK`/8
+  sub kept `09-21 / 11-16 / 01-11 / 03-08`, and a 3-days-out sub migrated with its date and its
+  $79.95 − 25% pricing intact.
+- **forever after** — the renewal worker re-pins one cycle ahead on each successful charge, and
+  every portal timing change (date change, pause/resume, skip, dunning reschedule) goes through
+  `shopifyRetimeContract`. Shopify only materializes ~12 months of schedule, so the horizon has to
+  roll.
+
+The alternative — converting `WEEK`/4 and `WEEK`/8 to `MONTH`/1 and `MONTH`/2 so anchors work
+permanently — was priced at **~$147,625/yr (7.9%)** across 1,955 subs, because 28 days is not a
+month. Rejected. Mechanism table: [[../libraries/commerce__shopify-subscription-client]] § "Keeping
+a customer's own dates".
+
+⚠️ **A date that lands in an already-`BILLED` cycle strands the sub silently** — the renewal worker
+resolves the cycle by date and skips spent ones. Measured on the 2026-09-16 cohort: two of three
+subs that had just charged were already dead, one by eight minutes. `shopifyRetimeContract` verifies
+after writing and returns `stranded` rather than succeeding quietly.
+
 ## Open decisions
 
 - **~$9,700/cycle**: 974 lines are priced above the standard ladder because their subs never got a

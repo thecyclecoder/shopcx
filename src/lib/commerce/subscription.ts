@@ -576,7 +576,18 @@ export async function subscriptionUpdateNextBillingDate(
   if (src === "internal") {
     return internalSubUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
   }
-  if (src === "shopcx") return shopifySetNextBillingDate(workspaceId, contractId, nextBillingDate);
+  if (src === "shopcx") {
+    // ⭐ RETIME, not just set. `shopifySetNextBillingDate` moves only the display field; the cycle
+    // calendar underneath stays where it was, and the renewal worker picks the cycle BY DATE and
+    // skips one already BILLED. A new date landing in a spent cycle strands the subscription
+    // silently. `shopifyRetimeContract` re-anchors the calendar and verifies the date is billable.
+    const { shopifyRetimeContract } = await import("@/lib/commerce/shopify-subscription-client");
+    const r = await shopifyRetimeContract(workspaceId, contractId, nextBillingDate);
+    if (r.stranded) {
+      return { success: false, error: "date_not_billable — it lands in a cycle already charged" };
+    }
+    return r;
+  }
   return appstleUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
 }
 

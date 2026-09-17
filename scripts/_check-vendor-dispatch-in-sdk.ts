@@ -88,6 +88,7 @@ const ENGINE_RESOLVERS: ReadonlyArray<{ path: string; reason: string }> = [
   { path: "src/lib/action-executor.ts", reason: "agent price restore routes before the vendor fetch" },
   { path: "src/lib/dunning-webhook.ts", reason: "a Braintree method cannot attach to a Shopify contract" },
   { path: "src/lib/commerce/shopify-one-time-charge.ts", reason: "picks the Braintree vs Shopify rail" },
+  { path: "src/lib/inngest/portal-auto-resume.ts", reason: "only ShopCX needs its cycle calendar re-anchored on resume" },
 ];
 
 const SCAN_ROOTS = ["src"];
