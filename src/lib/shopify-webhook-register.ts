@@ -29,6 +29,12 @@ const WEBHOOK_TOPICS = [
   "subscription_billing_attempts/success",
   "subscription_billing_attempts/failure",
   "subscription_billing_attempts/challenged",
+  // Contracts born OUTSIDE our code — a PDP checkout with a selling plan. Almost all storefront
+  // traffic lands on Shopify PDPs, so this is the main way new ShopCX subscriptions will arrive.
+  // These two were registered by hand on the live shop and were missing from this list, which
+  // means a re-install would silently have dropped them. See src/lib/commerce/shopcx-contract-ingest.ts.
+  "subscription_contracts/create",
+  "subscription_contracts/update",
 ];
 
 export async function registerShopifyWebhooks(

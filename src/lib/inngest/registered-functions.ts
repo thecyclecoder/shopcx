@@ -81,6 +81,10 @@ import {
   shopifySubscriptionRenewalAttempt,
 } from "@/lib/inngest/shopify-subscription-renewals";
 import {
+  shopcxContractIngest,
+  shopcxContractSync,
+} from "@/lib/inngest/shopcx-contract-ingest";
+import {
   oneTimeChargeCron,
   oneTimeChargeAttempt,
 } from "@/lib/inngest/one-time-charges";
@@ -272,6 +276,8 @@ export const registeredInngestFunctions = [
   internalSubscriptionRenewalAttempt,
   shopifySubscriptionRenewalCron,
   shopifySubscriptionRenewalAttempt,
+  shopcxContractIngest,
+  shopcxContractSync,
   oneTimeChargeCron,
   oneTimeChargeAttempt,
   migrationAuditRetryCron,
