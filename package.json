@@ -300,6 +300,7 @@
     "test:action-executor-vaulted-pm-guard": "tsx --test src/lib/action-executor.vaulted-pm-guard.test.ts",
     "test:action-executor-full-order-refund-customer-binding": "tsx --test src/lib/action-executor.full-order-refund-customer-binding.test.ts",
     "test:create-return-resolution-type": "tsx --test src/lib/action-executor.create-return-resolution-type.test.ts",
+    "test:create-return-linked-accounts": "tsx --test src/lib/action-executor.create-return-linked-accounts.test.ts",
     "test:playbook-executor-check-vaulted-pm": "tsx --test src/lib/playbook-executor.check-vaulted-pm.test.ts",
     "test:playbook-executor-assisted-purchase-routing": "tsx --test src/lib/playbook-executor.assisted-purchase-routing.test.ts",
     "test:playbook-executor-assisted-purchase-intent-hardening": "tsx --test src/lib/playbook-executor.assisted-purchase-intent-hardening.test.ts",

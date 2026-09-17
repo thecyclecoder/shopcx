@@ -22,13 +22,18 @@ type Row = Record<string, unknown>;
 type Tables = Record<string, Row[]>;
 
 interface Filter {
-  kind: "eq";
+  kind: "eq" | "in";
   col: string;
   val: unknown;
 }
 
 function matches(row: Row, filters: Filter[]): boolean {
   for (const f of filters) {
+    if (f.kind === "in") {
+      const set = f.val as unknown[];
+      if (!Array.isArray(set) || !set.includes(row[f.col])) return false;
+      continue;
+    }
     if (row[f.col] !== f.val) return false;
   }
   return true;
@@ -37,6 +42,7 @@ function matches(row: Row, filters: Filter[]): boolean {
 interface FakeChain {
   select: (...args: unknown[]) => FakeChain;
   eq: (col: string, val: unknown) => FakeChain;
+  in: (col: string, vals: unknown[]) => FakeChain;
   order: (col: string, opts?: { ascending?: boolean }) => FakeChain;
   limit: (n: number) => FakeChain;
   single: () => Promise<{ data: Row | null; error: null }>;
@@ -66,6 +72,10 @@ function makeChain(tables: Tables, table: string): FakeChain {
     select: () => chain,
     eq: (col, val) => {
       filters.push({ kind: "eq", col, val });
+      return chain;
+    },
+    in: (col, vals) => {
+      filters.push({ kind: "in", col, val: vals });
       return chain;
     },
     order: (col, opts) => {
