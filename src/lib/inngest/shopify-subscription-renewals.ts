@@ -37,6 +37,7 @@ import {
   getBillingCycleForDate,
   shopifyAttemptBilling,
   awaitBillingAttempt,
+  shopifySyncBillingSchedule,
 } from "@/lib/commerce/shopify-subscription-client";
 import { enforceSwitch } from "@/lib/control-tower/enforce-switch";
 import { rollForwardToFutureBillingDate } from "@/lib/dunning";
@@ -392,6 +393,31 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
           // `succeeded`, not "paid" — the vocabulary the rules engine and the dashboard badge use.
           .update({ next_billing_date: advanceTo.toISOString(), last_payment_status: "succeeded", updated_at: new Date().toISOString() })
           .eq("id", sub.id);
+
+        // ⭐ ROLLING SCHEDULE PIN. Shopify caps `scheduleEdit` about 12 months out, so the sync
+        // done at migration eventually runs out. Pinning one cycle ahead on every charge keeps the
+        // customer's Shopify-visible date correct indefinitely, for one mutation per renewal.
+        //
+        // This is what buys the alternative: converting WEEK/4 and WEEK/8 to MONTH/1 and MONTH/2
+        // would make the schedule permanently anchorable, but 28 days is not a month — it costs
+        // ~1.04 billing cycles a year per sub, about $148k/yr across this book.
+        //
+        // Non-fatal: the charge already succeeded and the worker bills by explicit selector, so a
+        // failed pin is a display drift, never a missed renewal.
+        try {
+          const landing = await getBillingCycleForDate(
+            workspace_id, sub.shopify_contract_id, advanceTo.toISOString(),
+          );
+          if (landing.success && landing.cycle) {
+            await shopifySyncBillingSchedule(workspace_id, sub.shopify_contract_id, {
+              firstDate: advanceTo.toISOString(),
+              startIndex: landing.cycle.index,
+              cycles: 2,
+            });
+          }
+        } catch (e) {
+          console.error(`[shopcx-renewal] ${sub.shopify_contract_id}: schedule pin failed (non-fatal):`, e instanceof Error ? e.message : e);
+        }
       });
 
       await step.run("beat-charged", () => emitReactiveHeartbeat(ATTEMPT_FN_ID, { produced: { outcome: "charged" } }));

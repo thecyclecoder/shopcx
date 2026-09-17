@@ -876,6 +876,164 @@ export async function shopifyRemoveDraftLine(
  */
 /** The grandfathered per-unit concession. Named separately — it is the one structural discount
  *  that carries into an internal sub's BASE price rather than being re-derived from the rules. */
+/**
+ * The `billingPolicy.anchors` that put Shopify's cycle calendar on a given day.
+ *
+ * MONTH → MONTHDAY; WEEK → WEEKDAY (Shopify counts Monday=1, JS counts Sunday=0 — passing the JS
+ * value straight through sends an invalid `day:0`). Day 29-31 is deliberately unanchored: an
+ * anchor of 31 has no meaning in a 30-day month.
+ */
+export function anchorsForDate(
+  interval: string | null,
+  iso: string | null,
+): { anchors?: { type: string; day: number }[] } {
+  if (!interval || !iso) return {};
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return {};
+  const iv = String(interval).toUpperCase();
+  if (iv === "MONTH") {
+    const day = d.getUTCDate();
+    return day >= 1 && day <= 28 ? { anchors: [{ type: "MONTHDAY", day }] } : {};
+  }
+  if (iv === "WEEK") {
+    const js = d.getUTCDay();
+    return { anchors: [{ type: "WEEKDAY", day: js === 0 ? 7 : js }] };
+  }
+  return {};
+}
+
+/**
+ * Move a ShopCX contract's billing timing — the date AND the cycle calendar underneath it.
+ *
+ * ⭐ Setting `nextBillingDate` alone is NOT ENOUGH, and that is the trap. It moves only the
+ * display field: verified live — a contract set to 2026-12-01 kept cycles 11-10 / 01-05 / 03-02
+ * unchanged. Meanwhile the renewal worker resolves which cycle to bill BY DATE and treats a BILLED
+ * cycle as "already charged, skip". So a new date that lands inside an already-billed cycle makes
+ * the subscription SILENTLY DEAD — never charged again, no error anywhere.
+ *
+ * Measured on the 2026-09-16 cohort: two of three subs that had just charged were already dead,
+ * one by EIGHT MINUTES. Both were revived by re-anchoring.
+ *
+ * `subscriptionBillingCycleScheduleEdit` cannot do this — it refuses any date outside a cycle's own
+ * window (OUT_OF_BOUNDS). Re-anchoring the billingPolicy through a draft CAN, and it re-phases the
+ * whole calendar: C's cycles moved to 11-12 / 01-12 / 03-12 / 05-12, the customer's real day, on a
+ * MONTH/2 cadence that an at-CREATE anchor could not phase correctly.
+ *
+ * Every timing change must come through here — a portal date change, a pause/resume, a dunning
+ * reschedule, the renewal advance. Anything that moves the date without moving the calendar can
+ * strand the subscription.
+ */
+/** Advance a date by the contract's own cadence. Mirrors `rollForwardToFutureBillingDate`'s step. */
+function stepSchedule(from: Date, interval: string | null, count: number | null): Date {
+  const n = count && count > 0 ? count : 1;
+  const d = new Date(from);
+  switch (String(interval ?? "MONTH").toUpperCase()) {
+    case "DAY": d.setUTCDate(d.getUTCDate() + n); break;
+    case "WEEK": d.setUTCDate(d.getUTCDate() + 7 * n); break;
+    case "YEAR": d.setUTCFullYear(d.getUTCFullYear() + n); break;
+    default: d.setUTCMonth(d.getUTCMonth() + n); break;
+  }
+  return d;
+}
+
+/**
+ * Pin Shopify's billing cycles to the customer's OWN schedule.
+ *
+ * ⭐ THIS is how a subscription's dates are actually synced. Shopify computes cycles as
+ * `createdAt + n × interval`, so a migrated contract's schedule sits on its migration date, not the
+ * customer's anniversary. Two other mechanisms look like they should fix that and do not:
+ *
+ *   · `subscriptionContractSetNextBillingDate` — Shopify staff describe `nextBillingDate` as
+ *     "essentially a storage field for apps, not actually tied to billing cycle recalculation".
+ *     Verified: setting it left the cycles untouched.
+ *   · re-anchoring `billingPolicy.anchors` — works, and is permanent, but anchors can only express
+ *     MONTHDAY or WEEKDAY. That phases a MONTH cadence correctly and CANNOT phase a WEEK/n one:
+ *     it can say "Mondays", not "starting the 21st". 96% of this book is WEEK/4 or WEEK/8.
+ *
+ * `subscriptionBillingCycleScheduleEdit` moves a cycle's billing date within that cycle's own
+ * window — which is enough, because when the cadence equals the cycle length every target lands
+ * inside its own cycle. Verified end to end: a WEEK/8 contract went from
+ * `11-12 / 01-07 / 03-04 / 04-29` to `09-21 / 11-16 / 01-11 / 03-08`, the customer's real dates.
+ *
+ * ⚠️ Shopify caps this ~12 months out, so it is a ROLLING sync: pin what you can now, and pin one
+ * more cycle after each charge. A cycle that refuses (OUT_OF_BOUNDS) stops the walk rather than
+ * failing the call — the pins already made are still correct, and billing works regardless because
+ * the worker charges by explicit selector.
+ */
+export async function shopifySyncBillingSchedule(
+  workspaceId: string,
+  contractId: string,
+  opts: { firstDate: string; startIndex?: number; cycles?: number },
+): Promise<SubscriptionActionResult & { pinned?: number; stoppedAt?: string }> {
+  const live = await getSubscriptionContract(workspaceId, contractId);
+  if (!live.success || !live.contract) return { success: false, error: live.error ?? "contract unreadable" };
+  const { interval, intervalCount } = live.contract;
+
+  let when = new Date(opts.firstDate);
+  if (Number.isNaN(when.getTime())) return { success: false, error: "invalid firstDate" };
+  const startIndex = opts.startIndex ?? 1;
+  const cycles = opts.cycles ?? 6;
+
+  let pinned = 0;
+  for (let i = 0; i < cycles; i++) {
+    const index = startIndex + i;
+    const env = await gql<{ subscriptionBillingCycleScheduleEdit: { userErrors: { message: string; code?: string }[] } }>(
+      workspaceId,
+      `mutation($in:SubscriptionBillingCycleInput!,$edit:SubscriptionBillingCycleScheduleEditInput!){
+         subscriptionBillingCycleScheduleEdit(billingCycleInput:$in, input:$edit){
+           billingCycle { cycleIndex billingAttemptExpectedDate } userErrors { message code } } }`,
+      {
+        in: { contractId: contractGid(contractId), selector: { index } },
+        edit: { billingDate: when.toISOString(), reason: "MERCHANT_INITIATED" },
+      },
+    );
+    const ue = env.data?.subscriptionBillingCycleScheduleEdit?.userErrors ?? [];
+    if (env.errors?.length || ue.length) {
+      // Expected at the horizon, and on any cycle already billed. Not a failure.
+      return { success: true, pinned, stoppedAt: `cycle ${index}: ${ue[0]?.message ?? env.errors?.[0]?.message}` };
+    }
+    pinned++;
+    when = stepSchedule(when, interval, intervalCount);
+  }
+  return { success: true, pinned };
+}
+
+/**
+ * Move a ShopCX contract's billing timing — the date AND the schedule underneath it.
+ *
+ * Setting `nextBillingDate` alone is NOT enough: it is a storage field, and the renewal worker
+ * resolves which cycle to bill BY DATE and skips a cycle already marked BILLED. A new date landing
+ * in a spent cycle strands the subscription silently — measured on the 2026-09-16 cohort, where two
+ * of three subs that had just charged were already dead, one by eight minutes.
+ *
+ * Every timing change must come through here: a portal date change, a pause/resume, a dunning
+ * reschedule, the renewal advance.
+ */
+export async function shopifyRetimeContract(
+  workspaceId: string,
+  contractId: string,
+  nextBillingDate: string,
+): Promise<SubscriptionActionResult & { stranded?: boolean }> {
+  const landingBefore = await getBillingCycleForDate(workspaceId, contractId, nextBillingDate);
+  // Pin from whichever cycle the new date belongs to, so the walk does not try to rewrite history.
+  const startIndex = landingBefore.cycle?.index ?? 1;
+  await shopifySyncBillingSchedule(workspaceId, contractId, { firstDate: nextBillingDate, startIndex });
+
+  const set = await shopifySetNextBillingDate(workspaceId, contractId, nextBillingDate);
+  if (!set.success) return set;
+
+  // ⚠️ VERIFY. A silent strand is the exact failure this exists to prevent, so it must never be
+  // possible to succeed quietly into one.
+  const landing = await getBillingCycleForDate(workspaceId, contractId, nextBillingDate);
+  if (landing.success && landing.cycle && (landing.cycle.status === "BILLED" || landing.cycle.skipped)) {
+    console.error(
+      `[shopcx-retime] ${contractId}: ${nextBillingDate} lands in cycle #${landing.cycle.index} (${landing.cycle.status}${landing.cycle.skipped ? ", skipped" : ""}) — the renewal worker WILL skip this subscription`,
+    );
+    return { success: true, stranded: true };
+  }
+  return { success: true };
+}
+
 export const LEGACY_RATE_TITLE = "Legacy rate";
 export const STRUCTURAL_DISCOUNT_TITLES = ["Subscribe & Save", "Volume discount", LEGACY_RATE_TITLE];
 

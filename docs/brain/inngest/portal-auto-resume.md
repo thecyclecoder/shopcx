@@ -6,9 +6,33 @@ Resumes paused subs at `pause_resume_at` using the shared internal-aware subscri
 
 ## Implementation
 
-The cron uses [[../libraries/appstle]]'s `appstleSubscriptionAction` to resume subscriptions. This ensures internal subscriptions are handled correctly: internal subs are marked active locally without touching Appstle, while Appstle-managed subs resume through the Appstle API. This prevents internal-* contract ids from being sent to Appstle, which would fail as invalid (internal ids are UUIDs that Appstle doesn't recognize).
+Resume goes through [[../libraries/commerce__subscription]]'s `subscriptionAction(..., "resume")`,
+which is **engine-aware**: an `internal` sub is marked active locally without touching any vendor, a
+`shopcx` sub resumes its Shopify contract, and an `appstle` sub goes to the Appstle API. This is why
+internal contract ids (UUIDs Appstle would reject) never leave the box. Helper `appstleResume` — the
+name is historical — wraps it and throws on error so failures stay visible in cron logs.
 
-Helper function: `appstleResume(workspaceId, contractId)` → calls `appstleSubscriptionAction(..., "resume")` and throws on error, preserving failure visibility in cron logs.
+## ⭐ A resumed sub must be given a date it can bill on
+
+Resuming only flips `status` back to `active`. **Nothing was setting a new billing date**, so after a
+30/60/90-day pause the row still carried the date it had when it was paused — now in the past. On
+`internal` that means an immediate surprise charge. On `shopcx` it is worse: the renewal worker
+resolves which Shopify cycle to bill BY DATE and skips a cycle already marked `BILLED`, so a stale
+date lands in a spent cycle and the subscription is **never charged again, silently**.
+
+`retimeAfterResume()` fixes both paths, on the cron and the event function alike:
+
+- rolls forward from the sub's ORIGINAL date by its own cadence (`rollForwardToFutureBillingDate`),
+  so a customer who billed on the 12th still bills on the 12th — the pause skips some of their days,
+  it does not move them. Tomorrow is the floor if the roll cannot produce a future date.
+- on `shopcx`, calls `shopifyRetimeContract` so the **Shopify cycle schedule** moves too — setting
+  `nextBillingDate` alone only moves a display field
+  ([[../libraries/commerce__shopify-subscription-client]] § "Keeping a customer's own dates").
+- if the new date still lands in a spent cycle, `shopifyRetimeContract` returns `stranded` and this
+  logs it loudly rather than succeeding quietly into a sub that will never bill.
+
+The resulting date is written to `subscriptions.next_billing_date` in the same update that clears
+`pause_resume_at`.
 
 ## Functions
 

@@ -33,7 +33,14 @@ Design + migration plan: [[../lifecycles/shopcx-subscriptions]]. Dunning interac
 | `getBillingAttempt` / `awaitBillingAttempt` | — | read |
 | `getSubscriptionContract(ws, contractId)` | — | read |
 | `getUpcomingBillingCycles(ws, contractId, opts?)` | `appstleGetUpcomingOrders` | read |
+| `getBillingCycleForDate(ws, contractId, date)` | — | read |
+| `shopifySyncBillingSchedule(ws, contractId, {firstDate, startIndex?, cycles?})` | — | pin |
+| `shopifyRetimeContract(ws, contractId, nextDate)` | `appstleUpdateNextBillingDate` (done right) | pin |
+| `anchorsForDate(date, interval)` | — | helper |
 | `withDraft(ws, contractId, mutate)` | — | envelope |
+| `withBillingCycleDraft(ws, contractId, sel, mutate)` / `shopifyDeleteBillingCycleEdit` | — | envelope |
+| `getSubscriptionDraft(ws, draftId)` | — | read |
+| `shopifyUpdateShippingAddress(ws, contractId, addr)` | `appstleUpdateShippingAddress` | draft |
 | `contractGid` / `asFailure` | — | helpers |
 
 All action functions return `{ success, error? }` and never throw (`gql` converts credential,
@@ -216,3 +223,62 @@ Subtract this from `currentPrice * quantity` instead. A code discount's union me
 
 `getSubscriptionDraft(ws, draftId)` is the draft-side equivalent — **mid-edit the draft is the
 truth and the contract is stale**; see [[commerce__shopcx-line-ops]] § failure mode 1.
+
+
+## ⭐ Keeping a customer's own dates — the three date mechanisms, ranked
+
+The single hardest thing about running subscriptions on bare Shopify: **Shopify computes a cycle
+calendar from `createdAt + n × interval` and will not let you move it.** A migrated contract is
+created today, so its calendar starts today — not on the customer's anniversary. There are exactly
+three levers, and only the third works for every cadence.
+
+| # | Mechanism | Scope | Works for |
+|---|---|---|---|
+| 1 | `shopifySetNextBillingDate` (`subscriptionContractSetNextBillingDate`) | the `nextBillingDate` FIELD only | display; changes nothing about the cycle calendar |
+| 2 | re-anchor `billingPolicy.anchors` via a draft (`anchorsForDate`) | permanent, all future cycles | `MONTH`/`YEAR` only — an anchor is a day-of-month / day-of-week, and **`WEEK`/n>1 cannot be expressed** |
+| 3 | `subscriptionBillingCycleScheduleEdit` (`shopifySyncBillingSchedule`) | **one cycle at a time**, pinned inside its own window | every cadence, including `WEEK`/4 and `WEEK`/8 — the whole book |
+
+**Mechanism 1 is a storage field, not a schedule.** Shopify support, verbatim: it is *"essentially a
+storage field for apps, it's not actually tied to billing cycle recalculation."* Setting it moves
+the number the portal renders and nothing else. This is the same fact as the `35917070509`
+observation in Gotchas — `nextBillingDate` 2027-01-15 while the next UNBILLED cycle was 2026-11-03.
+
+**Mechanism 3's constraint is the one that shapes the code:** a `scheduleEdit` can only move a cycle
+**within its own window** (you cannot pin cycle 3 to a date that belongs to cycle 7), and Shopify
+only materializes roughly **12 months** of schedule. So `shopifySyncBillingSchedule` walks the
+customer's cadence forward one cycle at a time from `firstDate`, pinning each, and stops
+**non-fatally** the moment Shopify answers `OUT_OF_BOUNDS`:
+
+```ts
+await shopifySyncBillingSchedule(ws, contractId, { firstDate: nextBillingDate });
+// → { success, pinned: 13, stoppedAt?: "2027-09-14" }
+```
+
+`shopifyRetimeContract` is the portal-facing wrapper: resolve the landing cycle for the new date
+with `getBillingCycleForDate`, then sync from that index. It is what a "change my next order date",
+a pause/resume, or a skip should call — **not** `shopifySetNextBillingDate` alone, which leaves the
+Shopify-visible schedule saying something different from what we will actually charge.
+
+### Why the 12-month horizon does not need solving with a cadence change
+
+The obvious permanent fix is to convert `WEEK`/4 → `MONTH`/1 and `WEEK`/8 → `MONTH`/2, which makes
+mechanism 2 work forever. **Priced and rejected:** 28 days is not a month, so every converted
+customer loses ~1.04 billing cycles a year. Across the 1,138 `WEEK`/4 subs ($100,853/cycle) and 817
+`WEEK`/8 subs ($83,362/cycle) that is **~$147,625/yr, 7.9% of that revenue**. We keep the cadences
+and re-pin instead.
+
+### The rolling pin — how the horizon is kept full
+
+One mutation per renewal buys a permanently-correct schedule:
+
+- **at migration** — [[commerce__shopify-subscription-migrate]] calls `shopifySyncBillingSchedule`
+  immediately after `subscriptionContractCreate`, filling the horizon from the customer's real next
+  date.
+- **on every successful charge** — [[../inngest/shopify-subscription-renewals]] pins the cycle that
+  lands on the new `advanceTo` (plus one), so the horizon advances with the customer.
+- **on any portal date change** — pause/resume ([[../inngest/portal-auto-resume]]), skip, or an
+  explicit reschedule go through `shopifyRetimeContract`.
+
+Every one of these is **non-fatal**. The renewal worker bills by an explicit
+`billingCycleSelector` it resolves itself, so a failed pin is a display drift, never a missed or
+duplicated charge.

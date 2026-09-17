@@ -85,6 +85,25 @@ Two details that matter:
   finds whichever cycle contains whatever date we set. Migrated subs renew on scattered days, and
   carrying each customer's real date across is the entire point.
 
+## ⭐ The rolling schedule pin
+
+Advancing `next_billing_date` fixes OUR calendar. Shopify's stays where it was, and a customer
+looking at the portal — or any Shopify surface reading the contract — sees the old date. Worse, the
+renewal worker resolves the cycle to bill BY DATE and skips a cycle already `BILLED`, so a date that
+drifts into a spent cycle **strands the subscription silently** (measured on the 2026-09-16 cohort:
+two of three subs that had just charged were already dead, one by eight minutes).
+
+So after a successful charge and advance, the worker pins the cycle that lands on the new
+`advanceTo` (plus one more) via `shopifySyncBillingSchedule`. One mutation per renewal; the
+customer's Shopify-visible schedule stays permanently correct even though Shopify only materializes
+~12 months of cycles at a time. See [[../libraries/commerce__shopify-subscription-client]] §
+"Keeping a customer's own dates" for why this is the only mechanism that works on `WEEK`/n cadences,
+and why converting those cadences to `MONTH` instead was priced at ~$147,625/yr and rejected.
+
+**Non-fatal by construction.** The charge already succeeded and the worker bills by an explicit
+`billingCycleSelector` it resolves itself, so a failed pin is a display drift — never a missed or
+duplicated charge. It logs and moves on.
+
 ## Flow
 
 **`shopifySubscriptionRenewalCron`** — daily `0 10 * * *` (an hour after the internal cron):

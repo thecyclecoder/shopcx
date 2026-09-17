@@ -8,6 +8,7 @@
 
 import { inngest } from "./client";
 import { errText } from "@/lib/error-text";
+import { rollForwardToFutureBillingDate } from "@/lib/dunning";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { subscriptionAction } from "@/lib/commerce/subscription";
@@ -27,6 +28,56 @@ async function appstleResume(workspaceId: string, contractId: string) {
   }
 }
 
+
+/**
+ * Give a resumed subscription a billing date it can actually be charged on.
+ *
+ * ⭐ Resuming only flips `status` back to active — nothing sets a new date. After a 30/60/90-day
+ * pause the row still carries the date it had when it was paused, which is now in the PAST. On the
+ * internal engine that means an immediate surprise charge; on ShopCX it is worse, because the
+ * renewal worker resolves which Shopify cycle to bill BY DATE and skips a cycle already marked
+ * BILLED — so a stale date can land in a spent cycle and the subscription is never charged again,
+ * silently.
+ *
+ * Rolls forward from their ORIGINAL date by their own cadence, so a customer who billed on the 12th
+ * still bills on the 12th after a pause — the day is theirs, the pause just skips some of them.
+ *
+ * On ShopCX the Shopify cycle calendar is re-anchored to match, because setting the date alone
+ * moves only a display field (see `shopifyRetimeContract`).
+ */
+async function retimeAfterResume(
+  workspaceId: string,
+  contractId: string,
+  sub: { next_billing_date: string | null; billing_interval: string | null; billing_interval_count: number | null },
+): Promise<string | null> {
+  const from = sub.next_billing_date ? new Date(sub.next_billing_date) : new Date();
+  let next: Date;
+  try {
+    next = rollForwardToFutureBillingDate(
+      Number.isNaN(from.getTime()) ? new Date() : from,
+      sub.billing_interval ?? "month",
+      sub.billing_interval_count ?? 1,
+    );
+  } catch {
+    // rollForward refuses to return a past date; if it cannot, tomorrow is the safe floor.
+    next = new Date(Date.now() + 86_400_000);
+  }
+
+  const { resolveBillingSource } = await import("@/lib/internal-subscription");
+  if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
+    const { shopifyRetimeContract } = await import("@/lib/commerce/shopify-subscription-client");
+    const r = await shopifyRetimeContract(workspaceId, contractId, next.toISOString());
+    if (r.stranded) {
+      console.error(
+        `[Auto-Resume] ${contractId}: resumed but its new date lands in a spent cycle — it will NOT be charged. Needs manual re-timing.`,
+      );
+    } else if (!r.success) {
+      console.error(`[Auto-Resume] ${contractId}: retime failed (${r.error}) — date written locally only`);
+    }
+  }
+  return next.toISOString();
+}
+
 // ── Cron: runs hourly, resumes all past-due paused subs ──
 export const portalAutoResumeCron = inngest.createFunction(
   {
@@ -41,7 +92,7 @@ export const portalAutoResumeCron = inngest.createFunction(
     const subs = await step.run("find-resumable-subs", async () => {
       const { data } = await admin
         .from("subscriptions")
-        .select("id, workspace_id, shopify_contract_id, customer_id, pause_resume_at")
+        .select("id, workspace_id, shopify_contract_id, customer_id, pause_resume_at, next_billing_date, billing_interval, billing_interval_count")
         .eq("status", "paused")
         .not("pause_resume_at", "is", null)
         .lte("pause_resume_at", new Date().toISOString());
@@ -76,11 +127,15 @@ export const portalAutoResumeCron = inngest.createFunction(
           // Resume in Appstle
           await appstleResume(sub.workspace_id, sub.shopify_contract_id);
 
+          // ⭐ A resumed sub needs a date it can actually bill on — see retimeAfterResume.
+          const nextDate = await retimeAfterResume(sub.workspace_id, sub.shopify_contract_id, sub);
+
           // Update our DB
           await admin.from("subscriptions")
             .update({
               status: "active",
               pause_resume_at: null,
+              next_billing_date: nextDate,
               updated_at: new Date().toISOString(),
             })
             .eq("id", sub.id);
@@ -141,7 +196,7 @@ export const portalAutoResume = inngest.createFunction(
     const sub = await step.run("check-subscription-status", async () => {
       const admin = createAdminClient();
       const { data } = await admin.from("subscriptions")
-        .select("status, pause_resume_at")
+        .select("status, pause_resume_at, next_billing_date, billing_interval, billing_interval_count")
         .eq("workspace_id", workspaceId)
         .eq("shopify_contract_id", contractId)
         .single();
@@ -159,10 +214,13 @@ export const portalAutoResume = inngest.createFunction(
 
     await step.run("update-db", async () => {
       const admin = createAdminClient();
+      // Same retime as the cron path — a resumed sub must carry a billable date.
+      const nextDate = await retimeAfterResume(workspaceId, contractId, sub);
       await admin.from("subscriptions")
         .update({
           status: "active",
           pause_resume_at: null,
+          next_billing_date: nextDate,
           updated_at: new Date().toISOString(),
         })
         .eq("workspace_id", workspaceId)
