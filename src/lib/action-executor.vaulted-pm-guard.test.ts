@@ -264,14 +264,14 @@ test("(HAPPY PATH — guard passes) create_subscription — customer WITH an act
 
 test("(LINKED ACCOUNT) create_order — vaulted PM lives on a linked customer id: guard passes", async () => {
   // A customer is linked (via customer_links.group_id) to a sibling that
-  // holds the vaulted PM. The guard expands linked ids and honors the
-  // vault so the linked household isn't asked to add a card they already
-  // have on the primary account.
+  // holds the vaulted PM. The guard resolves the link group via
+  // `linkGroupIds` and honors the vault so the linked household isn't
+  // asked to add a card they already have on the primary account.
   const inserts: InsertLog[] = [];
   const ctx = makeCtx({
     customer_links: [
-      { customer_id: "c-1", group_id: "g-1" },
-      { customer_id: "c-2", group_id: "g-1" },
+      { workspace_id: "ws-1", customer_id: "c-1", group_id: "g-1" },
+      { workspace_id: "ws-1", customer_id: "c-2", group_id: "g-1" },
     ],
     customer_payment_methods: [
       { id: "pm-1", workspace_id: "ws-1", customer_id: "c-2", status: "active", is_default: true },
