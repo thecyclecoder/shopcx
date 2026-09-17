@@ -1,0 +1,1 @@
+- **Create-return (and sibling order-scoped actions) must resolve the order across the customer's link group** · verified 2026-09-17 · → [[../libraries/action-executor]]
