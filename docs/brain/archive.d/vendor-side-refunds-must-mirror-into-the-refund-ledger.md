@@ -1,0 +1,1 @@
+- **Vendor-side refunds must mirror into the refund ledger** · verified 2026-09-17 · → [[lifecycles/return-pipeline]]
