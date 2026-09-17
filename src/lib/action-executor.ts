@@ -18,6 +18,7 @@ import { buildClarificationMessage, loadIrreversibleSet, shouldClarify } from "@
 import { usageCostCents } from "@/lib/ai-usage";
 import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 import { LOYALTY_REMEDY_MAX_CENTS } from "@/lib/loyalty";
+import { linkGroupIds } from "@/lib/customer-links";
 
 // ── Types ──
 
@@ -1201,33 +1202,26 @@ export function pickChargeableVaultedPm(
 }
 
 /**
- * DB roundtrip — resolve the customer's chargeable vaulted PM. Expands
- * linked customer ids (mirrors resolveLinkedCustomerIds in sonnet-
- * orchestrator-v2) so a linked account's vault is honored. Returns null
- * when the customer has no chargeable PM on file — the guard's fail-closed
- * branch.
+ * DB roundtrip — resolve the customer's chargeable vaulted PM. The lookup spans
+ * the customer's link group via `linkGroupIds`, so a card vaulted on a linked
+ * sibling counts. Returns null when the link group has no chargeable PM on
+ * file — the guard's fail-closed branch.
+ *
+ * Deliberate: only `customer_payment_methods` rows are consulted (the Braintree
+ * vault). A Shopify-vaulted card on the same person does not satisfy this
+ * guard, and the assisted-purchase journey fires even when one exists. That is
+ * the current behaviour and it is kept: the guard runs before `create_order`
+ * / `create_subscription`, which drop through to the Braintree rail whenever
+ * possible, so a Shopify-only card is not what the guard's downstream is set
+ * up to charge. Revisit if/when a Shopify-vaulted card becomes reachable from
+ * the same effector.
  */
 async function resolveVaultedPm(
   admin: Admin,
   workspaceId: string,
   customerId: string,
 ): Promise<CustomerPaymentMethodRow | null> {
-  const { data: linkData } = await admin
-    .from("customer_links")
-    .select("group_id")
-    .eq("customer_id", customerId)
-    .maybeSingle();
-  let ids: string[] = [customerId];
-  if (linkData?.group_id) {
-    const { data: grp } = await admin
-      .from("customer_links")
-      .select("customer_id")
-      .eq("group_id", linkData.group_id);
-    const linked = (grp || [])
-      .map((g: { customer_id: string }) => g.customer_id)
-      .filter((v): v is string => !!v);
-    if (linked.length) ids = linked;
-  }
+  const ids = await linkGroupIds(admin, workspaceId, customerId);
   const { data: rows } = await admin
     .from("customer_payment_methods")
     .select("id, status, is_default, provider")

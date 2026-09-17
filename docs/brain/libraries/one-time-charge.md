@@ -37,9 +37,14 @@ chargeOneTimeOrder({
 Mirrors the checkout route's money path, minus the cart:
 
 1. **Resolve the card** — `customer_payment_methods` filtered to
-   `status='active'` with a Braintree token. Same filter the renewal uses: a
-   card the customer removed is never charged, even if a stale
-   `subscriptions.payment_method_id` still points at it.
+   `status='active'` with a Braintree token. The customer_id filter spans the
+   caller's link group via [[customer-links]] `linkGroupIds` (payment-method-
+   lookups-must-span-linked-accounts spec Phase 1) — a card vaulted on a linked
+   sibling is chargeable. Same filter the renewal uses: a card the customer
+   removed is never charged, even if a stale `subscriptions.payment_method_id`
+   still points at it. `customerId` (the caller's argument) still owns the
+   order + transaction rows written below — widening a lookup is correct,
+   re-pointing a charge is not.
 2. **Resolve the items** — price / sku / title from `product_variants`. A
    variant with no price is rejected rather than charged at zero.
 3. **Tax** — Avalara `SalesInvoice` with `commit: true` when the workspace has
