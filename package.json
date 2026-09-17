@@ -99,6 +99,7 @@
     "test:subscription-cancel-truth": "tsx --test src/lib/subscription-cancel-truth.test.ts",
     "test:cs-director-cancellation-timeline": "tsx --test src/lib/cs-director-cancellation-timeline.test.ts",
     "test:predeploy-guard-extract": "tsx --test src/lib/predeploy-guard-extract.test.ts",
+    "test:order-holds": "tsx --test src/lib/order-holds.test.ts",
     "test:chain-advance-selector": "tsx --test src/lib/agent-jobs.chain-advance-selector.test.ts",
     "test:platform-director-escalation-dedupe": "tsx --test src/lib/agents/platform-director-escalation-dedupe.test.ts",
     "test:cs-director-transition": "tsx --test src/lib/cs-director-ticket-transition.test.ts",

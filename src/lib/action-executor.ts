@@ -18,6 +18,7 @@ import { buildClarificationMessage, loadIrreversibleSet, shouldClarify } from "@
 import { usageCostCents } from "@/lib/ai-usage";
 import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 import { LOYALTY_REMEDY_MAX_CENTS } from "@/lib/loyalty";
+import { attemptAllergenHold, isAllergyEscalation } from "@/lib/order-holds";
 
 // ── Types ──
 
@@ -5594,4 +5595,41 @@ async function escalateTicket(ctx: ActionContext, reason: string): Promise<void>
   // Mark on the context so executeSonnetDecision returns escalated=true
   // and the post-execute auto-close in unified-ticket-handler skips.
   ctx._escalatedThisRun = true;
+
+  // ── Allergen auto-hold — a-flagged-allergen-order-must-not-ship, Phase 1 ──
+  // If the escalation is an allergy/safety report, raise a protective hold on
+  // the customer's most-recent unshipped order in the SAME turn that stamps
+  // escalated_at. The remedy decision still stays with a human (the existing
+  // allergy override); this separates the reversible protective action from
+  // the judgement call. Ground truth: SC138523 — allergy reported at t+4min,
+  // warehouse received at t+3h, shipped 46h later; a human-notice-based hold
+  // simply was never issued. Fire-and-forget by design: `attemptAllergenHold`
+  // captures its own errors and never throws — the escalation itself is the
+  // safety-critical artifact and the hold is best-effort on top of it.
+  if (isAllergyEscalation(reason)) {
+    const outcome = await attemptAllergenHold(ctx.admin, {
+      workspaceId: ctx.workspaceId,
+      customerId: ctx.customerId,
+      ticketId: ctx.ticketId,
+      reason,
+    });
+    try {
+      await ctx.admin.from("ticket_messages").insert({
+        ticket_id: ctx.ticketId,
+        direction: "outbound",
+        visibility: "internal",
+        author_type: "system",
+        body:
+          outcome.kind === "placed"
+            ? `[Allergen hold placed on ${outcome.orderNumber || outcome.orderId.slice(0, 8)}]`
+            : outcome.kind === "refused"
+              ? `[Allergen hold REFUSED on ${outcome.orderNumber || outcome.orderId.slice(0, 8)} — ${outcome.refusedReason}]`
+              : outcome.kind === "already_held"
+                ? `[Allergen hold already active on ${outcome.orderNumber || outcome.orderId.slice(0, 8)}]`
+                : `[Allergen escalation raised — no unshipped order found to hold]`,
+      });
+    } catch {
+      // System note is a nice-to-have; a failure here must not block escalation.
+    }
+  }
 }

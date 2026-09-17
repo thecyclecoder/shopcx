@@ -34,6 +34,7 @@ import { createAmplifierOrder, stampAmplifierImportFailure } from "@/lib/integra
 import { buildPackingSlipMessage } from "@/lib/packing-slip-message";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { errText } from "@/lib/error-text";
+import { isOrderOnAllergenHold } from "@/lib/order-holds";
 
 const RETRY_CAP = 5;
 const GRACE_MINUTES = 10;
@@ -150,13 +151,18 @@ async function isFraudHeld(admin: AdminClient, workspaceId: string, orderId: str
 async function reconcileOne(
   admin: AdminClient,
   row: CandidateRow,
-): Promise<"imported" | "failed" | "skipped-fraud" | "skipped-no-skus" | "skipped-non-storefront" | "skipped-shopify-origin"> {
+): Promise<"imported" | "failed" | "skipped-fraud" | "skipped-allergen-hold" | "skipped-no-skus" | "skipped-non-storefront" | "skipped-shopify-origin"> {
   // Defensive — the candidate query already excludes Shopify-origin rows. A
   // non-zero count here means a selection site lost its predicate, which is
   // exactly the silent regression that stalled this rail before.
   if (isShopifyOriginOrder(row)) return "skipped-shopify-origin";
   if (!isReconcileEligibleSourceName(row.source_name)) return "skipped-non-storefront";
   if (await isFraudHeld(admin, row.workspace_id, row.id)) return "skipped-fraud";
+  // Allergen hold: an unshipped order under an active `hold_status='placed'`
+  // with `hold_kind='allergen'` MUST NOT be handed off to the warehouse — the
+  // same rail the fraud-held state uses. See order-holds.ts + spec
+  // a-flagged-allergen-order-must-not-ship Phase 1.
+  if (await isOrderOnAllergenHold(admin, row.workspace_id, row.id)) return "skipped-allergen-hold";
 
   const ship = (row.shipping_address as { phone?: string; first_name?: string; firstName?: string } | null) || null;
   const lines = ((row.line_items as Line[]) || []).filter((l) => l && l.sku);
@@ -418,6 +424,7 @@ export const amplifierImportReconcileCron = inngest.createFunction(
       let imported = 0;
       let failed = 0;
       let skippedFraud = 0;
+      let skippedAllergenHold = 0;
       let skippedNoSkus = 0;
       let skippedNonStorefront = 0;
       let skippedShopifyOrigin = 0;
@@ -428,6 +435,7 @@ export const amplifierImportReconcileCron = inngest.createFunction(
           if (outcome === "imported") imported++;
           else if (outcome === "failed") failed++;
           else if (outcome === "skipped-fraud") skippedFraud++;
+          else if (outcome === "skipped-allergen-hold") skippedAllergenHold++;
           else if (outcome === "skipped-no-skus") skippedNoSkus++;
           else if (outcome === "skipped-shopify-origin") skippedShopifyOrigin++;
           else skippedNonStorefront++;
@@ -443,6 +451,7 @@ export const amplifierImportReconcileCron = inngest.createFunction(
         imported,
         failed,
         skipped_fraud: skippedFraud,
+        skipped_allergen_hold: skippedAllergenHold,
         skipped_no_skus: skippedNoSkus,
         skipped_non_storefront: skippedNonStorefront,
         // Expected to stay 0 — the query excludes Shopify-origin rows. A
@@ -474,7 +483,7 @@ export const amplifierImportReconcileCron = inngest.createFunction(
       await emitCronHeartbeat("amplifier-import-reconcile", {
         ok: true,
         produced: { ...result, escalation, stale_escalation: staleEscalation },
-        detail: `${result.scanned} scanned · ${result.imported} imported · ${result.failed} failed · ${result.skipped_fraud + result.skipped_no_skus + result.skipped_non_storefront + result.skipped_shopify_origin} skipped · escalation ${escalation.opened} opened / ${escalation.already_open} dedup · stale ${staleEscalation.opened} opened / ${staleEscalation.already_open} dedup`,
+        detail: `${result.scanned} scanned · ${result.imported} imported · ${result.failed} failed · ${result.skipped_fraud + result.skipped_allergen_hold + result.skipped_no_skus + result.skipped_non_storefront + result.skipped_shopify_origin} skipped · escalation ${escalation.opened} opened / ${escalation.already_open} dedup · stale ${staleEscalation.opened} opened / ${staleEscalation.already_open} dedup`,
         durationMs: Date.now() - startedAt,
       });
     });
