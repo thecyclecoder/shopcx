@@ -525,6 +525,39 @@ export function carryableCodes(raw: Record<string, unknown> | null): { title: st
  * is between `cancel` and the final flip — which is why `migrated_from_contract_id` is written
  * BEFORE the cancel, so a crashed swap is findable rather than silent.
  */
+
+/**
+ * The `billingPolicy.anchors` that make Shopify's cycle calendar land on the customer's own day.
+ *
+ * MONTH  → MONTHDAY anchored to their day-of-month. Day 29–31 is deliberately NOT anchored: an
+ *          anchor of 31 has no meaning in a 30-day month and Shopify's handling of that is not
+ *          something to discover in production. Those fall back to the createdAt calendar, which
+ *          is the behaviour we already have rather than a new failure.
+ * WEEK   → WEEKDAY anchored to their weekday (Shopify counts Monday = 1).
+ * YEAR   → left unanchored; one cycle a year makes the phase question moot.
+ *
+ * Returns `{}` when no sane anchor exists, so the caller spreads it and gets today's behaviour.
+ */
+export function anchorsForSchedule(
+  interval: string | null,
+  nextBillingDateIso: string | null,
+): { anchors?: { type: string; day: number }[] } {
+  if (!interval || !nextBillingDateIso) return {};
+  const d = new Date(nextBillingDateIso);
+  if (Number.isNaN(d.getTime())) return {};
+  const iv = String(interval).toUpperCase();
+  if (iv === "MONTH") {
+    const day = d.getUTCDate();
+    return day >= 1 && day <= 28 ? { anchors: [{ type: "MONTHDAY", day }] } : {};
+  }
+  if (iv === "WEEK") {
+    // JS: Sunday = 0. Shopify: Monday = 1 … Sunday = 7.
+    const js = d.getUTCDay();
+    return { anchors: [{ type: "WEEKDAY", day: js === 0 ? 7 : js }] };
+  }
+  return {};
+}
+
 export async function executeMigration(
   workspaceId: string,
   appstleContractId: string,
@@ -688,8 +721,31 @@ export async function executeMigration(
       // the contract is briefly active and billable.
       status: norm.status === "PAUSED" ? "PAUSED" : "ACTIVE",
       paymentMethodId: norm.payment_method_id,
-      billingPolicy: { interval: norm.billing_interval, intervalCount: norm.billing_interval_count },
-      deliveryPolicy: { interval: norm.billing_interval, intervalCount: norm.billing_interval_count },
+      // ⭐ ANCHOR the cycle calendar to the customer's OWN billing day.
+      //
+      // Shopify computes its cycles as `createdAt + n × interval` and that calendar is IMMUTABLE:
+      // `setNextBillingDate` moves only the display field (verified — cycles unchanged), and
+      // `subscriptionBillingCycleScheduleEdit` refuses any date outside a cycle's own window
+      // (OUT_OF_BOUNDS). An anchor is the only lever, and it only exists at CREATE.
+      //
+      // Without it a migrated contract's cycles fall on its migration date, so the customer's real
+      // billing day is lost — and worse, our cadence-advanced date can land INSIDE the cycle we
+      // already billed, which the worker reads as `cycle_already_billed` and skips FOREVER.
+      // Measured on the 2026-09-16 cohort: 2 of 3 subs were silently dead one renewal after their
+      // first successful charge, one of them by eight minutes.
+      //
+      // Verified: a contract created on the 17th with MONTHDAY=20 produced cycles on 09-20,
+      // 10-20, 11-20, 12-20 — the customer's day, from the first cycle.
+      billingPolicy: {
+        interval: norm.billing_interval,
+        intervalCount: norm.billing_interval_count,
+        ...anchorsForSchedule(norm.billing_interval, nextBillingDate),
+      },
+      deliveryPolicy: {
+        interval: norm.billing_interval,
+        intervalCount: norm.billing_interval_count,
+        ...anchorsForSchedule(norm.billing_interval, nextBillingDate),
+      },
       // ⭐ CARRY the customer's existing shipping charge — do NOT zero it.
       //
       // The pricing rule grants free shipping, but that rule governs NEW subscriptions. 1,620
