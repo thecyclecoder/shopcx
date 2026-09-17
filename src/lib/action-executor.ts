@@ -2465,9 +2465,10 @@ export const directActionHandlers: Record<
     };
     pushUnique(p.variant_id);
 
+    const crisisIds = await linkGroupIds(ctx.admin, ctx.workspaceId, ctx.customerId);
     const { data: crisisAction } = await ctx.admin.from("crisis_customer_actions")
       .select("tier1_swapped_to, tier2_swapped_to, crisis_id")
-      .eq("customer_id", ctx.customerId)
+      .in("customer_id", crisisIds)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -2591,7 +2592,11 @@ export const directActionHandlers: Record<
 
   create_return: async (ctx, p) => {
     const { createFullReturn } = await import("@/lib/shopify-returns");
-    const admin = createAdminClient();
+    // ctx.admin is the same service-role client `createAdminClient()` returns —
+    // pinning to ctx.admin lets the linked-account fixture test drive the
+    // order-ownership lookup through the handler without an env-dependent
+    // production supabase client.
+    const admin = ctx.admin;
 
     // HARD INVARIANT: at most ONE return per ticket. We never issue more
     // than a single return in one interaction — a second is a human
@@ -2614,15 +2619,22 @@ export const directActionHandlers: Record<
       }
     }
 
-    // Look up order — scoped to BOTH the workspace AND the ticket's customer.
+    // Look up order — scoped to BOTH the workspace AND the ticket's LINK GROUP.
     //
     // ⭐ OWNERSHIP CHECK (security). The workspace filter alone is not sufficient: `order_number` is
     // only unique WITHIN a workspace, and the value comes from the model's action payload — so a
     // ticket for customer A could name customer B's order number and create a return against B's
-    // order (issuing a label + refund exposure on someone else's purchase). Requiring
-    // `customer_id === ctx.customerId` makes the lookup prove ownership before anything is created.
-    // `ctx.customerId` is the ticket's resolved customer, the same identity used for the customer
-    // lookup immediately below, so this adds no new input to trust.
+    // order (issuing a label + refund exposure on someone else's purchase). Requiring the order's
+    // `customer_id` to be a member of the ticket customer's link group makes the lookup prove
+    // ownership before anything is created — a linked account is the SAME person (see
+    // [[../libraries/customer-links]]), so widening from `.eq(ctx.customerId)` to
+    // `.in(linkGroupIds(...))` preserves the ownership property (unrelated workspace orders still
+    // return zero rows) while unblocking the ground-truth failure mode: ticket bafa0f7a-447b-4cdf-
+    // a44b-f4fca0decce6, where SC138373's customer_id was a linked peer of the ticket's resolved
+    // customer and create_return kept returning "Order SC138373 not found" for a real, owned order.
+    // `linkGroupIds` returns `[ctx.customerId]` when there is no group, so unlinked customers keep
+    // the exact pre-widening behavior. Mirrors the pattern in
+    // `payment-method-lookups-must-span-linked-accounts` (#2816).
     //
     // `maybeSingle` (not `single`): a miss is an expected outcome here — a wrong/foreign order number
     // — so it must return null and fall into the generic error below, not throw a PostgREST exception
@@ -2637,10 +2649,11 @@ export const directActionHandlers: Record<
     if (!ctx.customerId) {
       return { success: false, error: "Cannot create a return without a resolved customer on the ticket" };
     }
+    const ownerIds = await linkGroupIds(admin, ctx.workspaceId, ctx.customerId);
     const { data: order } = await admin.from("orders")
       .select("id, order_number, shopify_order_id, shipping_address")
       .eq("workspace_id", ctx.workspaceId)
-      .eq("customer_id", ctx.customerId)
+      .in("customer_id", ownerIds)
       .eq("order_number", p.order_number!)
       .maybeSingle();
     if (!order) return { success: false, error: `Order ${p.order_number} not found` };
@@ -2846,11 +2859,13 @@ export const directActionHandlers: Record<
       // active LOYALTY-* row minted in this ticket's window to
       // `redeemed_as_refund`. Bounded by ticket.created_at so a routine
       // shipping refund can't consume an older legit LOYALTY-* coupon.
+      const loyaltyIds = await linkGroupIds(ctx.admin, ctx.workspaceId, ctx.customerId);
       const { data: loyaltyMember } = await ctx.admin
         .from("loyalty_members")
         .select("id")
         .eq("workspace_id", ctx.workspaceId)
-        .eq("customer_id", ctx.customerId)
+        .in("customer_id", loyaltyIds)
+        .limit(1)
         .maybeSingle();
       const loyaltyMemberId = (loyaltyMember as { id?: string } | null)?.id;
       if (loyaltyMemberId) {
@@ -2913,14 +2928,18 @@ export const directActionHandlers: Record<
     }
 
     // ⭐ Ticket-customer binding — spec:
-    // full-order-refund-must-bind-ticket-customer. Even a founder-approved
+    // full-order-refund-must-bind-ticket-customer, widened by
+    // create-return-order-lookup-must-span-linked-accounts. Even a founder-approved
     // parked remedy on ticket T (customerId A) MUST NOT refund an order that
-    // happens to sit in the same workspace but is owned by customer B: the
-    // remedy payload is spec-authored input and a valid same-workspace order
-    // number from a different customer cannot become authority to move that
-    // customer's money. Bind the order lookup to `ctx.customerId` and bail
-    // BEFORE the refund module is even loaded, so no network side effect can
-    // fire on a cross-customer refusal.
+    // happens to sit in the same workspace but is owned by an unrelated
+    // customer B: the remedy payload is spec-authored input and a valid
+    // same-workspace order number from a different customer cannot become
+    // authority to move that customer's money. Bind the order lookup to
+    // the ticket customer's LINK GROUP (linked accounts are the same person —
+    // see [[../libraries/customer-links]]) and bail BEFORE the refund module
+    // is even loaded, so no network side effect can fire on a cross-customer
+    // refusal. `linkGroupIds` returns `[ctx.customerId]` when the customer is
+    // unlinked, so unlinked accounts keep the exact pre-widening behavior.
     if (!ctx.customerId) {
       return {
         success: false,
@@ -2931,12 +2950,13 @@ export const directActionHandlers: Record<
 
     const oid = String(p.shopify_order_id);
     const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
+    const forOwnerIds = await linkGroupIds(ctx.admin, ctx.workspaceId, ctx.customerId);
     const { data: ord } = await ctx.admin
       .from("orders")
       .select("id, total_cents")
       .eq(orderMatch.col, orderMatch.val)
       .eq("workspace_id", ctx.workspaceId)
-      .eq("customer_id", ctx.customerId)
+      .in("customer_id", forOwnerIds)
       .maybeSingle();
     if (!ord?.id) {
       return {
@@ -3009,12 +3029,14 @@ export const directActionHandlers: Record<
     const tier = tiers[p.tier_index];
     if (!tier) return { success: false, error: "Invalid tier" };
 
+    const redeemMemberIds = await linkGroupIds(ctx.admin, ctx.workspaceId, ctx.customerId);
     const { data: member } = await ctx.admin
       .from("loyalty_members")
       .select("*")
       .eq("workspace_id", ctx.workspaceId)
-      .eq("customer_id", ctx.customerId)
-      .single();
+      .in("customer_id", redeemMemberIds)
+      .limit(1)
+      .maybeSingle();
     if (!member) return { success: false, error: "No loyalty member" };
 
     const validation = validateRedemption(member, tier);
@@ -3480,9 +3502,10 @@ export const directActionHandlers: Record<
         .select("id, auto_readd, original_item").eq("id", targetId).maybeSingle();
       row = data;
     } else {
+      const crisisAutoReaddIds = await linkGroupIds(admin, ctx.workspaceId, ctx.customerId);
       const { data } = await admin.from("crisis_customer_actions")
         .select("id, auto_readd, original_item")
-        .eq("customer_id", ctx.customerId)
+        .in("customer_id", crisisAutoReaddIds)
         .order("created_at", { ascending: false })
         .limit(1).maybeSingle();
       row = data;
@@ -4780,20 +4803,29 @@ export async function verifyActionInDB(
 ): Promise<boolean> {
   const admin = ctx.admin;
 
-  // Scope helpers — Phase 1 of docs/brain/specs/secure-sol-required-outcomes-dispatch.md. When the
-  // caller supplied workspaceId / customerId (the honor step passes both from ActionContext), add
-  // them to subscription/order reads so a target that belongs to a different tenant or a
-  // different customer legitimately returns zero rows (→ verified=false) instead of confirming
-  // an unscoped identifier. Existing callers that pass only { admin, ticketId } are unaffected —
-  // the eq() calls are skipped when the field is undefined. Typed as `unknown` because
-  // Supabase's builder generic tree overflows tsc's instantiation-depth limit if we type-thread
-  // the concrete query type — the switch arms upcast to unknown on entry and cast back to the
-  // builder shape here.
-  type ScopableQuery = { eq: (col: string, val: unknown) => ScopableQuery };
+  // Scope helpers — Phase 1 of docs/brain/specs/secure-sol-required-outcomes-dispatch.md, widened
+  // by create-return-order-lookup-must-span-linked-accounts. When the caller supplied
+  // workspaceId / customerId (the honor step passes both from ActionContext), add them to
+  // subscription/order reads so a target that belongs to a different tenant or a different
+  // customer legitimately returns zero rows (→ verified=false) instead of confirming an unscoped
+  // identifier. The customer filter spans the ticket customer's LINK GROUP so a sub/order that
+  // lives on a linked-sibling profile — same person, separate customer row (see
+  // [[../libraries/customer-links]]) — verifies rather than false-negating. Existing callers that
+  // pass only { admin, ticketId } are unaffected — the customer filter is skipped when
+  // ctx.customerId is undefined. Typed as `unknown` because Supabase's builder generic tree
+  // overflows tsc's instantiation-depth limit if we type-thread the concrete query type — the
+  // switch arms upcast to unknown on entry and cast back to the builder shape here.
+  type ScopableQuery = {
+    eq: (col: string, val: unknown) => ScopableQuery;
+    in: (col: string, vals: unknown[]) => ScopableQuery;
+  };
+  const scopeCustomerIds = ctx.customerId
+    ? await linkGroupIds(admin, ctx.workspaceId ?? "", ctx.customerId)
+    : null;
   const scopeSub = (q: unknown): ScopableQuery => {
     let out = q as ScopableQuery;
     if (ctx.workspaceId) out = out.eq("workspace_id", ctx.workspaceId);
-    if (ctx.customerId) out = out.eq("customer_id", ctx.customerId);
+    if (scopeCustomerIds) out = out.in("customer_id", scopeCustomerIds);
     return out;
   };
   const scopeOrder = scopeSub;
