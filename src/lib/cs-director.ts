@@ -64,6 +64,8 @@ import type { CxOrderRemedyState, CxOrderRemedyStateRef } from "@/lib/cx-agent-s
 import { MONEY_ACTION_TYPES, isNonOrderScopedLoyaltyAction, isNonRefundReplacementAction } from "@/lib/june-remedy-approval";
 import { getAgentPolicyPackage, formatAgentPolicyPackage } from "@/lib/policies";
 import { linkGroupIds } from "@/lib/customer-links";
+import type { OrderHoldState } from "@/lib/order-holds";
+import { getOrderHoldState } from "@/lib/order-holds";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -855,11 +857,29 @@ export async function loadRemedyStatesForPlan(
  * mirror the runner's own pattern in scripts/builder-worker.ts so a tsc pass on this module doesn't
  * drag in the action-executor's transitive deps).
  */
+/**
+ * The director-visible slice of a ticket. `allergen_hold` carries the state raised by
+ * [[../lifecycles/order-fulfilment]] / [[order-holds]] `attemptAllergenHold` on the
+ * customer's most-recent order (see spec a-flagged-allergen-order-must-not-ship § Phase 2):
+ * three values must render distinguishably — `placed` (parcel must not ship), `refused`
+ * (already shipped, remedy space collapsed to a refund), and `null` (no hold ever
+ * attempted). A REFUSED or ABSENT hold on a live allergy ticket is an alert on the
+ * director's context, not a field — the director must never author a remedy that promises
+ * a stop the system did not actually place. `null` on this field means "no allergen hold
+ * has been raised on this customer's recent order" (the default state), NOT "no data".
+ */
+export interface DirectorTicketFacts {
+  customer_id: string | null;
+  channel: string | null;
+  /** See {@link DirectorTicketFacts}. */
+  allergen_hold?: OrderHoldState | null;
+}
+
 export interface ApproveRemedyDeps {
   loadTicketFacts: (
     admin: Admin,
     ticketId: string,
-  ) => Promise<{ customer_id: string | null; channel: string | null } | null>;
+  ) => Promise<DirectorTicketFacts | null>;
   loadWorkspaceSandbox: (admin: Admin, workspaceId: string) => Promise<boolean>;
   runExecutor: (
     ctx: ActionContext,
@@ -891,15 +911,51 @@ export interface ApproveRemedyDeps {
 async function defaultLoadTicketFacts(
   admin: Admin,
   ticketId: string,
-): Promise<{ customer_id: string | null; channel: string | null } | null> {
+): Promise<DirectorTicketFacts | null> {
   const { data } = await admin
     .from("tickets")
-    .select("customer_id, channel")
+    .select("customer_id, workspace_id, channel")
     .eq("id", ticketId)
     .maybeSingle();
   if (!data) return null;
-  const row = data as { customer_id: string | null; channel: string | null };
-  return { customer_id: row.customer_id ?? null, channel: row.channel ?? null };
+  const row = data as {
+    customer_id: string | null;
+    workspace_id: string | null;
+    channel: string | null;
+  };
+  const customerId = row.customer_id ?? null;
+  const workspaceId = row.workspace_id ?? null;
+
+  // Surface allergen_hold on the director's ticket context — spec Phase 2 of
+  // a-flagged-allergen-order-must-not-ship. Load the customer's most-recent order
+  // across the [[customer-links]] group and read its hold state via the
+  // [[order-holds]] SDK. Three distinguishable values ('placed', 'refused', null)
+  // are what the director surface renders; a REFUSED or ABSENT hold on a live
+  // allergy ticket is an alert (the parcel is still moving / already gone), never
+  // a silent success. Read-only + swallowed on error — the director's context read
+  // never fails a Sonnet call.
+  let allergenHold: OrderHoldState | null = null;
+  if (customerId && workspaceId) {
+    try {
+      const linked = await linkGroupIds(admin, workspaceId, customerId);
+      const { data: orderRow } = await admin
+        .from("orders")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .in("customer_id", linked)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const recentOrderId = (orderRow as { id?: string } | null)?.id ?? null;
+      if (recentOrderId) {
+        allergenHold = await getOrderHoldState(admin, workspaceId, recentOrderId);
+      }
+    } catch {
+      allergenHold = null;
+    }
+  }
+
+  return { customer_id: customerId, channel: row.channel ?? null, allergen_hold: allergenHold };
 }
 
 async function defaultLoadWorkspaceSandbox(admin: Admin, workspaceId: string): Promise<boolean> {
