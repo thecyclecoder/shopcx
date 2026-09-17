@@ -293,22 +293,30 @@ async function settle(
 }
 
 /**
- * Charge the customer's vaulted BRAINTREE card if they have one.
+ * Charge the customer's vaulted BRAINTREE card if they have one — the lookup spans the linked
+ * account group via `linkGroupIds`, so a card vaulted on a linked sibling counts.
  *
- * Returns `null` when there is no active Braintree card — the caller then falls through to the
- * Shopify contract path. A `{success:false}` is a real decline and must NOT fall through: the
- * customer's card was already asked and charging a second rail would risk billing them twice.
+ * Returns `null` when there is no active Braintree card anywhere in the link group — the caller
+ * then falls through to the Shopify contract path. A `{success:false}` is a real decline and must
+ * NOT fall through: the customer's card was already asked and charging a second rail would risk
+ * billing them twice.
+ *
+ * `row.customer_id` remains the identity for the charge (the queue row's owner + the resulting
+ * order's `customer_id`); widening the LOOKUP is correct, re-pointing the CHARGE is not. See
+ * [[../../../docs/brain/libraries/customer-links]] `linkGroupIds`.
  */
 async function chargeViaBraintreeIfPossible(
   workspaceId: string,
   row: { id: string; customer_id: string; items: unknown; reason: string | null },
 ): Promise<{ success: boolean; error?: string; order_id?: string; order_number?: string; amount_cents?: number } | null> {
   const admin = createAdminClient();
+  const { linkGroupIds } = await import("@/lib/customer-links");
+  const groupIds = await linkGroupIds(admin, workspaceId, row.customer_id);
   const { data: pm } = await admin
     .from("customer_payment_methods")
     .select("id")
     .eq("workspace_id", workspaceId)
-    .eq("customer_id", row.customer_id)
+    .in("customer_id", groupIds)
     .eq("provider", "braintree")
     .eq("status", "active")
     .limit(1)

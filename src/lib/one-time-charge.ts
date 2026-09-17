@@ -139,11 +139,19 @@ export async function chargeOneTimeOrder(
   // status='active' is the same filter the renewal uses. A card the
   // customer removed must never be charged, even if a stale
   // `subscriptions.payment_method_id` still points at it.
+  //
+  // The lookup spans the customer's link group via `linkGroupIds` — the same
+  // "one wallet per linked person" rule loyalty and the internal renewal use.
+  // A card vaulted on a linked sibling is chargeable here. `customerId` still
+  // owns the order + transaction rows written below (widening a LOOKUP is
+  // correct; re-pointing a CHARGE is not).
+  const { linkGroupIds } = await import("@/lib/customer-links");
+  const pmGroupIds = await linkGroupIds(admin, workspaceId, customerId);
   const pmQuery = admin
     .from("customer_payment_methods")
     .select("id, braintree_customer_id, braintree_payment_method_token, card_brand, last4")
     .eq("workspace_id", workspaceId)
-    .eq("customer_id", customerId)
+    .in("customer_id", pmGroupIds)
     .eq("status", "active");
   const { data: pm } = input.paymentMethodId
     ? await pmQuery.eq("id", input.paymentMethodId).maybeSingle()
