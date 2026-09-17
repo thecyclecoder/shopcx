@@ -1,0 +1,1 @@
+- **create_return net_refund must net order-level coupon discounts, not just per-line** · verified 2026-09-17 · → [[../lifecycles/return-pipeline]]
