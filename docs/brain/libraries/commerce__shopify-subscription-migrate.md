@@ -89,7 +89,7 @@ correctly-dated contract in our own records, and the next renewal re-pins it. Fu
 
 What it proved, and what it broke.
 
-**Result:** 23 swapped, 0 duplicates, 0 missing items or addresses, 0 past-due dates, $3,056.87/cycle
+**Result:** 24 of 25 swapped (the 25th correctly refused by the drift guard), 0 duplicates, 0 missing items or addresses, 0 past-due dates, $3,056.87/cycle
 now billed by ShopCX. Appstle confirmed `CANCELLED` on all 23 by live read. The 2 that did not swap
 are still billed by Appstle — **every customer in the cohort is billed by exactly one engine.**
 
@@ -120,9 +120,32 @@ migration" ([[commerce__shopcx-contract-ingest]]).
 **Pricing:** 11 of 24 got cheaper (the quantity break they qualified for and never had), 13
 unchanged, **none more expensive** — −$173.81/cycle, −5.7%. CEO approved applying standard rules.
 
+**Two more defects found completing the wave (both fixed):**
+
+3. **`entitledLines` must be `{ all: true }` when unscoped.** Omitting it does NOT mean "no scoping"
+   — Shopify defaults it to an empty set and rejects with *"Entitled lines may not be empty"*.
+   Exactly ONE contract in wave 1 carried a customer code, and it failed on this; **132 contracts in
+   the book carry codes**, so it would have failed every one of them. Probed directly against a live
+   inert contract: omitted → rejected, `{all:true}` → accepted. Fixed in `normalizeEntitledLines`.
+
+4. **The swap never re-mirrored `subscriptions.items`.** It repoints the row and flips the engine,
+   but leaves the APPSTLE-ERA prices in place — so the portal and CS keep quoting the old number
+   while the contract charges the new one. **13 of 25 rows showed a price HIGHER than the contract
+   would charge, by up to $43.13.** It errs in the customer's favour, which is precisely why nothing
+   would ever have complained about it. `mirrorContractPricing` now runs after every swap
+   (non-fatal — a stale price is a display bug, not a failed migration), and
+   `scripts/_backfill-migrated-pricing-mirror.ts` corrected the 13.
+
+**A migration that fails at `codes` cannot be resumed** — resume never re-applies codes, so the
+codes stay missing forever. The recovery is `scripts/_remigrate-broken.ts`: cancel the inert
+contract, VERIFY the cancel, only then clear the markers, and migrate again from scratch. Safe
+because the customer is billed by Appstle throughout. Proved on 27832090797 → 36064592045.
+
+**Pre-flight before the first renewals:** `scripts/_preflight-renewals.ts` replays the cron's
+selection and per-sub cycle resolution for a future date without charging. All 24 resolve to cycle
+#1 UNBILLED across 09-22..09-28, $3,056.87 total, zero strands.
+
 **Still open from the wave:**
-- `27832090797` — created but `codes` failed with "Entitled lines may not be empty", so its carried
-  fixed-amount codes are missing and it verifies $8.01/$6.99 high. Customer safely on Appstle.
 - `27847327917` — drift guard refused it (the customer edited since the snapshot). Correct.
 
 ## Gotchas

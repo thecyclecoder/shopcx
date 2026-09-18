@@ -1015,6 +1015,23 @@ export async function executeMigration(
     .eq("workspace_id", workspaceId)
     .eq("appstle_contract_id", appstleContractId);
 
+  // ⭐ RE-MIRROR THE PRICING. The swap above repoints the row and flips the engine but leaves
+  // `items` holding the APPSTLE-ERA prices — so the portal and CS keep quoting the old number
+  // while the contract charges the new one. Measured on wave 1 before this existed: 13 of 25 rows
+  // showed a price HIGHER than the contract would charge, by up to $43.13. It errs in the
+  // customer's favour, which is exactly why nothing would ever have complained.
+  //
+  // Non-fatal: the migration itself is complete and correct at this point, and the drift
+  // reconciler plus any later contract edit both re-mirror. A stale price is a display bug; a
+  // thrown error here would look like a failed migration that actually succeeded.
+  {
+    const { mirrorContractPricing } = await import("@/lib/commerce/shopcx-contract-ingest");
+    const m = await mirrorContractPricing(workspaceId, newContractId);
+    if (!m.ok) {
+      console.error(`[migrate] ${newContractId}: swapped, but the pricing mirror failed (portal will show pre-migration prices): ${m.error}`);
+    }
+  }
+
   return { ok: true, stage: "swapped", plan, newContractId };
 }
 

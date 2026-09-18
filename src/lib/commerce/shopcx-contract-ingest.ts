@@ -283,6 +283,52 @@ export async function ingestShopifyContract(
 }
 
 /**
+ * Re-mirror ONLY what the portal renders — lines, discounts, shipping cost — from the live contract.
+ *
+ * ⭐ Why this is separate from `syncShopifyContract`. The migration swap updates
+ * `shopify_contract_id`, `billing_source`, `status` and `next_billing_date`, but **not `items`** —
+ * so a migrated row kept its Appstle-era prices. Measured on wave 1: **13 of 25 rows showed the
+ * customer a price HIGHER than their new contract will actually charge** (up to $43.13 out), which
+ * is the pricing correction the migration had just applied to their contract and never mirrored.
+ * It errs in the customer's favour, but the portal and CS both quote it.
+ *
+ * Dates and status are deliberately NOT touched here: the migration computes the billing date with
+ * care (clamping, schedule pinning) and a blanket sync would overwrite that with whatever Shopify's
+ * display field happens to say.
+ */
+export async function mirrorContractPricing(
+  workspaceId: string,
+  contractId: string,
+): Promise<{ ok: boolean; error?: string }> {
+  const bare = String(contractId).replace("gid://shopify/SubscriptionContract/", "");
+  try {
+    const read = await getContractForIngest(workspaceId, bare);
+    if (!read.success || !read.contract) return { ok: false, error: read.error };
+    const c = read.contract;
+    const admin = createAdminClient();
+    const { error } = await admin
+      .from("subscriptions")
+      .update({
+        items: await buildItems(workspaceId, c),
+        applied_discounts: c.discounts.map((d) => ({
+          id: d.id, title: d.title ?? "", type: d.type ?? "",
+          targetType: d.targetType, value: d.value, valueType: d.valueType,
+        })),
+        delivery_price_cents: c.deliveryPriceCents ?? 0,
+        updated_at: new Date().toISOString(),
+      })
+      // ⚠️ Scope BOTH. `shopify_contract_id` is minted externally and is not globally unique, so
+      // filtering on it alone can overwrite ANOTHER tenant's row.
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", bare);
+    if (error) return { ok: false, error: error.message };
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: errText(err) };
+  }
+}
+
+/**
  * Bring an ALREADY-ingested contract back in step after a Shopify-side edit.
  *
  * Deliberately narrower than the create path: a merchant editing lines in the Shopify admin should

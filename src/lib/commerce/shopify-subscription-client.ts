@@ -896,8 +896,22 @@ export interface ManualDiscountInput {
  * it is the `all` flag that is missing. Normalizing here rather than at each call site means the
  * next discount someone adds cannot reintroduce the bug.
  */
+/**
+ * Shopify requires `entitledLines` on EVERY manual discount, and both obvious shorthands fail.
+ *
+ * - **Omitting it** does not mean "no scoping" — Shopify defaults the field to an empty set and
+ *   rejects the mutation with *"Entitled lines all may not be empty"*. Measured 2026-09-18: this
+ *   is why the ONE contract in wave 1 that carried a customer code (`LOYALTY-15-ZCNCUT`) failed,
+ *   and 132 contracts in the book carry codes, so it would have failed all of them.
+ * - **`{lines: [...]}` without `all`** hits the same error from the other side; `all: false` has to
+ *   be present alongside the line list.
+ *
+ * So an unscoped discount is `{ all: true }` — "every line on the contract" — which is the right
+ * meaning for a carried order-level code. Probed directly against a live inert contract: omitted
+ * was rejected, `{all:true}` was accepted.
+ */
 function normalizeEntitledLines(e: ManualDiscountInput["entitledLines"]) {
-  if (!e) return undefined;
+  if (!e) return { all: true };
   if ("all" in e) return e;
   return { all: false, lines: e.lines };
 }
