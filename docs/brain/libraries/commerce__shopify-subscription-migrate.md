@@ -145,6 +145,26 @@ because the customer is billed by Appstle throughout. Proved on 27832090797 → 
 selection and per-sub cycle resolution for a future date without charging. All 24 resolve to cycle
 #1 UNBILLED across 09-22..09-28, $3,056.87 total, zero strands.
 
+## Wave 1b — 20 more, due the NEXT day (2026-09-18)
+
+Wave 1's earliest renewal was four days out, which is four days before the untested decline path
+says anything. So a second batch was picked for **exactly the next calendar day** (`--due`), to get
+the answer in one cron tick instead of a week.
+
+**19 of 20 swapped. ZERO verify-pricing failures** — against 10 of 25 in wave 1, which is the
+line-ordering fix measured rather than asserted. The 20th was refused by the drift guard (customer
+edited since the snapshot), same as wave 1's one refusal.
+
+**43 of 43 real source contracts confirmed `CANCELLED` on Appstle by live read** — no customer is
+billed by both engines. (The 44th flagged row is a self-referential 09-10 test artifact on the
+founder's own account, already `cancelled` with a null billing date.)
+
+One pricing mirror failed on a transient `fetch failed` and was caught because it is non-fatal and
+logged — `_backfill-migrated-pricing-mirror.ts` corrected it. That is the intended shape: a display
+bug that reports itself rather than a migration that looks failed.
+
+**Pre-flight for the 19th:** all 19 resolve to cycle #1 UNBILLED, **$1,791.06** due in one tick.
+
 **Still open from the wave:**
 - `27847327917` — drift guard refused it (the customer edited since the snapshot). Correct.
 
