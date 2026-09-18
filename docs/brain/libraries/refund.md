@@ -52,6 +52,8 @@ The value is derived from the ledger, not the amount just refunded:
 
 **Case handling.** The column carries both `PAID`/`paid` and `REFUNDED`/`refunded` and `PARTIALLY_REFUNDED`/`partially_refunded` in prod ([[../tables/orders]] § `financial_status` gotcha) — a case-sensitive comparison already mismeasured this exact problem while it was being investigated. The comparison is case-insensitive; the write is lowercase.
 
+**Historical correction.** Fixing the write path forward left the wall in place: measured 2026-09-18, 15 internal orders and 33 store orders under-reported on the column. `scripts/_backfill-order-financial-status.ts` closes that gap — idempotent, dry-run by default, `--apply` to write; drives off the ledger, never claims more refunded than the ledger shows, and re-runs as a no-op. Auto-ledgered in [[../tables/data_op_runs]] via [[ship-time-backfill-detector]]'s `_backfill-*.ts` convention.
+
 ## Contract highlights
 
 - **Money moves ONCE.** The pre-dispatch guard reads `order_refunds` for a terminal row on the same `(workspace, order, request_key)` and short-circuits — combined with the `(order_id, request_key)` unique index, the post-success mirror write is idempotent under retry.
