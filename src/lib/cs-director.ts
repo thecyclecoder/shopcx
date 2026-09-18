@@ -62,6 +62,7 @@ import type { ActionContext, ActionParams, SonnetDecision } from "@/lib/action-e
 import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
 import type { CxOrderRemedyState, CxOrderRemedyStateRef } from "@/lib/cx-agent-sdk";
 import { MONEY_ACTION_TYPES, isNonOrderScopedLoyaltyAction, isNonRefundReplacementAction } from "@/lib/june-remedy-approval";
+import { recordDirectorActivity, type DirectorActivityInput } from "@/lib/director-activity";
 import { getAgentPolicyPackage, formatAgentPolicyPackage } from "@/lib/policies";
 import { linkGroupIds } from "@/lib/customer-links";
 import type { OrderHoldState } from "@/lib/order-holds";
@@ -459,6 +460,109 @@ export function promoteRecommendedRemedyToExecutable(
   const summary = typeof remedy.summary === "string" ? remedy.summary.trim() : "";
   if (summary) out.summary = summary;
   return out;
+}
+
+// ── Founder-approval outcome record (a-director-remedy-must-be-executable-when-it-can-be Phase 2) ──
+
+/**
+ * The exhaustive union of outcomes `raiseFounderApproval` returns via `RaiseJuneRemedyResult.via`
+ * (mirrored in [[june-remedy-approval]]). Kept as a discriminant so `buildFounderApprovalOutcomeActivity`
+ * can be counted / grouped in the ledger without re-parsing free-text.
+ */
+export type FounderApprovalOutcomeVia =
+  | "sms_cockpit"
+  | "escalated_no_cockpit"
+  | "escalated_recommendation_only"
+  | "blocked_by_asked"
+  | "blocked_by_ceiling";
+
+/**
+ * Ordered input to `buildFounderApprovalOutcomeActivity` — the RAW and PROMOTED remedy shapes are
+ * BOTH carried on purpose. The RAW remedy is what the LLM emitted (the attribution axis: a rising
+ * `escalated_recommendation_only` count tied to a particular kind names WHICH kind is still slipping
+ * past the promoter); the PROMOTED remedy is what the guard actually saw (records whether Phase 1's
+ * promotion path fired). See [[../../docs/brain/libraries/june-remedy-approval]] § Executable-shape
+ * promotion + § Outcome recording.
+ */
+export interface FounderApprovalOutcomeInput {
+  workspaceId: string;
+  ticketId: string | null;
+  triageRunId: string | null;
+  via: FounderApprovalOutcomeVia;
+  /** The `openApproval` card id when a card was minted; null on any block/skip path. */
+  approvalId: string | null;
+  /** The RAW `recommended_remedy` the CS Director's Sonnet call emitted, before promotion. */
+  rawRecommendedRemedy: Record<string, unknown> | null | undefined;
+  /**
+   * The remedy AFTER `promoteRecommendedRemedyToExecutable` — i.e. what `raiseFounderApproval`'s
+   * `canOfferOneTapApproval` guard actually saw. When identical to the raw remedy, the promoter
+   * declined; when different, Phase 1 rewrote a `{kind, order_ref}` recommendation into an
+   * executable `{action_type, payload}`.
+   */
+  promotedRecommendedRemedy: Record<string, unknown> | null | undefined;
+}
+
+/**
+ * Compose the `director_activity` row that records a `raiseFounderApproval` outcome — the
+ * measurement surface Phase 2 of a-director-remedy-must-be-executable-when-it-can-be adds so an
+ * `escalated_recommendation_only` count can be tracked over time and attributed to a remedy kind
+ * (a rising count means the director's remedy CONSTRUCTION is regressing again — the Phase 1
+ * `promoteRecommendedRemedyToExecutable` path is missing more shapes than it should). Reporting
+ * only — nothing here changes which card is minted or what the guard allows.
+ *
+ * Pure so the test suite can pin the row's exact metadata shape without a Supabase seam. The caller
+ * (`handleEscalateFounder`) hands the returned `DirectorActivityInput` to `recordDirectorActivity`
+ * best-effort; a DB hiccup on the ledger write never affects the founder-facing card path.
+ *
+ * The `remedy_kind` attribution axis is the RAW remedy's `kind` (the LLM's intent) with a fallback
+ * to the raw `action_type` (some verdicts already emit the executable shape upstream). The
+ * `remedy_action_type` axis is the PROMOTED remedy's `action_type` — i.e. what the guard resolved.
+ * `was_promoted` fires when the two differ (Phase 1's rewrite path succeeded).
+ */
+export function buildFounderApprovalOutcomeActivity(
+  input: FounderApprovalOutcomeInput,
+): DirectorActivityInput {
+  const readStringField = (
+    remedy: Record<string, unknown> | null | undefined,
+    key: string,
+  ): string | null => {
+    if (!remedy || typeof remedy !== "object" || Array.isArray(remedy)) return null;
+    const raw = (remedy as Record<string, unknown>)[key];
+    if (typeof raw !== "string") return null;
+    const trimmed = raw.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  };
+  const rawKind = readStringField(input.rawRecommendedRemedy, "kind");
+  const rawActionType = readStringField(input.rawRecommendedRemedy, "action_type");
+  const promotedActionType = readStringField(input.promotedRecommendedRemedy, "action_type");
+  // Attribution: prefer the LLM's `kind` (the semantic label it chose) over `action_type` (already
+  // canonical). Null → the escalation carried no recommended_remedy at all.
+  const remedy_kind = rawKind ?? rawActionType ?? null;
+  // Phase 1's promoter fired iff the RAW carried a `kind` (no `action_type`) AND the PROMOTED
+  // resolved to an `action_type`. A raw shape that was already executable (`action_type` set) is
+  // never counted as promoted — no rewrite happened.
+  const was_promoted = rawKind !== null && rawActionType === null && promotedActionType !== null;
+  const reason =
+    remedy_kind !== null
+      ? `raiseFounderApproval outcome ${input.via} (kind=${remedy_kind})`
+      : `raiseFounderApproval outcome ${input.via}`;
+  return {
+    workspaceId: input.workspaceId,
+    directorFunction: "cs",
+    actionKind: "founder_remedy_outcome",
+    specSlug: null,
+    reason,
+    metadata: {
+      via: input.via,
+      remedy_kind,
+      remedy_action_type: promotedActionType,
+      was_promoted,
+      ticket_id: input.ticketId,
+      triage_run_id: input.triageRunId,
+      approval_id: input.approvalId,
+      autonomous: true,
+    },
+  };
 }
 
 /**
@@ -2416,6 +2520,24 @@ async function handleEscalateFounder(
             remedyStates: recommendedRemedyStates,
           });
           console.log(`${tag} escalate_founder: founder SMS approval ${raised.via} (${raised.approvalId ? raised.approvalId.slice(0, 8) : "no-card"})`);
+          // Phase 2 of a-director-remedy-must-be-executable-when-it-can-be — persist the outcome
+          // per escalation so `escalated_recommendation_only` can be counted over time and
+          // attributed to a remedy kind. Reporting only; the card + guard are untouched.
+          // Best-effort — the recorder never throws (mirrors recordDirectorActivity's contract),
+          // so a DB hiccup on the ledger write cannot affect the founder-facing card path.
+          const activity = buildFounderApprovalOutcomeActivity({
+            workspaceId,
+            ticketId: linkage.ticketId,
+            triageRunId: linkage.triageRunId,
+            via: raised.via,
+            approvalId: raised.approvalId ?? null,
+            rawRecommendedRemedy:
+              rawRecommended && typeof rawRecommended === "object" && !Array.isArray(rawRecommended)
+                ? (rawRecommended as Record<string, unknown>)
+                : null,
+            promotedRecommendedRemedy: recommended as Record<string, unknown>,
+          });
+          await recordDirectorActivity(admin, activity);
         } catch (e) {
           console.warn(`${tag} escalate_founder: raiseFounderApproval failed (non-fatal):`, e instanceof Error ? e.message : e);
         }

@@ -36,6 +36,7 @@ import assert from "node:assert/strict";
 import {
   applyBoxCsDirectorCall,
   buildAuthorSpecInput,
+  buildFounderApprovalOutcomeActivity,
   buildRemedySonnetDecision,
   canOfferOneTapApproval,
   composeFounderEscalationAck,
@@ -616,6 +617,144 @@ test("promoteRecommendedRemedyToExecutable — a multi-action `actions[]` recomm
 test("promoteRecommendedRemedyToExecutable — null / undefined / non-object short-circuits without throwing", () => {
   assert.equal(promoteRecommendedRemedyToExecutable(null), null);
   assert.equal(promoteRecommendedRemedyToExecutable(undefined), undefined);
+});
+
+// ── buildFounderApprovalOutcomeActivity — director-remedy-must-be-executable-when-it-can-be Phase 2 ──
+
+test("buildFounderApprovalOutcomeActivity — an `escalated_recommendation_only` outcome records the raw kind for attribution (the count Phase 2 tracks)", () => {
+  // Named failing state Phase 2 measures: a recommendation whose SHAPE the guard rejected. Records
+  // via + remedy_kind so a rising count attributed to a single kind names the class Phase 1 should
+  // have promoted but didn't.
+  const activity = buildFounderApprovalOutcomeActivity({
+    workspaceId: "ws-1",
+    ticketId: "ticket-1",
+    triageRunId: null,
+    via: "escalated_recommendation_only",
+    approvalId: null,
+    rawRecommendedRemedy: {
+      kind: "refund_and_price_lock",
+      summary: "Refund + restore the grandfathered price.",
+    },
+    promotedRecommendedRemedy: {
+      kind: "refund_and_price_lock",
+      summary: "Refund + restore the grandfathered price.",
+    },
+  });
+  assert.equal(activity.directorFunction, "cs");
+  assert.equal(activity.actionKind, "founder_remedy_outcome");
+  assert.equal(activity.specSlug, null);
+  assert.equal(activity.workspaceId, "ws-1");
+  assert.match(activity.reason, /escalated_recommendation_only/);
+  assert.match(activity.reason, /kind=refund_and_price_lock/);
+  assert.deepEqual(activity.metadata, {
+    via: "escalated_recommendation_only",
+    remedy_kind: "refund_and_price_lock",
+    remedy_action_type: null,
+    was_promoted: false,
+    ticket_id: "ticket-1",
+    triage_run_id: null,
+    approval_id: null,
+    autonomous: true,
+  });
+});
+
+test("buildFounderApprovalOutcomeActivity — a promoted {kind:'full_order_refund'} → executable path records was_promoted:true + both axes (Phase 1 win)", () => {
+  // The ticket 63c7a2ff success shape: raw was {kind:'full_order_refund', order_number}, promoted
+  // to {action_type:'full_order_refund'}, guard accepted → sms_cockpit. Records BOTH axes so a
+  // reader can count "how many recommendations Phase 1 rescued" vs "how many the guard still rejects."
+  const activity = buildFounderApprovalOutcomeActivity({
+    workspaceId: "ws-1",
+    ticketId: "ticket-1",
+    triageRunId: "triage-1",
+    via: "sms_cockpit",
+    approvalId: "card-1",
+    rawRecommendedRemedy: {
+      kind: "full_order_refund",
+      order_number: "SHOPCX373",
+      summary: "Refund $140.28 for SHOPCX373 — no return required.",
+    },
+    promotedRecommendedRemedy: {
+      action_type: "full_order_refund",
+      payload: { order_number: "SHOPCX373" },
+      summary: "Refund $140.28 for SHOPCX373 — no return required.",
+    },
+  });
+  assert.equal(activity.actionKind, "founder_remedy_outcome");
+  assert.deepEqual(activity.metadata, {
+    via: "sms_cockpit",
+    remedy_kind: "full_order_refund",
+    remedy_action_type: "full_order_refund",
+    was_promoted: true,
+    ticket_id: "ticket-1",
+    triage_run_id: "triage-1",
+    approval_id: "card-1",
+    autonomous: true,
+  });
+});
+
+test("buildFounderApprovalOutcomeActivity — a recommendation that was ALREADY executable is not counted as promoted", () => {
+  // A raw {action_type} shape means the LLM emitted it executable in the first place — Phase 1's
+  // promoter did NOT fire. `was_promoted:false` keeps the "promoter fired" count truthful.
+  const activity = buildFounderApprovalOutcomeActivity({
+    workspaceId: "ws-1",
+    ticketId: "ticket-1",
+    triageRunId: null,
+    via: "sms_cockpit",
+    approvalId: "card-1",
+    rawRecommendedRemedy: {
+      action_type: "full_order_refund",
+      payload: { order_number: "SHOPCX373" },
+    },
+    promotedRecommendedRemedy: {
+      action_type: "full_order_refund",
+      payload: { order_number: "SHOPCX373" },
+    },
+  });
+  const meta = activity.metadata as Record<string, unknown>;
+  assert.equal(meta.was_promoted, false);
+  assert.equal(meta.remedy_kind, "full_order_refund");
+  assert.equal(meta.remedy_action_type, "full_order_refund");
+});
+
+test("buildFounderApprovalOutcomeActivity — every `via` outcome maps to a well-formed activity row (blocked_by_asked / blocked_by_ceiling / escalated_no_cockpit)", () => {
+  // The reporting must record ANY outcome, not just the escalated_recommendation_only failure. The
+  // block/skip paths still cost founder attention and should show up in the tally.
+  for (const via of ["blocked_by_asked", "blocked_by_ceiling", "escalated_no_cockpit"] as const) {
+    const activity = buildFounderApprovalOutcomeActivity({
+      workspaceId: "ws-1",
+      ticketId: "ticket-1",
+      triageRunId: null,
+      via,
+      approvalId: null,
+      rawRecommendedRemedy: { kind: "refund_order", summary: "..." },
+      promotedRecommendedRemedy: { kind: "refund_order", summary: "..." },
+    });
+    assert.equal(activity.actionKind, "founder_remedy_outcome");
+    const meta = activity.metadata as Record<string, unknown>;
+    assert.equal(meta.via, via);
+    assert.equal(meta.remedy_kind, "refund_order");
+  }
+});
+
+test("buildFounderApprovalOutcomeActivity — null / non-object raw remedy still records the `via` outcome (no attribution)", () => {
+  // A future callsite might invoke raiseFounderApproval with no recommended_remedy attribute at
+  // all. The recorder must still stamp the outcome — the void case is still a data point.
+  const activity = buildFounderApprovalOutcomeActivity({
+    workspaceId: "ws-1",
+    ticketId: null,
+    triageRunId: null,
+    via: "escalated_no_cockpit",
+    approvalId: null,
+    rawRecommendedRemedy: null,
+    promotedRecommendedRemedy: null,
+  });
+  assert.equal(activity.actionKind, "founder_remedy_outcome");
+  const meta = activity.metadata as Record<string, unknown>;
+  assert.equal(meta.via, "escalated_no_cockpit");
+  assert.equal(meta.remedy_kind, null);
+  assert.equal(meta.remedy_action_type, null);
+  assert.equal(meta.was_promoted, false);
+  assert.equal(meta.ticket_id, null);
 });
 
 test("planRemedyExecution — REJECTS a legacy single-action step whose payload carries a reserved `type` (bypass class)", () => {

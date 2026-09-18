@@ -100,6 +100,44 @@ Order-scoped executable money actions the promoter recognizes (drawn from `MONEY
 
 Same `full_order_refund` guard still holds downstream: `executeParkedRemedy` re-verifies the plan against LIVE remedy state at sweep time (spec [[../specs/a-money-remedy-must-read-the-live-remedy-state-first]]) + the `_founderApprovedFullOrderRefund` context flag is the ONLY caller-side authorisation the full_order_refund handler recognises. Promotion opens the one-tap PATH; the downstream rails still refuse an over-refund on the day it fires.
 
+## Outcome recording — how the recommendation-only class is counted
+
+[[../specs/a-director-remedy-must-be-executable-when-it-can-be]] Phase 2 — every `raiseFounderApproval` invocation now writes ONE `director_activity` row so the `escalated_recommendation_only` outcome can be counted over time and attributed to a remedy kind. A rising count means the director's remedy CONSTRUCTION is regressing (Phase 1's `promoteRecommendedRemedyToExecutable` is missing shapes it should cover); a stable-non-zero count is fine — some remedies genuinely cannot be expressed as one action. Reporting only — **nothing here changes which card is minted or what the guard allows**.
+
+The row shape (`cs-director.ts` `buildFounderApprovalOutcomeActivity` — pure, unit-tested):
+
+```
+director_activity {
+  director_function: 'cs',
+  action_kind:       'founder_remedy_outcome',
+  spec_slug:         null,
+  reason:            'raiseFounderApproval outcome <via> (kind=<remedy_kind?>)',
+  metadata: {
+    via:                 'sms_cockpit'|'escalated_no_cockpit'|'escalated_recommendation_only'|'blocked_by_asked'|'blocked_by_ceiling',
+    remedy_kind:         '<raw kind|action_type|null>',   // attribution axis — WHICH kind slipped past the promoter
+    remedy_action_type:  '<promoted action_type|null>',   // what the guard actually saw
+    was_promoted:        boolean,                          // true iff Phase 1's rewrite fired (raw {kind} → promoted {action_type})
+    ticket_id:           string|null,
+    triage_run_id:       string|null,
+    approval_id:         string|null,                      // the openApproval card id when a card was minted
+    autonomous:          true,
+  }
+}
+```
+
+Counting query (denominator: every founder-escalation over the window; numerator: the failing outcome):
+
+```
+select metadata->>'remedy_kind' as kind, count(*)
+from director_activity
+where action_kind = 'founder_remedy_outcome'
+  and metadata->>'via' = 'escalated_recommendation_only'
+  and created_at > now() - interval '30 days'
+group by 1 order by 2 desc;
+```
+
+Called from [[cs-director]] `handleEscalateFounder` right after `raiseFounderApproval` returns. Best-effort (uses `recordDirectorActivity`) — a DB hiccup on the ledger write cannot affect the founder-facing card path.
+
 ## Gotchas
 
 - **Strictly-above the SUM, not at-or-above.** A batch whose money total is exactly the threshold runs autonomously; only `sum > threshold` (or an unknown amount on any money action) gates.

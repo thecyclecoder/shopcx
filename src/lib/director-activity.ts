@@ -305,7 +305,18 @@ export type DirectorActionKind =
   // OR the enqueue itself threw (fail-open path — never swallow a drift signal). metadata:
   // { lane, drift_suspect_phase_indices, drift_suspect_phase_titles, audit_state:
   //   'ran_and_unresolved' | 'enqueue_error' | 'unknown', prior_audit_job_id, autonomous:true }.
-  | "drift_suspect_flagged";
+  | "drift_suspect_flagged"
+  // a-director-remedy-must-be-executable-when-it-can-be Phase 2 — one row per
+  // `raiseFounderApproval` invocation from [[cs-director]] `handleEscalateFounder`,
+  // so the `escalated_recommendation_only` outcome can be counted over time and
+  // attributed to a remedy kind (the rising-count regression signal that Phase 1's
+  // `promoteRecommendedRemedyToExecutable` is missing shapes). Reporting only —
+  // does not change which card is minted or what the guard allows. Composition is
+  // the pure unit [[cs-director]] `buildFounderApprovalOutcomeActivity`.
+  // director_function='cs', spec_slug=null. metadata:
+  // { via, remedy_kind, remedy_action_type, was_promoted, ticket_id, triage_run_id,
+  //   approval_id, autonomous:true }.
+  | "founder_remedy_outcome";
 
 export interface DirectorActivityInput {
   workspaceId: string;
