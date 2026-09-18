@@ -1,0 +1,1 @@
+- **A refunded order must say it was refunded** · verified 2026-09-18 · → [[../lifecycles/return-pipeline]]
