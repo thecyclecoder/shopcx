@@ -31,6 +31,8 @@ const SIZE = Number(arg("--size") ?? 25);
 const ONE = arg("--contract");
 const DUE_FROM_DAYS = Number(arg("--from") ?? 3);
 const DUE_TO_DAYS = Number(arg("--to") ?? 10);
+/** Exact calendar due date (UTC), e.g. --due 2026-09-19. Overrides the day window. */
+const DUE_ON = arg("--due");
 
 /** Politeness delay between contracts. Appstle is metered AND rate limited. */
 const PACE_MS = 1200;
@@ -55,8 +57,12 @@ async function main() {
   console.log(`rule: S&S ${ctx.snsPct}%  breaks ${ctx.breaks.map((b) => `${b.quantity}:${b.discount_pct}%`).join(" ")}\n`);
 
   // ── candidates, entirely from local data ────────────────────────────────────
-  const from = new Date(Date.now() + DUE_FROM_DAYS * 86400000).toISOString();
-  const to = new Date(Date.now() + DUE_TO_DAYS * 86400000).toISOString();
+  const from = DUE_ON
+    ? `${DUE_ON}T00:00:00.000Z`
+    : new Date(Date.now() + DUE_FROM_DAYS * 86400000).toISOString();
+  const to = DUE_ON
+    ? `${DUE_ON}T23:59:59.999Z`
+    : new Date(Date.now() + DUE_TO_DAYS * 86400000).toISOString();
 
   let q = admin.from("subscriptions")
     .select("id, shopify_contract_id, next_billing_date, billing_interval, billing_interval_count, items")
@@ -94,7 +100,7 @@ async function main() {
 
   const byCadence: Record<string, Cand[]> = {};
   for (const c of cands) (byCadence[c.cadence] ??= []).push(c);
-  console.log(`candidates due +${DUE_FROM_DAYS}d..+${DUE_TO_DAYS}d with a clean snapshot: ${cands.length}`);
+  console.log(`candidates due ${DUE_ON ?? `+${DUE_FROM_DAYS}d..+${DUE_TO_DAYS}d`} with a clean snapshot: ${cands.length}`);
   for (const [k, v] of Object.entries(byCadence)) console.log(`  ${k.padEnd(10)} ${v.length}`);
 
   // ── pick the wave: round-robin across cadences, preferring multi-line ───────
