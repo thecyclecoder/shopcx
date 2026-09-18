@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Amazon sync-orders — classify 'LWA secret token has expired', deactivate the connection, notify the owner** · verified 2026-09-18 · → [[../inngest/amazon-sync]]
 - **A flagged allergen order must not ship** · verified 2026-09-17 · → [[../lifecycles/ticket-lifecycle]]
 - **Create-return (and sibling order-scoped actions) must resolve the order across the customer's link group** · verified 2026-09-17 · → [[../libraries/action-executor]]
 - **Payment-method lookups must span linked accounts (Phase 1)** · verified 2026-09-17 · → [[../libraries/one-time-charge]] · [[../libraries/commerce__shopify-one-time-charge]] · [[../libraries/action-executor]]

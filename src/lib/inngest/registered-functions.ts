@@ -84,6 +84,7 @@ import {
   shopcxContractIngest,
   shopcxContractSync,
 } from "@/lib/inngest/shopcx-contract-ingest";
+import { shopcxDriftReconcileCron } from "@/lib/inngest/shopcx-drift-reconcile";
 import {
   oneTimeChargeCron,
   oneTimeChargeAttempt,
@@ -278,6 +279,7 @@ export const registeredInngestFunctions = [
   shopifySubscriptionRenewalAttempt,
   shopcxContractIngest,
   shopcxContractSync,
+  shopcxDriftReconcileCron,
   oneTimeChargeCron,
   oneTimeChargeAttempt,
   migrationAuditRetryCron,

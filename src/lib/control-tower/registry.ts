@@ -502,6 +502,15 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     livenessWindowMs: 30 * HOUR,
   },
   {
+    id: "shopcx-drift-reconcile-cron",
+    kind: "cron",
+    owner: "retention",
+    label: "ShopCX subscription drift reconcile",
+    description: "Daily row-vs-contract check for shopcx-billed subs. Catches the two silent failures on the ShopCX money path: a row that says active against a cancelled contract, and a billing date that has drifted into an already-BILLED cycle (which makes the renewal worker skip that subscriber forever, with no error anywhere).",
+    expectedCadence: "daily (0 8 * * *)",
+    livenessWindowMs: 30 * HOUR,
+  },
+  {
     id: "shopcx-contract-ingest",
     kind: "reactive",
     owner: "retention",
