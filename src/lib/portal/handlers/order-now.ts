@@ -26,9 +26,18 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
       return jsonErr({ error: "not_active", message: "This subscription isn't active." }, 409);
     }
     const { inngest } = await import("@/lib/inngest/client");
+    // ⭐ Stamp the sub's pre-charge next_billing_date onto the event so the per-cycle claim
+    // pins on the DISPATCHED cycle, not a post-advance live read. An immediate-charge attempt
+    // that landed together with a scheduled cron for the same cycle used to compute a
+    // different key against the advanced live state and both charged — see
+    // docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md.
     await inngest.send({
       name: "internal-subscription/renewal-attempt",
-      data: { subscription_id: resolved.id, workspace_id: auth.workspaceId },
+      data: {
+        subscription_id: resolved.id,
+        workspace_id: auth.workspaceId,
+        expected_next_billing_date: resolved.next_billing_date,
+      },
     });
     const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
     if (customer) {

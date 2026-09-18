@@ -157,17 +157,24 @@ export type RenewalOutcome =
   // means a customer cannot be billed for THIS cycle and the state must be alertable, not
   // blended into normal skip volume. `succeeded` refusals stay `skipped_other` (benign — a
   // real Braintree sale already resolved this cycle). See RENEWAL_BAD_OUTCOMES below.
-  | "refused_wedged_cycle";
+  | "refused_wedged_cycle"
+  // Phase 2 of docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md
+  // — a second attempt on a subscription that already has an in_flight claim (regardless of
+  // cycle_key) is refused. Distinct from `refused_wedged_cycle` (same cycle already claimed) so
+  // "two attempts raced" and "this cycle was already charged" do not look identical when someone
+  // is working out why a customer was or was not billed.
+  | "refused_concurrent_renewal";
 
 /** loop_heartbeats.loop_id the per-sub renewal outcome beats are written under (kind 'reactive' so the cron/agent-kind beats RPC skips them). NOT a monitored tile — a data channel for the outcome-distribution assertion. */
 export const RENEWAL_OUTCOME_LOOP_ID = "internal-subscription-renewal-outcome";
 
-/** Outcomes that count as "anomalous" for the outcome-distribution spike/floor check (vs the benign charged / comp_shipped / zero-total / other-skip outcomes). `refused_wedged_cycle` is included so a wedged-cycle refusal alerts through the same channel rather than blending into `skipped_other` (Phase 2 of a-declined-renewal-must-not-wedge-the-cycle-forever). */
+/** Outcomes that count as "anomalous" for the outcome-distribution spike/floor check (vs the benign charged / comp_shipped / zero-total / other-skip outcomes). `refused_wedged_cycle` is included so a wedged-cycle refusal alerts through the same channel rather than blending into `skipped_other` (Phase 2 of a-declined-renewal-must-not-wedge-the-cycle-forever). `refused_concurrent_renewal` alerts through the same channel — two attempts racing on the same sub is the hazard Phase 2 of a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md closes and must never blend into normal skip volume. */
 export const RENEWAL_BAD_OUTCOMES: RenewalOutcome[] = [
   "skipped_no_payment_method",
   "declined_to_dunning",
   "comp_blocked",
   "refused_wedged_cycle",
+  "refused_concurrent_renewal",
 ];
 
 /**

@@ -992,8 +992,17 @@ export async function subscriptionAttemptBilling(
  * claims it before charging — so an order-now racing the nightly cron cannot double-bill.
  * Appstle subs go through get-upcoming → attempt-billing.
  *
- * Both async events pass `expected_next_billing_date: null` deliberately: the stale guard exists
- * to drop a fan-out whose cycle someone else already took, and an order-now IS the someone else.
+ * ShopCX (Shopify-billed) events pass `expected_next_billing_date: null` deliberately: the
+ * shopify stale guard exists to drop a fan-out whose cycle someone else already took, and an
+ * order-now IS the someone else.
+ *
+ * ⭐ Internal (Braintree) events STAMP the sub's pre-charge `next_billing_date` onto the event
+ * so the per-cycle claim pins to the DISPATCHED cycle, not a post-advance live read. Without
+ * that stamp a delayed order-now overlapping a scheduled cron read the sub AFTER the cron had
+ * advanced next_billing_date, computed a different key, and both charged — see
+ * docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md
+ * (ground truth: sub e9b8a6d9, 2026-10-30 + 2026-12-25 eight seconds apart).
+ *
  * See docs/brain/libraries/appstle.md § Gotchas.
  */
 export async function subscriptionOrderNow(
@@ -1003,7 +1012,7 @@ export async function subscriptionOrderNow(
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, status, billing_source")
+    .select("id, status, billing_source, next_billing_date")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", contractId)
     .maybeSingle();
@@ -1024,7 +1033,11 @@ export async function subscriptionOrderNow(
     }
     await inngest.send({
       name: "internal-subscription/renewal-attempt",
-      data: { subscription_id: sub.id, workspace_id: workspaceId },
+      data: {
+        subscription_id: sub.id,
+        workspace_id: workspaceId,
+        expected_next_billing_date: (sub as { next_billing_date?: string | null }).next_billing_date ?? null,
+      },
     });
     return { success: true, internal: true, summary: "Triggered internal renewal (order now)" };
   }

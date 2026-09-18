@@ -2190,6 +2190,7 @@ function baselineAssertionInputs(overrides: Partial<AssertionInputs>): Assertion
       comp_blocked: 0,
       skipped_other: 0,
       refused_wedged_cycle: 0,
+      refused_concurrent_renewal: 0,
     },
     renewalBaseline: {
       total: 0,
@@ -2201,6 +2202,7 @@ function baselineAssertionInputs(overrides: Partial<AssertionInputs>): Assertion
       comp_blocked: 0,
       skipped_other: 0,
       refused_wedged_cycle: 0,
+      refused_concurrent_renewal: 0,
     },
     stuckDunningCycles: 0,
     smsSubscribedTotal: 0,
