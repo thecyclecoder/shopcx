@@ -199,9 +199,11 @@ export async function refundOrder(
 
   // Read the order + gateway signals. Scoped to workspace so an
   // orderId from another tenant can't ever surface a refund path.
+  // total_cents + financial_status feed the post-success derive-and-set
+  // of the order's payment state from the refund ledger below.
   const { data: order, error: orderErr } = await admin
     .from("orders")
-    .select("id, shopify_order_id, braintree_transaction_id, customer_id, order_number")
+    .select("id, shopify_order_id, braintree_transaction_id, customer_id, order_number, total_cents, financial_status")
     .eq("id", orderId)
     .eq("workspace_id", workspaceId)
     .maybeSingle();
@@ -324,6 +326,59 @@ export async function refundOrder(
     });
   } catch (e) {
     console.error("[refundOrder] failed to write order_refunds mirror row:", e);
+  }
+
+  // ── orders.financial_status derive-and-set ──
+  // The mirror row for THIS refund has just landed; derive the order's
+  // payment state from the ledger and stamp it in one place, engine-
+  // independent (this is the fix for internal orders never learning
+  // they were refunded — Shopify sync used to be the only writer).
+  //
+  // Sum the terminal (succeeded + settled) refunds for the order and
+  // compare against `total_cents`: reaching total ⇒ `refunded`, any
+  // positive lesser sum ⇒ `partially_refunded`. Two partials that
+  // together clear the total therefore end up fully refunded — never
+  // inferred from the single amount just refunded.
+  //
+  // For a Shopify order the vendor sync is authoritative and re-writes
+  // this column from webhook/sync. This is a BACKSTOP: never regress a
+  // stronger vendor-stamped state (weight refunded > partially_refunded
+  // > everything else), and compare case-insensitively — the column
+  // carries both `PAID`/`paid` and `REFUNDED`/`refunded` in prod
+  // (docs/brain/tables/orders.md § financial_status). We write lowercase.
+  try {
+    const { data: ledger } = await admin
+      .from("order_refunds")
+      .select("amount_cents, status")
+      .eq("workspace_id", workspaceId)
+      .eq("order_id", order.id)
+      .in("status", ["succeeded", "settled"]);
+    const refundedTotalCents = (ledger || []).reduce(
+      (sum, r) => sum + (Number((r as { amount_cents?: number }).amount_cents) || 0),
+      0,
+    );
+    const totalCents = Number(order.total_cents) || 0;
+    let nextStatus: "refunded" | "partially_refunded" | null = null;
+    if (refundedTotalCents > 0 && totalCents > 0) {
+      nextStatus = refundedTotalCents >= totalCents ? "refunded" : "partially_refunded";
+    } else if (refundedTotalCents > 0) {
+      nextStatus = "refunded";
+    }
+    if (nextStatus) {
+      const currentRaw = String(order.financial_status ?? "").toLowerCase();
+      const weight: Record<string, number> = { refunded: 2, partially_refunded: 1 };
+      const currentWeight = weight[currentRaw] ?? 0;
+      const nextWeight = weight[nextStatus] ?? 0;
+      if (nextWeight > currentWeight) {
+        await admin
+          .from("orders")
+          .update({ financial_status: nextStatus })
+          .eq("workspace_id", workspaceId)
+          .eq("id", order.id);
+      }
+    }
+  } catch (e) {
+    console.error("[refundOrder] failed to derive-and-set orders.financial_status:", e);
   }
 
   // ── Double-refund guard ──
