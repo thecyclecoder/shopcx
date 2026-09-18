@@ -27,7 +27,13 @@
  * attribution sensor cannot resolve is a rail — and hitting a rail means stop, not execute
  * (CLAUDE.md § North star). Nothing here escalates on its own; the caller decides.
  */
-import { CREATIVE_PACK_MIN, type MetaCopyPack } from "@/lib/ads/creative-pack";
+import {
+  CREATIVE_PACK_MIN,
+  planCreativePackInserts,
+  type CreativePackInsertsPlan,
+  type MetaCopyPack,
+  type PlacementFormat,
+} from "@/lib/ads/creative-pack";
 import { META_CAPS, type AdFormat, type CaptionStyle } from "@/lib/ad-tool-config";
 import { hasScentMatchParams } from "@/lib/advertorial-pages";
 import { AUTHOR_SELF_SCORE_FLOOR, type AuthorSelfScore } from "@/lib/ads/creative-agent";
@@ -75,7 +81,8 @@ export type ManualCreativeRefusal =
   | "description_over_cap"
   | "missing_scent_match_params"
   | "empty_media"
-  | "self_score_below_floor";
+  | "self_score_below_floor"
+  | "missing_placement_coverage";
 
 export interface ManualCreativeGateResult {
   ok: boolean;
@@ -282,5 +289,214 @@ export async function updateManualCreativeCopy(
     adCampaignId: data.id,
     headlines: copyPack.headlines.length,
     primaryTexts: copyPack.primaryTexts.length,
+  };
+}
+
+// ── Hand-produced STATIC packs ──────────────────────────────────────────────────────────────
+//
+// `landManualCreative` above is video-shaped: it hardcodes `media_kind:'video'`, writes the bytes
+// to `finals/{ws}/{id}.mp4` under a `video/mp4` mime, and lands exactly ONE `ad_videos` row. A
+// hand-produced STATIC is a different animal — [[./creative-pack]] `isCreativePackComplete` only
+// treats a campaign as postable when it carries THREE `media_kind='static'` rows: a canonical
+// `feed_4x5` with `format_variant_of_id` NULL, plus a 9:16 sibling and a `right_column_1x1`
+// sibling that both point at the canonical. Pushing JPEGs through the video path would shelve a
+// row Bianca's publish gate reads as a half-pack forever.
+//
+// So statics get their own writer that mirrors `insertOnePlacementRender` in [[./creative-agent]]
+// (the autonomous lane's per-placement write) — same `finals/{ws}/{id}.{ext}` path, same
+// `static_jpg_url` + `meta.storage_path` shape — while reusing THIS module's copy rails, so a
+// hand-made pack clears the identical bar as a hand-made video.
+
+/** One rendered placement to shelve. `mimeType` drives the stored extension, matching the
+ *  autonomous lane (`png` when it says png, `jpg` otherwise). */
+export interface ManualStaticRender {
+  buffer: Buffer;
+  format: PlacementFormat;
+  mimeType?: "image/jpeg" | "image/png";
+}
+
+export interface LandManualStaticPackArgs {
+  workspaceId: string;
+  productId: string;
+  name: string;
+  landingUrl: string;
+  audienceTemperature: "cold" | "warm" | "hot";
+  copyPack: MetaCopyPack;
+  selfScore?: AuthorSelfScore | null;
+  /** Must cover the canonical `feed_4x5` + a 9:16 (`stories_9x16` | `reels_9x16`) +
+   *  `right_column_1x1` — the three placements Meta rotates. */
+  renders: ManualStaticRender[];
+  /** Stamped onto every row's `meta` so a hand-made pack is distinguishable from Dahlia's in
+   *  the same table. Defaults mark it as manual. */
+  archetype?: string;
+  generatedBy?: string;
+}
+
+export type LandManualStaticPackResult =
+  | {
+      kind: "ok";
+      campaignId: string;
+      canonicalVideoId: string;
+      siblingVideoIds: string[];
+      assets: Array<{ format: PlacementFormat; videoId: string; storagePath: string; url: string }>;
+    }
+  | { kind: "refused"; reason: ManualCreativeRefusal; detail?: string }
+  | { kind: "failed"; detail: string };
+
+/**
+ * PURE pre-write gate for a static pack. Same ordering discipline as the video gate — copy rails
+ * first, then the destination URL, then media — with one extra rail: placement coverage. A pack
+ * missing a placement is refused BEFORE a campaign row exists, rather than landing a permanent
+ * half-pack that `isCreativePackComplete` will reject at publish time with no way back.
+ */
+export function evaluateManualStaticPackGate(args: LandManualStaticPackArgs): ManualCreativeGateResult {
+  const copyRails = evaluateManualCopyRails(args);
+  if (!copyRails.ok) return copyRails;
+
+  if (!args.landingUrl || !hasScentMatchParams(args.landingUrl)) {
+    return { ok: false, reason: "missing_scent_match_params", detail: args.landingUrl || "(empty)" };
+  }
+
+  const renders = args.renders ?? [];
+  if (!renders.length || renders.some((r) => !r.buffer?.length)) {
+    return { ok: false, reason: "empty_media" };
+  }
+
+  const formats = renders.map((r) => r.format);
+  const missing: string[] = [];
+  if (!formats.includes("feed_4x5")) missing.push("feed_4x5 (canonical)");
+  if (!formats.some((f) => f === "stories_9x16" || f === "reels_9x16")) missing.push("stories_9x16|reels_9x16");
+  if (!formats.includes("right_column_1x1")) missing.push("right_column_1x1");
+  if (missing.length) {
+    return {
+      ok: false,
+      reason: "missing_placement_coverage",
+      detail: `have [${formats.join(", ")}], missing [${missing.join(", ")}]`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * Land a hand-produced 3-placement static pack as a postable ad-library row.
+ *
+ * Write order mirrors the video path so a crash mid-flight is recoverable, never silently
+ * postable: campaign lands `draft`, every `ad_videos` row lands `pending`, bytes upload, each row
+ * flips to `ready` as its own upload lands, and the campaign is promoted LAST. A failure part-way
+ * leaves a visible draft whose incomplete pack `isCreativePackComplete` already refuses — the
+ * same verdict it would give a genuinely half-rendered Dahlia pack.
+ *
+ * The canonical's `id` is stamped onto each sibling's `format_variant_of_id`, which is what
+ * expresses the same-psychology invariant the pack contract is built on.
+ */
+export async function landManualStaticPack(
+  admin: Admin,
+  args: LandManualStaticPackArgs,
+): Promise<LandManualStaticPackResult> {
+  const gate = evaluateManualStaticPackGate(args);
+  if (!gate.ok) return { kind: "refused", reason: gate.reason!, detail: gate.detail };
+
+  const { workspaceId, productId, name, landingUrl, audienceTemperature, copyPack, selfScore, renders } = args;
+  const canonicalRender = renders.find((r) => r.format === "feed_4x5")!;
+  const siblingRenders = renders.filter((r) => r !== canonicalRender);
+
+  const { data: campaign, error: cErr } = await admin
+    .from("ad_campaigns")
+    .insert({
+      workspace_id: workspaceId,
+      product_id: productId,
+      name,
+      status: "draft", // promoted only once every placement's bytes are stored
+      landing_url: landingUrl,
+      audience_temperature: audienceTemperature,
+      author_self_score: selfScore ?? null,
+      max_qc_eligible: null, // Max never ran — NULL reads as postable, TRUE would be a lie
+      headline: copyPack.headlines[0],
+      primary_text: copyPack.primaryTexts[0],
+      description: copyPack.description,
+      metadata: { copy_pack: copyPack },
+    })
+    .select("id")
+    .single();
+  if (cErr || !campaign) return { kind: "failed", detail: `campaign_insert: ${cErr?.message ?? "no row"}` };
+
+  // Reuse the autonomous lane's PURE planner for the row bodies, so a hand-made pack and a
+  // Dahlia pack are byte-identical in shape. It re-asserts the coverage invariants the gate
+  // already checked — by here they cannot fail.
+  let plan: CreativePackInsertsPlan;
+  try {
+    plan = planCreativePackInserts({
+      workspaceId,
+      campaignId: campaign.id,
+      archetype: args.archetype ?? "manual",
+      generatedBy: args.generatedBy ?? "manual-static-pack",
+      canonicalRender: {
+        format: "feed_4x5",
+        buffer: canonicalRender.buffer,
+        mimeType: canonicalRender.mimeType ?? "image/jpeg",
+      },
+      siblingRenders: siblingRenders.map((r) => ({
+        format: r.format,
+        buffer: r.buffer,
+        mimeType: r.mimeType ?? "image/jpeg",
+      })),
+      copyPack,
+    });
+  } catch (err) {
+    return { kind: "failed", detail: `plan: ${String((err as Error)?.message ?? err)}` };
+  }
+
+  const assets: Array<{ format: PlacementFormat; videoId: string; storagePath: string; url: string }> = [];
+
+  async function writeOne(
+    body: (typeof plan)["canonical"],
+    render: ManualStaticRender,
+    variantOfId: string | null,
+  ): Promise<string | { error: string }> {
+    const { data: vrow, error: vErr } = await admin
+      .from("ad_videos")
+      .insert({ ...body, format_variant_of_id: variantOfId })
+      .select("id")
+      .single();
+    const videoId = (vrow as { id: string } | null)?.id;
+    if (vErr || !videoId) return { error: `video_insert(${render.format}): ${vErr?.message ?? "no row"}` };
+
+    const mime = render.mimeType ?? "image/jpeg";
+    const ext = mime.includes("png") ? "png" : "jpg";
+    const storagePath = `finals/${workspaceId}/${videoId}.${ext}`;
+    try {
+      await uploadBuffer(storagePath, render.buffer, mime);
+      const url = await signedUrl(storagePath);
+      await admin
+        .from("ad_videos")
+        .update({ static_jpg_url: url, status: "ready", meta: { ...body.meta, storage_path: storagePath } })
+        .eq("id", videoId);
+      assets.push({ format: render.format, videoId, storagePath, url });
+    } catch (err) {
+      const detail = String((err as Error)?.message ?? err);
+      await admin.from("ad_videos").update({ status: "failed", meta: { ...body.meta, error: detail } }).eq("id", videoId);
+      return { error: `upload(${render.format}): ${detail}` };
+    }
+    return videoId;
+  }
+
+  const canonicalId = await writeOne(plan.canonical, canonicalRender, null);
+  if (typeof canonicalId !== "string") return { kind: "failed", detail: canonicalId.error };
+
+  const siblingIds: string[] = [];
+  for (let i = 0; i < siblingRenders.length; i++) {
+    const res = await writeOne(plan.siblings[i], siblingRenders[i], canonicalId);
+    if (typeof res !== "string") return { kind: "failed", detail: res.error };
+    siblingIds.push(res);
+  }
+
+  await admin.from("ad_campaigns").update({ status: "ready" }).eq("id", campaign.id);
+
+  return {
+    kind: "ok",
+    campaignId: campaign.id,
+    canonicalVideoId: canonicalId,
+    siblingVideoIds: siblingIds,
+    assets,
   };
 }
