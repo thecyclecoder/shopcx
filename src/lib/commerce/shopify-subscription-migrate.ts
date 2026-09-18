@@ -563,7 +563,7 @@ export async function executeMigration(
   workspaceId: string,
   appstleContractId: string,
   ctx: PricingContext,
-  opts: { dryRun?: boolean; nextBillingDateOverride?: string; completeSwap?: boolean } = {},
+  opts: { dryRun?: boolean; nextBillingDateOverride?: string; completeSwap?: boolean; resume?: boolean } = {},
 ): Promise<MigrationResult> {
   const admin = createAdminClient();
 
@@ -577,9 +577,23 @@ export async function executeMigration(
   //    35945054381). Nothing billed because billing_source was untouched, but at scale a duplicate
   //    contract is a double-charge waiting for whichever one gets activated.
   const already = (snap as { migrated_to_contract_id: string | null }).migrated_to_contract_id;
-  if (already) {
-    return { ok: false, stage: "already-migrated", error: `already migrated to ${already}`, newContractId: already };
+  const completedAt = (snap as { migration_completed_at: string | null }).migration_completed_at;
+  // ⭐ RESUME. A contract created but not swapped is the NORMAL outcome of any failure after the
+  // create — verify rejected it, the codes step failed, the process died. The marker then brands
+  // the snapshot, so a plain re-run can only ever say "already migrated" and the customer is
+  // stranded with a live inert contract nobody finishes.
+  //
+  // `resume` re-enters at the VERIFY step against the contract that already exists, skipping the
+  // create. It is refused once `migration_completed_at` is stamped, so it can never re-run a
+  // finished migration.
+  if (already && opts.resume) {
+    if (completedAt) {
+      return { ok: false, stage: "already-migrated", error: `migration completed at ${completedAt}`, newContractId: already };
+    }
+  } else if (already) {
+    return { ok: false, stage: "already-migrated", error: `already migrated to ${already} — pass resume:true to verify and finish it`, newContractId: already };
   }
+  const resuming = Boolean(already && opts.resume);
 
   // 1. Fresh read. The snapshot plans; the source decides.
   const fresh = await fetchAppstleContract(workspaceId, appstleContractId);
@@ -659,7 +673,7 @@ export async function executeMigration(
   // attempt timestamp we can tell "never tried" from "tried, outcome unknown" and adopt the
   // contract the previous attempt actually made.
   const attemptedAt = (snap as { migration_attempted_at: string | null }).migration_attempted_at;
-  if (attemptedAt) {
+  if (attemptedAt && !resuming) {
     const { getShopifyCredentials } = await import("@/lib/shopify-sync");
     const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
     const { shop, accessToken } = await getShopifyCredentials(workspaceId);
@@ -686,7 +700,7 @@ export async function executeMigration(
       return { ok: false, stage: "ambiguous-orphan", error: `${candidates.length} contracts created for this customer since the last attempt — needs a human before another is made`, plan };
     }
   }
-  {
+  if (!resuming) {
     const { error: attErr } = await admin.from("appstle_contract_snapshots")
       .update({ migration_attempted_at: new Date().toISOString() })
       .eq("workspace_id", workspaceId).eq("appstle_contract_id", appstleContractId);
@@ -710,7 +724,10 @@ export async function executeMigration(
     }
   }
 
-  const created = await shopifyCreateContract(workspaceId, {
+  // On a resume the contract already exists; adopt it rather than making a second one.
+  const created = resuming
+    ? { success: true as const, contractId: already as string, error: undefined }
+    : await shopifyCreateContract(workspaceId, {
     customerId,
     nextBillingDate: nextBillingDate ?? new Date().toISOString(),
     currencyCode: "USD",
@@ -806,7 +823,11 @@ export async function executeMigration(
   }
 
   // 5. Customer codes only — structural discounts already rode along on the atomic create.
-  const codes = carryableCodes(fresh.raw as Record<string, unknown>);
+  //
+  // ⚠️ NEVER on a resume. These are FIXED-AMOUNT discounts; re-applying them to a contract that
+  // already carries them doubles the customer's discount, silently and permanently. A resume
+  // re-enters to verify what exists, not to re-apply anything.
+  const codes = resuming ? [] : carryableCodes(fresh.raw as Record<string, unknown>);
   if (codes.length) {
     const applied = await withDraft(workspaceId, newContractId, async (draftId) => {
       for (const c of codes) {
@@ -830,20 +851,49 @@ export async function executeMigration(
     return { ok: false, stage: "verify", error: verify.error, plan, newContractId };
   }
   const mismatches: string[] = [];
-  // ⭐ Match by INDEX, not variant. `subscriptionContractAtomicCreate` preserves line order, and a
-  // contract can legitimately carry the same variant on two lines with DIFFERENT grandfathers —
-  // 45 contracts do. Matching by variant compares every duplicate against the first live line, so
-  // 10 of them falsely fail verify and get permanently bricked by the marker.
-  const liveLines = verify.contract.lines;
+  // ⭐ Match by VARIANT with best-fit pairing — NOT by index, and not by first-variant-wins.
+  //
+  // Both naive strategies are wrong, in opposite directions:
+  //
+  //   - by index: assumes `subscriptionContractAtomicCreate` returns lines in submission order.
+  //     ⚠️ IT DOES NOT. Measured 2026-09-18 on a 25-contract wave: 10 contracts came back with
+  //     their lines permuted (every SKU present, every position different), and all 10 failed
+  //     verify on a contract that was actually priced correctly.
+  //   - by variant, first match wins: a contract can legitimately carry the SAME variant on two
+  //     lines with DIFFERENT grandfathers — 45 contracts do — so every duplicate gets compared
+  //     against the first live line and falsely fails.
+  //
+  // So: group the live lines by variant, and let each plan line CONSUME the unclaimed live line
+  // for its variant whose effective unit price is closest to what the plan expects. That is
+  // order-independent and still distinguishes two same-variant lines at different prices.
+  const byVariant = new Map<string, typeof verify.contract.lines>();
+  for (const live of verify.contract.lines) {
+    const v = String(live.variantId ?? "").replace("gid://shopify/ProductVariant/", "");
+    const bucket = byVariant.get(v);
+    if (bucket) bucket.push(live);
+    else byVariant.set(v, [live]);
+  }
+  const claimed = new Set<string>();
+
   for (let i = 0; i < plan.lines.length; i++) {
     const l = plan.lines[i];
-    const live = liveLines[i];
-    if (!live) { mismatches.push(`${l.sku}: missing on the created contract (index ${i})`); continue; }
-    const liveVariant = String(live.variantId ?? "").replace("gid://shopify/ProductVariant/", "");
-    if (liveVariant !== l.shopifyVariantId) {
-      mismatches.push(`${l.sku}: line ${i} is variant ${liveVariant}, expected ${l.shopifyVariantId}`);
+    const candidates = (byVariant.get(l.shopifyVariantId) ?? []).filter((c) => !claimed.has(c.id));
+    if (!candidates.length) {
+      const present = [...byVariant.keys()].join(", ");
+      mismatches.push(
+        `${l.sku}: variant ${l.shopifyVariantId} is not on the created contract (it carries: ${present})`,
+      );
       continue;
     }
+    // Closest effective unit price wins, so two same-variant lines pair with the right grandfather.
+    const wantEff = l.finalUnitCents - (l.carriedCodeUnitCents ?? 0);
+    const live = candidates.reduce((best, c) => {
+      const eff = (x: typeof c) => x.lineDiscountedPrice != null
+        ? Math.round((parseFloat(x.lineDiscountedPrice) * 100) / (x.quantity || 1))
+        : Number.MAX_SAFE_INTEGER;
+      return Math.abs(eff(c) - wantEff) < Math.abs(eff(best) - wantEff) ? c : best;
+    }, candidates[0]);
+    claimed.add(live.id);
     const baseCents = Math.round(parseFloat(live.currentPrice ?? "0") * 100);
     if (baseCents !== l.baseCents) mismatches.push(`${l.sku}: base ${baseCents} != planned ${l.baseCents}`);
 

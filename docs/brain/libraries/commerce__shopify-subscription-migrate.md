@@ -85,6 +85,46 @@ Non-fatal and dry-run-aware — a migration whose schedule sync fails is still a
 correctly-dated contract in our own records, and the next renewal re-pins it. Full mechanism table:
 [[commerce__shopify-subscription-client]] § "Keeping a customer's own dates".
 
+## ⭐ Wave 1 — 25 real contracts, 2026-09-18
+
+What it proved, and what it broke.
+
+**Result:** 23 swapped, 0 duplicates, 0 missing items or addresses, 0 past-due dates, $3,056.87/cycle
+now billed by ShopCX. Appstle confirmed `CANCELLED` on all 23 by live read. The 2 that did not swap
+are still billed by Appstle — **every customer in the cohort is billed by exactly one engine.**
+
+**Two defects it exposed, both in the verifier:**
+
+1. **`atomicCreate` does NOT preserve line order.** The verifier matched plan line *i* to live line
+   *i*, and **10 of 25 contracts came back permuted** — every SKU present, every position different
+   — so 10 correctly-priced contracts failed verify. The old comment asserted order was preserved;
+   it is not. Now matched by variant with **best-fit pairing on effective price**, which is
+   order-independent AND still separates two same-variant lines at different grandfathers (45
+   contracts carry those, and first-match-wins fails them).
+
+2. **No resume path.** A verify failure leaves a created, inert contract and a snapshot branded with
+   `migrated_to_contract_id` — after which a plain re-run can only say "already migrated". All 24
+   created contracts were stranded that way. `executeMigration(..., {resume:true})` now re-enters at
+   the VERIFY step against the contract that already exists.
+   ⚠️ **A resume NEVER re-applies customer codes.** They are fixed-amount discounts; re-adding them
+   to a contract that already carries them silently doubles the customer's discount. Resume verifies
+   what exists, it does not re-apply.
+
+**The safety design held exactly as written.** `completeSwap` defaults false, so the whole wave
+stopped in the reversible middle state: contracts created, `billing_source` untouched, every
+customer still billed by Appstle. Nothing was double-charged and nothing was stranded without a
+biller. The PDP ingest claim guard also held — all 24 new contracts fired
+`subscription_contracts/create`, and all 24 were correctly refused as "created by the Appstle
+migration" ([[commerce__shopcx-contract-ingest]]).
+
+**Pricing:** 11 of 24 got cheaper (the quantity break they qualified for and never had), 13
+unchanged, **none more expensive** — −$173.81/cycle, −5.7%. CEO approved applying standard rules.
+
+**Still open from the wave:**
+- `27832090797` — created but `codes` failed with "Entitled lines may not be empty", so its carried
+  fixed-amount codes are missing and it verifies $8.01/$6.99 high. Customer safely on Appstle.
+- `27847327917` — drift guard refused it (the customer edited since the snapshot). Correct.
+
 ## Gotchas
 
 - **Not idempotent without the marker.** The first real run created TWO live contracts for one
