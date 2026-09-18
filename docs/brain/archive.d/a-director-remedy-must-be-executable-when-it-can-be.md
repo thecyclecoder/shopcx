@@ -1,0 +1,1 @@
+- **A director remedy must be executable when it can be** · verified 2026-09-18 · → [[../libraries/june-remedy-approval]] · [[../libraries/cs-director]]
