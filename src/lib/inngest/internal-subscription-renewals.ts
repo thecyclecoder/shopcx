@@ -29,7 +29,7 @@ import {
 } from "@/lib/subscription-renewal-guard";
 import {
   claimChargeIdempotency,
-  chargeIdempotencyKeyFromNextBillingDate,
+  chargeIdempotencyKeyFromDispatchedNextBillingDate,
   resolveChargeIdempotency,
   renewalRefusalOutcomeLabel,
 } from "@/lib/subscription-cycle-charge-claim";
@@ -68,15 +68,19 @@ export function filterCandidatesByDunningRetryWindow<T extends { id: string }>(
 }
 
 // ─── Stale renewal-attempt guard ────────────────────────────────────
-// The cron fan-out stamps the sub's next_billing_date onto every attempt event
-// as `expected_next_billing_date`. If a duplicate/delayed attempt reaches the
-// per-sub handler AFTER another attempt has already completed the cycle (and
-// advanced next_billing_date), the live value will no longer match — that is
-// the fingerprint of a stale event, and charging on it would re-bill the
-// customer and reopen dunning. Immediate-charge callers (portal "order now",
-// payment-method recovery, appstle orderNowByContract) intentionally bypass
-// the schedule and send NO expected_next_billing_date, so this guard leaves
-// them untouched.
+// Every dispatcher — the cron fan-out AND the immediate-charge callers (portal
+// order-now, payment-method recovery, subscriptionOrderNow) — stamps the sub's
+// pre-charge `next_billing_date` onto its attempt event. If a duplicate/delayed
+// attempt reaches the per-sub handler AFTER another attempt has already completed
+// the cycle (and advanced next_billing_date), the live value will no longer
+// match — that is the fingerprint of a stale event, and charging on it would
+// re-bill the customer and reopen dunning.
+//
+// The guard fails OPEN on a missing/empty expected value: a null `expected` is
+// caught downstream at the per-cycle idempotency-claim chokepoint, which refuses
+// any attempt whose dispatched cycle is missing (see the phase 1 spec at
+// docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md
+// — a live-state fallback there was the hole that let sub e9b8a6d9 double-charge).
 //
 // Pure — no I/O. Tested via [[../inngest/internal-subscription-renewals]]
 // stale-attempt test.
@@ -413,12 +417,14 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
 
     // ── 0a. Skip stale renewal attempt ──────────────────────────
     // Runs BEFORE the comp and paid branches so no stale event can charge,
-    // create an order, or dispatch dunning. The cron fan-out stamps the sub's
+    // create an order, or dispatch dunning. Every dispatcher (cron fan-out
+    // AND the immediate-charge callers) stamps the sub's pre-charge
     // next_billing_date onto the event; if the live value has moved (another
     // attempt already advanced the cycle), we're a duplicate/delayed event —
-    // record a benign skip outcome and exit. Immediate-charge callers (portal
-    // order-now, payment-method recovery, appstle orderNowByContract) send no
-    // expected_next_billing_date and the helper passes them through.
+    // record a benign skip outcome and exit. A missing expected value fails
+    // OPEN here and is caught at the per-cycle claim chokepoint (below), which
+    // REFUSES any attempt whose dispatched cycle is not stamped — see the
+    // phase 1 spec docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md.
     const stale = await step.run("skip-stale-renewal-attempt", async () => {
       if (!expected_next_billing_date) return { stale: false } as const;
       // Scope the live read to (id, workspace_id) — a cross-tenant lookup must
@@ -1042,12 +1048,52 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     // [[../../supabase/migrations/20261215140000_subscription_cycle_charges.sql]] refuses the
     // second INSERT deterministically; the second trigger becomes a `refused_duplicate` skip
     // instead of a second Braintree sale. Same-run Inngest step re-runs are identified via
-    // `claimant=event.id` and treated as a resumed claim, not a duplicate. cycle_key is derived
-    // from the sub's pre-advance next_billing_date so successive cycles get fresh keys and
-    // dunning's date-move retry naturally lands on a new key.
-    // See [[../libraries/subscription-cycle-charge-claim]] +
+    // `claimant=event.id` and treated as a resumed claim, not a duplicate.
+    //
+    // ⭐ cycle_key derives from the ATTEMPT's stamped `expected_next_billing_date`, NOT a live
+    // read of `ctx.sub.next_billing_date`. A successful renewal ADVANCES that live field, so if
+    // two attempts overlap by even seconds and the second reads the sub AFTER the first has
+    // advanced it, both compute genuinely different keys and both claim cleanly — the ground-
+    // truth double-charge on sub e9b8a6d9 (2026-10-30 15:30:46.79 for $108.01 + 2026-12-25
+    // 15:30:55.20 for $140.28, eight seconds apart, both source_name=internal_subscription_renewal).
+    // Pinning to the dispatched cycle means both attempts for that ONE reactivation compute the
+    // SAME key and the DB's unique index refuses the second.
+    //
+    // An attempt that arrives with NO stamped date is REFUSED rather than falling back to live
+    // state — every dispatcher (the cron fan-out below, portal order-now, payment-method
+    // recovery, subscriptionOrderNow) already knows the cycle it is targeting, so a missing
+    // value is a dispatcher bug and a live-state fallback is the exact hole this pin closes.
+    // See docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md +
+    // [[../libraries/subscription-cycle-charge-claim]] +
     // docs/brain/specs/immediate-charge-renewal-paths-need-per-subscription-idempotency.md.
-    const cycleKey = chargeIdempotencyKeyFromNextBillingDate(ctx.sub.next_billing_date as string | null);
+    const cycleKey = chargeIdempotencyKeyFromDispatchedNextBillingDate(expected_next_billing_date);
+    if (!cycleKey) {
+      await step.run("emit-outcome-missing-dispatched-cycle", () =>
+        emitRenewalOutcomeHeartbeat("refused_wedged_cycle"),
+      );
+      await step.run("log-missing-dispatched-cycle-event", async () => {
+        const { logCustomerEvent } = await import("@/lib/customer-events");
+        await logCustomerEvent({
+          workspaceId: workspace_id,
+          customerId: (ctx.sub.customer_id as string | null) ?? null,
+          eventType: "subscription.renewal_refused_missing_dispatched_cycle",
+          source: "internal_subscription_renewal",
+          summary:
+            "Renewal refused — attempt event arrived with no expected_next_billing_date. The " +
+            "dispatcher must stamp the pre-charge cycle onto the event; falling back to live " +
+            "state would let two concurrent attempts for the same reactivation claim different " +
+            "keys and both charge.",
+          properties: {
+            subscription_id,
+            expected_next_billing_date: expected_next_billing_date ?? null,
+          },
+        });
+      });
+      return {
+        skipped: true,
+        reason: "missing_dispatched_cycle",
+      };
+    }
     const claimantId = (event as { id?: string }).id || `sub:${subscription_id}:cycle:${cycleKey}`;
     const claim = await step.run("claim-charge-idempotency", async () => {
       const res = await claimChargeIdempotency(admin, {

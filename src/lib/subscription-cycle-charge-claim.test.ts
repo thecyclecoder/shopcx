@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 
 import {
   STALE_IN_FLIGHT_RECLAIM_MS,
+  cycleKeyFromDispatchedNextBillingDate,
   isReclaimable,
   renewalRefusalOutcomeLabel,
   type CycleChargeRow,
@@ -88,4 +89,63 @@ test("failed refusal (CAS-race fall-through) → refused_wedged_cycle (alertable
   // refusal is a CAS race where the reset lost. That is exactly the case that needs to
   // surface — the row is still on the ledger AND the customer cannot be billed.
   assert.equal(renewalRefusalOutcomeLabel("failed"), "refused_wedged_cycle");
+});
+
+// ── Phase 1 — pin cycle_key to the dispatched cycle, not to live state ──
+// docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md
+//
+// Ground truth: sub e9b8a6d9 claimed cycle_key 2026-10-30 at 15:30:46.79 for $108.01 and
+// 2026-12-25 at 15:30:55.20 for $140.28 — eight seconds apart, both real Braintree sales.
+// The pre-charge next_billing_date for the reactivation was 2026-10-30 (T1). A successful
+// renewal advances it to 2026-12-25 (T2). Concurrent attempt B reads AFTER attempt A has
+// advanced the field, computes T2 as its cycle_key, does not collide with A's T1 claim,
+// and both charge. Pinning the derivation to the DISPATCHED value (`expected_next_billing_date`
+// stamped by the dispatcher onto the attempt event) makes both attempts compute the SAME
+// key so the unique index refuses the second.
+const GROUND_TRUTH_PRE_CHARGE = "2026-10-30";
+const GROUND_TRUTH_POST_ADVANCE = "2026-12-25";
+
+test("Phase 1: concurrent attempts for the SAME reactivation collide on the same key (ground truth: sub e9b8a6d9)", () => {
+  const attemptA = cycleKeyFromDispatchedNextBillingDate(GROUND_TRUTH_PRE_CHARGE);
+  const attemptB = cycleKeyFromDispatchedNextBillingDate(GROUND_TRUTH_PRE_CHARGE);
+  assert.equal(attemptA, "2026-10-30");
+  assert.equal(attemptB, "2026-10-30");
+  assert.equal(attemptA, attemptB);
+});
+
+test("Phase 1: the ground-truth bug — deriving from live state after the first attempt advanced next_billing_date computes DIFFERENT keys", () => {
+  // This test PINS the bug shape. If both attempts derive from what the SUB'S FIELD reads at
+  // the moment they run — attempt A reads T1 (pre-charge), attempt B reads T2 (after A
+  // advanced it) — the keys diverge and both claim cleanly. The dispatched-cycle derivation
+  // above is what forces them together.
+  const attemptA = cycleKeyFromDispatchedNextBillingDate(GROUND_TRUTH_PRE_CHARGE);
+  const attemptBFromLiveState = cycleKeyFromDispatchedNextBillingDate(GROUND_TRUTH_POST_ADVANCE);
+  assert.equal(attemptA, "2026-10-30");
+  assert.equal(attemptBFromLiveState, "2026-12-25");
+  assert.notEqual(attemptA, attemptBFromLiveState);
+});
+
+test("Phase 1: a missing dispatched cycle returns null so the caller MUST refuse (no live-state fallback)", () => {
+  // The fallback to a live read is EXACTLY the hole the spec closes. If the dispatcher
+  // failed to stamp the cycle, the caller has no honest way to identify which cycle the
+  // attempt is for — refusing is the safe answer.
+  assert.equal(cycleKeyFromDispatchedNextBillingDate(null), null);
+  assert.equal(cycleKeyFromDispatchedNextBillingDate(undefined), null);
+  assert.equal(cycleKeyFromDispatchedNextBillingDate(""), null);
+});
+
+test("Phase 1: an unparseable dispatched cycle returns null (never coalesce to a garbage constant that would collide across subs)", () => {
+  assert.equal(cycleKeyFromDispatchedNextBillingDate("not-a-date"), null);
+  assert.equal(cycleKeyFromDispatchedNextBillingDate("2026-13-40"), null);
+});
+
+test("Phase 1: cycle_key is the UTC date slice (concurrent triggers on the same day pin to the same key regardless of hh:mm:ss)", () => {
+  assert.equal(
+    cycleKeyFromDispatchedNextBillingDate("2026-10-30T15:30:46.79Z"),
+    "2026-10-30",
+  );
+  assert.equal(
+    cycleKeyFromDispatchedNextBillingDate("2026-10-30T23:59:59.999Z"),
+    "2026-10-30",
+  );
 });

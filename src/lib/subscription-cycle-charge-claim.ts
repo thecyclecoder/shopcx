@@ -108,11 +108,45 @@ export type ClaimResult =
  * hh:mm:ss the handler stamps. Falls back to `unknown-cycle` when the date is unusable — the
  * caller MUST short-circuit those rather than claim, because a garbage key would collide across
  * unrelated retries.
+ *
+ * ⚠️ For the internal-renewal chokepoint, prefer `cycleKeyFromDispatchedNextBillingDate` — the
+ * value must come from the ATTEMPT event (`expected_next_billing_date`), not a live sub read.
+ * A successful renewal advances `subscriptions.next_billing_date`, so re-deriving from live
+ * state during the overlap window of two concurrent attempts computes DIFFERENT keys for what
+ * is really the SAME cycle, and both attempts claim cleanly — the ground truth double-charge
+ * on sub e9b8a6d9 (2026-10-30 15:30:46.79 for $108.01 + 2026-12-25 15:30:55.20 for $140.28,
+ * eight seconds apart, both `source_name=internal_subscription_renewal`). See
+ * docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md.
  */
 export function cycleKeyFromNextBillingDate(nextBillingDate: string | null | undefined): string {
   if (!nextBillingDate) return "unknown-cycle";
   const d = new Date(nextBillingDate);
   if (!Number.isFinite(d.getTime())) return "unknown-cycle";
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Pure: derive the cycle_key from the DISPATCHED next_billing_date carried by the attempt event
+ * (`expected_next_billing_date`), NOT a live sub read. Two concurrent renewals for the same
+ * reactivation must pin to the SAME cycle_key so the (subscription_id, cycle_key) unique index
+ * refuses the second — reading `subscriptions.next_billing_date` at claim time computes the key
+ * of whatever cycle the first attempt already advanced to. YYYY-MM-DD slice, same shape as the
+ * legacy helper.
+ *
+ * Returns `null` when the dispatched value is missing/unparseable. The caller MUST refuse rather
+ * than falling back to a live read — that fallback is the hole this helper's whole point is to
+ * close. Every dispatcher that fires `internal-subscription/renewal-attempt` (cron fan-out,
+ * portal order-now, payment-method recovery, `subscriptionOrderNow`) already knows the cycle it
+ * is targeting; if the value did not arrive, the dispatcher is buggy and a charge is not safe.
+ *
+ * See docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md.
+ */
+export function cycleKeyFromDispatchedNextBillingDate(
+  dispatchedNextBillingDate: string | null | undefined,
+): string | null {
+  if (!dispatchedNextBillingDate) return null;
+  const d = new Date(dispatchedNextBillingDate);
+  if (!Number.isFinite(d.getTime())) return null;
   return d.toISOString().slice(0, 10);
 }
 
@@ -373,3 +407,9 @@ export const readChargeIdempotency = readCycleCharge;
 /** Alias for `cycleKeyFromNextBillingDate` — the pure cycle_key derivation used to key a charge
  *  idempotency claim. */
 export const chargeIdempotencyKeyFromNextBillingDate = cycleKeyFromNextBillingDate;
+
+/** Alias for `cycleKeyFromDispatchedNextBillingDate` — the pure cycle_key derivation used at the
+ *  internal-renewal chokepoint, deriving the key from the ATTEMPT event's stamped cycle rather
+ *  than from a post-advance live sub read. Returns null when the dispatched value is missing;
+ *  callers MUST refuse rather than fall back to live state. */
+export const chargeIdempotencyKeyFromDispatchedNextBillingDate = cycleKeyFromDispatchedNextBillingDate;

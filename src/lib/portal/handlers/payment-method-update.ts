@@ -162,14 +162,32 @@ export const updatePaymentMethod: RouteHandler = async ({ auth, route, req }) =>
           reactivatedIds.filter((id) => !subIds.includes(id)),
         );
         if (chargeIds.length) {
+          const dedupedChargeIds = [...new Set(chargeIds)];
+          // ⭐ Load each sub's pre-charge next_billing_date and stamp it onto the event so the
+          // per-cycle claim pins to the DISPATCHED cycle rather than a post-advance live read.
+          // Two attempts on the same sub with the OLD live-read key would compute different
+          // keys once the first advanced the sub, and both would charge — see
+          // docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md.
+          const { data: chargeSubs } = await admin
+            .from("subscriptions")
+            .select("id, next_billing_date")
+            .eq("workspace_id", auth.workspaceId)
+            .in("id", dedupedChargeIds);
+          const nextBillingById = new Map<string, string | null>(
+            (chargeSubs || []).map((s) => [s.id as string, (s.next_billing_date as string | null) ?? null]),
+          );
           const { inngest } = await import("@/lib/inngest/client");
-          for (const subscription_id of [...new Set(chargeIds)]) {
+          for (const subscription_id of dedupedChargeIds) {
             await inngest.send({
               name: "internal-subscription/renewal-attempt",
-              data: { workspace_id: auth.workspaceId, subscription_id },
+              data: {
+                workspace_id: auth.workspaceId,
+                subscription_id,
+                expected_next_billing_date: nextBillingById.get(subscription_id) ?? null,
+              },
             });
           }
-          chargedCount = new Set(chargeIds).size;
+          chargedCount = dedupedChargeIds.length;
         }
       } catch (e) {
         console.error("[portal/payment] recover immediate-charge failed (non-fatal):", e instanceof Error ? e.message : e);
