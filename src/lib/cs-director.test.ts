@@ -43,6 +43,7 @@ import {
   extractRemedyOrderRefFromStep,
   planAuthorSpec,
   planRemedyExecution,
+  promoteRecommendedRemedyToExecutable,
   verifyPlanAgainstRemedyStates,
   type ApproveRemedyDeps,
   type AuthorSpecDeps,
@@ -530,6 +531,91 @@ test("canOfferOneTapApproval — a multi-action actions[] batch with a malformed
     }),
     false,
   );
+});
+
+// ── promoteRecommendedRemedyToExecutable — director-remedy-must-be-executable-when-it-can-be Phase 1 ──
+
+test("promoteRecommendedRemedyToExecutable — {kind:'full_order_refund'} on a named order promotes to executable + guard accepts (ticket 63c7a2ff ground truth)", () => {
+  // Named failing state: on ticket 63c7a2ff card ddb7406e, recommended_remedy was {kind:'full_order_refund',
+  // summary:'Refund $140.28 for SHOPCX373 — no return required.'} on order SHOPCX373. The card landed
+  // with pending_actions:[] because planRemedyExecution rejected the {kind} shape (`remedy_missing_action_type`).
+  // The promoter must rewrite it into the executable form BEFORE raiseFounderApproval's guard runs, so the
+  // founder gets a real one-tap Approve. The unit that pins the corrected state.
+  const promoted = promoteRecommendedRemedyToExecutable({
+    kind: "full_order_refund",
+    order_number: "SHOPCX373",
+    summary: "Refund $140.28 for SHOPCX373 — no return required.",
+  }) as Record<string, unknown>;
+  assert.equal(promoted.action_type, "full_order_refund");
+  assert.deepEqual(promoted.payload, { order_number: "SHOPCX373" });
+  assert.equal(promoted.summary, "Refund $140.28 for SHOPCX373 — no return required.");
+  // Round-trip: the same guard raiseFounderApproval calls now accepts the promoted shape → one-tap Approve.
+  assert.equal(canOfferOneTapApproval(promoted), true);
+});
+
+test("promoteRecommendedRemedyToExecutable — shopify_order_id-shaped refs land on the payload (executor honors all three keys)", () => {
+  const promoted = promoteRecommendedRemedyToExecutable({
+    kind: "full_order_refund",
+    shopify_order_id: "SHOPCX373",
+    summary: "Refund the internal renewal — no return required.",
+  }) as Record<string, unknown>;
+  assert.equal(promoted.action_type, "full_order_refund");
+  // extractRemedyOrderRefFromStep canonicalizes an all-non-digit shopify_order_id → order_number (mirrors
+  // the executor's own resolution against both columns). The payload names the ref in the field the
+  // executor will actually match on.
+  assert.deepEqual(promoted.payload, { order_number: "SHOPCX373" });
+  assert.equal(canOfferOneTapApproval(promoted), true);
+});
+
+test("promoteRecommendedRemedyToExecutable — a {kind, summary} recommendation with NO order ref stays a written recommendation (behaviour unchanged)", () => {
+  // Where the recommendation does NOT map cleanly onto an executable action, the guard's
+  // escalated_recommendation_only path is preserved — this promoter must NOT invent an order.
+  const input = {
+    kind: "full_order_refund",
+    summary: "Refund whatever the customer had — I don't know which order.",
+  };
+  const promoted = promoteRecommendedRemedyToExecutable(input);
+  assert.deepEqual(promoted, input);
+  assert.equal(canOfferOneTapApproval(promoted as Record<string, unknown>), false);
+});
+
+test("promoteRecommendedRemedyToExecutable — a non-money `kind` (semantic label like refund_and_price_lock) is passed through unchanged", () => {
+  // Semantic labels that don't 1:1 map to a single executor action MUST stay a written recommendation —
+  // the spec's "genuinely does not map, nothing changes."
+  const input = {
+    kind: "refund_and_price_lock",
+    order_number: "SHOPCX373",
+    summary: "Refund + restore the grandfathered price.",
+  };
+  const promoted = promoteRecommendedRemedyToExecutable(input);
+  assert.deepEqual(promoted, input);
+  assert.equal(canOfferOneTapApproval(promoted as Record<string, unknown>), false);
+});
+
+test("promoteRecommendedRemedyToExecutable — a recommendation that ALREADY carries action_type is passed through untouched (never re-shape an executable input)", () => {
+  const input = {
+    action_type: "full_order_refund",
+    payload: { order_number: "SHOPCX373" },
+    customer_message: "Refunded. Sorry about the mix-up.",
+  };
+  const promoted = promoteRecommendedRemedyToExecutable(input);
+  assert.strictEqual(promoted, input);
+});
+
+test("promoteRecommendedRemedyToExecutable — a multi-action `actions[]` recommendation is passed through untouched", () => {
+  const input = {
+    actions: [
+      { action_type: "partial_refund", payload: { order_number: "SHOPCX373", amount_cents: 3000 } },
+    ],
+    customer_message: "Refunded $30.",
+  };
+  const promoted = promoteRecommendedRemedyToExecutable(input);
+  assert.strictEqual(promoted, input);
+});
+
+test("promoteRecommendedRemedyToExecutable — null / undefined / non-object short-circuits without throwing", () => {
+  assert.equal(promoteRecommendedRemedyToExecutable(null), null);
+  assert.equal(promoteRecommendedRemedyToExecutable(undefined), undefined);
 });
 
 test("planRemedyExecution — REJECTS a legacy single-action step whose payload carries a reserved `type` (bypass class)", () => {

@@ -404,6 +404,64 @@ export function canOfferOneTapApproval(remedy: Record<string, unknown> | null | 
 }
 
 /**
+ * Promote a `{kind, summary, order_number|shopify_order_id|order_id}` RECOMMENDATION into the
+ * executable `{action_type, payload}` shape the executor accepts — but ONLY when the recommendation
+ * cleanly maps onto an action `MONEY_ACTION_TYPES` already knows how to fire. Every other shape
+ * (a semantic label like `refund_and_price_lock`, a recommendation with no order ref, or a
+ * recommendation that already carries an `action_type` / `actions[]`) is returned UNCHANGED so the
+ * existing guard's rejection semantics are preserved.
+ *
+ * Why here, not in the guard: `canOfferOneTapApproval` (and its `planRemedyExecution` core) is the
+ * authority on what can fire, and the founder-approval Phase-2 fix hardened it after ticket
+ * db8b3d66 — a one-tap card for a shape the executor cannot run failed the instant Approve was
+ * tapped. Weakening the guard would re-open that class. Instead, promote the recommendation upstream:
+ * a `{kind:'full_order_refund'}` on a NAMED order was already runnable at authoring time (the order
+ * and amount were both known — `full_order_refund` refunds `orders.total_cents` verbatim); we just
+ * emit it in the shape the executor understands. When the guard then accepts it, the founder gets a
+ * real one-tap Approve. When the guard would still reject (no order ref, unknown kind), promotion
+ * declines and behaviour is unchanged — a written recommendation.
+ *
+ * Ground truth (ticket 63c7a2ff): recommendation `{kind:'full_order_refund', summary:'Refund
+ * $140.28 for SHOPCX373 — no return required.'}` on card ddb7406e landed with `pending_actions: []`
+ * because `raiseFounderApproval` → `canOfferOneTapApproval` → `planRemedyExecution` rejected the
+ * shape (no `action_type`). Promoted into `{action_type:'full_order_refund', payload:{order_number:
+ * 'SHOPCX373'}, summary}`, the same recommendation now passes the guard — the founder gets a
+ * real Approve.
+ *
+ * The founder-facing prose is preserved on `summary` so the preview builder keeps saying what and
+ * why. Pure. Called by `handleEscalateFounder` before it hands the recommended_remedy to
+ * `raiseFounderApproval` (and also inlined into the runner's verdict normalize so the CEO card
+ * metadata carries the same executable shape). See docs/brain/libraries/june-remedy-approval.
+ */
+export function promoteRecommendedRemedyToExecutable(
+  remedy: Record<string, unknown> | null | undefined,
+): Record<string, unknown> | null | undefined {
+  if (!remedy || typeof remedy !== "object" || Array.isArray(remedy)) return remedy;
+  if (typeof remedy.action_type === "string" && remedy.action_type.trim().length > 0) return remedy;
+  if (Array.isArray(remedy.actions) && remedy.actions.length > 0) return remedy;
+
+  const kind = typeof remedy.kind === "string" ? remedy.kind.trim() : "";
+  if (!kind) return remedy;
+  if (!MONEY_ACTION_TYPES.has(kind)) return remedy;
+
+  const ref = extractRemedyOrderRefFromStep(remedy);
+  if (!ref) return remedy;
+
+  const payload: Record<string, unknown> = {};
+  if (ref.shopifyOrderId) payload.shopify_order_id = ref.shopifyOrderId;
+  if (ref.orderNumber) payload.order_number = ref.orderNumber;
+  if (ref.orderId) payload.order_id = ref.orderId;
+
+  const out: Record<string, unknown> = {
+    action_type: kind,
+    payload,
+  };
+  const summary = typeof remedy.summary === "string" ? remedy.summary.trim() : "";
+  if (summary) out.summary = summary;
+  return out;
+}
+
+/**
  * Build the `SonnetDecision` we hand to `executeSonnetDecision`. Always `action_type:'direct_action'`
  * with the plan's FULL ordered `actions[]` (executeSonnetDecision already accepts a batch and runs
  * them in sequence); NEVER carries `response_message` (the customer message is delivered AFTER the
@@ -2321,7 +2379,17 @@ async function handleEscalateFounder(
       // escalation carries a recommended remedy, ALSO raise an Eve SMS approval so the founder taps
       // Approve/Decline on their phone (executeApprovedJuneRemedies runs it on Approve) — not just a
       // silent CEO dashboard card. The runner still mints the dashboard card as the durable record.
-      const recommended = verdict.recommended_remedy;
+      const rawRecommended = verdict.recommended_remedy;
+      // Promote a `{kind, summary, order_ref}` recommendation into `{action_type, payload}` when it
+      // maps cleanly onto an executable money action — the founder-approval Phase-1 fix for
+      // "a director remedy must be executable when it can be." Non-mappable shapes pass through
+      // unchanged, so the existing guard's `escalated_recommendation_only` path is preserved for
+      // genuine judgment calls. See promoteRecommendedRemedyToExecutable + ticket 63c7a2ff.
+      const recommended = promoteRecommendedRemedyToExecutable(
+        rawRecommended && typeof rawRecommended === "object" && !Array.isArray(rawRecommended)
+          ? (rawRecommended as Record<string, unknown>)
+          : rawRecommended,
+      );
       if (recommended && typeof recommended === "object" && !Array.isArray(recommended)) {
         try {
           const { raiseFounderApproval, remedyStatesForCardFromMap } = await import("@/lib/june-remedy-approval");

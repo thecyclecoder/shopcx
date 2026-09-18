@@ -76,6 +76,30 @@ Enforced by pure predicates ([[../../src/lib/june-remedy-approval.ts]] `extractR
 
 `remedyNeedsFounderApproval` still exists for callers that work with the raw remedy shape (e.g. the preview builder + audit surfaces) and is unit-tested separately.
 
+## Executable-shape promotion (2026-09-18)
+
+[[../specs/a-director-remedy-must-be-executable-when-it-can-be]] Phase 1 — when a `recommended_remedy` cleanly maps onto ONE money action the executor already supports on a NAMED order, the director now emits it in the EXECUTABLE `{action_type, payload}` shape instead of a written `{kind, summary}` recommendation, so the existing guard-first `canOfferOneTapApproval` predicate accepts it and the founder gets a real one-tap Approve.
+
+The fix lives in the director's remedy CONSTRUCTION, not in the guard: [[cs-director]] `promoteRecommendedRemedyToExecutable(remedy)` is a pure helper `handleEscalateFounder` calls right before it hands the `verdict.recommended_remedy` to `raiseFounderApproval`. Behaviour matrix:
+
+| Input shape | Promoted to | Guard sees |
+|---|---|---|
+| `{kind:'full_order_refund', order_number:'SHOPCX373', summary:'...'}` | `{action_type:'full_order_refund', payload:{order_number:'SHOPCX373'}, summary}` | **one-tap accepted** — founder gets Approve |
+| `{kind:'full_order_refund', shopify_order_id:'SHOPCX373', summary:'...'}` | `{action_type:'full_order_refund', payload:{order_number:'SHOPCX373'}, summary}` (`extractRemedyOrderRefFromStep` normalizes an all-non-digit `shopify_order_id` into `order_number` — mirrors the executor's own resolution) | one-tap accepted |
+| `{kind:'full_order_refund', summary:'...'}` (no order ref) | unchanged | `via:'escalated_recommendation_only'` — written recommendation |
+| `{kind:'refund_and_price_lock', order_number:'...', summary:'...'}` | unchanged (semantic label, not a `MONEY_ACTION_TYPES` entry) | written recommendation |
+| `{action_type:'full_order_refund', payload:{...}}` (already executable) | unchanged (identity — never re-shape an executable input) | one-tap accepted |
+| `{actions:[...]}` (multi-action batch) | unchanged (identity) | one-tap accepted iff every step is well-formed |
+| `null` / `undefined` / non-object | short-circuit | no card |
+
+The Sonnet prompt in `scripts/builder-worker.ts runCsDirectorCallJob` now teaches the LLM to emit the executable shape when it can — the promoter is a safety net for the shapes the LLM still emits as `{kind, summary}` alongside an order ref.
+
+Ground truth (ticket 63c7a2ff, card ddb7406e): `recommended_remedy` was `{kind:'full_order_refund', summary:'Refund $140.28 for SHOPCX373 — no return required.'}` on order SHOPCX373 with a known $140.28 amount, and the card still landed with `pending_actions:[]` because the guard rejected the `{kind}` shape. Promoted (with `order_number` carried through), the same recommendation now becomes `{action_type:'full_order_refund', payload:{order_number:'SHOPCX373'}, summary}` — the guard accepts, the founder gets Approve.
+
+Order-scoped executable money actions the promoter recognizes (drawn from `MONEY_ACTION_TYPES`, gated by the presence of an order ref): `full_order_refund`, `partial_refund`, `redeem_points_as_refund`, `create_replacement_order`, `dollar_replacement`, `apply_loyalty_coupon` (contract-scoped stays unchanged — no order ref, no promotion; the founder gate's unknown-collapse path still gates), `redeem_points`. A `kind` outside this set is a semantic label; the promoter never rewrites it.
+
+Same `full_order_refund` guard still holds downstream: `executeParkedRemedy` re-verifies the plan against LIVE remedy state at sweep time (spec [[../specs/a-money-remedy-must-read-the-live-remedy-state-first]]) + the `_founderApprovedFullOrderRefund` context flag is the ONLY caller-side authorisation the full_order_refund handler recognises. Promotion opens the one-tap PATH; the downstream rails still refuse an over-refund on the day it fires.
+
 ## Gotchas
 
 - **Strictly-above the SUM, not at-or-above.** A batch whose money total is exactly the threshold runs autonomously; only `sum > threshold` (or an unknown amount on any money action) gates.
