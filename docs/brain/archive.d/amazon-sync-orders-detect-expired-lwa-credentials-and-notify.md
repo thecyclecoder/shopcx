@@ -1,0 +1,1 @@
+- **Amazon sync-orders — classify 'LWA secret token has expired', deactivate the connection, notify the owner** · verified 2026-09-18 · → [[../inngest/amazon-sync]]
