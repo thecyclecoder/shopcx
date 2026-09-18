@@ -80,6 +80,25 @@ export function getSpApiEndpoint(marketplaceId: string): string {
   return REGION_ENDPOINTS[marketplaceId] ?? REGION_ENDPOINTS.ATVPDKIKX0DER;
 }
 
+// Classify an error thrown from anywhere in the SP-API request path (LWA token
+// exchange, or a downstream SP-API 401 whose body carries the same signature)
+// as "the stored LWA client_secret has expired and needs the workspace owner
+// to rotate it". Amazon rotates LWA app client secrets on a rolling window; when
+// the stored secret expires SP-API returns 401 with body
+// `The LWA secret token you provided has expired` on every request, and the
+// LWA token exchange itself throws with the `LWA token exchange failed` prefix
+// this file's `getAccessToken` builds above (line 48). Callers use this to stop
+// the retry storm — deactivate the connection + notify the owner — instead of
+// re-throwing forever.
+export function isLwaCredentialsExpiredError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message || "";
+  return (
+    msg.includes("LWA secret token you provided has expired") ||
+    msg.includes("LWA token exchange failed")
+  );
+}
+
 export async function spApiRequest(
   connectionId: string,
   marketplaceId: string,

@@ -10,6 +10,7 @@ Pulls Amazon SP-API order + ASIN data; writes `amazon_*`, `daily_amazon_order_sn
 - **Trigger:** event `amazon/sync-orders`
 - **Retries:** 2
 - **Concurrency:** `concurrency: [{ limit: 1, key: "event.data.connection_id" }]`
+- **Expired-LWA graceful exit:** the `request-report` step is wrapped in a try/catch that runs [[../libraries/amazon__auth]] `isLwaCredentialsExpiredError` on failure. On a match (SP-API 401 with body `The LWA secret token you provided has expired`, or the LWA token-exchange `getAccessToken` throw), a `handle-lwa-expired` step (a) sets [[../tables/amazon_connections]] `is_active = false` for the connection so the daily cron below stops re-hitting it, (b) inserts one open [[../tables/dashboard_notifications]] card asking the workspace owner to rotate the LWA client_secret in Seller Central (routed_to_function `platform`, deduped on `metadata.dedupe_key = 'amazon:lwa_expired:<connection_id>'` — the DB's UNIQUE partial index makes the "one open card per key" invariant authoritative), and (c) returns `{ status: 'credentials_expired', reason: 'lwa_client_secret_expired' }` — no throw, so the Inngest error feed stops burning on repeat 401s from the same dead credential. Non-matching errors re-throw so real defects still surface through the 2 retries.
 
 
 ### `amazon-sync-asins`

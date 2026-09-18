@@ -3,7 +3,7 @@
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { requestReport, pollReportStatus, downloadReport, processOrderReport } from "@/lib/amazon/sync-orders";
-import { spApiRequest } from "@/lib/amazon/auth";
+import { spApiRequest, isLwaCredentialsExpiredError } from "@/lib/amazon/auth";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 // ── amazon/sync-orders ──
@@ -47,10 +47,67 @@ export const amazonSyncOrders = inngest.createFunction(
     const startDate = new Date(todayUtcMs - syncDays * 86400000).toISOString();
     const endDate = new Date(todayUtcMs + 86400000).toISOString();
 
-    // Request report
-    const reportId = await step.run("request-report", async () => {
-      return requestReport(connection_id, conn.marketplace_id, startDate, endDate);
-    });
+    // Request report — wrapped so an expired LWA client_secret (Amazon rotates
+    // them on a rolling window) short-circuits into a graceful `credentials_expired`
+    // status instead of throwing and burning the retry/cron on the same 401. This
+    // is the SP-API chokepoint: `spApiRequest` funnels every call through
+    // `getAccessToken`, so the first LWA-expired error surfaces here.
+    let reportId: string;
+    try {
+      reportId = await step.run("request-report", async () => {
+        return requestReport(connection_id, conn.marketplace_id, startDate, endDate);
+      });
+    } catch (err) {
+      if (!isLwaCredentialsExpiredError(err)) throw err;
+      return await step.run("handle-lwa-expired", async () => {
+        // (a) Deactivate the connection so the daily cron stops re-hitting the
+        // dead credential (the cron filters on `is_active = true`).
+        await admin
+          .from("amazon_connections")
+          .update({ is_active: false })
+          .eq("id", connection_id);
+
+        // (b) File ONE open dashboard notification asking the workspace owner
+        // to rotate their LWA client_secret. Deduped by metadata.dedupe_key —
+        // the DB has a UNIQUE partial index on ((metadata->>'dedupe_key'))
+        // WHERE dismissed = false, so a concurrent second insert would 23505.
+        const dedupeKey = `amazon:lwa_expired:${connection_id}`;
+        const { data: prior } = await admin
+          .from("dashboard_notifications")
+          .select("id")
+          .eq("workspace_id", workspace_id)
+          .eq("metadata->>dedupe_key", dedupeKey)
+          .eq("dismissed", false)
+          .limit(1);
+        if ((prior ?? []).length === 0) {
+          await admin.from("dashboard_notifications").insert({
+            workspace_id,
+            type: "system",
+            title: "Amazon LWA client secret expired — rotate to resume sync",
+            body:
+              "Amazon has rotated the LWA app client secret on your Seller Central " +
+              "app. The stored secret is rejected at every SP-API request (401 " +
+              "'The LWA secret token you provided has expired'), so we deactivated " +
+              "this Amazon connection to stop the daily sync from re-hitting it. " +
+              "Generate a new client secret in Seller Central (Develop Apps → your " +
+              "app → LWA credentials), paste it into the ShopCX integration UI, " +
+              "then re-enable the connection.",
+            metadata: {
+              routed_to_function: "platform",
+              escalation_kind: "amazon_lwa_expired",
+              dedupe_key: dedupeKey,
+              amazon_connection_id: connection_id,
+            },
+            read: false,
+            dismissed: false,
+          });
+        }
+
+        // (c) Graceful terminal status — the function completes cleanly so the
+        // error feed stops burning on repeat 401s from the same dead credential.
+        return { status: "credentials_expired", reason: "lwa_client_secret_expired" };
+      });
+    }
 
     // Poll until ready (max 60 attempts × 5s = 5 min)
     let documentId: string | null = null;
