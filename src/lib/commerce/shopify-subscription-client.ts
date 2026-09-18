@@ -43,6 +43,22 @@ function variantGid(variantId: string): string {
 interface GqlResult<T> { data?: T; errors?: { message: string }[] }
 
 /** One Admin GraphQL call. Returns the raw envelope so callers can read `userErrors` themselves. */
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Shopify signals overload two ways and only ONE of them looks like an error.
+ *
+ * The insidious one is HTTP **200** carrying a top-level `errors` array with
+ * `extensions.code === "THROTTLED"` and no `data` — which every caller here would otherwise read
+ * as "the mutation returned nothing" and report as a hard failure. `shopify-draft-orders.ts` hit
+ * exactly this and stranded a replacement on ticket 332f4509.
+ */
+const isThrottled = (errors: { message: string; extensions?: { code?: string } }[] | undefined): boolean =>
+  !!errors?.some((e) => e.extensions?.code === "THROTTLED" || /throttl/i.test(e.message || ""));
+
+const THROTTLE_ATTEMPTS = 4;
+const THROTTLE_BASE_MS = 500;
+
 async function gql<T>(
   workspaceId: string,
   query: string,
@@ -54,13 +70,37 @@ async function gql<T>(
   // can surprise the routing layer with an exception.
   try {
     const { shop, accessToken } = await getShopifyCredentials(workspaceId);
-    const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
-      method: "POST",
-      headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
-      body: JSON.stringify({ query, variables }),
-    });
-    if (!res.ok) return { errors: [{ message: `Shopify HTTP ${res.status}` }] };
-    return (await res.json()) as GqlResult<T>;
+
+    for (let attempt = 1; ; attempt++) {
+      const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+        method: "POST",
+        headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+        body: JSON.stringify({ query, variables }),
+      });
+
+      // ⚠️ 429 ONLY. A 5xx is NOT retried here and that is deliberate: this module runs mutations
+      // on a money path, and a 5xx is ambiguous about whether Shopify executed the request.
+      // Re-sending `subscriptionContractAtomicCreate` after one would create a SECOND live
+      // contract for the same customer — the exact duplicate-create hazard the migration marker
+      // exists to prevent, and invisible to it, because the marker is only written once the call
+      // returns. A 429 carries no such ambiguity: rate-limited means not executed.
+      if (res.status === 429 && attempt < THROTTLE_ATTEMPTS) {
+        const retryAfter = Number(res.headers.get("retry-after"));
+        await sleep(Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter * 1000
+          : THROTTLE_BASE_MS * 2 ** (attempt - 1));
+        continue;
+      }
+      if (!res.ok) return { errors: [{ message: `Shopify HTTP ${res.status}` }] };
+
+      const body = (await res.json()) as GqlResult<T>;
+      // A THROTTLED 200 means Shopify declined to run the query at all — always safe to re-send.
+      if (isThrottled(body.errors) && attempt < THROTTLE_ATTEMPTS) {
+        await sleep(THROTTLE_BASE_MS * 2 ** (attempt - 1));
+        continue;
+      }
+      return body;
+    }
   } catch (err) {
     return { errors: [{ message: errText(err) }] };
   }

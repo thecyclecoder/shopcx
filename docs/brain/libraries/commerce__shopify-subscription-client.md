@@ -154,9 +154,17 @@ commits, a charge landing in the window bills the new quantity at the old tier.
 - **Date-only inputs anchor at NOON UTC**, matching `appstle.ts`. Midnight-UTC floored "Oct 2"
   back to Oct 1 in US zones (ticket 83ee7005); noon is the same calendar day across UTC-10..UTC-4.
 - `lines(first:50)` selects `pageInfo.hasNextPage`; a >50-line contract is truncated.
-- **No throttle/backoff yet.** `shopify-draft-orders.ts` already has the right primitive
-  (`isThrottleError` + exponential backoff over 429/5xx, THROTTLED arrives as an HTTP **200**).
-  Reuse it before the renewal worker runs this at thousands-of-contracts scale.
+- **Throttle handling: 429 and THROTTLED-200 are retried; 5xx is NOT.** Shopify signals overload
+  two ways and only one looks like an error — the insidious one is HTTP **200** with a top-level
+  `errors` array (`extensions.code === "THROTTLED"`) and no `data`, which every caller here would
+  otherwise read as "the mutation returned nothing". Both are retried with exponential backoff
+  (4 attempts, 500ms base, honouring `Retry-After`).
+  ⚠️ **A 5xx is deliberately not retried.** This module runs mutations on a money path and a 5xx is
+  ambiguous about whether Shopify executed the request: re-sending
+  `subscriptionContractAtomicCreate` after one would create a SECOND live contract for the same
+  customer — the exact duplicate-create hazard the migration marker exists to prevent, and
+  invisible to it, since the marker is only written once the call returns. A 429 carries no such
+  ambiguity: rate-limited means not executed.
 
 ## The guard, and why this file lives here
 
