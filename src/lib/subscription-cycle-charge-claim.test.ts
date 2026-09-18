@@ -25,8 +25,10 @@ import {
   STALE_IN_FLIGHT_RECLAIM_MS,
   cycleKeyFromDispatchedNextBillingDate,
   isReclaimable,
+  pickBlockingInFlightForSubscription,
   renewalRefusalOutcomeLabel,
   type CycleChargeRow,
+  type InFlightRowSummary,
 } from "./subscription-cycle-charge-claim";
 
 function priorRow(overrides: Partial<Pick<CycleChargeRow, "status" | "claimed_at">>) {
@@ -149,3 +151,109 @@ test("Phase 1: cycle_key is the UTC date slice (concurrent triggers on the same 
     "2026-10-30",
   );
 });
+
+// ── Phase 2 — one renewal in flight per subscription ────────────────
+// docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md § Phase 2
+//
+// Pinning cycle_key (Phase 1) closes the exact ground-truth shape. Phase 2 closes the CLASS:
+// while an attempt is in flight for a subscription, another attempt is refused regardless of
+// what key it computes. The pure predicate `pickBlockingInFlightForSubscription` is the honest
+// heart of that gate — the DB helper is a thin wrapper that fetches rows and hands them here.
+function inFlightRow(overrides: Partial<InFlightRowSummary> = {}): InFlightRowSummary {
+  return {
+    id: overrides.id ?? "row-1",
+    claimant: overrides.claimant ?? "other-claimant",
+    status: overrides.status ?? "in_flight",
+    cycle_key: overrides.cycle_key ?? "2026-10-30",
+    claimed_at: overrides.claimed_at ?? "2026-10-30T15:30:46.79Z",
+  };
+}
+
+test("Phase 2: no in_flight rows → no blocker, the attempt proceeds", () => {
+  assert.equal(pickBlockingInFlightForSubscription([], "me"), null);
+});
+
+test("Phase 2: an in_flight row held by the SAME claimant is a resumed step re-check — not a blocker", () => {
+  // The SDK's claim step already treats a same-claimant collision as `resumed:true`. The Phase 2
+  // guard must not undo that by refusing a step that legitimately re-reads its OWN row.
+  const own = inFlightRow({ claimant: "me" });
+  assert.equal(pickBlockingInFlightForSubscription([own], "me"), null);
+});
+
+test("Phase 2: an in_flight row held by a DIFFERENT claimant blocks the attempt (belt-and-suspenders even when cycle_keys diverge)", () => {
+  // The ground-truth shape: attempt A already claimed cycle 2026-10-30; attempt B (a delayed
+  // duplicate) arrives 8 seconds later. Even if B computed a different cycle_key (2026-12-25
+  // — the shape Phase 1 fixed), the per-sub guard STILL refuses B because a renewal is already
+  // in flight for this subscription.
+  const otherAttempt = inFlightRow({
+    id: "row-A",
+    claimant: "attempt-A",
+    cycle_key: "2026-10-30",
+  });
+  const blocker = pickBlockingInFlightForSubscription([otherAttempt], "attempt-B");
+  assert.ok(blocker);
+  assert.equal(blocker.id, "row-A");
+  assert.equal(blocker.claimant, "attempt-A");
+  assert.equal(blocker.cycle_key, "2026-10-30");
+});
+
+test("Phase 2: refuse rather than queue — even a very-recently-claimed in_flight row blocks (the customer only authorised one charge)", () => {
+  // The spec is emphatic: "Refuse rather than queue. A renewal that waits and then fires is
+  // still a second charge; the customer only authorised one." Freshness of the prior claim
+  // must never soften into "wait a bit and try again".
+  const freshlyClaimed = inFlightRow({
+    claimant: "attempt-A",
+    claimed_at: new Date(Date.now() - 100).toISOString(), // 100ms ago
+  });
+  const blocker = pickBlockingInFlightForSubscription([freshlyClaimed], "attempt-B");
+  assert.ok(blocker);
+});
+
+test("Phase 2: a terminal (succeeded/failed) row snuck into the array does NOT block — the guard is about IN-FLIGHT only", () => {
+  // Defensive: `refused_wedged_cycle` (the cycle-key gate) already handles a terminal row on
+  // the same cycle_key. The Phase 2 gate is about "another attempt is running RIGHT NOW" —
+  // status must be in_flight, not merely non-null.
+  const succeeded = inFlightRow({ claimant: "attempt-A", status: "succeeded" });
+  const failed = inFlightRow({ id: "row-2", claimant: "attempt-C", status: "failed" });
+  assert.equal(pickBlockingInFlightForSubscription([succeeded, failed], "attempt-B"), null);
+});
+
+test("Phase 2: first blocking row wins (arbitrary but deterministic — the refusal only needs one row to cite)", () => {
+  const first = inFlightRow({ id: "row-1", claimant: "attempt-A", cycle_key: "2026-10-30" });
+  const second = inFlightRow({ id: "row-2", claimant: "attempt-C", cycle_key: "2026-12-25" });
+  const blocker = pickBlockingInFlightForSubscription([first, second], "me");
+  assert.ok(blocker);
+  assert.equal(blocker.id, "row-1");
+});
+
+test("Phase 2 distinguishing refusal outcomes: `refused_concurrent_renewal` is DIFFERENT from `refused_wedged_cycle`", () => {
+  // Not a runtime check — a compile-time-adjacent assertion that the two refusal shapes are
+  // NOT the same string. The spec: "'two attempts raced' and 'this cycle was already charged'
+  // do not look identical when someone is working out why a customer was or was not billed."
+  const twoAttemptsRaced = "refused_concurrent_renewal" as const;
+  const cycleAlreadyCharged = "refused_wedged_cycle" as const;
+  assert.notEqual(twoAttemptsRaced, cycleAlreadyCharged);
+});
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function _typeCheck_InFlightRowSummary_matches_CycleChargeRow(): void {
+  // A CycleChargeRow satisfies InFlightRowSummary — the DB helper's `.select("id, claimant, ...")`
+  // returns exactly the fields the predicate needs, and any drift here fails tsc.
+  const fake: CycleChargeRow = {
+    id: "row",
+    workspace_id: "ws",
+    subscription_id: "sub",
+    cycle_key: "2026-10-30",
+    status: "in_flight",
+    amount_cents: 0,
+    claimant: "me",
+    source: null,
+    transaction_id: null,
+    order_id: null,
+    claimed_at: "2026-10-30T00:00:00Z",
+    resolved_at: null,
+    superseded_claims: [],
+  };
+  const _: InFlightRowSummary = fake;
+  void _;
+}

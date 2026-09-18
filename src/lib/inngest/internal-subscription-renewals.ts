@@ -30,6 +30,7 @@ import {
 import {
   claimChargeIdempotency,
   chargeIdempotencyKeyFromDispatchedNextBillingDate,
+  findBlockingInFlightForSubscription,
   resolveChargeIdempotency,
   renewalRefusalOutcomeLabel,
 } from "@/lib/subscription-cycle-charge-claim";
@@ -1095,6 +1096,70 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       };
     }
     const claimantId = (event as { id?: string }).id || `sub:${subscription_id}:cycle:${cycleKey}`;
+
+    // ── 2.6. Per-subscription in-flight guard ─────────────────────
+    // Phase 2 of docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md
+    // — pinning cycle_key (Phase 1) closes the shape that let sub e9b8a6d9 double-charge, but
+    // the class survives: the next variant of overlapping renewals will find some other way to
+    // disagree about which cycle it is charging. A per-SUBSCRIPTION gate refuses a second
+    // attempt while one is already in flight for that sub, regardless of what key it computes.
+    // Eight seconds apart is well inside any plausible charge duration, so this belt-and-
+    // suspenders would have stopped the ground-truth case even with the old key.
+    //
+    // Refuse rather than queue — a renewal that waits and then fires is still a second charge;
+    // the customer only authorised one. Same-claimant rows (a resumed Inngest step re-checking
+    // after a partial write) are ignored by the SDK so we never refuse ourselves.
+    //
+    // Distinct outcome + customer_event from the cycle-key refusal below: `refused_concurrent_renewal`
+    // vs `refused_wedged_cycle` — "two attempts raced" and "this cycle was already charged"
+    // must not look identical when someone is working out why a customer was or was not billed.
+    const blockingInFlight = await step.run("check-subscription-in-flight", async () => {
+      const row = await findBlockingInFlightForSubscription(admin, subscription_id, claimantId);
+      if (!row) return { blocked: false as const };
+      return {
+        blocked: true as const,
+        blocking_id: row.id,
+        blocking_cycle_key: row.cycle_key,
+        blocking_claimant: row.claimant,
+        blocking_claimed_at: row.claimed_at,
+      };
+    });
+    if (blockingInFlight.blocked) {
+      await step.run("emit-outcome-refused-concurrent-renewal", () =>
+        emitRenewalOutcomeHeartbeat("refused_concurrent_renewal"),
+      );
+      await step.run("log-refused-concurrent-renewal-event", async () => {
+        const { logCustomerEvent } = await import("@/lib/customer-events");
+        await logCustomerEvent({
+          workspaceId: workspace_id,
+          customerId: (ctx.sub.customer_id as string | null) ?? null,
+          eventType: "subscription.renewal_refused_concurrent_attempt",
+          source: "internal_subscription_renewal",
+          summary:
+            `Renewal refused — another attempt is already in flight for this subscription ` +
+            `(claim ${blockingInFlight.blocking_id} on cycle ${blockingInFlight.blocking_cycle_key}, ` +
+            `claimed ${blockingInFlight.blocking_claimed_at}). No second Braintree sale — only one ` +
+            `renewal can be in flight per subscription at a time.`,
+          properties: {
+            subscription_id,
+            attempted_cycle_key: cycleKey,
+            blocking_claim_id: blockingInFlight.blocking_id,
+            blocking_cycle_key: blockingInFlight.blocking_cycle_key,
+            blocking_claimant: blockingInFlight.blocking_claimant,
+            blocking_claimed_at: blockingInFlight.blocking_claimed_at,
+          },
+        });
+      });
+      return {
+        skipped: true,
+        reason: "refused_concurrent_renewal",
+        subscription_id,
+        attempted_cycle_key: cycleKey,
+        blocking_claim_id: blockingInFlight.blocking_id,
+        blocking_cycle_key: blockingInFlight.blocking_cycle_key,
+      };
+    }
+
     const claim = await step.run("claim-charge-idempotency", async () => {
       const res = await claimChargeIdempotency(admin, {
         workspace_id,

@@ -137,6 +137,11 @@ export interface RenewalOutcomeCounts {
    * claim is NOT `succeeded` (customer cannot be billed for THIS cycle). Broken out from
    * `skipped_other` so it can be alerted on rather than blended into normal skip volume. */
   refused_wedged_cycle: number;
+  /** Phase 2 of a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves.md — a
+   * second attempt on a subscription that already has an in_flight claim (regardless of
+   * cycle_key) is refused. Distinct from `refused_wedged_cycle` (same cycle already claimed)
+   * so "two attempts raced" and "this cycle was already charged" do not look identical. */
+  refused_concurrent_renewal: number;
 }
 
 function emptyRenewalOutcomeCounts(): RenewalOutcomeCounts {
@@ -150,6 +155,7 @@ function emptyRenewalOutcomeCounts(): RenewalOutcomeCounts {
     comp_blocked: 0,
     skipped_other: 0,
     refused_wedged_cycle: 0,
+    refused_concurrent_renewal: 0,
   };
 }
 

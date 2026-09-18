@@ -319,6 +319,83 @@ function supersedeSnapshot(prior: CycleChargeRow): SupersededClaim {
   };
 }
 
+// ─── Phase 2 — per-subscription in-flight guard ─────────────────────
+// [[docs/brain/specs/a-renewal-cycle-key-must-not-derive-from-a-field-the-charge-moves]] Phase 2:
+// pinning cycle_key to the DISPATCHED cycle closes the shape that let sub e9b8a6d9 double-charge
+// (Phase 1), but the class survives — the next variant of overlapping renewals will find some
+// other way to disagree about which cycle it is charging. A per-SUBSCRIPTION gate refuses a
+// second attempt while one is already in flight for that sub, regardless of what key it computes.
+//
+// Eight seconds apart is well inside any plausible charge duration, so this belt-and-suspenders
+// would have stopped the ground-truth case even with the old key. Refuse rather than queue — a
+// renewal that waits and then fires is still a second charge; the customer only authorised one.
+
+/**
+ * Minimal shape of an in-flight row we need to decide whether it belongs to us or to another
+ * claimant. Kept narrow so the pure predicate below can be exercised with cheap literals in
+ * unit tests without dragging the full CycleChargeRow.
+ */
+export type InFlightRowSummary = Pick<
+  CycleChargeRow,
+  "id" | "claimant" | "status" | "cycle_key" | "claimed_at"
+>;
+
+/**
+ * Pure: given every in_flight row currently on record for a subscription, decide whether ANY of
+ * them was claimed by a DIFFERENT claimant than the caller. Returns the first such row (so the
+ * caller can surface its cycle_key/claimant in the refusal artifact) or null if the only
+ * in_flight rows belong to the caller (a resumed Inngest step re-check must not refuse itself).
+ *
+ * This is the per-subscription guard the Phase 2 spec calls for: "while an attempt is in flight
+ * for a sub, another attempt is refused regardless of what key it computes." Distinct from the
+ * cycle-key claim, which only catches the equal-cycle case.
+ *
+ * Filters defensively on `status='in_flight'` even though the DB helper already does — the
+ * predicate must be honest on any pre-filtered array a test might hand it.
+ */
+export function pickBlockingInFlightForSubscription(
+  rows: readonly InFlightRowSummary[],
+  claimant: string,
+): InFlightRowSummary | null {
+  for (const r of rows) {
+    if (r.status !== "in_flight") continue;
+    if (r.claimant === claimant) continue;
+    return r;
+  }
+  return null;
+}
+
+/**
+ * READ-ONLY: fetch every `status='in_flight'` claim currently on record for a subscription and
+ * return the first one held by a claimant OTHER than the caller — the row the Phase 2 refusal
+ * cites — or null if the sub is not already being charged by anyone else. Same-claimant rows
+ * (a resumed Inngest step re-checking after a partial write) are ignored so the caller's own
+ * in_flight row does not refuse itself.
+ *
+ * The bare `select` bounds at `limit(2)` because only one row is needed to make the decision AND
+ * the practical invariant is that at most one in_flight row exists per sub anyway — reading two
+ * gives us a signal (if it ever fires) that we're already past the invariant. Errors propagate
+ * so a service failure doesn't silently degrade into "no blocker, proceed to charge".
+ */
+export async function findBlockingInFlightForSubscription(
+  admin: Admin,
+  subscription_id: string,
+  claimant: string,
+): Promise<InFlightRowSummary | null> {
+  const { data, error } = await admin
+    .from("subscription_cycle_charges")
+    .select("id, claimant, status, cycle_key, claimed_at")
+    .eq("subscription_id", subscription_id)
+    .eq("status", "in_flight")
+    .limit(2);
+  if (error) {
+    throw new Error(
+      `find_in_flight_for_subscription_failed: ${error.message} (sub=${subscription_id})`,
+    );
+  }
+  return pickBlockingInFlightForSubscription((data ?? []) as InFlightRowSummary[], claimant);
+}
+
 /**
  * Look up the current claim row for (subscription_id, cycle_key). Read-only helper used inside
  * `claimCycleCharge` on the 23505 branch and available to callers for diagnostics.
