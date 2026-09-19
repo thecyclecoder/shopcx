@@ -186,14 +186,17 @@ export function markOutcomeDone(
  * Mark a required outcome as verified — the `expected_db_state` predicate holds. Phase 2 calls
  * this after `verifyActionInDB` (or an equivalent read-back) confirms the DB is in the expected
  * state. CAS from `from` (default 'done' — the executor's normal path); pass `from: 'pending'`
- * for the rare case where the predicate already held at authoring time.
+ * for the rare case where the predicate already held at authoring time, or `from: 'failed'`
+ * for the CS Director approve_remedy reconciliation path (a rescue action fired the same kind
+ * and the live DB now backs the claim — see [[honor-required-outcomes]]
+ * `reconcileRequiredOutcomesForFiredActions`).
  */
 export function markOutcomeVerified(
   admin: Admin,
   input: {
     id: string;
     workspace_id: string;
-    from?: "pending" | "done";
+    from?: "pending" | "done" | "failed";
     resolution_event_id?: string | null;
   },
 ): Promise<TicketRequiredOutcome | null> {

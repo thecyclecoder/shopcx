@@ -21,13 +21,14 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { errText } from "@/lib/error-text";
 import type { ActionParams, ActionContext, ActionResult } from "./action-executor";
-import { directActionHandlers, verifyActionInDB } from "./action-executor";
+import { directActionHandlers, hasDiscountCode, stillHasDiscountCode, verifyActionInDB } from "./action-executor";
 import {
   listRequiredOutcomes,
   markOutcomeDone,
   markOutcomeVerified,
   markOutcomeFailed,
   type TicketRequiredOutcome,
+  type RequiredOutcomeStatus,
 } from "./ticket-required-outcomes";
 
 /** The subset of {@link ActionContext} the honor step needs to synthesize a real ActionContext. */
@@ -295,4 +296,549 @@ export function honorSummaryToLedgerOutcome(
   // Fallback — not_verified with no failed items shouldn't happen with the current logic, but
   // treat it as 'unbacked' (the send guard's shape) so callers can still make progress.
   return "unbacked";
+}
+
+/** One row the reconciler touched (or considered) on the approve_remedy success path. */
+export interface OutcomeReconcileResult {
+  outcome_id: string;
+  kind: string;
+  description: string;
+  from_status: Exclude<RequiredOutcomeStatus, "verified">;
+  /** `verified` means the CAS from `from_status` → `verified` landed. `left_open` means the live
+   * DB predicate did NOT hold, so the row was left in its prior terminal state (no false close). */
+  outcome: "verified" | "left_open";
+}
+
+/** Rollup of one reconcile pass. */
+export interface ReconcileSummary {
+  reconciled: OutcomeReconcileResult[];
+  left_open: OutcomeReconcileResult[];
+  /** Rows whose kind wasn't in the fired-kinds set — untouched. */
+  skipped_kind_mismatch: number;
+  /** Rows already verified when the reconciler ran — untouched. */
+  skipped_already_verified: number;
+}
+
+/** A fired action a rescue path is offering to the reconciler for target-identity matching. */
+export interface FiredActionRef {
+  actionType: string;
+  actionParams: Record<string, unknown>;
+}
+
+/**
+ * Identity-field set per action kind — the concrete target-ids fields the reconciler REQUIRES to
+ * match a stored row against a fired action. Same-kind alone is INSUFFICIENT: `verifyActionInDB`'s
+ * broad arms (create_return in particular) confirm ANY non-cancelled return on the ticket, so a
+ * successful return on order A would false-close a failed row for order B on the same ticket
+ * without an identity guard. The set below is the "concrete target identity" for each kind — the
+ * fields that pin the row to a specific subscription / order / code the rescue must have targeted.
+ *
+ * A row whose kind is here MUST carry at least one of these fields on `target_ids` AND every
+ * present field must match the fired action's `actionParams` for the reconciler to run — an empty
+ * target_ids on an identity-sensitive kind fails-closed (leaves the row open).
+ */
+export const KIND_IDENTITY_FIELDS: Record<string, readonly string[]> = {
+  // Returns + refunds — target one specific order
+  create_return: ["order_id", "shopify_order_id", "order_number"],
+  partial_refund: ["order_id", "shopify_order_id", "order_number"],
+  redeem_points_as_refund: ["order_id", "shopify_order_id", "order_number"],
+  dollar_replacement: ["order_id", "shopify_order_id", "order_number"],
+  create_replacement_order: ["order_id", "shopify_order_id", "order_number"],
+  // Subscription mutations — target one specific contract
+  cancel: ["contract_id"],
+  pause: ["contract_id"],
+  crisis_pause: ["contract_id"],
+  resume: ["contract_id"],
+  change_next_date: ["contract_id"],
+  swap: ["contract_id"],
+  // Coupons — code AND (usually) contract_id
+  apply_coupon: ["contract_id", "code"],
+  remove_coupon: ["contract_id", "code"],
+};
+
+/**
+ * Pure target-identity match. Returns the fired action that has:
+ *   1. `actionType === row.kind`, AND
+ *   2. Every identity field the row's `target_ids` carries (from the kind's `KIND_IDENTITY_FIELDS`
+ *      set, or from `target_ids` itself when the kind isn't in the map) matches the fired
+ *      action's `actionParams`.
+ *
+ * Fail-closed shape:
+ *   - A row with EMPTY `target_ids` on an identity-sensitive kind never matches — the row can't
+ *     prove which order/subscription/code it tracked, so the reconciler leaves it open (a human
+ *     re-authors a fresh Direction to retry, per the terminal-failures-are-not-retried invariant).
+ *   - A fired action missing one of the row's identity fields never matches — we can't confirm
+ *     the fired action targeted the same object.
+ *   - Cross-key aliasing (row names `order_number`, fired names `shopify_order_id`) does NOT
+ *     match — the caller (`handleApproveRemedy`) normalizes upstream if a match is intended.
+ */
+export function findMatchingFiredAction(
+  row: TicketRequiredOutcome,
+  firedActions: readonly FiredActionRef[],
+): FiredActionRef | null {
+  const rowIds = (row.target_ids ?? {}) as Record<string, unknown>;
+  const isIdentitySensitive = row.kind in KIND_IDENTITY_FIELDS;
+  const knownFields = KIND_IDENTITY_FIELDS[row.kind];
+  // For an identity-sensitive kind: only compare the KNOWN identity fields the row carries.
+  // For an unknown kind: fall back to every non-empty field on the row's target_ids.
+  const candidateFields = knownFields ?? Object.keys(rowIds);
+  const rowPresent = candidateFields.filter((f) => {
+    const v = rowIds[f];
+    return v != null && v !== "";
+  });
+  // Fail-closed: an identity-sensitive kind whose row has no concrete identity fields cannot be
+  // matched. This is the sec:real-vuln fix — a target-less row on `create_return` would otherwise
+  // be closed on kind alone the moment ANY create_return fires on the ticket.
+  if (isIdentitySensitive && rowPresent.length === 0) return null;
+  // A kind not in the identity map with an empty target_ids: also fail closed. A row that names
+  // no target at all has no identity to prove same-target on.
+  if (rowPresent.length === 0) return null;
+
+  for (const fired of firedActions) {
+    if (fired.actionType !== row.kind) continue;
+    const params = fired.actionParams as Record<string, unknown>;
+    let allMatch = true;
+    for (const f of rowPresent) {
+      const rowVal = rowIds[f];
+      const firedVal = params[f];
+      if (firedVal == null || firedVal === "") { allMatch = false; break; }
+      if (String(firedVal) !== String(rowVal)) { allMatch = false; break; }
+    }
+    if (allMatch) return fired;
+  }
+  return null;
+}
+
+/** Per-row verdict from {@link classifyOutcomeForReconcile} — the pure classification step. */
+export type ReconcileClassification =
+  | { verdict: "skip_verified" }
+  | { verdict: "skip_done" }
+  | { verdict: "skip_kind_mismatch" }
+  | { verdict: "verify_and_reconcile"; matched: FiredActionRef };
+
+/**
+ * Pure classification: given a stored required-outcome row and the fired actions a rescue just
+ * completed, decide which reconcile branch the row falls into.
+ *   - `skip_verified`      — row is already closed. No work to do.
+ *   - `skip_done`          — normal honor path owns `done`; the reconciler is only for the
+ *                            pending-never-attempted / failed-terminal states the honor step
+ *                            can't advance.
+ *   - `skip_kind_mismatch` — no fired action matches this row's KIND *and* target identity. This
+ *                            arm covers the sec:real-vuln: a same-kind rescue on a DIFFERENT
+ *                            order/subscription MUST NOT close this row.
+ *   - `verify_and_reconcile` — a fired action matches the row's kind AND every identity field the
+ *                            row's target_ids carries; the caller runs `verifyActionInDB` and
+ *                            marks the row verified iff the live predicate holds.
+ *
+ * Kept pure so tests can drive each branch without a DB or the executor's real verify.
+ */
+export function classifyOutcomeForReconcile(
+  row: TicketRequiredOutcome,
+  firedActions: readonly FiredActionRef[],
+): ReconcileClassification {
+  if (row.status === "verified") return { verdict: "skip_verified" };
+  if (row.status === "done") return { verdict: "skip_done" };
+  const matched = findMatchingFiredAction(row, firedActions);
+  if (matched == null) return { verdict: "skip_kind_mismatch" };
+  return { verdict: "verify_and_reconcile", matched };
+}
+
+/**
+ * A canonical order reference the target-exact verifier can resolve to an `orders.id` in the
+ * matched row's workspace. At least one field must be present; `order_id` (an already-resolved
+ * orders.id) is preferred, `shopify_order_id` is uniquely indexed, and `order_number` requires a
+ * workspace-scoped lookup.
+ */
+export interface CanonicalOrderRef {
+  order_id: string | null;
+  shopify_order_id: string | null;
+  order_number: string | null;
+}
+
+/**
+ * The planner's verdict — the concrete target-exact predicate the reconcile verifier will run
+ * against the DB, or `insufficient_identity` when the row (matched by
+ * {@link findMatchingFiredAction}) still doesn't carry enough identity to run a target-exact check.
+ * Fail-closed on the insufficient path is the sec:real-vuln invariant — the broad
+ * `verifyActionInDB` predicates (`create_return`: any non-cancelled return on the ticket;
+ * refund kinds: `true` when `shopify_order_id` is missing) would otherwise verify without proof
+ * of the exact target.
+ */
+export type ReconcileVerifierPlan =
+  | { kind: "insufficient_identity"; reason: string }
+  | { kind: "check_return_for_order"; orderRef: CanonicalOrderRef }
+  | { kind: "check_order_financial"; orderRef: CanonicalOrderRef }
+  | { kind: "check_sub_status"; contract_id: string; expected: "cancelled" | "paused" | "active" }
+  | { kind: "check_sub_next_date"; contract_id: string; date: string }
+  | { kind: "check_coupon_applied"; contract_id: string; code: string }
+  | { kind: "check_coupon_removed"; contract_id: string; code: string };
+
+function trimmedString(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t.length > 0 ? t : null;
+}
+
+function pickOrderRef(
+  rowIds: Record<string, unknown>,
+  firedParams: Record<string, unknown>,
+): CanonicalOrderRef | null {
+  // Prefer identity fields the ROW carries — `findMatchingFiredAction` already asserted every
+  // present row identity field matches the fired action, so the row and fired-action orderRefs are
+  // equivalent for the fields the row named. Fill missing fields from the fired action too, so a
+  // row that only has `order_number` still benefits when the fired action carried a
+  // shopify_order_id (the verifier's most-specific read).
+  const order_id =
+    trimmedString(rowIds.order_id) ?? trimmedString(firedParams.order_id);
+  const shopify_order_id =
+    trimmedString(rowIds.shopify_order_id) ?? trimmedString(firedParams.shopify_order_id);
+  const order_number =
+    trimmedString(rowIds.order_number) ?? trimmedString(firedParams.order_number);
+  if (!order_id && !shopify_order_id && !order_number) return null;
+  return { order_id, shopify_order_id, order_number };
+}
+
+/** Kinds whose expected-DB predicate lives on a specific subscription. */
+const SUB_STATUS_KIND_EXPECTED: Record<string, "cancelled" | "paused" | "active"> = {
+  cancel: "cancelled",
+  pause: "paused",
+  crisis_pause: "paused",
+  pause_timed: "paused",
+  resume: "active",
+  reactivate: "active",
+};
+
+/** Kinds whose expected-DB predicate reads the `returns` table scoped to a specific order. */
+const RETURN_KINDS = new Set([
+  "create_return",
+  "create_replacement",
+  "create_replacement_order",
+]);
+
+/** Kinds whose expected-DB predicate reads the target `orders` row's financial_status. */
+const REFUND_KINDS = new Set([
+  "partial_refund",
+  "full_order_refund",
+  "redeem_points_as_refund",
+  "dollar_replacement",
+]);
+
+/**
+ * Pure classifier: given the matched (row, fired action) pair, decide the target-exact predicate
+ * the verifier will run — or that identity is insufficient (in which case the reconciler leaves
+ * the row open). Kept pure so tests can pin every kind's plan without a DB. Fail-closed on:
+ *   - Order-scoped kinds when no canonical order identity is present on the row/fired action.
+ *   - Subscription kinds when `contract_id` is missing.
+ *   - Coupon kinds when `contract_id` or `code` is missing.
+ *   - Any kind we don't recognize (unknown kinds never auto-verify — a fresh Direction is required).
+ */
+export function planReconcileVerification(
+  row: TicketRequiredOutcome,
+  matched: FiredActionRef,
+): ReconcileVerifierPlan {
+  const rowIds = (row.target_ids ?? {}) as Record<string, unknown>;
+  const firedParams = (matched.actionParams ?? {}) as Record<string, unknown>;
+
+  if (RETURN_KINDS.has(row.kind)) {
+    const orderRef = pickOrderRef(rowIds, firedParams);
+    if (!orderRef) return { kind: "insufficient_identity", reason: "return kind requires order identity" };
+    return { kind: "check_return_for_order", orderRef };
+  }
+
+  if (REFUND_KINDS.has(row.kind)) {
+    const orderRef = pickOrderRef(rowIds, firedParams);
+    if (!orderRef) return { kind: "insufficient_identity", reason: "refund kind requires order identity" };
+    return { kind: "check_order_financial", orderRef };
+  }
+
+  const subExpected = SUB_STATUS_KIND_EXPECTED[row.kind];
+  if (subExpected) {
+    const contract_id = trimmedString(rowIds.contract_id);
+    if (!contract_id) return { kind: "insufficient_identity", reason: "subscription kind requires contract_id" };
+    return { kind: "check_sub_status", contract_id, expected: subExpected };
+  }
+
+  if (row.kind === "change_next_date") {
+    const contract_id = trimmedString(rowIds.contract_id);
+    if (!contract_id) return { kind: "insufficient_identity", reason: "change_next_date requires contract_id" };
+    const date = trimmedString(firedParams.date) ?? trimmedString(rowIds.date);
+    if (!date) return { kind: "insufficient_identity", reason: "change_next_date requires a target date" };
+    return { kind: "check_sub_next_date", contract_id, date };
+  }
+
+  if (row.kind === "apply_coupon" || row.kind === "apply_loyalty_coupon") {
+    const contract_id = trimmedString(rowIds.contract_id);
+    const code = trimmedString(rowIds.code) ?? trimmedString(firedParams.code);
+    if (!contract_id || !code) return { kind: "insufficient_identity", reason: "coupon apply requires contract_id + code" };
+    return { kind: "check_coupon_applied", contract_id, code };
+  }
+
+  if (row.kind === "remove_coupon") {
+    const contract_id = trimmedString(rowIds.contract_id);
+    const code =
+      trimmedString(rowIds.code) ??
+      trimmedString(firedParams.code) ??
+      trimmedString((firedParams as { coupon_code?: unknown }).coupon_code);
+    if (!contract_id || !code) return { kind: "insufficient_identity", reason: "coupon remove requires contract_id + code" };
+    return { kind: "check_coupon_removed", contract_id, code };
+  }
+
+  return { kind: "insufficient_identity", reason: `no target-exact verifier for kind '${row.kind}'` };
+}
+
+/**
+ * Resolve a {@link CanonicalOrderRef} to a workspace-scoped `orders.id`. Returns null when the
+ * ref can't be pinned to exactly one order — the reconciler treats null as fail-closed (leave
+ * row open) because we can't prove the target-exact predicate without a concrete DB row.
+ *
+ * Resolution order:
+ *   1. `order_id` — already an orders.id; verify it exists in this workspace and return it.
+ *   2. `shopify_order_id` — uniquely indexed; workspace-scoped lookup.
+ *   3. `order_number` — workspace-scoped lookup; expected to be unique per workspace.
+ */
+async function resolveOrderIdForReconcile(
+  admin: SupabaseClient,
+  workspace_id: string,
+  ref: CanonicalOrderRef,
+): Promise<string | null> {
+  if (ref.order_id) {
+    const { data } = await admin
+      .from("orders")
+      .select("id")
+      .eq("workspace_id", workspace_id)
+      .eq("id", ref.order_id)
+      .maybeSingle();
+    const id = (data as { id?: string } | null)?.id;
+    if (id) return id;
+    // Fall through if the caller-supplied order_id isn't in this workspace — an attacker-supplied
+    // cross-tenant id would resolve to null here (workspace-scoped), which is the fail-closed
+    // path the sec:real-vuln fix requires.
+  }
+  if (ref.shopify_order_id) {
+    const { data } = await admin
+      .from("orders")
+      .select("id")
+      .eq("workspace_id", workspace_id)
+      .eq("shopify_order_id", ref.shopify_order_id)
+      .maybeSingle();
+    const id = (data as { id?: string } | null)?.id;
+    if (id) return id;
+  }
+  if (ref.order_number) {
+    const { data } = await admin
+      .from("orders")
+      .select("id")
+      .eq("workspace_id", workspace_id)
+      .eq("order_number", ref.order_number)
+      .maybeSingle();
+    const id = (data as { id?: string } | null)?.id;
+    if (id) return id;
+  }
+  return null;
+}
+
+/**
+ * Target-exact DB verifier for the reconciler. Runs the plan {@link planReconcileVerification}
+ * produced against the actual DB, bound to the SPECIFIC target the row named. Replaces the broad
+ * {@link verifyActionInDB} call on the reconciler path:
+ *
+ *   - `create_return` / `create_replacement` / `create_replacement_order`: instead of asking "any
+ *     non-cancelled return on the ticket?", asks "does a non-cancelled return exist on THIS
+ *     ticket AND against THIS resolved orders.id?". A wrong-order rescue can no longer close a
+ *     failed row targeting a different order.
+ *   - `partial_refund` / `full_order_refund` / `redeem_points_as_refund` / `dollar_replacement`:
+ *     instead of returning true when `shopify_order_id` is missing, resolves the row's canonical
+ *     order identity to a specific `orders.id` and reads THAT row's `financial_status`. An
+ *     `order_number`-only row is accepted only when the workspace-scoped lookup pins it to one
+ *     order.
+ *   - Subscription/coupon kinds: hard-require `contract_id` (+ `code` for coupons); no
+ *     silent-`true` fallback on missing identity.
+ *
+ * Any error thrown during a read is treated as "did not verify" — the failed row stays failed;
+ * the pending row stays pending. Never a false close on a broken read.
+ */
+export async function verifyReconcileTargetExact(
+  ctx: HonorContext,
+  row: TicketRequiredOutcome,
+  matched: FiredActionRef,
+): Promise<boolean> {
+  const plan = planReconcileVerification(row, matched);
+  if (plan.kind === "insufficient_identity") return false;
+
+  switch (plan.kind) {
+    case "check_return_for_order": {
+      const orderId = await resolveOrderIdForReconcile(ctx.admin, ctx.workspace_id, plan.orderRef);
+      if (!orderId) return false;
+      const { data, error } = await ctx.admin
+        .from("returns")
+        .select("id, status")
+        .eq("workspace_id", ctx.workspace_id)
+        .eq("ticket_id", ctx.ticket_id)
+        .eq("order_id", orderId)
+        .neq("status", "cancelled")
+        .limit(1);
+      if (error) return false;
+      return (data ?? []).length > 0;
+    }
+    case "check_order_financial": {
+      const orderId = await resolveOrderIdForReconcile(ctx.admin, ctx.workspace_id, plan.orderRef);
+      if (!orderId) return false;
+      const { data, error } = await ctx.admin
+        .from("orders")
+        .select("financial_status")
+        .eq("workspace_id", ctx.workspace_id)
+        .eq("id", orderId)
+        .maybeSingle();
+      if (error) return false;
+      const fs = (data as { financial_status?: string } | null)?.financial_status;
+      return fs === "partially_refunded" || fs === "refunded";
+    }
+    case "check_sub_status": {
+      const { data, error } = await ctx.admin
+        .from("subscriptions")
+        .select("status")
+        .eq("workspace_id", ctx.workspace_id)
+        .eq("shopify_contract_id", plan.contract_id)
+        .maybeSingle();
+      if (error) return false;
+      const st = (data as { status?: string } | null)?.status;
+      return st === plan.expected;
+    }
+    case "check_sub_next_date": {
+      const { data, error } = await ctx.admin
+        .from("subscriptions")
+        .select("next_billing_date")
+        .eq("workspace_id", ctx.workspace_id)
+        .eq("shopify_contract_id", plan.contract_id)
+        .maybeSingle();
+      if (error) return false;
+      const nbd = (data as { next_billing_date?: string } | null)?.next_billing_date;
+      if (!nbd) return false;
+      return String(nbd).slice(0, 10) === plan.date.slice(0, 10);
+    }
+    case "check_coupon_applied": {
+      const { data, error } = await ctx.admin
+        .from("subscriptions")
+        .select("applied_discounts")
+        .eq("workspace_id", ctx.workspace_id)
+        .eq("shopify_contract_id", plan.contract_id)
+        .maybeSingle();
+      if (error) return false;
+      const ad = (data as { applied_discounts?: unknown } | null)?.applied_discounts;
+      return hasDiscountCode(ad, plan.code);
+    }
+    case "check_coupon_removed": {
+      const { data, error } = await ctx.admin
+        .from("subscriptions")
+        .select("applied_discounts")
+        .eq("workspace_id", ctx.workspace_id)
+        .eq("shopify_contract_id", plan.contract_id)
+        .maybeSingle();
+      if (error) return false;
+      const ad = (data as { applied_discounts?: unknown } | null)?.applied_discounts;
+      return !stillHasDiscountCode(ad, plan.code);
+    }
+  }
+}
+
+/**
+ * Reconcile a ticket's PENDING and FAILED required-outcome rows against live DB state after a
+ * rescue action fired. The CS Director approve_remedy path is the primary caller — when June
+ * rescues a ticket whose earlier Sol-authored action self-blocked (the `create_return` order-level
+ * coupon ceiling bug on ticket cc78ad94 is the ground-truth incident), the tracking
+ * ticket_required_outcomes row sits in `status='failed'` and the outcome-completion gate keeps
+ * `hasUnverifiedOutcomes=true` forever, re-escalating a fully-resolved ticket on every tick.
+ *
+ * This helper closes that loop with TWO consecutive fail-closed gates:
+ *   1. Walks {@link listRequiredOutcomes} for the ticket.
+ *   2. IDENTITY GATE — for each row whose `status` is `pending` or `failed`, calls
+ *      {@link findMatchingFiredAction}: the row's kind must equal a fired action's `actionType`,
+ *      AND every identity field the row's `target_ids` names for that kind must match the fired
+ *      action's `actionParams`. A row without concrete target identity fails-closed.
+ *   3. TARGET-EXACT VERIFY — runs {@link verifyReconcileTargetExact}, NOT the broad
+ *      {@link verifyActionInDB}. `verifyActionInDB`'s `create_return` arm asks "does ANY
+ *      non-cancelled return exist on this ticket?" and its refund arms return `true` when
+ *      `shopify_order_id` is missing — either would false-close a row for a different order on
+ *      the same ticket. `verifyReconcileTargetExact` resolves the row's canonical order to a
+ *      specific `orders.id` and reads THAT row's state; subscription/coupon kinds hard-require
+ *      `contract_id` (+ `code`), never silent-`true` on missing identity.
+ *   4. If BOTH gates pass, CAS from the row's current status → `verified`. If either fails, the
+ *      row is left in its prior state (no false close on a broken read or a different target).
+ *
+ * Rows already `verified` are skipped. Rows in `done` are left alone (owned by whoever set them
+ * to done; the normal honor path completes them). Idempotent — a second call on the same state
+ * is a no-op.
+ *
+ * NEVER retries a failed row's dispatch. This helper ONLY re-reads live DB state and closes rows
+ * whose predicate the rescue action already made true. A caller who wants to actually re-fire a
+ * failed dispatch is on the honor path (authoring a fresh Direction / required-outcome row).
+ */
+export async function reconcileRequiredOutcomesForFiredActions(
+  ctx: HonorContext,
+  firedActions: readonly FiredActionRef[],
+): Promise<ReconcileSummary> {
+  const summary: ReconcileSummary = {
+    reconciled: [],
+    left_open: [],
+    skipped_kind_mismatch: 0,
+    skipped_already_verified: 0,
+  };
+  if (firedActions.length === 0) return summary;
+  const outcomes = await listRequiredOutcomes(ctx.admin, ctx.ticket_id, {
+    workspace_id: ctx.workspace_id,
+  });
+  const actionCtx = toActionContext(ctx);
+
+  for (const o of outcomes) {
+    const cls = classifyOutcomeForReconcile(o, firedActions);
+    if (cls.verdict === "skip_verified") {
+      summary.skipped_already_verified += 1;
+      continue;
+    }
+    if (cls.verdict === "skip_done") continue;
+    if (cls.verdict === "skip_kind_mismatch") {
+      summary.skipped_kind_mismatch += 1;
+      continue;
+    }
+    // verify_and_reconcile — a fired action's target identity matched the row. Now run the
+    // TARGET-EXACT verifier (NOT the broad verifyActionInDB) — the create_return arm of the
+    // broad predicate confirms any non-cancelled return on the ticket, and the refund arms
+    // return true when shopify_order_id is missing, either of which would false-close a row
+    // for a different order on the same ticket. The target-exact verifier resolves the row's
+    // canonical order to a specific orders.id and reads THAT row's state.
+    let verified = false;
+    try {
+      verified = await verifyReconcileTargetExact(ctx, o, cls.matched);
+    } catch (err) {
+      const _reason = errText(err);
+      void _reason;
+      verified = false;
+    }
+    if (!verified) {
+      summary.left_open.push({
+        outcome_id: o.id,
+        kind: o.kind,
+        description: o.description,
+        from_status: o.status as Exclude<RequiredOutcomeStatus, "verified" | "done">,
+        outcome: "left_open",
+      });
+      continue;
+    }
+    const updated = await markOutcomeVerified(ctx.admin, {
+      id: o.id,
+      workspace_id: ctx.workspace_id,
+      from: o.status as "pending" | "failed",
+    });
+    const result: OutcomeReconcileResult = {
+      outcome_id: o.id,
+      kind: o.kind,
+      description: o.description,
+      from_status: o.status as Exclude<RequiredOutcomeStatus, "verified" | "done">,
+      outcome: updated ? "verified" : "left_open",
+    };
+    if (updated) summary.reconciled.push(result);
+    else summary.left_open.push(result);
+  }
+
+  return summary;
 }
