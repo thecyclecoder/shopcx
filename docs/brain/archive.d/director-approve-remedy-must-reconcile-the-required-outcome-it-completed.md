@@ -1,0 +1,1 @@
+- **A CS Director approve_remedy that completes an action must reconcile the failed/pending required-outcome row it satisfied, so the completion gate stops re-escalating a fully-resolved ticket** · verified 2026-09-19 · → [[../libraries/cs-director]]
