@@ -27,6 +27,7 @@ import {
   honorSummaryToLedgerOutcome,
   classifyOutcomeForReconcile,
   findMatchingFiredAction,
+  planReconcileVerification,
 } from "./honor-required-outcomes";
 
 function fakeOutcome(overrides: Partial<TicketRequiredOutcome>): TicketRequiredOutcome {
@@ -521,4 +522,163 @@ test("classifyOutcomeForReconcile: FAILED row with empty target_ids → skip_kin
     { verdict: "skip_kind_mismatch" },
     "a row with no target identity must never reconcile — the reconciler would otherwise false-close via kind alone",
   );
+});
+
+// ── planReconcileVerification — TARGET-EXACT verifier planning (Fix 2 sec:real-vuln) ──
+// After Fix 1 the identity gate blocks obvious wrong-target rows, but the reconciler still
+// ran the BROAD verifyActionInDB — `create_return` verified any non-cancelled return on the
+// ticket (not the matched order), and refund arms returned true when `shopify_order_id` was
+// missing. Fix 2 replaces that broad predicate with a target-exact verifier whose PLAN
+// requires a canonical order/subscription/code identity before ANY DB read. These tests pin
+// the plan surface — the wire-in verifier only ever runs a plan the planner blessed.
+
+test("planReconcileVerification: create_return with order_number → check_return_for_order (verifier will resolve to orders.id and read returns bound to THAT id)", () => {
+  const row = fakeOutcome({ kind: "create_return", target_ids: { order_number: "SC138816" } });
+  const plan = planReconcileVerification(row, {
+    actionType: "create_return",
+    actionParams: { order_number: "SC138816" },
+  });
+  assert.equal(plan.kind, "check_return_for_order");
+  if (plan.kind === "check_return_for_order") {
+    assert.equal(plan.orderRef.order_number, "SC138816");
+    assert.equal(plan.orderRef.shopify_order_id, null);
+  }
+});
+
+test("planReconcileVerification: partial_refund with ONLY order_number → check_order_financial (verifier resolves to workspace-scoped orders.id and reads THAT financial_status — NOT the broad verifyActionInDB fallthrough)", () => {
+  const row = fakeOutcome({ kind: "partial_refund", target_ids: { order_number: "SC138816" } });
+  const plan = planReconcileVerification(row, {
+    actionType: "partial_refund",
+    actionParams: { order_number: "SC138816", amount_cents: 1500 },
+  });
+  assert.equal(plan.kind, "check_order_financial", "order_number-only refund must plan a target-exact orders read, NEVER auto-true");
+  if (plan.kind === "check_order_financial") {
+    assert.equal(plan.orderRef.order_number, "SC138816");
+    // If the fired action DID carry a shopify_order_id, we'd resolve on the more-specific field.
+    assert.equal(plan.orderRef.shopify_order_id, null);
+  }
+});
+
+test("planReconcileVerification: partial_refund with NEITHER order identity → insufficient_identity (Fix 2 fail-closed: no shopify_order_id + no order_number + no order_id means the broad verifyActionInDB would've returned true)", () => {
+  const row = fakeOutcome({ kind: "partial_refund", target_ids: { amount: 1500 } });
+  const plan = planReconcileVerification(row, {
+    actionType: "partial_refund",
+    actionParams: { amount_cents: 1500 },
+  });
+  assert.equal(plan.kind, "insufficient_identity");
+  if (plan.kind === "insufficient_identity") {
+    assert.match(plan.reason, /order identity/);
+  }
+});
+
+test("planReconcileVerification: create_return with NO order identity → insufficient_identity (the wrong-order create_return regression: broad verifyActionInDB would've confirmed any non-cancelled return on the ticket)", () => {
+  const row = fakeOutcome({ kind: "create_return", target_ids: {} });
+  const plan = planReconcileVerification(row, {
+    actionType: "create_return",
+    actionParams: {},
+  });
+  assert.equal(plan.kind, "insufficient_identity");
+});
+
+test("planReconcileVerification: cancel — contract_id present → check_sub_status(expected='cancelled')", () => {
+  const row = fakeOutcome({ kind: "cancel", target_ids: { contract_id: "gid://sub/1" } });
+  const plan = planReconcileVerification(row, {
+    actionType: "cancel",
+    actionParams: { contract_id: "gid://sub/1" },
+  });
+  assert.equal(plan.kind, "check_sub_status");
+  if (plan.kind === "check_sub_status") {
+    assert.equal(plan.contract_id, "gid://sub/1");
+    assert.equal(plan.expected, "cancelled");
+  }
+});
+
+test("planReconcileVerification: pause/crisis_pause map to expected='paused'", () => {
+  const rowP = fakeOutcome({ kind: "pause", target_ids: { contract_id: "gid://sub/1" } });
+  const planP = planReconcileVerification(rowP, { actionType: "pause", actionParams: { contract_id: "gid://sub/1" } });
+  assert.equal(planP.kind, "check_sub_status");
+  if (planP.kind === "check_sub_status") assert.equal(planP.expected, "paused");
+  const rowC = fakeOutcome({ kind: "crisis_pause", target_ids: { contract_id: "gid://sub/1" } });
+  const planC = planReconcileVerification(rowC, { actionType: "crisis_pause", actionParams: { contract_id: "gid://sub/1" } });
+  if (planC.kind === "check_sub_status") assert.equal(planC.expected, "paused");
+});
+
+test("planReconcileVerification: cancel — missing contract_id → insufficient_identity (fail-closed instead of the broad-predicate silent-true fallback)", () => {
+  const row = fakeOutcome({ kind: "cancel", target_ids: {} });
+  const plan = planReconcileVerification(row, { actionType: "cancel", actionParams: {} });
+  assert.equal(plan.kind, "insufficient_identity");
+});
+
+test("planReconcileVerification: apply_coupon — both contract_id AND code required, else insufficient", () => {
+  const row = fakeOutcome({
+    kind: "apply_coupon",
+    target_ids: { contract_id: "gid://sub/1", code: "SAVE15" },
+  });
+  const plan = planReconcileVerification(row, {
+    actionType: "apply_coupon",
+    actionParams: { contract_id: "gid://sub/1", code: "SAVE15" },
+  });
+  assert.equal(plan.kind, "check_coupon_applied");
+  if (plan.kind === "check_coupon_applied") {
+    assert.equal(plan.contract_id, "gid://sub/1");
+    assert.equal(plan.code, "SAVE15");
+  }
+
+  // Missing code
+  const rowNoCode = fakeOutcome({ kind: "apply_coupon", target_ids: { contract_id: "gid://sub/1" } });
+  const planNoCode = planReconcileVerification(rowNoCode, {
+    actionType: "apply_coupon",
+    actionParams: { contract_id: "gid://sub/1" }, // fired without code either
+  });
+  assert.equal(planNoCode.kind, "insufficient_identity");
+});
+
+test("planReconcileVerification: change_next_date requires contract_id + date", () => {
+  const row = fakeOutcome({ kind: "change_next_date", target_ids: { contract_id: "gid://sub/1" } });
+  const planWithDate = planReconcileVerification(row, {
+    actionType: "change_next_date",
+    actionParams: { contract_id: "gid://sub/1", date: "2026-10-15" },
+  });
+  assert.equal(planWithDate.kind, "check_sub_next_date");
+  if (planWithDate.kind === "check_sub_next_date") {
+    assert.equal(planWithDate.date, "2026-10-15");
+  }
+
+  const planNoDate = planReconcileVerification(row, {
+    actionType: "change_next_date",
+    actionParams: { contract_id: "gid://sub/1" },
+  });
+  assert.equal(planNoDate.kind, "insufficient_identity");
+});
+
+test("planReconcileVerification: unknown kind → insufficient_identity (an unrecognized kind never auto-verifies — a fresh Direction is required)", () => {
+  const row = fakeOutcome({ kind: "unrecognized_action", target_ids: { contract_id: "gid://x" } });
+  const plan = planReconcileVerification(row, {
+    actionType: "unrecognized_action",
+    actionParams: { contract_id: "gid://x" },
+  });
+  assert.equal(plan.kind, "insufficient_identity");
+});
+
+test("planReconcileVerification: full_order_refund → check_order_financial (identity-sensitive money kind)", () => {
+  const row = fakeOutcome({
+    kind: "full_order_refund",
+    target_ids: { shopify_order_id: "138816" },
+  });
+  const plan = planReconcileVerification(row, {
+    actionType: "full_order_refund",
+    actionParams: { shopify_order_id: "138816" },
+  });
+  assert.equal(plan.kind, "check_order_financial");
+  if (plan.kind === "check_order_financial") {
+    assert.equal(plan.orderRef.shopify_order_id, "138816");
+  }
+});
+
+test("planReconcileVerification: dollar_replacement + redeem_points_as_refund route through the same target-exact orders read", () => {
+  for (const kind of ["dollar_replacement", "redeem_points_as_refund"]) {
+    const row = fakeOutcome({ kind, target_ids: { order_number: "SC1" } });
+    const plan = planReconcileVerification(row, { actionType: kind, actionParams: { order_number: "SC1" } });
+    assert.equal(plan.kind, "check_order_financial", `${kind} must plan check_order_financial`);
+  }
 });
