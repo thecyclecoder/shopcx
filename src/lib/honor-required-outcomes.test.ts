@@ -26,6 +26,7 @@ import {
   outcomeToActionParams,
   honorSummaryToLedgerOutcome,
   classifyOutcomeForReconcile,
+  findMatchingFiredAction,
 } from "./honor-required-outcomes";
 
 function fakeOutcome(overrides: Partial<TicketRequiredOutcome>): TicketRequiredOutcome {
@@ -320,51 +321,204 @@ test("honorSummaryToLedgerOutcome: any carried_forward_failed → 'drifted'", ()
   assert.equal(outcome, "drifted");
 });
 
-// ── classifyOutcomeForReconcile ─────────────────────────────────────────
-// Ground-truth: ticket cc78ad94 — Sol's queue-executed create_return went to status='failed'
-// because the order-level coupon ceiling bug blocked it. June's approve_remedy then fired
-// create_return successfully. Before this reconciler existed, the failed row stayed failed
-// forever, keeping hasUnverifiedOutcomes=true and re-escalating the fully-resolved ticket
-// on every completion-gate tick.
+// ── findMatchingFiredAction (target-identity gate — security regression fix) ────────────────
+// The kind-only reconciler let a successful create_return on order A close a failed row for
+// order B on the SAME ticket, because `verifyActionInDB`'s create_return arm confirms ANY
+// non-cancelled return on the ticket. The security fix requires the fired action's actionParams
+// to match every identity field the row's target_ids names for that kind. Rows without concrete
+// target identity (target_ids={}) never match on an identity-sensitive kind — fail-closed leaves
+// the row open rather than false-close via kind alone.
 
-test("classifyOutcomeForReconcile: FAILED row + kind in firedKinds → verify_and_reconcile (cc78ad94 shape)", () => {
+test("findMatchingFiredAction: same kind + same order_number → matches (returns the fired action)", () => {
+  const row = fakeOutcome({
+    kind: "create_return",
+    target_ids: { order_number: "SC138816" },
+    status: "failed",
+  });
+  const match = findMatchingFiredAction(row, [
+    { actionType: "create_return", actionParams: { order_number: "SC138816" } },
+  ]);
+  assert.equal(match?.actionType, "create_return");
+});
+
+test("findMatchingFiredAction: same kind + DIFFERENT order_number → null (the security-regression case: order A rescue must NOT close order B's row)", () => {
+  const row = fakeOutcome({
+    kind: "create_return",
+    target_ids: { order_number: "SC138817" }, // row targets a DIFFERENT order
+    status: "failed",
+  });
+  const match = findMatchingFiredAction(row, [
+    { actionType: "create_return", actionParams: { order_number: "SC138816" } },
+  ]);
+  assert.equal(match, null, "same kind + different target must NEVER match — this is the pre-merge sec:real-vuln fix");
+});
+
+test("findMatchingFiredAction: different kind → null", () => {
+  const row = fakeOutcome({
+    kind: "apply_coupon",
+    target_ids: { contract_id: "gid://shopify/SC/1", code: "SAVE15" },
+    status: "pending",
+  });
+  const match = findMatchingFiredAction(row, [
+    { actionType: "create_return", actionParams: { order_number: "SC138816" } },
+  ]);
+  assert.equal(match, null);
+});
+
+test("findMatchingFiredAction: identity-sensitive kind with EMPTY target_ids → null (fail-closed — no identity, no proof of same target)", () => {
+  const row = fakeOutcome({
+    kind: "create_return",
+    target_ids: {}, // no identity — the row can't prove which order it tracked
+    status: "failed",
+  });
+  const match = findMatchingFiredAction(row, [
+    { actionType: "create_return", actionParams: { order_number: "SC138816" } },
+  ]);
+  assert.equal(match, null, "an empty target_ids on an identity-sensitive kind must never match — the reconciler would otherwise close on kind alone (the pre-merge sec:real-vuln)");
+});
+
+test("findMatchingFiredAction: partial_refund — same shopify_order_id matches", () => {
+  const row = fakeOutcome({
+    kind: "partial_refund",
+    target_ids: { shopify_order_id: "SC138816" },
+    status: "pending",
+  });
+  const match = findMatchingFiredAction(row, [
+    { actionType: "partial_refund", actionParams: { shopify_order_id: "SC138816", amount: 15 } },
+  ]);
+  assert.equal(match?.actionType, "partial_refund");
+});
+
+test("findMatchingFiredAction: apply_coupon — contract_id matches but code differs → null", () => {
+  const row = fakeOutcome({
+    kind: "apply_coupon",
+    target_ids: { contract_id: "gid://shopify/SC/1", code: "SAVE15" },
+    status: "failed",
+  });
+  const match = findMatchingFiredAction(row, [
+    { actionType: "apply_coupon", actionParams: { contract_id: "gid://shopify/SC/1", code: "SAVE20" } },
+  ]);
+  assert.equal(match, null, "apply_coupon has TWO identity fields — both must match");
+});
+
+test("findMatchingFiredAction: cancel — contract_id match on the correct subscription", () => {
+  const row = fakeOutcome({
+    kind: "cancel",
+    target_ids: { contract_id: "gid://shopify/SC/1" },
+    status: "pending",
+  });
+  const match = findMatchingFiredAction(row, [
+    { actionType: "cancel", actionParams: { contract_id: "gid://shopify/SC/2" } }, // different sub
+    { actionType: "cancel", actionParams: { contract_id: "gid://shopify/SC/1" } }, // the right one
+  ]);
+  assert.equal(match?.actionType, "cancel");
+  assert.equal((match?.actionParams as Record<string, unknown>).contract_id, "gid://shopify/SC/1");
+});
+
+test("findMatchingFiredAction: fired action MISSING the row's identity field → null (can't confirm same target)", () => {
+  const row = fakeOutcome({
+    kind: "create_return",
+    target_ids: { order_number: "SC138816" },
+    status: "failed",
+  });
+  const match = findMatchingFiredAction(row, [
+    { actionType: "create_return", actionParams: {} }, // fired without an order identity
+  ]);
+  assert.equal(match, null);
+});
+
+// ── classifyOutcomeForReconcile ─────────────────────────────────────────
+// Ground-truth: ticket cc78ad94 — Sol's create_return row (kind=create_return, target_ids
+// naming the target order) went to status='failed' because the order-level coupon ceiling bug
+// blocked it. June's approve_remedy then fired create_return successfully against the SAME
+// order. Before this reconciler existed the failed row stayed failed forever, keeping
+// hasUnverifiedOutcomes=true and re-escalating the fully-resolved ticket every tick.
+
+test("classifyOutcomeForReconcile: FAILED row + fired action with matching target → verify_and_reconcile (cc78ad94 shape)", () => {
   const row = fakeOutcome({
     id: "o-cc78",
     kind: "create_return",
-    description: "Sol enqueue-executed create_return",
+    description: "Sol authored create_return",
+    target_ids: { order_number: "SC138816" },
     status: "failed",
     failed_reason: "order-level coupon ceiling exceeded",
   });
-  const cls = classifyOutcomeForReconcile(row, new Set(["create_return"]));
-  assert.deepEqual(cls, { verdict: "verify_and_reconcile" });
+  const cls = classifyOutcomeForReconcile(row, [
+    { actionType: "create_return", actionParams: { order_number: "SC138816" } },
+  ]);
+  assert.equal(cls.verdict, "verify_and_reconcile");
+  assert.equal(
+    cls.verdict === "verify_and_reconcile" ? cls.matched.actionType : null,
+    "create_return",
+  );
 });
 
-test("classifyOutcomeForReconcile: PENDING row + kind in firedKinds → verify_and_reconcile", () => {
-  const row = fakeOutcome({ kind: "apply_coupon", status: "pending" });
-  const cls = classifyOutcomeForReconcile(row, new Set(["apply_coupon"]));
-  assert.deepEqual(cls, { verdict: "verify_and_reconcile" });
+test("classifyOutcomeForReconcile: FAILED row + fired action with DIFFERENT target → skip_kind_mismatch (the sec:real-vuln — never close order B's row from an order A rescue)", () => {
+  const row = fakeOutcome({
+    kind: "create_return",
+    target_ids: { order_number: "SC138817" }, // row is order B
+    status: "failed",
+  });
+  const cls = classifyOutcomeForReconcile(row, [
+    { actionType: "create_return", actionParams: { order_number: "SC138816" } }, // fired order A
+  ]);
+  assert.deepEqual(cls, { verdict: "skip_kind_mismatch" });
+});
+
+test("classifyOutcomeForReconcile: PENDING row + matching fired action → verify_and_reconcile", () => {
+  const row = fakeOutcome({
+    kind: "apply_coupon",
+    target_ids: { contract_id: "gid://x", code: "SAVE15" },
+    status: "pending",
+  });
+  const cls = classifyOutcomeForReconcile(row, [
+    { actionType: "apply_coupon", actionParams: { contract_id: "gid://x", code: "SAVE15" } },
+  ]);
+  assert.equal(cls.verdict, "verify_and_reconcile");
 });
 
 test("classifyOutcomeForReconcile: verified row → skip_verified (idempotent — never re-mark)", () => {
-  const row = fakeOutcome({ kind: "create_return", status: "verified" });
-  const cls = classifyOutcomeForReconcile(row, new Set(["create_return"]));
+  const row = fakeOutcome({ kind: "create_return", target_ids: { order_number: "SC1" }, status: "verified" });
+  const cls = classifyOutcomeForReconcile(row, [
+    { actionType: "create_return", actionParams: { order_number: "SC1" } },
+  ]);
   assert.deepEqual(cls, { verdict: "skip_verified" });
 });
 
 test("classifyOutcomeForReconcile: done row → skip_done (normal honor path owns done)", () => {
-  const row = fakeOutcome({ kind: "create_return", status: "done" });
-  const cls = classifyOutcomeForReconcile(row, new Set(["create_return"]));
+  const row = fakeOutcome({ kind: "create_return", target_ids: { order_number: "SC1" }, status: "done" });
+  const cls = classifyOutcomeForReconcile(row, [
+    { actionType: "create_return", actionParams: { order_number: "SC1" } },
+  ]);
   assert.deepEqual(cls, { verdict: "skip_done" });
 });
 
-test("classifyOutcomeForReconcile: FAILED row but kind not in firedKinds → skip_kind_mismatch (rescue didn't touch it)", () => {
-  const row = fakeOutcome({ kind: "apply_coupon", status: "failed" });
-  const cls = classifyOutcomeForReconcile(row, new Set(["create_return"]));
+test("classifyOutcomeForReconcile: FAILED row but no fired action of same kind → skip_kind_mismatch (rescue didn't touch it)", () => {
+  const row = fakeOutcome({ kind: "apply_coupon", target_ids: { contract_id: "gid://x", code: "SAVE15" }, status: "failed" });
+  const cls = classifyOutcomeForReconcile(row, [
+    { actionType: "create_return", actionParams: { order_number: "SC1" } },
+  ]);
   assert.deepEqual(cls, { verdict: "skip_kind_mismatch" });
 });
 
-test("classifyOutcomeForReconcile: FAILED row + empty firedKinds → skip_kind_mismatch (no reconciliation without evidence)", () => {
-  const row = fakeOutcome({ kind: "create_return", status: "failed" });
-  const cls = classifyOutcomeForReconcile(row, new Set<string>());
+test("classifyOutcomeForReconcile: FAILED row + empty firedActions → skip_kind_mismatch (no reconciliation without evidence)", () => {
+  const row = fakeOutcome({ kind: "create_return", target_ids: { order_number: "SC1" }, status: "failed" });
+  const cls = classifyOutcomeForReconcile(row, []);
   assert.deepEqual(cls, { verdict: "skip_kind_mismatch" });
+});
+
+test("classifyOutcomeForReconcile: FAILED row with empty target_ids → skip_kind_mismatch (fail-closed on target-less identity-sensitive rows — the sec:real-vuln)", () => {
+  const row = fakeOutcome({
+    kind: "create_return",
+    target_ids: {}, // Sol queue-executed rows before target_ids population — the wrong-target risk
+    status: "failed",
+  });
+  const cls = classifyOutcomeForReconcile(row, [
+    { actionType: "create_return", actionParams: { order_number: "SC138816" } },
+  ]);
+  assert.deepEqual(
+    cls,
+    { verdict: "skip_kind_mismatch" },
+    "a row with no target identity must never reconcile — the reconciler would otherwise false-close via kind alone",
+  );
 });

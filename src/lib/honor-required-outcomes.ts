@@ -319,35 +319,128 @@ export interface ReconcileSummary {
   skipped_already_verified: number;
 }
 
+/** A fired action a rescue path is offering to the reconciler for target-identity matching. */
+export interface FiredActionRef {
+  actionType: string;
+  actionParams: Record<string, unknown>;
+}
+
+/**
+ * Identity-field set per action kind — the concrete target-ids fields the reconciler REQUIRES to
+ * match a stored row against a fired action. Same-kind alone is INSUFFICIENT: `verifyActionInDB`'s
+ * broad arms (create_return in particular) confirm ANY non-cancelled return on the ticket, so a
+ * successful return on order A would false-close a failed row for order B on the same ticket
+ * without an identity guard. The set below is the "concrete target identity" for each kind — the
+ * fields that pin the row to a specific subscription / order / code the rescue must have targeted.
+ *
+ * A row whose kind is here MUST carry at least one of these fields on `target_ids` AND every
+ * present field must match the fired action's `actionParams` for the reconciler to run — an empty
+ * target_ids on an identity-sensitive kind fails-closed (leaves the row open).
+ */
+export const KIND_IDENTITY_FIELDS: Record<string, readonly string[]> = {
+  // Returns + refunds — target one specific order
+  create_return: ["order_id", "shopify_order_id", "order_number"],
+  partial_refund: ["order_id", "shopify_order_id", "order_number"],
+  redeem_points_as_refund: ["order_id", "shopify_order_id", "order_number"],
+  dollar_replacement: ["order_id", "shopify_order_id", "order_number"],
+  create_replacement_order: ["order_id", "shopify_order_id", "order_number"],
+  // Subscription mutations — target one specific contract
+  cancel: ["contract_id"],
+  pause: ["contract_id"],
+  crisis_pause: ["contract_id"],
+  resume: ["contract_id"],
+  change_next_date: ["contract_id"],
+  swap: ["contract_id"],
+  // Coupons — code AND (usually) contract_id
+  apply_coupon: ["contract_id", "code"],
+  remove_coupon: ["contract_id", "code"],
+};
+
+/**
+ * Pure target-identity match. Returns the fired action that has:
+ *   1. `actionType === row.kind`, AND
+ *   2. Every identity field the row's `target_ids` carries (from the kind's `KIND_IDENTITY_FIELDS`
+ *      set, or from `target_ids` itself when the kind isn't in the map) matches the fired
+ *      action's `actionParams`.
+ *
+ * Fail-closed shape:
+ *   - A row with EMPTY `target_ids` on an identity-sensitive kind never matches — the row can't
+ *     prove which order/subscription/code it tracked, so the reconciler leaves it open (a human
+ *     re-authors a fresh Direction to retry, per the terminal-failures-are-not-retried invariant).
+ *   - A fired action missing one of the row's identity fields never matches — we can't confirm
+ *     the fired action targeted the same object.
+ *   - Cross-key aliasing (row names `order_number`, fired names `shopify_order_id`) does NOT
+ *     match — the caller (`handleApproveRemedy`) normalizes upstream if a match is intended.
+ */
+export function findMatchingFiredAction(
+  row: TicketRequiredOutcome,
+  firedActions: readonly FiredActionRef[],
+): FiredActionRef | null {
+  const rowIds = (row.target_ids ?? {}) as Record<string, unknown>;
+  const isIdentitySensitive = row.kind in KIND_IDENTITY_FIELDS;
+  const knownFields = KIND_IDENTITY_FIELDS[row.kind];
+  // For an identity-sensitive kind: only compare the KNOWN identity fields the row carries.
+  // For an unknown kind: fall back to every non-empty field on the row's target_ids.
+  const candidateFields = knownFields ?? Object.keys(rowIds);
+  const rowPresent = candidateFields.filter((f) => {
+    const v = rowIds[f];
+    return v != null && v !== "";
+  });
+  // Fail-closed: an identity-sensitive kind whose row has no concrete identity fields cannot be
+  // matched. This is the sec:real-vuln fix — a target-less row on `create_return` would otherwise
+  // be closed on kind alone the moment ANY create_return fires on the ticket.
+  if (isIdentitySensitive && rowPresent.length === 0) return null;
+  // A kind not in the identity map with an empty target_ids: also fail closed. A row that names
+  // no target at all has no identity to prove same-target on.
+  if (rowPresent.length === 0) return null;
+
+  for (const fired of firedActions) {
+    if (fired.actionType !== row.kind) continue;
+    const params = fired.actionParams as Record<string, unknown>;
+    let allMatch = true;
+    for (const f of rowPresent) {
+      const rowVal = rowIds[f];
+      const firedVal = params[f];
+      if (firedVal == null || firedVal === "") { allMatch = false; break; }
+      if (String(firedVal) !== String(rowVal)) { allMatch = false; break; }
+    }
+    if (allMatch) return fired;
+  }
+  return null;
+}
+
 /** Per-row verdict from {@link classifyOutcomeForReconcile} — the pure classification step. */
 export type ReconcileClassification =
   | { verdict: "skip_verified" }
   | { verdict: "skip_done" }
   | { verdict: "skip_kind_mismatch" }
-  | { verdict: "verify_and_reconcile" };
+  | { verdict: "verify_and_reconcile"; matched: FiredActionRef };
 
 /**
- * Pure classification: given a stored required-outcome row and the set of action kinds a rescue
- * just fired, decide which reconcile branch the row falls into.
+ * Pure classification: given a stored required-outcome row and the fired actions a rescue just
+ * completed, decide which reconcile branch the row falls into.
  *   - `skip_verified`      — row is already closed. No work to do.
  *   - `skip_done`          — normal honor path owns `done`; the reconciler is only for the
  *                            pending-never-attempted / failed-terminal states the honor step
  *                            can't advance.
- *   - `skip_kind_mismatch` — the rescue didn't fire an action of this row's kind.
- *   - `verify_and_reconcile` — the row is a candidate; the caller runs `verifyActionInDB` and
- *                            marks it verified iff the live predicate holds.
+ *   - `skip_kind_mismatch` — no fired action matches this row's KIND *and* target identity. This
+ *                            arm covers the sec:real-vuln: a same-kind rescue on a DIFFERENT
+ *                            order/subscription MUST NOT close this row.
+ *   - `verify_and_reconcile` — a fired action matches the row's kind AND every identity field the
+ *                            row's target_ids carries; the caller runs `verifyActionInDB` and
+ *                            marks the row verified iff the live predicate holds.
  *
- * Kept pure so tests can drive each branch (verified / done / pending-mismatch / failed-match /
- * pending-match) without a DB or the executor's real verify.
+ * Kept pure so tests can drive each branch without a DB or the executor's real verify.
  */
 export function classifyOutcomeForReconcile(
   row: TicketRequiredOutcome,
-  firedKinds: Set<string>,
+  firedActions: readonly FiredActionRef[],
 ): ReconcileClassification {
   if (row.status === "verified") return { verdict: "skip_verified" };
   if (row.status === "done") return { verdict: "skip_done" };
-  if (!firedKinds.has(row.kind)) return { verdict: "skip_kind_mismatch" };
-  return { verdict: "verify_and_reconcile" };
+  const matched = findMatchingFiredAction(row, firedActions);
+  if (matched == null) return { verdict: "skip_kind_mismatch" };
+  return { verdict: "verify_and_reconcile", matched };
 }
 
 /**
@@ -358,17 +451,21 @@ export function classifyOutcomeForReconcile(
  * ticket_required_outcomes row sits in `status='failed'` and the outcome-completion gate keeps
  * `hasUnverifiedOutcomes=true` forever, re-escalating a fully-resolved ticket on every tick.
  *
- * This helper closes that loop:
+ * This helper closes that loop with a TARGET-IDENTITY GATE:
  *   1. Walks {@link listRequiredOutcomes} for the ticket.
- *   2. For each row whose `status` is `pending` or `failed` AND whose `kind` is in `firedKinds`:
- *      runs {@link verifyActionInDB} against the row's own action shape ({@link outcomeToActionParams}).
- *   3. If the live predicate holds → CAS from the row's current status → `verified`. If not → leave
- *      the row in its prior state (we never mark verified based on kind-match alone — the DB read
- *      is the sole evidence).
+ *   2. For each row whose `status` is `pending` or `failed`: calls {@link findMatchingFiredAction}
+ *      — the row's kind must equal a fired action's `actionType`, AND every identity field the
+ *      row's `target_ids` names for that kind must match the fired action's `actionParams`. A
+ *      row without concrete target identity on an identity-sensitive kind fails-closed (never
+ *      reconciled), which is the pre-merge `sec:real-vuln` fix — a successful create_return on
+ *      order A must never close a failed row for order B on the same ticket.
+ *   3. If matched, runs {@link verifyActionInDB} against the row's own action shape and CAS
+ *      transitions from the row's current status → `verified` iff the live predicate holds. If
+ *      not, leaves the row in its prior terminal state (no false close on a broken read).
  *
- * Rows already `verified` are skipped. Rows in `done` are left alone (owned by whoever set them to
- * done; the normal honor path completes them). Kinds outside `firedKinds` are skipped (the rescue
- * didn't touch them). Idempotent — a second call on the same state is a no-op.
+ * Rows already `verified` are skipped. Rows in `done` are left alone (owned by whoever set them
+ * to done; the normal honor path completes them). Idempotent — a second call on the same state
+ * is a no-op.
  *
  * NEVER retries a failed row's dispatch. This helper ONLY re-reads live DB state and closes rows
  * whose predicate the rescue action already made true. A caller who wants to actually re-fire a
@@ -376,7 +473,7 @@ export function classifyOutcomeForReconcile(
  */
 export async function reconcileRequiredOutcomesForFiredActions(
   ctx: HonorContext,
-  firedKinds: string[],
+  firedActions: readonly FiredActionRef[],
 ): Promise<ReconcileSummary> {
   const summary: ReconcileSummary = {
     reconciled: [],
@@ -384,15 +481,14 @@ export async function reconcileRequiredOutcomesForFiredActions(
     skipped_kind_mismatch: 0,
     skipped_already_verified: 0,
   };
-  if (firedKinds.length === 0) return summary;
-  const kindSet = new Set(firedKinds);
+  if (firedActions.length === 0) return summary;
   const outcomes = await listRequiredOutcomes(ctx.admin, ctx.ticket_id, {
     workspace_id: ctx.workspace_id,
   });
   const actionCtx = toActionContext(ctx);
 
   for (const o of outcomes) {
-    const cls = classifyOutcomeForReconcile(o, kindSet);
+    const cls = classifyOutcomeForReconcile(o, firedActions);
     if (cls.verdict === "skip_verified") {
       summary.skipped_already_verified += 1;
       continue;
@@ -402,7 +498,7 @@ export async function reconcileRequiredOutcomesForFiredActions(
       summary.skipped_kind_mismatch += 1;
       continue;
     }
-    // verify_and_reconcile
+    // verify_and_reconcile — a fired action's target identity matched the row.
     const action = outcomeToActionParams(o);
     let verified = false;
     try {

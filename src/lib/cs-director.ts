@@ -1481,22 +1481,29 @@ async function handleApproveRemedy(
       };
     }
 
-    // 7½. Reconcile PENDING/FAILED required-outcome rows the rescue just satisfied.
-    //     Ground-truth: ticket cc78ad94 — Sol's queue-executed create_return self-blocked (the
-    //     since-fixed order-level coupon ceiling bug) and its ticket_required_outcomes row went
-    //     status='failed'. June's approve_remedy then fired create_return successfully — a live
-    //     refund_return landed on the target order — but the failed tracking row was never
-    //     reconciled: [[honor-required-outcomes]] only transitions pending/done→verified, and
-    //     the approve_remedy handler authored no fresh row for the action it just completed. So
-    //     the Phase-4 [[outcome-completion-gate]] saw `hasUnverifiedOutcomes=true` and
-    //     re-escalated the fully-resolved ticket on every tick (3 June sessions burned).
-    //     This closes the loop: for every pending/failed row whose kind matches an action we
-    //     just fired AND whose live DB predicate holds via `verifyActionInDB`, CAS to `verified`.
+    // 7½. Reconcile PENDING/FAILED required-outcome rows the rescue just satisfied — with a
+    //     TARGET-IDENTITY GATE (pre-merge sec:real-vuln fix). Ground-truth: ticket cc78ad94 —
+    //     Sol's create_return row went status='failed' after the since-fixed order-level coupon
+    //     ceiling bug; June's approve_remedy fired create_return successfully on the same order
+    //     — but the failed tracking row was never reconciled: [[honor-required-outcomes]] only
+    //     transitions pending/done→verified, and the approve_remedy handler authored no fresh
+    //     row for the action it just completed. So the Phase-4 [[outcome-completion-gate]] saw
+    //     `hasUnverifiedOutcomes=true` and re-escalated the fully-resolved ticket every tick
+    //     (3 June sessions burned).
+    //     Pass the full `planned.plan.actions` (actionType + actionParams) so the reconciler can
+    //     require target IDENTITY match (not just same kind) — `verifyActionInDB`'s create_return
+    //     arm confirms ANY non-cancelled return on the ticket, so a rescue on order A would
+    //     otherwise false-close a failed row for order B on the same ticket. See
+    //     [[honor-required-outcomes]] `findMatchingFiredAction`.
     //     Best-effort — a throw here never blocks the customer message that IS ready to ship.
     try {
       const { reconcileRequiredOutcomesForFiredActions } = await import(
         "@/lib/honor-required-outcomes"
       );
+      const firedActions = planned.plan.actions.map((a) => ({
+        actionType: a.actionType,
+        actionParams: a.actionParams,
+      }));
       const reconcile = await reconcileRequiredOutcomesForFiredActions(
         {
           admin,
@@ -1506,7 +1513,7 @@ async function handleApproveRemedy(
           channel: ctx.channel,
           sandbox,
         },
-        plannedActionTypes,
+        firedActions,
       );
       if (reconcile.reconciled.length > 0) {
         const names = reconcile.reconciled
