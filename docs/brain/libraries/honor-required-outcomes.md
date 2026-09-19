@@ -18,6 +18,8 @@
 | `outcomeToActionParams(outcome)` | pure | Builds an [[action-executor]] `ActionParams` from a stored row — `{type: kind, ...target_ids}`. |
 | `honorRequiredOutcomes(ctx)` | wire-in | Top-level honor pass. Walks pending items in authored order, calls `decideOutcome` per item, marks status via [[ticket-required-outcomes]] CAS transitions, returns `HonorSummary`. |
 | `honorSummaryToLedgerOutcome(summary)` | pure | Maps `HonorSummary` → [[../tables/ticket_resolution_events]] `verified_outcome` enum (`confirmed` \| `drifted` \| `unbacked`). |
+| `classifyOutcomeForReconcile(row, firedKinds)` | pure | Per-row branch decision for the reconcile pass: `skip_verified` \| `skip_done` \| `skip_kind_mismatch` \| `verify_and_reconcile`. |
+| `reconcileRequiredOutcomesForFiredActions(ctx, firedKinds)` | wire-in | After a rescue action fires, walks pending/failed rows whose kind is in `firedKinds` and CAS-transitions them to `verified` when the live [[action-executor]] `verifyActionInDB` predicate holds. The **failed→verified** path the honor step deliberately doesn't cover — the honor step treats a failed row as terminal and never re-dispatches; the reconciler only READS live DB state to close a row whose predicate the rescue already made true. |
 
 ## Ordering invariant
 
@@ -50,6 +52,13 @@ Phase 2 lands the SDK; wire-in sites land as later phases:
 - **Verify is never called on a failed dispatch.** `decideOutcome` short-circuits after `dispatch` returns `success=false` or throws — the executor's `verifyActionInDB` reads a real DB, so a probe on an action that never fired would be a false negative (and a wasted round-trip). The test `decideOutcome: verify is NEVER called if dispatch returned success=false` pins this.
 - **A `done` row is not ship-worthy.** `done` means the handler returned success but the DB verify hasn't confirmed. The Phase-3 send guard treats it the same as `pending` — a reply that claims a done outcome is still asserting an unverified DB state.
 - **Terminal failures are not retried.** `honorRequiredOutcomes` surfaces `carried_forward_failed` items in the summary but never re-fires a `failed` row. A caller who wants to retry authors a fresh Direction (which authors a fresh required-outcome row) — never an in-place status reset of a landed failure.
+- **The reconciler NEVER re-dispatches.** `reconcileRequiredOutcomesForFiredActions` only READS live DB state (via `verifyActionInDB`) and CAS-transitions a row from `pending`/`failed` → `verified` when the predicate holds. A row whose predicate does NOT hold is left in its prior state — kind-match alone is never sufficient to close a row. This keeps the "failed = terminal, never silently retried" invariant intact while still closing rows whose predicate a subsequent rescue action already made true.
+
+## Reconciliation (CS Director approve_remedy)
+
+`reconcileRequiredOutcomesForFiredActions` is the failed→verified path the honor step deliberately doesn't cover. When a CS Director approve_remedy (via [[cs-director]] `applyBoxCsDirectorCall` → `handleApproveRemedy`) fires an action that RESCUES a ticket, the tracking [[../tables/ticket_required_outcomes]] row Sol originally authored is often still in `status='failed'` (Sol's earlier queue-executed attempt blew up on a since-fixed rail — the ground-truth incident is ticket cc78ad94, where Sol's `create_return` self-blocked on the order-level coupon ceiling bug). The honor step's rule that terminal failures are not retried leaves the row failed forever, keeping [[ticket-required-outcomes]] `hasUnverifiedOutcomes=true` and [[outcome-completion-gate]] re-escalating the fully-resolved ticket on every tick.
+
+The reconciler runs on `handleApproveRemedy`'s success path (after `executeSonnetDecision` returns without escalation). For each pending/failed row whose `kind` is in the fired-action set, it re-runs `verifyActionInDB` against the row's own action shape (`outcomeToActionParams`). If the live predicate holds — the director's rescue satisfied THIS row's target — CAS from the row's current status → `verified`. If not, the row is left as-is (no false close on a broken read or a different target). The pass writes an internal `[cs-director/approve_remedy] Reconciled N required-outcome row(s)…` sysNote naming each closed row.
 
 ## Test + migration
 - Tests: `npx tsx --test src/lib/honor-required-outcomes.test.ts` (22 tests: decideOutcome permutations, replyGateBlocked branches, Judy ordering + failure).

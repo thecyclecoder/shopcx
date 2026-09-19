@@ -1481,6 +1481,49 @@ async function handleApproveRemedy(
       };
     }
 
+    // 7½. Reconcile PENDING/FAILED required-outcome rows the rescue just satisfied.
+    //     Ground-truth: ticket cc78ad94 — Sol's queue-executed create_return self-blocked (the
+    //     since-fixed order-level coupon ceiling bug) and its ticket_required_outcomes row went
+    //     status='failed'. June's approve_remedy then fired create_return successfully — a live
+    //     refund_return landed on the target order — but the failed tracking row was never
+    //     reconciled: [[honor-required-outcomes]] only transitions pending/done→verified, and
+    //     the approve_remedy handler authored no fresh row for the action it just completed. So
+    //     the Phase-4 [[outcome-completion-gate]] saw `hasUnverifiedOutcomes=true` and
+    //     re-escalated the fully-resolved ticket on every tick (3 June sessions burned).
+    //     This closes the loop: for every pending/failed row whose kind matches an action we
+    //     just fired AND whose live DB predicate holds via `verifyActionInDB`, CAS to `verified`.
+    //     Best-effort — a throw here never blocks the customer message that IS ready to ship.
+    try {
+      const { reconcileRequiredOutcomesForFiredActions } = await import(
+        "@/lib/honor-required-outcomes"
+      );
+      const reconcile = await reconcileRequiredOutcomesForFiredActions(
+        {
+          admin,
+          workspace_id: workspaceId,
+          ticket_id: ticketId,
+          customer_id: facts.customer_id,
+          channel: ctx.channel,
+          sandbox,
+        },
+        plannedActionTypes,
+      );
+      if (reconcile.reconciled.length > 0) {
+        const names = reconcile.reconciled
+          .map((r) => `${r.kind}[${r.from_status}→verified]`)
+          .join(", ");
+        await sysNote(
+          `Reconciled ${reconcile.reconciled.length} required-outcome row(s) against live DB: ${names}`,
+        );
+      }
+    } catch (e) {
+      // Never fail the approve_remedy over an audit-shaped write. The customer's remedy already
+      // fired + verified; a reconciliation gap only leaves the outcome-completion gate closed a
+      // bit longer (a human can reopen or the next honor pass clears it) — never a false close
+      // or a missed customer message.
+      console.warn(`${tag} approve_remedy reconcile threw (non-fatal): ${errText(e)}`);
+    }
+
     // 8. Success path: EVERY action in the batch verified — deliver the customer message. If June
     //    did not include one (rare — the prompt strongly implies one on approve_remedy, but the
     //    shape is Record<string, unknown> so it can be missing), we still return ok — the actions

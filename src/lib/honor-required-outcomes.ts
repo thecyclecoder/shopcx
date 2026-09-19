@@ -28,6 +28,7 @@ import {
   markOutcomeVerified,
   markOutcomeFailed,
   type TicketRequiredOutcome,
+  type RequiredOutcomeStatus,
 } from "./ticket-required-outcomes";
 
 /** The subset of {@link ActionContext} the honor step needs to synthesize a real ActionContext. */
@@ -295,4 +296,149 @@ export function honorSummaryToLedgerOutcome(
   // Fallback — not_verified with no failed items shouldn't happen with the current logic, but
   // treat it as 'unbacked' (the send guard's shape) so callers can still make progress.
   return "unbacked";
+}
+
+/** One row the reconciler touched (or considered) on the approve_remedy success path. */
+export interface OutcomeReconcileResult {
+  outcome_id: string;
+  kind: string;
+  description: string;
+  from_status: Exclude<RequiredOutcomeStatus, "verified">;
+  /** `verified` means the CAS from `from_status` → `verified` landed. `left_open` means the live
+   * DB predicate did NOT hold, so the row was left in its prior terminal state (no false close). */
+  outcome: "verified" | "left_open";
+}
+
+/** Rollup of one reconcile pass. */
+export interface ReconcileSummary {
+  reconciled: OutcomeReconcileResult[];
+  left_open: OutcomeReconcileResult[];
+  /** Rows whose kind wasn't in the fired-kinds set — untouched. */
+  skipped_kind_mismatch: number;
+  /** Rows already verified when the reconciler ran — untouched. */
+  skipped_already_verified: number;
+}
+
+/** Per-row verdict from {@link classifyOutcomeForReconcile} — the pure classification step. */
+export type ReconcileClassification =
+  | { verdict: "skip_verified" }
+  | { verdict: "skip_done" }
+  | { verdict: "skip_kind_mismatch" }
+  | { verdict: "verify_and_reconcile" };
+
+/**
+ * Pure classification: given a stored required-outcome row and the set of action kinds a rescue
+ * just fired, decide which reconcile branch the row falls into.
+ *   - `skip_verified`      — row is already closed. No work to do.
+ *   - `skip_done`          — normal honor path owns `done`; the reconciler is only for the
+ *                            pending-never-attempted / failed-terminal states the honor step
+ *                            can't advance.
+ *   - `skip_kind_mismatch` — the rescue didn't fire an action of this row's kind.
+ *   - `verify_and_reconcile` — the row is a candidate; the caller runs `verifyActionInDB` and
+ *                            marks it verified iff the live predicate holds.
+ *
+ * Kept pure so tests can drive each branch (verified / done / pending-mismatch / failed-match /
+ * pending-match) without a DB or the executor's real verify.
+ */
+export function classifyOutcomeForReconcile(
+  row: TicketRequiredOutcome,
+  firedKinds: Set<string>,
+): ReconcileClassification {
+  if (row.status === "verified") return { verdict: "skip_verified" };
+  if (row.status === "done") return { verdict: "skip_done" };
+  if (!firedKinds.has(row.kind)) return { verdict: "skip_kind_mismatch" };
+  return { verdict: "verify_and_reconcile" };
+}
+
+/**
+ * Reconcile a ticket's PENDING and FAILED required-outcome rows against live DB state after a
+ * rescue action fired. The CS Director approve_remedy path is the primary caller — when June
+ * rescues a ticket whose earlier Sol-authored action self-blocked (the `create_return` order-level
+ * coupon ceiling bug on ticket cc78ad94 is the ground-truth incident), the tracking
+ * ticket_required_outcomes row sits in `status='failed'` and the outcome-completion gate keeps
+ * `hasUnverifiedOutcomes=true` forever, re-escalating a fully-resolved ticket on every tick.
+ *
+ * This helper closes that loop:
+ *   1. Walks {@link listRequiredOutcomes} for the ticket.
+ *   2. For each row whose `status` is `pending` or `failed` AND whose `kind` is in `firedKinds`:
+ *      runs {@link verifyActionInDB} against the row's own action shape ({@link outcomeToActionParams}).
+ *   3. If the live predicate holds → CAS from the row's current status → `verified`. If not → leave
+ *      the row in its prior state (we never mark verified based on kind-match alone — the DB read
+ *      is the sole evidence).
+ *
+ * Rows already `verified` are skipped. Rows in `done` are left alone (owned by whoever set them to
+ * done; the normal honor path completes them). Kinds outside `firedKinds` are skipped (the rescue
+ * didn't touch them). Idempotent — a second call on the same state is a no-op.
+ *
+ * NEVER retries a failed row's dispatch. This helper ONLY re-reads live DB state and closes rows
+ * whose predicate the rescue action already made true. A caller who wants to actually re-fire a
+ * failed dispatch is on the honor path (authoring a fresh Direction / required-outcome row).
+ */
+export async function reconcileRequiredOutcomesForFiredActions(
+  ctx: HonorContext,
+  firedKinds: string[],
+): Promise<ReconcileSummary> {
+  const summary: ReconcileSummary = {
+    reconciled: [],
+    left_open: [],
+    skipped_kind_mismatch: 0,
+    skipped_already_verified: 0,
+  };
+  if (firedKinds.length === 0) return summary;
+  const kindSet = new Set(firedKinds);
+  const outcomes = await listRequiredOutcomes(ctx.admin, ctx.ticket_id, {
+    workspace_id: ctx.workspace_id,
+  });
+  const actionCtx = toActionContext(ctx);
+
+  for (const o of outcomes) {
+    const cls = classifyOutcomeForReconcile(o, kindSet);
+    if (cls.verdict === "skip_verified") {
+      summary.skipped_already_verified += 1;
+      continue;
+    }
+    if (cls.verdict === "skip_done") continue;
+    if (cls.verdict === "skip_kind_mismatch") {
+      summary.skipped_kind_mismatch += 1;
+      continue;
+    }
+    // verify_and_reconcile
+    const action = outcomeToActionParams(o);
+    let verified = false;
+    try {
+      verified = await verifyActionInDB(actionCtx, action);
+    } catch (err) {
+      // verifyActionInDB threw — treat as "predicate did not hold". The failed row stays failed;
+      // the pending row stays pending. Never a false close on a broken read.
+      const _reason = errText(err);
+      void _reason;
+      verified = false;
+    }
+    if (!verified) {
+      summary.left_open.push({
+        outcome_id: o.id,
+        kind: o.kind,
+        description: o.description,
+        from_status: o.status as Exclude<RequiredOutcomeStatus, "verified" | "done">,
+        outcome: "left_open",
+      });
+      continue;
+    }
+    const updated = await markOutcomeVerified(ctx.admin, {
+      id: o.id,
+      workspace_id: ctx.workspace_id,
+      from: o.status as "pending" | "failed",
+    });
+    const result: OutcomeReconcileResult = {
+      outcome_id: o.id,
+      kind: o.kind,
+      description: o.description,
+      from_status: o.status as Exclude<RequiredOutcomeStatus, "verified" | "done">,
+      outcome: updated ? "verified" : "left_open",
+    };
+    if (updated) summary.reconciled.push(result);
+    else summary.left_open.push(result);
+  }
+
+  return summary;
 }

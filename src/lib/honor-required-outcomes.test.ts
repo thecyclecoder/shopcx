@@ -25,6 +25,7 @@ import {
   replyGateBlocked,
   outcomeToActionParams,
   honorSummaryToLedgerOutcome,
+  classifyOutcomeForReconcile,
 } from "./honor-required-outcomes";
 
 function fakeOutcome(overrides: Partial<TicketRequiredOutcome>): TicketRequiredOutcome {
@@ -317,4 +318,53 @@ test("honorSummaryToLedgerOutcome: any carried_forward_failed → 'drifted'", ()
     carried_forward_failed: [{ outcome_id: "x", kind: "cancel", description: "cancel next box", final_status: "failed" }],
   });
   assert.equal(outcome, "drifted");
+});
+
+// ── classifyOutcomeForReconcile ─────────────────────────────────────────
+// Ground-truth: ticket cc78ad94 — Sol's queue-executed create_return went to status='failed'
+// because the order-level coupon ceiling bug blocked it. June's approve_remedy then fired
+// create_return successfully. Before this reconciler existed, the failed row stayed failed
+// forever, keeping hasUnverifiedOutcomes=true and re-escalating the fully-resolved ticket
+// on every completion-gate tick.
+
+test("classifyOutcomeForReconcile: FAILED row + kind in firedKinds → verify_and_reconcile (cc78ad94 shape)", () => {
+  const row = fakeOutcome({
+    id: "o-cc78",
+    kind: "create_return",
+    description: "Sol enqueue-executed create_return",
+    status: "failed",
+    failed_reason: "order-level coupon ceiling exceeded",
+  });
+  const cls = classifyOutcomeForReconcile(row, new Set(["create_return"]));
+  assert.deepEqual(cls, { verdict: "verify_and_reconcile" });
+});
+
+test("classifyOutcomeForReconcile: PENDING row + kind in firedKinds → verify_and_reconcile", () => {
+  const row = fakeOutcome({ kind: "apply_coupon", status: "pending" });
+  const cls = classifyOutcomeForReconcile(row, new Set(["apply_coupon"]));
+  assert.deepEqual(cls, { verdict: "verify_and_reconcile" });
+});
+
+test("classifyOutcomeForReconcile: verified row → skip_verified (idempotent — never re-mark)", () => {
+  const row = fakeOutcome({ kind: "create_return", status: "verified" });
+  const cls = classifyOutcomeForReconcile(row, new Set(["create_return"]));
+  assert.deepEqual(cls, { verdict: "skip_verified" });
+});
+
+test("classifyOutcomeForReconcile: done row → skip_done (normal honor path owns done)", () => {
+  const row = fakeOutcome({ kind: "create_return", status: "done" });
+  const cls = classifyOutcomeForReconcile(row, new Set(["create_return"]));
+  assert.deepEqual(cls, { verdict: "skip_done" });
+});
+
+test("classifyOutcomeForReconcile: FAILED row but kind not in firedKinds → skip_kind_mismatch (rescue didn't touch it)", () => {
+  const row = fakeOutcome({ kind: "apply_coupon", status: "failed" });
+  const cls = classifyOutcomeForReconcile(row, new Set(["create_return"]));
+  assert.deepEqual(cls, { verdict: "skip_kind_mismatch" });
+});
+
+test("classifyOutcomeForReconcile: FAILED row + empty firedKinds → skip_kind_mismatch (no reconciliation without evidence)", () => {
+  const row = fakeOutcome({ kind: "create_return", status: "failed" });
+  const cls = classifyOutcomeForReconcile(row, new Set<string>());
+  assert.deepEqual(cls, { verdict: "skip_kind_mismatch" });
 });
