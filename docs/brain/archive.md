@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **A CS Director approve_remedy that completes an action must reconcile the failed/pending required-outcome row it satisfied, so the completion gate stops re-escalating a fully-resolved ticket** · verified 2026-09-19 · → [[../libraries/cs-director]]
 - **A director remedy must be executable when it can be** · verified 2026-09-18 · → [[../libraries/june-remedy-approval]] · [[../libraries/cs-director]]
 - **A refunded order must say it was refunded** · verified 2026-09-18 · → [[../lifecycles/return-pipeline]]
 - **A renewal cycle key must not derive from a field the charge moves** · verified 2026-09-18 · → [[../libraries/subscription-cycle-charge-claim]] + [[../inngest/internal-subscription-renewals]]
