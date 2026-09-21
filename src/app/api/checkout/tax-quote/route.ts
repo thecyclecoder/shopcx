@@ -24,6 +24,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { resolveRateForCart } from "@/lib/shipping-rates";
 import { createTransaction } from "@/lib/avalara";
 import { buildAvalaraLines, type CartLineForTax } from "@/lib/avalara-cart";
+import { resolveCustomerTaxExemption } from "@/lib/customer-tax-exemptions";
 
 interface AddressInput {
   address1?: string;
@@ -122,6 +123,16 @@ export async function POST(request: NextRequest) {
     .maybeSingle();
   const customerCode = cartFull?.customer_id || cartFull?.email || `cart-${body.cart_token}`;
 
+  // Phase 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md — resolve the
+  // buyer's live sales-tax exemption for the ship-to region, if we can identify the buyer at
+  // quote time. A cart without a customer_id (guest browsing) sees a null resolution and full
+  // taxable quote — the same customer's first *committed* checkout runs the same resolver in
+  // /api/checkout/route.ts. The resolver honors expires_at.
+  const shipRegion = addr.province_code!.toUpperCase();
+  const exemption = cartFull?.customer_id
+    ? await resolveCustomerTaxExemption(admin, cart.workspace_id as string, cartFull.customer_id as string, shipRegion)
+    : null;
+
   // Avalara caps `code` at 50 chars. Cart tokens are 48 hex chars,
   // so `cart-{token}` overflows. Truncate the token; the leading
   // 24 hex chars (96 bits) is still unique enough for a non-filing
@@ -138,10 +149,12 @@ export async function POST(request: NextRequest) {
       line1: addr.address1!,
       line2: addr.address2,
       city: addr.city!,
-      region: addr.province_code!.toUpperCase(),
+      region: shipRegion,
       postalCode: addr.zip!,
       country: (addr.country_code || "US").toUpperCase(),
     },
+    exemptionNo: exemption?.exemptionNo,
+    entityUseCode: exemption?.entityUseCode,
   });
 
   if (!result.success) {

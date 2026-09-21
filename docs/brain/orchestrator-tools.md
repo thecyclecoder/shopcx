@@ -90,6 +90,9 @@ Sonnet returns `{action_type, actions: [...]}` with the action type and params; 
 - `close_ticket` — explicit close (e.g. OOO auto-reply handling); `_closedThisRun` flag set so the post-execute path doesn't reopen
 - `deactivate_ticket` — soft-deactivate (used for system-generated tickets that don't need a human reply)
 
+### Tax exemption
+- `record_tax_exemption` `{exemption_no, entity_use_code, jurisdiction_region, expires_at?, notes?}` — record a per-customer sales-tax exemption certificate from a ticket. Writes via the SDK chokepoint [[libraries/customer-tax-exemptions|recordCustomerTaxExemption]] which validates the shape and enforces the partial UNIQUE on `(customer_id, jurisdiction_region) WHERE revoked_at IS NULL`. **⭐ Founder-approval-only** (same rail as `full_order_refund`): recording an exemption decides whether we collect tax from the buyer going forward, so the handler REFUSES to fire unless `_founderApprovedTaxExemption` is set on the `ActionContext`. The only sanctioned path is a founder-approved [[june-remedy-approval]] card that flips the flag. Direct dispatch from a Sonnet `direct_action` / journey / playbook / workflow reaches the handler with the flag unset and gets `success:false`, escalating instead. An AI agent must never mark an account tax-exempt on a customer's say-so alone — the certificate is the evidence. `entity_use_code` MUST be verified against Avalara's `/definitions/entityusecodes` endpoint by the approval UI before offering it as a choice; an unrecognized code silently downgrades to fully-taxable at Avalara. See [[specs/a-customer-can-be-recorded-as-sales-tax-exempt]] Phase 3 + [[tables/customer_tax_exemptions]].
+
 ### Action types vs handler dispatch
 
 `SonnetDecision.action_type` is one of:

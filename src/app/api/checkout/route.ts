@@ -59,6 +59,7 @@ import { checkOrderForFraud } from "@/lib/fraud-detector";
 import { buildPackingSlipMessage } from "@/lib/packing-slip-message";
 import { createTransaction as createAvalaraTx } from "@/lib/avalara";
 import { buildAvalaraLines } from "@/lib/avalara-cart";
+import { resolveCustomerTaxExemption } from "@/lib/customer-tax-exemptions";
 import crypto from "crypto";
 
 interface AddressInput {
@@ -290,6 +291,21 @@ export async function POST(request: NextRequest) {
         protectionTitle,
       });
       if (avalaraLines.length > 0) {
+        // Phase 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md —
+        // resolve the buyer's live sales-tax exemption for the ship-to region. Look up by email
+        // (the customer row is created later in this route; on a returning buyer it already
+        // exists). Guest / first-order buyers with no prior record see a null resolution and a
+        // normal fully-taxable commit.
+        const commitRegion = ship.province_code!.toUpperCase();
+        const { data: exemptCustomer } = await admin
+          .from("customers")
+          .select("id")
+          .eq("workspace_id", cart.workspace_id)
+          .ilike("email", customerEmailForAvalara)
+          .maybeSingle();
+        const commitExemption = exemptCustomer?.id
+          ? await resolveCustomerTaxExemption(admin, cart.workspace_id, exemptCustomer.id as string, commitRegion)
+          : null;
         const avalaraResult = await createAvalaraTx(cart.workspace_id, {
           code: orderNumber,
           customerCode: customerEmailForAvalara,
@@ -301,10 +317,12 @@ export async function POST(request: NextRequest) {
             line1: ship.address1!,
             line2: ship.address2,
             city: ship.city!,
-            region: ship.province_code!.toUpperCase(),
+            region: commitRegion,
             postalCode: ship.zip!,
             country: (ship.country_code || "US").toUpperCase(),
           },
+          exemptionNo: commitExemption?.exemptionNo,
+          entityUseCode: commitExemption?.entityUseCode,
         });
         if (avalaraResult.success) {
           taxCents = avalaraResult.totalTaxCents ?? 0;

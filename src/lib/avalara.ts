@@ -50,6 +50,26 @@ export interface CreateTransactionParams {
   shipTo: AvalaraAddress;
   commit: boolean;          // false = quote, true = lock in for filing
   type?: "SalesOrder" | "SalesInvoice" | "ReturnOrder" | "ReturnInvoice";
+  /**
+   * Phase 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md.
+   * The certificate reference the buyer holds for this jurisdiction — Avalara's `exemptionNo`
+   * request field. Pass alongside `entityUseCode`; both come from the SDK reader
+   * [[../lib/customer-tax-exemptions]] `resolveCustomerTaxExemption`. When absent, tax is
+   * calculated as normal. When present + resolvable + non-expired, Avalara zeroes tax at the
+   * source for this transaction (and future ones with the same customerCode, since customerCode
+   * is the buyer's email — Avalara's stable exemption key).
+   */
+  exemptionNo?: string;
+  /**
+   * Phase 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md.
+   * Avalara's stable reason code for WHY the buyer is exempt (e.g. Oklahoma 100% disabled
+   * veteran, reseller, government purchase). MUST match Avalara's definitions endpoint or
+   * Avalara silently downgrades the transaction to fully-taxable with a 200 OK — the trap
+   * documented on [[../integrations/avalara]] § Silent-degrade. Never guessed from memory; the
+   * Phase-3 support UX MUST verify the code against `/definitions/entityusecodes` before
+   * offering it as a choice.
+   */
+  entityUseCode?: string;
 }
 
 export interface CreateTransactionResult {
@@ -155,6 +175,15 @@ export async function createTransaction(
       itemCode: l.itemCode,
     })),
     commit: params.commit,
+    // Phase 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md — the buyer's
+    // recorded certificate + reason code, from the SDK reader resolveCustomerTaxExemption. Only
+    // set when the caller actually resolved a LIVE exemption for this transaction; a legitimately
+    // taxed buyer sees these fields OMITTED and Avalara computes tax normally. `exemptionNo` +
+    // `entityUseCode` are the exact Avalara request-body keys — Avalara zeroes tax on the
+    // transaction when they resolve against a known reason code (docs.avalara.com AvaTax
+    // /transactions/createoradjust API reference).
+    ...(params.exemptionNo ? { exemptionNo: params.exemptionNo } : {}),
+    ...(params.entityUseCode ? { entityUseCode: params.entityUseCode } : {}),
   };
 
   const res = await fetch(`${host}${API_VERSION}/transactions/createoradjust`, {
