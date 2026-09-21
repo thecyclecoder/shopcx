@@ -25,6 +25,7 @@ import { readSessionFromRequest } from "@/lib/auth-session";
 import { linkGroupIds } from "@/lib/customer-links";
 import { resolveBraintreeCustomerId, savePaymentMethod, vaultPaymentMethod, VaultCreateError } from "@/lib/integrations/braintree-customer";
 import { triggerNewCardRecovery } from "@/lib/dunning";
+import { errText } from "@/lib/error-text";
 
 export async function GET(request: NextRequest) {
   const cartToken = request.nextUrl.searchParams.get("cart_token");
@@ -142,7 +143,7 @@ export async function POST(request: NextRequest) {
     if (err instanceof VaultCreateError) {
       return NextResponse.json({ error: err.code, message: err.message }, { status: 402 });
     }
-    return NextResponse.json({ error: "vault_failed", message: err instanceof Error ? err.message : String(err) }, { status: 500 });
+    return NextResponse.json({ error: "vault_failed", message: errText(err) }, { status: 500 });
   }
 
   const saved = await savePaymentMethod({
