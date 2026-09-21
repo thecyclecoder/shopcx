@@ -1036,6 +1036,12 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         shippingMethodLabel: (ctx.sub.shipping_method_code as string | null) || "Shipping",
         protectionCents,
         customerEmail: ctx.customer.email || null,
+        // Phase 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md — pass
+        // the customer_id so commitSubscriptionRenewalTax can resolve the buyer's live
+        // exemption via the SDK reader (honors expires_at). Belt-and-suspenders against the
+        // quote-then-commit race — a certificate revoked between the portal quote and this
+        // commit charges the correct tax on the renewal.
+        customerId: ctx.customer.id || null,
       });
     });
     const taxCents = taxResult?.tax_cents ?? 0;

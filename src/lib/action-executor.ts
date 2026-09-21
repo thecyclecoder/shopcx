@@ -155,6 +155,16 @@ export interface ActionParams {
     price_override_cents?: number | null;
   }>;
   next_billing_date?: string;
+  // record_tax_exemption — Phase 3 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md.
+  // Records a per-customer sales-tax exemption certificate from a support ticket via the SDK
+  // (src/lib/customer-tax-exemptions.ts). Because this decides whether we collect tax from a
+  // buyer going forward, the handler REFUSES to fire unless `_founderApprovedTaxExemption` is
+  // set on the ActionContext (same rail as full_order_refund). See docs/brain/orchestrator-tools.md.
+  exemption_no?: string;              // certificate/permit reference the state issued
+  entity_use_code?: string;           // Avalara reason code (verified against /definitions/entityusecodes)
+  jurisdiction_region?: string;       // two-letter region the certificate covers, e.g. "OK"
+  expires_at?: string | null;         // optional ISO expiry — never in the past
+  notes?: string | null;              // free-text prose recorded alongside (DAV number, etc)
 }
 
 export interface ActionContext {
@@ -226,6 +236,16 @@ export interface ActionContext {
    * removal. See Fix-1 phase of a-clamped-refund-must-never-report-success.
    */
   _founderApprovedFullOrderRefund?: boolean;
+  /**
+   * ⭐ The ONLY caller-side authorisation the `record_tax_exemption` handler recognises.
+   * Phase 3 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md — recording an
+   * exemption decides whether we collect tax from the buyer going forward, so it's a class of
+   * change the CEO must sign off on, no exceptions. The only sanctioned path is a founder-
+   * approved [[june-remedy-approval]] card via `executeParkedRemedy`, which sets this flag true
+   * on the ActionContext. An AI agent must never mark an account tax-exempt on a customer's
+   * say-so alone — the certificate is the evidence.
+   */
+  _founderApprovedTaxExemption?: boolean;
 }
 
 type SendFn = (msg: string, sandbox: boolean) => Promise<void>;
@@ -4073,6 +4093,77 @@ export const directActionHandlers: Record<
       summary: `Dollar replacement issued — ${quantity}x variant ${variantId} shipped + $${(amountCents / 100).toFixed(2)} refund`,
       refundAmountCents: amountCents,
     };
+  },
+
+  // Phase 3 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md.
+  // Records a per-customer sales-tax exemption certificate from a ticket — the certificate
+  // reference (`exemption_no`), Avalara reason code (`entity_use_code`, verified against
+  // /definitions/entityusecodes on the approval UI), the two-letter jurisdiction, and an optional
+  // expiry. Writes via the SDK chokepoint recordCustomerTaxExemption which validates + enforces
+  // the (customer, region) partial UNIQUE.
+  //
+  // ⭐ NON-AUTONOMOUS BY CONSTRUCTION. Recording an exemption changes whether we collect tax
+  // from the buyer going forward — same class of decision the CEO must sign off on. The only
+  // sanctioned path is a founder-approved [[june-remedy-approval]] card that flips
+  // _founderApprovedTaxExemption on the ActionContext before dispatching. Any other caller
+  // (a raw Sonnet direct_action, a journey/playbook/workflow) reaches this handler with the
+  // flag unset and we refuse — an AI agent must never mark an account tax-exempt on the
+  // customer's say-so alone, the certificate is the evidence. Same rail pattern as
+  // full_order_refund above.
+  record_tax_exemption: async (ctx, p) => {
+    if (!ctx._founderApprovedTaxExemption) {
+      return {
+        success: false,
+        error:
+          `Refusing record_tax_exemption for customer ${ctx.customerId}: this action is ` +
+          `founder-approval-only (recording an exemption decides whether we collect tax from ` +
+          `the buyer going forward). It must be routed through a founder-approved remedy card; ` +
+          `direct dispatch is not permitted.`,
+      };
+    }
+    if (!ctx.customerId) {
+      return {
+        success: false,
+        error:
+          `Refusing record_tax_exemption: no ticket customer bound to this action context — ` +
+          `an unbound remedy cannot authorise a tax-exemption record.`,
+      };
+    }
+    if (!p.exemption_no || !p.entity_use_code || !p.jurisdiction_region) {
+      return {
+        success: false,
+        error:
+          `Missing required fields for record_tax_exemption — need exemption_no + ` +
+          `entity_use_code + jurisdiction_region.`,
+      };
+    }
+    const { recordCustomerTaxExemption, CustomerTaxExemptionError } = await import(
+      "@/lib/customer-tax-exemptions"
+    );
+    try {
+      const row = await recordCustomerTaxExemption(ctx.admin, {
+        workspace_id: ctx.workspaceId,
+        customer_id: ctx.customerId,
+        exemption_no: p.exemption_no,
+        entity_use_code: p.entity_use_code,
+        jurisdiction_region: p.jurisdiction_region,
+        expires_at: p.expires_at ?? null,
+        notes: p.notes ?? null,
+        recorded_by: null,
+      });
+      return {
+        success: true,
+        summary:
+          `Recorded sales-tax exemption for customer ${ctx.customerId}: ` +
+          `${row.exemption_no} (${row.entity_use_code}) in ${row.jurisdiction_region}` +
+          (row.expires_at ? ` — expires ${row.expires_at}` : ""),
+      };
+    } catch (err) {
+      if (err instanceof CustomerTaxExemptionError) {
+        return { success: false, error: `record_tax_exemption ${err.code}: ${err.message}` };
+      }
+      return { success: false, error: `record_tax_exemption failed: ${errText(err)}` };
+    }
   },
 };
 

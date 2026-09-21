@@ -59,6 +59,8 @@ import { checkOrderForFraud } from "@/lib/fraud-detector";
 import { buildPackingSlipMessage } from "@/lib/packing-slip-message";
 import { createTransaction as createAvalaraTx } from "@/lib/avalara";
 import { buildAvalaraLines } from "@/lib/avalara-cart";
+import { resolveCustomerTaxExemption } from "@/lib/customer-tax-exemptions";
+import { readSessionFromRequest } from "@/lib/auth-session";
 import crypto from "crypto";
 
 interface AddressInput {
@@ -290,6 +292,32 @@ export async function POST(request: NextRequest) {
         protectionTitle,
       });
       if (avalaraLines.length > 0) {
+        // Phase 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md — resolve
+        // the buyer's live sales-tax exemption for the ship-to region.
+        //
+        // ⭐ VERIFIED SESSION ONLY. Fix 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-
+        // tax-exempt.md § Phase 5. `cart.customer_id` alone is NOT a trust source — the
+        // unauthenticated `/api/checkout/identify` route binds it by caller-supplied email
+        // BEFORE any OTP verify, so an attacker who knows an exempt customer's email can
+        // identify an open cart as that customer and then have the exemption applied to their
+        // own checkout. The ONLY trustworthy signal on this endpoint is the signed `sx_session`
+        // cookie (set after OTP verify / magic-link click by [[../../../../lib/auth-session]]),
+        // which binds `{w, c}` to a verified identity. Resolve the exemption ONLY when the
+        // cookie is present AND `session.w === cart.workspace_id` AND `session.c ===
+        // cart.customer_id`; otherwise omit exemptionNo/entityUseCode and charge normal Avalara-
+        // computed tax. Body.email / cart.email / identify-bound cart.customer_id are all
+        // ignored for exemption authorization.
+        const commitRegion = ship.province_code!.toUpperCase();
+        const commitSession = readSessionFromRequest(request);
+        const trustedCustomerId =
+          commitSession &&
+          commitSession.w === cart.workspace_id &&
+          commitSession.c === cart.customer_id
+            ? commitSession.c
+            : null;
+        const commitExemption = trustedCustomerId
+          ? await resolveCustomerTaxExemption(admin, cart.workspace_id, trustedCustomerId, commitRegion)
+          : null;
         const avalaraResult = await createAvalaraTx(cart.workspace_id, {
           code: orderNumber,
           customerCode: customerEmailForAvalara,
@@ -301,10 +329,12 @@ export async function POST(request: NextRequest) {
             line1: ship.address1!,
             line2: ship.address2,
             city: ship.city!,
-            region: ship.province_code!.toUpperCase(),
+            region: commitRegion,
             postalCode: ship.zip!,
             country: (ship.country_code || "US").toUpperCase(),
           },
+          exemptionNo: commitExemption?.exemptionNo,
+          entityUseCode: commitExemption?.entityUseCode,
         });
         if (avalaraResult.success) {
           taxCents = avalaraResult.totalTaxCents ?? 0;

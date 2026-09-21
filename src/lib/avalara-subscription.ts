@@ -23,6 +23,10 @@ import { createHash } from "node:crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createTransaction } from "@/lib/avalara";
 import { buildAvalaraLines, type CartLineForTax } from "@/lib/avalara-cart";
+import {
+  resolveCustomerTaxExemption,
+  type CustomerTaxExemptionForAvalara,
+} from "@/lib/customer-tax-exemptions";
 
 interface SubAddress {
   address1?: string;
@@ -126,6 +130,15 @@ interface TaxInputs {
   shippingCents: number;
   protectionCents: number;
   shipTo: NonNullable<Awaited<ReturnType<typeof resolveSubAddress>>>;
+  /**
+   * Phase 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md.
+   * The buyer's live sales-tax exemption for the ship-to region, or null when none.
+   * MUST be part of the tax-inputs hash — a customer who becomes exempt (or whose
+   * certificate expires) between quotes must NOT keep being served the cached
+   * fully-taxed (or exempt) quote. `resolveCustomerTaxExemption` already honors
+   * `expires_at`, so a lapsed certificate reads as null here.
+   */
+  exemption: CustomerTaxExemptionForAvalara | null;
 }
 
 /**
@@ -173,7 +186,23 @@ async function buildTaxInputs(
       }))
     : enginePriced;
 
-  return { pricedItems, subtotalCents, discountCents, shippingCents, protectionCents, shipTo };
+  // Phase 2 — resolve the buyer's live exemption for the ship-to region via the SDK reader.
+  // The reader honors expires_at, so a lapsed certificate reads as null (Avalara sees a normal
+  // taxable transaction). Keyed by (workspace, customer, region); null when unregistered.
+  const customerId = (sub.customer_id as string | null) ?? null;
+  const exemption = customerId
+    ? await resolveCustomerTaxExemption(createAdminClient(), workspaceId, customerId, shipTo.region)
+    : null;
+
+  return {
+    pricedItems,
+    subtotalCents,
+    discountCents,
+    shippingCents,
+    protectionCents,
+    shipTo,
+    exemption,
+  };
 }
 
 /**
@@ -186,7 +215,22 @@ function hashTaxInputs(inputs: TaxInputs): string {
   const items = inputs.pricedItems
     .map((l) => `${l.variant_id}:${l.quantity}:${l.price_cents}`)
     .sort();
-  const payload = JSON.stringify({ items, s: inputs.shippingCents, p: inputs.protectionCents, a: inputs.shipTo });
+  // Phase 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md — the
+  // exemption MUST be part of the hash. Without this, a customer who becomes exempt (or whose
+  // certificate expires) between quotes keeps being served the cached fully-taxed (or
+  // fully-exempted) quote. `resolveCustomerTaxExemption` already returns null once expires_at
+  // passes, so a lapsed certificate flips the hash back to unexempted on the next call and the
+  // cache invalidates.
+  const e = inputs.exemption
+    ? `${inputs.exemption.exemptionNo}:${inputs.exemption.entityUseCode}:${inputs.exemption.jurisdictionRegion}`
+    : "";
+  const payload = JSON.stringify({
+    items,
+    s: inputs.shippingCents,
+    p: inputs.protectionCents,
+    a: inputs.shipTo,
+    e,
+  });
   return createHash("sha256").update(payload).digest("hex").slice(0, 32);
 }
 
@@ -228,7 +272,7 @@ export async function quoteSubscriptionTax(
   // internal-subscription-renewals.ts:519-524).
   const inputs = await buildTaxInputs(workspaceId, sub);
   if (!inputs) return null;
-  const { pricedItems, subtotalCents, discountCents, shippingCents, protectionCents, shipTo } = inputs;
+  const { pricedItems, subtotalCents, discountCents, shippingCents, protectionCents, shipTo, exemption } = inputs;
   const inputHash = hashTaxInputs(inputs);
   const cartLines = subItemsToCartLines(pricedItems);
   if (cartLines.length === 0) return null;
@@ -260,6 +304,10 @@ export async function quoteSubscriptionTax(
     type: "SalesOrder",
     lines: avalaraLines,
     shipTo,
+    // Phase 2 — thread the resolved exemption into the Avalara request body so the quote is
+    // zeroed at the source for an exempt buyer (never refunded after the fact).
+    exemptionNo: exemption?.exemptionNo,
+    entityUseCode: exemption?.entityUseCode,
   });
 
   if (!result.success) {
@@ -343,6 +391,13 @@ export async function commitSubscriptionRenewalTax(
     shippingMethodLabel?: string;
     protectionCents: number;
     customerEmail: string | null;
+    /**
+     * Phase 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md — the
+     * subscription's `customer_id`, used by `resolveCustomerTaxExemption` to look up the live
+     * certificate. When absent the renewal is treated as unexempted (Avalara computes tax
+     * normally). Existing callers that predate the exemption feature stay backward-compatible.
+     */
+    customerId?: string | null;
   },
 ): Promise<{ tax_cents: number; transaction_code: string } | null> {
   const admin = createAdminClient();
@@ -370,6 +425,14 @@ export async function commitSubscriptionRenewalTax(
   });
   if (avalaraLines.length === 0) return null;
 
+  // Phase 2 — commit-time resolve of the buyer's live exemption for the ship-to region. The
+  // resolver honors expires_at; a lapsed certificate returns null so Avalara commits full tax.
+  // Belt-and-suspenders against the quote-then-commit race: if the certificate was revoked
+  // between the portal quote and this commit, the renewal charges the correct (non-zero) tax.
+  const exemption = args.customerId
+    ? await resolveCustomerTaxExemption(admin, workspaceId, args.customerId, shipTo.region)
+    : null;
+
   const result = await createTransaction(workspaceId, {
     code: args.orderNumber,
     customerCode: args.customerEmail || `sub-${args.subscriptionId}`,
@@ -378,6 +441,8 @@ export async function commitSubscriptionRenewalTax(
     type: "SalesInvoice",
     lines: avalaraLines,
     shipTo,
+    exemptionNo: exemption?.exemptionNo,
+    entityUseCode: exemption?.entityUseCode,
   });
   if (!result.success) {
     console.warn(`[avalara-subscription] commit failed for renewal ${args.orderNumber}:`, result.error);
