@@ -1,0 +1,1 @@
+- **A customer can be recorded as sales-tax exempt** · verified 2026-09-21 · → [[lifecycles/subscription-billing]]

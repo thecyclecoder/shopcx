@@ -29,20 +29,45 @@ endpoint.
 ### `quoteSubscriptionTax` — function
 
 ```ts
-async function quoteSubscriptionTax(workspaceId: string, subscriptionId: string,) : Promise<
+async function quoteSubscriptionTax(
+  workspaceId: string,
+  subscriptionId: string,
+): Promise<{ tax_cents: number; total_cents: number } | null>
 ```
+
+Calls Avalara `SalesOrder` (commit=false) — non-filing. Saves the result to `subscriptions.avalara_quote_*`. Used by the customer portal to show the actual renewal total. Returns `null` when Avalara isn't enabled for the workspace or the subscription is not quotable (comp sub, missing items/address).
 
 ### `ensureFreshSubscriptionTaxQuote` — function
 
 ```ts
-async function ensureFreshSubscriptionTaxQuote(workspaceId: string, subscriptionId: string,) : Promise<
+async function ensureFreshSubscriptionTaxQuote(
+  workspaceId: string,
+  subscriptionId: string,
+): Promise<{ tax_cents: number; total_cents: number } | null>
 ```
+
+Returns a fresh or cached tax quote, re-quoting only when the cached hash is stale. Shares the same `buildAvalaraLines` logic with `quoteSubscriptionTax` so the displayed portal tax and the renewal-charged tax stay in sync. Returns `null` when Avalara isn't enabled or the subscription is not quotable.
 
 ### `commitSubscriptionRenewalTax` — function
 
 ```ts
-async function commitSubscriptionRenewalTax(workspaceId: string, args: { subscriptionId: string; orderNumber: string; items: unknown; shippingAddress: unknown; shippingCents: number; shippingMethodLabel?: string; protectionCents: number; customerEmail: string | null; },) : Promise<
+async function commitSubscriptionRenewalTax(
+  workspaceId: string,
+  args: {
+    subscriptionId: string;
+    orderNumber: string;
+    items: unknown;
+    shippingAddress: unknown;
+    shippingCents: number;
+    shippingMethodLabel?: string;
+    protectionCents: number;
+    customerEmail: string | null;
+    customerId?: string;
+  },
+): Promise<{ tax_cents: number; total_cents: number } | null>
 ```
+
+Calls Avalara `SalesInvoice` (commit=true) using the renewal order_number as the code. The returned tax_cents is the authoritative tax the renewal will charge. Threads the customer's [[../tables/customer_tax_exemptions]] (Phase 2) to Avalara via `resolveCustomerTaxExemption` when `customerId` is present and the certificate is not expired. Returns `null` when Avalara isn't enabled or the renewal is not billable.
 
 ## Callers
 
