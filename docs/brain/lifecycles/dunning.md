@@ -358,7 +358,7 @@ the cycle instead of collapsing into "no cards".
 
 ## Status / open work
 
-**Shipped:** Silent card rotation (`deduplicatePaymentMethods`), payday-aware retries (`getNextPaydayDates` — 1st/15th/Fridays/last-business-day), Cycle 2 cancel-instead-of-pause + auto-reactivate, customer-driven new-card recovery, terminal-card cancel-without-entering-dunning, replacement-of-Appstle-payment-update-email, **internal-sub dunning (Braintree, payday-retry via renewal cron, magic-link recovery, cancel+reactivate, AI visibility)**, **transient-Shopify-error resilience (retry-on-5xx/429/network)** — all functional.
+**Shipped:** Silent card rotation (`deduplicatePaymentMethods`), payday-aware retries (`getNextPaydayDates` — 1st/15th/Fridays/last-business-day), Cycle 2 cancel-instead-of-pause + auto-reactivate, customer-driven new-card recovery, terminal-card cancel-without-entering-dunning, replacement-of-Appstle-payment-update-email, **internal-sub dunning (Braintree, payday-retry via renewal cron, magic-link recovery, cancel+reactivate, AI visibility)**, **transient-Shopify-error resilience (retry-on-5xx/429/network)**, **migration-aware re-pointing of open dunning cycles** (Phase 1 of [[../specs/a-dunning-cycle-must-never-silently-strand-a-subscription]] — 2026-09-21), **stranded-subscription detector** ([[../libraries/dunning-strand-detector]] — Phase 5) — all functional.
 
 **Known gaps / not yet shipped:** None identified.
 
