@@ -4162,8 +4162,7 @@ export const directActionHandlers: Record<
       if (err instanceof CustomerTaxExemptionError) {
         return { success: false, error: `record_tax_exemption ${err.code}: ${err.message}` };
       }
-      const msg = err instanceof Error ? err.message : String(err);
-      return { success: false, error: `record_tax_exemption failed: ${msg}` };
+      return { success: false, error: `record_tax_exemption failed: ${errText(err)}` };
     }
   },
 };
