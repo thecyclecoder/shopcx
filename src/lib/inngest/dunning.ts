@@ -572,6 +572,23 @@ export const dunningNewCardRecovery = inngest.createFunction(
           // notice for a card that was just declined.
           const ordersRes = { success: !!billingRes0.attemptId, orders: billingRes0.attemptId ? [{ id: billingRes0.attemptId }] : [], error: billingRes0.error } as { success: boolean; orders?: { id: string }[]; error?: string };
           if (!ordersRes.success || !ordersRes.orders?.length) {
+            // Trace the no-charge attempt in payment_failures so a recovery that
+            // finds nothing to bill is visible instead of silent. Pre-2026-09-21
+            // a wrong-contract retry wrote NOTHING anywhere — the sub then
+            // dropped out of renewal selection for weeks without a signal. Ground-truth:
+            // five customers stranded 50-72 days.
+            await logPaymentFailure({
+              workspaceId: workspace_id,
+              customerId: customer_id,
+              subscriptionId: cancelled.subscriptionId,
+              shopifyContractId: cancelled.contractId,
+              paymentMethodId: payment_method_id,
+              errorCode: "no_upcoming_orders",
+              errorMessage: billingRes0.error || "Reactivated but no upcoming orders to bill",
+              attemptNumber: 1,
+              attemptType: "new_card_retry",
+              succeeded: false,
+            });
             return { contractId: cancelled.contractId, recovered: true, error: "Reactivated but no upcoming orders to bill" };
           }
 
@@ -640,6 +657,23 @@ export const dunningNewCardRecovery = inngest.createFunction(
           // See above: lookup-success, not charge-success. A decline must reach logPaymentFailure.
           const ordersRes = { success: !!billingRes1.attemptId, orders: billingRes1.attemptId ? [{ id: billingRes1.attemptId }] : [], error: billingRes1.error } as { success: boolean; orders?: { id: string }[]; error?: string };
           if (!ordersRes.success || !ordersRes.orders?.length) {
+            // Trace the no-charge attempt in payment_failures so a recovery that
+            // finds nothing to bill is visible instead of silent — the exact
+            // silent-failure hole that let five subs strand 50-72 days on
+            // 2026-09-21 (open dunning cycle pointing at a dead pre-migration
+            // contract; each retry found no upcoming orders and wrote nothing).
+            await logPaymentFailure({
+              workspaceId: workspace_id,
+              customerId: customer_id,
+              subscriptionId: cycle.subscription_id,
+              shopifyContractId: cycle.shopify_contract_id,
+              paymentMethodId: payment_method_id,
+              errorCode: "no_upcoming_orders",
+              errorMessage: billingRes1.error || "No upcoming orders",
+              attemptNumber: 1,
+              attemptType: "new_card_retry",
+              succeeded: false,
+            });
             return { contractId: cycle.shopify_contract_id, recovered: false, error: "No upcoming orders" };
           }
 

@@ -25,8 +25,72 @@ import { getAppstleConfig } from "@/lib/subscription-items";
 import { isEnginePromotion, type BillingSource } from "@/lib/internal-subscription";
 import { subscriptionAction } from "@/lib/commerce/subscription";
 import { inferAppstleLineBase, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
+import { OPEN_DUNNING_STATUSES, updateDunningCycle } from "@/lib/dunning";
 
 type Admin = ReturnType<typeof createAdminClient>;
+
+/**
+ * Carry a subscription's OPEN dunning cycles across when the migration rewrites
+ * its `shopify_contract_id`. Keyed on the SUBSCRIPTION (not the contract string)
+ * so a sub that just had its contract flipped in place is still findable, and
+ * every open cycle follows the sub instead of stranding on the dead contract.
+ *
+ * ⚠️ `idx_dunning_cycles_contract` is UNIQUE on
+ *   (workspace_id, shopify_contract_id, cycle_number)
+ * so a re-point can COLLIDE with a cycle already sitting on the target contract
+ * at the same cycle_number (this actually happened on 4 of the 7 rows repaired
+ * on 2026-09-21). On collision we CLOSE the orphan as exhausted with
+ * `closed_reason='orphaned_by_migration'` rather than mutating cycle_number,
+ * which would misrepresent the dunning ladder. `dunning-new-card-recovery`
+ * correctly skips exhausted cycles that carry a `closed_reason`, so a closed
+ * orphan cannot resurrect on the next card add.
+ *
+ * All writes go through the `updateDunningCycle` SDK ([[libraries/dunning]]) —
+ * per CLAUDE.md, never a raw `.from('dunning_cycles')` write.
+ */
+async function repointOpenDunningCyclesForMigration(
+  admin: Admin,
+  workspaceId: string,
+  subscriptionId: string,
+  newContractId: string,
+): Promise<{ repointed: number; closedOnCollision: number }> {
+  const { data: openCycles } = await admin
+    .from("dunning_cycles")
+    .select("id, cycle_number, shopify_contract_id")
+    .eq("workspace_id", workspaceId)
+    .eq("subscription_id", subscriptionId)
+    .in("status", OPEN_DUNNING_STATUSES as unknown as string[]);
+  if (!openCycles?.length) return { repointed: 0, closedOnCollision: 0 };
+
+  const { data: existingOnTarget } = await admin
+    .from("dunning_cycles")
+    .select("cycle_number")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_contract_id", newContractId);
+  const takenCycleNumbers = new Set<number>(
+    (existingOnTarget || []).map((r) => Number(r.cycle_number)),
+  );
+
+  let repointed = 0;
+  let closedOnCollision = 0;
+  for (const c of openCycles) {
+    if (c.shopify_contract_id === newContractId) continue;
+    const n = Number(c.cycle_number);
+    if (takenCycleNumbers.has(n)) {
+      await updateDunningCycle(c.id, {
+        status: "exhausted",
+        next_retry_at: null,
+        closed_reason: "orphaned_by_migration",
+      });
+      closedOnCollision++;
+      continue;
+    }
+    await updateDunningCycle(c.id, { shopify_contract_id: newContractId });
+    takenCycleNumbers.add(n);
+    repointed++;
+  }
+  return { repointed, closedOnCollision };
+}
 
 /**
  * Appstle bills shipping protection as a regular **line item** titled "Shipping
@@ -427,6 +491,15 @@ export async function migrateContractToInternalComp(
       .eq("shopify_contract_id", contractId);
     if (flipErr) return { ok: false, error: `flip failed (re-run to recover): ${flipErr.message}` };
 
+    // Carry open dunning cycles across to the new contract so a still-in-flight
+    // cycle doesn't strand on the dead pre-migration contract (never renews,
+    // never surfaces). Non-fatal — a re-point failure is logged, not thrown.
+    try {
+      await repointOpenDunningCyclesForMigration(admin, workspaceId, String(sub.id), internalContractId);
+    } catch (e) {
+      console.error(`[migrate-comp] dunning re-point failed (non-fatal) for ${contractId}:`, e instanceof Error ? e.message : e);
+    }
+
     // Timeline event. (No migration_audit — a comp sub has no billable card by design.)
     try {
       const { logCustomerEvent } = await import("@/lib/customer-events");
@@ -602,6 +675,15 @@ export async function migrateCustomerAppstleSubsToInternal(
         .eq("workspace_id", workspaceId)
         .eq("shopify_contract_id", contractId);
       if (flipErr) { result.failed.push({ contractId, error: `flip failed (re-run to recover): ${flipErr.message}` }); continue; }
+
+      // Carry open dunning cycles across to the new contract so a still-in-flight
+      // cycle doesn't strand on the dead pre-migration contract (never renews,
+      // never surfaces). Non-fatal — a re-point failure is logged, not thrown.
+      try {
+        await repointOpenDunningCyclesForMigration(admin, workspaceId, String(sub.id), internalContractId);
+      } catch (e) {
+        console.error(`[migrate] dunning re-point failed (non-fatal) for ${contractId}:`, e instanceof Error ? e.message : e);
+      }
 
       result.migrated.push({ contractId, subId: String(sub.id), billableCustomerId });
 

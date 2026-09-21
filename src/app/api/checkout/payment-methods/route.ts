@@ -5,11 +5,28 @@
  * checkout client can render a "Pay with •••4242" picker above the
  * new-card Hosted Fields form. Returns an empty list when the
  * customer isn't authenticated.
+ *
+ * POST /api/checkout/payment-methods { cart_token, payment_method_nonce, device_data? }
+ *
+ * Vaults a Braintree nonce as a saved card on the authenticated customer's
+ * link group and — critically — calls `triggerNewCardRecovery` so any open
+ * dunning cycles the customer has are picked up by the same
+ * `dunning/new-card-recovery` handler that the Shopify payment-method webhook
+ * uses. Storefront/portal card adds used to trigger nothing, so five real
+ * customers (verified 2026-09-21) vaulted a card and stayed stranded for
+ * 50-72 days because their open cycles kept retrying a card that no longer
+ * existed. Recovery is best-effort — a recovery-trigger failure never fails
+ * the card-add itself. See [[../../../../docs/brain/lifecycles/dunning.md]]
+ * § recovery.
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { readSessionFromRequest } from "@/lib/auth-session";
 import { linkGroupIds } from "@/lib/customer-links";
+import { resolveBraintreeCustomerId, savePaymentMethod, vaultPaymentMethod, VaultCreateError } from "@/lib/integrations/braintree-customer";
+import { triggerNewCardRecovery } from "@/lib/dunning";
+import { errText } from "@/lib/error-text";
+import { logCheckoutError } from "@/lib/checkout-error-log";
 
 export async function GET(request: NextRequest) {
   const cartToken = request.nextUrl.searchParams.get("cart_token");
@@ -77,4 +94,139 @@ export async function GET(request: NextRequest) {
     }));
 
   return NextResponse.json({ methods });
+}
+
+interface PostBody {
+  cart_token?: string;
+  payment_method_nonce?: string;
+  device_data?: string;
+}
+
+export async function POST(request: NextRequest) {
+  const body = (await request.json().catch(() => ({}))) as PostBody;
+  if (!body.cart_token) return NextResponse.json({ error: "missing_cart_token" }, { status: 400 });
+  if (!body.payment_method_nonce) return NextResponse.json({ error: "missing_nonce" }, { status: 400 });
+
+  const session = readSessionFromRequest(request);
+  if (!session) return NextResponse.json({ error: "not_authenticated" }, { status: 401 });
+
+  const admin = createAdminClient();
+  const { data: cart } = await admin
+    .from("cart_drafts")
+    .select("workspace_id")
+    .eq("token", body.cart_token)
+    .maybeSingle();
+  if (!cart || cart.workspace_id !== session.w) {
+    return NextResponse.json({ error: "cart_not_found" }, { status: 400 });
+  }
+
+  const { data: customer } = await admin
+    .from("customers")
+    .select("id, email, first_name, last_name, phone")
+    .eq("workspace_id", session.w)
+    .eq("id", session.c)
+    .maybeSingle();
+  if (!customer?.email) return NextResponse.json({ error: "customer_missing_email" }, { status: 400 });
+
+  // Info-disclosure discipline (matches sanitizedCheckoutErrorResponse in
+  // src/app/api/checkout/route.ts): every failure below returns ONLY a stable
+  // machine-readable `error` code to the client, and the full errText is
+  // captured server-side via logCheckoutError with contextual ids (workspace,
+  // customer, cart). Payment tokens/nonces are never logged — the Braintree
+  // upstream text can carry raw processor detail and must stay server-side.
+  let braintreeCustomerId: string;
+  try {
+    braintreeCustomerId = await resolveBraintreeCustomerId({
+      workspaceId: session.w,
+      customerId: customer.id,
+      email: customer.email,
+      firstName: customer.first_name,
+      lastName: customer.last_name,
+      phone: customer.phone,
+    });
+  } catch (err) {
+    await logCheckoutError({
+      workspaceId: session.w,
+      stage: "identify",
+      cartToken: body.cart_token,
+      customerId: customer.id,
+      errorCode: "braintree_customer_resolve_failed",
+      errorMessage: errText(err),
+    });
+    return NextResponse.json({ error: "braintree_customer_resolve_failed" }, { status: 502 });
+  }
+
+  let vaulted;
+  try {
+    vaulted = await vaultPaymentMethod(session.w, braintreeCustomerId, body.payment_method_nonce, body.device_data);
+  } catch (err) {
+    if (err instanceof VaultCreateError && err.code === "vault_declined") {
+      // Stable public decline — log full detail server-side, return a stable
+      // code the client renders with generic decline copy.
+      await logCheckoutError({
+        workspaceId: session.w,
+        stage: "tokenize",
+        cartToken: body.cart_token,
+        customerId: customer.id,
+        errorCode: "vault_declined",
+        errorMessage: errText(err),
+      });
+      return NextResponse.json({ error: "vault_declined" }, { status: 402 });
+    }
+    // VaultCreateError('vault_error') + any unexpected throw → generic
+    // vault_failed. Never echo raw processor / gateway text back to the client.
+    await logCheckoutError({
+      workspaceId: session.w,
+      stage: "tokenize",
+      cartToken: body.cart_token,
+      customerId: customer.id,
+      errorCode: "vault_failed",
+      errorMessage: errText(err),
+    });
+    return NextResponse.json({ error: "vault_failed" }, { status: 502 });
+  }
+
+  let saved;
+  try {
+    saved = await savePaymentMethod({
+      workspaceId: session.w,
+      customerId: customer.id,
+      braintreeCustomerId,
+      braintreePaymentMethodToken: vaulted.token,
+      paymentType: vaulted.paymentType,
+      cardBrand: vaulted.cardBrand,
+      last4: vaulted.last4,
+      expirationMonth: vaulted.expirationMonth,
+      expirationYear: vaulted.expirationYear,
+      paypalEmail: vaulted.paypalEmail,
+      cartToken: body.cart_token,
+      makeDefault: true,
+    });
+  } catch (err) {
+    await logCheckoutError({
+      workspaceId: session.w,
+      stage: "other",
+      cartToken: body.cart_token,
+      customerId: customer.id,
+      errorCode: "save_payment_method_failed",
+      errorMessage: errText(err),
+    });
+    return NextResponse.json({ error: "save_payment_method_failed" }, { status: 500 });
+  }
+
+  // Best-effort recovery trigger — a card added on our storefront/portal must
+  // wake any open dunning cycle for this customer, otherwise the sub silently
+  // keeps retrying the dead card. Never fails the vault on a recovery error.
+  // ⚠️ Pass the BRAINTREE token (not saved.id / customer_payment_methods.id UUID) —
+  // internalSubSwitchPaymentMethod matches on braintree_payment_method_token.
+  await triggerNewCardRecovery(session.w, customer.id, vaulted.token);
+
+  return NextResponse.json({
+    id: saved.id,
+    token: vaulted.token,
+    brand: vaulted.cardBrand,
+    last4: vaulted.last4,
+    exp_month: vaulted.expirationMonth,
+    exp_year: vaulted.expirationYear,
+  });
 }
