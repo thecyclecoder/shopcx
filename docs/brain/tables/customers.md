@@ -75,6 +75,7 @@ Synced from Shopify. Email, retention_score, subscription_status, LTV, marketing
 - [[crisis_customer_actions]].`customer_id`
 - [[customer_demographics]].`customer_id`
 - [[customer_events]].`customer_id`
+- [[customer_tax_exemptions]].`customer_id`
 - [[customer_link_rejections]].`customer_id`
 - [[customer_link_rejections]].`rejected_customer_id`
 - [[customer_links]].`customer_id`

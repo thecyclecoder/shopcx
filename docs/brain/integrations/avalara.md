@@ -39,6 +39,15 @@ Auth: HTTP basic `Authorization: Basic base64(account_id:license_key)`.
 - Stale quotes (`avalara_quote_at` > X hours old) → re-quote before checkout.
 - Failures fall back to a flat tax estimate per state — better than blocking checkout. Logged for review.
 
+## Customer tax exemptions
+
+Exempt buyers can carry a recorded certificate via [[../tables/customer_tax_exemptions]], and both the quote and committed-transaction paths pass it to Avalara so the exempt buyer's tax is zero at the source (not refunded after the fact). See [[../libraries/customer-tax-exemptions]].
+
+- **Phase 2 integration:** `src/lib/avalara.ts` extends `CreateTransactionParams` with optional `exemptionNo` and `entityUseCode` fields. Both [[../libraries/avalara-cart]] (checkout) and [[../libraries/avalara-subscription]] (renewals + quotes) call `resolveCustomerTaxExemption` with the ship-to region and thread the result into `transactions/create` and `transactions/createoradjust` requests.
+- **Cache-hash invariant:** The `avalara_quote_hash` used to short-circuit re-quotes MUST include the exemption fields. A customer who becomes exempt would otherwise keep being served the cached taxed quote. See `hashTaxInputs` in avalara-cart.
+- **Silent-degrade trap:** An unrecognized `entityUseCode` is silently downgraded by Avalara to fully-taxable with a **200 OK**. The Phase 3 founder-approval UI MUST verify the code against Avalara's `GET /api/v2/definitions/entityusecodes` endpoint before offering it as a choice. Never assume a code is valid from memory.
+- **Expired certificates are non-live:** `resolveCustomerTaxExemption` treats a row with `expires_at <= now()` as absent — an expired certificate does not zero tax; the buyer is charged normally from that instant.
+
 ## Gotchas
 
 - **⚠️ An invalid tax code is NOT rejected — it is silently downgraded.** Send a `taxCode` Avalara
@@ -83,7 +92,8 @@ Auth: HTTP basic `Authorization: Basic base64(account_id:license_key)`.
 - `src/lib/avalara-cart.ts` — Quote for [[../tables/cart_drafts]]
 - `src/lib/avalara-subscription.ts` — Quote for [[../tables/subscriptions]]
 - `src/lib/avalara-tax-codes.ts` — Tax code lookup by variant
+- `src/lib/customer-tax-exemptions.ts` — Customer exemption SDK (Phase 2)
 
 ## Related
 
-[[../tables/orders]] · [[../tables/cart_drafts]] · [[../tables/subscriptions]] · [[../tables/pricing_rules]] · [[../tables/product_variants]]
+[[../tables/orders]] · [[../tables/cart_drafts]] · [[../tables/subscriptions]] · [[../tables/pricing_rules]] · [[../tables/product_variants]] · [[../tables/customer_tax_exemptions]] · [[../libraries/customer-tax-exemptions]]
