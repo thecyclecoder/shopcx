@@ -35,6 +35,7 @@ import {
   renewalRefusalOutcomeLabel,
 } from "@/lib/subscription-cycle-charge-claim";
 import { runDuplicateRenewalSweep } from "@/lib/subscription-duplicate-renewal-detector";
+import { runStrandedDunningCyclesSweep } from "@/lib/dunning-strand-detector";
 
 // ─── Dunning retry-window filter ────────────────────────────────────
 // Dunning is the source of truth for WHEN the next failed-payment retry is
@@ -367,6 +368,39 @@ export const internalSubscriptionRenewalCron = inngest.createFunction(
         }
       }
       return { workspaces_scanned: workspaceIds.length, duplicate_groups: totalGroups, alerts_inserted: totalAlerts };
+    });
+
+    // Same-cron piggy-back for the stranded-dunning-cycle detector — no new MONITORED_LOOPS
+    // row, no new cadence to monitor. Two invariants (contract drift + overdue-but-active),
+    // both MUST be 0 (were 6+ on 2026-09-21 while nothing paged for two months). Read-only
+    // against dunning_cycles + subscriptions; the ONLY write is a dashboard_notifications
+    // card per fresh finding (dedupe key inside metadata, same shape as the duplicate-renewal
+    // detector). Best-effort: a detector failure MUST NOT break the renewal fan-out.
+    // See [[../libraries/dunning-strand-detector]].
+    await step.run("scan-stranded-dunning-cycles", async () => {
+      const workspaceIds = Array.from(new Set(due.map((s) => s.workspace_id))).filter(Boolean);
+      let totalContractDrift = 0;
+      let totalOverdueActive = 0;
+      let totalAlerts = 0;
+      for (const ws of workspaceIds) {
+        try {
+          const res = await runStrandedDunningCyclesSweep(admin, ws);
+          totalContractDrift += res.contract_drift;
+          totalOverdueActive += res.overdue_but_active;
+          totalAlerts += res.alerts_inserted;
+        } catch (e) {
+          console.warn(
+            `[internal-subscription-renewal-cron] stranded-dunning sweep failed for workspace ${ws}:`,
+            e instanceof Error ? e.message : e,
+          );
+        }
+      }
+      return {
+        workspaces_scanned: workspaceIds.length,
+        contract_drift: totalContractDrift,
+        overdue_but_active: totalOverdueActive,
+        alerts_inserted: totalAlerts,
+      };
     });
 
     // Control Tower: end-of-run heartbeat (control-tower spec, Phase 1) carrying the per-cycle

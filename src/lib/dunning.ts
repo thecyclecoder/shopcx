@@ -3,6 +3,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
+import { inngest } from "@/lib/inngest/client";
 
 // ── Types ──
 
@@ -382,15 +383,28 @@ export async function createDunningCycle(
   return data!;
 }
 
+/**
+ * Update a dunning cycle. Returns `true` on success, `false` on a swallowed DB
+ * error (still logged via `console.error` with the literal `updateDunningCycle failed`
+ * so it shows up in log searches). A silent write failure on a money-adjacent
+ * ledger is not acceptable — the repair pass on 2026-09-21 found four of seven
+ * writes hitting a unique-constraint collision while every caller reported
+ * success, because this helper threw the error away.
+ */
 export async function updateDunningCycle(
   cycleId: string,
   updates: Record<string, unknown>,
-): Promise<void> {
+): Promise<boolean> {
   const admin = createAdminClient();
-  await admin
+  const { error } = await admin
     .from("dunning_cycles")
     .update({ ...updates, updated_at: new Date().toISOString() })
     .eq("id", cycleId);
+  if (error) {
+    console.error(`[Dunning] updateDunningCycle failed (cycle=${cycleId}): ${error.message}`);
+    return false;
+  }
+  return true;
 }
 
 /** Cycle states that are still "in flight" — a sub pause/cancel should close these. */
@@ -402,6 +416,83 @@ export async function updateDunningCycle(
 // still held the unique-index slot with no way to clear it. Nothing writes 'paused' today,
 // but the codebase retains it for legacy rows, so the lists must not diverge silently.
 export const OPEN_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped", "paused"] as const;
+
+/**
+ * Cycle states that a new-card add should try to recover.
+ *
+ * = `OPEN_DUNNING_STATUSES` + `'exhausted'` — the extra `'exhausted'` covers
+ * dunning-CANCELLED subs (dunning ends the cycle as `exhausted`; a fresh card
+ * arrives after the sub was cancelled by dunning and we WANT that flow to
+ * reactivate it). Derived from `OPEN_DUNNING_STATUSES` so the recovery gate
+ * (`src/lib/dunning-webhook.ts`) can never drift from
+ * `getActiveDunningCyclesForCustomer`'s open-set again.
+ *
+ * The caller MUST additionally filter `closed_reason IS NULL` — an exhausted
+ * cycle that carries `closed_reason` was closed by a customer pause/cancel or
+ * by the migration orphan sweep and MUST NOT be resurrected.
+ */
+export const RECOVERABLE_DUNNING_STATUSES = [...OPEN_DUNNING_STATUSES, "exhausted"] as const;
+
+/**
+ * Adding a card on our own storefront or portal MUST kick recovery for any
+ * still-open dunning cycles the customer has — otherwise their sub keeps
+ * retrying a card that no longer exists. This is the shared trigger used by
+ * every card-add path outside the Shopify payment-method webhook (checkout,
+ * portal, mini-site). All five stranded customers on 2026-09-21 vaulted their
+ * card through this path and got nothing.
+ *
+ * ⚠️ `braintreePaymentMethodToken` MUST be the Braintree token (not the
+ * `customer_payment_methods.id` UUID) — `internalSubSwitchPaymentMethod`
+ * (src/lib/internal-subscription.ts:1099-1104) matches on
+ * `braintree_payment_method_token`. Passing the row UUID silently switches
+ * nothing.
+ *
+ * Best-effort and idempotent — never throws (never fails the card-add on a
+ * recovery error) and the handler is already serialized per customer
+ * (concurrency key `event.data.customer_id`, limit 1) to prevent the
+ * SHOPCX273/274 double-charge class.
+ */
+export async function triggerNewCardRecovery(
+  workspaceId: string,
+  customerId: string,
+  braintreePaymentMethodToken: string,
+): Promise<{ fired: boolean; cycleCount: number }> {
+  try {
+    const admin = createAdminClient();
+    // Recoverable = OPEN_DUNNING_STATUSES + 'exhausted', with closed_reason NULL
+    // (a customer pause/cancel OR a migration orphan-close writes a closed_reason
+    // and must never be resurrected).
+    const { data: cycles } = await admin
+      .from("dunning_cycles")
+      .select("id")
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", customerId)
+      .in("status", RECOVERABLE_DUNNING_STATUSES as unknown as string[])
+      .is("closed_reason", null);
+    if (!cycles?.length) return { fired: false, cycleCount: 0 };
+
+    // Payload shape mirrors src/lib/dunning-webhook.ts:113-121 so the handler
+    // (dunning/new-card-recovery) can't tell the difference between a Shopify
+    // webhook call and a storefront/portal card-add call.
+    await inngest.send({
+      name: "dunning/new-card-recovery",
+      data: {
+        workspace_id: workspaceId,
+        customer_id: customerId,
+        shopify_customer_id: null,
+        payment_method_id: braintreePaymentMethodToken,
+      },
+    });
+    return { fired: true, cycleCount: cycles.length };
+  } catch (err) {
+    // Never fail the card-add on a recovery error — the vault already succeeded.
+    console.error(
+      `[Dunning] triggerNewCardRecovery best-effort failed (customer=${customerId}):`,
+      err instanceof Error ? err.message : err,
+    );
+    return { fired: false, cycleCount: 0 };
+  }
+}
 
 // ────────────────────────────────────────────────────────────────────────────────────────
 // Pure dunning decisions.

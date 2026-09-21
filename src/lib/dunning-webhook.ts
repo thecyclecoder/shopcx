@@ -4,6 +4,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { inngest } from "@/lib/inngest/client";
+import { RECOVERABLE_DUNNING_STATUSES } from "@/lib/dunning";
 
 export async function handlePaymentMethodEvent(
   workspaceId: string,
@@ -91,17 +92,28 @@ export async function handlePaymentMethodEvent(
   }
 
   // Check if this customer has any dunning cycles worth recovering.
-  // 'exhausted' is included on purpose: a sub that dunning *cancelled*
-  // leaves its cycle 'exhausted', and dunning/new-card-recovery is built to
-  // reactivate those (it resumes the cancelled sub + bills the new card).
-  // Gating only on active/skipped meant a customer adding a card after their
-  // sub was cancelled never auto-reactivated — the exact case we kept hitting.
+  //
+  // Derived from RECOVERABLE_DUNNING_STATUSES (= OPEN_DUNNING_STATUSES + 'exhausted')
+  // so this gate can never drift from getActiveDunningCyclesForCustomer / the
+  // handler again — before 2026-09-21 the hard-coded ['active','skipped','exhausted']
+  // list here silently disagreed with the handler that BOTH selects AND explicitly
+  // handles 'retrying'. All five stranded cycles on 2026-09-21 were 'retrying', so
+  // even a Shopify card update was being refused at this gate.
+  //
+  // 'exhausted' stays included on purpose: a sub that dunning *cancelled* leaves
+  // its cycle 'exhausted', and dunning/new-card-recovery is built to reactivate
+  // those (it resumes the cancelled sub + bills the new card).
+  //
+  // closed_reason IS NULL discipline: a cycle closed by a customer pause/cancel
+  // (or by the migration orphan sweep) carries a closed_reason and MUST NOT be
+  // resurrected.
   const { data: activeCycles } = await admin
     .from("dunning_cycles")
     .select("id")
     .eq("workspace_id", workspaceId)
     .eq("customer_id", customer.id)
-    .in("status", ["active", "skipped", "exhausted"]);
+    .in("status", RECOVERABLE_DUNNING_STATUSES as unknown as string[])
+    .is("closed_reason", null);
 
   if (!activeCycles?.length) {
     console.log(`Payment method webhook: no recoverable dunning cycles for customer ${customerId}`);
