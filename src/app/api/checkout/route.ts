@@ -291,20 +291,22 @@ export async function POST(request: NextRequest) {
         protectionTitle,
       });
       if (avalaraLines.length > 0) {
-        // Phase 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md —
-        // resolve the buyer's live sales-tax exemption for the ship-to region. Look up by email
-        // (the customer row is created later in this route; on a returning buyer it already
-        // exists). Guest / first-order buyers with no prior record see a null resolution and a
-        // normal fully-taxable commit.
+        // Phase 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md — resolve
+        // the buyer's live sales-tax exemption for the ship-to region.
+        //
+        // ⭐ TRUSTED BINDING ONLY. This endpoint is UNAUTHENTICATED (a public checkout POST), so
+        // the buyer's identity for exemption purposes is only trustworthy when the cart row itself
+        // carries a `customer_id` (bound by the earlier verified checkout / storefront-session
+        // identity flow). We do NOT resolve by `body.email` here — a shopper who knows or guesses
+        // an exempt customer's email could otherwise submit checkout with that email and receive
+        // the exemption, causing tax undercollection (Fix 1 of docs/brain/specs/
+        // a-customer-can-be-recorded-as-sales-tax-exempt.md § Phase 4). With no trusted binding,
+        // omit exemptionNo/entityUseCode and charge normal Avalara-computed tax; the customer's
+        // exemption still applies to future authenticated renewals via avalara-subscription.
         const commitRegion = ship.province_code!.toUpperCase();
-        const { data: exemptCustomer } = await admin
-          .from("customers")
-          .select("id")
-          .eq("workspace_id", cart.workspace_id)
-          .ilike("email", customerEmailForAvalara)
-          .maybeSingle();
-        const commitExemption = exemptCustomer?.id
-          ? await resolveCustomerTaxExemption(admin, cart.workspace_id, exemptCustomer.id as string, commitRegion)
+        const trustedCustomerId = (cart.customer_id as string | null) ?? null;
+        const commitExemption = trustedCustomerId
+          ? await resolveCustomerTaxExemption(admin, cart.workspace_id, trustedCustomerId, commitRegion)
           : null;
         const avalaraResult = await createAvalaraTx(cart.workspace_id, {
           code: orderNumber,

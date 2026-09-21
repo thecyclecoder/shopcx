@@ -298,6 +298,7 @@
     "test:refund-guard": "tsx --test src/lib/refund.guard.test.ts",
     "test:commerce-replacement-dollar": "tsx --test src/lib/commerce/replacement.dollar.test.ts",
     "test:action-executor-aliases": "tsx --test src/lib/action-executor.aliases.test.ts",
+    "test:checkout-exemption-trust-binding": "tsx --test src/app/api/checkout/route.exemption-trust-binding.test.ts",
     "test:action-executor-vaulted-pm-guard": "tsx --test src/lib/action-executor.vaulted-pm-guard.test.ts",
     "test:action-executor-full-order-refund-customer-binding": "tsx --test src/lib/action-executor.full-order-refund-customer-binding.test.ts",
     "test:create-return-resolution-type": "tsx --test src/lib/action-executor.create-return-resolution-type.test.ts",
