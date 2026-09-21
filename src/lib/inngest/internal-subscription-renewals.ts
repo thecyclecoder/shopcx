@@ -1294,6 +1294,21 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       // which dunning keys cycles on) + the Braintree decline code as error_code so
       // the dunning router can create a proper cycle. Also log a customer_events
       // failure NOW so the timeline + AI see it regardless of dunning's outcome.
+      // ⭐ Mark the ROW failed. Only the success path wrote `last_payment_status`, so a sub whose
+      // card just declined kept advertising `succeeded` from its previous cycle — on the dashboard
+      // badge, the portal, and every CS surface the orchestrator reads. Found on the ShopCX worker
+      // 2026-09-21 and backfilled; 7 of the 9 stale rows turned out to be INTERNAL subs, so the
+      // same gap has been live on this engine the whole time.
+      //
+      // ⚠️ `next_billing_date` is deliberately NOT touched — dunning owns the retry schedule from
+      // here and holds the date in the past on purpose.
+      await step.run("mark-row-failed", async () => {
+        const admin = createAdminClient();
+        await admin
+          .from("subscriptions")
+          .update({ last_payment_status: "failed", updated_at: new Date().toISOString() })
+          .eq("id", subscription_id);
+      });
       await step.run("log-payment-failed-event", async () => {
         const { logCustomerEvent } = await import("@/lib/customer-events");
         await logCustomerEvent({

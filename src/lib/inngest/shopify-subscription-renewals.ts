@@ -394,29 +394,33 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
           .update({ next_billing_date: advanceTo.toISOString(), last_payment_status: "succeeded", updated_at: new Date().toISOString() })
           .eq("id", sub.id);
 
-        // ⭐ ROLLING SCHEDULE PIN. Shopify caps `scheduleEdit` about 12 months out, so the sync
-        // done at migration eventually runs out. Pinning one cycle ahead on every charge keeps the
+        // ⭐ ROLLING RETIME. Shopify caps `scheduleEdit` about 12 months out, so the sync done at
+        // migration eventually runs out. Re-timing one cycle ahead on every charge keeps the
         // customer's Shopify-visible date correct indefinitely, for one mutation per renewal.
         //
-        // This is what buys the alternative: converting WEEK/4 and WEEK/8 to MONTH/1 and MONTH/2
-        // would make the schedule permanently anchorable, but 28 days is not a month — it costs
-        // ~1.04 billing cycles a year per sub, about $148k/yr across this book.
+        // ⚠️ This MUST be `shopifyRetimeContract`, not `shopifySyncBillingSchedule` alone. The
+        // cycle schedule and the contract's `nextBillingDate` are INDEPENDENT — pinning cycles
+        // leaves the display field on the old date, and the display field is the one the customer
+        // and every Shopify surface read. Measured 2026-09-21 after the first cohort renewals:
+        // 7 contracts sat exactly one interval out (28d on WEEK/4, 56d on WEEK/8, 14d on WEEK/2)
+        // because the pin moved the schedule and nothing moved the date. `shopifyRetimeContract`
+        // does both and then re-reads to confirm the new date did not land in a spent cycle.
         //
         // Non-fatal: the charge already succeeded and the worker bills by explicit selector, so a
-        // failed pin is a display drift, never a missed renewal.
+        // failed retime is display drift, never a missed renewal. The daily drift reconciler
+        // catches whatever this misses.
         try {
-          const landing = await getBillingCycleForDate(
+          const { shopifyRetimeContract } = await import("@/lib/commerce/shopify-subscription-client");
+          const retimed = await shopifyRetimeContract(
             workspace_id, sub.shopify_contract_id, advanceTo.toISOString(),
           );
-          if (landing.success && landing.cycle) {
-            await shopifySyncBillingSchedule(workspace_id, sub.shopify_contract_id, {
-              firstDate: advanceTo.toISOString(),
-              startIndex: landing.cycle.index,
-              cycles: 2,
-            });
+          if (retimed.stranded) {
+            console.error(`[shopcx-renewal] ${sub.shopify_contract_id}: advanced to ${advanceTo.toISOString()} but it lands in a spent cycle — will NOT be charged again without a re-pin`);
+          } else if (!retimed.success) {
+            console.error(`[shopcx-renewal] ${sub.shopify_contract_id}: retime failed (${retimed.error}) — Shopify-visible date is stale`);
           }
         } catch (e) {
-          console.error(`[shopcx-renewal] ${sub.shopify_contract_id}: schedule pin failed (non-fatal):`, e instanceof Error ? e.message : e);
+          console.error(`[shopcx-renewal] ${sub.shopify_contract_id}: retime threw (non-fatal):`, e instanceof Error ? e.message : e);
         }
       });
 
@@ -429,6 +433,21 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
     await step.run("resolve-claim-failed", () =>
       resolveCycleCharge(admin, claim.id, { status: "failed" }),
     );
+
+    // ⭐ Mark the ROW failed too. Only the success path wrote `last_payment_status`, so a sub whose
+    // card just declined kept advertising `succeeded` from its previous cycle — on the dashboard
+    // badge, the portal, and every CS surface the orchestrator reads. Measured 2026-09-21:
+    // 36065771693 sat mid-dunning with a declined card and a row reading `succeeded`.
+    //
+    // ⚠️ `next_billing_date` is deliberately NOT touched. Dunning owns the retry schedule from
+    // here and holds the date in the past ON PURPOSE so the cycle stays targetable;
+    // `resetBillingDateAfterDunning` sets the real one when the cycle closes.
+    await step.run("mark-row-failed", async () => {
+      await admin
+        .from("subscriptions")
+        .update({ last_payment_status: "failed", updated_at: new Date().toISOString() })
+        .eq("id", sub.id);
+    });
     await step.run("dispatch-dunning", async () => {
       await inngest.send({
         // ⚠️ The topic is `dunning/payment-failed` — every other producer uses it and

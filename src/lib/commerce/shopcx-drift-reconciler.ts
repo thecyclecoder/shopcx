@@ -139,6 +139,14 @@ export async function reconcileShopcxDrift(
 
         if (!sub.next_billing_date) continue;
 
+        // ⚠️ A PAUSED sub is not a strand. Its date is frozen at its last charge, so it looks like
+        // it lands in a spent cycle — but the renewal cron only selects `active`, and
+        // `retimeAfterResume` ([[portal-auto-resume]]) rolls the date forward and re-pins when the
+        // pause ends. Measured 2026-09-21: two customers took a 60-day pause hours after renewing,
+        // and both were reported STRANDED — the loudest alert this module raises, on subscriptions
+        // that were behaving perfectly. A false strand teaches people to ignore real ones.
+        if (sub.status === "paused") continue;
+
         // ⭐ The expensive check, and the one that actually costs money. Ask Shopify which cycle
         // our billing date lands in; a BILLED or skipped cycle means the renewal worker will skip
         // this subscription every run from here on, silently and forever.

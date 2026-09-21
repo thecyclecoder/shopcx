@@ -494,6 +494,44 @@ resolves the cycle by date and skips spent ones. Measured on the 2026-09-16 coho
 subs that had just charged were already dead, one by eight minutes. `shopifyRetimeContract` verifies
 after writing and returns `stranded` rather than succeeding quietly.
 
+## ⭐ First real renewals — 2026-09-19
+
+19 migrated subs came due in one cron tick. **17 charged clean ($1,811.38), 3 declined, 0 double
+charges** — every cohort customer has exactly one order, confirmed by querying orders for the
+customers rather than for the subscriptions.
+
+**The decline path ran in production for the first time** and behaved: `dunning/payment-failed`
+dispatched from the ShopCX worker, cycles opened, and one (`36065935533`, INVALID_PAYMENT_METHOD)
+went the whole way to `recovered` with its date advanced. Two are still retrying.
+
+### Four defects it exposed
+
+1. **Dunning labelled every retry outcome "Appstle"** — `error_code: "appstle_rejected"`,
+   hardcoded from the single-engine era. A ShopCX card decline was recorded as an Appstle rejection
+   against a Shopify contract id. Nothing was mis-billed (`dunningChargeContract` is engine-aware
+   and routed correctly) but a ledger that accuses the wrong engine is the worst possible thing to
+   hand someone investigating a double-billing question — it cost a full investigation to rule out.
+   `DunningChargeResult.engine` now carries the truth.
+2. **A decline never wrote `last_payment_status`.** Only the success path did, so a sub mid-dunning
+   kept advertising `succeeded` from its previous cycle on the dashboard badge, the portal and every
+   CS surface. **7 of the 9 stale rows were INTERNAL subs**, so this gap had been live on the
+   Braintree engine the whole time — the migration just surfaced it.
+3. **The rolling pin moved the schedule but not the date.** `shopifySyncBillingSchedule` pins
+   cycles; `nextBillingDate` is an independent storage field and is the one customers see. Seven
+   contracts sat exactly one interval out (28d on WEEK/4, 56d on WEEK/8, 14d on WEEK/2). The advance
+   now calls `shopifyRetimeContract`, which does both and verifies.
+4. **The reconciler cried STRANDED on paused subs.** Two customers took a 60-day pause hours after
+   renewing; their date is frozen at the last charge, so it looks like a spent cycle. But the cron
+   only selects `active`, and `retimeAfterResume` re-pins on wake. A false strand teaches people to
+   ignore real ones, so paused subs are now skipped by that check.
+
+After all four: **drift 0 of 51.**
+
+### Worth knowing
+
+**2 of 19 paused within a day of renewing** — both 60-day pauses. Not a defect; a retention signal
+about what the first post-migration charge prompts.
+
 ## Open decisions
 
 - **~$9,700/cycle**: 974 lines are priced above the standard ladder because their subs never got a
