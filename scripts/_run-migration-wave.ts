@@ -29,6 +29,19 @@ const DRY = process.argv.includes("--dry");
 const APPLY = process.argv.includes("--apply");
 const SIZE = Number(arg("--size") ?? 25);
 const ONE = arg("--contract");
+/**
+ * Re-snapshot each target immediately before migrating it.
+ *
+ * ⭐ The snapshot PLANS the migration and `detectDrift` refuses if the contract has changed since —
+ * correct, and the reason 2 of 45 contracts were refused across waves 1 and 1b. That refusal rate
+ * is a function of SNAPSHOT AGE, and the snapshots are now 11 days old and ageing: every day more
+ * customers edit their subscription and become un-migratable until someone re-pulls them.
+ *
+ * Refreshing right before the migration makes the plan current, so the only drift that can fire is
+ * a change in the seconds between — which is exactly the window the check should be guarding.
+ * Costs one extra metered Appstle call per contract, scoped to the wave and nothing else.
+ */
+const REFRESH = process.argv.includes("--refresh");
 const DUE_FROM_DAYS = Number(arg("--from") ?? 3);
 const DUE_TO_DAYS = Number(arg("--to") ?? 10);
 /** Exact calendar due date (UTC), e.g. --due 2026-09-19. Overrides the day window. */
@@ -127,7 +140,19 @@ async function main() {
   console.log(`\n=== ${APPLY ? "MIGRATING" : "DRY RUN"} ${wave.length} contract(s) ===`);
   const outcomes: Record<string, number> = {};
   const failures: string[] = [];
+  const { snapshotAppstleContract } = await import("../src/lib/appstle-snapshot");
+  let refreshed = 0, refreshFailed = 0;
   for (const [n, c] of wave.entries()) {
+    if (REFRESH) {
+      const snap = await snapshotAppstleContract(WORKSPACE_ID, c.contractId, c.subId);
+      if (snap.ok) refreshed++;
+      else {
+        refreshFailed++;
+        console.log(`  [${String(n + 1).padStart(2)}/${wave.length}] ${c.contractId} ✗ snapshot refresh failed: ${snap.error}${snap.rateLimited ? " (RATE LIMITED)" : ""}`);
+        // A failed refresh means we would migrate from stale data. Skip rather than risk it.
+        continue;
+      }
+    }
     const r = await executeMigration(WORKSPACE_ID, c.contractId, ctx, { dryRun: !APPLY });
     const key = r.ok ? "ok" : `${r.stage}`;
     outcomes[key] = (outcomes[key] ?? 0) + 1;
@@ -139,7 +164,8 @@ async function main() {
     await sleep(PACE_MS);
   }
 
-  console.log(`\noutcomes: ${JSON.stringify(outcomes)}`);
+  if (REFRESH) console.log(`\nsnapshots refreshed: ${refreshed}  refresh failures (skipped): ${refreshFailed}`);
+  console.log(`outcomes: ${JSON.stringify(outcomes)}`);
   if (failures.length) {
     console.log(`\n${failures.length} failure(s):`);
     for (const f of failures) console.log(`  ${f}`);

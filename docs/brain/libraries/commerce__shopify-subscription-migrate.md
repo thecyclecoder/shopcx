@@ -168,6 +168,27 @@ bug that reports itself rather than a migration that looks failed.
 **Still open from the wave:**
 - `27847327917` — drift guard refused it (the customer edited since the snapshot). Correct.
 
+## ⭐ `--refresh` — re-snapshot immediately before migrating
+
+The snapshot PLANS a migration and `detectDrift` refuses if the contract changed since. Correct,
+and the reason **2 of 45 contracts were refused across waves 1 and 1b**. That refusal rate is a
+function of **snapshot age**: every day more customers edit their subscription and quietly become
+un-migratable until someone re-pulls them. The snapshots were 11 days old by 2026-09-21.
+
+`scripts/_run-migration-wave.ts --refresh` re-snapshots each target right before migrating it, so
+the plan is current and the only drift that can fire is a change in the intervening seconds —
+exactly the window the check should be guarding. One extra metered Appstle call per contract,
+scoped to the wave.
+
+A failed refresh SKIPS that contract rather than falling back to stale data.
+
+Proved on 2026-09-21: a 5-contract wave went 5/5 **including `27847327917`, which wave 1 had
+drift-refused** — the refresh fixed precisely the failure it was built for. The in-swap pricing
+mirror also needed 0 corrections afterwards, confirming that fix landed too.
+
+**This is the default for any wave past a handful.** Without it, the refusal rate climbs with the
+age of the snapshot table and the misses are silent — a refused contract just stays on Appstle.
+
 ## Gotchas
 
 - **Not idempotent without the marker.** The first real run created TWO live contracts for one
