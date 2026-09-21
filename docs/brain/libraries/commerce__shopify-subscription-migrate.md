@@ -189,6 +189,37 @@ mirror also needed 0 corrections afterwards, confirming that fix landed too.
 **This is the default for any wave past a handful.** Without it, the refusal rate climbs with the
 age of the snapshot table and the misses are silent — a refused contract just stays on Appstle.
 
+## Wave 2 — 126 contracts across 7 due dates, 2026-09-21
+
+First wave run with `--refresh` on, and the first one that found **no new defects**.
+
+**123 of 126 migrated and swapped.** 0 missing items, 0 missing addresses, 0 duplicate rows,
+**0 pricing-mirror corrections** (the in-swap mirror works), **drift 0 of 179**.
+**128 of 128 confirmed `CANCELLED` on Appstle by live read** — no customer billed by both engines.
+
+Population now: **178 on ShopCX ($16,758.33/cycle), 1,831 still active on Appstle.**
+
+Deliberately spread 18/day across 09-22..09-28 so renewals arrive in daily batches small enough to
+watch, rather than one cliff.
+
+### The 3 refusals — all safe, all left on Appstle
+
+- **2 × drift**, even with `--refresh`: the contract changed between the re-snapshot and the
+  migration seconds later. That is the guard doing exactly its job in the window it was narrowed to.
+- **1 × verify-pricing** (`27947565229`): `Insure01` effective 549 vs planned 600, and
+  `SC-TABS-BERRY` 5043 vs 5041. The 2-cent one is multiplicative rounding across 3 allocations; the
+  51-cent one on shipping protection is a genuine pricing disagreement worth chasing before a
+  full-book sweep, since protection rides on many contracts. **Do not widen the ±1c tolerance to
+  make this pass** — it would mask the real half.
+
+### Two rates to keep watching (both still too small to conclude from)
+
+- **declines:** 3 of 19 in the first renewal batch (15.8%) vs a book-wide baseline near 6%. At 6%
+  the expected count was 1.2, so 3 is not yet a signal. Wave 2's renewals over 09-22..09-28 are the
+  sample that settles it. If it holds near 15% across hundreds, that is a payment-method problem the
+  migration is EXPOSING, not causing.
+- **pauses:** 2 of 19 paused within a day of renewing, both 60-day.
+
 ## Gotchas
 
 - **Not idempotent without the marker.** The first real run created TWO live contracts for one
