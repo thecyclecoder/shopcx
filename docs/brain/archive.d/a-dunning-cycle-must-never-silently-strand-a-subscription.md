@@ -1,0 +1,1 @@
+- **A dunning cycle must never silently strand a subscription** · verified 2026-09-21 · → [[lifecycles/dunning]]
