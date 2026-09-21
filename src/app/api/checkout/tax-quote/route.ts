@@ -25,6 +25,7 @@ import { resolveRateForCart } from "@/lib/shipping-rates";
 import { createTransaction } from "@/lib/avalara";
 import { buildAvalaraLines, type CartLineForTax } from "@/lib/avalara-cart";
 import { resolveCustomerTaxExemption } from "@/lib/customer-tax-exemptions";
+import { readSessionFromRequest } from "@/lib/auth-session";
 
 interface AddressInput {
   address1?: string;
@@ -124,13 +125,29 @@ export async function POST(request: NextRequest) {
   const customerCode = cartFull?.customer_id || cartFull?.email || `cart-${body.cart_token}`;
 
   // Phase 2 of docs/brain/specs/a-customer-can-be-recorded-as-sales-tax-exempt.md — resolve the
-  // buyer's live sales-tax exemption for the ship-to region, if we can identify the buyer at
-  // quote time. A cart without a customer_id (guest browsing) sees a null resolution and full
-  // taxable quote — the same customer's first *committed* checkout runs the same resolver in
-  // /api/checkout/route.ts. The resolver honors expires_at.
+  // buyer's live sales-tax exemption for the ship-to region, if the caller carries a VERIFIED
+  // identity for this cart.
+  //
+  // ⭐ VERIFIED SESSION ONLY. Fix 2 of the same spec § Phase 5. `cartFull.customer_id` alone is
+  // NOT a trust source — the unauthenticated `/api/checkout/identify` route binds it by
+  // caller-supplied email BEFORE any OTP verify, so an attacker who knows an exempt customer's
+  // email can identify an open cart as that customer and preview their exemption here. Resolve
+  // the exemption ONLY when the signed `sx_session` cookie (set after OTP verify / magic-link
+  // click) is present AND `session.w === cart.workspace_id` AND `session.c ===
+  // cartFull.customer_id`; otherwise omit exemptionNo/entityUseCode and quote normal Avalara-
+  // computed tax. A guest cart (no session, no cart.customer_id) sees a null resolution and a
+  // fully-taxable quote — the same customer's first authenticated checkout will pick up their
+  // exemption once they OTP-verify.
   const shipRegion = addr.province_code!.toUpperCase();
-  const exemption = cartFull?.customer_id
-    ? await resolveCustomerTaxExemption(admin, cart.workspace_id as string, cartFull.customer_id as string, shipRegion)
+  const quoteSession = readSessionFromRequest(request);
+  const trustedQuoteCustomerId =
+    quoteSession &&
+    quoteSession.w === (cart.workspace_id as string) &&
+    quoteSession.c === (cartFull?.customer_id as string | null | undefined)
+      ? quoteSession.c
+      : null;
+  const exemption = trustedQuoteCustomerId
+    ? await resolveCustomerTaxExemption(admin, cart.workspace_id as string, trustedQuoteCustomerId, shipRegion)
     : null;
 
   // Avalara caps `code` at 50 chars. Cart tokens are 48 hex chars,
