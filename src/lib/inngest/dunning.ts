@@ -356,8 +356,15 @@ export const dunningPaymentFailed = inngest.createFunction(
           billingAttemptId: attemptId,
           paymentMethodLast4: card.last4,
           paymentMethodId: card.id,
-          errorCode: billingRes.success ? null : "appstle_rejected",
-          errorMessage: billingRes.success ? "Billing attempt accepted by Appstle" : `Appstle rejected billing attempt: ${billingRes.error}`,
+          // ⚠️ Name the engine that ACTUALLY ran this. Hardcoding "appstle" here recorded ShopCX
+          // card declines as Appstle rejections against a Shopify contract id — measured on
+          // 36065968301, three rows reading "Appstle rejected" for charges that never touched
+          // Appstle. Nothing was mis-billed, but a ledger that accuses the wrong engine is the
+          // worst kind of wrong to hand someone investigating a double-billing question.
+          errorCode: billingRes.success ? null : `${billingRes.engine ?? "vendor"}_rejected`,
+          errorMessage: billingRes.success
+            ? `Billing attempt accepted by ${billingRes.engine ?? "vendor"}`
+            : `${billingRes.engine ?? "vendor"} rejected billing attempt: ${billingRes.error}`,
           attemptNumber,
           attemptType: "card_rotation",
           succeeded: false,

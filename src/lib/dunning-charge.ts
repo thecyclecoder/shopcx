@@ -23,6 +23,17 @@ import { errText } from "@/lib/error-text";
 export interface DunningChargeResult {
   success: boolean;
   error?: string;
+  /**
+   * Which engine actually ran the charge.
+   *
+   * ⭐ Callers LOG this. Before it existed, dunning hardcoded every retry outcome as
+   * "Appstle rejected billing attempt" / `error_code: "appstle_rejected"` regardless of engine —
+   * so a ShopCX card decline was recorded as an Appstle rejection against a Shopify contract id.
+   * Measured 2026-09-21 on contract 36065968301: three rows reading "Appstle rejected" for charges
+   * that never touched Appstle. Nothing was mis-billed, but the ledger accuses the wrong system,
+   * which is the worst kind of wrong on a double-billing question.
+   */
+  engine?: "appstle" | "internal" | "shopcx";
   /** Appstle billing-attempt id, or the Shopify attempt gid. Recorded on the cycle either way. */
   attemptId?: string | null;
   /** True when the outcome is not yet settled (3DS). NOT a failure — must not advance dunning. */
@@ -65,6 +76,7 @@ export async function dunningChargeContract(
   attemptOrdinal: number,
 ): Promise<DunningChargeResult> {
   const src = await resolveBillingSource(workspaceId, contractId);
+  const engine = src as DunningChargeResult["engine"];
 
   if (src === "shopcx") {
     const admin = createAdminClient();
@@ -95,11 +107,12 @@ export async function dunningChargeContract(
       const started = await shopifyAttemptBilling(workspaceId, contractId, key,
         due ? { billingCycleSelector: { date: due } } : {});
       if (!started.success || !started.attemptId) {
-        return { success: false, error: started.error ?? "attempt not accepted" };
+        return { success: false, engine, error: started.error ?? "attempt not accepted" };
       }
       const outcome = await awaitBillingAttempt(workspaceId, started.attemptId);
       return {
         success: outcome.success,
+        engine,
         settled: !(outcome.pending ?? false),
         pending: outcome.pending ?? false,
         error: outcome.error ?? outcome.errorCode ?? undefined,
@@ -107,19 +120,19 @@ export async function dunningChargeContract(
         orderName: outcome.orderName ?? null,
       };
     } catch (err) {
-      return { success: false, error: errText(err) };
+      return { success: false, engine, error: errText(err) };
     }
   }
 
   // Appstle / internal: look up the upcoming order, then bill that attempt.
   const ordersRes = await subscriptionGetUpcomingOrders(workspaceId, contractId);
   if (!ordersRes.success || !ordersRes.orders?.length) {
-    return { success: false, error: ordersRes.error || "no upcoming orders" };
+    return { success: false, engine, error: ordersRes.error || "no upcoming orders" };
   }
   const attemptId = ordersRes.orders[0].id;
   const billingRes = await subscriptionAttemptBilling(workspaceId, attemptId);
   // Vendor ACCEPTANCE only — the charge result lands later on the Appstle webhook.
-  return { success: billingRes.success, settled: false, error: billingRes.error, attemptId };
+  return { success: billingRes.success, engine, settled: false, error: billingRes.error, attemptId };
 }
 
 /** Unskip whatever the engine considers skipped. A no-op where the concept doesn't apply. */
