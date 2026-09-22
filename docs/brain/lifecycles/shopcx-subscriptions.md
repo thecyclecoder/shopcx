@@ -532,6 +532,38 @@ After all four: **drift 0 of 51.**
 **2 of 19 paused within a day of renewing** — both 60-day pauses. Not a defect; a retention signal
 about what the first post-migration charge prompts.
 
+## Renewal watch — running totals
+
+`scripts/_daily-renewal-report.ts <YYYY-MM-DD>` is the daily check;
+`scripts/_shopcx-renewal-rates.ts` the cumulative one.
+
+| Day | Charged | Declined | Collected |
+|---|---|---|---|
+| 2026-09-19 | 17 | 3 | $1,811.38 |
+| 2026-09-22 | 21 | 2 | $2,014.99 |
+| **Cumulative** | **38** | **5 (11.6%)** | **$3,826.37** |
+
+**Zero double charges on either day** — checked by counting orders per CUSTOMER, so a charge landing
+on either engine would surface regardless of which subscription it linked to.
+
+**The engine-label fix is confirmed live**: today's retries record `shopcx_rejected` /
+"shopcx rejected billing attempt", where before every engine's failures were logged as Appstle's.
+
+**Dunning is working end to end.** Of the ShopCX-era cycles: 1 recovered outright
+(`36065935533`), 4 retrying with the next attempt scheduled. No cycle has been lost or stalled.
+
+### Decline rate — still watching, now trending down
+
+15.8% on day one (3/19) → 8.7% on day two (2/23) → **11.6% cumulative (5/43)**. The book baseline is
+~6% (126 dunning cycles in 30 days across all engines). Day one was a small-sample high, exactly as
+suspected; the rate is converging as the sample grows. **Do not act on this yet** — 43 attempts is
+still thin. Revisit near 200.
+
+⚠️ **A daily report must check ALL OPEN dunning cycles, not just cycles opened that day.** A sub
+that declines on Monday sits in a cycle whose next retry is Friday — neither charged nor newly
+dunned in between. Filtering on today's cycles alone reported two healthy subs as MISSED RENEWALS
+every day until they resolved. Fixed in the report.
+
 ## Open decisions
 
 - **~$9,700/cycle**: 974 lines are priced above the standard ladder because their subs never got a
