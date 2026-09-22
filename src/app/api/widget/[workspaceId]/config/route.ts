@@ -20,7 +20,10 @@ export async function GET(
 
   return NextResponse.json({
     name: ws.name,
-    color: ws.widget_color || "#4f46e5",
+    // Warm near-black. Deliberately NOT a saturated hue: the bubble sits on top of
+    // every merchant's page and must never read as one of their CTAs. Indigo
+    // (#4f46e5) competed with buttons; a green default competed with them harder.
+    color: ws.widget_color || "#33272B",
     greeting: ws.widget_greeting || "Hi! How can we help you today?",
     position: ws.widget_position || "bottom-right",
     chatEnabled: ws.chat_ticket_creation ?? true,
