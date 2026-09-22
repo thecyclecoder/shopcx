@@ -1,0 +1,114 @@
+import { NextRequest, NextResponse } from "next/server";
+import { createAdminClient } from "@/lib/supabase/admin";
+
+/**
+ * Categorised product reviews for the storefront review widget.
+ *
+ * Reads the benefit buckets that product intelligence already derived
+ * (product_review_analysis.top_benefits — each carries the review_ids it was drawn
+ * from) and hydrates them with the real rows from product_reviews. Nothing here
+ * invents a category or a quote: a product with no analysis row returns no
+ * categories, and the widget renders nothing rather than filling the gap.
+ *
+ * Keyed by SHOPIFY product id so a Liquid template can call it with `product.id`
+ * and stay generic across products.
+ */
+
+// Short tab labels from the analysis's own benefit sentences. Keyword-driven rather
+// than a per-product table, so a newly analysed product needs no code change.
+const LABELS: Array<[RegExp, string]> = [
+  [/craving|appetite|hunger|snack/i, "Cravings"],
+  [/weight|scale|pounds|lbs/i,       "Weight loss"],
+  [/energy|jitter|crash/i,           "Energy"],
+  [/focus|clarity|brain|mental/i,    "Focus"],
+  [/stomach|digest|bloat|gut|reflux/i, "Digestion"],
+  [/aging|younger|skin|wrinkl/i,     "Aging"],
+  [/sleep|rest/i,                    "Sleep"],
+  [/taste|flavor|flavour|mocha/i,    "Taste"],
+  [/stress|cortisol|calm|mood/i,     "Mood"],
+];
+const FREQ_RANK: Record<string, number> = { "very high": 0, high: 1, moderate: 2, low: 3 };
+
+function labelFor(benefit: string): string {
+  for (const [re, label] of LABELS) if (re.test(benefit)) return label;
+  return benefit.split(/\s+/).slice(0, 2).join(" ");
+}
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  // storefront-public data only: published reviews already visible on the PDP
+  "Cache-Control": "public, max-age=300, s-maxage=900, stale-while-revalidate=3600",
+};
+
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: CORS });
+}
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ shopifyProductId: string }> },
+) {
+  const { shopifyProductId } = await params;
+  const limitPer = Math.min(Math.max(Number(req.nextUrl.searchParams.get("per") ?? 3), 1), 8);
+  const admin = createAdminClient();
+
+  const { data: product } = await admin
+    .from("products")
+    .select("id, title")
+    .eq("shopify_product_id", String(shopifyProductId))
+    .maybeSingle();
+
+  if (!product) {
+    return NextResponse.json({ categories: [] }, { headers: CORS });
+  }
+
+  const { data: analysis } = await admin
+    .from("product_review_analysis")
+    .select("top_benefits, reviews_analyzed_count, analyzed_at")
+    .eq("product_id", product.id)
+    .maybeSingle();
+
+  const buckets = (analysis?.top_benefits as
+    | Array<{ benefit: string; frequency?: string; review_ids?: string[] }>
+    | null) ?? [];
+  if (!buckets.length) {
+    return NextResponse.json({ product: product.title, categories: [] }, { headers: CORS });
+  }
+
+  // One round trip for every referenced review, then group in memory.
+  const ids = [...new Set(buckets.flatMap((b) => b.review_ids ?? []))];
+  const { data: reviews } = await admin
+    .from("product_reviews")
+    .select("id, reviewer_name, rating, body, smart_quote, verified_purchase")
+    .in("id", ids);
+  const byId = new Map((reviews ?? []).map((r) => [r.id, r]));
+
+  const categories = buckets
+    .slice()
+    .sort((a, b) => (FREQ_RANK[a.frequency ?? ""] ?? 9) - (FREQ_RANK[b.frequency ?? ""] ?? 9))
+    .map((b) => ({
+      label: labelFor(b.benefit),
+      benefit: b.benefit,
+      frequency: b.frequency ?? null,
+      reviews: (b.review_ids ?? [])
+        .map((id) => byId.get(id))
+        .filter((r): r is NonNullable<typeof r> => Boolean(r?.body))
+        // a verified reviewer is the stronger proof, so lead with those
+        .sort((x, y) => Number(Boolean(y.verified_purchase)) - Number(Boolean(x.verified_purchase)))
+        .slice(0, limitPer)
+        .map((r) => ({
+          name: r.reviewer_name ?? "Verified customer",
+          rating: r.rating ?? 5,
+          quote: r.smart_quote ?? null,
+          body: r.body,
+          verified: Boolean(r.verified_purchase),
+        })),
+    }))
+    .filter((c) => c.reviews.length > 0);
+
+  return NextResponse.json(
+    { product: product.title, analyzedCount: analysis?.reviews_analyzed_count ?? null, categories },
+    { headers: CORS },
+  );
+}
