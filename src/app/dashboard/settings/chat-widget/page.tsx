@@ -8,7 +8,7 @@ export default function ChatWidgetSettingsPage() {
   const workspace = useWorkspace();
   const [enabled, setEnabled] = useState(false);
   const [chatTicketCreation, setChatTicketCreation] = useState(true);
-  const [color, setColor] = useState("#4f46e5");
+  const [color, setColor] = useState("#33272B");
   const [greeting, setGreeting] = useState("Hi! How can we help you today?");
   const [position, setPosition] = useState("bottom-right");
   const [saving, setSaving] = useState(false);
