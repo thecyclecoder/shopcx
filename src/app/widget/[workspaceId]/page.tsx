@@ -378,7 +378,7 @@ export default function ChatWidgetPage() {
     }
   };
 
-  const primaryColor = config?.color || "#4f46e5";
+  const primaryColor = config?.color || "#33272B";   // keep in sync with the widget config route
 
   if (loading) {
     return (
