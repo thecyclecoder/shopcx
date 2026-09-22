@@ -31,8 +31,21 @@ const LABELS: Array<[RegExp, string]> = [
   [/sleep|rest/i,                    "Sleep"],
   [/taste|flavor|flavour|mocha/i,    "Taste"],
   [/stress|cortisol|calm|mood/i,     "Mood"],
+  [/ingredient|superfood|mushroom|natural/i, "Ingredients"],
+  [/immun/i,                         "Immunity"],
 ];
-const FREQ_RANK: Record<string, number> = { "very high": 0, high: 1, moderate: 2, low: 3 };
+// Analyses disagree on how they express frequency: some write "very high", others
+// write a raw mention count. Both are normalised to one 0-4 score so buckets from
+// different products can be ordered against each other.
+const FREQ_WORDS: Record<string, number> = { "very high": 4, high: 3, moderate: 2, low: 1 };
+
+function freqScore(frequency: unknown, maxCount: number): number {
+  if (typeof frequency === "number" && Number.isFinite(frequency)) {
+    return maxCount > 0 ? (frequency / maxCount) * 4 : 0;
+  }
+  const w = String(frequency ?? "").toLowerCase().trim();
+  return FREQ_WORDS[w] ?? 0;
+}
 
 function labelFor(benefit: string): string {
   for (const [re, label] of LABELS) if (re.test(benefit)) return label;
@@ -75,7 +88,7 @@ export async function GET(
     .select("product_id, top_benefits, reviews_analyzed_count")
     .in("product_id", (products ?? []).map((p) => p.id));
 
-  type Bucket = { benefit: string; frequency?: string; review_ids?: string[] };
+  type Bucket = { benefit: string; frequency?: string | number; review_ids?: string[] };
   const buckets: Bucket[] = (analyses ?? []).flatMap((a) => (a.top_benefits as Bucket[] | null) ?? []);
   if (!buckets.length) {
     return NextResponse.json({ product: primary.title, categories: [] }, { headers: CORS });
@@ -90,7 +103,14 @@ export async function GET(
 
   // Merge across products by LABEL: two analyses word the same shelf differently
   // ("Curbs appetite and cravings" vs "Suppresses hunger") but a shopper reads one tab.
-  const merged = new Map<string, { benefit: string; frequency: string | null; ids: Set<string> }>();
+  const maxCount = Math.max(
+    0,
+    ...buckets.map((b) => (typeof b.frequency === "number" ? b.frequency : 0)),
+  );
+  const merged = new Map<
+    string,
+    { benefit: string; frequency: string | number | null; score: number; ids: Set<string> }
+  >();
   for (const b of buckets) {
     const label = labelFor(b.benefit);
     const cur = merged.get(label);
@@ -98,23 +118,26 @@ export async function GET(
       merged.set(label, {
         benefit: b.benefit,
         frequency: b.frequency ?? null,
+        score: freqScore(b.frequency, maxCount),
         ids: new Set(b.review_ids ?? []),
       });
       continue;
     }
     for (const id of b.review_ids ?? []) cur.ids.add(id);
-    if ((FREQ_RANK[b.frequency ?? ""] ?? 9) < (FREQ_RANK[cur.frequency ?? ""] ?? 9)) {
+    const score = freqScore(b.frequency, maxCount);
+    if (score > cur.score) {
+      cur.score = score;
       cur.frequency = b.frequency ?? cur.frequency;
       cur.benefit = b.benefit;
     }
   }
 
   const categories = [...merged.entries()]
-    .sort((x, y) => (FREQ_RANK[x[1].frequency ?? ""] ?? 9) - (FREQ_RANK[y[1].frequency ?? ""] ?? 9))
+    .sort((x, y) => y[1].score - x[1].score || y[1].ids.size - x[1].ids.size)
     .map(([label, c]) => ({
       label,
       benefit: c.benefit,
-      frequency: c.frequency,
+      frequency: typeof c.frequency === "string" ? c.frequency : null,
       reviews: [...c.ids]
         .map((id) => byId.get(id))
         .filter((r): r is NonNullable<typeof r> => Boolean(r?.body))
