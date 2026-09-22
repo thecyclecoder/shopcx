@@ -155,7 +155,24 @@ const STATUS_MUTATION = {
   resume: ["subscriptionContractActivate", "subscriptionContractId"],
 } as const;
 
-/** Mirrors `appstleSubscriptionAction`. Direct mutations — no draft. */
+/**
+ * Mirrors `appstleSubscriptionAction`. Direct mutations — with ONE draft fallback.
+ *
+ * ⭐ **A CANCELLED contract can be reactivated — but not by the activate mutation.**
+ * `subscriptionContractActivate` refuses it with *"Contract status must be either active, paused,
+ * or failed."* The DRAFT path does it fine:
+ *
+ *     subscriptionContractUpdate → subscriptionDraftUpdate{ status: ACTIVE } → subscriptionDraftCommit
+ *
+ * Verified end to end on a live contract (35917070509): cancelled, activate refused, draft route
+ * returned it to ACTIVE with its billing date and line intact.
+ *
+ * This is the THIRD time the same lesson has cost something here: **the draft surface can do
+ * things the direct mutations cannot, and neither introspection nor the direct error tells you.**
+ * A direct mutation saying "impossible" means "not through this door" — probe the draft before
+ * concluding Shopify cannot do it. Dunning depends on this: it cancels a customer at the end of a
+ * cycle and reactivates them when they fix their card, exactly as it does on Appstle.
+ */
 export async function shopifySubscriptionAction(
   workspaceId: string,
   contractId: string,
@@ -167,7 +184,22 @@ export async function shopifySubscriptionAction(
     `mutation($id:ID!){ ${field}(${arg}:$id){ contract { id status } userErrors { message } } }`,
     { id: contractGid(contractId) },
   );
-  return toResult(env as never, field);
+  const direct = toResult(env as never, field);
+  if (direct.success || action !== "resume") return direct;
+
+  // Only a CANCELLED contract needs the draft route; anything else is a real failure.
+  const live = await getSubscriptionContract(workspaceId, contractId);
+  if (!live.success || live.contract?.status !== "CANCELLED") return direct;
+
+  return withDraft(workspaceId, contractId, async (draftId) => {
+    const up = await gql(
+      workspaceId,
+      `mutation($id:ID!,$in:SubscriptionDraftInput!){
+         subscriptionDraftUpdate(draftId:$id, input:$in){ draft { id } userErrors { message } } }`,
+      { id: draftId, in: { status: "ACTIVE" } },
+    );
+    return toResult(up as never, "subscriptionDraftUpdate");
+  });
 }
 
 // ── the calendar ───────────────────────────────────────────────────────────────────────────
