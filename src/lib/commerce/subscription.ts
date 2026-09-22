@@ -452,27 +452,6 @@ export async function subscriptionAction(
   action: "pause" | "cancel" | "resume",
   cancelReason?: string,
   cancelledBy?: string,
-  /**
-   * ⭐ `recoverable: true` — cancel LOCALLY but leave the vendor contract revivable.
-   *
-   * ⚠️ **A cancelled Shopify subscription contract can NEVER be reactivated.** Probed directly:
-   * Shopify's contract-activate mutation, called on a CANCELLED contract, returns *"Contract status must be
-   * either active, paused, or failed."* Appstle allows reactivation, so every caller written
-   * against Appstle assumes a cancel is reversible — and on ShopCX it is not.
-   *
-   * That assumption is load-bearing in DUNNING, which cancels a customer at the end of a cycle and
-   * then RESUMES them if they fix their card ([[../inngest/dunning]] steps 1b and 6). On a shopcx
-   * sub that resume would fail forever and the customer would be permanently unrecoverable —
-   * while dunning reported them reactivated.
-   *
-   * So for a cancel that must stay recoverable, the vendor contract is PAUSED instead. Nothing
-   * bills it: Shopify fires nothing on its own, and the renewal cron selects on
-   * `status='active'` + `billing_source='shopcx'`, which the local cancel-truth has already
-   * cleared. The local row is the business truth either way.
-   *
-   * A customer-initiated cancel does NOT pass this — that one is final and should cancel for real.
-   */
-  opts: { recoverable?: boolean } = {},
 ): Promise<OpResult> {
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
@@ -491,11 +470,7 @@ export async function subscriptionAction(
     // customer status rollup — used to live inside appstleSubscriptionAction, so a migrated sub
     // skipped all of it: the row stayed active, still advertised a future charge date, kept an
     // open dunning cycle, and the renewal cron went on billing a customer who had cancelled.
-    // See `opts.recoverable`: a cancelled Shopify contract is dead forever, so a cancel that a
-    // caller intends to be able to undo pauses the contract instead. The LOCAL truth below still
-    // records a real cancellation, which is what every reader of ours sees.
-    const vendorAction = action === "cancel" && opts.recoverable ? "pause" : action;
-    const r = await shopifySubscriptionAction(workspaceId, contractId, vendorAction);
+    const r = await shopifySubscriptionAction(workspaceId, contractId, action);
     if (!r.success) return r;
     await applySubscriptionStatusTruth(workspaceId, contractId, action, { cancelReason, cancelledBy });
     return { success: true };
