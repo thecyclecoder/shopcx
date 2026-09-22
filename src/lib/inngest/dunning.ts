@@ -213,7 +213,11 @@ export const dunningPaymentFailed = inngest.createFunction(
         // Cancel subscription — recovery webhook will reactivate if customer adds new card
         await subscriptionAction(
           workspace_id, shopify_contract_id, "cancel", "dunning",
-          `Cancelled by ShopCX — terminal billing error: ${error_code} (${error_message || "no details"}), no other payment methods available`
+          `Cancelled by ShopCX — terminal billing error: ${error_code} (${error_message || "no details"}), no other payment methods available`,
+          // ⚠️ recoverable: the line above this one promises the recovery webhook will reactivate.
+          // A CANCELLED Shopify contract can never be reactivated, so on shopcx this pauses the
+          // vendor contract and records the cancel locally. See subscriptionAction's `opts`.
+          { recoverable: true },
         );
 
         // Magic-link recovery email + tagged closed ticket (replaces the
@@ -416,7 +420,9 @@ export const dunningPaymentFailed = inngest.createFunction(
 
         await subscriptionAction(
           workspace_id, shopify_contract_id, "cancel", "dunning",
-          `Cancelled by ShopCX — all ${paymentMethods.length} payment methods returned terminal errors`
+          `Cancelled by ShopCX — all ${paymentMethods.length} payment methods returned terminal errors`,
+          // recoverable — the dunning note below promises auto-reactivation on a new card.
+          { recoverable: true },
         );
 
         if (customer_id) await sendPaymentRecoveryEmail(workspace_id, customer_id);
@@ -805,7 +811,12 @@ async function handleAllCardsExhausted(
   } else if (action === "pause" || action === "cancel") {
     // Cancel the subscription — cleaner than indefinite pause
     // If customer adds a new payment method later, auto-reactivate via webhook
-    await subscriptionAction(workspaceId, shopifyContractId, "cancel", "dunning", "Cancelled by ShopCX — payment failed after multiple billing cycles");
+    // recoverable — dunning's step 1b reactivates these when the customer adds a working card.
+    await subscriptionAction(
+      workspaceId, shopifyContractId, "cancel", "dunning",
+      "Cancelled by ShopCX — payment failed after multiple billing cycles",
+      { recoverable: true },
+    );
     await updateDunningCycle(cycle.id, { status: "exhausted", paused_at: new Date().toISOString() });
     await tagCustomerTickets(workspaceId, customerId, "dunning:cancelled");
   } else {
