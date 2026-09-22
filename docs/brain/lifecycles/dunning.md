@@ -377,3 +377,28 @@ the cycle instead of collapsing into "no cards".
 ## Related
 
 [[ticket-lifecycle]] · [[chargeback-pipeline]] · [[subscription-billing]] · [[../integrations/appstle]] · [[../integrations/shopify]] · [[../integrations/resend]] · [[../tables/dunning_cycles]] · [[../tables/payment_failures]] · [[../tables/customer_payment_methods]] · [[../inngest/dunning]]
+
+
+## 🔴 A cancelled Shopify contract can NEVER be reactivated
+
+Probed directly 2026-09-22: `subscriptionContractActivate` on a `CANCELLED` contract returns
+**"Contract status must be either active, paused, or failed."** A `PAUSED` contract round-trips to
+ACTIVE cleanly.
+
+**Appstle allows reactivation, so every caller written against Appstle assumes a cancel is
+reversible.** On ShopCX it is not — and that assumption is load-bearing in DUNNING, which cancels a
+customer at the end of a cycle and then RESUMES them if they fix their card (steps 1b and 6, plus
+the terminal-error and all-cards-exhausted paths). All three cancel sites carry comments promising
+exactly that: *"recovery webhook will reactivate if customer adds new card"*.
+
+On a migrated sub that resume would have failed **forever**, leaving the customer permanently
+unrecoverable while dunning reported them reactivated. Four ShopCX subs were in retrying cycles with
+their next attempt scheduled for 2026-09-25 when this was found — no ShopCX cycle had ever reached
+its terminal outcome, so nothing had exercised the path.
+
+**The fix:** `subscriptionAction(ws, id, "cancel", reason, by, { recoverable: true })`. On shopcx it
+PAUSES the vendor contract and records a real cancellation locally. Nothing bills it — Shopify fires
+nothing on its own, and the renewal cron selects `status='active'` + `billing_source='shopcx'`,
+which the local cancel-truth has already cleared. The local row stays the business truth.
+
+A **customer-initiated** cancel does NOT pass `recoverable` — that one is final and cancels for real.
