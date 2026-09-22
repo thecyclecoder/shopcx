@@ -12,6 +12,11 @@ import { createAdminClient } from "@/lib/supabase/admin";
  *
  * Keyed by SHOPIFY product id so a Liquid template can call it with `product.id`
  * and stay generic across products.
+ *
+ * ?merge=<id,id> folds sibling products' analyses into the same buckets — the K-Cups
+ * and the ground-coffee listing are the same formula, so their reviews describe one
+ * product even though the catalogue splits them. The pairing lives in the template's
+ * render call, not here, so this route stays generic.
  */
 
 // Short tab labels from the analysis's own benefit sentences. Keyword-driven rather
@@ -51,32 +56,31 @@ export async function GET(
 ) {
   const { shopifyProductId } = await params;
   const limitPer = Math.min(Math.max(Number(req.nextUrl.searchParams.get("per") ?? 3), 1), 8);
+  const mergeIds = (req.nextUrl.searchParams.get("merge") ?? "")
+    .split(",").map((x) => x.trim()).filter(Boolean).slice(0, 4);
   const admin = createAdminClient();
 
-  const { data: product } = await admin
+  const { data: products } = await admin
     .from("products")
-    .select("id, title")
-    .eq("shopify_product_id", String(shopifyProductId))
-    .maybeSingle();
+    .select("id, title, shopify_product_id")
+    .in("shopify_product_id", [String(shopifyProductId), ...mergeIds]);
 
-  if (!product) {
+  const primary = (products ?? []).find((p) => p.shopify_product_id === String(shopifyProductId));
+  if (!primary) {
     return NextResponse.json({ categories: [] }, { headers: CORS });
   }
 
-  const { data: analysis } = await admin
+  const { data: analyses } = await admin
     .from("product_review_analysis")
-    .select("top_benefits, reviews_analyzed_count, analyzed_at")
-    .eq("product_id", product.id)
-    .maybeSingle();
+    .select("product_id, top_benefits, reviews_analyzed_count")
+    .in("product_id", (products ?? []).map((p) => p.id));
 
-  const buckets = (analysis?.top_benefits as
-    | Array<{ benefit: string; frequency?: string; review_ids?: string[] }>
-    | null) ?? [];
+  type Bucket = { benefit: string; frequency?: string; review_ids?: string[] };
+  const buckets: Bucket[] = (analyses ?? []).flatMap((a) => (a.top_benefits as Bucket[] | null) ?? []);
   if (!buckets.length) {
-    return NextResponse.json({ product: product.title, categories: [] }, { headers: CORS });
+    return NextResponse.json({ product: primary.title, categories: [] }, { headers: CORS });
   }
 
-  // One round trip for every referenced review, then group in memory.
   const ids = [...new Set(buckets.flatMap((b) => b.review_ids ?? []))];
   const { data: reviews } = await admin
     .from("product_reviews")
@@ -84,14 +88,34 @@ export async function GET(
     .in("id", ids);
   const byId = new Map((reviews ?? []).map((r) => [r.id, r]));
 
-  const categories = buckets
-    .slice()
-    .sort((a, b) => (FREQ_RANK[a.frequency ?? ""] ?? 9) - (FREQ_RANK[b.frequency ?? ""] ?? 9))
-    .map((b) => ({
-      label: labelFor(b.benefit),
-      benefit: b.benefit,
-      frequency: b.frequency ?? null,
-      reviews: (b.review_ids ?? [])
+  // Merge across products by LABEL: two analyses word the same shelf differently
+  // ("Curbs appetite and cravings" vs "Suppresses hunger") but a shopper reads one tab.
+  const merged = new Map<string, { benefit: string; frequency: string | null; ids: Set<string> }>();
+  for (const b of buckets) {
+    const label = labelFor(b.benefit);
+    const cur = merged.get(label);
+    if (!cur) {
+      merged.set(label, {
+        benefit: b.benefit,
+        frequency: b.frequency ?? null,
+        ids: new Set(b.review_ids ?? []),
+      });
+      continue;
+    }
+    for (const id of b.review_ids ?? []) cur.ids.add(id);
+    if ((FREQ_RANK[b.frequency ?? ""] ?? 9) < (FREQ_RANK[cur.frequency ?? ""] ?? 9)) {
+      cur.frequency = b.frequency ?? cur.frequency;
+      cur.benefit = b.benefit;
+    }
+  }
+
+  const categories = [...merged.entries()]
+    .sort((x, y) => (FREQ_RANK[x[1].frequency ?? ""] ?? 9) - (FREQ_RANK[y[1].frequency ?? ""] ?? 9))
+    .map(([label, c]) => ({
+      label,
+      benefit: c.benefit,
+      frequency: c.frequency,
+      reviews: [...c.ids]
         .map((id) => byId.get(id))
         .filter((r): r is NonNullable<typeof r> => Boolean(r?.body))
         // a verified reviewer is the stronger proof, so lead with those
@@ -107,8 +131,10 @@ export async function GET(
     }))
     .filter((c) => c.reviews.length > 0);
 
+  const analyzedCount = (analyses ?? []).reduce((n, a) => n + (a.reviews_analyzed_count ?? 0), 0);
+
   return NextResponse.json(
-    { product: product.title, analyzedCount: analysis?.reviews_analyzed_count ?? null, categories },
+    { product: primary.title, analyzedCount, categories },
     { headers: CORS },
   );
 }
