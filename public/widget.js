@@ -45,7 +45,7 @@
   container.id = "shopcx-chat-widget";
   container.className = "shopcx-widget shopcx-widget-container";
   container.style.cssText =
-    "position:fixed;bottom:20px;right:20px;z-index:999999;font-family:system-ui,-apple-system,sans-serif;";
+    "position:fixed;bottom:12px;right:15px;z-index:999999;font-family:system-ui,-apple-system,sans-serif;";
 
   // The bubble paints before the config fetch resolves, so this default must match
   // the server's default (api/widget/[workspaceId]/config) — otherwise every store
