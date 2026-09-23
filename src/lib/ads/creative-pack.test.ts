@@ -25,6 +25,7 @@ import {
   type CreativePackSnapshot,
   type PackAdVideoLike,
   type PackAngleMetadataLike,
+  resolvePackCopySource,
 } from "./creative-pack";
 
 function makeAngle(overrides: Partial<ScoredAngle> = {}): ScoredAngle {
@@ -363,4 +364,46 @@ test("isCreativePackComplete — a sibling that ISN'T status=ready doesn't satis
   assert.equal(result.ready, false);
   if (result.ready) return;
   assert.equal(result.reason, "missing_right_column_1x1_sibling");
+});
+
+/* ── copy-source resolution ───────────────────────────────────────────────────
+ * The gate used to read the angle's metadata only. `manual-creative` lands a
+ * hand-produced static with NO angle by design and carries the identical 4×4 pack
+ * on `ad_campaigns.metadata` — so every manual-lane static refused as
+ * `copy_pack_missing` while a complete pack sat on the campaign row.
+ * Ground truth: the two Amazing Coffee K-Cups statics, 2026-09-23.
+ */
+const PACK = { headlines: ["a", "b", "c", "d"], primaryTexts: ["p", "q", "r", "s"] };
+
+test("resolvePackCopySource prefers the angle when it carries a pack", () => {
+  const angle = { copy_pack: PACK };
+  const campaign = { copy_pack: { headlines: ["z"], primaryTexts: ["z"] } };
+  assert.equal(resolvePackCopySource(angle, campaign), angle);
+});
+
+test("resolvePackCopySource falls back to the campaign when there is no angle", () => {
+  const campaign = { copy_pack: PACK };
+  assert.equal(resolvePackCopySource(null, campaign), campaign);
+});
+
+test("resolvePackCopySource falls back when the angle exists but carries no pack", () => {
+  const campaign = { copy_pack: PACK };
+  assert.equal(resolvePackCopySource({ copy_pack: null }, campaign), campaign);
+});
+
+test("resolvePackCopySource returns null when neither surface carries a pack", () => {
+  assert.equal(resolvePackCopySource(null, null), null);
+});
+
+test("a manual-lane campaign pack satisfies the pack predicate end to end", () => {
+  const snap = {
+    adVideos: [
+      { format: "feed_4x5", media_kind: "static", status: "ready", format_variant_of_id: null },
+      { format: "stories_9x16", media_kind: "static", status: "ready", format_variant_of_id: "canon" },
+      { format: "right_column_1x1", media_kind: "static", status: "ready", format_variant_of_id: "canon" },
+    ],
+    canonicalId: "canon",
+    angleMetadata: resolvePackCopySource(null, { copy_pack: PACK }),
+  };
+  assert.equal(isCreativePackComplete(snap).ready, true);
 });

@@ -45,7 +45,7 @@ import { resolvePlacementPublish } from "@/lib/ads/placement-publish";
 import { evaluateCreativePackGate, missingCreativePackDiagnosis, MISSING_CREATIVE_PACK_REASON } from "@/lib/ads/creative-pack-gate";
 import { MISSING_INSTAGRAM_IDENTITY_REASON, shouldRefuseForMissingInstagramIdentity } from "@/lib/ads/publish-instagram-identity-guard";
 import { STALE_ADSET_FAILURE_REASON, isMetaAdsetUnavailableError } from "@/lib/ads/publish-adset-unavailable-classifier";
-import type { CreativePackSnapshot } from "@/lib/ads/creative-pack";
+import { resolvePackCopySource, type CreativePackSnapshot, type PackAngleMetadataLike } from "@/lib/ads/creative-pack";
 import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { generateAdvertorialPagesForCampaign } from "@/lib/advertorial-pages";
@@ -882,7 +882,7 @@ export const adToolPublishToMeta = inngest.createFunction(
     const ctx = await step.run("load", async () => {
       const { data: job } = await admin.from("ad_publish_jobs").select("*").eq("id", job_id).single();
       if (!job) throw new Error("job_not_found");
-      const { data: campaign } = await admin.from("ad_campaigns").select("name, product_id, angle_id").eq("id", job.campaign_id).single();
+      const { data: campaign } = await admin.from("ad_campaigns").select("name, product_id, angle_id, metadata").eq("id", job.campaign_id).single();
       // Gather BOTH ratios for the campaign so we can publish one placement-customized
       // ad — 4:5 in feed, 9:16 in stories/reels (like shopgrowth). Also grab the
       // right_column_1x1 sibling so a complete Dahlia pack routes through Bianca's
@@ -974,7 +974,14 @@ export const adToolPublishToMeta = inngest.createFunction(
       const packSnapshot: CreativePackSnapshot = {
         adVideos: gateAdVideos,
         canonicalId: canonicalRow?.id ?? null,
-        angleMetadata: (angleRow?.metadata as { copy_pack?: { headlines?: unknown; primaryTexts?: unknown } | null } | null) ?? null,
+        // Angle first (Dahlia's lane), campaign second — the manual lane
+        // ([[../ads/manual-creative]]) has no angle by design and carries the same
+        // 4×4 pack on `ad_campaigns.metadata`. Reading only the angle refused every
+        // manual-lane static with `copy_pack_missing`.
+        angleMetadata: resolvePackCopySource(
+          (angleRow?.metadata as PackAngleMetadataLike | null) ?? null,
+          (campaign as { metadata?: PackAngleMetadataLike | null } | null)?.metadata ?? null,
+        ),
       };
       const packGate = evaluateCreativePackGate({ mediaKind, snapshot: packSnapshot });
       return { job, adName, mediaKind, feedUrl, storyUrl, rightColumnUrl, singleUrl, token, productId, metaAdAccountRowId, placementDecision, packGate };

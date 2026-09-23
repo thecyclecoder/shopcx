@@ -325,6 +325,31 @@ export interface PackAngleMetadataLike {
   copy_pack?: { headlines?: unknown; primaryTexts?: unknown } | null;
 }
 
+/**
+ * resolvePackCopySource — which metadata JSONB the pack predicate should read the
+ * 4×4 copy pack from.
+ *
+ * Dahlia's autonomous lane hangs the pack on the angle (`product_ad_angles.metadata`,
+ * written by [[./creative-overlay-landing]] — but ONLY when the campaign already
+ * carries an `angle_id`). A creative landed through [[./manual-creative]] has no
+ * angle *by design* ("a creative produced outside that lane … has none of those")
+ * and carries the very same pack on `ad_campaigns.metadata` instead.
+ *
+ * Reading the angle alone made the publish gate refuse every manual-lane static with
+ * `copy_pack_missing` even though a complete 4×4 pack was sitting on the campaign —
+ * the publisher behind the gate already reads all three copy surfaces. This resolver
+ * closes that gap: angle first (Dahlia's lane is authoritative where it exists),
+ * campaign second. Pure — no DB, no fetch.
+ */
+export function resolvePackCopySource(
+  angleMetadata: PackAngleMetadataLike | null,
+  campaignMetadata: PackAngleMetadataLike | null,
+): PackAngleMetadataLike | null {
+  if (angleMetadata?.copy_pack) return angleMetadata;
+  if (campaignMetadata?.copy_pack) return campaignMetadata;
+  return angleMetadata ?? campaignMetadata ?? null;
+}
+
 /** What `isCreativePackComplete` inspects for one campaign. */
 export interface CreativePackSnapshot {
   /** ALL `ad_videos` rows for the campaign — the predicate finds the canonical (`format='feed_4x5'`
@@ -395,11 +420,13 @@ export function isCreativePackComplete(snap: CreativePackSnapshot): CreativePack
   }
 
   // 3. Copy pack — 4×4 on the angle's metadata JSONB (Dahlia writes it at authoring time via
-  //    planCreativePackInserts). A missing pack, a wrong shape, or a below-min count are each a
-  //    named reason so downstream can distinguish "never authored" from "shrunk after author".
+  //    planCreativePackInserts) OR on the campaign's (the manual lane, which has no angle). The
+  //    caller resolves which via `resolvePackCopySource`. A missing pack, a wrong shape, or a
+  //    below-min count are each a named reason so downstream can distinguish "never authored"
+  //    from "shrunk after author".
   const pack = angleMetadata?.copy_pack ?? null;
   if (!pack) {
-    return { ready: false, reason: "copy_pack_missing", detail: "no copy_pack on angle metadata (Dahlia's 4x4 headlines + primary texts missing)" };
+    return { ready: false, reason: "copy_pack_missing", detail: "no copy_pack on the angle or the campaign (the 4x4 headlines + primary texts were never authored)" };
   }
   const headlines = Array.isArray(pack.headlines) ? (pack.headlines as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0) : [];
   const primaryTexts = Array.isArray(pack.primaryTexts) ? (pack.primaryTexts as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0) : [];
