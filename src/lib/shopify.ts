@@ -1,11 +1,16 @@
 import { createHmac, randomBytes } from "crypto";
 
 export const SHOPIFY_API_VERSION = "2025-07";
+// NOTE: this list is NOT what the app actually requests. With
+// use_legacy_install_flow = false, managed install grants whatever
+// shopify-extension/shopify.app.toml declares, and that file is already a superset of
+// this one (read_pixels, read_content, write_products, … are there but not here). Keep
+// the two in step and remember a `shopify app deploy` is what publishes a scope change.
+//
 // read_script_tags/write_script_tags: apps inject storefront <script> tags server-side
 // and Shopify has no admin UI for them, so an app that uninstalls badly leaves one
-// running forever. Superfoods still loads chat.siena.cx on every page from a tag whose
-// app is long gone — a reinstall/uninstall cycle did not reclaim it. These scopes are
-// what let us audit and delete such orphans.
+// running forever. Superfoods was loading chat.siena.cx on every page from a tag whose
+// app was long gone. These scopes are what let us audit and delete such orphans.
 export const SHOPIFY_SCOPES =
   "read_all_orders,read_customers,write_customers,read_discounts,write_discounts,write_draft_orders,read_inventory,read_merchant_managed_fulfillment_orders,read_orders,write_orders,read_product_listings,read_products,read_publications,read_shopify_payments_disputes,read_themes,write_themes,read_script_tags,write_script_tags,read_channels,read_store_credit_accounts,read_store_credit_account_transactions,write_store_credit_account_transactions";
 
