@@ -15,6 +15,10 @@ Pure predicate (no DB / no fetch / no Meta) — the caller in [[../inngest/ad-to
 | `CreativePackGateInput` | What the gate inspects for one publish job: `{ mediaKind, snapshot: CreativePackSnapshot }`. |
 | `missingCreativePackDiagnosis(args)` | Diagnosis string surfaced on the CEO escalation body and the growth `director_activity` row. Names WHAT is missing and WHY that's fatal (a 1-image ad loses the whole point of the placement + fatigue benefit), so a human can fix it (re-render Dahlia's pack / re-run copy) rather than shrug at a boolean. Args: `{ packReason, detail, campaignId }`. |
 
+## Copy surface
+
+The gate reads the pack off `CreativePackSnapshot.angleMetadata`, which the caller resolves with [[creative-pack]] `resolvePackCopySource(angleMetadata, campaignMetadata)` — **angle first, campaign second**. Dahlia's lane hangs the pack on `product_ad_angles.metadata.copy_pack`; [[ads__manual-creative]] has no angle by design and hangs it on `ad_campaigns.metadata.copy_pack`. Reading the angle alone refused every manual-lane static as `copy_pack_missing` (2026-09-23, the Amazing Coffee K-Cups statics) — see [[creative-pack]] § Decisions.
+
 ## Caller
 
 [[../inngest/ad-tool]] `adToolPublishToMeta` — pre-flight gate before publish. Refuses a static campaign whose pack is incomplete (missing a placement static or <4 copy) and escalates via `escalateDiagnosisToCeo` with `escalationKind='bianca_missing_creative_pack'` (deduped by workspace + campaign + packReason) + a growth `director_activity` row (`action_kind='bianca_missing_creative_pack'`).
