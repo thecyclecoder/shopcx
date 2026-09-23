@@ -47,6 +47,13 @@
   container.style.cssText =
     "position:fixed;bottom:20px;right:20px;z-index:999999;font-family:system-ui,-apple-system,sans-serif;";
 
+  // The bubble paints before the config fetch resolves, so this default must match
+  // the server's default (api/widget/[workspaceId]/config) — otherwise every store
+  // without an override flashes one colour and repaints to another. Neutral
+  // warm-black: the bubble floats over the merchant's page and must not read as one
+  // of their CTAs.
+  var DEFAULT_BUBBLE_COLOR = "#33272B";
+
   // Chat bubble button
   var bubble = document.createElement("button");
   bubble.id = "shopcx-chat-bubble";
@@ -54,7 +61,7 @@
   bubble.innerHTML =
     '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
   bubble.style.cssText =
-    "width:56px;height:56px;border-radius:50%;border:none;background:#4f46e5;color:white;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,0.15);transition:transform 0.2s;";
+    "width:56px;height:56px;border-radius:50%;border:none;background:" + DEFAULT_BUBBLE_COLOR + ";color:white;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 12px rgba(0,0,0,0.15);transition:transform 0.2s;";
   bubble.onmouseenter = function () {
     bubble.style.transform = "scale(1.05)";
   };
@@ -112,7 +119,7 @@
     isOpen: function () { return isOpen; },
   };
 
-  var bubbleColor = "#4f46e5";
+  var bubbleColor = DEFAULT_BUBBLE_COLOR;
 
   // Fetch config for color and position
   fetch(BASE + "/api/widget/" + workspaceId + "/config")
