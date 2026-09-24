@@ -24,6 +24,8 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import { getShopifyCredentials } from "@/lib/shopify-sync";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
+import { getBraintreeGateway } from "@/lib/integrations/braintree";
+import { deriveAndSetOrderRefundStatus } from "@/lib/refund";
 
 export interface ParsedShopifyRefund {
   shopifyRefundId: string;
@@ -277,4 +279,223 @@ export async function reconcileShopifyRefundsForOrder(
     else skipped++;
   }
   return { ok: true, mirrored, skipped };
+}
+
+// ── Braintree counterpart ────────────────────────────────────────────
+// A refund performed on the card gateway (Braintree) produces no ledger
+// row and no status change on our side — the shipped Shopify mirror is
+// blind to the gateway path. Four orders totalling $532.90 measured on
+// 2026-09-24 are gateway-refunded with no ledger row, and the near-miss
+// on 2026-09-24 (SHOPCX373, refund pr0jwp0z) is the whole reason this
+// mirror exists: the customer was refunded $140.28 at the gateway six
+// days before a founder-queue session tried to refund her a second time
+// and only the gateway itself refused. This module ingests that path.
+//
+// Money never moves here. This module only records what already happened
+// at Braintree — either via a webhook (the primary source) or via a
+// reconcile that reads the transaction's refunds off the gateway.
+//
+// Row shape is identical to the Shopify mirror (same `vendor_refund_id`,
+// same `request_key` uniqueness discipline, same `source='live'` on the
+// happy path and `'backfill'` on the historical arm), so downstream
+// consumers (double-refund guard, financial_status derivation, audit)
+// see one uniform ledger.
+
+// Stable, vendor-scoped request_key for a Braintree refund. The refund
+// id at Braintree (e.g. `pr0jwp0z`) is unique per refund transaction,
+// so keying on it means a re-delivered webhook or a re-run reconcile
+// hits the `(order_id, request_key)` unique index rather than writing
+// a second row.
+export function braintreeRefundRequestKey(refundId: string): string {
+  return `braintree_refund:${refundId}`;
+}
+
+export interface ParsedBraintreeRefund {
+  braintreeRefundId: string;
+  braintreeTransactionId: string;
+  amountCents: number;
+}
+
+/**
+ * Insert an `order_refunds` mirror row for a Braintree refund the
+ * gateway already completed. Idempotent on TWO axes — same discipline
+ * as `insertShopifyRefundMirror`:
+ *   1. (order_id, request_key) — the DB unique index catches a re-run
+ *      or a re-delivered webhook (same braintree refund id ⇒ same
+ *      request_key).
+ *   2. (workspace_id, order_id, vendor='braintree', vendor_refund_id) —
+ *      a pre-insert lookup catches a refund we already mirrored via
+ *      `refundOrder` (which writes vendor_refund_id from the same
+ *      Braintree result). Without this, refundOrder's row and the
+ *      webhook's row would carry different request_keys and both land.
+ *
+ * `source` defaults to `'live'` (the ongoing capture path). The
+ * reconcile arm below passes `'backfill'` for a historical row.
+ *
+ * NEVER moves money.
+ */
+export async function insertBraintreeRefundMirror(
+  workspaceId: string,
+  orderId: string,
+  parsed: ParsedBraintreeRefund,
+  opts?: { source?: "live" | "backfill" },
+): Promise<MirrorInsertResult> {
+  if (parsed.amountCents <= 0) {
+    return { inserted: false, reason: "amount_zero" };
+  }
+  const admin = createAdminClient();
+
+  // Confirm the order exists inside the tenant. `insertShopifyRefundMirror`
+  // resolves the order from the shopify_order_id; here the caller
+  // already knows the internal order_id, so we just double-check it
+  // exists inside the workspace (a stray refund id from another tenant
+  // can never fabricate a row).
+  const { data: order, error: orderErr } = await admin
+    .from("orders")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("id", orderId)
+    .maybeSingle();
+  if (orderErr) {
+    return { inserted: false, reason: "insert_failed", detail: `Order lookup failed: ${orderErr.message}` };
+  }
+  if (!order) {
+    return { inserted: false, reason: "order_not_found", detail: `No order with id=${orderId} in workspace` };
+  }
+
+  // Semantic dedupe against refundOrder-initiated refunds. refundOrder
+  // stores the gateway refund id in `vendor_refund_id`, so a match on
+  // that exact identity means the money we saw here already has a
+  // mirror row.
+  const { data: existingByVendorId } = await admin
+    .from("order_refunds")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("order_id", order.id)
+    .eq("vendor", "braintree")
+    .eq("vendor_refund_id", parsed.braintreeRefundId)
+    .maybeSingle();
+  if (existingByVendorId) {
+    return { inserted: false, reason: "already_mirrored" };
+  }
+
+  const requestKey = braintreeRefundRequestKey(parsed.braintreeRefundId);
+  try {
+    const { error: insertErr } = await admin.from("order_refunds").insert({
+      workspace_id: workspaceId,
+      order_id: order.id,
+      request_key: requestKey,
+      vendor: "braintree",
+      vendor_refund_id: parsed.braintreeRefundId,
+      amount_cents: parsed.amountCents,
+      status: "succeeded",
+      source: opts?.source ?? "live",
+    });
+    if (insertErr) {
+      const code = (insertErr as { code?: string }).code;
+      if (code === "23505") {
+        return { inserted: false, reason: "already_mirrored" };
+      }
+      return { inserted: false, reason: "insert_failed", detail: insertErr.message };
+    }
+  } catch (e) {
+    return { inserted: false, reason: "insert_failed", detail: errText(e) };
+  }
+  return {
+    inserted: true,
+    order_id: order.id,
+    amount_cents: parsed.amountCents,
+    vendor_refund_id: parsed.braintreeRefundId,
+  };
+}
+
+// A Braintree Transaction carries its refunds as either an inline array
+// of Transaction objects (each a type='credit' transaction) or as a
+// `refundIds` list. We only need the id + amount to build the mirror
+// row; we do NOT re-verify that the refund settled — the transaction's
+// existence in the .refunds list IS the gateway's confirmation.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractBraintreeRefunds(txn: any): ParsedBraintreeRefund[] {
+  const list: ParsedBraintreeRefund[] = [];
+  const braintreeTransactionId = String(txn?.id ?? "");
+  const inline = Array.isArray(txn?.refunds) ? txn.refunds : [];
+  for (const r of inline) {
+    const id = r?.id != null ? String(r.id) : "";
+    if (!id) continue;
+    const raw = r?.amount;
+    const asNumber = typeof raw === "number" ? raw : parseFloat(String(raw ?? "0"));
+    if (!Number.isFinite(asNumber) || asNumber <= 0) continue;
+    list.push({
+      braintreeRefundId: id,
+      braintreeTransactionId,
+      amountCents: Math.round(asNumber * 100),
+    });
+  }
+  return list;
+}
+
+/**
+ * Reconcile Braintree refunds for a single order. Reads the order's
+ * `braintree_transaction_id`, asks the gateway what refunds sit against
+ * that transaction, and mirrors any missing ones through
+ * `insertBraintreeRefundMirror`. After the mirror pass finishes, delegates
+ * to Phase 1's `deriveAndSetOrderRefundStatus` so the order's payment
+ * state advances with the ledger — one call, one writer.
+ *
+ * READ-ONLY at the gateway. No money moves. Idempotent: a re-run over
+ * an already-mirrored refund hits the (vendor, vendor_refund_id) dedupe
+ * and is a no-op, and the derive routine's own weight guard keeps a
+ * second pass from churning the order status.
+ */
+export async function reconcileBraintreeRefundsForOrder(
+  workspaceId: string,
+  orderId: string,
+  opts?: { source?: "live" | "backfill" },
+): Promise<
+  | { ok: true; mirrored: number; skipped: number; status?: "refunded" | "partially_refunded" | null }
+  | { ok: false; reason: string }
+> {
+  if (!workspaceId || !orderId) {
+    return { ok: false, reason: "workspaceId + orderId required" };
+  }
+  const admin = createAdminClient();
+  const { data: order, error: orderErr } = await admin
+    .from("orders")
+    .select("id, braintree_transaction_id")
+    .eq("workspace_id", workspaceId)
+    .eq("id", orderId)
+    .maybeSingle();
+  if (orderErr) return { ok: false, reason: `Order lookup failed: ${orderErr.message}` };
+  if (!order) return { ok: false, reason: `Order ${orderId} not found in workspace` };
+  const braintreeTxnId = (order.braintree_transaction_id ?? null) as string | null;
+  if (!braintreeTxnId) {
+    return { ok: false, reason: "Order has no braintree_transaction_id — nothing to reconcile" };
+  }
+
+  let refunds: ParsedBraintreeRefund[];
+  try {
+    const gateway = await getBraintreeGateway(workspaceId);
+    const txn = await gateway.transaction.find(braintreeTxnId).catch(() => null);
+    if (!txn) return { ok: false, reason: `Braintree transaction ${braintreeTxnId} not found` };
+    refunds = extractBraintreeRefunds(txn);
+  } catch (e) {
+    return { ok: false, reason: `Braintree gateway error: ${errText(e)}` };
+  }
+
+  let mirrored = 0;
+  let skipped = 0;
+  for (const parsed of refunds) {
+    const result = await insertBraintreeRefundMirror(workspaceId, order.id, parsed, {
+      source: opts?.source ?? "live",
+    });
+    if (result.inserted) mirrored++;
+    else skipped++;
+  }
+
+  // Advance orders.financial_status through the ONE writer so the
+  // ledger and the column agree byte-for-byte with the derive rules
+  // used by refundOrder (Phase 1).
+  const derived = await deriveAndSetOrderRefundStatus(workspaceId, order.id);
+  const status = derived.ok ? (derived.to ?? null) : null;
+  return { ok: true, mirrored, skipped, status };
 }

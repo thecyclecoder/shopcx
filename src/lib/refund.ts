@@ -36,39 +36,62 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { refundBraintreeTransaction } from "@/lib/integrations/braintree";
 import { partialRefundByAmount, recordManualRefund } from "@/lib/shopify-order-actions";
 import { logCustomerEvent } from "@/lib/customer-events";
+import { errText } from "@/lib/error-text";
 
 export type RefundMethod = "shopify" | "braintree";
 
 // Stable idempotency key when the caller doesn't thread its own
-// action.request_key through. Same shape → same key → the UNIQUE
-// index on (order_id, request_key) short-circuits a retry.
+// action.request_key through. Same (order, amount) → same key → the
+// UNIQUE index on (order_id, request_key) short-circuits a retry.
+//
+// The reason text is intentionally NOT part of the identity — the pre-
+// merge behavior folded the free-text reason into the hash, so a re-
+// worded second attempt at the same refund produced a different key
+// and only the gateway itself blocked the double refund (SHOPCX373,
+// 2026-09-24 near-miss). The reason is now recorded context on the
+// ledger row, not an ingredient of what makes a refund unique.
+//
+// Two GENUINELY distinct partial refunds of the same amount on one
+// order are still legitimate (two $20 goodwill credits); the caller
+// signals that with an explicit `attempt` ordinal (or by threading an
+// action-side `requestKey` through). The default path is safe; a
+// deliberate second identical refund must be explicit.
 export function hashRefundRequestKey(
   orderId: string,
   amountCents: number,
-  reason: string,
+  _reason?: string,
+  attempt?: number | string,
 ): string {
+  const key =
+    attempt !== undefined && attempt !== null && String(attempt).length > 0
+      ? `${orderId}:${amountCents}:attempt=${attempt}`
+      : `${orderId}:${amountCents}`;
   return createHash("sha256")
-    .update(`${orderId}:${amountCents}:${reason || ""}`)
+    .update(key)
     .digest("hex")
     .slice(0, 32);
 }
 
 // Stable action-identity key — the Phase 2 key handlers thread down
 // from the caller side. Scopes the request to the ACTION that fired
-// (a ticket, a returns row, a replacement), not just the refund shape.
-// Two different tickets legitimately refunding the same (order, amount,
-// reason) get distinct keys and both fire; a retry of the SAME action
-// (Inngest step retry, self-heal re-drive) computes the same key and
-// short-circuits via the pre-dispatch guard.
+// (a ticket, a returns row, a replacement), so two different tickets
+// legitimately refunding the same shape get distinct keys via their
+// actor id and both fire; a retry of the SAME action (Inngest step
+// retry, self-heal re-drive) computes the same key and short-circuits
+// via the pre-dispatch guard. The reason text is intentionally NOT
+// part of the identity here either — a re-worded retry of the same
+// action must still short-circuit (Phase 3 of docs/brain/specs/
+// a-braintree-side-refund-must-reach-our-books.md — same principle
+// as hashRefundRequestKey above).
 export function hashActionRefundKey(
   actorScope: string,
   actorId: string,
   orderId: string,
   amountCents: number,
-  reason: string,
+  _reason?: string,
 ): string {
   return createHash("sha256")
-    .update(`${actorScope}:${actorId}:${orderId}:${amountCents}:${reason || ""}`)
+    .update(`${actorScope}:${actorId}:${orderId}:${amountCents}`)
     .digest("hex")
     .slice(0, 32);
 }
@@ -130,6 +153,130 @@ export async function resolveRefundMethod(
   };
 }
 
+// ── orders.financial_status derive-and-set ──
+// The ONE writer of `orders.financial_status` from the refund ledger.
+// Everything that mirrors a refund (refundOrder above, vendor-refund-mirror,
+// the reconcile backfill scripts/_backfill-order-refund-status-from-ledger.ts)
+// funnels through this routine — the spec requires ONE writer so nothing can
+// silently disagree with the ledger.
+//
+// Rules preserved from the block that used to live inline in refundOrder:
+//   - Sum only `succeeded`/`settled` order_refunds rows.
+//   - refundedTotalCents >= total_cents ⇒ 'refunded'.
+//   - Any lesser positive sum ⇒ 'partially_refunded'.
+//   - A positive sum on an order with no total_cents ⇒ 'refunded'.
+//   - Case-insensitive comparison against the currently-stored column
+//     (prod carries both `PAID` and `paid`), always write lowercase.
+//   - Never regress a stronger vendor-stamped state:
+//     `refunded` (2) > `partially_refunded` (1) > everything else (0).
+//     The write only fires when the derived weight is STRICTLY greater.
+//
+// Best-effort at the caller: this NEVER throws (any DB error is captured
+// in `error`). refundOrder logs the error and returns success — the money
+// already moved and the mirror row is what the ledger cares about.
+export interface DeriveOrderRefundStatusResult {
+  ok: boolean;
+  error?: string;
+  updated?: boolean;
+  from?: string | null;
+  to?: "refunded" | "partially_refunded" | null;
+  refunded_cents?: number;
+  total_cents?: number;
+}
+
+// Pure predicate used by `deriveAndSetOrderRefundStatus` and the
+// reconcile backfill script. Returns the state the column SHOULD be
+// stamped to, or `null` when the current stored state already covers
+// the ledger (never regress a stronger state, never no-write-needed
+// churn a row). All the rules above live here in one place so the
+// derive routine and any auditor read the identical decision.
+export function decideRefundStatusFromLedger(input: {
+  refundedCents: number;
+  totalCents: number;
+  currentStatus: string | null | undefined;
+}): "refunded" | "partially_refunded" | null {
+  const refundedCents = Number(input.refundedCents) || 0;
+  const totalCents = Number(input.totalCents) || 0;
+  let derived: "refunded" | "partially_refunded" | null = null;
+  if (refundedCents > 0 && totalCents > 0) {
+    derived = refundedCents >= totalCents ? "refunded" : "partially_refunded";
+  } else if (refundedCents > 0) {
+    derived = "refunded";
+  }
+  if (!derived) return null;
+  const weight: Record<string, number> = { refunded: 2, partially_refunded: 1 };
+  const currentWeight = weight[String(input.currentStatus ?? "").toLowerCase()] ?? 0;
+  const nextWeight = weight[derived] ?? 0;
+  return nextWeight > currentWeight ? derived : null;
+}
+
+export async function deriveAndSetOrderRefundStatus(
+  workspaceId: string,
+  orderId: string,
+): Promise<DeriveOrderRefundStatusResult> {
+  if (!workspaceId) return { ok: false, error: "workspaceId is required" };
+  if (!orderId) return { ok: false, error: "orderId is required" };
+  const admin = createAdminClient();
+  try {
+    const { data: order, error: orderErr } = await admin
+      .from("orders")
+      .select("id, total_cents, financial_status")
+      .eq("workspace_id", workspaceId)
+      .eq("id", orderId)
+      .maybeSingle();
+    if (orderErr) return { ok: false, error: `Order lookup failed: ${orderErr.message}` };
+    if (!order) return { ok: false, error: `Order ${orderId} not found in workspace` };
+
+    const { data: ledger, error: ledgerErr } = await admin
+      .from("order_refunds")
+      .select("amount_cents, status")
+      .eq("workspace_id", workspaceId)
+      .eq("order_id", order.id)
+      .in("status", ["succeeded", "settled"]);
+    if (ledgerErr) return { ok: false, error: `Ledger lookup failed: ${ledgerErr.message}` };
+
+    const refundedTotalCents = (ledger || []).reduce(
+      (sum, r) => sum + (Number((r as { amount_cents?: number }).amount_cents) || 0),
+      0,
+    );
+    const totalCents = Number(order.total_cents) || 0;
+
+    const nextStatus = decideRefundStatusFromLedger({
+      refundedCents: refundedTotalCents,
+      totalCents,
+      currentStatus: order.financial_status,
+    });
+
+    if (!nextStatus) {
+      return {
+        ok: true,
+        updated: false,
+        from: order.financial_status ?? null,
+        to: null,
+        refunded_cents: refundedTotalCents,
+        total_cents: totalCents,
+      };
+    }
+
+    const { error: updateErr } = await admin
+      .from("orders")
+      .update({ financial_status: nextStatus })
+      .eq("workspace_id", workspaceId)
+      .eq("id", order.id);
+    if (updateErr) return { ok: false, error: `Order update failed: ${updateErr.message}` };
+    return {
+      ok: true,
+      updated: true,
+      from: order.financial_status ?? null,
+      to: nextStatus,
+      refunded_cents: refundedTotalCents,
+      total_cents: totalCents,
+    };
+  } catch (e) {
+    return { ok: false, error: errText(e) };
+  }
+}
+
 export interface RefundOrderOptions {
   // Origin of the refund for customer_events.source. Defaults to
   // "system". Callers should set this to their surface — "ai",
@@ -153,12 +300,20 @@ export interface RefundOrderOptions {
   // an action-side request id (Sonnet direct_action, playbook step,
   // etc.) should thread it in so a retry can be short-circuited by
   // the Phase 2 verify-by-refund-id lookup. When omitted, the wrapper
-  // falls back to a stable hash of (order_id + amount_cents + reason)
-  // per the spec — enough for the retry-with-same-shape case but not
-  // enough to distinguish two legitimate refunds of the same amount +
-  // reason on the same order (the caller MUST pass an explicit key in
-  // that case).
+  // falls back to a stable hash of (order_id + amount_cents [+ attempt]).
+  // The hash does NOT include the reason text — a re-worded retry of
+  // the same refund must be recognised as the same refund and refused
+  // by us (Phase 3, docs/brain/specs/a-braintree-side-refund-must-reach-our-books.md).
   requestKey?: string;
+  // Explicit attempt ordinal for a GENUINELY deliberate second refund
+  // of the same amount on the same order (two separate $20 goodwill
+  // credits, for example). When set, it is folded into the identity
+  // hash so the intended second refund does not collide with the
+  // first — the same discipline as the dunning charge path's
+  // caller-held attempt ordinal. The default path (attempt omitted)
+  // is the safe one: same (order, amount) hashes the same key and
+  // the pre-dispatch guard blocks the second attempt.
+  attempt?: number | string;
 }
 
 export interface RefundOrderResult {
@@ -178,6 +333,14 @@ export interface RefundOrderResult {
   // gateway refund, e.g. PayPal settling over a few days). No new refund was
   // issued — the caller should surface "already processing", not a hard error.
   alreadyPending?: boolean;
+  // Set to true when the pre-dispatch idempotency guard matched an
+  // already-succeeded / already-settled ledger row on the same
+  // (order, amount [+ attempt]) identity, so no new refund was fired.
+  // The caller MUST distinguish this from a fresh refund — surfacing it
+  // as "the refund already happened; not issuing a second one" rather
+  // than a bare gateway-error string. `refund_id` still carries the
+  // first fire's id so a caller can present it.
+  blockedDuplicate?: boolean;
 }
 
 export async function refundOrder(
@@ -213,15 +376,20 @@ export async function refundOrder(
   // ── Pre-dispatch idempotency guard ──
   // Compute the stable request_key up front (opts.requestKey when the
   // caller threads its own action id; otherwise the deterministic hash
-  // over order_id + amount_cents + reason). Look up the order_refunds
-  // ledger for an already-succeeded / already-settled row on the same
-  // (workspace, order, key) triple; if present, short-circuit BEFORE
-  // any gateway dispatch — the money already moved. This is the
-  // choke-point double-refund guard the spec is restoring; the
-  // post-success mirror write below plus the DB unique index are the
-  // second and third layers, and the open-return stamp handles the
-  // orthogonal return-vs-direct collision.
-  const requestKey = opts.requestKey || hashRefundRequestKey(order.id, amountCents, reason);
+  // over (order_id, amount_cents [, attempt])). The reason text is NOT
+  // part of the identity — a re-worded retry of the same refund hashes
+  // the same key so we refuse to re-fire, and only a caller-supplied
+  // `attempt` ordinal can request a deliberate second identical refund
+  // (Phase 3, docs/brain/specs/a-braintree-side-refund-must-reach-our-books.md).
+  //
+  // Look up the order_refunds ledger for an already-succeeded /
+  // already-settled row on the same (workspace, order, key) triple; if
+  // present, short-circuit BEFORE any gateway dispatch — the money
+  // already moved. Return `blockedDuplicate: true` so the caller can
+  // surface "the refund already happened" rather than a bare error
+  // that reads like a gateway failure.
+  const requestKey =
+    opts.requestKey || hashRefundRequestKey(order.id, amountCents, reason, opts.attempt);
   if (!opts.dryRun) {
     const { data: existing } = await admin
       .from("order_refunds")
@@ -236,6 +404,7 @@ export async function refundOrder(
         success: true,
         method: (existing.vendor === "braintree" ? "braintree" : "shopify") as RefundMethod,
         refund_id: existing.vendor_refund_id ?? undefined,
+        blockedDuplicate: true,
       };
     }
   }
@@ -329,56 +498,12 @@ export async function refundOrder(
   }
 
   // ── orders.financial_status derive-and-set ──
-  // The mirror row for THIS refund has just landed; derive the order's
-  // payment state from the ledger and stamp it in one place, engine-
-  // independent (this is the fix for internal orders never learning
-  // they were refunded — Shopify sync used to be the only writer).
-  //
-  // Sum the terminal (succeeded + settled) refunds for the order and
-  // compare against `total_cents`: reaching total ⇒ `refunded`, any
-  // positive lesser sum ⇒ `partially_refunded`. Two partials that
-  // together clear the total therefore end up fully refunded — never
-  // inferred from the single amount just refunded.
-  //
-  // For a Shopify order the vendor sync is authoritative and re-writes
-  // this column from webhook/sync. This is a BACKSTOP: never regress a
-  // stronger vendor-stamped state (weight refunded > partially_refunded
-  // > everything else), and compare case-insensitively — the column
-  // carries both `PAID`/`paid` and `REFUNDED`/`refunded` in prod
-  // (docs/brain/tables/orders.md § financial_status). We write lowercase.
-  try {
-    const { data: ledger } = await admin
-      .from("order_refunds")
-      .select("amount_cents, status")
-      .eq("workspace_id", workspaceId)
-      .eq("order_id", order.id)
-      .in("status", ["succeeded", "settled"]);
-    const refundedTotalCents = (ledger || []).reduce(
-      (sum, r) => sum + (Number((r as { amount_cents?: number }).amount_cents) || 0),
-      0,
-    );
-    const totalCents = Number(order.total_cents) || 0;
-    let nextStatus: "refunded" | "partially_refunded" | null = null;
-    if (refundedTotalCents > 0 && totalCents > 0) {
-      nextStatus = refundedTotalCents >= totalCents ? "refunded" : "partially_refunded";
-    } else if (refundedTotalCents > 0) {
-      nextStatus = "refunded";
-    }
-    if (nextStatus) {
-      const currentRaw = String(order.financial_status ?? "").toLowerCase();
-      const weight: Record<string, number> = { refunded: 2, partially_refunded: 1 };
-      const currentWeight = weight[currentRaw] ?? 0;
-      const nextWeight = weight[nextStatus] ?? 0;
-      if (nextWeight > currentWeight) {
-        await admin
-          .from("orders")
-          .update({ financial_status: nextStatus })
-          .eq("workspace_id", workspaceId)
-          .eq("id", order.id);
-      }
-    }
-  } catch (e) {
-    console.error("[refundOrder] failed to derive-and-set orders.financial_status:", e);
+  // The mirror row for THIS refund has just landed. Delegate to the
+  // exported chokepoint so this path and the reconcile backfill agree
+  // byte-for-byte (see deriveAndSetOrderRefundStatus above for the rules).
+  const derived = await deriveAndSetOrderRefundStatus(workspaceId, order.id);
+  if (!derived.ok) {
+    console.error("[refundOrder] failed to derive-and-set orders.financial_status:", derived.error);
   }
 
   // ── Double-refund guard ──
