@@ -1607,6 +1607,187 @@ export function extractAssistedPurchaseIntentFromDecision(
   };
 }
 
+// ── Cancelled-sub reactivation fallback ─────────────────────────────────────
+//
+// Spec: docs/brain/specs/assisted-subscription-purchase-resolves-variant-when-routing-omits-params.md
+//
+// When the live orchestrator picks `pb:assisted_subscription_purchase` but its
+// decision carries NO `create_subscription` action with a `variant_id`
+// (`extractAssistedPurchaseIntentFromDecision` returned null), and the ticket's
+// customer HAS a cancelled subscription whose item titles appear in the
+// customer's stated intent, the routing boundary can still resolve the target
+// variant + cadence from that cancelled sub instead of refusing.
+//
+// Ground-truth case: ticket e5dedbf8 — Deborah Kacprowicz asked to restart her
+// cancelled Cocoa French Roast subscription '2 bags every 2 months'; the
+// orchestrator routed to the playbook but attached no variant, and the
+// original refusal escalated. This fallback closes that gap without loosening
+// the trust boundary (variant is still resolved to an internal UUID via
+// `findVariant` in [[resolveAssistedPurchaseIntentToParams]], and `unit_cents`
+// + `vendor` still flow server-side, never from the decision or the message).
+
+/**
+ * Minimal projection of one cancelled sub the pure matcher reads. The DB-backed
+ * sibling projects [[../lib/commerce/subscription.ts]] `SubscriptionView` onto
+ * this shape so the matcher stays pure — no DB, no network, no full row.
+ */
+export interface CancelledSubProjection {
+  subscription_id: string;
+  billing_interval: "day" | "week" | "month" | "year" | null;
+  billing_interval_count: number | null;
+  items: Array<{
+    variant_id: string;
+    title: string | null;
+    variant_title: string | null;
+    sku: string | null;
+    quantity: number;
+  }>;
+}
+
+/**
+ * Normalize a title / message segment for substring matching — lowercase,
+ * strip punctuation to spaces, collapse runs of whitespace. Deliberately
+ * conservative: does NOT stem or fuzzy-match (a customer typing "Cacao French
+ * Roast" for "Cocoa French Roast" is intentionally a miss — misspelling a
+ * different product is a real risk we don't want to autoresolve past).
+ */
+function normalizeForTitleMatch(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Pure matcher: return the unambiguous cancelled sub whose item titles the
+ * customer named in this turn's message. Returns null when:
+ *
+ *   - zero cancelled subs whose title/variant_title appears in the message;
+ *   - MORE than one cancelled sub matches (ambiguity — escalate rather than
+ *     guess which sub the customer meant);
+ *   - the matched sub is missing the cadence (`billing_interval` /
+ *     `billing_interval_count`) the `create_subscription` params require.
+ *
+ * The item title is normalized identically to the customer message; a hit
+ * requires the WHOLE normalized title to be a substring of the normalized
+ * message (a 2-word product name in a 20-word message matches; a 1-word noise
+ * word does not, because item titles are never one common word). Ambiguity
+ * bail-out is the guard against "I want my French Roast subscription" matching
+ * both "Cocoa French Roast" and "Vanilla French Roast" — Sol's Direction
+ * boundary is the right place to disambiguate, not the routing boundary.
+ */
+export interface MatchedCancelledSubIntent {
+  subscription_id: string;
+  variantId: string;
+  title: string | null;
+  quantity: number;
+  interval: "day" | "week" | "month" | "year";
+  intervalCount: number;
+}
+
+export function matchCancelledSubForStatedProduct(input: {
+  customerMsg: string;
+  cancelledSubs: CancelledSubProjection[];
+}): MatchedCancelledSubIntent | null {
+  const msg = normalizeForTitleMatch(input.customerMsg || "");
+  if (!msg) return null;
+  const hits: MatchedCancelledSubIntent[] = [];
+  for (const sub of input.cancelledSubs) {
+    for (const item of sub.items) {
+      const candidates = [item.title, item.variant_title].filter(
+        (t): t is string => typeof t === "string" && t.trim().length > 0,
+      );
+      const matched = candidates.find((t) => {
+        const n = normalizeForTitleMatch(t);
+        return n.length > 0 && msg.includes(n);
+      });
+      if (!matched) continue;
+      if (
+        !sub.billing_interval ||
+        !sub.billing_interval_count ||
+        !item.variant_id
+      ) {
+        continue;
+      }
+      hits.push({
+        subscription_id: sub.subscription_id,
+        variantId: item.variant_id,
+        title: item.title ?? item.variant_title ?? null,
+        quantity: Math.max(1, Math.floor(item.quantity || 1)),
+        interval: sub.billing_interval,
+        intervalCount: sub.billing_interval_count,
+      });
+      break;
+    }
+  }
+  if (hits.length === 0) return null;
+  const uniqueSubs = new Set(hits.map((h) => h.subscription_id));
+  if (uniqueSubs.size > 1) return null;
+  return hits[0];
+}
+
+/**
+ * DB-backed sibling: fetch the customer's cancelled subs (via the
+ * [[../lib/commerce/subscription.ts]] SDK), project onto the pure matcher's
+ * shape, and return a `RawAssistedPurchaseIntent` when the customer's stated
+ * product resolves to exactly one matching cancelled sub. The caller
+ * (`handlePlaybook`) hands the result to [[resolveAssistedPurchaseIntentToParams]]
+ * so the variant is re-verified against `product_variants` (workspace-scoped;
+ * unit_cents + vendor stay server-side — the trust boundary is unchanged).
+ *
+ * `today` is caller-supplied (`YYYY-MM-DD`) so the reactivation's first bill
+ * fires immediately; the terminal step's `directActionHandlers.create_subscription`
+ * accepts either `YYYY-MM-DD` or a full ISO timestamp (see
+ * `commerce/subscription.ts` `createSubscription`).
+ */
+export async function resolveAssistedSubscriptionIntentFromCancelledSubs(input: {
+  workspaceId: string;
+  customerId: string;
+  customerMsg: string;
+  today: string;
+}): Promise<RawAssistedPurchaseIntent | null> {
+  if (!input.customerId || !input.customerMsg) return null;
+  const { listSubscriptionsByCustomer } = await import("@/lib/commerce/subscription");
+  const subs = await listSubscriptionsByCustomer(input.workspaceId, input.customerId);
+  const cancelled: CancelledSubProjection[] = subs
+    .filter((s) => s.status === "cancelled")
+    .map((s) => ({
+      subscription_id: s.id,
+      billing_interval:
+        s.billing_interval === "day" ||
+        s.billing_interval === "week" ||
+        s.billing_interval === "month" ||
+        s.billing_interval === "year"
+          ? s.billing_interval
+          : null,
+      billing_interval_count: s.billing_interval_count,
+      items: s.items.map((it) => ({
+        variant_id: it.variant_id,
+        title: it.title ?? null,
+        variant_title: it.variant_title ?? null,
+        sku: it.sku ?? null,
+        quantity: it.quantity ?? 1,
+      })),
+    }));
+  const matched = matchCancelledSubForStatedProduct({
+    customerMsg: input.customerMsg,
+    cancelledSubs: cancelled,
+  });
+  if (!matched) return null;
+  return {
+    actionType: "create_subscription",
+    variantId: matched.variantId,
+    shopifyVariantId: null,
+    sku: null,
+    title: matched.title,
+    quantity: matched.quantity,
+    interval: matched.interval,
+    intervalCount: matched.intervalCount,
+    nextBillingDate: input.today,
+  };
+}
+
 /**
  * Pure result→response mapper for the assisted-purchase terminal step. Extracted
  * from [[handleAssistedCreate]] so Phase 4 of

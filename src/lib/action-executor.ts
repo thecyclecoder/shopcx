@@ -5541,14 +5541,51 @@ async function handlePlaybook(
       playbook.slug === "assisted-order-purchase" ||
       playbook.slug === "assisted-subscription-purchase"
     ) {
-      const { extractAssistedPurchaseIntentFromDecision, resolveAssistedPurchaseIntentToParams } =
-        await import("@/lib/playbook-executor");
-      const intent = extractAssistedPurchaseIntentFromDecision(decision, playbook.slug);
+      const {
+        extractAssistedPurchaseIntentFromDecision,
+        resolveAssistedPurchaseIntentToParams,
+        resolveAssistedSubscriptionIntentFromCancelledSubs,
+      } = await import("@/lib/playbook-executor");
+      let intent = extractAssistedPurchaseIntentFromDecision(decision, playbook.slug);
+      let fallbackSource: "cancelled_sub_reactivation" | null = null;
+      // Cancelled-sub reactivation fallback — spec
+      // docs/brain/specs/assisted-subscription-purchase-resolves-variant-when-routing-omits-params.md.
+      // When the orchestrator routes to `assisted-subscription-purchase` but
+      // omits the variant, resolve the target variant + cadence from a
+      // matching cancelled sub the customer named in their message (ticket
+      // e5dedbf8 — Deborah Kacprowicz, Cocoa French Roast 2 bags every 2
+      // months, matched her cancelled contract 875ed88e). The trust boundary
+      // is preserved: `findVariant` still runs on the resolved id, unit_cents
+      // + vendor still flow server-side. Only `assisted-subscription-purchase`
+      // has a cancelled-sub anchor to fall back to — the order slug stays
+      // strict.
+      if (
+        !intent &&
+        playbook.slug === "assisted-subscription-purchase" &&
+        ctx.customerId
+      ) {
+        const today = new Date().toISOString().slice(0, 10);
+        const fallback = await resolveAssistedSubscriptionIntentFromCancelledSubs({
+          workspaceId: ctx.workspaceId,
+          customerId: ctx.customerId,
+          customerMsg,
+          today,
+        });
+        if (fallback) {
+          intent = fallback;
+          fallbackSource = "cancelled_sub_reactivation";
+        }
+      }
       const params = intent
         ? await resolveAssistedPurchaseIntentToParams(ctx.admin, ctx.workspaceId, intent)
         : null;
       if (params) {
         assistedSeedContext = { assisted_purchase_params: params };
+        if (fallbackSource) {
+          await sysNote(
+            `[Playbook] ${playbook.slug} — routing decision omitted assisted_purchase_params; resolved from ${fallbackSource} (matched the customer's stated product against a cancelled subscription).`,
+          );
+        }
       } else {
         // Fail at the routing boundary rather than start the playbook with
         // empty params — the terminal step's empty-order guard would refuse
@@ -5559,7 +5596,7 @@ async function handlePlaybook(
         // specific variant when the reference genuinely cannot be resolved).
         const why = intent
           ? "variant_id could not be resolved to an internal product_variant"
-          : "no create_order/create_subscription action with a variant_id on the decision";
+          : "no create_order/create_subscription action with a variant_id on the decision (and no matching cancelled-sub reactivation)";
         await sysNote(
           `[Playbook] ${playbook.slug} — refusing to start with empty assisted_purchase_params (${why}); escalating so Sol's Direction boundary re-runs the resolver.`,
         );
