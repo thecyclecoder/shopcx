@@ -485,9 +485,33 @@ export function buildStructuralDiscounts(
 }
 
 /** Customer codes eligible to carry: recurring, or one-use not yet consumed. */
-export function carryableCodes(raw: Record<string, unknown> | null): { title: string; amount: number; appliesOnEachItem: boolean; recurringCycleLimit: number | null }[] {
+export interface CarriedCode {
+  title: string;
+  /** Fixed-amount codes only. */
+  amount: number;
+  appliesOnEachItem: boolean;
+  recurringCycleLimit: number | null;
+  /** Percentage codes only. */
+  percentage?: number;
+}
+
+/**
+ * The customer's own codes, carried forward. Structural discounts are NOT here — they are
+ * recomputed, because copying a stored tier is how 386 contracts froze at the wrong quantity break.
+ *
+ * ⚠️ **Percentage codes are carried, but `Buy N Discount` ones are NOT.** Appstle stores a quantity
+ * break as a percentage CODE_DISCOUNT titled "Buy 2 Discount_xxxxx" — 188 of the book's 229
+ * percentage codes are exactly that, and carrying them would double the volume break on top of the
+ * one the migration computes itself.
+ *
+ * The other 40 are real customer codes (SHOPCX-CR20, JULY4THVIP, VIPFreeShip, one at 50%). Those
+ * used to be dropped silently by a `skip for now` branch: **4 customers were migrated with a 10–25%
+ * discount quietly removed, $40.34/cycle**, and nothing failed or warned. Found 2026-09-24 only
+ * because the CEO doubted the code count.
+ */
+export function carryableCodes(raw: Record<string, unknown> | null): CarriedCode[] {
   const nodes = (raw as { discounts?: { nodes?: Record<string, unknown>[] } } | null)?.discounts?.nodes ?? [];
-  const out: { title: string; amount: number; appliesOnEachItem: boolean; recurringCycleLimit: number | null }[] = [];
+  const out: CarriedCode[] = [];
   for (const d of nodes) {
     const type = String(d.type ?? "");
     // Structural discounts are RECOMPUTED, never copied — copying a stored tier is exactly how
@@ -497,12 +521,21 @@ export function carryableCodes(raw: Record<string, unknown> | null): { title: st
     const used = Number(d.usageCount ?? 0);
     // ⚠️ usageCount resets to 0 on a NEW contract, so a consumed one-use code would be re-granted.
     if (limit != null && used >= limit) continue;
-    const value = d.value as { amount?: { amount?: string }; appliesOnEachItem?: boolean } | undefined;
+    const value = d.value as { amount?: { amount?: string }; appliesOnEachItem?: boolean; percentage?: number } | undefined;
+    const title = String(d.title ?? "code");
     const amt = value?.amount?.amount != null ? parseFloat(String(value.amount.amount)) : NaN;
-    if (!Number.isFinite(amt)) continue; // percentage-valued codes need a separate shape; skip for now
+    const pct = value?.percentage != null ? Number(value.percentage) : NaN;
+
+    // ⚠️ A quantity break wearing a code's clothes. Appstle titles them "Buy 2 Discount_xxxxx";
+    // the migration recomputes the break from the pricing rule, so carrying this too would apply
+    // it twice. 188 of 229 percentage codes in the book are these.
+    if (Number.isFinite(pct) && /^buy\s*\d/i.test(title)) continue;
+
+    if (!Number.isFinite(amt) && !Number.isFinite(pct)) continue;
     out.push({
-      title: String(d.title ?? "code"),
-      amount: amt,
+      title,
+      amount: Number.isFinite(amt) ? amt : 0,
+      ...(Number.isFinite(pct) ? { percentage: pct } : {}),
       appliesOnEachItem: !!value?.appliesOnEachItem,
       // ⚠️ Carry the REMAINING cycles, not the original limit. `usageCount` resets to 0 on a new
       // contract, so copying `limit` verbatim re-grants the whole run: a code at 2 of 3 used would
@@ -833,7 +866,9 @@ export async function executeMigration(
       for (const c of codes) {
         const r = await shopifyAddDraftDiscount(workspaceId, draftId, {
           title: c.title,
-          value: { fixedAmount: { amount: c.amount, appliesOnEachItem: c.appliesOnEachItem } },
+          value: c.percentage != null
+            ? { percentage: c.percentage }
+            : { fixedAmount: { amount: c.amount, appliesOnEachItem: c.appliesOnEachItem } },
           ...(c.recurringCycleLimit != null ? { recurringCycleLimit: c.recurringCycleLimit } : {}),
         });
         if (!r.success) return r;
@@ -866,8 +901,12 @@ export async function executeMigration(
   // So: group the live lines by variant, and let each plan line CONSUME the unclaimed live line
   // for its variant whose effective unit price is closest to what the plan expects. That is
   // order-independent and still distinguishes two same-variant lines at different prices.
-  // A carried customer code is a FIXED amount; Shopify spreads it across every line. See below.
-  const carriesFixedCode = plan.lines.some((l) => (l.carriedCodeUnitCents ?? 0) > 0);
+  // A carried customer code moves money off the lines in a way the per-line plan does not model —
+  // a fixed amount spreads proportionally, a percentage applies to whatever Shopify decides is the
+  // discounted base. Either way the per-line EFFECTIVE check cannot predict it. See below.
+  const carriedCodes = carryableCodes(fresh.raw as Record<string, unknown>);
+  const carriesFixedCode = plan.lines.some((l) => (l.carriedCodeUnitCents ?? 0) > 0)
+    || carriedCodes.length > 0;
 
   const byVariant = new Map<string, typeof verify.contract.lines>();
   for (const live of verify.contract.lines) {
@@ -927,20 +966,43 @@ export async function executeMigration(
   // still catching a genuinely wrong price. Per-line BASE and the structural percentage discounts
   // are still verified line by line either way.
   if (carriesFixedCode && !mismatches.length) {
-    const plannedTotal = plan.lines.reduce(
-      (t, l) => t + (l.finalUnitCents * l.quantity) - ((l.carriedCodeUnitCents ?? 0) * l.quantity),
-      0,
-    );
+    // The structural price, before any customer code — what the plan models exactly.
+    const structuralTotal = plan.lines.reduce((t, l) => t + l.finalUnitCents * l.quantity, 0);
     const liveTotal = verify.contract.lines.reduce(
       (t, l) => t + Math.round(parseFloat(l.lineDiscountedPrice ?? "0") * 100),
       0,
     );
     // One cent of rounding per line is the most a proportional spread can introduce.
     const tolerance = Math.max(2, verify.contract.lines.length);
-    if (Math.abs(liveTotal - plannedTotal) > tolerance) {
-      mismatches.push(
-        `CONTRACT TOTAL ${liveTotal} != planned ${plannedTotal} (fixed-amount code spread across ${verify.contract.lines.length} line(s), tolerance ${tolerance})`,
-      );
+    const hasPercentageCode = carriedCodes.some((c) => c.percentage != null);
+
+    if (hasPercentageCode) {
+      // ⚠️ A PERCENTAGE code cannot be predicted to the cent: Shopify chooses the base it applies
+      // to, and stacking order with the structural percentages is not documented. So assert the two
+      // things that actually matter and can be known:
+      //   1. the customer is NEVER charged more than the structural price — a carried code can only
+      //      ever reduce, so a live total above it means the code failed to apply or something
+      //      worse happened;
+      //   2. it did in fact reduce, i.e. the code is genuinely on the contract.
+      // The exact amount is then whatever Shopify computes, which is the same figure the customer
+      // was paying on Appstle.
+      if (liveTotal > structuralTotal + tolerance) {
+        mismatches.push(
+          `CONTRACT TOTAL ${liveTotal} EXCEEDS the structural price ${structuralTotal} — a carried code must never increase the charge`,
+        );
+      } else if (liveTotal >= structuralTotal - tolerance) {
+        mismatches.push(
+          `carried percentage code(s) ${carriedCodes.filter((c) => c.percentage != null).map((c) => `${c.title} ${c.percentage}%`).join(", ")} did NOT reduce the contract total (${liveTotal} vs structural ${structuralTotal})`,
+        );
+      }
+    } else {
+      const plannedTotal = structuralTotal
+        - plan.lines.reduce((t, l) => t + (l.carriedCodeUnitCents ?? 0) * l.quantity, 0);
+      if (Math.abs(liveTotal - plannedTotal) > tolerance) {
+        mismatches.push(
+          `CONTRACT TOTAL ${liveTotal} != planned ${plannedTotal} (fixed-amount code spread across ${verify.contract.lines.length} line(s), tolerance ${tolerance})`,
+        );
+      }
     }
   }
   if (mismatches.length) {

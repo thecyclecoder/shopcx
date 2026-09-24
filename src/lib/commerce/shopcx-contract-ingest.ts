@@ -236,7 +236,7 @@ export async function ingestShopifyContract(
       delivery_price_cents: c.deliveryPriceCents ?? 0,
       shipping_address: c.shippingAddress,
       subscription_created_at: c.createdAt,
-      applied_discounts: c.discounts.map((d) => ({
+      applied_discounts: dedupeDiscounts(c.discounts.map((d) => ({
         id: d.id,
         title: d.title ?? "",
         type: d.type ?? "",
@@ -245,7 +245,7 @@ export async function ingestShopifyContract(
         targetType: d.targetType,
         value: d.value,
         valueType: d.valueType,
-      })),
+      }))),
       // ⚠️ NOT `payment_method_id`. That column is a uuid FK to `customer_payment_methods` — the
       // pinned Braintree card on the INTERNAL rail. A Shopify `CustomerPaymentMethod` gid is a
       // different thing entirely and the write is rejected by the type. The contract's own payment
@@ -283,6 +283,26 @@ export async function ingestShopifyContract(
 }
 
 /**
+ * Collapse per-LINE discounts into the one entry a customer should see.
+ *
+ * ⭐ A migrated contract carries its structural discounts **scoped per line** — the atomic create
+ * takes `{line, discounts}` — so a 4-line contract genuinely holds four "Subscribe & Save" records.
+ * That is correct pricing (each line is discounted once) but it renders as the same discount listed
+ * four times in the portal. Measured 2026-09-24: 54 of 202 migrated rows.
+ *
+ * Grouping is by title AND value, so two genuinely different discounts that share a title still
+ * both survive.
+ */
+function dedupeDiscounts<T extends { title: string; value: number; valueType: string }>(list: T[]): T[] {
+  const seen = new Map<string, T>();
+  for (const d of list) {
+    const key = `${d.title}|${d.value}|${d.valueType}`;
+    if (!seen.has(key)) seen.set(key, d);
+  }
+  return [...seen.values()];
+}
+
+/**
  * Re-mirror ONLY what the portal renders — lines, discounts, shipping cost — from the live contract.
  *
  * ⭐ Why this is separate from `syncShopifyContract`. The migration swap updates
@@ -310,10 +330,10 @@ export async function mirrorContractPricing(
       .from("subscriptions")
       .update({
         items: await buildItems(workspaceId, c),
-        applied_discounts: c.discounts.map((d) => ({
+        applied_discounts: dedupeDiscounts(c.discounts.map((d) => ({
           id: d.id, title: d.title ?? "", type: d.type ?? "",
           targetType: d.targetType, value: d.value, valueType: d.valueType,
-        })),
+        }))),
         delivery_price_cents: c.deliveryPriceCents ?? 0,
         updated_at: new Date().toISOString(),
       })
