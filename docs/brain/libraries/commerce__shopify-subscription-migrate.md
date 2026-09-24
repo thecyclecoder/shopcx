@@ -266,6 +266,51 @@ each one leaving a correctly-priced customer stranded on Appstle for no reason.
 spread onto an unmodelled line is 51 — a tolerance wide enough to swallow that would swallow real
 mispricing too.
 
+## 🔴 Percentage codes were silently dropped — 4 customers lost their discount
+
+`carryableCodes` skipped every percentage-valued code behind a *"needs a separate shape; skip for
+now"* branch. It failed nothing and warned nobody: the contract migrated, verify passed (the plan
+never modelled the code either), and the customer simply started paying more.
+
+**4 customers were migrated with a 10–25% discount quietly removed — $40.34/cycle.** One of them was
+due to renew the next morning at $89.94 instead of $71.96. Found 2026-09-24 only because the CEO
+doubted the reported code count: "out of 2400 subs there has to be more than 133 with codes."
+
+### The counts that made it invisible
+
+| Shape | Count | Verdict |
+|---|---|---|
+| `AUTOMATIC_DISCOUNT/PERCENTAGE` | 648 | structural, recomputed — correct to drop |
+| `CODE_DISCOUNT/PERCENTAGE` — titled `Buy N Discount_xxxxx` | 188 | **a quantity break wearing a code's clothes.** Appstle stores volume breaks this way; carrying them would double the break the migration computes itself |
+| `CODE_DISCOUNT/PERCENTAGE` — real customer codes | **40** | `SHOPCX-CR20`, `JULY4THVIP`, `VIPFreeShip`, one at 50% — **these were the loss** |
+| `CODE_DISCOUNT/FIXED` | 133 | carried all along |
+
+So "133 contracts carry codes" was true only of the fixed ones. The percentage half was three times
+larger, and 188 of 229 of them *should* be dropped — which is exactly why a blanket skip looked
+reasonable and stayed wrong.
+
+`carryableCodes` now carries percentage codes and excludes `Buy N Discount` by title.
+`scripts/_restore-dropped-codes.ts` repaired the 4 (verified: 25% → $44.97→$33.73, 20% →
+$89.94→$71.96, 10% → $47.22→$42.50, 20% → $31.96→$25.57).
+
+### Verifying a percentage code
+
+A fixed amount can be checked on the contract total. A percentage **cannot be predicted to the
+cent** — Shopify chooses the base it applies to, and its stacking order with the structural
+percentages is undocumented. So the verifier asserts the two things that are both knowable and
+worth knowing:
+
+1. the live total never EXCEEDS the structural price — a carried code can only reduce; and
+2. it did in fact reduce, so a code that failed to attach is caught.
+
+## Per-line discounts render as duplicates
+
+A migrated contract carries its structural discounts **scoped per line**, so a 4-line contract
+genuinely holds four `Subscribe & Save` records. Correct pricing, but the portal listed the same
+discount four times — 54 of 202 rows. `mirrorContractPricing` now groups by title AND value, which
+collapses the repeats while keeping two same-titled discounts at different values (10 rows carry a
+`Legacy rate` per line at genuinely different amounts).
+
 ## Gotchas
 
 - **Not idempotent without the marker.** The first real run created TWO live contracts for one
