@@ -55,6 +55,7 @@ const money = (c: number) => `$${(c / 100).toFixed(2)}`;
 interface Cand {
   contractId: string;
   subId: string;
+  customerId: string | null;
   due: string;
   cadence: string;
   lines: number;
@@ -78,7 +79,7 @@ async function main() {
     : new Date(Date.now() + DUE_TO_DAYS * 86400000).toISOString();
 
   let q = admin.from("subscriptions")
-    .select("id, shopify_contract_id, next_billing_date, billing_interval, billing_interval_count, items")
+    .select("id, shopify_contract_id, next_billing_date, billing_interval, billing_interval_count, items, customer_id")
     .eq("workspace_id", WORKSPACE_ID).eq("status", "active").eq("billing_source", "appstle");
   if (ONE) q = q.eq("shopify_contract_id", ONE);
   else q = q.gte("next_billing_date", from).lte("next_billing_date", to);
@@ -104,6 +105,7 @@ async function main() {
     cands.push({
       contractId: s.shopify_contract_id,
       subId: s.id,
+      customerId: s.customer_id as string | null,
       due: String(s.next_billing_date).slice(0, 10),
       cadence: `${s.billing_interval}/${s.billing_interval_count}`,
       lines: items.length,
@@ -127,6 +129,44 @@ async function main() {
       if (p[i]) { wave.push(p[i]); progressed = true; if (wave.length >= SIZE) break; }
     }
     if (!progressed) break;
+  }
+
+  // ⭐ KEEP CUSTOMERS WHOLE. Selection is by DUE DATE, which cuts a customer holding several
+  // subscriptions straight down the middle: one contract migrates, the rest stay on Appstle, and
+  // that customer now bills from two engines on two schedules. Measured 2026-09-24 — waves 1 and 2
+  // left 27 customers split that way.
+  //
+  // Nothing breaks outright (their subs already billed on separate dates, and `resolveBillingSource`
+  // is per-contract) but it is operationally confusing, and a customer failing payment on BOTH
+  // engines at once would be dunned twice and emailed twice — separate cycles that know nothing of
+  // each other. So once a customer is in the wave, every migratable subscription they hold comes
+  // with them.
+  {
+    const custIds = [...new Set(wave.map((c) => c.customerId).filter(Boolean))] as string[];
+    const chosen = new Set(wave.map((c) => c.contractId));
+    const { data: siblings } = await admin.from("subscriptions")
+      .select("id, shopify_contract_id, next_billing_date, billing_interval, billing_interval_count, items, customer_id")
+      .eq("workspace_id", WORKSPACE_ID).eq("status", "active").eq("billing_source", "appstle")
+      .in("customer_id", custIds);
+    let pulled = 0;
+    for (const s of siblings ?? []) {
+      if (chosen.has(s.shopify_contract_id)) continue;
+      // Only a contract we could actually plan — a missing or errored snapshot would just fail.
+      if (!snapOk.has(s.shopify_contract_id)) continue;
+      const items = (s.items as { quantity?: number; price_cents?: number }[]) ?? [];
+      wave.push({
+        contractId: s.shopify_contract_id,
+        subId: s.id,
+        customerId: s.customer_id as string | null,
+        due: String(s.next_billing_date).slice(0, 10),
+        cadence: `${s.billing_interval}/${s.billing_interval_count}`,
+        lines: items.length,
+        monthlyCents: items.reduce((t, i) => t + (i.price_cents ?? 0) * (i.quantity ?? 1), 0),
+      });
+      chosen.add(s.shopify_contract_id);
+      pulled++;
+    }
+    if (pulled) console.log(`\n+${pulled} sibling subscription(s) pulled in to keep customers whole`);
   }
 
   console.log(`\nwave: ${wave.length} contract(s), ${money(wave.reduce((t, c) => t + c.monthlyCents, 0))}/cycle`);
