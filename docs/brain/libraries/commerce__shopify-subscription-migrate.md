@@ -311,6 +311,30 @@ discount four times — 54 of 202 rows. `mirrorContractPricing` now groups by ti
 collapses the repeats while keeping two same-titled discounts at different values (10 rows carry a
 `Legacy rate` per line at genuinely different amounts).
 
+## ⭐ Price parity — the check that does not trust our own plan
+
+Every other pricing check verifies the contract against **the plan**, and the plan is what has been
+wrong, silently, twice: `subscriptions.items` kept Appstle-era prices after the swap, and percentage
+codes were dropped entirely. Neither failed anything, because the plan didn't model the problem
+either.
+
+`scripts/_price-parity.ts` has no such blind spot. It asks the only question that matters to a
+customer — **is ShopCX about to charge me more than Appstle would have?** — using the snapshot on
+one side and the live Shopify contract on the other.
+
+**Result 2026-09-24: 198 of 198 at or below Appstle's price. Nobody is charged more.**
+
+⚠️ **Baseline the snapshot's next-cycle total, NOT the customer's last order.** The first version
+compared against the last real order and flagged 12 of 196. Inspection showed the baseline was
+wrong, not the price:
+
+- the customer **added a line** since that order (a 1-line order against a 2-line contract, +48%);
+- the order carried a **one-off promo** (the order before it matched ShopCX to the cent);
+- quantity changed between the order and now.
+
+A last-order baseline produces a steady stream of alarming, wrong numbers on exactly the customers
+whose subscriptions are most active. Run this before and after every wave.
+
 ## Gotchas
 
 - **Not idempotent without the marker.** The first real run created TWO live contracts for one
