@@ -3,7 +3,7 @@
 Portal + dashboard guards that refuse an order-now / bill-now call before it can produce a duplicate charge. Two guards, one per billing engine:
 
 - `guardAppstleOrderNow` — blocks a firing against a cancelled or otherwise non-active Appstle contract.
-- `guardInternalOrderNow` — blocks a repeat press for the SAME internal subscription while a charge is already in flight OR just landed (Phase 1 of [[../specs/a-subscription-is-never-more-than-one-cycle-behind]]).
+- `guardInternalOrderNow` — blocks a repeat press for the SAME internal subscription while a charge is already in flight OR just landed (guards against repeat-press billing; see [[../tables/subscription_cycle_charges]]  gate).
 
 **File:** `src/lib/portal/order-now-guard.ts`
 
