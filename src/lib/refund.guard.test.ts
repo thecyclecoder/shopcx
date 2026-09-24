@@ -192,11 +192,22 @@ test("guard: distinct amount is NOT short-circuited (different request_key ⇒ g
   assert.equal(ledger.length, 2);
 });
 
-test("guard: distinct reason is NOT short-circuited (different request_key ⇒ gateway fires again)", async () => {
+test("guard: Phase 3 — a re-worded retry of the SAME (order, amount) is blocked (reason no longer part of the identity)", async () => {
   resetWorld();
   await refundOrder(WORKSPACE_ID, ORDER_ID, 500, "reason-a");
   const other = await refundOrder(WORKSPACE_ID, ORDER_ID, 500, "reason-b");
   assert.equal(other.success, true);
+  assert.equal(other.blockedDuplicate, true, "the block MUST be surfaced to the caller");
+  assert.equal(braintreeCalls, 1, "the gateway MUST NOT be re-hit");
+  assert.equal(ledger.length, 1);
+});
+
+test("guard: Phase 3 — a deliberate second identical refund requires an explicit attempt ordinal", async () => {
+  resetWorld();
+  await refundOrder(WORKSPACE_ID, ORDER_ID, 500, "goodwill credit");
+  const second = await refundOrder(WORKSPACE_ID, ORDER_ID, 500, "goodwill credit", { attempt: 2 });
+  assert.equal(second.success, true);
+  assert.equal(second.blockedDuplicate, undefined, "an explicit attempt must NOT be blocked");
   assert.equal(braintreeCalls, 2);
   assert.equal(ledger.length, 2);
 });
@@ -223,12 +234,16 @@ test("guard: dryRun does not consult the ledger and does not fire the gateway", 
   assert.equal(ledger.length, 0);
 });
 
-test("guard: hashRefundRequestKey is deterministic over (order, amount, reason)", () => {
+test("guard: hashRefundRequestKey is deterministic per (order, amount) and IGNORES the reason text (Phase 3)", () => {
   const k1 = hashRefundRequestKey(ORDER_ID, 500, "customer overcharged");
   const k2 = hashRefundRequestKey(ORDER_ID, 500, "customer overcharged");
   const k3 = hashRefundRequestKey(ORDER_ID, 750, "customer overcharged");
+  const kAlt = hashRefundRequestKey(ORDER_ID, 500, "totally different wording");
+  const kAttempt = hashRefundRequestKey(ORDER_ID, 500, "customer overcharged", 2);
   assert.equal(k1, k2);
-  assert.notEqual(k1, k3);
+  assert.notEqual(k1, k3, "amount MUST partition the identity");
+  assert.equal(k1, kAlt, "reason text MUST NOT change the identity (Phase 3 fix)");
+  assert.notEqual(k1, kAttempt, "an explicit attempt ordinal MUST partition the identity");
 });
 
 // ── Phase 2: stable action-identity keys threaded from the handlers ──

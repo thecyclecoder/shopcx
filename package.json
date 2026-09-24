@@ -296,6 +296,7 @@
     "test:commerce-price-freeship": "tsx --test src/lib/commerce/price.freeship.test.ts",
     "test:sol-stock-promise-guard": "tsx --test src/lib/sol-stock-promise-guard.test.ts",
     "test:refund-guard": "tsx --test src/lib/refund.guard.test.ts",
+    "test:refund-derive-status": "tsx --test src/lib/refund.derive-status.test.ts",
     "test:commerce-replacement-dollar": "tsx --test src/lib/commerce/replacement.dollar.test.ts",
     "test:action-executor-aliases": "tsx --test src/lib/action-executor.aliases.test.ts",
     "test:checkout-exemption-trust-binding": "tsx --test src/app/api/checkout/route.exemption-trust-binding.test.ts",
