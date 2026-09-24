@@ -241,6 +241,31 @@ runner pulls in the siblings after picking the wave. The existing 27 were healed
 combination is the intended end state, not a defect. Only `appstle + shopcx` is the mistake.
 `appstle + internal` splits predate this work entirely (5 of them).
 
+## ⭐ A fixed-amount code is verified on the TOTAL, never per line
+
+Shopify spreads an order-level **fixed-amount** discount **proportionally across every line** —
+including lines the pricing plan never modelled. Measured on 27947565229: a $10 `LOYALTY-10-KKSWXX`
+code landed **$9.49 on the product and $0.51 on the shipping-protection line**, which the plan
+expects at full price.
+
+Per-line comparison called that a pricing error. **It is not** — the customer is charged exactly $10
+less, which is the entire contract of the discount. The same spread also shifts each line by a cent
+or two of rounding, which is what produced the other half of that failure (`5043 != 5041`).
+
+So when a carried code rides along, the per-line *effective* check is skipped and the **contract
+total** is checked instead — it nets out wherever Shopify chose to put the money while still
+catching a genuinely wrong price. Per-line BASE and the structural percentage discounts are still
+verified line by line either way. Tolerance is one cent per line, which is the most a proportional
+spread can introduce.
+
+**This matters at scale:** 126 remaining contracts carry codes and 126 carry shipping protection, so
+the combination would have produced a steady trickle of false verify failures through the full run —
+each one leaving a correctly-priced customer stranded on Appstle for no reason.
+
+⚠️ **Do NOT "fix" this by widening the per-line tolerance.** The rounding is a few cents but the
+spread onto an unmodelled line is 51 — a tolerance wide enough to swallow that would swallow real
+mispricing too.
+
 ## Gotchas
 
 - **Not idempotent without the marker.** The first real run created TWO live contracts for one
