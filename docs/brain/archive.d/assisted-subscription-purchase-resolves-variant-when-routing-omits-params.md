@@ -1,0 +1,1 @@
+- **Assisted Subscription Purchase must resolve the target variant from a stated product + matching cancelled sub instead of refusing empty params and stranding a reactivation** · verified 2026-09-24 · → [[lifecycles/subscription-billing]]
