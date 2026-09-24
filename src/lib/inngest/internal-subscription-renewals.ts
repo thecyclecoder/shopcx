@@ -36,6 +36,7 @@ import {
 } from "@/lib/subscription-cycle-charge-claim";
 import { runDuplicateRenewalSweep } from "@/lib/subscription-duplicate-renewal-detector";
 import { runStrandedDunningCyclesSweep } from "@/lib/dunning-strand-detector";
+import { advanceToNextFutureBillingDate } from "@/lib/subscription-billing-date";
 
 // ─── Dunning retry-window filter ────────────────────────────────────
 // Dunning is the source of truth for WHEN the next failed-payment retry is
@@ -662,15 +663,13 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const compDroppedOneTime = ((c.sub.items as any[]) || []).some((i) => i?.one_time_next_renewal === true);
       await step.run("comp-advance-next-billing-date", async () => {
+        // Phase 2 of docs/brain/specs/a-subscription-is-never-more-than-one-cycle-behind.md:
+        // skip whole cycles until strictly future so a backlog is never billed out
+        // one-day-at-a-time.
         const interval = (c.sub.billing_interval || "day").toLowerCase();
         const count = c.sub.billing_interval_count || 1;
         const current = c.sub.next_billing_date ? new Date(c.sub.next_billing_date) : new Date();
-        const next = new Date(current);
-        if (interval === "day") next.setUTCDate(next.getUTCDate() + count);
-        else if (interval === "week") next.setUTCDate(next.getUTCDate() + count * 7);
-        else if (interval === "month") next.setUTCMonth(next.getUTCMonth() + count);
-        else if (interval === "year") next.setUTCFullYear(next.getUTCFullYear() + count);
-        else next.setUTCDate(next.getUTCDate() + count * 28);
+        const next = advanceToNextFutureBillingDate(current, interval, count, new Date());
         const update: Record<string, unknown> = {
           next_billing_date: next.toISOString(),
           updated_at: new Date().toISOString(),
@@ -1057,15 +1056,11 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const zeroDroppedOneTime = ((ctx.sub.items as any[]) || []).some((i) => i?.one_time_next_renewal === true);
       await step.run("zero-total-advance-next-billing-date", async () => {
+        // Phase 2 of docs/brain/specs/a-subscription-is-never-more-than-one-cycle-behind.md.
         const interval = (ctx.sub.billing_interval || "day").toLowerCase();
         const count = ctx.sub.billing_interval_count || 1;
         const current = ctx.sub.next_billing_date ? new Date(ctx.sub.next_billing_date) : new Date();
-        const next = new Date(current);
-        if (interval === "day") next.setUTCDate(next.getUTCDate() + count);
-        else if (interval === "week") next.setUTCDate(next.getUTCDate() + count * 7);
-        else if (interval === "month") next.setUTCMonth(next.getUTCMonth() + count);
-        else if (interval === "year") next.setUTCFullYear(next.getUTCFullYear() + count);
-        else next.setUTCDate(next.getUTCDate() + count * 28);
+        const next = advanceToNextFutureBillingDate(current, interval, count, new Date());
         const update: Record<string, unknown> = {
           next_billing_date: next.toISOString(),
           updated_at: new Date().toISOString(),
@@ -1450,17 +1445,20 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     // on this renewal — they're spent. Recurring items stay.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const droppedAnyOneTime = ((ctx.sub.items as any[]) || []).some((i) => i?.one_time_next_renewal === true);
-    // Advance next_billing_date by exactly `count` × `interval`.
+    // Advance next_billing_date to the next occurrence in the FUTURE (whole
+    // intervals from the anchor). Phase 2 of
+    // docs/brain/specs/a-subscription-is-never-more-than-one-cycle-behind.md:
+    // a sub several cycles behind used to have `next = current + one interval`
+    // land STILL in the past, get re-picked by the daily cron, and charged again
+    // on consecutive days until it caught up. The shared helper skips whole
+    // cycles until strictly future, so a backlog is skipped rather than billed
+    // out. The skipped cycles are NOT stamped anywhere — the ledger only records
+    // the cycle that actually charged (this one).
     await step.run("advance-next-billing-date", async () => {
       const interval = (ctx.sub.billing_interval || "day").toLowerCase();
       const count = ctx.sub.billing_interval_count || 1;
       const current = ctx.sub.next_billing_date ? new Date(ctx.sub.next_billing_date) : new Date();
-      const next = new Date(current);
-      if (interval === "day") next.setUTCDate(next.getUTCDate() + count);
-      else if (interval === "week") next.setUTCDate(next.getUTCDate() + count * 7);
-      else if (interval === "month") next.setUTCMonth(next.getUTCMonth() + count);
-      else if (interval === "year") next.setUTCFullYear(next.getUTCFullYear() + count);
-      else next.setUTCDate(next.getUTCDate() + count * 28);
+      const next = advanceToNextFutureBillingDate(current, interval, count, new Date());
       // Filter out one-time items — they shipped on this renewal and
       // shouldn't recur.
       const update: Record<string, unknown> = {

@@ -3,7 +3,7 @@ import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstle
 import { appstleAttemptBilling } from "@/lib/appstle";
 import { subscriptionGetUpcomingOrders } from "@/lib/commerce/subscription";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { guardAppstleOrderNow } from "@/lib/portal/order-now-guard";
+import { guardAppstleOrderNow, guardInternalOrderNow } from "@/lib/portal/order-now-guard";
 
 export const orderNow: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -24,6 +24,21 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
   if (resolved.is_internal) {
     if (resolved.status !== "active") {
       return jsonErr({ error: "not_active", message: "This subscription isn't active." }, 409);
+    }
+    // ⭐ Phase 1 of docs/brain/specs/a-subscription-is-never-more-than-one-cycle-behind.md.
+    // Refuse a second immediate-order press while one is already in flight or just landed
+    // for THIS subscription. Ground truth: 2026-09-23 three portal presses on a single sub
+    // (01:08:28 / 01:09:40 / 01:19:49) produced three charges 5s behind each press
+    // ($351.71 total). The prior `next_billing_date` staleness check was blind to this —
+    // each press re-read that field AFTER the previous charge moved it. The AUTHORITATIVE
+    // signal is the per-cycle claim ledger; the guard reads it and returns a distinct
+    // `order_in_progress` reason the portal can render ('Your order is already being
+    // placed.') — a silent no-op is what made the customer press again.
+    const internalGuard = await guardInternalOrderNow(createAdminClient(), {
+      subscription_id: resolved.id,
+    });
+    if (internalGuard.action === "block") {
+      return jsonErr({ error: internalGuard.reason, message: internalGuard.message }, 409);
     }
     const { inngest } = await import("@/lib/inngest/client");
     // ⭐ Stamp the sub's pre-charge next_billing_date onto the event so the per-cycle claim
