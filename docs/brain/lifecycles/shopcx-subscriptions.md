@@ -541,9 +541,13 @@ about what the first post-migration charge prompts.
 |---|---|---|---|
 | 2026-09-19 | 17 | 3 | $1,811.38 |
 | 2026-09-22 | 21 | 2 | $2,014.99 |
-| **Cumulative** | **38** | **5 (11.6%)** | **$3,826.37** |
+| 2026-09-23 | 15 | 1 | $1,316.81 |
+| 2026-09-24 | 21 | 3 | $2,260.05 |
+| **Cumulative** | **76** | **9 (10.6%)** | **$7,640.50** |
 
-**Zero double charges on either day** — checked by counting orders per CUSTOMER, so a charge landing
+**83 subs ($8,505) still to renew** across 09-25..09-28 — the sample is NOT complete.
+
+**Zero double charges across the whole period** — checked by counting orders per CUSTOMER, so a charge landing
 on either engine would surface regardless of which subscription it linked to.
 
 **The engine-label fix is confirmed live**: today's retries record `shopcx_rejected` /
@@ -554,10 +558,16 @@ on either engine would surface regardless of which subscription it linked to.
 
 ### Decline rate — still watching, now trending down
 
-15.8% on day one (3/19) → 8.7% on day two (2/23) → **11.6% cumulative (5/43)**. The book baseline is
+15.8% (3/19) → 8.7% (2/23) → 6.3% (1/16) → 12.5% (3/24), **10.6% cumulative (9/85)**. The book baseline is
 ~6% (126 dunning cycles in 30 days across all engines). Day one was a small-sample high, exactly as
 suspected; the rate is converging as the sample grows. **Do not act on this yet** — 43 attempts is
 still thin. Revisit near 200.
+
+⚠️ **Count double charges per SUBSCRIPTION-day, not per customer-day.** A customer can hold two
+subscriptions, and mid-migration one may still be on Appstle while the other is on ShopCX — so they
+bill from different crons, at different times, for different amounts. That is two correct charges.
+The only per-customer hit in the entire period was exactly that shape (Appstle at 08:02, ShopCX at
+10:00) and a per-customer check reports it as a double charge every time.
 
 ⚠️ **A daily report must check ALL OPEN dunning cycles, not just cycles opened that day.** A sub
 that declines on Monday sits in a cycle whose next retry is Friday — neither charged nor newly
