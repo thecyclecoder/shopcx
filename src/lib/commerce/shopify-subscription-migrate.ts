@@ -866,6 +866,9 @@ export async function executeMigration(
   // So: group the live lines by variant, and let each plan line CONSUME the unclaimed live line
   // for its variant whose effective unit price is closest to what the plan expects. That is
   // order-independent and still distinguishes two same-variant lines at different prices.
+  // A carried customer code is a FIXED amount; Shopify spreads it across every line. See below.
+  const carriesFixedCode = plan.lines.some((l) => (l.carriedCodeUnitCents ?? 0) > 0);
+
   const byVariant = new Map<string, typeof verify.contract.lines>();
   for (const live of verify.contract.lines) {
     const v = String(live.variantId ?? "").replace("gid://shopify/ProductVariant/", "");
@@ -901,12 +904,43 @@ export async function executeMigration(
     // but the live contract already has the carried code allocated — so the two differ by exactly
     // the code. Without this the 132 contracts carrying a fixed code ALL abort here, and an abort
     // brands them permanently via `migrated_to_contract_id`.
-    if (live.lineDiscountedPrice != null) {
+    if (live.lineDiscountedPrice != null && !carriesFixedCode) {
       const effUnit = Math.round((parseFloat(live.lineDiscountedPrice) * 100) / (live.quantity || 1));
       const expected = l.finalUnitCents - (l.carriedCodeUnitCents ?? 0);
       if (Math.abs(effUnit - expected) > 1) {
         mismatches.push(`${l.sku}: EFFECTIVE ${effUnit} != expected ${expected} (allocations: ${live.discountAllocationCount})`);
       }
+    }
+  }
+
+  // ⭐ A FIXED-AMOUNT code is verified on the TOTAL, never per line.
+  //
+  // Shopify spreads an order-level fixed amount PROPORTIONALLY across every line, including ones
+  // the pricing plan never modelled. Measured on 27947565229: a $10 LOYALTY code landed $9.49 on
+  // the product and **$0.51 on the shipping-protection line**, which the plan expects at full
+  // price. Per-line comparison called that a pricing error; it is not — the customer is charged
+  // exactly $10 less, which is the whole contract of the discount. The same spread also shifts each
+  // line by a cent or two of rounding, which used to trip the ±1c check.
+  //
+  // So when a fixed-amount code rides along, the per-line effective check above is skipped and the
+  // CONTRACT TOTAL is checked instead: it nets out wherever Shopify chose to put the money, while
+  // still catching a genuinely wrong price. Per-line BASE and the structural percentage discounts
+  // are still verified line by line either way.
+  if (carriesFixedCode && !mismatches.length) {
+    const plannedTotal = plan.lines.reduce(
+      (t, l) => t + (l.finalUnitCents * l.quantity) - ((l.carriedCodeUnitCents ?? 0) * l.quantity),
+      0,
+    );
+    const liveTotal = verify.contract.lines.reduce(
+      (t, l) => t + Math.round(parseFloat(l.lineDiscountedPrice ?? "0") * 100),
+      0,
+    );
+    // One cent of rounding per line is the most a proportional spread can introduce.
+    const tolerance = Math.max(2, verify.contract.lines.length);
+    if (Math.abs(liveTotal - plannedTotal) > tolerance) {
+      mismatches.push(
+        `CONTRACT TOTAL ${liveTotal} != planned ${plannedTotal} (fixed-amount code spread across ${verify.contract.lines.length} line(s), tolerance ${tolerance})`,
+      );
     }
   }
   if (mismatches.length) {
