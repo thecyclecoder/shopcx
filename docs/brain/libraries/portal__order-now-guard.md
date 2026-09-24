@@ -1,6 +1,9 @@
 # libraries/portal/order-now-guard
 
-Portal + dashboard guard that blocks a bill_now / order-now call from firing against a cancelled or otherwise non-active Appstle contract.
+Portal + dashboard guards that refuse an order-now / bill-now call before it can produce a duplicate charge. Two guards, one per billing engine:
+
+- `guardAppstleOrderNow` — blocks a firing against a cancelled or otherwise non-active Appstle contract.
+- `guardInternalOrderNow` — blocks a repeat press for the SAME internal subscription while a charge is already in flight OR just landed (Phase 1 of [[../specs/a-subscription-is-never-more-than-one-cycle-behind]]).
 
 **File:** `src/lib/portal/order-now-guard.ts`
 
@@ -37,12 +40,29 @@ export function guardAppstleOrderNow(sub: {
 | `false`       | `"active"`    | `proceed`                                     |
 | `false`       | `null`        | `proceed` (unknown ≠ cancelled — the vendor call is the source of truth) |
 
-**Unit test:** `src/lib/portal/order-now-guard.test.ts` (5 cases including the exact Ellyn/`27803779245` shape).
+**Unit test:** `src/lib/portal/order-now-guard.test.ts` (Appstle: 5 cases including the Ellyn/`27803779245` shape; internal: 11 cases pinning the ground-truth 2026-09-23 three-press burst).
+
+### `guardInternalOrderNow(admin, { subscription_id, now?, windowMs? }): Promise<OrderNowGuardVerdict>` — async
+
+Returns the SAME `OrderNowGuardVerdict` shape, with an additional `reason: "order_in_progress"` case.
+
+**Decision table** (per-subscription, reads [[../tables/subscription_cycle_charges]]):
+
+| Ledger state for this `subscription_id`                        | Verdict                                                |
+|----------------------------------------------------------------|--------------------------------------------------------|
+| Any `status='in_flight'` row (regardless of age)               | `block:order_in_progress` (409) — a charge is running  |
+| `succeeded` or `failed` row `claimed_at` within window (15 min) | `block:order_in_progress` (409) — a charge just landed |
+| Only rows outside the window                                    | `proceed` — deliberate repeat is allowed               |
+| No rows                                                         | `proceed`                                              |
+
+Window default: `INTERNAL_ORDER_NOW_RECENT_WINDOW_MS = 15 * 60 * 1000`. Overridable in tests. The message on refusal is `"Your order is already being placed."` — a clear non-alarming rendering the portal shows instead of a silent no-op (the silent failure is what made the 2026-09-23 customer press again). A DB error on the ledger read propagates: a service failure MUST NOT silently degrade into "no blocker, proceed to charge".
+
+The pure predicate `pickInternalOrderNowBlock(rows, now, windowMs)` is exported for unit-testing without a DB.
 
 ## Callers
 
-- `src/lib/portal/handlers/order-now.ts` — portal 'Order now' button; blocks with `{ error: "contract_cancelled", message: "This subscription is no longer active." }` at HTTP 409 instead of proxying the raw Appstle body.
-- `src/app/api/workspaces/[id]/subscriptions/[subId]/bill-now/route.ts` — dashboard "Bill now" (agent action); same 409 shape.
+- `src/lib/portal/handlers/order-now.ts` — portal 'Order now' button. **Internal branch:** calls `guardInternalOrderNow` FIRST, before the `internal-subscription/renewal-attempt` event, returning `{ error: "order_in_progress", message: "Your order is already being placed." }` at HTTP 409 on a repeat press. **Appstle branch:** calls `guardAppstleOrderNow` and blocks with `{ error: "contract_cancelled", message: "This subscription is no longer active." }` at HTTP 409 instead of proxying the raw Appstle body.
+- `src/app/api/workspaces/[id]/subscriptions/[subId]/bill-now/route.ts` — dashboard "Bill now" (agent action); same 409 shape from `guardAppstleOrderNow`.
 
 ## Out of scope
 
