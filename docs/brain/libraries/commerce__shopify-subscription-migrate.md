@@ -220,6 +220,27 @@ watch, rather than one cliff.
   migration is EXPOSING, not causing.
 - **pauses:** 2 of 19 paused within a day of renewing, both 60-day.
 
+## ⭐ Waves keep customers WHOLE — selection is customer-atomic
+
+Selection is by **due date**, which cuts a customer holding several subscriptions straight down the
+middle: one contract migrates, the rest stay on Appstle. Waves 1 and 2 left **27 customers billing
+from two engines at once** before anyone noticed — and nobody would have, because nothing breaks
+outright: their subscriptions already billed on separate dates, and `resolveBillingSource` is
+per-contract so every code path stays correct.
+
+**The failure it sets up is dunning.** A customer who fails payment on both engines is dunned by two
+cycles that know nothing of each other — two card rotations, two recovery emails, two cancellations.
+(None had reached that state when it was found, but it was reachable.)
+
+So once a customer is in a wave, **every migratable subscription they hold comes with them** — the
+runner pulls in the siblings after picking the wave. The existing 27 were healed by
+`scripts/_heal-split-customers.ts` (29 of 30 swapped; 1 drift-refused and left on Appstle).
+
+⚠️ **`internal` alongside `shopcx` is NOT a split to heal.** The CEO's engine ranking is
+`internal > shopcx > appstle` and anyone who adds a vaulted card should move to internal — so that
+combination is the intended end state, not a defect. Only `appstle + shopcx` is the mistake.
+`appstle + internal` splits predate this work entirely (5 of them).
+
 ## Gotchas
 
 - **Not idempotent without the marker.** The first real run created TWO live contracts for one
