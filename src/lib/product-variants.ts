@@ -28,12 +28,15 @@ export interface ProductVariant {
   weight_unit: string | null;
   position: number;
   available: boolean;
+  /** Ad-tool cut-out product shot on our own storage. Consistent across variants,
+   *  which the Shopify-hosted `image_url` is not — see [[shopify-variant-images]]. */
+  isolated_image_url: string | null;
 }
 
 // `inventory_quantity` is intentionally absent: on-hand is the canonical inventory_levels
 // table's job (getShopifyOnHandByVariant), never the stale product_variants scalar.
 const SELECT_COLS =
-  "id, workspace_id, product_id, shopify_variant_id, sku, title, option1, option2, option3, price_cents, compare_at_price_cents, image_url, weight, weight_unit, position, available";
+  "id, workspace_id, product_id, shopify_variant_id, sku, title, option1, option2, option3, price_cents, compare_at_price_cents, image_url, isolated_image_url, weight, weight_unit, position, available";
 
 /**
  * Fetch all variants for a product, ordered by position.
