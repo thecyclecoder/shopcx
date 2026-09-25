@@ -12,6 +12,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **A subscription is never more than one cycle behind** · verified 2026-09-24 · → [[../lifecycles/subscription-billing]]
+- **Assisted Subscription Purchase must resolve the target variant from a stated product + matching cancelled sub instead of refusing empty params and stranding a reactivation** · verified 2026-09-24 · → [[lifecycles/subscription-billing]]
 - **A customer can be recorded as sales-tax exempt** · verified 2026-09-21 · → [[lifecycles/subscription-billing]]
 - **A dunning cycle must never silently strand a subscription** · verified 2026-09-21 · → [[lifecycles/dunning]]
 - **A CS Director approve_remedy that completes an action must reconcile the failed/pending required-outcome row it satisfied, so the completion gate stops re-escalating a fully-resolved ticket** · verified 2026-09-19 · → [[../libraries/cs-director]]
