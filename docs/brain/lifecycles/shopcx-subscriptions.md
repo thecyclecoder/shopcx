@@ -574,6 +574,43 @@ that declines on Monday sits in a cycle whose next retry is Friday — neither c
 dunned in between. Filtering on today's cycles alone reported two healthy subs as MISSED RENEWALS
 every day until they resolved. Fixed in the report.
 
+## 🔴 NO anchors on the delivery policy — they hold the shipment
+
+A BILLING anchor phases the cycle calendar, which is what we want. A **DELIVERY** anchor tells
+Shopify which days deliveries may happen — so a charge landing off-anchor has its fulfillment order
+held in `SCHEDULED` until the next anchor day. **Paid, and never released to the 3PL.**
+
+The migration was setting `anchorsForSchedule(...)` on BOTH policies. Dunning recoveries land
+off-anchor by definition, so the first two produced exactly this: SC139358 charged Friday against a
+Wednesday anchor → `fulfillAt` **2026-09-30**, five days out, sitting UNSUBMITTED at Amplifier.
+
+**Nothing reports it.** The order reads `PAID`, our mirror is happy, and the customer simply waits.
+A contract born at PDP checkout carries no anchors at all — which is why only migrated subs showed
+it, and why it took the CEO noticing an order status he had never seen before.
+
+Anchors are off the delivery policy going forward, and the 198 already-migrated contracts were
+stripped (billing anchors verified intact afterwards).
+
+⚠️ **We cannot release a held fulfillment order ourselves** — `fulfillmentOrderOpen` needs
+`write_merchant_managed_fulfillment_orders` and the app holds read-only. Any already-SCHEDULED order
+has to be released in the Shopify admin, or the scope added.
+
+## 🔴 A closed dunning cycle MUST release the billing date
+
+Dunning deliberately holds `next_billing_date` in the past while a cycle is open, so the cycle stays
+targetable. When it closes, something has to release it — the retry ladder's `mark-exhausted` step
+does; **`handleAllCardsExhausted` (the all-cards and no-customer paths) never did.**
+
+On ShopCX that strands the customer permanently. The `subscription_cycle_charges` claim is keyed on
+`(subscription_id, cycle_key)` and the **cycle_key IS the frozen due date** — so the renewal cron
+selects the sub, fails to claim, and skips. Every day. No further charge, no cycle 2, no
+cancellation, no error.
+
+Measured 2026-09-25: **56 subs were sitting like that — 3 ShopCX and 53 Appstle going back to
+July.** The ShopCX three were genuinely unbillable; the Appstle ones matter less for revenue
+(Appstle bills those itself) but were equally invisible to dunning. All 56 rolled forward by
+`scripts/_repair-stalled-dunning.ts`.
+
 ## Open decisions
 
 - **~$9,700/cycle**: 974 lines are priced above the standard ladder because their subs never got a
