@@ -56,4 +56,4 @@ The **homepage rebuild** (direct-response, Tabs-led) shipped this way: 9 custom 
 
 ## Related
 
-[[../integrations/shopify]] · [[../libraries/shopify-theme]] · [[../lifecycles/storefront-checkout]]
+[[../integrations/shopify]] · [[../libraries/shopify-theme]] · [[../lifecycles/storefront-checkout]] · [[diagnose-slow-storefront-page]]
