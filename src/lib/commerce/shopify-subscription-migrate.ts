@@ -781,10 +781,21 @@ export async function executeMigration(
         intervalCount: norm.billing_interval_count,
         ...anchorsForSchedule(norm.billing_interval, nextBillingDate),
       },
+      // ⚠️ NO ANCHORS ON THE DELIVERY POLICY. A billing anchor phases the cycle calendar, which is
+      // what we want. A DELIVERY anchor tells Shopify which days deliveries may happen — so any
+      // charge landing off-anchor gets its fulfillment order held in SCHEDULED until the next
+      // anchor day, paid but unreleased to the 3PL.
+      //
+      // Measured 2026-09-25: two dunning recoveries charged on a Friday sat with
+      // `fulfillAt` 3 and 5 days out (SC139358 → 09-30 against a Wednesday anchor). The customer
+      // has paid and is waiting, and nothing reports it — the order looks PAID and simply never
+      // ships. A contract born at PDP checkout carries no anchors at all, which is why only
+      // migrated subs showed this.
+      //
+      // We ship when we are paid; the billing policy alone decides when that is.
       deliveryPolicy: {
         interval: norm.billing_interval,
         intervalCount: norm.billing_interval_count,
-        ...anchorsForSchedule(norm.billing_interval, nextBillingDate),
       },
       deliveryPrice: ((norm.delivery_price_cents ?? 0) / 100).toFixed(2),
       deliveryMethod: {

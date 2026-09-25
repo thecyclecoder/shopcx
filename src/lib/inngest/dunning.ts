@@ -818,6 +818,27 @@ async function handleAllCardsExhausted(
     await updateDunningCycle(cycle.id, { status: "exhausted" });
   }
 
+  // ⭐ ALWAYS roll the billing date forward when a cycle closes without recovering.
+  //
+  // ⚠️ Dunning deliberately HOLDS `next_billing_date` in the past while a cycle is open, so the
+  // cycle stays targetable. When the cycle closes, something has to release it — the retry-ladder's
+  // `mark-exhausted` step does, but this function (the all-cards-exhausted and no-customer paths)
+  // never did.
+  //
+  // On ShopCX that strands the customer permanently: the `subscription_cycle_charges` claim is keyed
+  // on `(subscription_id, cycle_key)` and the cycle_key IS the frozen due date, so the renewal cron
+  // selects the sub, fails to claim, and skips — every day, forever. No further charge, no cycle 2,
+  // no cancellation. Measured 2026-09-25: 3 subs sat exactly like that (36065771693, 36106895533,
+  // 36106797229), active, past-due, and quietly unbillable.
+  //
+  // (On Appstle it was survivable because Appstle runs its own schedule and would re-fail on its
+  // own, generating a fresh cycle. Nothing does that for us.)
+  //
+  // A cancel already nulls the date via cancel-truth, so this is a no-op there.
+  if (action !== "pause" && action !== "cancel") {
+    await resetBillingDateAfterDunning(workspaceId, shopifyContractId, cycle.id, false);
+  }
+
   await updateDunningCycle(cycle.id, { payment_update_sent: true, payment_update_sent_at: new Date().toISOString() });
 
   // Magic-link recovery email + tagged closed ticket (replaces the static
