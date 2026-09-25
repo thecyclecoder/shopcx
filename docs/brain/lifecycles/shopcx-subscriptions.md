@@ -611,6 +611,37 @@ July.** The ShopCX three were genuinely unbillable; the Appstle ones matter less
 (Appstle bills those itself) but were equally invisible to dunning. All 56 rolled forward by
 `scripts/_repair-stalled-dunning.ts`.
 
+## ⭐ The 12.2% decline rate was selection, not the engine
+
+ShopCX's headline decline rate looked alarming — **12.2% against Appstle's 3.6% over the same
+window**, a 3.4× gap on a sample large enough to take seriously. Split by the customer's payment
+history before migration, it resolves completely:
+
+| Group | n | Charged | Declined | Rate |
+|---|---|---|---|---|
+| Prior dunning cycle | 31 | 12 | 8 | **40.0%** |
+| Clean history | 171 | 96 | 7 | **6.8%** |
+| Appstle, same window | — | 238 | 9 | 3.6% |
+
+**15% of the cohort were customers whose card was already failing, and they declined at 40%.** Wave
+selection is by DUE DATE, which picks those up indifferently — and a migration does not fix a dead
+card. The engine was never the problem.
+
+Waves now DEFER any sub with a dunning cycle in the last 120 days (`--include-dunning` takes them
+deliberately). Migrating them is not wrong; it should be a decision rather than a side effect of
+their renewal date, because each one lands mid-dunning on a new engine and the wave's health
+numbers stop meaning anything.
+
+The clean group's 6.8% vs Appstle's 3.6% is still ~2×, but on 7 declines out of 103 attempts — too
+thin to act on. Worth re-checking once the clean population is several hundred.
+
+⚠️ **Two measurement traps hit while establishing this**, both worth remembering:
+- **The PostgREST 1000-row cap.** An unpaginated `subscriptions` select left 344 of 346 renewal
+  orders resolving to "unknown engine" and made both rates read as 0%. With 2,619 subs, every
+  lookup map over this table must paginate.
+- **`orders.subscription_id` looked unpopulated** and wasn't — that was the same truncation. The
+  link is actually 346 of 347.
+
 ## Open decisions
 
 - **~$9,700/cycle**: 974 lines are priced above the standard ladder because their subs never got a
