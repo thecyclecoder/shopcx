@@ -97,9 +97,33 @@ async function main() {
     }
   }
 
+  // ⭐ DEFER subs with recent payment trouble. Selection is by due date, which happily picks up
+  // customers whose card is already failing — and a migration does not fix a dead card.
+  //
+  // Measured 2026-09-25 across the 202 already migrated: the 31 with a prior dunning cycle declined
+  // at **40.0%**; the 171 with a clean history declined at **6.8%**, against Appstle's 3.6% over the
+  // same window. The cohort's alarming 12.2% headline was almost entirely those 31.
+  //
+  // Migrating them is not wrong, but it should be a DECISION, not a side effect of their renewal
+  // date — each one lands mid-dunning on a new engine, and a wave's health metrics stop meaning
+  // anything. Pass --include-dunning to take them deliberately.
+  const INCLUDE_TROUBLE = process.argv.includes("--include-dunning");
+  const troubled = new Set<string>();
+  if (!INCLUDE_TROUBLE && ids.length) {
+    for (let i = 0; i < ids.length; i += 200) {
+      const slice = ids.slice(i, i + 200);
+      const { data: dc } = await admin.from("dunning_cycles")
+        .select("shopify_contract_id")
+        .eq("workspace_id", WORKSPACE_ID).in("shopify_contract_id", slice)
+        .gte("created_at", new Date(Date.now() - 120 * 86400000).toISOString());
+      for (const d of dc ?? []) troubled.add(d.shopify_contract_id as string);
+    }
+  }
+
   const cands: Cand[] = [];
   for (const s of subs ?? []) {
     if (!snapOk.has(s.shopify_contract_id)) continue;
+    if (troubled.has(s.shopify_contract_id)) continue;
     const items = (s.items as { quantity?: number; price_cents?: number }[]) ?? [];
     const cycleCents = items.reduce((t, i) => t + (i.price_cents ?? 0) * (i.quantity ?? 1), 0);
     cands.push({
@@ -115,7 +139,7 @@ async function main() {
 
   const byCadence: Record<string, Cand[]> = {};
   for (const c of cands) (byCadence[c.cadence] ??= []).push(c);
-  console.log(`candidates due ${DUE_ON ?? `+${DUE_FROM_DAYS}d..+${DUE_TO_DAYS}d`} with a clean snapshot: ${cands.length}`);
+  console.log(`candidates due ${DUE_ON ?? `+${DUE_FROM_DAYS}d..+${DUE_TO_DAYS}d`} with a clean snapshot: ${cands.length}${troubled.size ? `  (${troubled.size} deferred — recent payment trouble)` : ""}`);
   for (const [k, v] of Object.entries(byCadence)) console.log(`  ${k.padEnd(10)} ${v.length}`);
 
   // ── pick the wave: round-robin across cadences, preferring multi-line ───────
