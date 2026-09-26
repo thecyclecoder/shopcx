@@ -83,6 +83,10 @@ Because the deriver always prefers the phase rollup (or, for a one-shot, the mer
 - `supabase/migrations/20260831120000_specs_ws_active_partial_index.sql` (DB Health Agent — pg_stat_statements 4608471940106465663) — adds `specs_ws_active_updated_at_idx` on `(workspace_id, updated_at) WHERE (status IS NULL OR status <> 'folded')`, a partial composite whose predicate EXACTLY matches the `'active'` branch of `public.list_specs_with_phases`. The existing `specs_ws_status_idx` (workspace_id, status) missed because the CASE-on-status wrapper is not sargable; `specs_ws_updated_at_idx` (workspace_id, updated_at) missed because the common p_since=NULL caller can't use the trailing key. Kills the seq scan flagged at 100ms × 79447 calls = 7969s total · apply: `scripts/apply-specs-ws-active-partial-index-migration.ts`
 - One-time backfill from markdown ([[../specs/spec-body-table-and-backfill]] Phase 3): `scripts/backfill-specs-from-markdown.ts`
 
+## Gotchas / known-fixes
+
+**`vale_review_passed_at` is the canonical review-passed column — diagnostic tools must read it, never `review_passed_at`** · `scripts/_check-build-state.ts` and similar diagnostics that probe spec flags must select `vale_review_passed_at` (not any obsolete column) to report review state. This is the DURABLE stamp set by the spec-review agents and read by the claim-time build gate. If a probe selects a non-existent column name, the read will fail silently or produce undefined data; capture the error returned by `maybeSingle()` and report it loudly so schema drift is visible during troubleshooting. ([[../specs/check-build-state-uses-canonical-review-stamp]] Phase 1)
+
 ## Related
 
 [[spec_phases]] · [[spec_card_state]] · [[spec_status_history]] · [[../libraries/specs-table]] · [[../libraries/brain-roadmap]] · [[../libraries/spec-card-state]] · [[../specs/spec-body-table-and-backfill]] · [[../specs/spec-readers-from-db-retire-parser]] · [[../specs/spec-authoring-writes-db-and-worker-materialize]] · [[../goals/db-driven-specs]]
