@@ -1,0 +1,1 @@
+- **Drop ad hoc control_tower_events lookup noise from Supabase DB logs** · verified 2026-09-26 · → [[lifecycles/control-tower]]
