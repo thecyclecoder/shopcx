@@ -22,6 +22,7 @@ import {
   isForeignEasyPostReturnsSweepRateLimit,
   isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
+  isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isInngestStepWrappedNonErrorLog,
   isInngestTerminalFailureMirrorLog,
@@ -436,6 +437,158 @@ test("isForeignSupabasePostgresAggregateIntrospectionNoise returns false on empt
   assert.equal(isForeignSupabasePostgresAggregateIntrospectionNoise(undefined), false);
   assert.equal(isForeignSupabasePostgresAggregateIntrospectionNoise(""), false);
   assert.equal(isForeignSupabasePostgresAggregateIntrospectionNoise("   "), false);
+});
+
+// ── isForeignSupabasePostgresMissingControlTowerEventsLookupNoise ──
+// The ad hoc `select * from public.control_tower_events` lookup by an external tool or a
+// stale exploratory query. `control_tower_events` is NOT part of the product schema, so the
+// relation-missing ERROR is repair work for a query we don't own. Drop AT CAPTURE only when
+// BOTH the exact relation-missing message AND the SELECT-lookup shape are present; a
+// relation-missing error on any other table (a real product-schema regression) still pages.
+
+test("isForeignSupabasePostgresMissingControlTowerEventsLookupNoise drops the ad hoc SELECT lookup on the exact relation-missing shape", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'relation "public.control_tower_events" does not exist',
+      "select * from public.control_tower_events",
+    ),
+    true,
+  );
+  // The unqualified (no `public.`) variant is the same class — Postgres sometimes reports
+  // the message without the schema qualifier depending on the caller's search_path.
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'relation "control_tower_events" does not exist',
+      "select id, ts from control_tower_events",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'relation "public.control_tower_events" does not exist',
+      "select * from public.control_tower_events where ts > now() - interval '1 hour' order by ts desc limit 100",
+    ),
+    true,
+  );
+  // Case-insensitive on the query (Postgres normalizes to lowercase in the log, but a hand
+  // -typed uppercase SELECT should still drop).
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'relation "public.control_tower_events" does not exist',
+      "SELECT * FROM public.control_tower_events",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'ERROR: relation "public.control_tower_events" does not exist',
+      "select * from public.control_tower_events",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      '  relation "public.control_tower_events" does not exist  ',
+      "   select * from public.control_tower_events   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingControlTowerEventsLookupNoise KEEPS a relation-missing error for any OTHER table (a real product-schema regression still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'relation "public.orders" does not exist',
+      "select * from public.orders",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'relation "public.tickets" does not exist',
+      "select * from public.tickets where id = $1",
+    ),
+    false,
+  );
+  // A similarly-named foreign table that isn't ours must still page (defence against a
+  // renamed / moved control_tower_* table breaking a live query).
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'relation "public.control_tower_alerts" does not exist',
+      "select * from public.control_tower_alerts",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingControlTowerEventsLookupNoise KEEPS a non-SELECT statement shape (a real code-bug on this name still pages)", () => {
+  // An INSERT / UPDATE / DELETE / DDL against control_tower_events indicates real code
+  // trying to write the table — a bug we WANT to see, not the ad hoc read we drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'relation "public.control_tower_events" does not exist',
+      "insert into public.control_tower_events (id, ts) values ($1, now())",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'relation "public.control_tower_events" does not exist',
+      "update public.control_tower_events set resolved_at = now() where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'relation "public.control_tower_events" does not exist',
+      "delete from public.control_tower_events where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingControlTowerEventsLookupNoise KEEPS a non-relation-missing message shape on this table (a different Postgres error still pages)", () => {
+  // A permission denied / column-missing / constraint / other ERROR on the same table name
+  // is NOT the ad hoc missing-relation lookup we drop; the pin is exact.
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'permission denied for relation "public.control_tower_events"',
+      "select * from public.control_tower_events",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'column "resolved_at" does not exist',
+      "select * from public.control_tower_events",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingControlTowerEventsLookupNoise returns false on empty / nullish input", () => {
+  assert.equal(isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(null, null), false);
+  assert.equal(isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(undefined, undefined), false);
+  assert.equal(isForeignSupabasePostgresMissingControlTowerEventsLookupNoise("", ""), false);
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured (an unqualified miss with no lookup context should surface).
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'relation "public.control_tower_events" does not exist',
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
+      'relation "public.control_tower_events" does not exist',
+      null,
+    ),
+    false,
+  );
 });
 
 // ── isForeignGoTrueEdgeNoise (error-feed-drop-supabase-gotrue-504-edge-noise) ──
