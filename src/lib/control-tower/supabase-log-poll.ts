@@ -52,6 +52,7 @@ import {
   isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise,
   isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise,
   isForeignSupabasePostgresPoliciesKindLookupNoise,
+  isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -412,6 +413,22 @@ const LOG_QUERIES: LogQuery[] = [
       // non-SELECT statement (real code-bug shape) still surfaces / pages on first
       // sighting.
       if (isForeignSupabasePostgresPoliciesKindLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.spec_phases.shipped_at`. The `spec_phases` table exists but has
+      // NO `shipped_at` timestamp column — a phase's shipped state is recorded via
+      // `status = 'shipped'` plus the `build_sha` + `build_pr_url` provenance pair
+      // (phase-pr-provenance). The column-missing ERROR only reaches this feed when a
+      // foreign app / stale SQL Editor session / deprecated integration queries
+      // `/rest/v1/spec_phases?select=...shipped_at...` or `?order=shipped_at.desc`.
+      // There is no lever from ShopCX to make that query resolve — paging Platform on
+      // it (Control Tower signature `supabase-logs:85c223f859afc86a`,
+      // [[../specs/error-feed-drop-spec-phases-shipped-at-direct-rest-noise]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-spec_phases shape (bare OR PostgREST CTE
+      // wrapper) — a column-missing error on any other table, a different column on
+      // `spec_phases`, a JOIN through `specs`, or on `spec_phases` via a non-SELECT
+      // statement (real code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
