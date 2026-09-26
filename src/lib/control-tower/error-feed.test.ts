@@ -30,6 +30,7 @@ import {
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
+  isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise,
   isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise,
   isForeignSupabasePostgresPoliciesKindLookupNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
@@ -2936,6 +2937,260 @@ test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise returns false on e
   assert.equal(
     isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
       "column spec_phases.idx does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise ──
+// A foreign / stale PostgREST / SQL Editor client runs a legacy approval-history read that
+// LEFT-JOINs `public.approval_decisions` to `public.agent_jobs` and asks for `aj.payload`
+// / `aj.branch_name` — columns that do not exist on the current `agent_jobs` schema
+// (`supabase/migrations/20260618120000_agent_jobs.sql` + its follow-ons). Foreign-owned
+// surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `agent_jobs.payload` / `agent_jobs.branch_name` AND a SELECT that names BOTH
+// `approval_decisions` AND `agent_jobs` are present. A column-missing on any other table,
+// a different column on `agent_jobs`, a bare SELECT on `agent_jobs` alone (real product
+// code), or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise drops the stale approval-history join on the exact agent_jobs.payload / agent_jobs.branch_name column-missing shape", () => {
+  // The observed shape — approval_decisions LEFT JOIN agent_jobs, selecting a legacy
+  // `aj.payload` column that no longer exists.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.payload does not exist",
+      "select ad.id, aj.payload from public.approval_decisions ad left join public.agent_jobs aj on aj.id = ad.agent_job_id order by ad.at desc limit 100",
+    ),
+    true,
+  );
+  // The sibling legacy column `aj.branch_name` — same shape, same drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.branch_name does not exist",
+      "select ad.id, aj.branch_name from public.approval_decisions ad left join public.agent_jobs aj on aj.id = ad.agent_job_id",
+    ),
+    true,
+  );
+  // public.-qualified column-missing variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column public.agent_jobs.payload does not exist",
+      "select aj.payload from approval_decisions ad left join agent_jobs aj on aj.id = ad.agent_job_id",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column public.agent_jobs.branch_name does not exist",
+      "select aj.branch_name from approval_decisions ad left join agent_jobs aj on aj.id = ad.agent_job_id",
+    ),
+    true,
+  );
+  // Case-insensitive on the query — SQL keywords may be uppercase in a copy-pasted read.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.payload does not exist",
+      "SELECT AD.ID, AJ.PAYLOAD FROM PUBLIC.APPROVAL_DECISIONS AD LEFT JOIN PUBLIC.AGENT_JOBS AJ ON AJ.ID = AD.AGENT_JOB_ID",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "ERROR: column agent_jobs.payload does not exist",
+      "select aj.payload from public.approval_decisions ad left join public.agent_jobs aj on aj.id = ad.agent_job_id",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "  column agent_jobs.payload does not exist  ",
+      "   select aj.payload from public.approval_decisions ad left join public.agent_jobs aj on aj.id = ad.agent_job_id   ",
+    ),
+    true,
+  );
+  // A different JOIN keyword (INNER JOIN) or a comma-in-FROM shape is still the same
+  // stale approval-history read.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.payload does not exist",
+      "select aj.payload from public.approval_decisions ad inner join public.agent_jobs aj on aj.id = ad.agent_job_id",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.payload does not exist",
+      "select aj.payload from public.approval_decisions ad, public.agent_jobs aj where aj.id = ad.agent_job_id",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise KEEPS a column-missing error on any OTHER table (a real schema regression on a different table still pages)", () => {
+  // A table that DOES have a `payload` column missing it is a real schema regression.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_action_grades.payload does not exist",
+      "select payload from public.approval_decisions ad left join public.agent_action_grades aj on aj.id = ad.grade_id",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column ticket_messages.branch_name does not exist",
+      "select branch_name from public.approval_decisions ad left join public.ticket_messages t on t.id = ad.ticket_id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise KEEPS a DIFFERENT column-missing on agent_jobs (a real agent_jobs column rename still pages)", () => {
+  // Real agent_jobs columns going missing is a schema regression we DO want to see —
+  // the pin covers `payload` and `branch_name` only, not any column name.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.kind does not exist",
+      "select aj.kind from public.approval_decisions ad left join public.agent_jobs aj on aj.id = ad.agent_job_id",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.status does not exist",
+      "select aj.status from public.approval_decisions ad left join public.agent_jobs aj on aj.id = ad.agent_job_id",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.spec_slug does not exist",
+      "select aj.spec_slug from public.approval_decisions ad left join public.agent_jobs aj on aj.id = ad.agent_job_id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise KEEPS a bare SELECT on agent_jobs alone (real product-code read regressing on the schema still pages)", () => {
+  // A bare `select payload from agent_jobs` (no `approval_decisions` join) could be real
+  // product code reading agent_jobs after a schema regression — we want to see it. The
+  // drop is scoped to the approval-history join shape only.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.payload does not exist",
+      "select payload from public.agent_jobs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.branch_name does not exist",
+      "select branch_name from public.agent_jobs where kind = 'build'",
+    ),
+    false,
+  );
+  // Neither table alone — some other approval reader that references neither table but
+  // triggers the same message from a different code path — stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.payload does not exist",
+      "select payload from public.something_else where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise KEEPS a non-SELECT statement shape (a real code-bug writing agent_jobs.payload still pages)", () => {
+  // INSERT / UPDATE / DELETE against agent_jobs referencing a bogus column is real code
+  // trying to write the table — a bug we WANT to see, not the ad hoc read we drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.payload does not exist",
+      "insert into public.agent_jobs (id, payload) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.branch_name does not exist",
+      "update public.agent_jobs set branch_name = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.payload does not exist",
+      "delete from public.agent_jobs where payload is null",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on agent_jobs (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "database is shutting down",
+      "select aj.payload from public.approval_decisions ad left join public.agent_jobs aj on aj.id = ad.agent_job_id",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      'duplicate key value violates unique constraint "agent_jobs_pkey"',
+      "select aj.payload from public.approval_decisions ad left join public.agent_jobs aj on aj.id = ad.agent_job_id",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "canceling statement due to statement timeout",
+      "select aj.payload from public.approval_decisions ad left join public.agent_jobs aj on aj.id = ad.agent_job_id",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      'permission denied for relation "public.agent_jobs"',
+      "select aj.payload from public.approval_decisions ad left join public.agent_jobs aj on aj.id = ad.agent_job_id",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      'relation "public.agent_jobs" does not exist',
+      "select aj.payload from public.approval_decisions ad left join public.agent_jobs aj on aj.id = ad.agent_job_id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.payload does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+      "column agent_jobs.payload does not exist",
       null,
     ),
     false,
