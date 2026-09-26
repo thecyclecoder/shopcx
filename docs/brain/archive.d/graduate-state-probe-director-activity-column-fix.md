@@ -1,0 +1,1 @@
+- **Fix the graduate-state probe's director_activity column names** · verified 2026-09-26 · → [[../tables/director_activity]]

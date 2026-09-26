@@ -1,0 +1,1 @@
+- **Drop Supabase array_agg aggregate introspection noise from the error feed** · verified 2026-09-26 · → [[../libraries/control-tower]]

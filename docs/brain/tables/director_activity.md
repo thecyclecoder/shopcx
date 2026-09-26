@@ -38,6 +38,10 @@ The media-buyer graduate flow ([[../libraries/media-buyer-graduate-scaler]]) wri
 
 [[../libraries/cold-scaler-graduate-heartbeat]] Phase 3 reads these `cohort_id`-scoped rows to compute a per-cohort `lastGraduatedAt` / `lastSkippedAt` / `lastSkipReason` heartbeat (surfaced on [[../libraries/media-buyer-director-digest]]) and to raise a deduped CEO card when an active cohort has ≥1 eligible crowned winner and no successful graduate inside a 7-day window — the "silently dead autonomous rail" signal the 2026-07-27 incident exposed.
 
+## Diagnostic reads
+
+- **`scripts/_graduate-state.ts`** ([[../specs/graduate-state-probe-director-activity-column-fix]]): a read-only probe that filters on `action_kind` matching any of `graduate|crown|scaler|replenish` and prints the recent activity (up to 25 rows) showing `created_at`, `action_kind`, and `reason` for Growth to diagnose the cold-scaler graduate flow state. Selects only `created_at`, `action_kind`, `reason`, `metadata` to avoid fetching unused columns.
+
 ## Related
 
 [[../libraries/director-activity]] · [[../specs/regression-agent]] · [[../specs/security-dependency-agent]] · [[../libraries/security-agent]] · [[../goals/devops-director]] · [[../specs/director-loop-grading]] · [[../specs/worker-coaching-loop]] · [[../libraries/agent-coaching]] · [[../specs/board-grooming]] · [[../libraries/platform-director]] · [[director_messages]] · [[../libraries/director-board]] · [[../libraries/deploy-guardian]] · [[deploy_watches]] · [[../specs/deploy-health-rollback-guardian]] · [[../specs/needs-attention-triage-and-verdict-robustness]]
