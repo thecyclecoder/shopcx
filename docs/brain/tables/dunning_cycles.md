@@ -95,6 +95,7 @@ const { count } = await admin.from("dunning_cycles")
 - Per-(subscription, billing cycle). Don't conflate with `payment_failures` which is per-attempt within a cycle.
 - Driven by Inngest `dunning/payment-failed`. See Phase 5 in CLAUDE.md.
 - **Internal joins use the UUID.** Join to [[subscriptions]] via `subscription_id` UUID — NOT `shopify_contract_id`. Shopify is being sunset; the contract id will be deprecated. `subscription_id` is column-nullable but always populated in practice for cycles created by our Inngest path; a NULL is a data issue worth surfacing, not a fallback signal.
+- **Anomaly integration.** The customer timeline's dunning-cycle anomaly card reads `created_at` to populate the dunning cycle start timestamp — see [[../libraries/customer-timeline]] § Gotchas for why the anomaly evidence label reads `started_at` despite sourcing from `created_at`.
 
 ---
 

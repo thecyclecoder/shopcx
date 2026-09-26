@@ -57,7 +57,7 @@ The customer link-group expansion (`resolveLinkedCustomerIds`) was refactored to
 
 ## Gotchas
 
-_None documented._
+- **Dunning cycle anomaly dates.** The dunning-cycle anomaly evidence labels its timestamp as `started_at` but sources the value from `dunning_cycles.created_at` (the moment the cycle row was inserted, marking when the dunning process began). The phantom `started_at` column does not exist. Fixed in [[../archive.d/customer-timeline-dunning-cycles-started-at-column-fix]]. The label name is stable for downstream consumers; the source column mirrors Postgres ground truth.
 
 ---
 
