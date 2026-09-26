@@ -1498,6 +1498,76 @@ export function isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoi
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column spec_status_history.created_at does not
+ * exist` for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.spec_status_history.created_at`. The `spec_status_history` audit table exists
+ * (see `supabase/migrations/20260624130000_spec_status_history.sql`) but its timestamp
+ * column is `at`, not `created_at` — grep confirms every ShopCX code path uses `at`
+ * (`src/lib/spec-card-state.ts`, `src/lib/pipeline-doctor.ts`,
+ * `src/lib/brain-roadmap.ts`, `src/lib/security-agent.ts`, etc.) and the migration only
+ * creates the `at timestamptz` column. The error only reaches Supabase's `postgres_logs`
+ * feed when an external / stale PostgREST client (a foreign app, a deprecated
+ * integration, a stale SQL Editor session) queries `/rest/v1/spec_status_history?
+ * select=...created_at...` or `?order=created_at.desc`. There is no lever from ShopCX to
+ * make that query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:8c74545e2bb338bf`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresOrdersNameLookupNoise` — the same narrow-gating
+ * shape (exact `column <table>.<name> does not exist` + bare SELECT-on-table shape),
+ * aimed at a different foreign caller.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column spec_status_history.created_at does not exist` (or the
+ *      `public.` qualified variant, with any leading `ERROR: ` prefix Postgres includes
+ *      on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.spec_status_history`
+ *      lookup shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have a `created_at` column) still pages — the pin is
+ *     `spec_status_history.created_at` only,
+ *   - a column-missing error on `spec_status_history` for a DIFFERENT column (e.g. the
+ *     real `at` column got renamed) still pages — the pin covers `created_at` only,
+ *   - a `spec_status_history.created_at` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin
+ *     is the bare SELECT-lookup shape, matching the ad hoc direct-REST read we've observed,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `spec_status_history` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column spec_status_history.created_at does not exist" ||
+    stripped === "column public.spec_status_history.created_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `spec_status_history`
+  // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to spec_status_history with a bogus
+  // `created_at` column is a code bug we DO want to page on, not the ad hoc direct-REST
+  // read this drop targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?spec_status_history\b/.test(q);
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).
