@@ -48,6 +48,7 @@ import {
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
+  isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise,
   isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise,
   isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise,
   isForeignSupabasePostgresPoliciesKindLookupNoise,
@@ -351,6 +352,22 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_phases` via a non-SELECT statement (real code-bug shape) still surfaces /
       // pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale approval-history SELECT that
+      // LEFT-JOINs `public.approval_decisions` to `public.agent_jobs` and asks for legacy
+      // `aj.payload` / `aj.branch_name` columns that do not exist on the current schema.
+      // Both tables exist, but every ShopCX approval-history reader queries real columns —
+      // the row only reaches this feed when a foreign app / stale SQL Editor session runs
+      // the deprecated join shape. There is no lever from ShopCX to make that query
+      // resolve — the fix is to update the caller, not add fake columns to agent_jobs
+      // (Control Tower signature `supabase-logs:0197dad10ff4a69c`,
+      // [[../specs/error-feed-drop-agent-jobs-legacy-approval-join-noise]]). Narrowly
+      // gated to require BOTH the exact column-missing message on
+      // `agent_jobs.payload` / `agent_jobs.branch_name` AND a SELECT that joins
+      // `approval_decisions` with `agent_jobs` — a bare SELECT on `agent_jobs` alone (real
+      // product code), a different column on `agent_jobs`, a column-missing on any other
+      // table, or a non-SELECT statement (INSERT/UPDATE/DELETE — real write bug) still
+      // surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.specs.is_active`. The `specs` table exists but carries no
       // `is_active` boolean — spec activity is derived from the `spec_phases` rollup +
