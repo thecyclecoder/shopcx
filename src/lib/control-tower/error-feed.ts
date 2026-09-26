@@ -1075,6 +1075,70 @@ export function isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing COLUMN (`title` or `signature`) for
+ * an ad hoc lookup against `public.loop_alerts`. Neither column lives on `loop_alerts` —
+ * both are on `error_events` — so the message appears on Supabase's `postgres_logs` feed
+ * only when a Supabase SQL Editor session (an external human debug) confuses the two
+ * tables and runs `select * from public.loop_alerts where title ilike '%…%' / signature
+ * = '…'`. There is no ShopCX code path that references `loop_alerts.title` or
+ * `loop_alerts.signature`; grep both to confirm. Paging Platform on it
+ * ([[../specs/error-feed-drop-supabase-loop-alerts-adhoc-column-title-nois]], Control
+ * Tower signature `supabase-logs:0e3379f172768a91`) is repair work for a query we don't
+ * own — the exact twin of `isForeignSupabasePostgresMissingControlTowerEventsLookupNoise`,
+ * scoped to the confused-column shape instead of the confused-relation shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for one of these two
+ *      columns — trimmed equal to `column "title" does not exist` or `column "signature"
+ *      does not exist` (with any leading `ERROR: ` prefix stripped, matching the sibling
+ *      missing-relation drop), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.loop_alerts`
+ *      lookup shape (the ad hoc SELECT — any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - the SAME column-missing message on any OTHER relation (a real product-schema
+ *     regression, a rename that broke a live query on a table that DOES have `title`)
+ *     still pages,
+ *   - a `loop_alerts` error attached to a DIFFERENT statement shape (INSERT / UPDATE /
+ *     DELETE / DDL, a JOIN with `error_events`) still pages — the pin is the bare
+ *     SELECT-lookup shape only, matching the ad hoc read we've observed,
+ *   - a FATAL / PANIC / constraint violation on `loop_alerts` is untouched (different
+ *     message),
+ *   - a DIFFERENT column-missing on `loop_alerts` (e.g. a real column that got renamed)
+ *     still pages — the pin covers `title` and `signature` only.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column "<name>" does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === 'column "title" does not exist' ||
+    stripped === 'column "signature" does not exist';
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name loop_alerts (with
+  // or without the `public.` schema qualifier). A JOIN with `error_events` (the real
+  // code shape when the human means to query both) uses `error_events` as the FROM
+  // relation, which fails this pin — as does any non-SELECT / UNION / different-FROM
+  // statement, so a real query against loop_alerts that references a missing column is
+  // a code bug we DO want to page on, not the SQL-Editor confusion this drop targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?loop_alerts\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column reference "oid" is ambiguous` on a
  * catalog-introspection query that joins two `pg_catalog` tables (each carrying its own
  * `oid` column) without qualifying the `oid` reference. None of our own SQL emits this
