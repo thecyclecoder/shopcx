@@ -1,0 +1,1 @@
+- **Drop ad hoc smart_patterns content-column searches from Supabase log feed** · verified 2026-09-26 · → [[../libraries/control-tower]]

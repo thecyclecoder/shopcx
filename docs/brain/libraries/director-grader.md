@@ -49,6 +49,7 @@ The defining invariant: **soundness is scored separately from outcome** — a so
 - **Idempotent + human-safe** — keyed on the partial uniques; a re-run UPDATEs in place, and `graded_by='human'` is never re-written by the agent.
 - **Best-effort, never blocking** — the sweep is wrapped per workspace so a grader failure never breaks the cron; a missing API key is a clean no-op.
 - **Dormant-aware by data** — pre-Phase-4 the director makes no autonomous calls, so the sweep simply finds zero candidates (no explicit gate needed).
+- **`approval_decisions` schema pin (box-lane reader)** ([[../specs/director-grade-approval-decision-select-schema-fix]] Phase 1) — the box-side director-grade job reads `approval_decisions` to load auto-approval context for grading. The table has `routed_to_function` (where the request was routed), NOT `director_function`. The director label is DERIVED from the candidate's already-resolved `director_function` (set by `pickDirectorGradeBatch` from `routed_to_function`), with the row's `routed_to_function` as a fallback. A regression that selects a non-existent `director_function` column throws Postgres `42703` and halts the grader. Pinned by `scripts/builder-worker.director-grade-approval-select.test.ts` — a static assertion that runs every commit and catches any reintroduction of the missing column name into the select list. See [[../tables/approval_decisions]] for the authoritative schema and [[../specs/director-grade-approval-decision-select-schema-fix]] for the mismatch root cause.
 
 ---
 
