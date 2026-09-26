@@ -1424,6 +1424,80 @@ export function isForeignSupabasePostgresOrdersNameLookupNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column spec_phases.workspace_id does not exist`
+ * (or the `spec_slug` twin) for a bare SELECT lookup / PostgREST direct-REST call against
+ * `public.spec_phases`. The `spec_phases` table exists (child of `public.specs`, keyed by
+ * `spec_id`) but by design carries no `workspace_id` and no `spec_slug` column — those live
+ * on the parent `specs` row (`workspace_id`, `slug`), and every ShopCX reader either joins
+ * through `specs` or goes through the server-side RPCs. The column-missing ERROR only
+ * reaches Supabase's `postgres_logs` feed when a foreign / stale PostgREST client or manual
+ * SQL Editor session queries `/rest/v1/spec_phases?select=...workspace_id...` (or the
+ * `spec_slug` variant). There is no lever from ShopCX to make that query resolve — paging
+ * Platform on it (Control Tower signature `supabase-logs:4371de33cf8e1d68`,
+ * [[../specs/error-feed-drop-spec-phases-workspace-slug-adhoc-lookup-nois]]) is repair work
+ * for a query we do not own.
+ *
+ * Sibling of `isForeignSupabasePostgresOrdersNameLookupNoise` — the same narrow-gating shape
+ * (exact `column <table>.<name> does not exist` + bare SELECT-on-table shape), aimed at a
+ * different foreign caller and pinned to the two specific columns (`workspace_id` /
+ * `spec_slug`) that only belong on the parent `specs` row.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for one of the two pinned
+ *      columns — trimmed equal to `column spec_phases.workspace_id does not exist` or
+ *      `column spec_phases.spec_slug does not exist` (or the `public.` qualified variant),
+ *      with any leading `ERROR: ` prefix Postgres includes on the logs surface stripped, AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.spec_phases` lookup
+ *      shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real code bug on a table that DOES
+ *     have `workspace_id` / `spec_slug`) still pages — the pin is `spec_phases.` only,
+ *   - a column-missing error on `spec_phases` for a DIFFERENT column (e.g. `spec_id`
+ *     going missing — a real schema regression) still pages — the pin covers the two
+ *     off-schema columns only, not any column name,
+ *   - a `spec_phases.workspace_id` / `spec_phases.spec_slug` error attached to a DIFFERENT
+ *     statement shape (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still
+ *     pages — the pin is the bare SELECT-lookup shape, matching the ad hoc read we've
+ *     observed,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `spec_phases` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `spec_phases` (with or without the `public.` qualifier) and one of the two columns
+  // that only belong on the parent `specs` row (`workspace_id` or `spec_slug`).
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column spec_phases.workspace_id does not exist" ||
+    stripped === "column public.spec_phases.workspace_id does not exist" ||
+    stripped === "column spec_phases.spec_slug does not exist" ||
+    stripped === "column public.spec_phases.spec_slug does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `spec_phases` (with
+  // or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to spec_phases with a bogus column is a
+  // code bug we DO want to page on, not the ad hoc direct-REST read this drop targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?spec_phases\b/.test(q);
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).
