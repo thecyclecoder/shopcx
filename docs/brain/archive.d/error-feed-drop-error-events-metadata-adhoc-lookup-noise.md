@@ -1,0 +1,1 @@
+- **Drop foreign-app 'column error_events.metadata does not exist' ad-hoc SELECT noise from postgres_logs capture** · verified 2026-09-26 · → [[../libraries/control-tower]]

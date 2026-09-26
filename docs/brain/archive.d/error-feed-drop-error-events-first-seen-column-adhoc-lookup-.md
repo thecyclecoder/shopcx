@@ -1,0 +1,1 @@
+- **Drop ad-hoc `error_events.first_seen` column-missing lookup noise from Supabase Postgres logs** · verified 2026-09-26 · → [[../libraries/control-tower#error-feed-capture-filters]]
