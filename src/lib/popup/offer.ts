@@ -23,6 +23,37 @@ export const POPUP_COUPON_PCT = 15;
 /** Standard shipping we waive — representative rate (no address at popup time). */
 const DEFAULT_SHIPPING_VALUE_CENTS = 695;
 
+// The popup boundary receives the product ref from the storefront widget, which
+// can pass either the internal UUID or the legacy Shopify numeric product id.
+// Downstream reads all hit UUID columns (product_pricing_rule.product_id,
+// product_variants.product_id), so a numeric id feeds Postgres 22P02 (uuid cast)
+// and the caller silently loses the value stack. Normalize at the boundary.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NUMERIC_ID_RE = /^\d+$/;
+
+/**
+ * Normalize the storefront's product ref to an internal products.id BEFORE any
+ * UUID-column query. A strict UUID passes through; a strictly-numeric legacy
+ * Shopify id resolves through products.shopify_product_id scoped to the
+ * workspace; anything else (or an unresolved numeric id) returns null so
+ * downstream reads never fire and no 22P02 uuid-cast error surfaces.
+ */
+export async function resolvePopupProductId(
+  workspaceId: string,
+  productRef: string,
+): Promise<string | null> {
+  if (UUID_RE.test(productRef)) return productRef;
+  if (!NUMERIC_ID_RE.test(productRef)) return null;
+  const admin = createAdminClient();
+  const { data } = await admin
+    .from("products")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("shopify_product_id", productRef)
+    .maybeSingle();
+  return (data as { id?: string } | null)?.id ?? null;
+}
+
 export interface PopupOffer {
   pack_quantity: number;
   coupon_pct: number;
@@ -46,6 +77,12 @@ export interface PopupOffer {
  * Returns null when the product has no usable pricing tiers.
  */
 export async function computePopupOffer(workspaceId: string, productId: string): Promise<PopupOffer | null> {
+  // Normalize the incoming product ref BEFORE any UUID-column query so a
+  // legacy Shopify numeric id can't feed a 22P02 uuid-cast on the downstream
+  // reads, and an unresolvable ref fails closed with no offer.
+  const internalProductId = await resolvePopupProductId(workspaceId, productId);
+  if (!internalProductId) return null;
+
   const admin = createAdminClient();
 
   // Pricing lives in pricing_rules (via the product_pricing_rule join), NOT the
@@ -54,7 +91,7 @@ export async function computePopupOffer(workspaceId: string, productId: string):
     .from("product_pricing_rule")
     .select("pricing_rule_id")
     .eq("workspace_id", workspaceId)
-    .eq("product_id", productId)
+    .eq("product_id", internalProductId)
     .maybeSingle();
   type RuleShape = { quantity_breaks?: Array<{ quantity: number; discount_pct: number }>; subscribe_discount_pct?: number; free_shipping?: boolean; free_gift_variant_id?: string | null; free_gift_product_title?: string | null };
   let rule: RuleShape | null = null;
@@ -72,7 +109,7 @@ export async function computePopupOffer(workspaceId: string, productId: string):
     .from("product_variants")
     .select("price_cents, compare_at_price_cents")
     .eq("workspace_id", workspaceId)
-    .eq("product_id", productId)
+    .eq("product_id", internalProductId)
     .order("price_cents", { ascending: true })
     .limit(1)
     .maybeSingle();
