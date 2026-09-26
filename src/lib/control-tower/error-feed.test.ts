@@ -26,6 +26,7 @@ import {
   isForeignSupabasePostgresOrdersNameLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -2033,6 +2034,203 @@ test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise retur
   assert.equal(
     isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
       "column spec_status_history.created_at does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/subscriptions?select=...paused_until...` against our `public.subscriptions`
+// table. The table exists but its canonical pause timestamp is `pause_resume_at`, not
+// `paused_until`. Foreign-owned surface, no lever from us — drop AT CAPTURE only when
+// BOTH the exact column-missing message on `subscriptions.paused_until` AND the bare
+// SELECT-lookup shape on `subscriptions` are present. A column-missing on any other
+// table, a different column on `subscriptions`, or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise drops the ad hoc SELECT lookup on the exact subscriptions.paused_until column-missing shape", () => {
+  // The captured PostgREST direct-REST shape — unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column subscriptions.paused_until does not exist",
+      "select id, paused_until from public.subscriptions where status = 'paused' limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column public.subscriptions.paused_until does not exist",
+      "select id, paused_until from public.subscriptions where status = 'paused' limit 100",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column subscriptions.paused_until does not exist",
+      "select paused_until from subscriptions limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column subscriptions.paused_until does not exist",
+      "select id, paused_until from public.subscriptions where paused_until < now() order by paused_until desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column subscriptions.paused_until does not exist",
+      "SELECT ID, PAUSED_UNTIL FROM PUBLIC.SUBSCRIPTIONS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "ERROR: column subscriptions.paused_until does not exist",
+      "select paused_until from public.subscriptions",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "  column subscriptions.paused_until does not exist  ",
+      "   select paused_until from public.subscriptions   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a paused_until column still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column journeys.paused_until does not exist",
+      "select paused_until from public.journeys where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column campaigns.paused_until does not exist",
+      "select paused_until from public.campaigns where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise KEEPS a DIFFERENT column-missing on subscriptions (the real `pause_resume_at` column renamed still pages)", () => {
+  // The real pause timestamp column is `pause_resume_at`. If someone breaks that, we want to see it.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column subscriptions.pause_resume_at does not exist",
+      "select pause_resume_at from public.subscriptions where status = 'paused'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column subscriptions.next_billing_date does not exist",
+      "select next_billing_date from public.subscriptions where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise KEEPS a non-SELECT statement shape (a real code-bug writing subscriptions.paused_until still pages)", () => {
+  // INSERT / UPDATE / DELETE against subscriptions referencing a bogus column is real
+  // code trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column subscriptions.paused_until does not exist",
+      "insert into public.subscriptions (id, paused_until) values ($1, now())",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column subscriptions.paused_until does not exist",
+      "update public.subscriptions set paused_until = now() where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column subscriptions.paused_until does not exist",
+      "delete from public.subscriptions where paused_until < now() - interval '90 days'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on subscriptions (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "database is shutting down",
+      "select id from public.subscriptions where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      'duplicate key value violates unique constraint "subscriptions_pkey"',
+      "select id from public.subscriptions where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.subscriptions where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      'permission denied for relation "public.subscriptions"',
+      "select id from public.subscriptions where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      'relation "public.subscriptions" does not exist',
+      "select id from public.subscriptions where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column subscriptions.paused_until does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+      "column subscriptions.paused_until does not exist",
       null,
     ),
     false,

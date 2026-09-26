@@ -1564,6 +1564,79 @@ export function isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocN
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column subscriptions.paused_until does not exist`
+ * for an ad hoc SELECT lookup / PostgREST direct-REST call against
+ * `public.subscriptions.paused_until`. The `subscriptions` table exists as a first-class
+ * product table (see [[../tables/subscriptions]]), but it has no `paused_until` column —
+ * the canonical pause timestamp is `pause_resume_at` (grep confirms every ShopCX caller
+ * uses `pause_resume_at`: `src/lib/action-executor.ts`, `src/lib/internal-subscription.ts`,
+ * `src/lib/portal/handlers/pause.ts`, `src/lib/inngest/portal-auto-resume.ts`,
+ * `src/lib/commerce/subscription.ts`, `src/lib/research/probes/subscription.ts`, etc.).
+ * The error only reaches Supabase's `postgres_logs` feed when an external / stale
+ * PostgREST client (a foreign app assuming a generic `.paused_until` column, a stale SQL
+ * Editor session, a deprecated integration) issues a `select=...paused_until...` against
+ * `/rest/v1/subscriptions`. There is no lever from ShopCX to make that query resolve —
+ * paging Platform on it (Control Tower signature `supabase-logs:c3930da3c95e519a`) is
+ * repair work for a query we do not own.
+ *
+ * Sibling of `isForeignSupabasePostgresOrdersNameLookupNoise` — the same narrow-gating
+ * shape (exact `column <table>.<name> does not exist` + bare SELECT-on-table shape),
+ * aimed at a different foreign caller.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column subscriptions.paused_until does not exist` (or the
+ *      `public.` qualified variant, with any leading `ERROR: ` prefix Postgres includes
+ *      on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.subscriptions`
+ *      lookup shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have a `paused_until` column) still pages — the pin is
+ *     `subscriptions.paused_until` only,
+ *   - a column-missing error on `subscriptions` for a DIFFERENT column (e.g. the real
+ *     `pause_resume_at` column got renamed) still pages — the pin covers `paused_until`
+ *     only, not any column name,
+ *   - a `subscriptions.paused_until` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin
+ *     is the bare SELECT-lookup shape, matching the ad hoc direct-REST read we've
+ *     observed,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `subscriptions` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column subscriptions.paused_until does not exist" ||
+    stripped === "column public.subscriptions.paused_until does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `subscriptions`
+  // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to subscriptions with a bogus `paused_until`
+  // column is a code bug we DO want to page on, not the ad hoc direct-REST read this
+  // drop targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?subscriptions\b/.test(q);
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).

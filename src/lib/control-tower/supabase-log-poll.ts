@@ -44,6 +44,7 @@ import {
   isForeignSupabasePostgresOrdersNameLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -288,6 +289,23 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_status_history`, or on it via a non-SELECT statement (real code-bug shape)
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.subscriptions.paused_until`. The `subscriptions` table exists but
+      // has no `paused_until` column — the canonical pause timestamp is `pause_resume_at`
+      // (grep confirms every ShopCX caller uses `pause_resume_at`). The column-missing
+      // ERROR only reaches this feed when a foreign app / deprecated integration / stale
+      // SQL Editor session queries `/rest/v1/subscriptions?select=...paused_until...`.
+      // There is no lever from ShopCX to make that query resolve — paging Platform on it
+      // (Control Tower signature `supabase-logs:c3930da3c95e519a`,
+      // [[../specs/error-feed-drop-subscriptions-paused-until-direct-rest-noise]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND the bare-SELECT-on-subscriptions shape — a column-
+      // missing error on any other table, a different column on `subscriptions`, or on
+      // `subscriptions` via a non-SELECT statement (real code-bug shape) still surfaces /
+      // pages on first sighting.
+      // grep-anchor (spec check pattern is regex; unescaped parens are groups):
+      // isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoisemessage, query
+      if (isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
