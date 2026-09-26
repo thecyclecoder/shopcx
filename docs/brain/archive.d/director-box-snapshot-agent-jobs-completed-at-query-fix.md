@@ -1,0 +1,1 @@
+- **Stop the director box snapshot from querying a missing agent_jobs.completed_at column** · verified 2026-09-26 · → [[../libraries/director-box-snapshot]]
