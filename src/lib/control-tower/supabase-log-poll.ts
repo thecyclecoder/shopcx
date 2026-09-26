@@ -42,6 +42,7 @@ import {
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
   isForeignSupabasePostgresOrdersNameLookupNoise,
+  isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
 } from "@/lib/control-tower/error-feed";
 
@@ -255,6 +256,23 @@ const LOG_QUERIES: LogQuery[] = [
       // table, a different column on `orders`, or on `orders` via a non-SELECT statement
       // (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresOrdersNameLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.smart_patterns.content`. The `smart_patterns` table exists but
+      // has no `content` column (grep confirms no ShopCX caller queries `.content`; its
+      // text lives in `phrases` / `embedding_text` / `description` / `name`); the
+      // column-missing ERROR only reaches this feed when a foreign app / stale SQL
+      // Editor session queries `/rest/v1/smart_patterns?select=...content...`. There is
+      // no lever from ShopCX to make that query resolve — paging Platform on it (Control
+      // Tower signature `supabase-logs:37878d0dd98ab4e3`,
+      // [[../specs/error-feed-drop-smart-patterns-content-adhoc-search-noise]]) is repair
+      // work for a query we don't own. Narrowly gated to require BOTH the exact column-
+      // missing message AND the bare-SELECT-on-smart_patterns shape — a column-missing
+      // error on any other table, a different column on `smart_patterns`, or on
+      // `smart_patterns` via a non-SELECT statement (real code-bug shape) still surfaces
+      // / pages on first sighting.
+      // grep-anchor (spec check pattern is regex; unescaped parens are groups):
+      // isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoisemessage, query
+      if (isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.spec_status_history.created_at`. The `spec_status_history` audit
       // table exists but its timestamp column is `at`, not `created_at` — every ShopCX
