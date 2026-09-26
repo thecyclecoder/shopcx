@@ -1638,6 +1638,28 @@ export function isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocN
 }
 
 /**
+ * Foreign-app noise - Postgres reporting `syntax error at end of input` for a stale /
+ * hand-typed ad hoc approval-decisions lookup that references the non-existent
+ * `agent_jobs.branch_name` column. `approval_decisions` and `agent_jobs` are real
+ * product tables, but `agent_jobs` has NO `branch_name` column. The captured shape is
+ * a one-off SQL Editor / stale external tool query that dangles at the end; there is no
+ * lever from ShopCX to make that query resolve.
+ */
+export function isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped.toLowerCase() !== "syntax error at end of input") return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  if (!/^select\b[\s\S]*\bfrom\s+(?:public\.)?approval_decisions\b/.test(q)) return false;
+  return q.includes("agent_jobs.branch_name");
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column specs.<archived_at|folded_at|deferred_at>
  * does not exist` for an ad hoc / stale PostgREST direct-REST SELECT against
  * `public.specs`. The `specs` card table exists (see

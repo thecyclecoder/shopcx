@@ -45,6 +45,7 @@ import {
   isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
   isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise,
@@ -311,6 +312,12 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_status_history`, or on it via a non-SELECT statement (real code-bug shape)
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / hand-typed SQL Editor lookup
+      // against `public.approval_decisions` that references the non-existent
+      // `agent_jobs.branch_name` column and dangles at the end, which Postgres reports as
+      // `syntax error at end of input`. Narrowly gated to require the exact message, the
+      // bare SELECT-on-approval_decisions shape, and the `agent_jobs.branch_name` marker.
+      if (isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.specs.<archived_at|folded_at|deferred_at>`. The `specs` card table
       // exists but records lifecycle state via `status text` (with a `folded` value) plus
