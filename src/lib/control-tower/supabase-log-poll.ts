@@ -48,6 +48,7 @@ import {
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
+  isForeignSupabasePostgresPoliciesKindLookupNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -348,6 +349,20 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_phases` via a non-SELECT statement (real code-bug shape) still surfaces /
       // pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.policies.kind`. The `policies` table exists but has no `kind`
+      // column by design — it is keyed by `slug`, and every ShopCX caller goes through
+      // the policies SDK (`src/lib/policies.ts`) which reads real columns. The column-
+      // missing ERROR only reaches this feed when a foreign app / stale SQL Editor
+      // session queries `/rest/v1/policies?select=...kind...`. There is no lever from
+      // ShopCX to make that query resolve — paging Platform on it
+      // ([[../specs/error-feed-drop-policies-kind-direct-rest-lookup-noise]]) is repair
+      // work for a query we don't own. Narrowly gated to require BOTH the exact column-
+      // missing message AND the bare-SELECT-on-policies shape — a column-missing error
+      // on any other table, a different column on `policies`, or on `policies` via a
+      // non-SELECT statement (real code-bug shape) still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresPoliciesKindLookupNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
