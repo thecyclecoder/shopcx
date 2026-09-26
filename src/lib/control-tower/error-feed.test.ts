@@ -31,6 +31,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
+  isErrorEventsAdhocSelectLookupQuery,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isInngestStepWrappedNonErrorLog,
   isInngestTerminalFailureMirrorLog,
@@ -1359,6 +1360,134 @@ test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise returns false 
     ),
     false,
   );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise drops the PostgREST-generated CTE lookup shape", () => {
+  // The observed incident: a foreign PostgREST client asks for `updated_at` on
+  // `error_events` via a direct-REST call. PostgREST wraps the SELECT in
+  // `WITH pgrst_source AS ( SELECT "public"."error_events"."<col>" ... FROM
+  // "public"."error_events" ... )` before dispatch. The message carries the same
+  // canonical `column error_events.updated_at does not exist` shape, but the query
+  // is no longer a bare SELECT — the simple-shape regex would miss it and the row
+  // pages Platform on a query we do not own.
+  const cteQuery =
+    'WITH pgrst_source AS ( SELECT "public"."error_events"."id", "public"."error_events"."updated_at" FROM "public"."error_events" WHERE "public"."error_events"."workspace_id" = $1 ORDER BY "public"."error_events"."updated_at" DESC LIMIT $2 OFFSET $3 )';
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.updated_at does not exist",
+      cteQuery,
+    ),
+    true,
+  );
+  // Same shape, `public.` qualified variant of the message.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column public.error_events.updated_at does not exist",
+      cteQuery,
+    ),
+    true,
+  );
+  // ERROR: prefix on the Postgres logs surface still strips cleanly.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "ERROR: column error_events.updated_at does not exist",
+      cteQuery,
+    ),
+    true,
+  );
+  // The same CTE wrapper around a WRITE (PostgREST direct-REST POST/PATCH/DELETE)
+  // is a real code-bug shape we WANT to see — the pin requires the CTE body's
+  // leading token to be SELECT.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.updated_at does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."error_events" ("updated_at") VALUES ($1) RETURNING "public"."error_events"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.updated_at does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."error_events" SET "updated_at" = $1 WHERE "public"."error_events"."id" = $2 )',
+    ),
+    false,
+  );
+  // A CTE that names a DIFFERENT table in its FROM still pages (real code bug on
+  // that table — the pin is `error_events` in the FROM).
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.updated_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."orders"."id" FROM "public"."orders" )',
+    ),
+    false,
+  );
+});
+
+test("isErrorEventsAdhocSelectLookupQuery accepts simple SELECT + PostgREST CTE and rejects everything else", () => {
+  // Simple SELECT — the SQL-editor / hand-typed shape.
+  assert.equal(
+    isErrorEventsAdhocSelectLookupQuery("select metadata from public.error_events"),
+    true,
+  );
+  assert.equal(isErrorEventsAdhocSelectLookupQuery("select id from error_events"), true);
+  // PostgREST CTE — quoted `"public"."error_events"`.
+  assert.equal(
+    isErrorEventsAdhocSelectLookupQuery(
+      'WITH pgrst_source AS ( SELECT "public"."error_events"."updated_at" FROM "public"."error_events" WHERE "public"."error_events"."workspace_id" = $1 )',
+    ),
+    true,
+  );
+  // PostgREST CTE — unqualified quoted `"error_events"`.
+  assert.equal(
+    isErrorEventsAdhocSelectLookupQuery(
+      'WITH pgrst_source AS ( SELECT "error_events"."updated_at" FROM "error_events" )',
+    ),
+    true,
+  );
+  // Non-SELECT / write statements are NOT the ad hoc read shape.
+  assert.equal(
+    isErrorEventsAdhocSelectLookupQuery(
+      "insert into public.error_events (updated_at) values ($1)",
+    ),
+    false,
+  );
+  assert.equal(
+    isErrorEventsAdhocSelectLookupQuery(
+      "update public.error_events set updated_at = $1",
+    ),
+    false,
+  );
+  // A CTE wrapping a WRITE stays captured — the pin is on the CTE body being SELECT.
+  assert.equal(
+    isErrorEventsAdhocSelectLookupQuery(
+      'WITH pgrst_source AS ( INSERT INTO "public"."error_events" ("updated_at") VALUES ($1) )',
+    ),
+    false,
+  );
+  // A SELECT / CTE against ANY OTHER table stays captured — the pin is
+  // `error_events` in the FROM.
+  assert.equal(
+    isErrorEventsAdhocSelectLookupQuery("select id from public.orders"),
+    false,
+  );
+  assert.equal(
+    isErrorEventsAdhocSelectLookupQuery(
+      'WITH pgrst_source AS ( SELECT "public"."orders"."id" FROM "public"."orders" )',
+    ),
+    false,
+  );
+  // A table whose name suffix is `error_events` does not match — the pin requires
+  // the exact table name after the FROM.
+  assert.equal(
+    isErrorEventsAdhocSelectLookupQuery(
+      "select metadata from public.archived_error_events",
+    ),
+    false,
+  );
+  // Empty / nullish query — cannot confirm the shape.
+  assert.equal(isErrorEventsAdhocSelectLookupQuery(""), false);
+  assert.equal(isErrorEventsAdhocSelectLookupQuery(null), false);
+  assert.equal(isErrorEventsAdhocSelectLookupQuery(undefined), false);
 });
 
 
