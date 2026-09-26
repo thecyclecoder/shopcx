@@ -45,8 +45,10 @@ import {
   isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
   isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise,
+  isForeignSupabasePostgresPoliciesKindLookupNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -310,6 +312,22 @@ const LOG_QUERIES: LogQuery[] = [
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.<archived_at|folded_at|deferred_at>`. The `specs` card table
+      // exists but records lifecycle state via `status text` (with a `folded` value) plus
+      // a `deferred boolean` flag — none of these three timestamp columns exist and no
+      // ShopCX caller reads them. The column-missing ERROR only reaches this feed when a
+      // foreign app / deprecated integration / stale SQL Editor session queries
+      // `/rest/v1/specs?select=...archived_at...` (or `folded_at`, or `deferred_at`).
+      // There is no lever from ShopCX to make that query resolve — paging Platform on it
+      // (Control Tower signature `supabase-logs:fbf1fe604803f481`,
+      // [[../specs/error-feed-drop-specs-archive-timestamp-adhoc-lookup-noise]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message (on one of the three obsolete names) AND the bare-SELECT-
+      // on-specs shape — a column-missing error on any other table, a different column on
+      // `specs`, or on it via a non-SELECT statement (real code-bug shape) still surfaces
+      // / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.spec_phases.idx`. The `spec_phases` table exists but its
       // ordering column is `position`, not `idx` — every ShopCX caller orders phases by
       // `position` (see `spec_phases_spec_position` unique index + the
@@ -340,6 +358,20 @@ const LOG_QUERIES: LogQuery[] = [
       // any other table, a different column on `specs`, or on `specs` via a non-SELECT
       // statement (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.policies.kind`. The `policies` table exists but has no `kind`
+      // column by design — it is keyed by `slug`, and every ShopCX caller goes through
+      // the policies SDK (`src/lib/policies.ts`) which reads real columns. The column-
+      // missing ERROR only reaches this feed when a foreign app / stale SQL Editor
+      // session queries `/rest/v1/policies?select=...kind...`. There is no lever from
+      // ShopCX to make that query resolve — paging Platform on it
+      // ([[../specs/error-feed-drop-policies-kind-direct-rest-lookup-noise]]) is repair
+      // work for a query we don't own. Narrowly gated to require BOTH the exact column-
+      // missing message AND the bare-SELECT-on-policies shape — a column-missing error
+      // on any other table, a different column on `policies`, or on `policies` via a
+      // non-SELECT statement (real code-bug shape) still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresPoliciesKindLookupNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
