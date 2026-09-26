@@ -23,12 +23,12 @@ async function main() {
 
   // Any escalation / activity about the graduate path
   const { data: acts } = await admin.from("director_activity")
-    .select("created_at,kind,summary,metadata").eq("workspace_id", WS)
-    .or("kind.ilike.%graduate%,kind.ilike.%crown%,kind.ilike.%scaler%,kind.ilike.%replenish%")
+    .select("created_at,action_kind,reason,metadata").eq("workspace_id", WS)
+    .or("action_kind.ilike.%graduate%,action_kind.ilike.%crown%,action_kind.ilike.%scaler%,action_kind.ilike.%replenish%")
     .order("created_at", { ascending: false }).limit(25);
   console.log(`\nrecent graduate/crown/scaler/replenish activity (${(acts ?? []).length}):`);
   for (const a of acts ?? []) {
-    console.log(`  ${String(a.created_at).slice(0, 16)}  ${String(a.kind).padEnd(48)} ${String(a.summary ?? "").slice(0, 90)}`);
+    console.log(`  ${String(a.created_at).slice(0, 16)}  ${String(a.action_kind).padEnd(48)} ${String(a.reason ?? "").slice(0, 90)}`);
   }
 
   // Arming authorization — the graduate may be gated behind it
