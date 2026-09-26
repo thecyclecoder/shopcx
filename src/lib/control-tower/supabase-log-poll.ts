@@ -45,6 +45,7 @@ import {
   isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -307,6 +308,22 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_status_history`, or on it via a non-SELECT statement (real code-bug shape)
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.spec_phases.idx`. The `spec_phases` table exists but its
+      // ordering column is `position`, not `idx` — every ShopCX caller orders phases by
+      // `position` (see `spec_phases_spec_position` unique index + the
+      // `get_spec_with_phases` / `list_specs_with_phases` RPCs). The column-missing
+      // ERROR only reaches this feed when a foreign app / stale SQL Editor session
+      // queries `/rest/v1/spec_phases?select=...idx...` or `?order=idx.asc`. There is no
+      // lever from ShopCX to make that query resolve — paging Platform on it (Control
+      // Tower signature `supabase-logs:1dcc664aba4a5239`,
+      // [[../specs/error-feed-drop-spec-phases-idx-adhoc-lookup-noise]]) is repair work
+      // for a query we don't own. Narrowly gated to require BOTH the exact column-
+      // missing message AND the bare-SELECT-on-spec_phases shape — a column-missing
+      // error on any other table, a different column on `spec_phases`, or on
+      // `spec_phases` via a non-SELECT statement (real code-bug shape) still surfaces /
+      // pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
