@@ -22,6 +22,7 @@ import {
   isForeignEasyPostReturnsSweepRateLimit,
   isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
+  isForeignSupabasePostgresAggregateIntrospectionNoise,
   isInngestStepWrappedNonErrorLog,
   isInngestTerminalFailureMirrorLog,
   isTransientAnthropicOverloadError,
@@ -373,6 +374,68 @@ test("isTransientSupabaseLogNoise tolerates a bad/non-JSON event_message (falls 
     isTransientSupabaseLogNoise("auth", { severity: "error", message: "context canceled", eventMessage: "not-json" }),
     true,
   );
+});
+
+// ── isForeignSupabasePostgresAggregateIntrospectionNoise ──
+// The exact Postgres ERROR `"array_agg" is an aggregate function` surfaces on Supabase's
+// postgres_logs feed at severity ERROR when a catalog/introspection query probes a
+// built-in aggregate as if it were a scalar function. Foreign-owned surface, no lever from
+// us; drop AT CAPTURE to the exact trimmed phrase. Real Postgres bugs (constraint
+// violations, FATAL/PANIC, non-timeout ERRORs) still surface.
+
+test("isForeignSupabasePostgresAggregateIntrospectionNoise drops the exact array_agg introspection message", () => {
+  assert.equal(
+    isForeignSupabasePostgresAggregateIntrospectionNoise('"array_agg" is an aggregate function'),
+    true,
+  );
+  // Leading/trailing whitespace is tolerated (trimmed).
+  assert.equal(
+    isForeignSupabasePostgresAggregateIntrospectionNoise('  "array_agg" is an aggregate function  '),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAggregateIntrospectionNoise('\n"array_agg" is an aggregate function\n'),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresAggregateIntrospectionNoise KEEPS a non-matching Postgres ERROR (constraint violation) so real bugs still page", () => {
+  assert.equal(
+    isForeignSupabasePostgresAggregateIntrospectionNoise(
+      'duplicate key value violates unique constraint "orders_pkey"',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAggregateIntrospectionNoise(
+      'null value in column "customer_id" of relation "orders" violates not-null constraint',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAggregateIntrospectionNoise("canceling statement due to statement timeout"),
+    false,
+  );
+  // A different aggregate carrying the same shape must still page — the pin is exact.
+  assert.equal(
+    isForeignSupabasePostgresAggregateIntrospectionNoise('"count" is an aggregate function'),
+    false,
+  );
+  // A super-string of the exact message stays captured — the equality is exact, not a
+  // substring test, so an introspection tool wrapping the message in extra context still pages.
+  assert.equal(
+    isForeignSupabasePostgresAggregateIntrospectionNoise(
+      'ERROR: "array_agg" is an aggregate function at line 3',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresAggregateIntrospectionNoise returns false on empty / nullish input", () => {
+  assert.equal(isForeignSupabasePostgresAggregateIntrospectionNoise(null), false);
+  assert.equal(isForeignSupabasePostgresAggregateIntrospectionNoise(undefined), false);
+  assert.equal(isForeignSupabasePostgresAggregateIntrospectionNoise(""), false);
+  assert.equal(isForeignSupabasePostgresAggregateIntrospectionNoise("   "), false);
 });
 
 // ── isForeignGoTrueEdgeNoise (error-feed-drop-supabase-gotrue-504-edge-noise) ──
