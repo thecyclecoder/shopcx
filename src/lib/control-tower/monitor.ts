@@ -586,7 +586,7 @@ export function isBoxEmittedCronLoop(loop: MonitoredLoop): boolean {
   return loop.kind === "cron" && loop.runsOnBox === true;
 }
 
-export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadFailed = false, monitorUptimeMs: number | null = null, firstObservedMs: number | null = null, workerUnavailable = false): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
+export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, deployAgeMs: number | null, everBeatCount: number, beatsReadFailed = false, monitorUptimeMs: number | null = null, firstObservedMs: number | null = null, workerUnavailable = false, monitorSchedulerGap = false): Omit<LoopStatus, "history" | "openAlert" | "owner"> {
   const base = {
     id: loop.id,
     kind: loop.kind,
@@ -606,6 +606,24 @@ export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, dep
   // existing freshness windows still page real stale-loop failures.
   const suppressForBoxOutage = workerUnavailable && isBoxEmittedCronLoop(loop);
   const boxOutageAmber = (statusTextForWaiting: string): Omit<LoopStatus, "history" | "openAlert" | "owner"> => ({
+    ...base,
+    color: "amber",
+    statusText: statusTextForWaiting,
+    violation: null,
+  });
+  // control-tower-suppress-cron-freshness-during-watchdog-gap Phase 1 — a shared scheduler pause
+  // that stalls the Inngest watchdog itself will look, on recovery, like every peer cron went
+  // silent for the same interval. The useful page is loop:control-tower-monitor (the watchdog
+  // itself stays red so operators still see the platform problem); opening a red on each peer
+  // cron_freshness violation for the SAME shared window just fans a scheduler-cascade out into
+  // multiple misleading loop-specific repair jobs. Suppress the peer red → amber
+  // ("waiting on watchdog scheduler gap"). The watchdog loop itself never has this flag set by
+  // the caller, so its own red is preserved. Scoped to the cron_freshness path only — a stale
+  // beat that predates the gap by more than one window still pages once the shared status
+  // clears. (Never-fired / registered-not-firing paths are governed by their own long grace
+  // windows and are unaffected by a one-tick monitor gap.)
+  const suppressForWatchdogSchedulerGap = monitorSchedulerGap;
+  const watchdogGapAmber = (statusTextForWaiting: string): Omit<LoopStatus, "history" | "openAlert" | "owner"> => ({
     ...base,
     color: "amber",
     statusText: statusTextForWaiting,
@@ -725,6 +743,14 @@ export function evalCron(loop: MonitoredLoop, latest: LoopHistoryRow | null, dep
       // the box `liveness` tile already identified the parent failure. The DB Health pass recovered
       // immediately once the worker restarted — a cascade, not a freshness defect.
       return boxOutageAmber(`waiting on box worker outage — last beat ${elapsed(latest.ran_at)} ago`);
+    }
+    if (suppressForWatchdogSchedulerGap) {
+      // Originating incident: the storefront-experiments-refresh-cron tile went red during a
+      // broad Inngest/watchdog scheduling pause while the loop:control-tower-monitor tile
+      // already carried the parent failure. Every peer cron missed the same shared window; a
+      // per-peer red would fan the scheduler-cascade out into six misleading repair jobs.
+      // Preserve amber and let the watchdog loop itself stay the actionable red.
+      return watchdogGapAmber(`waiting on watchdog scheduler gap — last beat ${elapsed(latest.ran_at)} ago`);
     }
     return { ...base, color: "red", statusText: `hasn't run in ${elapsed(latest.ran_at)} (expected ${loop.expectedCadence})`, violation: { reason: "cron_freshness", detail: `Cron ${loop.id} hasn't run in ${elapsed(latest.ran_at)} (expected ${loop.expectedCadence}; last beat ${latest.ran_at}).` } };
   }
@@ -2485,6 +2511,20 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     workerLoop?.livenessWindowMs ?? 5 * 60_000,
   );
 
+  // control-tower-suppress-cron-freshness-during-watchdog-gap Phase 1 — a shared Inngest/watchdog
+  // scheduling pause silences every cron for the same window; on recovery, evalCron would fire a
+  // cron_freshness red on each peer even though the useful page is loop:control-tower-monitor.
+  // Compute the shared-gap flag from the watchdog's OWN latest beat vs its livenessWindowMs (both
+  // deploy-independent, read from the same registry row the watchdog tile uses). Once the flag is
+  // set, peer crons whose freshness would otherwise red are held at amber; the watchdog loop
+  // itself is never passed the flag so its own red is preserved (see the loop-level pass below).
+  const monitorLoop = MONITORED_LOOPS.find((l) => l.id === "control-tower-monitor");
+  const monitorLatest = byLoop.get("control-tower-monitor")?.[0] ?? null;
+  const monitorSchedulerGap = !beatsReadFailed
+    && monitorLoop != null
+    && monitorLatest != null
+    && ageMs(monitorLatest.ran_at) > (monitorLoop.livenessWindowMs ?? 20 * 60_000);
+
   // SHA-direction (control-tower-box-sha-direction-check, signal loop:box). Classify the box
   // worker's running_sha vs VERCEL_GIT_COMMIT_SHA via the GitHub compare API BEFORE evalWorker
   // decides "behind" — a plain prefix mismatch can't tell stale-code (worker-behind) from deploy
@@ -2543,7 +2583,7 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     const latest = history[0] ?? null;
     let core: Omit<LoopStatus, "history" | "openAlert" | "owner">;
     if (loop.kind === "worker") core = evalWorker(loop, workerRow as WorkerRow | null, queuedCount, manualDrain, shaDirection, firstDivergentAt);
-    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstSeenByLoop.get(loop.id) ?? null, workerUnavailable);
+    else if (loop.kind === "cron") core = evalCron(loop, latest, deployAgeMs, history.length, beatsReadFailed, monitorUptimeMs, firstSeenByLoop.get(loop.id) ?? null, workerUnavailable, monitorSchedulerGap && loop.id !== "control-tower-monitor");
     else core = evalAgentKind(loop, latest, activeJobs, (workerRow as WorkerRow | null)?.started_at ?? null, workerUnavailable);
     // Phase 2: layer the output assertion(s) on top. Only escalates green/amber → red
     // (a P1 red — silent/stale/stuck — is the higher-priority violation; keep it). A loop may
