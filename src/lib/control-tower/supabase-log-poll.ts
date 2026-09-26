@@ -34,6 +34,7 @@ import {
   isTransientSupabaseLogNoise,
   isForeignGoTrueEdgeNoise,
   isForeignGoTrueAuthLogNoise,
+  isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
 } from "@/lib/control-tower/error-feed";
 
@@ -152,7 +153,7 @@ const LOG_QUERIES: LogQuery[] = [
   {
     key: "postgres",
     sql:
-      "select timestamp, log_attributes['parsed.error_severity'] as severity, event_message " +
+      "select timestamp, log_attributes['parsed.error_severity'] as severity, log_attributes['parsed.query'] as query, event_message " +
       "from logs " +
       "where source = 'postgres_logs' " +
       "and log_attributes['parsed.error_severity'] in ('ERROR','FATAL','PANIC') " +
@@ -160,6 +161,17 @@ const LOG_QUERIES: LogQuery[] = [
     mapRow: (row) => {
       const severity = str(row.severity) || "ERROR";
       const message = str(row.event_message) || "postgres error";
+      const query = str(row.query);
+      // Drop foreign-app noise at capture: an ad hoc `select * from public.control_tower_events`
+      // lookup by an external tool / stale exploratory query. `control_tower_events` is NOT
+      // part of the product schema (no migration creates it, no code path queries it) so
+      // the relation-missing ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-control-tower-events-adhoc-lookup-noise]], Control Tower
+      // signature `supabase-logs:dfa01ed65bdbeb33`). Narrowly gated to require BOTH the
+      // exact relation-missing message AND the SELECT-lookup shape — a relation-missing
+      // error on any other table, or on `control_tower_events` via a non-SELECT statement
+      // (real code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: Postgres reporting the built-in aggregate
       // `array_agg` classification when a catalog/introspection query resolves it as a
       // regular function ([[../specs/error-feed-drop-supabase-array-agg-aggregate-introspection-n]],
