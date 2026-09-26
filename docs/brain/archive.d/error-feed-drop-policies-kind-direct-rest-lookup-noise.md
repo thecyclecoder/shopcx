@@ -1,0 +1,1 @@
+- **Drop stale public.policies.kind direct-REST lookup noise from Supabase logs** · verified 2026-09-26 · → [[../libraries/control-tower]]
