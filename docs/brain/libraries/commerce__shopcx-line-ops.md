@@ -94,6 +94,11 @@ On `35945087149`, one contiguous run: baseline `$52.47` → coupon `$47.23` → 
 removed `$52.47`. Exact round trip. Gift: cycle 2 `editedContract` carried the paid line **and** a
 `$0.00` line; cycles 1/3/4 untouched.
 
+## Status / open work
+
+**Phase 1 — Resolve Shopify product ids through the parent product row** (shipped 2026-09-26):
+`mirrorContractToItems` now joins `products!inner(shopify_product_id)` on `product_variants`, reading the Shopify product id from the parent row instead of the nonexistent `product_variants.shopify_product_id` column. Fallback to null if no parent exists. See [[../../archive.d/shopcx-contract-items-join-products-for-shopify-product-id]].
+
 ## Related
 
 [[commerce__shopcx-discount-ops]] · [[commerce__shopify-subscription-client]] ·

@@ -92,6 +92,11 @@ The `update` topic fires for every edit **we** make too, so the sync must not un
 - **250 lines is the read cap**; past that the items mirror is logged as TRUNCATED rather than
   silently partial.
 
+## Status / open work
+
+**Phase 1 — Resolve Shopify product ids through the parent product row** (shipped 2026-09-26):
+`buildItems` now joins `products!inner(shopify_product_id)` on `product_variants`, reading the Shopify product id from the parent row instead of the nonexistent `product_variants.shopify_product_id` column. Fallback to null if no parent exists. See [[../../archive.d/shopcx-contract-items-join-products-for-shopify-product-id]].
+
 ## Related
 
 [[../inngest/shopcx-contract-ingest]] · [[commerce__shopify-subscription-client]] ·
