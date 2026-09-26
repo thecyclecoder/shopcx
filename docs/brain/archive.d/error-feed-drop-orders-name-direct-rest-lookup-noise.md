@@ -1,0 +1,1 @@
+- **Drop stale direct Supabase orders.name lookup noise** · verified 2026-09-26 · → [[lifecycles/control-tower]]

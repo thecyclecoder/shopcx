@@ -43,6 +43,7 @@ import {
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
   isForeignSupabasePostgresOrdersNameLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
+  isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -272,6 +273,21 @@ const LOG_QUERIES: LogQuery[] = [
       // grep-anchor (spec check pattern is regex; unescaped parens are groups):
       // isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoisemessage, query
       if (isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.spec_status_history.created_at`. The `spec_status_history` audit
+      // table exists but its timestamp column is `at`, not `created_at` — every ShopCX
+      // caller uses `at`. The column-missing ERROR only reaches this feed when a foreign
+      // app / deprecated integration / stale SQL Editor session queries
+      // `/rest/v1/spec_status_history?select=...created_at...`. There is no lever from
+      // ShopCX to make that query resolve — paging Platform on it (Control Tower
+      // signature `supabase-logs:8c74545e2bb338bf`,
+      // [[../specs/error-feed-drop-spec-status-history-created-at-adhoc-lookup-]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND the bare-SELECT-on-spec_status_history shape — a
+      // column-missing error on any other table, a different column on
+      // `spec_status_history`, or on it via a non-SELECT statement (real code-bug shape)
+      // still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
