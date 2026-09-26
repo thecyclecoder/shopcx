@@ -22,7 +22,7 @@ Probed against the shape verified on contract 27806990509 (via `src/lib/billing-
 
 ## Callers
 
-- `scripts/builder-worker.ts` `loadCsDirectorCallBrief` — loads the customer's subs + `billing_forecast_events` rows for those contracts + orders, calls `buildCancellationTimeline`, and pushes `formatCancellationTimelineForBrief`'s output plus the Phase-2 mandatory-ordering-check sentence into the brief.
+- `scripts/builder-worker.ts` `loadCsDirectorCallBrief` — loads the customer's subs + `billing_forecast_events` rows for those contracts + orders, calls `buildCancellationTimeline`, and pushes `formatCancellationTimelineForBrief`'s output plus the Phase-2 mandatory-ordering-check sentence into the brief. Orders are queried by `subscription_id` only (the `shopify_contract_id` column does not exist on orders); a `subscriptionContractById` map is built from the already-loaded subscription rows, and each order row is enriched with `shopify_contract_id` via a map lookup on `order.subscription_id` ([[../specs/builder-worker-cancellation-timeline-order-contract-join-fix]] Phase 1).
 
 ## Regression test
 
