@@ -46,6 +46,8 @@ import {
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
+  isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
+  isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -310,19 +312,42 @@ const LOG_QUERIES: LogQuery[] = [
       if (isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / hand-typed SQL Editor lookup
       // against `public.approval_decisions` that references the non-existent
-      // `agent_jobs.branch_name` column and dangles at the end, which Postgres reports
-      // as `syntax error at end of input`. `approval_decisions` and `agent_jobs` are
-      // both real product tables, but `agent_jobs` has no `branch_name` column — the
-      // query is not emitted by any ShopCX code path. There is no lever from ShopCX
-      // to make that query resolve — paging Platform on it (Control Tower signature
-      // `supabase-logs:2894da49c2a36610`,
-      // [[../specs/error-feed-drop-approval-decisions-adhoc-syntax-noise]]) is repair
-      // work for a query we don't own. Narrowly gated to require ALL of the exact
-      // end-of-input syntax message, the bare-SELECT-on-approval_decisions shape, AND
-      // the `agent_jobs.branch_name` marker — a real syntax error on any other query,
-      // a real column-missing / constraint / FATAL on approval_decisions, or a
-      // non-SELECT statement still surfaces / pages on first sighting.
+      // `agent_jobs.branch_name` column and dangles at the end, which Postgres reports as
+      // `syntax error at end of input`. Narrowly gated to require the exact message, the
+      // bare SELECT-on-approval_decisions shape, and the `agent_jobs.branch_name` marker.
       if (isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.<archived_at|folded_at|deferred_at>`. The `specs` card table
+      // exists but records lifecycle state via `status text` (with a `folded` value) plus
+      // a `deferred boolean` flag — none of these three timestamp columns exist and no
+      // ShopCX caller reads them. The column-missing ERROR only reaches this feed when a
+      // foreign app / deprecated integration / stale SQL Editor session queries
+      // `/rest/v1/specs?select=...archived_at...` (or `folded_at`, or `deferred_at`).
+      // There is no lever from ShopCX to make that query resolve — paging Platform on it
+      // (Control Tower signature `supabase-logs:fbf1fe604803f481`,
+      // [[../specs/error-feed-drop-specs-archive-timestamp-adhoc-lookup-noise]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message (on one of the three obsolete names) AND the bare-SELECT-
+      // on-specs shape — a column-missing error on any other table, a different column on
+      // `specs`, or on it via a non-SELECT statement (real code-bug shape) still surfaces
+      // / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.spec_phases.idx`. The `spec_phases` table exists but its
+      // ordering column is `position`, not `idx` — every ShopCX caller orders phases by
+      // `position` (see `spec_phases_spec_position` unique index + the
+      // `get_spec_with_phases` / `list_specs_with_phases` RPCs). The column-missing
+      // ERROR only reaches this feed when a foreign app / stale SQL Editor session
+      // queries `/rest/v1/spec_phases?select=...idx...` or `?order=idx.asc`. There is no
+      // lever from ShopCX to make that query resolve — paging Platform on it (Control
+      // Tower signature `supabase-logs:1dcc664aba4a5239`,
+      // [[../specs/error-feed-drop-spec-phases-idx-adhoc-lookup-noise]]) is repair work
+      // for a query we don't own. Narrowly gated to require BOTH the exact column-
+      // missing message AND the bare-SELECT-on-spec_phases shape — a column-missing
+      // error on any other table, a different column on `spec_phases`, or on
+      // `spec_phases` via a non-SELECT statement (real code-bug shape) still surfaces /
+      // pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,

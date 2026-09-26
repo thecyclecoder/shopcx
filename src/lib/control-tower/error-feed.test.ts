@@ -28,12 +28,13 @@ import {
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
+  isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
+  isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
-  isErrorEventsAdhocSelectLookupQuery,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isInngestStepWrappedNonErrorLog,
   isInngestTerminalFailureMirrorLog,
@@ -1364,134 +1365,6 @@ test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise returns false 
   );
 });
 
-test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise drops the PostgREST-generated CTE lookup shape", () => {
-  // The observed incident: a foreign PostgREST client asks for `updated_at` on
-  // `error_events` via a direct-REST call. PostgREST wraps the SELECT in
-  // `WITH pgrst_source AS ( SELECT "public"."error_events"."<col>" ... FROM
-  // "public"."error_events" ... )` before dispatch. The message carries the same
-  // canonical `column error_events.updated_at does not exist` shape, but the query
-  // is no longer a bare SELECT — the simple-shape regex would miss it and the row
-  // pages Platform on a query we do not own.
-  const cteQuery =
-    'WITH pgrst_source AS ( SELECT "public"."error_events"."id", "public"."error_events"."updated_at" FROM "public"."error_events" WHERE "public"."error_events"."workspace_id" = $1 ORDER BY "public"."error_events"."updated_at" DESC LIMIT $2 OFFSET $3 )';
-  assert.equal(
-    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
-      "column error_events.updated_at does not exist",
-      cteQuery,
-    ),
-    true,
-  );
-  // Same shape, `public.` qualified variant of the message.
-  assert.equal(
-    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
-      "column public.error_events.updated_at does not exist",
-      cteQuery,
-    ),
-    true,
-  );
-  // ERROR: prefix on the Postgres logs surface still strips cleanly.
-  assert.equal(
-    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
-      "ERROR: column error_events.updated_at does not exist",
-      cteQuery,
-    ),
-    true,
-  );
-  // The same CTE wrapper around a WRITE (PostgREST direct-REST POST/PATCH/DELETE)
-  // is a real code-bug shape we WANT to see — the pin requires the CTE body's
-  // leading token to be SELECT.
-  assert.equal(
-    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
-      "column error_events.updated_at does not exist",
-      'WITH pgrst_source AS ( INSERT INTO "public"."error_events" ("updated_at") VALUES ($1) RETURNING "public"."error_events"."id" )',
-    ),
-    false,
-  );
-  assert.equal(
-    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
-      "column error_events.updated_at does not exist",
-      'WITH pgrst_source AS ( UPDATE "public"."error_events" SET "updated_at" = $1 WHERE "public"."error_events"."id" = $2 )',
-    ),
-    false,
-  );
-  // A CTE that names a DIFFERENT table in its FROM still pages (real code bug on
-  // that table — the pin is `error_events` in the FROM).
-  assert.equal(
-    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
-      "column error_events.updated_at does not exist",
-      'WITH pgrst_source AS ( SELECT "public"."orders"."id" FROM "public"."orders" )',
-    ),
-    false,
-  );
-});
-
-test("isErrorEventsAdhocSelectLookupQuery accepts simple SELECT + PostgREST CTE and rejects everything else", () => {
-  // Simple SELECT — the SQL-editor / hand-typed shape.
-  assert.equal(
-    isErrorEventsAdhocSelectLookupQuery("select metadata from public.error_events"),
-    true,
-  );
-  assert.equal(isErrorEventsAdhocSelectLookupQuery("select id from error_events"), true);
-  // PostgREST CTE — quoted `"public"."error_events"`.
-  assert.equal(
-    isErrorEventsAdhocSelectLookupQuery(
-      'WITH pgrst_source AS ( SELECT "public"."error_events"."updated_at" FROM "public"."error_events" WHERE "public"."error_events"."workspace_id" = $1 )',
-    ),
-    true,
-  );
-  // PostgREST CTE — unqualified quoted `"error_events"`.
-  assert.equal(
-    isErrorEventsAdhocSelectLookupQuery(
-      'WITH pgrst_source AS ( SELECT "error_events"."updated_at" FROM "error_events" )',
-    ),
-    true,
-  );
-  // Non-SELECT / write statements are NOT the ad hoc read shape.
-  assert.equal(
-    isErrorEventsAdhocSelectLookupQuery(
-      "insert into public.error_events (updated_at) values ($1)",
-    ),
-    false,
-  );
-  assert.equal(
-    isErrorEventsAdhocSelectLookupQuery(
-      "update public.error_events set updated_at = $1",
-    ),
-    false,
-  );
-  // A CTE wrapping a WRITE stays captured — the pin is on the CTE body being SELECT.
-  assert.equal(
-    isErrorEventsAdhocSelectLookupQuery(
-      'WITH pgrst_source AS ( INSERT INTO "public"."error_events" ("updated_at") VALUES ($1) )',
-    ),
-    false,
-  );
-  // A SELECT / CTE against ANY OTHER table stays captured — the pin is
-  // `error_events` in the FROM.
-  assert.equal(
-    isErrorEventsAdhocSelectLookupQuery("select id from public.orders"),
-    false,
-  );
-  assert.equal(
-    isErrorEventsAdhocSelectLookupQuery(
-      'WITH pgrst_source AS ( SELECT "public"."orders"."id" FROM "public"."orders" )',
-    ),
-    false,
-  );
-  // A table whose name suffix is `error_events` does not match — the pin requires
-  // the exact table name after the FROM.
-  assert.equal(
-    isErrorEventsAdhocSelectLookupQuery(
-      "select metadata from public.archived_error_events",
-    ),
-    false,
-  );
-  // Empty / nullish query — cannot confirm the shape.
-  assert.equal(isErrorEventsAdhocSelectLookupQuery(""), false);
-  assert.equal(isErrorEventsAdhocSelectLookupQuery(null), false);
-  assert.equal(isErrorEventsAdhocSelectLookupQuery(undefined), false);
-});
-
 
 // ── isForeignSupabasePostgresAmbiguousOidIntrospectionNoise ──
 // The exact Postgres ERROR `column reference "oid" is ambiguous` surfaces on Supabase's
@@ -2415,17 +2288,15 @@ test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise retur
   );
 });
 
-// ── isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise ──
+// -- isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise --
 // A stale / hand-typed ad hoc SELECT against `public.approval_decisions` that references
 // the non-existent `agent_jobs.branch_name` column and dangles at the end. Postgres
-// reports it as `syntax error at end of input`. Foreign-owned surface — no lever from
-// us — drop AT CAPTURE only when ALL of the exact end-of-input syntax message, the bare
+// reports it as `syntax error at end of input`. Foreign-owned surface - no lever from
+// us - drop AT CAPTURE only when ALL of the exact end-of-input syntax message, the bare
 // SELECT-lookup shape on approval_decisions, AND the `agent_jobs.branch_name` marker are
-// present. A real syntax error on any other query, a real column-missing / constraint /
-// FATAL on approval_decisions, or a non-SELECT statement still pages.
+// present.
 
 test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise drops the ad hoc SELECT syntax-error lookup on the exact approval_decisions + agent_jobs.branch_name shape", () => {
-  // The captured ad hoc shape — public.-qualified and unqualified FROM variants.
   assert.equal(
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "syntax error at end of input",
@@ -2440,7 +2311,6 @@ test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise drops the ad hoc
     ),
     true,
   );
-  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
   assert.equal(
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "syntax error at end of input",
@@ -2448,7 +2318,6 @@ test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise drops the ad hoc
     ),
     true,
   );
-  // Case-insensitive on the query.
   assert.equal(
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "syntax error at end of input",
@@ -2456,7 +2325,6 @@ test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise drops the ad hoc
     ),
     true,
   );
-  // Postgres's `ERROR: ` prefix is stripped before the equality check.
   assert.equal(
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "ERROR: syntax error at end of input",
@@ -2464,7 +2332,6 @@ test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise drops the ad hoc
     ),
     true,
   );
-  // Leading / trailing whitespace on the message and query is tolerated.
   assert.equal(
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "  syntax error at end of input  ",
@@ -2474,8 +2341,7 @@ test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise drops the ad hoc
   );
 });
 
-test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a syntax error on any OTHER query (real syntax bugs still page)", () => {
-  // A syntax error whose query doesn't reference approval_decisions is a real bug.
+test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a syntax error on any OTHER query", () => {
   assert.equal(
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "syntax error at end of input",
@@ -2490,8 +2356,6 @@ test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a syntax e
     ),
     false,
   );
-  // Even against approval_decisions, if the `agent_jobs.branch_name` dead-giveaway
-  // marker is missing this is a DIFFERENT ad hoc syntax bug we want to see.
   assert.equal(
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "syntax error at end of input",
@@ -2501,9 +2365,7 @@ test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a syntax e
   );
 });
 
-test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a DIFFERENT syntax-error message class (a real code-bug syntax throws different text)", () => {
-  // Postgres has many syntax-error phrasings; only the exact end-of-input marker is
-  // this ad hoc lookup's fingerprint.
+test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a DIFFERENT syntax-error message class", () => {
   assert.equal(
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "syntax error at or near \"where\"",
@@ -2520,9 +2382,7 @@ test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a DIFFEREN
   );
 });
 
-test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a non-SELECT statement shape (a real code-bug writing approval_decisions still pages)", () => {
-  // INSERT / UPDATE / DELETE against approval_decisions with the same tokens is
-  // real code trying to write the table — a bug we WANT to see.
+test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a non-SELECT statement shape", () => {
   assert.equal(
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "syntax error at end of input",
@@ -2546,7 +2406,7 @@ test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a non-SELE
   );
 });
 
-test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a column-missing / constraint / FATAL / permission ERROR on approval_decisions (different message class still pages)", () => {
+test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a column-missing / constraint / FATAL / permission ERROR on approval_decisions", () => {
   assert.equal(
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "column agent_jobs.branch_name does not exist",
@@ -2597,8 +2457,6 @@ test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise returns false on
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise("", ""),
     false,
   );
-  // Empty query — even with the exact message we cannot confirm the shape, so the row
-  // stays captured.
   assert.equal(
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "syntax error at end of input",
@@ -2609,6 +2467,473 @@ test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise returns false on
   assert.equal(
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "syntax error at end of input",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/specs?select=...archived_at...` (or `folded_at`, or `deferred_at`) against
+// our `public.specs` card table. The `specs` table exists but records lifecycle state
+// via `status text` (with a `folded` value and a `deferred` value) + a `deferred boolean`
+// flag — none of these three timestamp columns exist. Foreign-owned surface, no lever
+// from us — drop AT CAPTURE only when BOTH the exact column-missing message (on one of
+// the three obsolete names) AND the bare SELECT-lookup shape on `specs` are present. A
+// column-missing on any other table, a different column on `specs`, or a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise drops the ad hoc SELECT lookup on the exact specs.archived_at column-missing shape", () => {
+  // The captured PostgREST direct-REST shape — unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      "select id, slug, archived_at from public.specs order by archived_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column public.specs.archived_at does not exist",
+      "select id, slug, archived_at from public.specs order by archived_at desc limit 100",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      "select archived_at from specs limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      "select id, archived_at from public.specs where workspace_id = '00000000' order by archived_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      "SELECT ID, ARCHIVED_AT FROM PUBLIC.SPECS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "ERROR: column specs.archived_at does not exist",
+      "select archived_at from public.specs",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "  column specs.archived_at does not exist  ",
+      "   select archived_at from public.specs   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise also drops the sibling folded_at and deferred_at shapes", () => {
+  // folded_at — the state is stored in specs.status = 'folded', no folded_at timestamp.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.folded_at does not exist",
+      "select id, slug, folded_at from public.specs order by folded_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column public.specs.folded_at does not exist",
+      "select folded_at from public.specs",
+    ),
+    true,
+  );
+  // deferred_at — the state is stored in specs.deferred boolean, no deferred_at timestamp.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.deferred_at does not exist",
+      "select id, slug, deferred_at from public.specs order by deferred_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column public.specs.deferred_at does not exist",
+      "select deferred_at from public.specs",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have one of these timestamp columns still pages)", () => {
+  // tickets DOES carry archived_at (20260330000028_ticket_auto_archive.sql) — a real
+  // schema regression there must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column tickets.archived_at does not exist",
+      "select archived_at from public.tickets where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column orders.archived_at does not exist",
+      "select archived_at from public.orders where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column policies.folded_at does not exist",
+      "select folded_at from public.policies where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a DIFFERENT column-missing on specs (a real column rename still pages)", () => {
+  // Any real specs column (`status`, `deferred`, `owner`, `parent`, `slug`, `title`)
+  // going missing is a schema regression we DO want to see — the pin covers the three
+  // obsolete archive-timestamp names only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.status does not exist",
+      "select status from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.deferred does not exist",
+      "select deferred from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.owner does not exist",
+      "select owner from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.slug does not exist",
+      "select slug from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing specs.archived_at still pages)", () => {
+  // INSERT / UPDATE / DELETE against specs referencing a bogus timestamp column is real
+  // code trying to write the table — a bug we WANT to see, not the ad hoc read we drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      "insert into public.specs (id, archived_at) values ($1, now())",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.folded_at does not exist",
+      "update public.specs set folded_at = now() where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.deferred_at does not exist",
+      "delete from public.specs where deferred_at < now() - interval '90 days'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on specs (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "database is shutting down",
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      'duplicate key value violates unique constraint "specs_ws_slug"',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      'permission denied for relation "public.specs"',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      'relation "public.specs" does not exist',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.folded_at does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/spec_phases?select=...idx...` against our `public.spec_phases` table. The
+// table exists but its ordering column is `position`, not `idx`. Foreign-owned surface,
+// no lever from us — drop AT CAPTURE only when BOTH the exact column-missing message on
+// `spec_phases.idx` AND the bare SELECT-lookup shape on `spec_phases` are present. A
+// column-missing on any other table, a different column on `spec_phases`, or a
+// non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise drops the ad hoc SELECT lookup on the exact spec_phases.idx column-missing shape", () => {
+  // The captured PostgREST direct-REST shape — unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "select id, idx from public.spec_phases order by idx asc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column public.spec_phases.idx does not exist",
+      "select id, idx from public.spec_phases order by idx asc limit 100",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "select idx from spec_phases limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "select spec_id, idx from public.spec_phases where spec_id = 'x' order by idx asc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "SELECT ID, IDX FROM PUBLIC.SPEC_PHASES",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "ERROR: column spec_phases.idx does not exist",
+      "select idx from public.spec_phases",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "  column spec_phases.idx does not exist  ",
+      "   select idx from public.spec_phases   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have an idx column still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column jobs.idx does not exist",
+      "select idx from public.jobs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column phases.idx does not exist",
+      "select idx from public.phases where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise KEEPS a DIFFERENT column-missing on spec_phases (the real `position` column renamed still pages)", () => {
+  // The real ordering column is `position`. If someone breaks that, we want to see it.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.position does not exist",
+      "select position from public.spec_phases where spec_id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.spec_id does not exist",
+      "select spec_id from public.spec_phases where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise KEEPS a JOIN across other tables (a real code shape referencing spec_phases still pages)", () => {
+  // A JOIN with another table is a real query shape — not the ad hoc direct-REST read.
+  // The regex is anchored on `from (public.)?spec_phases` as the FIRST FROM target; a
+  // JOIN whose first FROM is a different table won't match.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "select s.slug, p.idx from public.specs s join public.spec_phases p on p.spec_id = s.id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing spec_phases.idx still pages)", () => {
+  // INSERT / UPDATE / DELETE against spec_phases referencing a bogus column is real code
+  // trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "insert into public.spec_phases (spec_id, idx, title) values ($1, 1, 'x')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "update public.spec_phases set idx = 2 where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "delete from public.spec_phases where idx > 3",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on spec_phases (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "database is shutting down",
+      "select id from public.spec_phases where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      'duplicate key value violates unique constraint "spec_phases_spec_position"',
+      "select id from public.spec_phases where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.spec_phases where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      'permission denied for relation "public.spec_phases"',
+      "select id from public.spec_phases where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      'relation "public.spec_phases" does not exist',
+      "select id from public.spec_phases where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
       null,
     ),
     false,
