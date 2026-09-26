@@ -264,6 +264,41 @@ function buildPoliciesSection(policies: AgentPolicyPackageEntry[]): string {
   return formatAgentPolicyPackage(policies);
 }
 
+/**
+ * Ticket-policy schema alias guard. Approved `sonnet_prompts` rules occasionally
+ * carry legacy or invented ticket-schema field names (`assigned_agent`,
+ * `tickets.escalated`) that never existed on `public.tickets` — the real
+ * assignment column is `assigned_to`, and escalation state is `escalated_at`
+ * (timestamp) + `escalated_to` (uuid). Left in the model context, those aliases
+ * lead Sol/Sonnet to build PostgREST reads for non-existent columns
+ * (2026-09-26 live error selecting `tickets.assigned_agent`).
+ *
+ * Applied to approved prompt content BEFORE `buildPromptSections` composes the
+ * policy block, so the model never sees a stale schema hint even if the DB row
+ * has not yet been corrected through the sonnet-prompts writer. Narrow and
+ * conservative — only rewrites tokens that are column-shaped, not the ordinary
+ * English word "escalated" (which appears in prose throughout the prompt set).
+ */
+const TICKET_POLICY_ALIAS_REWRITES: Array<[RegExp, string]> = [
+  // `assigned_agent` is only ever the schema-column shape (snake_case, no
+  // space) — safe to rewrite anywhere it appears; the word does not occur in
+  // natural prose.
+  [/\bassigned_agent\b/g, "assigned_to"],
+  // `tickets.escalated` — the boolean-shaped alias that never existed. Only
+  // rewrite when qualified by `tickets.` so prose like "the ticket was
+  // escalated to a human" is left alone.
+  [/\btickets\.escalated\b(?!_)/g, "tickets.escalated_at"],
+];
+
+export function canonicalizeTicketPolicySchemaTerms(content: string): string {
+  if (!content) return content;
+  let out = content;
+  for (const [pattern, replacement] of TICKET_POLICY_ALIAS_REWRITES) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+
 function buildPromptSections(prompts: { category: string; title: string; content: string }[]): string {
   const grouped: Record<string, string[]> = {};
   for (const p of prompts) {
@@ -768,7 +803,7 @@ ${persBlock}
 
 ${buildPoliciesSection(policies || [])}
 
-${buildPromptSections(dbPrompts || [])}
+${buildPromptSections((dbPrompts || []).map((p) => ({ ...p, content: canonicalizeTicketPolicySchemaTerms(p.content) })))}
 
 ${compiledLibrarySection ? `${compiledLibrarySection}\n\n` : ""}DISCOUNT-CLAIM VERIFICATION (hard rule — never agree-and-refund a discount claim):
 UNIDENTIFIED CUSTOMER — IDENTIFY FIRST, PROMISE NOTHING (ticket 879dd36b, 2026-08-12).
