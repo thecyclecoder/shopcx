@@ -1890,6 +1890,78 @@ export function isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column specs.is_active does not exist` (or the
+ * unqualified `column "is_active" does not exist` shape) for an ad hoc / stale PostgREST
+ * direct-REST SELECT against `public.specs`. The `specs` table exists as a real product
+ * table but by design carries no `is_active` boolean — spec activity is derived from
+ * `spec_phases` rollup + `status` overrides, and the sibling `journey_definitions.is_active`
+ * column is the shape an external client typically confuses this with (grep confirms every
+ * ShopCX reader of `public.specs` uses `status` / phase rollup, never `is_active`). The
+ * column-missing ERROR only reaches this feed when a foreign app / stale SQL Editor session
+ * / deprecated integration queries `/rest/v1/specs?select=...is_active...` or
+ * `?is_active=eq.true`. There is no lever from ShopCX to make that query resolve — paging
+ * Platform on it (Control Tower signature per
+ * [[../specs/error-feed-drop-specs-is-active-direct-rest-noise]]) is repair work for a
+ * query we do not own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise` — same narrow-gating
+ * shape (exact `column <table>.<name> does not exist` + bare SELECT-on-table shape), aimed
+ * at a different foreign caller.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column specs.is_active does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.specs` lookup
+ *      shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have an `is_active` column — e.g. `journey_definitions.is_active`
+ *     the caller likely meant) still pages — the pin is `specs.is_active` only,
+ *   - a column-missing error on `specs` for a DIFFERENT column (e.g. a real column that
+ *     got renamed — `status`, `slug`, `workspace_id`) still pages — the pin covers
+ *     `is_active` only, not any column name,
+ *   - a `specs.is_active` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
+ *     bare SELECT-lookup shape, matching the ad hoc direct-REST read we've observed,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `specs` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to `specs`
+  // (with or without the `public.` qualifier) and the `is_active` column that only
+  // belongs on the sibling `journey_definitions` row.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column specs.is_active does not exist" ||
+    stripped === "column public.specs.is_active does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `specs` (with or
+  // without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays captured
+  // — a caller that actually writes to specs with a bogus `is_active` column is a code
+  // bug we DO want to page on, not the ad hoc direct-REST read this drop targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?specs\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column specs.archived does not exist` for an
  * ad hoc / stale PostgREST direct-REST SELECT against `public.specs.archived`. The
  * `specs` table exists (see
