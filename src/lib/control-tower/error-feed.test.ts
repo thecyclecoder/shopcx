@@ -29,6 +29,7 @@ import {
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
+  isForeignSupabasePostgresPoliciesKindLookupNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -2748,6 +2749,216 @@ test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise returns false on e
   assert.equal(
     isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
       "column spec_phases.idx does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresPoliciesKindLookupNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/policies?select=...kind...` against our `public.policies` table. The table
+// exists but is keyed by `slug` and has no `kind` column by design. Foreign-owned
+// surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `policies.kind` AND the bare SELECT-lookup shape on `policies` are present.
+// A column-missing on any other table, a different column on `policies`, or a
+// non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresPoliciesKindLookupNoise drops the ad hoc SELECT lookup on the exact policies.kind column-missing shape", () => {
+  // The captured PostgREST direct-REST shape — unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column policies.kind does not exist",
+      "select id, kind from public.policies where workspace_id = 'x'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column public.policies.kind does not exist",
+      "select id, kind from public.policies where workspace_id = 'x'",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column policies.kind does not exist",
+      "select kind from policies limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column policies.kind does not exist",
+      "select slug, kind from public.policies where workspace_id = 'x' order by slug asc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column policies.kind does not exist",
+      "SELECT ID, KIND FROM PUBLIC.POLICIES",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "ERROR: column policies.kind does not exist",
+      "select kind from public.policies",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "  column policies.kind does not exist  ",
+      "   select kind from public.policies   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresPoliciesKindLookupNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a kind column still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column journeys.kind does not exist",
+      "select kind from public.journeys where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column jobs.kind does not exist",
+      "select kind from public.jobs where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresPoliciesKindLookupNoise KEEPS a DIFFERENT column-missing on policies (the real `slug` column renamed still pages)", () => {
+  // Real column drift on the table is a schema regression we DO want to see.
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column policies.slug does not exist",
+      "select slug from public.policies where workspace_id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column policies.workspace_id does not exist",
+      "select workspace_id from public.policies where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresPoliciesKindLookupNoise KEEPS a JOIN across other tables (a real code shape referencing policies still pages)", () => {
+  // A JOIN with another table is a real query shape — not the ad hoc direct-REST read.
+  // The regex is anchored on `from (public.)?policies` as the FIRST FROM target; a
+  // JOIN whose first FROM is a different table won't match.
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column policies.kind does not exist",
+      "select w.name, p.kind from public.workspaces w join public.policies p on p.workspace_id = w.id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresPoliciesKindLookupNoise KEEPS a non-SELECT statement shape (a real code-bug writing policies.kind still pages)", () => {
+  // INSERT / UPDATE / DELETE against policies referencing a bogus column is real code
+  // trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column policies.kind does not exist",
+      "insert into public.policies (slug, kind) values ($1, 'x')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column policies.kind does not exist",
+      "update public.policies set kind = 'x' where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column policies.kind does not exist",
+      "delete from public.policies where kind = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresPoliciesKindLookupNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on policies (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "database is shutting down",
+      "select id from public.policies where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      'duplicate key value violates unique constraint "policies_workspace_id_slug_version_key"',
+      "select id from public.policies where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.policies where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      'permission denied for relation "public.policies"',
+      "select id from public.policies where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      'relation "public.policies" does not exist',
+      "select id from public.policies where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresPoliciesKindLookupNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column policies.kind does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresPoliciesKindLookupNoise(
+      "column policies.kind does not exist",
       null,
     ),
     false,
