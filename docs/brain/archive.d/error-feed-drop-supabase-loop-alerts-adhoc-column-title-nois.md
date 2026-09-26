@@ -1,0 +1,1 @@
+- **Drop foreign-app Supabase SQL Editor ad-hoc lookups on loop_alerts referencing non-existent columns** · verified 2026-09-26 · → [[../libraries/control-tower]]
