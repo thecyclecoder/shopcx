@@ -1,0 +1,1 @@
+- **Drop stale spec_phases idx lookup noise from Supabase log feed** · verified 2026-09-26 · → [[../libraries/control-tower]] `isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise`
