@@ -1879,6 +1879,122 @@ test("evalCron keeps a FRESH box-emitted beat green even while the worker is una
   }
 });
 
+// ─── Watchdog scheduler-gap cascade suppression for peer cron freshness
+// (control-tower-suppress-cron-freshness-during-watchdog-gap Phase 1) ───
+
+const storefrontExperimentsRefreshCronLoop: MonitoredLoop = {
+  id: "storefront-experiments-refresh-cron",
+  kind: "cron",
+  owner: "growth",
+  label: "Storefront experiments refresh",
+  description: "Every-5-min fan-out: recomputes attribution + bandit posteriors for running storefront experiments.",
+  expectedCadence: "every 5 min (*/5 * * * *)",
+  livenessWindowMs: 15 * 60_000,
+  registeredAt: "2026-06-22T17:45:00Z",
+};
+
+const controlTowerMonitorLoop: MonitoredLoop = {
+  id: "control-tower-monitor",
+  kind: "cron",
+  owner: "platform",
+  label: "Control Tower monitor",
+  description: "The watchdog itself — so a dead monitor is visible too.",
+  expectedCadence: "every 5 min (*/5 * * * *)",
+  livenessWindowMs: 20 * 60_000,
+};
+
+test("evalCron SUPPRESSES cron_freshness on a peer cron when the watchdog scheduler gap flag is set (storefront regression)", () => {
+  // The originating incident: an Inngest/watchdog scheduling pause silenced every cron for the
+  // same shared window. On recovery, evalCron would have paged red on every peer including
+  // storefront-experiments-refresh-cron even though loop:control-tower-monitor already carried
+  // the parent failure. With monitorSchedulerGap=true the peer stays amber; only the watchdog
+  // itself pages red (its caller never sets the flag on the watchdog).
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-17T12:00:00Z");
+  try {
+    const latest: LoopHistoryRow = {
+      ran_at: "2026-07-17T11:30:00Z", // 30 min stale, past the 15-min window
+      ok: true,
+      duration_ms: 500,
+      produced: null,
+      detail: null,
+    };
+    const result = evalCron(storefrontExperimentsRefreshCronLoop, latest, null, 5, false, null, null, false, true);
+    assert.equal(result.color, "amber");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /waiting on watchdog scheduler gap/);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron STILL flips cron_freshness on the storefront peer when the watchdog is healthy (control case)", () => {
+  // Same stale beat, but monitorSchedulerGap=false — the peer is genuinely late while the
+  // watchdog itself is beating. The freshness red must still page; the guard only fires during
+  // a shared scheduler gap.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-17T12:00:00Z");
+  try {
+    const latest: LoopHistoryRow = {
+      ran_at: "2026-07-17T11:30:00Z", // 30 min stale, past the 15-min window
+      ok: true,
+      duration_ms: 500,
+      produced: null,
+      detail: null,
+    };
+    const result = evalCron(storefrontExperimentsRefreshCronLoop, latest, null, 5, false, null, null, false, false);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "cron_freshness");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron leaves the control-tower-monitor loop itself RED during a scheduler gap (caller never sets the flag on the watchdog)", () => {
+  // The suppression is scoped by the caller: buildControlTowerSnapshot passes monitorSchedulerGap
+  // only to peer crons, never to the watchdog itself. This test asserts the direct call path:
+  // when the watchdog is evaluated with flag=false (its actual caller behavior), its own stale
+  // beat pages red as normal — so operators still see the platform problem.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-17T12:00:00Z");
+  try {
+    const latest: LoopHistoryRow = {
+      ran_at: "2026-07-17T11:30:00Z", // 30 min stale, past the 20-min window
+      ok: true,
+      duration_ms: 500,
+      produced: null,
+      detail: null,
+    };
+    const result = evalCron(controlTowerMonitorLoop, latest, null, 5, false, null, null, false, false);
+    assert.equal(result.color, "red");
+    assert.equal(result.violation?.reason, "cron_freshness");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("evalCron keeps a FRESH peer beat green even while the watchdog scheduler gap flag is set", () => {
+  // The suppression path only fires when the underlying result would be red. A fresh beat is
+  // still green — the guard mustn't paint healthy tiles amber just because the monitor stalled
+  // between the peer's last beat and the current tick.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-17T12:00:00Z");
+  try {
+    const latest: LoopHistoryRow = {
+      ran_at: "2026-07-17T11:58:00Z", // 2 min ago, well inside the 15-min window
+      ok: true,
+      duration_ms: 500,
+      produced: null,
+      detail: null,
+    };
+    const result = evalCron(storefrontExperimentsRefreshCronLoop, latest, null, 5, false, null, null, false, true);
+    assert.equal(result.color, "green");
+    assert.equal(result.violation, null);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 // ── countStuckDunningCycles — scoped to the payday-retry cron's owned population ──
 // (build-control-tower-stuck-dunning-scope-to-payday-cron Phase 1) — a `retrying` cycle on an
 // internal-* contract is Braintree-billed work handled by handleInternalDunningFailure / the
