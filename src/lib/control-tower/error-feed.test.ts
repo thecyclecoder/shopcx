@@ -24,6 +24,7 @@ import {
   isForeignGoTrueEdgeNoise,
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
   isForeignSupabasePostgresOrdersNameLookupNoise,
+  isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -1626,6 +1627,204 @@ test("isForeignSupabasePostgresOrdersNameLookupNoise returns false on empty / nu
   assert.equal(
     isForeignSupabasePostgresOrdersNameLookupNoise(
       "column orders.name does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/spec_status_history?select=...created_at...` against our
+// `public.spec_status_history` audit table. The table exists but its timestamp column is
+// `at`, not `created_at`. Foreign-owned surface, no lever from us — drop AT CAPTURE only
+// when BOTH the exact column-missing message on `spec_status_history.created_at` AND the
+// bare SELECT-lookup shape on `spec_status_history` are present. A column-missing on any
+// other table, a different column on `spec_status_history`, or a non-SELECT statement
+// still pages.
+
+test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise drops the ad hoc SELECT lookup on the exact spec_status_history.created_at column-missing shape", () => {
+  // The captured PostgREST direct-REST shape — unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column spec_status_history.created_at does not exist",
+      "select id, created_at from public.spec_status_history order by created_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column public.spec_status_history.created_at does not exist",
+      "select id, created_at from public.spec_status_history order by created_at desc limit 100",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column spec_status_history.created_at does not exist",
+      "select created_at from spec_status_history limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column spec_status_history.created_at does not exist",
+      "select spec_slug, created_at from public.spec_status_history where field = 'status' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column spec_status_history.created_at does not exist",
+      "SELECT ID, CREATED_AT FROM PUBLIC.SPEC_STATUS_HISTORY",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "ERROR: column spec_status_history.created_at does not exist",
+      "select created_at from public.spec_status_history",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "  column spec_status_history.created_at does not exist  ",
+      "   select created_at from public.spec_status_history   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a created_at column still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column orders.created_at does not exist",
+      "select created_at from public.orders where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column tickets.created_at does not exist",
+      "select created_at from public.tickets where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise KEEPS a DIFFERENT column-missing on spec_status_history (the real `at` column renamed still pages)", () => {
+  // The real timestamp column is `at`. If someone breaks that, we want to see it.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column spec_status_history.at does not exist",
+      "select at from public.spec_status_history where spec_slug = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column spec_status_history.spec_slug does not exist",
+      "select spec_slug from public.spec_status_history where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing spec_status_history.created_at still pages)", () => {
+  // INSERT / UPDATE / DELETE against spec_status_history referencing a bogus column is
+  // real code trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column spec_status_history.created_at does not exist",
+      "insert into public.spec_status_history (id, created_at) values ($1, now())",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column spec_status_history.created_at does not exist",
+      "update public.spec_status_history set created_at = now() where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column spec_status_history.created_at does not exist",
+      "delete from public.spec_status_history where created_at < now() - interval '90 days'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on spec_status_history (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "database is shutting down",
+      "select id from public.spec_status_history where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      'duplicate key value violates unique constraint "spec_status_history_pkey"',
+      "select id from public.spec_status_history where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.spec_status_history where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      'permission denied for relation "public.spec_status_history"',
+      "select id from public.spec_status_history where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      'relation "public.spec_status_history" does not exist',
+      "select id from public.spec_status_history where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column spec_status_history.created_at does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column spec_status_history.created_at does not exist",
       null,
     ),
     false,
