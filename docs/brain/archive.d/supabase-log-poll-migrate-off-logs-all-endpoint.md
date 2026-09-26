@@ -1,0 +1,1 @@
+- **Migrate Supabase log poller off the removed logs.all endpoint** · verified 2026-09-26 · → [[../inngest/supabase-log-poll]]
