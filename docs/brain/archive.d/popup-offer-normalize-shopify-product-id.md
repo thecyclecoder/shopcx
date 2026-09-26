@@ -1,0 +1,1 @@
+- **Normalize Shopify product ids before computing popup offers** · verified 2026-09-26 · → [[../libraries/popup-decide]]

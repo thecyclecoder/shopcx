@@ -1,0 +1,1 @@
+- **Fix fraud nightly scan workspace lookup column** · verified 2026-09-26 · → [[../inngest/fraud-detection]]
