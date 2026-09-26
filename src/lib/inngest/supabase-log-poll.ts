@@ -2,8 +2,9 @@
  * supabase-log-poll cron — pull DB-level Supabase errors into the Control Tower
  * (error-feed-monitoring Phase 2).
  *
- * Every ~15 min it polls the Supabase Management Logs API (logs.all) for the error
- * rows our own app code never sees — Postgres ERROR/FATAL/PANIC, auth-service errors,
+ * Every ~15 min it polls the Supabase Management Logs API (unified `logs` ClickHouse
+ * endpoint — the 2026-09-23 replacement for the removed `logs.all` SQL endpoint) for the
+ * error rows our own app code never sees — Postgres ERROR/FATAL/PANIC, auth-service errors,
  * edge API 5xxs — and records them grouped into error_events under source='supabase-logs'
  * (its own dashboard panel), paging owners on a new signature / spike (rate-limited).
  *

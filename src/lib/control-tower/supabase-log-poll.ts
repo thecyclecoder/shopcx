@@ -5,7 +5,9 @@
  * Postgres ERROR/FATAL/PANIC (constraint violations behind RLS, slow-query/timeouts),
  * auth-service errors, and API 5xxs at the edge. The app-layer reportDbError (Phase 1)
  * only catches errors our code holds a `{ error }` for; this pulls the rest straight
- * from Supabase's own logs via the **Management Logs API** (`logs.all` SQL endpoint).
+ * from Supabase's own logs via the **Management Logs API** (`logs` ClickHouse endpoint —
+ * the replacement Supabase shipped when the old `logs.all` SQL endpoint was removed on
+ * 2026-09-23, see the changelog referenced in [[../integrations/supabase-management-logs]]).
  *
  * Needs the LONE owner setup of this spec: a Supabase access token (personal/management —
  * the service-role key we have is for data, NOT logs). Pasted once via the owner-only API,
@@ -126,8 +128,10 @@ export async function clearSupabaseAccessToken(adminClient?: Admin): Promise<voi
 }
 
 // ── The log queries ──────────────────────────────────────────────────────────
-// Each pulls error-severity rows from one Supabase log source via the logs.all SQL
-// endpoint, following the documented `cross join unnest(metadata)` nesting pattern.
+// Each pulls error-severity rows from the unified Supabase `logs` ClickHouse endpoint
+// (the replacement for the removed `logs.all` SQL endpoint — every source now lives in a
+// single `logs` table, filtered by the `source` column; nested fields move from the
+// `metadata` array into a flat `log_attributes` map read via `log_attributes['a.b.c']`).
 // `mapRow` turns a result row into a grouped incident: keyParts (STABLE bits only —
 // the normalizer strips ids/numbers), a panel title, a fuller detail, and a `transient`
 // flag (a momentary edge 5xx / Postgres statement-timeout blip — see
@@ -147,10 +151,11 @@ const LOG_QUERIES: LogQuery[] = [
   {
     key: "postgres",
     sql:
-      "select t.timestamp as timestamp, metadata.parsed.error_severity as severity, t.event_message as event_message " +
-      "from postgres_logs as t cross join unnest(t.metadata) as metadata " +
-      "where metadata.parsed.error_severity in ('ERROR','FATAL','PANIC') " +
-      `order by t.timestamp desc limit ${ROW_LIMIT}`,
+      "select timestamp, log_attributes['parsed.error_severity'] as severity, event_message " +
+      "from logs " +
+      "where source = 'postgres_logs' " +
+      "and log_attributes['parsed.error_severity'] in ('ERROR','FATAL','PANIC') " +
+      `order by timestamp desc limit ${ROW_LIMIT}`,
     mapRow: (row) => {
       const severity = str(row.severity) || "ERROR";
       const message = str(row.event_message) || "postgres error";
@@ -165,10 +170,11 @@ const LOG_QUERIES: LogQuery[] = [
   {
     key: "auth",
     sql:
-      "select t.timestamp as timestamp, metadata.level as severity, metadata.msg as msg, t.event_message as event_message " +
-      "from auth_logs as t cross join unnest(t.metadata) as metadata " +
-      "where metadata.level in ('error','fatal') " +
-      `order by t.timestamp desc limit ${ROW_LIMIT}`,
+      "select timestamp, log_attributes['level'] as severity, log_attributes['msg'] as msg, event_message " +
+      "from logs " +
+      "where source = 'auth_logs' " +
+      "and log_attributes['level'] in ('error','fatal') " +
+      `order by timestamp desc limit ${ROW_LIMIT}`,
     mapRow: (row) => {
       // Drop foreign-app noise at capture: Supabase's own GoTrue `/user` 504 on the
       // auth_logs surface ([[../specs/error-feed-drop-supabase-gotrue-504-auth-log-noise]]).
@@ -208,13 +214,13 @@ const LOG_QUERIES: LogQuery[] = [
   {
     key: "api",
     sql:
-      "select t.timestamp as timestamp, response.status_code as status_code, request.method as method, request.path as path, t.event_message as event_message " +
-      "from edge_logs as t " +
-      "cross join unnest(t.metadata) as metadata " +
-      "cross join unnest(metadata.response) as response " +
-      "cross join unnest(metadata.request) as request " +
-      "where response.status_code >= 500 " +
-      `order by t.timestamp desc limit ${ROW_LIMIT}`,
+      "select timestamp, log_attributes['response.status_code'] as status_code, log_attributes['request.method'] as method, log_attributes['request.path'] as path, event_message " +
+      "from logs " +
+      "where source = 'edge_logs' " +
+      // log_attributes is Map(String,String) in ClickHouse — coerce for numeric compare;
+      // toInt32OrNull yields NULL on a missing/non-numeric value (NULL >= 500 is falsy).
+      "and toInt32OrNull(log_attributes['response.status_code']) >= 500 " +
+      `order by timestamp desc limit ${ROW_LIMIT}`,
     mapRow: (row) => {
       const status = str(row.status_code) || "5xx";
       const method = str(row.method) || "GET";
@@ -235,7 +241,7 @@ const LOG_QUERIES: LogQuery[] = [
   },
 ];
 
-/** GET one logs.all SQL query over the window. Returns the result rows (empty on any failure). */
+/** GET one ClickHouse SQL query over the window. Returns the result rows (empty on any failure). */
 async function fetchLogRows(
   config: SupabaseLogConfig,
   sql: string,
@@ -247,13 +253,13 @@ async function fetchLogRows(
     iso_timestamp_start: startIso,
     iso_timestamp_end: endIso,
   });
-  const url = `${MANAGEMENT_API_BASE}/projects/${config.projectRef}/analytics/endpoints/logs.all?${params.toString()}`;
+  const url = `${MANAGEMENT_API_BASE}/projects/${config.projectRef}/analytics/endpoints/logs?${params.toString()}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${config.token}`, Accept: "application/json" },
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`logs.all ${res.status}: ${body.slice(0, 200)}`);
+    throw new Error(`logs ${res.status}: ${body.slice(0, 200)}`);
   }
   const json = (await res.json()) as { result?: Record<string, unknown>[] };
   return Array.isArray(json.result) ? json.result : [];
