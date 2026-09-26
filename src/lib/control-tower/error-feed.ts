@@ -987,6 +987,38 @@ export function isForeignGoTrueAuthLogNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting the built-in aggregate `array_agg` when a caller
+ * probes it as a normal function. Postgres emits the EXACT ERROR message
+ * `"array_agg" is an aggregate function` when a catalog introspection query (or any
+ * `pg_proc` shape that resolves an aggregate as a regular function) reaches an aggregate;
+ * the same message surfaces on Supabase's `postgres_logs` feed at severity `ERROR`. The
+ * database is behaving correctly — the message says "this is an aggregate, not a normal
+ * function" — and no ShopCX code path can "fix" a Postgres built-in classification. The
+ * Control Tower has been paging Platform on it (Supabase-logs signature
+ * `supabase-logs:0562e7c36626723c`) with no code or data lever to pull.
+ *
+ * `true` ONLY when the trimmed message equals the exact
+ * `"array_agg" is an aggregate function` phrase. Narrowly gated so:
+ *   - a Postgres FATAL/PANIC still pages (it's a crash, not this introspection error),
+ *   - a constraint violation / data-integrity ERROR still pages (different message),
+ *   - a genuine query that legitimately hits `array_agg` in a real code path is unaffected
+ *     (the ERROR here is only surfaced when something is calling `array_agg` as if it were
+ *     a scalar function; the fix, if there is one, would be in the CALLER of the built-in,
+ *     not in something Platform can page on).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresAggregateIntrospectionNoise(
+  message: string | null | undefined,
+): boolean {
+  const text = (message ?? "").trim();
+  return text === '"array_agg" is an aggregate function';
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).

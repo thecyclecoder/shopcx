@@ -34,6 +34,7 @@ import {
   isTransientSupabaseLogNoise,
   isForeignGoTrueEdgeNoise,
   isForeignGoTrueAuthLogNoise,
+  isForeignSupabasePostgresAggregateIntrospectionNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -159,6 +160,14 @@ const LOG_QUERIES: LogQuery[] = [
     mapRow: (row) => {
       const severity = str(row.severity) || "ERROR";
       const message = str(row.event_message) || "postgres error";
+      // Drop foreign-app noise at capture: Postgres reporting the built-in aggregate
+      // `array_agg` classification when a catalog/introspection query resolves it as a
+      // regular function ([[../specs/error-feed-drop-supabase-array-agg-aggregate-introspection-n]],
+      // Control Tower signature `supabase-logs:0562e7c36626723c`). Foreign-owned surface,
+      // no lever from us; the built-in behaves correctly. Narrowly gated to the EXACT
+      // trimmed phrase so a Postgres FATAL/PANIC, a constraint violation, or any other
+      // non-timeout ERROR still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresAggregateIntrospectionNoise(message)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
