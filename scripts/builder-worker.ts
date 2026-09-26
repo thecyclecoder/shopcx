@@ -15881,6 +15881,10 @@ async function loadCsDirectorCallBrief(
         events = (evts ?? []) as typeof events;
       }
 
+      const subscriptionContractById = new Map<string, string | null>(
+        subRows.map((s) => [s.id as string, (s.shopify_contract_id as string | null) ?? null]),
+      );
+
       let orders: Array<{
         order_number: string | null;
         shopify_order_id: string | null;
@@ -15894,12 +15898,21 @@ async function loadCsDirectorCallBrief(
         const { data: ordRows } = await db
           .from("orders")
           .select(
-            "order_number, shopify_order_id, created_at, total_cents, financial_status, subscription_id, shopify_contract_id",
+            "order_number, shopify_order_id, created_at, total_cents, financial_status, subscription_id",
           )
           .eq("workspace_id", workspaceId)
           .in("customer_id", custIds)
           .order("created_at", { ascending: true });
-        orders = (ordRows ?? []) as typeof orders;
+        orders = (ordRows ?? []).map((o) => ({
+          order_number: (o.order_number as string | null) ?? null,
+          shopify_order_id: (o.shopify_order_id as string | null) ?? null,
+          created_at: o.created_at as string,
+          total_cents: (o.total_cents as number | null) ?? null,
+          financial_status: (o.financial_status as string | null) ?? null,
+          subscription_id: (o.subscription_id as string | null) ?? null,
+          shopify_contract_id:
+            subscriptionContractById.get((o.subscription_id as string | null) ?? "") ?? null,
+        }));
       }
 
       const { buildCancellationTimeline, formatCancellationTimelineForBrief } = await import(
