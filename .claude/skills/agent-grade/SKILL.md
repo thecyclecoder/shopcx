@@ -98,9 +98,12 @@ For each `AGENT_JOB` in the batch:
    Then `git diff --stat <ref>` to size it, and Read the touched files in the working tree for
    context. Cite `path.ts:LINE` in reasoning when you can.
 3. **Spec cross-check.** For a `build` / `repair` / `regression`: check `docs/brain/specs/<slug>.md` or
-   the DB spec (resolve the spec row first — `SELECT id FROM specs WHERE slug = '<slug>'` — then
-   `SELECT position, title, status FROM spec_phases WHERE spec_id = '<spec_id>' ORDER BY position`)
-   — did the diff satisfy the phase(s) it claims?
+   the DB spec. Resolve the spec row scoped to the job's workspace — `SELECT id FROM specs WHERE
+   workspace_id = '<workspace_id>' AND slug = '<slug>'` (a bare slug lookup is unsafe: slugs are
+   unique per workspace, so `createAdminClient` — which bypasses RLS — can silently return another
+   workspace's spec when a slug collides). Then read phases with `SELECT position, title, status
+   FROM spec_phases WHERE spec_id = '<spec_id>' ORDER BY position` — did the diff satisfy the
+   phase(s) it claims?
 4. **tsc / CI status if in doubt.**
    - `npx tsc --noEmit` (one bounded run per batch max; ~30s).
    - `gh pr view <PR#> --json statusCheckRollup,mergeStateStatus` for CI + merge cleanliness.
