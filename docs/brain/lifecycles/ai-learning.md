@@ -60,10 +60,10 @@ That's the upstream. Until this commit, the queue stopped here.
 1. Pull up to 50 proposals with `status='proposed' AND auto_decision IS NULL`.
 2. For each, load:
    - Top-K similar approved prompts (keyword overlap; pgvector path stubbed for later).
-   - Active policies for the workspace.
+   - Active policies for the workspace via [[../libraries/policies]]'s `getAgentPolicyPackage` — INTERNAL half only (`slug`, `name`, `internal_summary`, `rules`), never `customer_summary`.
    - Source pattern from [[../tables/daily_analysis_reports]] → contributing tickets via [[../tables/ticket_analyses]].
    - Voice docs — read from disk at function init, cached + hashed for audit.
-3. Call Claude Opus with a strict decision schema. Required output: `decision`, `confidence`, `reasoning`, `references[]`, optional `suggested_revisions` / `merge_target_id` / `supersede_target_id`.
+3. Call Claude Opus with a strict decision schema. The policies are rendered into the prompt so the agent can reason against workspace rules when deciding on the proposal. Required output: `decision`, `confidence`, `reasoning`, `references[]`, optional `suggested_revisions` / `merge_target_id` / `supersede_target_id`.
 4. Apply through the Phase 3 safety guards (next section).
 
 ### Decision values

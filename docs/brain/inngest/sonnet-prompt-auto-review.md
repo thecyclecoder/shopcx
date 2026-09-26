@@ -20,7 +20,7 @@ For each enabled workspace:
 3. Insert one `agent_jobs` row per fresh proposal: `kind='prompt-review'`, `status='queued'`, `spec_slug=proposal.id`, `workspace_id`. That's it — no LLM call here.
 4. Return per-workspace + global candidate / enqueued / skipped counts.
 
-The box worker (`scripts/builder-worker.ts → runPromptReviewJob`) claims each row, assembles the review inputs (top-K similar approved prompts, active [[../tables/policies]], source-pattern tickets from [[../tables/daily_analysis_reports]] + [[../tables/ticket_analyses]], voice docs from disk — same inputs `loadReviewInputs` used to hand the retired direct-Opus fetch), runs ONE Max session with `buildSystemPrompt` + `buildUserPrompt`, parses the JSON verdict via `parseDecision`, then hands it to `applyDecision` — which writes the SAME auto_decision fields with the SAME safety guards.
+The box worker (`scripts/builder-worker.ts → runPromptReviewJob`) claims each row, assembles the review inputs via `loadReviewInputs` (top-K similar approved prompts, active [[../tables/policies]] via [[../libraries/policies]]'s `getAgentPolicyPackage` — INTERNAL half only, source-pattern tickets from [[../tables/daily_analysis_reports]] + [[../tables/ticket_analyses]], voice docs from disk), runs ONE Max session with `buildSystemPrompt` + `buildUserPrompt` (the prompt renders each policy with its `internal_summary`), parses the JSON verdict via `parseDecision`, then hands it to `applyDecision` — which writes the SAME auto_decision fields with the SAME safety guards.
 
 ## Phase 3 safety guards
 
@@ -69,7 +69,7 @@ The following are written by the box lane (`applyDecision` in `src/lib/sonnet-pr
 - [[../tables/sonnet_prompts]] — backlog of proposed prompts to enqueue
 - `agent_jobs` — dedupe against in-flight prompt-review jobs
 
-The box lane's `runPromptReviewJob` reads [[../tables/policies]], [[../tables/daily_analysis_reports]], [[../tables/ticket_analyses]] + the voice docs on disk (`docs/brain/customer-voice.md`, `docs/brain/operational-rules.md`, `docs/brain/ui-conventions.md`) — not this cron.
+The box lane's `runPromptReviewJob` reads [[../tables/policies]] via [[../libraries/policies]]'s `getAgentPolicyPackage` (the SDK chokepoint), [[../tables/daily_analysis_reports]], [[../tables/ticket_analyses]] + the voice docs on disk (`docs/brain/customer-voice.md`, `docs/brain/operational-rules.md`, `docs/brain/ui-conventions.md`) — not this cron. The SDK filters to active, non-superseded rows and surfaces INTERNAL columns only (`slug`, `name`, `internal_summary`, `rules`); `customer_summary` is never passed to the agent.
 
 ## Per-workspace enable + cap
 
