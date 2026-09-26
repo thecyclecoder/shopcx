@@ -1,0 +1,1 @@
+- **Update stale spec phase probes to use position instead of phase** · verified 2026-09-26 · → [[../tables/spec_phases#columns]]

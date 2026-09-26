@@ -1,0 +1,1 @@
+- **Fix creative scout watcher to use real agent_jobs columns** · verified 2026-09-26 · → [[../libraries/agent-jobs#agent_job_columns--jobselect----typed-column-source-of-truth]]
