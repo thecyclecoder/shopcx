@@ -1075,6 +1075,185 @@ export function isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing COLUMN (`title` or `signature`) for
+ * an ad hoc lookup against `public.loop_alerts`. Neither column lives on `loop_alerts` —
+ * both are on `error_events` — so the message appears on Supabase's `postgres_logs` feed
+ * only when a Supabase SQL Editor session (an external human debug) confuses the two
+ * tables and runs `select * from public.loop_alerts where title ilike '%…%' / signature
+ * = '…'`. There is no ShopCX code path that references `loop_alerts.title` or
+ * `loop_alerts.signature`; grep both to confirm. Paging Platform on it
+ * ([[../specs/error-feed-drop-supabase-loop-alerts-adhoc-column-title-nois]], Control
+ * Tower signature `supabase-logs:0e3379f172768a91`) is repair work for a query we don't
+ * own — the exact twin of `isForeignSupabasePostgresMissingControlTowerEventsLookupNoise`,
+ * scoped to the confused-column shape instead of the confused-relation shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for one of these two
+ *      columns — trimmed equal to `column "title" does not exist` or `column "signature"
+ *      does not exist` (with any leading `ERROR: ` prefix stripped, matching the sibling
+ *      missing-relation drop), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.loop_alerts`
+ *      lookup shape (the ad hoc SELECT — any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - the SAME column-missing message on any OTHER relation (a real product-schema
+ *     regression, a rename that broke a live query on a table that DOES have `title`)
+ *     still pages,
+ *   - a `loop_alerts` error attached to a DIFFERENT statement shape (INSERT / UPDATE /
+ *     DELETE / DDL, a JOIN with `error_events`) still pages — the pin is the bare
+ *     SELECT-lookup shape only, matching the ad hoc read we've observed,
+ *   - a FATAL / PANIC / constraint violation on `loop_alerts` is untouched (different
+ *     message),
+ *   - a DIFFERENT column-missing on `loop_alerts` (e.g. a real column that got renamed)
+ *     still pages — the pin covers `title` and `signature` only.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column "<name>" does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === 'column "title" does not exist' ||
+    stripped === 'column "signature" does not exist';
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name loop_alerts (with
+  // or without the `public.` schema qualifier). A JOIN with `error_events` (the real
+  // code shape when the human means to query both) uses `error_events` as the FROM
+  // relation, which fails this pin — as does any non-SELECT / UNION / different-FROM
+  // statement, so a real query against loop_alerts that references a missing column is
+  // a code bug we DO want to page on, not the SQL-Editor confusion this drop targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?loop_alerts\b/.test(q);
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc lookup that
+ * mistypes `error_events.first_seen` (our schema has `first_seen_at`, not `first_seen`).
+ * The twin of `isForeignSupabasePostgresMissingControlTowerEventsLookupNoise`, aimed at
+ * the operator-typo shape on a real product table: an external SQL client typed the
+ * wrong column name, Supabase's `postgres_logs` feed captured the resulting
+ * undefined_column ERROR, and log-poll minted a Control Tower incident on a query we
+ * don't own ([[../specs/error-feed-drop-error-events-first-seen-column-adhoc-lookup-]],
+ * Control Tower signature `supabase-logs:41dd87c2e483a884`).
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column error_events.first_seen does not exist` (with or without
+ *      the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.error_events`
+ *      lookup shape AND it contains the bare `first_seen` token (word-boundary, no
+ *      `_at` suffix — a typo of the real `first_seen_at` column).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real schema regression) still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL, a JOIN across other tables) still pages — the pin is the SELECT-lookup shape,
+ *   - a typo message that names `first_seen_at` (the real column) instead of `first_seen`
+ *     is a genuinely different error and stays captured,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column error_events.first_seen does not exist" ||
+    stripped === "column public.error_events.first_seen does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT on error_events + the bare `first_seen` token (word-boundary, no `_at`
+  // suffix — otherwise a query that references the real `first_seen_at` column would
+  // false-positive). A JOIN/UNION/non-SELECT statement still surfaces; likewise a SELECT
+  // that names the real column via `first_seen_at` (a different mistype) stays captured.
+  if (!/^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q)) return false;
+  return /\bfirst_seen\b(?!_at)/.test(q);
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `error_events.metadata`. `error_events` DOES exist as a product table, but no ShopCX code
+ * path, migration, view, function or trigger references an `error_events.metadata` column
+ * (grep both to confirm). The message appears on Supabase's `postgres_logs` feed only when
+ * an external / manual tool or a stale exploratory query does a raw
+ * `select ... metadata ... from public.error_events` lookup. There is no lever from ShopCX
+ * to make that query resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-error-events-metadata-adhoc-lookup-noise]], Control Tower
+ * signature `supabase-logs:932dc308d8acafab`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingControlTowerEventsLookupNoise` — same narrow-
+ * gating shape, different failure class (missing column on an existing table instead of a
+ * missing relation).
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS name — trimmed
+ *      equal to `column error_events.metadata does not exist` (with or without the
+ *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.error_events` lookup
+ *      shape (the ad hoc SELECT — any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `error_events` (a real product-schema
+ *     regression on a live column) still pages,
+ *   - a column-missing error for `metadata` on ANY OTHER table (a real code bug on another
+ *     table that DOES have such a column) still pages,
+ *   - an `error_events.metadata` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
+ *     SELECT-lookup shape only, matching the ad hoc read we've observed,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <name> does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column error_events.metadata does not exist" ||
+    stripped === "column public.error_events.metadata does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name this exact table
+  // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to error_events with a `metadata` field is
+  // a code bug we DO want to page on, not the ad hoc read this drop targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing column on `error_events` for an ad hoc
  * SELECT lookup. `error_events` DOES exist as a product table, but every column our own
  * code path / migration / view / function / trigger touches is stable and known; a raw
