@@ -16,14 +16,20 @@ The smart-popup decision engine + offer computation (storefront-mvp Phase 4).
 
 **Budget** is enforced by `/api/popup/decide`, not here: one decision per session (the [[../tables/popup_decisions]] unique key), Haiku only on a stable per-session A/B split within a daily cap.
 
-## offer.ts — `computePopupOffer(workspaceId, productId)`
+## offer.ts
+
+### `resolvePopupProductId(workspaceId, productRef)`
+
+Normalizes the storefront's product reference at the boundary before any UUID-column queries. Accepts either an internal products.id UUID or a legacy numeric Shopify product id, resolving the numeric id via `products.shopify_product_id` scoped to the workspace. Returns null (failing closed with no offer, no UUID-cast error) for unresolvable references.
+
+### `computePopupOffer(workspaceId, productId)`
 
 Computes the **full stacked value** live from [[../tables/product_pricing_tiers]] + [[../tables/pricing_rules]]:
 - price discount = quantity-break × subscribe-and-save × the 15% signup coupon (`POPUP_COUPON_PCT`), applied **multiplicatively** (≈44% off product MSRP — adding them overstates at 52%);
 - + free shipping (representative waived rate — no address at popup time);
 - + free gift (the product's `free_gift_variant_id` MSRP).
 
-Returns `{ effective_pct (off the full retail bundle), total_savings_cents, product_discount_cents, shipping_value_cents, gift_value_cents, gift_title, pack_quantity, … }`. Null when the product has no pricing tiers.
+Calls `resolvePopupProductId` at the start to normalize incoming product references, preventing Postgres 22P02 UUID-cast errors from legacy numeric Shopify product ids. Returns `{ effective_pct (off the full retail bundle), total_savings_cents, product_discount_cents, shipping_value_cents, gift_value_cents, gift_title, pack_quantity, … }`. Null when normalization fails or the product has no pricing tiers.
 
 ## Flow
 

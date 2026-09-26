@@ -11,6 +11,8 @@ Per-order + per-customer + nightly fraud scans. Evaluates `fraud_rules`, writes 
 - **Retries:** 2
 - **Concurrency:** `concurrency: [{ limit: 1, key: "event.data.workspaceId" }]`
 
+Loads Shopify-connected workspaces via `.not("shopify_myshopify_domain", "is", null)` to match the actual schema, then runs fraud-rule evaluation and dispute polling for each workspace.
+
 
 ### `fraud-generate-summary`
 - **Trigger:** event `fraud/case.created`
