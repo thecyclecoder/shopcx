@@ -27,6 +27,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
+  isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isInngestStepWrappedNonErrorLog,
   isInngestTerminalFailureMirrorLog,
@@ -1148,6 +1149,208 @@ test("isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise returns fals
   );
   assert.equal(
     isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise(
+      "column error_events.metadata does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise ──
+// The ad hoc `select ... <column> ... from public.error_events` lookup by an external tool
+// or a stale exploratory query. `error_events` is a real product table with a stable known
+// column set — a raw SELECT that names a column we don't own only comes from an external
+// caller, so the column-missing ERROR is repair work for a query we don't own. Drop AT
+// CAPTURE only when BOTH a column-missing message pinned to `error_events.<any-unquoted-
+// identifier>` AND the SELECT-lookup shape are present; a column-missing error on any OTHER
+// table, or on `error_events` via a non-SELECT statement (real code-bug shape), still pages.
+// This generic form subsumes the earlier per-column drops (`metadata`, `first_seen_at`).
+
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise drops the ad hoc SELECT lookup on any error_events column", () => {
+  // `metadata` — the first observed instance (subsumes the earlier per-column drop).
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      "select metadata from public.error_events",
+    ),
+    true,
+  );
+  // `first_seen_at` — the second observed instance (subsumes the sibling per-column drop).
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.first_seen_at does not exist",
+      "select first_seen_at from public.error_events",
+    ),
+    true,
+  );
+  // Any other unquoted-identifier column name is the same class — the pin is on the
+  // `error_events.` prefix and the SELECT-lookup shape, not the specific column.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.foo_bar does not exist",
+      "select foo_bar from public.error_events",
+    ),
+    true,
+  );
+  // The `public.` qualified variant of the message is the same class — Postgres sometimes
+  // includes the schema on the column name depending on the caller's search_path.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column public.error_events.metadata does not exist",
+      "select id, metadata from public.error_events",
+    ),
+    true,
+  );
+  // Bare / unqualified `from error_events` (no `public.` prefix) is the same shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      "select id, metadata from error_events",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      "select metadata from public.error_events where first_seen_at > now() - interval '1 hour' order by first_seen_at desc limit 100",
+    ),
+    true,
+  );
+  // Case-insensitive on the query (Postgres normalizes to lowercase in the log, but a hand
+  // -typed uppercase SELECT should still drop).
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      "SELECT metadata FROM public.error_events",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "ERROR: column error_events.metadata does not exist",
+      "select metadata from public.error_events",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "  column error_events.metadata does not exist  ",
+      "   select metadata from public.error_events   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise KEEPS a column-missing error on OTHER tables (a real code bug on another table still pages)", () => {
+  // A missing column on any OTHER table is a real code bug we WANT to see, not the ad hoc
+  // read on error_events we drop. The pin is `error_events.` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column orders.metadata does not exist",
+      "select metadata from public.orders",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column tickets.metadata does not exist",
+      "select id, metadata from public.tickets where id = $1",
+    ),
+    false,
+  );
+  // A table whose name happens to end in `error_events` still doesn't match — the pin
+  // requires the exact table name at the start.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column archived_error_events.metadata does not exist",
+      "select metadata from public.archived_error_events",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug on this name still pages)", () => {
+  // An INSERT / UPDATE / DELETE / DDL against error_events with a bogus column indicates
+  // real code trying to WRITE the column — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      "insert into public.error_events (id, metadata) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.first_seen_at does not exist",
+      "update public.error_events set first_seen_at = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      "delete from public.error_events where metadata is null",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise KEEPS a non-column-missing message shape on this table (FATAL / PANIC / other Postgres error still pages)", () => {
+  // A relation-missing / permission-denied / FATAL / PANIC error on the same table name
+  // is NOT the ad hoc missing-column lookup we drop; the pin is on the column-missing
+  // shape only.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      'relation "public.error_events" does not exist',
+      "select metadata from public.error_events",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      'permission denied for relation "public.error_events"',
+      "select metadata from public.error_events",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "FATAL: sorry, too many clients already",
+      "select metadata from public.error_events",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "PANIC: could not write to file",
+      "select metadata from public.error_events",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(null, null), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise("", ""), false);
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured (an unqualified miss with no lookup context should surface).
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
       "column error_events.metadata does not exist",
       null,
     ),

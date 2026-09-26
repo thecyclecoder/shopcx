@@ -1254,6 +1254,76 @@ export function isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing column on `error_events` for an ad hoc
+ * SELECT lookup. `error_events` DOES exist as a product table, but every column our own
+ * code path / migration / view / function / trigger touches is stable and known; a raw
+ * `select ... <column> ... from public.error_events` that names a column we don't own only
+ * comes from an external / manual tool or a stale exploratory query. There is no lever from
+ * ShopCX to make that query resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-error-events-missing-column-adhoc-lookup-generic]],
+ * subsumes the two per-column drops
+ * [[../specs/error-feed-drop-error-events-metadata-adhoc-lookup-noise]] and
+ * [[../specs/error-feed-drop-error-events-first-seen-column-adhoc-lookup-]]) is repair work
+ * for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingControlTowerEventsLookupNoise` — same narrow-
+ * gating shape, different failure class (missing column on an existing table instead of a
+ * missing relation). Generic across the column name, since every observed instance of this
+ * signature so far has been the same ad hoc external-tool read hitting a different column,
+ * and per-column classifiers proliferate one-per-column with no upside — the SELECT-lookup
+ * shape is what identifies the ad hoc caller, not the specific column.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape scoped to `error_events` —
+ *      trimmed equal to `column error_events.<name> does not exist` (or the `public.`
+ *      qualified variant), with any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface stripped, AND `<name>` a plain unquoted identifier (a-z / 0-9 / _), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.error_events` lookup
+ *      shape (the ad hoc SELECT — any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for `<column>` on ANY OTHER table (a real code bug on another
+ *     table that DOES have such a column) still pages — the pin is `error_events.` only,
+ *   - an `error_events.<column>` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
+ *     SELECT-lookup shape only, matching the ad hoc read we've observed,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing is
+ *     untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist` — pinned here to
+  // `error_events` (with or without the `public.` qualifier) and any unquoted identifier
+  // column name.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (
+    !/^column (?:public\.)?error_events\.[a-z_][a-z0-9_]* does not exist$/.test(stripped)
+  ) {
+    return false;
+  }
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name this exact table
+  // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to error_events with a bogus column is a
+  // code bug we DO want to page on, not the ad hoc read this drop targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column reference "oid" is ambiguous` on a
  * catalog-introspection query that joins two `pg_catalog` tables (each carrying its own
  * `oid` column) without qualifying the `oid` reference. None of our own SQL emits this

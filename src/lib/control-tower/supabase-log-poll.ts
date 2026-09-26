@@ -38,6 +38,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
+  isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
 } from "@/lib/control-tower/error-feed";
@@ -209,6 +210,18 @@ const LOG_QUERIES: LogQuery[] = [
       // or on error_events via a non-SELECT statement (real code-bug shape) still surfaces
       // / pages on first sighting.
       if (isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... <column> ... from
+      // public.error_events` lookup by an external tool / stale exploratory query. The
+      // `error_events` table exists and its live column set is stable and known; a raw
+      // SELECT that names a column we don't own only comes from an external caller, so
+      // the column-missing ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-error-events-missing-column-adhoc-lookup-generic]] —
+      // one generic classifier subsumes the per-column drops for `metadata` and
+      // `first_seen_at`). Narrowly gated to require BOTH a column-missing message pinned to
+      // `error_events.<any-unquoted-identifier>` AND the SELECT-lookup shape — a column-
+      // missing error on any OTHER table, or on `error_events` via a non-SELECT statement
+      // (real code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: Postgres reporting the built-in aggregate
       // `array_agg` classification when a catalog/introspection query resolves it as a
       // regular function ([[../specs/error-feed-drop-supabase-array-agg-aggregate-introspection-n]],
