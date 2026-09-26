@@ -160,10 +160,56 @@ export interface AgentPolicyPackageEntry {
 }
 
 /**
+ * Legacy → supported policy rule field remap. Loyalty balance is a loyalty-member concept, not
+ * a customer column, and a rule that says `customer.loyalty_points` reads as an unknown column
+ * downstream (the Control Tower saw a Postgres 500 in production). We replace the legacy field
+ * with `loyalty.points_balance`, backed by `public.loyalty_members.points_balance`.
+ *
+ * GUARD for future unsupported `customer.*` fields: any new bad field should be added here
+ * (add the legacy → supported pair) rather than silently normalized in-place at every caller —
+ * this is the ONE chokepoint that owns the schema-split between customer and loyalty.
+ */
+const LEGACY_POLICY_FIELD_REMAP: ReadonlyArray<{ from: RegExp; to: string }> = [
+  // customer.loyalty_points → loyalty.points_balance (source: loyalty_members.points_balance)
+  { from: /\bcustomer\.loyalty_points\b/g, to: "loyalty.points_balance" },
+];
+
+/**
+ * Rewrite legacy field references inside a policy rule's string properties. Objects have their
+ * `condition` (and any other string prop) normalized; string entries are normalized directly;
+ * anything else passes through untouched. Idempotent — a rule that already uses the supported
+ * field is returned as-is. See {@link LEGACY_POLICY_FIELD_REMAP} for the mapping table and its
+ * guard comment about adding new unsupported `customer.*` fields.
+ */
+export function normalizePolicyRuleFieldRefs(rules: unknown[]): unknown[] {
+  const rewriteString = (s: string): string => {
+    let out = s;
+    for (const m of LEGACY_POLICY_FIELD_REMAP) out = out.replace(m.from, m.to);
+    return out;
+  };
+  return rules.map(rule => {
+    if (typeof rule === "string") return rewriteString(rule);
+    if (rule && typeof rule === "object") {
+      const src = rule as Record<string, unknown>;
+      const out: Record<string, unknown> = { ...src };
+      for (const [k, v] of Object.entries(src)) {
+        if (typeof v === "string") out[k] = rewriteString(v);
+      }
+      return out;
+    }
+    return rule;
+  });
+}
+
+/**
  * The shared agent policy package — active, non-superseded policies with `internal_summary` +
  * `rules`. Sol reads this via `buildPoliciesSection` in `sonnet-orchestrator-v2.ts`; June reads
  * it via `loadDirectorPolicyBrief` in `src/lib/cs-director.ts` (which the CS-director-call
  * brief loader in the worker embeds). Both agents therefore reason from the SAME rulebook.
+ *
+ * `rules` are passed through {@link normalizePolicyRuleFieldRefs} before returning so a legacy
+ * `customer.loyalty_points` reference in a live row can never reach a policy consumer that
+ * expects a supported field — see the guard comment on {@link LEGACY_POLICY_FIELD_REMAP}.
  */
 export async function getAgentPolicyPackage(
   admin: Admin,
@@ -181,7 +227,7 @@ export async function getAgentPolicyPackage(
     slug: r.slug,
     name: r.name,
     internal_summary: r.internal_summary ?? "",
-    rules: Array.isArray(r.rules) ? r.rules : [],
+    rules: normalizePolicyRuleFieldRefs(Array.isArray(r.rules) ? r.rules : []),
   }));
 }
 

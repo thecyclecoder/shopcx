@@ -45,8 +45,12 @@ import {
   isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
+  isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
   isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise,
+  isForeignSupabasePostgresPoliciesKindLookupNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -309,6 +313,28 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_status_history`, or on it via a non-SELECT statement (real code-bug shape)
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / hand-typed SQL Editor lookup
+      // against `public.approval_decisions` that references the non-existent
+      // `agent_jobs.branch_name` column and dangles at the end, which Postgres reports as
+      // `syntax error at end of input`. Narrowly gated to require the exact message, the
+      // bare SELECT-on-approval_decisions shape, and the `agent_jobs.branch_name` marker.
+      if (isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.<archived_at|folded_at|deferred_at>`. The `specs` card table
+      // exists but records lifecycle state via `status text` (with a `folded` value) plus
+      // a `deferred boolean` flag — none of these three timestamp columns exist and no
+      // ShopCX caller reads them. The column-missing ERROR only reaches this feed when a
+      // foreign app / deprecated integration / stale SQL Editor session queries
+      // `/rest/v1/specs?select=...archived_at...` (or `folded_at`, or `deferred_at`).
+      // There is no lever from ShopCX to make that query resolve — paging Platform on it
+      // (Control Tower signature `supabase-logs:fbf1fe604803f481`,
+      // [[../specs/error-feed-drop-specs-archive-timestamp-adhoc-lookup-noise]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message (on one of the three obsolete names) AND the bare-SELECT-
+      // on-specs shape — a column-missing error on any other table, a different column on
+      // `specs`, or on it via a non-SELECT statement (real code-bug shape) still surfaces
+      // / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.spec_phases.idx`. The `spec_phases` table exists but its
       // ordering column is `position`, not `idx` — every ShopCX caller orders phases by
@@ -340,6 +366,35 @@ const LOG_QUERIES: LogQuery[] = [
       // `specs` via a non-SELECT statement (real code-bug shape) still surfaces /
       // pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.archived`. The `specs` table exists but has no `archived`
+      // column — the terminal lifecycle state is `folded` on `specs.status` (M4 fold),
+      // not a boolean archive flag. Every ShopCX caller reads / writes via the
+      // `specs-table` SDK; no code path selects `.archived` from `public.specs`. The
+      // column-missing ERROR only reaches this feed when a foreign app / stale SQL
+      // Editor session queries `/rest/v1/specs?select=...archived...` or
+      // `?archived=eq.false`. There is no lever from ShopCX to make that query resolve —
+      // paging Platform on it
+      // ([[../specs/error-feed-scope-foreign-specs-archived-column-noise]]) is repair
+      // work for a query we don't own. Narrowly gated to require BOTH the exact column-
+      // missing message AND the bare-SELECT-on-specs shape — a column-missing error on
+      // any other table, a different column on `specs`, or on `specs` via a non-SELECT
+      // statement (real code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.policies.kind`. The `policies` table exists but has no `kind`
+      // column by design — it is keyed by `slug`, and every ShopCX caller goes through
+      // the policies SDK (`src/lib/policies.ts`) which reads real columns. The column-
+      // missing ERROR only reaches this feed when a foreign app / stale SQL Editor
+      // session queries `/rest/v1/policies?select=...kind...`. There is no lever from
+      // ShopCX to make that query resolve — paging Platform on it
+      // ([[../specs/error-feed-drop-policies-kind-direct-rest-lookup-noise]]) is repair
+      // work for a query we don't own. Narrowly gated to require BOTH the exact column-
+      // missing message AND the bare-SELECT-on-policies shape — a column-missing error
+      // on any other table, a different column on `policies`, or on `policies` via a
+      // non-SELECT statement (real code-bug shape) still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresPoliciesKindLookupNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,

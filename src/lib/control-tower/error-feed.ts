@@ -1313,53 +1313,14 @@ export function isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
   ) {
     return false;
   }
-  return isErrorEventsAdhocSelectLookupQuery(query);
-}
-
-/**
- * Query-shape helper — returns `true` when `query` is a read-only lookup against
- * `error_events` and can safely be treated as an external / stale caller (no ShopCX code
- * path emits this shape). Two shapes are accepted; every other shape is rejected so a
- * real code bug still pages:
- *
- *   1. **Simple SQL SELECT**: `select ... from public.error_events ...` (or the
- *      unqualified `from error_events` variant), with any trailing WHERE / ORDER BY /
- *      LIMIT tail. This is the bare exploratory query shape from the SQL Editor or a
- *      hand-written probe.
- *   2. **PostgREST-generated CTE**: PostgREST wraps a direct-REST column select in
- *      `WITH pgrst_source AS ( SELECT "public"."<table>"."<col>", ... FROM
- *      "public"."<table>" WHERE ... )` before dispatch. The wrapper CAN wrap a write
- *      body (e.g. `WITH pgrst_source AS ( INSERT INTO ... )`), so this helper requires
- *      the FIRST token inside the CTE body to be `SELECT` and the inner FROM clause to
- *      name `error_events` (quoted `"public"."error_events"` / `"error_events"` or the
- *      bare `public.error_events` / `error_events` form).
- *
- * Rejects:
- *   - non-SELECT statements (INSERT / UPDATE / DELETE / DDL — a real code path writing
- *     the missing column is a bug we WANT to see),
- *   - a CTE whose inner statement is not a SELECT (a PostgREST write wrapper),
- *   - queries whose FROM clause names any other relation (the pin is `error_events`),
- *   - empty / nullish query — without a lookup context we cannot confirm the shape.
- *
- * Exported so the pinned identifier is grep-able from the spec's verification check.
- * Not re-usable across other tables by design: the FROM-relation pin is baked in here
- * so a copy-and-tweak sibling (e.g. `smart_patterns.content`) stays a separate helper
- * with its own regression tests.
- */
-export function isErrorEventsAdhocSelectLookupQuery(
-  query: string | null | undefined,
-): boolean {
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
-  // Simple SQL SELECT-lookup form — `select ... from (public.)?error_events ...`.
-  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q)) return true;
-  // PostgREST-generated CTE form — `with pgrst_source as ( select ... from
-  // "public"."error_events" ... )`. Require the CTE body's leading token to be
-  // `select` so a PostgREST write wrapper (`... as ( insert into ... )`) stays captured
-  // as a real code-bug shape.
-  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+(?:"public"\."error_events"|"error_events"|(?:public\.)?error_events\b)/.test(
-    q,
-  );
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name this exact table
+  // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to error_events with a bogus column is a
+  // code bug we DO want to page on, not the ad hoc read this drop targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q);
 }
 
 /**
@@ -1677,6 +1638,103 @@ export function isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocN
 }
 
 /**
+ * Foreign-app noise - Postgres reporting `syntax error at end of input` for a stale /
+ * hand-typed ad hoc approval-decisions lookup that references the non-existent
+ * `agent_jobs.branch_name` column. `approval_decisions` and `agent_jobs` are real
+ * product tables, but `agent_jobs` has NO `branch_name` column. The captured shape is
+ * a one-off SQL Editor / stale external tool query that dangles at the end; there is no
+ * lever from ShopCX to make that query resolve.
+ */
+export function isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped.toLowerCase() !== "syntax error at end of input") return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  if (!/^select\b[\s\S]*\bfrom\s+(?:public\.)?approval_decisions\b/.test(q)) return false;
+  return q.includes("agent_jobs.branch_name");
+}
+
+/**
+ * Foreign-app noise — Postgres reporting `column specs.<archived_at|folded_at|deferred_at>
+ * does not exist` for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.specs`. The `specs` card table exists (see
+ * `supabase/migrations/20260713120001_specs_and_spec_phases.sql`) but its lifecycle state
+ * is NOT recorded via `archived_at` / `folded_at` / `deferred_at` timestamp columns — the
+ * schema uses `status text` (with a `folded` value and a `deferred` value) plus a
+ * `deferred boolean` flag; grep confirms no ShopCX code path reads any of the three
+ * timestamp names off `specs`, and the migration creates none of them. The error only
+ * reaches Supabase's `postgres_logs` feed when an external / stale PostgREST client (a
+ * foreign app, a deprecated integration, a stale SQL Editor session) queries
+ * `/rest/v1/specs?select=...archived_at...` (or `folded_at`, or `deferred_at`). There is
+ * no lever from ShopCX to make that query resolve — paging Platform on it (Control Tower
+ * signature `supabase-logs:fbf1fe604803f481`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise` — the
+ * same narrow-gating shape (exact `column <table>.<name> does not exist` + bare
+ * SELECT-on-table shape), scoped to the three obsolete `specs` timestamp column names.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS table+column set
+ *      — trimmed equal to `column specs.<archived_at|folded_at|deferred_at> does not exist`
+ *      (or the `public.` qualified variant, with any leading `ERROR: ` prefix Postgres
+ *      includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.specs` lookup shape
+ *      (any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have one of these timestamp columns — e.g. `tickets.archived_at`)
+ *     still pages — the pin is `specs.<archived_at|folded_at|deferred_at>` only,
+ *   - a column-missing error on `specs` for a DIFFERENT column (e.g. a real column that
+ *     got renamed — `status`, `deferred`, `owner`, `parent`) still pages — the pin covers
+ *     the three obsolete archive-timestamp names only,
+ *   - a `specs.archived_at` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin
+ *     is the bare SELECT-lookup shape, matching the ad hoc direct-REST read we've observed,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `specs` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column specs.archived_at does not exist" ||
+    stripped === "column public.specs.archived_at does not exist" ||
+    stripped === "column specs.folded_at does not exist" ||
+    stripped === "column public.specs.folded_at does not exist" ||
+    stripped === "column specs.deferred_at does not exist" ||
+    stripped === "column public.specs.deferred_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `specs` (with or
+  // without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays captured
+  // — a caller that actually writes to specs with one of these bogus timestamp columns
+  // is a code bug we DO want to page on, not the ad hoc direct-REST read this drop
+  // targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?specs\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column spec_phases.idx does not exist` for an
  * ad hoc / stale PostgREST direct-REST SELECT against `public.spec_phases.idx`. The
  * `spec_phases` table exists (see
@@ -1814,6 +1872,144 @@ export function isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
   // — a caller that actually writes to specs with a bogus `is_active` column is a code
   // bug we DO want to page on, not the ad hoc direct-REST read this drop targets.
   return /^select\b[\s\S]*\bfrom\s+(?:public\.)?specs\b/.test(q);
+}
+
+/**
+ * Foreign-app noise — Postgres reporting `column specs.archived does not exist` for an
+ * ad hoc / stale PostgREST direct-REST SELECT against `public.specs.archived`. The
+ * `specs` table exists (see
+ * `supabase/migrations/20260713120001_specs_and_spec_phases.sql`) but there is no
+ * `archived` column — a spec's terminal lifecycle state is `folded` on `specs.status`
+ * (M4 fold), not a boolean archive flag. Every ShopCX caller reads / writes via the
+ * `specs-table` SDK; grep confirms no code path selects `.archived` from `public.specs`.
+ * The error only reaches Supabase's `postgres_logs` feed when an external / stale
+ * PostgREST client (a foreign app, a deprecated integration, a stale SQL Editor session)
+ * queries `/rest/v1/specs?select=...archived...` or `?archived=eq.false`. There is no
+ * lever from ShopCX to make that query resolve — paging Platform on it is repair work
+ * for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise` — the same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` + bare
+ * SELECT-on-table shape), aimed at a different foreign caller on a different table.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column specs.archived does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.specs` lookup
+ *      shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have an `archived` column) still pages — the pin is
+ *     `specs.archived` only,
+ *   - a column-missing error on `specs` for a DIFFERENT column (e.g. the real `status`
+ *     column got renamed) still pages — the pin covers `archived` only,
+ *   - a `specs.archived` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
+ *     bare SELECT-lookup shape, matching the ad hoc direct-REST read we've observed,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `specs` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column specs.archived does not exist" ||
+    stripped === "column public.specs.archived does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `specs` (with or
+  // without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays captured
+  // — a caller that actually writes to `specs` with a bogus `archived` column is a code
+  // bug we DO want to page on, not the ad hoc direct-REST read this drop targets. `\b`
+  // around `specs` keeps the anchor from matching sibling tables like `spec_phases` /
+  // `spec_status_history`.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?specs\b/.test(q);
+}
+
+/**
+ * Foreign-app noise — Postgres reporting `column policies.kind does not exist` for an
+ * ad hoc / stale PostgREST direct-REST SELECT against `public.policies.kind`. The
+ * `policies` table exists (see `supabase/migrations/20260526130000_policies_table.sql`)
+ * but is keyed by `slug` — every ShopCX reader goes through the policies SDK
+ * ([[../libraries/policies]]) which selects the active row for a given
+ * `(workspace_id, slug)` pair and reads real columns (`slug`, `name`, `version`,
+ * `customer_summary`, `internal_summary`, `rules`, …). There is no `kind` column on the
+ * table by design. The column-missing ERROR only reaches Supabase's `postgres_logs` feed
+ * when an external / stale PostgREST client (a foreign app, a deprecated integration, a
+ * stale SQL Editor session) queries `/rest/v1/policies?select=...kind...`. There is no
+ * lever from ShopCX to make that query resolve — paging Platform on it is repair work
+ * for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise` — the same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` + bare
+ * SELECT-on-table shape), aimed at a different foreign caller.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column policies.kind does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.policies`
+ *      lookup shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have a `kind` column) still pages — the pin is `policies.kind`
+ *     only,
+ *   - a column-missing error on `policies` for a DIFFERENT column (e.g. the real
+ *     `slug` column got renamed) still pages — the pin covers `kind` only,
+ *   - a `policies.kind` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
+ *     bare SELECT-lookup shape, matching the ad hoc direct-REST read we've observed,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `policies` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresPoliciesKindLookupNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column policies.kind does not exist" ||
+    stripped === "column public.policies.kind does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `policies` (with
+  // or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to policies with a bogus `kind` column is
+  // a code bug we DO want to page on, not the ad hoc direct-REST read this drop targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?policies\b/.test(q);
 }
 
 /**
