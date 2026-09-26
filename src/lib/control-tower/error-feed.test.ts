@@ -22,6 +22,7 @@ import {
   isForeignEasyPostReturnsSweepRateLimit,
   isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
+  isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isInngestStepWrappedNonErrorLog,
@@ -589,6 +590,88 @@ test("isForeignSupabasePostgresMissingControlTowerEventsLookupNoise returns fals
     ),
     false,
   );
+});
+
+// ── isForeignSupabasePostgresAmbiguousOidIntrospectionNoise ──
+// The exact Postgres ERROR `column reference "oid" is ambiguous` surfaces on Supabase's
+// postgres_logs feed at severity ERROR when a catalog-introspection query joins two
+// pg_catalog tables (each carrying its own `oid` column) without qualifying the reference.
+// None of our own SQL emits this — every ShopCX `oid` reference is qualified — so the row
+// is from an external / manual catalog probe (Control Tower `supabase-logs:6961407f61ea9a08`).
+// Drop AT CAPTURE to the exact phrase; real Postgres bugs (a different ambiguous column,
+// FATAL/PANIC, constraint violations, statement timeouts) still surface.
+
+test("isForeignSupabasePostgresAmbiguousOidIntrospectionNoise drops the exact ambiguous-oid message", () => {
+  assert.equal(
+    isForeignSupabasePostgresAmbiguousOidIntrospectionNoise('column reference "oid" is ambiguous'),
+    true,
+  );
+  // Leading/trailing whitespace tolerated (trimmed).
+  assert.equal(
+    isForeignSupabasePostgresAmbiguousOidIntrospectionNoise('  column reference "oid" is ambiguous  '),
+    true,
+  );
+  // Newline padding is tolerated by the trim.
+  assert.equal(
+    isForeignSupabasePostgresAmbiguousOidIntrospectionNoise('\ncolumn reference "oid" is ambiguous\n'),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check (mirrors the sibling
+  // missing-relation drop's behavior).
+  assert.equal(
+    isForeignSupabasePostgresAmbiguousOidIntrospectionNoise('ERROR: column reference "oid" is ambiguous'),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAmbiguousOidIntrospectionNoise('ERROR:  column reference "oid" is ambiguous'),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresAmbiguousOidIntrospectionNoise KEEPS a different ambiguous-column message (real query bug still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresAmbiguousOidIntrospectionNoise('column reference "id" is ambiguous'),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAmbiguousOidIntrospectionNoise('column reference "customer_id" is ambiguous'),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresAmbiguousOidIntrospectionNoise KEEPS unrelated Postgres ERRORs and FATALs so real bugs still page", () => {
+  assert.equal(
+    isForeignSupabasePostgresAmbiguousOidIntrospectionNoise(
+      'duplicate key value violates unique constraint "orders_pkey"',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAmbiguousOidIntrospectionNoise("canceling statement due to statement timeout"),
+    false,
+  );
+  // A FATAL crash surfaced on postgres_logs must still page — the pin is exact.
+  assert.equal(
+    isForeignSupabasePostgresAmbiguousOidIntrospectionNoise(
+      "the database system is in recovery mode",
+    ),
+    false,
+  );
+  // A super-string of the exact message stays captured — the equality is exact.
+  assert.equal(
+    isForeignSupabasePostgresAmbiguousOidIntrospectionNoise(
+      'column reference "oid" is ambiguous at character 42',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresAmbiguousOidIntrospectionNoise returns false on empty / nullish / whitespace-only input", () => {
+  assert.equal(isForeignSupabasePostgresAmbiguousOidIntrospectionNoise(null), false);
+  assert.equal(isForeignSupabasePostgresAmbiguousOidIntrospectionNoise(undefined), false);
+  assert.equal(isForeignSupabasePostgresAmbiguousOidIntrospectionNoise(""), false);
+  assert.equal(isForeignSupabasePostgresAmbiguousOidIntrospectionNoise("   "), false);
+  assert.equal(isForeignSupabasePostgresAmbiguousOidIntrospectionNoise("\n\t  "), false);
 });
 
 // ── isForeignGoTrueEdgeNoise (error-feed-drop-supabase-gotrue-504-edge-noise) ──

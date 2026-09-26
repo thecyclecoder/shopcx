@@ -1075,6 +1075,42 @@ export function isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column reference "oid" is ambiguous` on a
+ * catalog-introspection query that joins two `pg_catalog` tables (each carrying its own
+ * `oid` column) without qualifying the `oid` reference. None of our own SQL emits this
+ * message — every ShopCX `oid` reference is qualified — so the row that reaches
+ * Supabase's `postgres_logs` feed at severity `ERROR` is from an external tool / manual
+ * catalog probe / stale exploratory query, a surface we hold zero levers on. The Control
+ * Tower has been paging Platform on it (Supabase-logs signature
+ * `supabase-logs:6961407f61ea9a08`) — the third member of the Postgres foreign-noise
+ * family after `isForeignSupabasePostgresAggregateIntrospectionNoise` and
+ * `isForeignSupabasePostgresMissingControlTowerEventsLookupNoise`.
+ *
+ * `true` ONLY when the trimmed message (with any leading Postgres `ERROR: ` prefix
+ * stripped, matching the sibling missing-relation drop) equals the exact phrase
+ * `column reference "oid" is ambiguous`. Narrowly gated so:
+ *   - a Postgres FATAL/PANIC still pages (it's a crash, not this introspection error),
+ *   - a different ambiguous-column ERROR (e.g. `column reference "id" is ambiguous`) still
+ *     pages — that's a real query bug we DO want to see; the pin is the `oid` column only,
+ *   - a constraint violation, statement timeout, or any other Postgres ERROR still pages
+ *     (different message),
+ *   - empty / nullish / whitespace-only input returns `false`.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresAmbiguousOidIntrospectionNoise(
+  message: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  return stripped === 'column reference "oid" is ambiguous';
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).
