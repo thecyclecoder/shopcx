@@ -27,6 +27,7 @@ import {
   isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -2408,6 +2409,206 @@ test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise retur
   assert.equal(
     isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
       "column spec_status_history.created_at does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise ──
+// A stale / hand-typed ad hoc SELECT against `public.approval_decisions` that references
+// the non-existent `agent_jobs.branch_name` column and dangles at the end. Postgres
+// reports it as `syntax error at end of input`. Foreign-owned surface — no lever from
+// us — drop AT CAPTURE only when ALL of the exact end-of-input syntax message, the bare
+// SELECT-lookup shape on approval_decisions, AND the `agent_jobs.branch_name` marker are
+// present. A real syntax error on any other query, a real column-missing / constraint /
+// FATAL on approval_decisions, or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise drops the ad hoc SELECT syntax-error lookup on the exact approval_decisions + agent_jobs.branch_name shape", () => {
+  // The captured ad hoc shape — public.-qualified and unqualified FROM variants.
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at end of input",
+      "select id, agent_jobs.branch_name from public.approval_decisions where",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at end of input",
+      "select agent_jobs.branch_name from approval_decisions",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at end of input",
+      "select ad.id, agent_jobs.branch_name from public.approval_decisions ad where ad.workspace_id = 'x' order by",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at end of input",
+      "SELECT ID, AGENT_JOBS.BRANCH_NAME FROM PUBLIC.APPROVAL_DECISIONS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "ERROR: syntax error at end of input",
+      "select agent_jobs.branch_name from public.approval_decisions",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "  syntax error at end of input  ",
+      "   select agent_jobs.branch_name from public.approval_decisions   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a syntax error on any OTHER query (real syntax bugs still page)", () => {
+  // A syntax error whose query doesn't reference approval_decisions is a real bug.
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at end of input",
+      "select id from public.orders where",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at end of input",
+      "select id from public.tickets where status =",
+    ),
+    false,
+  );
+  // Even against approval_decisions, if the `agent_jobs.branch_name` dead-giveaway
+  // marker is missing this is a DIFFERENT ad hoc syntax bug we want to see.
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at end of input",
+      "select id from public.approval_decisions where",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a DIFFERENT syntax-error message class (a real code-bug syntax throws different text)", () => {
+  // Postgres has many syntax-error phrasings; only the exact end-of-input marker is
+  // this ad hoc lookup's fingerprint.
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at or near \"where\"",
+      "select agent_jobs.branch_name from public.approval_decisions where",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at or near \",\"",
+      "select agent_jobs.branch_name from public.approval_decisions,",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a non-SELECT statement shape (a real code-bug writing approval_decisions still pages)", () => {
+  // INSERT / UPDATE / DELETE against approval_decisions with the same tokens is
+  // real code trying to write the table — a bug we WANT to see.
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at end of input",
+      "insert into public.approval_decisions (id, note) values (agent_jobs.branch_name,",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at end of input",
+      "update public.approval_decisions set note = agent_jobs.branch_name where",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at end of input",
+      "delete from public.approval_decisions where id = agent_jobs.branch_name and",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise KEEPS a column-missing / constraint / FATAL / permission ERROR on approval_decisions (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "column agent_jobs.branch_name does not exist",
+      "select agent_jobs.branch_name from public.approval_decisions",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "database is shutting down",
+      "select agent_jobs.branch_name from public.approval_decisions",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      'duplicate key value violates unique constraint "approval_decisions_pkey"',
+      "select agent_jobs.branch_name from public.approval_decisions",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "canceling statement due to statement timeout",
+      "select agent_jobs.branch_name from public.approval_decisions",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      'permission denied for relation "public.approval_decisions"',
+      "select agent_jobs.branch_name from public.approval_decisions",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at end of input",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+      "syntax error at end of input",
       null,
     ),
     false,

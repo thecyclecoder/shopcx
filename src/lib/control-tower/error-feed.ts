@@ -1677,6 +1677,84 @@ export function isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocN
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `syntax error at end of input` for a stale /
+ * hand-typed ad hoc approval-decisions lookup that references the non-existent
+ * `agent_jobs.branch_name` column. `approval_decisions` is a real product table
+ * (see `supabase/migrations/20260703120000_approval_decisions.sql`) and `agent_jobs`
+ * is a real product table, but `agent_jobs` has NO `branch_name` column — grep
+ * confirms no ShopCX code path selects, inserts, updates, or joins on
+ * `agent_jobs.branch_name`. The captured shape is a one-off SQL Editor / stale
+ * external tool query that dangles at the end (typed by hand, cut off before a
+ * WHERE / GROUP BY / LIMIT), which Postgres reports as `syntax error at end of
+ * input`. There is no lever from ShopCX to make that query resolve — paging
+ * Platform on it (Control Tower signature `supabase-logs:2894da49c2a36610`) is
+ * repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise`
+ * / `isForeignSupabasePostgresOrdersNameLookupNoise` — the same narrow-gating shape
+ * (message + query pinned to a specific ad hoc read), aimed at the syntax-error
+ * class instead of the column-missing class. Real syntax errors from migrations,
+ * app queries, writes, or on other tables carry a different query shape and stay
+ * captured / paged on first sighting.
+ *
+ * `true` ONLY when ALL of:
+ *   1. the message is Postgres's canonical end-of-input syntax marker — trimmed
+ *      equal to `syntax error at end of input`, with any leading `ERROR: ` prefix
+ *      Postgres includes on the logs surface stripped,
+ *   2. `parsed.query` is a bare `select ... from public.approval_decisions` (or
+ *      unqualified) lookup shape — the SELECT-on-approval_decisions ad hoc read
+ *      the incident query has,
+ *   3. the query names the non-existent `agent_jobs.branch_name` reference (the
+ *      dead-giveaway that this is the ad hoc lookup and not any other syntax bug
+ *      on approval_decisions).
+ *
+ * Narrowly gated so:
+ *   - a `syntax error at end of input` from a REAL app query, a migration, or
+ *     a table that isn't `approval_decisions` still pages — the pin requires the
+ *     approval_decisions FROM clause,
+ *   - a syntax error on an approval_decisions read that DOESN'T reference
+ *     `agent_jobs.branch_name` (a different ad hoc shape / a real code bug) still
+ *     pages — the pin requires the specific `agent_jobs.branch_name` marker,
+ *   - a column-missing / relation-missing / constraint / FATAL / PANIC / permission
+ *     error on approval_decisions is untouched (different message class),
+ *   - a non-SELECT statement carrying the same tokens stays captured — a caller
+ *     that actually writes with the malformed shape is a code bug we WANT to see,
+ *   - empty / nullish message OR query returns `false` — we need all three markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The syntax-error-at-end-of-input
+  // message itself has a stable canonical shape.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped.toLowerCase() !== "syntax error at end of input") return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on approval_decisions — allow any trailing WHERE/LIMIT/ORDER BY,
+  // but the statement MUST start with `select` and its FROM clause MUST name
+  // `approval_decisions` (with or without the `public.` schema qualifier). A JOIN /
+  // UNION / non-SELECT stays captured — a caller that actually writes to
+  // approval_decisions with a bogus shape is a code bug we DO want to page on.
+  if (!/^select\b[\s\S]*\bfrom\s+(?:public\.)?approval_decisions\b/.test(q)) return false;
+  // The dead-giveaway marker — the non-existent `agent_jobs.branch_name` reference
+  // that lets this predicate refuse to swallow other syntax-error shapes on
+  // approval_decisions (a different ad hoc shape, a real code bug). Case-insensitive
+  // substring — the query may have joined `agent_jobs` via an alias or bare table
+  // reference, either way the specific `agent_jobs.branch_name` column reference
+  // is what pins the ad hoc lookup.
+  return q.includes("agent_jobs.branch_name");
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).

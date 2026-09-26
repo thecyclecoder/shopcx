@@ -45,6 +45,7 @@ import {
   isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -307,6 +308,21 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_status_history`, or on it via a non-SELECT statement (real code-bug shape)
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / hand-typed SQL Editor lookup
+      // against `public.approval_decisions` that references the non-existent
+      // `agent_jobs.branch_name` column and dangles at the end, which Postgres reports
+      // as `syntax error at end of input`. `approval_decisions` and `agent_jobs` are
+      // both real product tables, but `agent_jobs` has no `branch_name` column — the
+      // query is not emitted by any ShopCX code path. There is no lever from ShopCX
+      // to make that query resolve — paging Platform on it (Control Tower signature
+      // `supabase-logs:2894da49c2a36610`,
+      // [[../specs/error-feed-drop-approval-decisions-adhoc-syntax-noise]]) is repair
+      // work for a query we don't own. Narrowly gated to require ALL of the exact
+      // end-of-input syntax message, the bare-SELECT-on-approval_decisions shape, AND
+      // the `agent_jobs.branch_name` marker — a real syntax error on any other query,
+      // a real column-missing / constraint / FATAL on approval_decisions, or a
+      // non-SELECT statement still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
