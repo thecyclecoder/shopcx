@@ -42,9 +42,11 @@ import {
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
   isForeignSupabasePostgresOrdersNameLookupNoise,
+  isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
+  isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -258,6 +260,24 @@ const LOG_QUERIES: LogQuery[] = [
       // (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresOrdersNameLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.spec_phases.workspace_id` (or the `spec_slug` twin). The
+      // `spec_phases` table exists as a real product table but by design carries no
+      // `workspace_id` and no `spec_slug` column — both live on the parent `public.specs`
+      // row (`workspace_id` / `slug`), and every ShopCX reader either joins through
+      // `specs` or goes through the server-side RPCs. The column-missing ERROR only
+      // reaches this feed when a foreign app / stale SQL Editor session / deprecated
+      // integration queries `/rest/v1/spec_phases?select=...workspace_id...`. There is
+      // no lever from ShopCX to make that query resolve — paging Platform on it
+      // (Control Tower signature `supabase-logs:4371de33cf8e1d68`,
+      // [[../specs/error-feed-drop-spec-phases-workspace-slug-adhoc-lookup-nois]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message on one of the two off-schema columns AND the bare-SELECT-
+      // on-spec_phases shape — a column-missing error on any other table, a different
+      // column on `spec_phases` (a real schema regression), or on `spec_phases` via a
+      // non-SELECT statement (real code-bug shape) still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.smart_patterns.content`. The `smart_patterns` table exists but
       // has no `content` column (grep confirms no ShopCX caller queries `.content`; its
       // text lives in `phrases` / `embedding_text` / `description` / `name`); the
@@ -305,6 +325,22 @@ const LOG_QUERIES: LogQuery[] = [
       // `specs`, or on it via a non-SELECT statement (real code-bug shape) still surfaces
       // / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.spec_phases.idx`. The `spec_phases` table exists but its
+      // ordering column is `position`, not `idx` — every ShopCX caller orders phases by
+      // `position` (see `spec_phases_spec_position` unique index + the
+      // `get_spec_with_phases` / `list_specs_with_phases` RPCs). The column-missing
+      // ERROR only reaches this feed when a foreign app / stale SQL Editor session
+      // queries `/rest/v1/spec_phases?select=...idx...` or `?order=idx.asc`. There is no
+      // lever from ShopCX to make that query resolve — paging Platform on it (Control
+      // Tower signature `supabase-logs:1dcc664aba4a5239`,
+      // [[../specs/error-feed-drop-spec-phases-idx-adhoc-lookup-noise]]) is repair work
+      // for a query we don't own. Narrowly gated to require BOTH the exact column-
+      // missing message AND the bare-SELECT-on-spec_phases shape — a column-missing
+      // error on any other table, a different column on `spec_phases`, or on
+      // `spec_phases` via a non-SELECT statement (real code-bug shape) still surfaces /
+      // pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
