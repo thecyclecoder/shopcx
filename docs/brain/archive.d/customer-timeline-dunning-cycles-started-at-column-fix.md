@@ -1,0 +1,1 @@
+- **customer-timeline: read dunning_cycles.created_at (not the non-existent started_at)** · verified 2026-09-26 · → [[../libraries/customer-timeline]] + [[../tables/dunning_cycles]]
