@@ -35,6 +35,7 @@ import {
   isForeignGoTrueEdgeNoise,
   isForeignGoTrueAuthLogNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
+  isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
 } from "@/lib/control-tower/error-feed";
 
@@ -172,6 +173,15 @@ const LOG_QUERIES: LogQuery[] = [
       // error on any other table, or on `control_tower_events` via a non-SELECT statement
       // (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an operator typo — a manual SQL client did a
+      // `select ... from error_events` naming the wrong column (`first_seen` instead of
+      // our real `first_seen_at`). The resulting undefined_column ERROR is repair work
+      // for a query we don't own ([[../specs/error-feed-drop-error-events-first-seen-column-adhoc-lookup-]],
+      // Control Tower signature `supabase-logs:41dd87c2e483a884`). Narrowly gated to
+      // require BOTH the exact column-missing message AND the bare-SELECT-on-error_events
+      // shape that names `first_seen` (not `first_seen_at`) — a column-missing error on
+      // any other table, or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: Postgres reporting the built-in aggregate
       // `array_agg` classification when a catalog/introspection query resolves it as a
       // regular function ([[../specs/error-feed-drop-supabase-array-agg-aggregate-introspection-n]],
