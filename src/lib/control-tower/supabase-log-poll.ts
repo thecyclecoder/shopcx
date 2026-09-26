@@ -35,6 +35,7 @@ import {
   isForeignGoTrueEdgeNoise,
   isForeignGoTrueAuthLogNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
+  isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
 } from "@/lib/control-tower/error-feed";
@@ -173,6 +174,18 @@ const LOG_QUERIES: LogQuery[] = [
       // error on any other table, or on `control_tower_events` via a non-SELECT statement
       // (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... metadata ... from
+      // public.error_events` lookup by an external tool / stale exploratory query. The
+      // `error_events` table exists but no ShopCX code path / migration / view / function
+      // / trigger references an `error_events.metadata` column, so the column-missing
+      // ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-error-events-metadata-adhoc-lookup-noise]], Control
+      // Tower signature `supabase-logs:932dc308d8acafab`). Narrowly gated to require BOTH
+      // the exact column-missing message AND the SELECT-lookup shape — a column-missing
+      // error for any other column on error_events, or for `metadata` on any other table,
+      // or on error_events via a non-SELECT statement (real code-bug shape) still surfaces
+      // / pages on first sighting.
+      if (isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: Postgres reporting the built-in aggregate
       // `array_agg` classification when a catalog/introspection query resolves it as a
       // regular function ([[../specs/error-feed-drop-supabase-array-agg-aggregate-introspection-n]],

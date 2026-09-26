@@ -1075,6 +1075,68 @@ export function isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `error_events.metadata`. `error_events` DOES exist as a product table, but no ShopCX code
+ * path, migration, view, function or trigger references an `error_events.metadata` column
+ * (grep both to confirm). The message appears on Supabase's `postgres_logs` feed only when
+ * an external / manual tool or a stale exploratory query does a raw
+ * `select ... metadata ... from public.error_events` lookup. There is no lever from ShopCX
+ * to make that query resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-error-events-metadata-adhoc-lookup-noise]], Control Tower
+ * signature `supabase-logs:932dc308d8acafab`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingControlTowerEventsLookupNoise` — same narrow-
+ * gating shape, different failure class (missing column on an existing table instead of a
+ * missing relation).
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS name — trimmed
+ *      equal to `column error_events.metadata does not exist` (with or without the
+ *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.error_events` lookup
+ *      shape (the ad hoc SELECT — any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `error_events` (a real product-schema
+ *     regression on a live column) still pages,
+ *   - a column-missing error for `metadata` on ANY OTHER table (a real code bug on another
+ *     table that DOES have such a column) still pages,
+ *   - an `error_events.metadata` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
+ *     SELECT-lookup shape only, matching the ad hoc read we've observed,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <name> does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column error_events.metadata does not exist" ||
+    stripped === "column public.error_events.metadata does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name this exact table
+  // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to error_events with a `metadata` field is
+  // a code bug we DO want to page on, not the ad hoc read this drop targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column reference "oid" is ambiguous` on a
  * catalog-introspection query that joins two `pg_catalog` tables (each carrying its own
  * `oid` column) without qualifying the `oid` reference. None of our own SQL emits this
