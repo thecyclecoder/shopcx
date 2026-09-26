@@ -92,14 +92,6 @@ const SANCTIONED_RAW_ACCESS: SanctionedEntry[] = [
       "migrated agent callers, deferred to a follow-up so Phase 1 stays scoped.",
   },
   {
-    file: "src/lib/sonnet-prompt-auto-review.ts",
-    reason:
-      "Auto-reviewer read — SELECTs non-existent columns (`summary`, `internal_notes`, " +
-      "`rules_json`) so the query already reads as empty; a follow-up rewrites it against the " +
-      "SDK's real column names. Sanctioned for now because migrating without also fixing the " +
-      "broken projection changes behaviour (the current code effectively noop-reads).",
-  },
-  {
     file: "scripts/builder-worker.ts",
     reason:
       "`loadActivePoliciesBlock` in Sol's ticket-handle brief loader — same shape as " +

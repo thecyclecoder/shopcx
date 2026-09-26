@@ -23,6 +23,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { OPUS_MODEL } from "@/lib/ai-models";
 import { logAiUsage, usageCostCents } from "@/lib/ai-usage";
 import { applyReviewDecision as applyReviewDecisionSdk, archiveSupersededPrompt } from "@/lib/sonnet-prompts-table";
+import { getAgentPolicyPackage, type AgentPolicyPackageEntry } from "@/lib/policies";
 
 // ── Constants ──────────────────────────────────────────────────────
 // Below this confidence, we DROP (reject) the proposal — not bother
@@ -76,7 +77,7 @@ export interface ReviewDecision {
 export interface ReviewInputs {
   proposal: any;
   similarPrompts: any[];
-  policies: any[];
+  policies: AgentPolicyPackageEntry[];
   sourceTickets: any[];
   voiceDocs: { customer_voice: string; operational_rules: string; ui_conventions: string };
 }
@@ -135,13 +136,7 @@ export async function loadReviewInputs(
     )
     .limit(TOP_K_SIMILAR_PROMPTS);
 
-  const { data: policies } = await admin
-    .from("policies")
-    .select("id, slug, name, summary, internal_notes, rules_json")
-    .eq("workspace_id", workspaceId)
-    .eq("is_active", true)
-    .is("superseded_by", null)
-    .limit(TOP_K_POLICIES);
+  const policies = (await getAgentPolicyPackage(admin, workspaceId)).slice(0, TOP_K_POLICIES);
 
   // Source pattern → contributing tickets.
   const sourceTickets: any[] = [];
@@ -182,7 +177,7 @@ export async function loadReviewInputs(
       category: proposal.category,
     },
     similarPrompts: similar || [],
-    policies: policies || [],
+    policies,
     sourceTickets,
     voiceDocs: docs,
   };
@@ -237,7 +232,7 @@ export function buildUserPrompt(inputs: ReviewInputs): string {
     "",
     `## Active policies (${policies.length})`,
     policies.length
-      ? policies.map((p: any) => `- ${p.slug}: ${p.name}\n  summary: ${p.summary || ""}\n  internal: ${p.internal_notes || ""}`).join("\n\n")
+      ? policies.map(p => `- ${p.slug}: ${p.name}\n  internal: ${p.internal_summary || ""}`).join("\n\n")
       : "_None._",
     "",
     `## Source pattern — contributing tickets (${sourceTickets.length})`,
