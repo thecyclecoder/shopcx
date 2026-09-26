@@ -13,6 +13,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  AGENT_JOB_DIRECTOR_PASS_SELECT,
+  AGENT_JOB_SNAPSHOT_SELECT,
   BOX_ACTIVE_STATUSES,
   BOX_PARKED_STATUSES,
   BOX_TERMINAL_STATUSES,
@@ -33,11 +35,30 @@ function row(over: Partial<RawJobRow> & Pick<RawJobRow, "id" | "status">): RawJo
     needs_attention_class: null,
     updated_at: MIN_AGO(5),
     created_at: MIN_AGO(10),
-    completed_at: null,
     error: null,
     ...over,
   };
 }
+
+test("agent_jobs select fingerprints never re-add the nonexistent `completed_at` column", () => {
+  // Regression: the director box snapshot's Supabase select MUST match the real agent_jobs schema
+  // (docs/brain/tables/agent_jobs.md). `completed_at` does not exist — asking for it makes Postgres
+  // emit a "column agent_jobs.completed_at does not exist" error and the snapshot silently returns
+  // empty data, so the coach reports "box is empty" while real work is in flight.
+  for (const fingerprint of [AGENT_JOB_SNAPSHOT_SELECT, AGENT_JOB_DIRECTOR_PASS_SELECT]) {
+    const columns = fingerprint.split(",").map((c) => c.trim());
+    assert.equal(
+      columns.includes("completed_at"),
+      false,
+      `agent_jobs select fingerprint must NOT include completed_at: ${fingerprint}`,
+    );
+    assert.equal(
+      columns.includes("updated_at"),
+      true,
+      `agent_jobs select fingerprint must include updated_at (the real lifecycle timestamp): ${fingerprint}`,
+    );
+  }
+});
 
 test("BOX_ACTIVE_STATUSES never includes the bad-enum statuses that started this whole spec", () => {
   const active = new Set<string>(BOX_ACTIVE_STATUSES);

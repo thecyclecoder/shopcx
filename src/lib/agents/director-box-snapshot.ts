@@ -99,7 +99,7 @@ export interface DirectorPass {
   spec_slug: string | null;
   status: string;
   created_at: string;
-  completed_at: string | null;
+  updated_at: string;
   error: string | null;
 }
 
@@ -145,7 +145,6 @@ export interface RawJobRow {
   needs_attention_class: string | null;
   updated_at: string | null;
   created_at: string | null;
-  completed_at?: string | null;
   error?: string | null;
 }
 
@@ -158,6 +157,17 @@ const ALL_TRACKED_STATUSES = [
 const KNOWN_ACTIVE = new Set<string>(BOX_ACTIVE_STATUSES);
 const KNOWN_PARKED = new Set<string>(BOX_PARKED_STATUSES);
 const KNOWN_TERMINAL = new Set<string>(BOX_TERMINAL_STATUSES);
+
+/**
+ * The columns this module reads from `agent_jobs`. Exported so the regression test can assert the
+ * fingerprint never re-adds `completed_at` — a column that does not exist on the table (see
+ * docs/brain/tables/agent_jobs.md: `created_at` / `updated_at` are the only lifecycle timestamps).
+ * When a director pass or terminal row's "completion" time is needed, `updated_at` is the real source.
+ */
+export const AGENT_JOB_SNAPSHOT_SELECT =
+  "id, spec_slug, kind, status, needs_attention_class, updated_at, created_at, error";
+export const AGENT_JOB_DIRECTOR_PASS_SELECT =
+  "id, spec_slug, status, created_at, updated_at, error";
 
 function ageMinutesFrom(iso: string | null | undefined, now: number): number {
   if (!iso) return 0;
@@ -199,7 +209,7 @@ export function bucketizeJobs(rows: RawJobRow[], now: number): JobBuckets {
     if (!isActive && !isParked && !isTerminal) continue;
 
     if (isTerminal) {
-      const tIso = r.updated_at ?? r.completed_at ?? r.created_at ?? "";
+      const tIso = r.updated_at ?? r.created_at ?? "";
       const t = Date.parse(tIso);
       if (!Number.isFinite(t) || now - t > RECENT_TERMINAL_WINDOW_MS) continue;
     }
@@ -292,14 +302,14 @@ async function readJobRows(admin: Admin, workspaceId: string, now: number): Prom
     const [{ data: a }, { data: t }] = await Promise.all([
       admin
         .from("agent_jobs")
-        .select("id, spec_slug, kind, status, needs_attention_class, updated_at, created_at, completed_at, error")
+        .select(AGENT_JOB_SNAPSHOT_SELECT)
         .eq("workspace_id", workspaceId)
         .in("status", activeParked)
         .order("updated_at", { ascending: false })
         .limit(JOB_QUERY_LIMIT),
       admin
         .from("agent_jobs")
-        .select("id, spec_slug, kind, status, needs_attention_class, updated_at, created_at, completed_at, error")
+        .select(AGENT_JOB_SNAPSHOT_SELECT)
         .eq("workspace_id", workspaceId)
         .in("status", BOX_TERMINAL_STATUSES as unknown as string[])
         .gte("updated_at", recentCutoff)
@@ -318,7 +328,7 @@ async function readDirectorPasses(admin: Admin, workspaceId: string): Promise<Di
     // not director_activity (the writes). See the spec's "why" — the wrong source was the second misread.
     const { data } = await admin
       .from("agent_jobs")
-      .select("id, spec_slug, status, created_at, completed_at, error")
+      .select(AGENT_JOB_DIRECTOR_PASS_SELECT)
       .eq("workspace_id", workspaceId)
       .eq("kind", "platform-director")
       .order("created_at", { ascending: false })
@@ -328,7 +338,7 @@ async function readDirectorPasses(admin: Admin, workspaceId: string): Promise<Di
       spec_slug: r.spec_slug,
       status: r.status,
       created_at: r.created_at,
-      completed_at: r.completed_at,
+      updated_at: r.updated_at,
       error: r.error,
     }));
   } catch {
