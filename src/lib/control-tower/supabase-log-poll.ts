@@ -41,6 +41,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
+  isForeignSupabasePostgresOrdersNameLookupNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -240,6 +241,19 @@ const LOG_QUERIES: LogQuery[] = [
       // drop) so a FATAL/PANIC, a different ambiguous-column ERROR, or any other Postgres
       // ERROR still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresAmbiguousOidIntrospectionNoise(message)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.orders.name`. The `orders` table exists but has no `name` column
+      // (grep confirms every ShopCX caller uses `first_name` / `last_name` / the internal
+      // UUID `id`); the column-missing ERROR only reaches this feed when a foreign app /
+      // deprecated integration / stale SQL Editor session queries `/rest/v1/orders?select=
+      // ...name...`. There is no lever from ShopCX to make that query resolve — paging
+      // Platform on it (Control Tower signature `supabase-logs:b7ce7a75d6250b29`,
+      // [[../specs/error-feed-drop-orders-name-direct-rest-lookup-noise]]) is repair work
+      // for a query we don't own. Narrowly gated to require BOTH the exact column-missing
+      // message AND the bare-SELECT-on-orders shape — a column-missing error on any other
+      // table, a different column on `orders`, or on `orders` via a non-SELECT statement
+      // (real code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresOrdersNameLookupNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,

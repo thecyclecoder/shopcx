@@ -1360,6 +1360,70 @@ export function isForeignSupabasePostgresAmbiguousOidIntrospectionNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column orders.name does not exist` for an ad hoc
+ * SELECT lookup / PostgREST direct-REST call against `public.orders.name`. The `orders`
+ * table exists as a product table, but it has no `name` column — grep confirms every
+ * ShopCX code path uses `first_name` / `last_name` / the internal UUID `id`, never a raw
+ * `orders.name`. The error only reaches Supabase's `postgres_logs` feed when an external
+ * / stale PostgREST client (a foreign app, a stale SQL Editor query, a deprecated
+ * integration) does a `select=... name ...` against `/rest/v1/orders`. There is no lever
+ * from ShopCX to make that query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:b7ce7a75d6250b29`) is repair work for a query we do not own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise` — the same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` + bare SELECT-on-table
+ * shape), aimed at a different foreign caller.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column orders.name does not exist` (or the `public.` qualified
+ *      variant, with any leading `ERROR: ` prefix Postgres includes on the logs surface
+ *      stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.orders` lookup
+ *      shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have a `name` column) still pages — the pin is `orders.name` only,
+ *   - a column-missing error on `orders` for a DIFFERENT column (e.g. a real column that
+ *     got renamed) still pages — the pin covers `name` only, not any column name,
+ *   - an `orders.name` error attached to a DIFFERENT statement shape (INSERT / UPDATE /
+ *     DELETE / DDL, a JOIN across other tables) still pages — the pin is the bare
+ *     SELECT-lookup shape, matching the ad hoc read we've observed,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `orders` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresOrdersNameLookupNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column orders.name does not exist" ||
+    stripped === "column public.orders.name does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `orders` (with or
+  // without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays captured
+  // — a caller that actually writes to orders with a bogus `name` column is a code bug
+  // we DO want to page on, not the ad hoc direct-REST read this drop targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?orders\b/.test(q);
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).

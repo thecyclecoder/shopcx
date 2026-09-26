@@ -23,6 +23,7 @@ import {
   isForeignGoTrueAuthLogNoise,
   isForeignGoTrueEdgeNoise,
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
+  isForeignSupabasePostgresOrdersNameLookupNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -1439,6 +1440,196 @@ test("isForeignSupabasePostgresAmbiguousOidIntrospectionNoise returns false on e
   assert.equal(isForeignSupabasePostgresAmbiguousOidIntrospectionNoise(""), false);
   assert.equal(isForeignSupabasePostgresAmbiguousOidIntrospectionNoise("   "), false);
   assert.equal(isForeignSupabasePostgresAmbiguousOidIntrospectionNoise("\n\t  "), false);
+});
+
+// ── isForeignSupabasePostgresOrdersNameLookupNoise ──
+// A foreign / stale PostgREST direct-REST client reads `/rest/v1/orders?select=...name...`
+// against our `public.orders` table. The `orders` table exists but has no `name` column
+// (ShopCX uses first_name / last_name / internal UUID id). Foreign-owned surface, no
+// lever from us — drop AT CAPTURE only when BOTH the exact column-missing message on
+// `orders.name` AND the bare SELECT-lookup shape on `orders` are present. A column-
+// missing on any other table, a different column on orders, or a non-SELECT statement
+// still pages.
+
+test("isForeignSupabasePostgresOrdersNameLookupNoise drops the ad hoc SELECT lookup on the exact orders.name column-missing shape", () => {
+  // The captured PostgREST direct-REST shape — unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column orders.name does not exist",
+      "select id, name from public.orders where id = '00000000-0000-0000-0000-000000000000'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column public.orders.name does not exist",
+      "select id, name from public.orders where id = '00000000-0000-0000-0000-000000000000'",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column orders.name does not exist",
+      "select name from orders limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column orders.name does not exist",
+      "select id, name from public.orders where workspace_id = '00000000' order by created_at desc limit 100",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column orders.name does not exist",
+      "SELECT id, name FROM public.orders WHERE id = 'x'",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "ERROR: column orders.name does not exist",
+      "select name from public.orders where id = 'x'",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "  column orders.name does not exist  ",
+      "   select name from public.orders   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresOrdersNameLookupNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a name column still pages)", () => {
+  // A table that DOES have a `name` column missing it is a real schema regression.
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column customers.name does not exist",
+      "select name from public.customers where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column products.name does not exist",
+      "select name from public.products where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresOrdersNameLookupNoise KEEPS a DIFFERENT column-missing on orders (a real column rename still pages)", () => {
+  // A real orders column (e.g. `first_name`) going missing is a schema regression we DO
+  // want to see — the pin is `name` only, not any column name.
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column orders.first_name does not exist",
+      "select first_name from public.orders where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column orders.status does not exist",
+      "select status from public.orders where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresOrdersNameLookupNoise KEEPS a non-SELECT statement shape (a real code-bug that writes orders.name still pages)", () => {
+  // INSERT / UPDATE / DELETE against orders referencing a bogus column is real code
+  // trying to write the table — a bug we WANT to see, not the ad hoc read we drop.
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column orders.name does not exist",
+      "insert into public.orders (name) values ('x')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column orders.name does not exist",
+      "update public.orders set name = 'x' where id = 'y'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column orders.name does not exist",
+      "delete from public.orders where name = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresOrdersNameLookupNoise KEEPS a FATAL / PANIC / constraint violation / other Postgres ERROR on orders (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "database is shutting down",
+      "select id from public.orders where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      'duplicate key value violates unique constraint "orders_pkey"',
+      "select id from public.orders where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.orders where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      'permission denied for relation "public.orders"',
+      "select id from public.orders where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      'relation "public.orders" does not exist',
+      "select id from public.orders where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresOrdersNameLookupNoise returns false on empty / nullish input", () => {
+  assert.equal(isForeignSupabasePostgresOrdersNameLookupNoise(null, null), false);
+  assert.equal(isForeignSupabasePostgresOrdersNameLookupNoise(undefined, undefined), false);
+  assert.equal(isForeignSupabasePostgresOrdersNameLookupNoise("", ""), false);
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column orders.name does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column orders.name does not exist",
+      null,
+    ),
+    false,
+  );
 });
 
 // ── isForeignGoTrueEdgeNoise (error-feed-drop-supabase-gotrue-504-edge-noise) ──
