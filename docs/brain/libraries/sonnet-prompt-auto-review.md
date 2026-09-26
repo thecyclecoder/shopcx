@@ -11,15 +11,17 @@ Supervised auto-review loop for proposed conversation rules: a box-session agent
 ### `loadReviewInputs` — async function
 
 ```ts
-async function loadReviewInputs(proposal: SonnetPrompt)
+async function loadReviewInputs(admin: Admin, workspaceId: string, proposal: SonnetPrompt)
   : Promise<ReviewInputs>
 ```
 
 Assembles the review context for a proposal:
-- Top-K similar approved prompts from `sonnet_prompts` (ranked by embedding distance)
-- Active [[../tables/policies]] 
+- Top-K similar approved prompts from `sonnet_prompts` (keyword overlap; pgvector path stubbed)
+- Active [[../tables/policies]] via `getAgentPolicyPackage` from [[policies]] (Phase 2 shared agent package, INTERNAL half only)
 - Source-pattern tickets from [[../tables/daily_analysis_reports]] + [[../tables/ticket_analyses]]
 - Voice docs from disk: `docs/brain/customer-voice.md`, `docs/brain/operational-rules.md`, `docs/brain/ui-conventions.md`
+
+The `policies` field is typed `AgentPolicyPackageEntry[]` (imported from [[policies]]) — each entry carries `{slug, name, internal_summary, rules}`. The builder renders these into the user prompt as `- slug: name\n  internal: internal_summary`.
 
 Used by `scripts/builder-worker.ts → runPromptReviewJob` to feed the Max session.
 
@@ -34,10 +36,10 @@ Returns the system prompt for the review session. Includes the rubric + role (Wr
 ### `buildUserPrompt` — function
 
 ```ts
-function buildUserPrompt(proposal: SonnetPrompt, inputs: ReviewInputs): string
+function buildUserPrompt(inputs: ReviewInputs): string
 ```
 
-Returns the user prompt for the review session. States the proposal + verification criteria + the need for a structured JSON verdict.
+Returns the user prompt for the review session. States the proposal + similar approved prompts + active policies (rendered from `inputs.policies` with each policy's slug, name, and internal_summary) + source-pattern tickets + voice rules + verification criteria + the need for a structured JSON verdict.
 
 ### `parseDecision` — function
 

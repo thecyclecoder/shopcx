@@ -1,0 +1,1 @@
+- **Fix sonnet-prompt auto-reviewer's stale policies column select** · verified 2026-09-26 · → [[../lifecycles/ai-learning]]

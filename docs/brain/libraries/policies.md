@@ -66,6 +66,7 @@ Adding a new contradiction class means adding a `FORBIDDEN_PATHS` entry with a c
 
 - [[sonnet-orchestrator-v2]] — `getAgentPolicyPackage` + `formatAgentPolicyPackage` inside `buildPoliciesSection`.
 - [[cs-director]] — `getAgentPolicyPackage` + `formatAgentPolicyPackage` inside `loadDirectorPolicyBrief` (exported for the CS-director-call brief loader in `scripts/builder-worker.ts`).
+- [[sonnet-prompt-auto-review]] — `getAgentPolicyPackage` in `loadReviewInputs`, feeds active policies into the prompt-review Max session so the agent can reason against workspace rules when deciding on proposed prompts.
 - [[ticket-analyzer]] — grader system prompt reads active policies for the Rule Compliance dimension *(allow-listed raw access — migration follow-up).*
 - [[daily-analysis-report]] — Opus report reads active policies so proposed rules don't contradict them.
 - [[improve-tools]] — Sol's `get_policies` research tool (single by slug OR full list, both halves surfaced so Sol can see drift between what we publish and what we obey).
