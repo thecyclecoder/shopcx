@@ -1564,6 +1564,81 @@ export function isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocN
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column specs.<archived_at|folded_at|deferred_at>
+ * does not exist` for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.specs`. The `specs` card table exists (see
+ * `supabase/migrations/20260713120001_specs_and_spec_phases.sql`) but its lifecycle state
+ * is NOT recorded via `archived_at` / `folded_at` / `deferred_at` timestamp columns — the
+ * schema uses `status text` (with a `folded` value and a `deferred` value) plus a
+ * `deferred boolean` flag; grep confirms no ShopCX code path reads any of the three
+ * timestamp names off `specs`, and the migration creates none of them. The error only
+ * reaches Supabase's `postgres_logs` feed when an external / stale PostgREST client (a
+ * foreign app, a deprecated integration, a stale SQL Editor session) queries
+ * `/rest/v1/specs?select=...archived_at...` (or `folded_at`, or `deferred_at`). There is
+ * no lever from ShopCX to make that query resolve — paging Platform on it (Control Tower
+ * signature `supabase-logs:fbf1fe604803f481`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise` — the
+ * same narrow-gating shape (exact `column <table>.<name> does not exist` + bare
+ * SELECT-on-table shape), scoped to the three obsolete `specs` timestamp column names.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS table+column set
+ *      — trimmed equal to `column specs.<archived_at|folded_at|deferred_at> does not exist`
+ *      (or the `public.` qualified variant, with any leading `ERROR: ` prefix Postgres
+ *      includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.specs` lookup shape
+ *      (any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have one of these timestamp columns — e.g. `tickets.archived_at`)
+ *     still pages — the pin is `specs.<archived_at|folded_at|deferred_at>` only,
+ *   - a column-missing error on `specs` for a DIFFERENT column (e.g. a real column that
+ *     got renamed — `status`, `deferred`, `owner`, `parent`) still pages — the pin covers
+ *     the three obsolete archive-timestamp names only,
+ *   - a `specs.archived_at` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin
+ *     is the bare SELECT-lookup shape, matching the ad hoc direct-REST read we've observed,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `specs` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column specs.archived_at does not exist" ||
+    stripped === "column public.specs.archived_at does not exist" ||
+    stripped === "column specs.folded_at does not exist" ||
+    stripped === "column public.specs.folded_at does not exist" ||
+    stripped === "column specs.deferred_at does not exist" ||
+    stripped === "column public.specs.deferred_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `specs` (with or
+  // without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays captured
+  // — a caller that actually writes to specs with one of these bogus timestamp columns
+  // is a code bug we DO want to page on, not the ad hoc direct-REST read this drop
+  // targets.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?specs\b/.test(q);
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).

@@ -26,6 +26,7 @@ import {
   isForeignSupabasePostgresOrdersNameLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -2033,6 +2034,263 @@ test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise retur
   assert.equal(
     isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
       "column spec_status_history.created_at does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/specs?select=...archived_at...` (or `folded_at`, or `deferred_at`) against
+// our `public.specs` card table. The `specs` table exists but records lifecycle state
+// via `status text` (with a `folded` value and a `deferred` value) + a `deferred boolean`
+// flag — none of these three timestamp columns exist. Foreign-owned surface, no lever
+// from us — drop AT CAPTURE only when BOTH the exact column-missing message (on one of
+// the three obsolete names) AND the bare SELECT-lookup shape on `specs` are present. A
+// column-missing on any other table, a different column on `specs`, or a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise drops the ad hoc SELECT lookup on the exact specs.archived_at column-missing shape", () => {
+  // The captured PostgREST direct-REST shape — unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      "select id, slug, archived_at from public.specs order by archived_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column public.specs.archived_at does not exist",
+      "select id, slug, archived_at from public.specs order by archived_at desc limit 100",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      "select archived_at from specs limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      "select id, archived_at from public.specs where workspace_id = '00000000' order by archived_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      "SELECT ID, ARCHIVED_AT FROM PUBLIC.SPECS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "ERROR: column specs.archived_at does not exist",
+      "select archived_at from public.specs",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "  column specs.archived_at does not exist  ",
+      "   select archived_at from public.specs   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise also drops the sibling folded_at and deferred_at shapes", () => {
+  // folded_at — the state is stored in specs.status = 'folded', no folded_at timestamp.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.folded_at does not exist",
+      "select id, slug, folded_at from public.specs order by folded_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column public.specs.folded_at does not exist",
+      "select folded_at from public.specs",
+    ),
+    true,
+  );
+  // deferred_at — the state is stored in specs.deferred boolean, no deferred_at timestamp.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.deferred_at does not exist",
+      "select id, slug, deferred_at from public.specs order by deferred_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column public.specs.deferred_at does not exist",
+      "select deferred_at from public.specs",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have one of these timestamp columns still pages)", () => {
+  // tickets DOES carry archived_at (20260330000028_ticket_auto_archive.sql) — a real
+  // schema regression there must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column tickets.archived_at does not exist",
+      "select archived_at from public.tickets where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column orders.archived_at does not exist",
+      "select archived_at from public.orders where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column policies.folded_at does not exist",
+      "select folded_at from public.policies where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a DIFFERENT column-missing on specs (a real column rename still pages)", () => {
+  // Any real specs column (`status`, `deferred`, `owner`, `parent`, `slug`, `title`)
+  // going missing is a schema regression we DO want to see — the pin covers the three
+  // obsolete archive-timestamp names only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.status does not exist",
+      "select status from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.deferred does not exist",
+      "select deferred from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.owner does not exist",
+      "select owner from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.slug does not exist",
+      "select slug from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing specs.archived_at still pages)", () => {
+  // INSERT / UPDATE / DELETE against specs referencing a bogus timestamp column is real
+  // code trying to write the table — a bug we WANT to see, not the ad hoc read we drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      "insert into public.specs (id, archived_at) values ($1, now())",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.folded_at does not exist",
+      "update public.specs set folded_at = now() where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.deferred_at does not exist",
+      "delete from public.specs where deferred_at < now() - interval '90 days'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on specs (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "database is shutting down",
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      'duplicate key value violates unique constraint "specs_ws_slug"',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      'permission denied for relation "public.specs"',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      'relation "public.specs" does not exist',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.folded_at does not exist",
       null,
     ),
     false,
