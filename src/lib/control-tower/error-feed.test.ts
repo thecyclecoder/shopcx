@@ -24,6 +24,7 @@ import {
   isForeignGoTrueEdgeNoise,
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
+  isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
@@ -594,6 +595,204 @@ test("isForeignSupabasePostgresMissingControlTowerEventsLookupNoise returns fals
   );
 });
 
+// ── isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise ──
+// The Supabase SQL Editor lookup that confuses `loop_alerts` with `error_events` —
+// `select * from public.loop_alerts where title / signature = ...`, columns that live
+// on `error_events`, not `loop_alerts`. Foreign-owned surface, no lever from ShopCX —
+// drop AT CAPTURE only when BOTH the exact column-missing message (`title` or
+// `signature`) AND the bare SELECT-lookup shape on `loop_alerts` are present. A JOIN
+// (real code shape), a different relation, or a FATAL/PANIC still pages.
+
+test("isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise drops the ad hoc SELECT lookup on the exact column-missing shape", () => {
+  // The two exact messages we've seen — `title` and `signature`, both columns that live
+  // on error_events, not loop_alerts.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "title" does not exist',
+      "select * from public.loop_alerts where title ilike '%boom%'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "signature" does not exist',
+      "select * from public.loop_alerts where signature = 'supabase-logs:0e3379f172768a91'",
+    ),
+    true,
+  );
+  // The unqualified (no `public.`) variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "title" does not exist',
+      "select id, ts from loop_alerts where title ilike '%foo%'",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "title" does not exist',
+      "select * from public.loop_alerts where title ilike '%err%' order by ts desc limit 100",
+    ),
+    true,
+  );
+  // Case-insensitive on the query (Postgres normalizes to lowercase in the log, but a
+  // hand-typed uppercase SELECT should still drop).
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "signature" does not exist',
+      "SELECT * FROM public.loop_alerts WHERE signature = 'x'",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'ERROR: column "title" does not exist',
+      "select * from public.loop_alerts where title ilike '%boom%'",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      '  column "title" does not exist  ',
+      "   select * from public.loop_alerts where title = 'x'   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise KEEPS the SAME column-missing message on a DIFFERENT relation (a real product-schema regression still pages)", () => {
+  // A table that DOES have `title` (a rename, a missed migration) missing it is a real
+  // regression we want to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "title" does not exist',
+      "select * from public.tickets where title ilike '%foo%'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "signature" does not exist',
+      "select * from public.error_events where signature = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise KEEPS a JOIN shape (a real code shape that joins loop_alerts with error_events still pages)", () => {
+  // The real code shape when a caller actually means to project loop_alerts's title /
+  // signature is a JOIN with error_events — the FROM is error_events (or another
+  // relation), not `loop_alerts`, so the pin fails and the row is captured / paged. A
+  // real column-missing on this class is a code bug we DO want to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "title" does not exist',
+      "select ee.title, la.id from public.error_events ee join public.loop_alerts la on la.signature_id = ee.signature_id where ee.title ilike '%boom%'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "signature" does not exist',
+      "select la.id from public.error_events ee join public.loop_alerts la on la.id = ee.loop_alert_id where ee.signature = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise KEEPS a FATAL / PANIC / constraint violation on loop_alerts (a different Postgres error still pages)", () => {
+  // A FATAL / PANIC / constraint violation on loop_alerts is a different message class —
+  // the pin is exact, only the confused-column-lookup shape is dropped.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      "database is shutting down",
+      "select * from public.loop_alerts where title ilike '%x%'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'duplicate key value violates unique constraint "loop_alerts_pkey"',
+      "select * from public.loop_alerts where title = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      "canceling statement due to statement timeout",
+      "select * from public.loop_alerts where signature = 'x'",
+    ),
+    false,
+  );
+  // A permission-denied on the relation is still a foreign-owned surface, but it's a
+  // different pin (relation-level, not column-level) — the sibling relation-missing drop
+  // is the one that filters that class. Here we confirm this helper stays out of it.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'permission denied for relation "public.loop_alerts"',
+      "select * from public.loop_alerts where title = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise KEEPS a non-SELECT statement shape (a real code-bug on this name still pages)", () => {
+  // INSERT / UPDATE / DELETE against loop_alerts referencing a missing column is real
+  // code trying to write the table — a bug we WANT to see, not the ad hoc read we drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "title" does not exist',
+      "insert into public.loop_alerts (title) values ('x')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "signature" does not exist',
+      "update public.loop_alerts set signature = 'x' where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise KEEPS a DIFFERENT column-missing on loop_alerts (a real column rename still pages)", () => {
+  // A real loop_alerts column (e.g. `resolved_at`) going missing is a schema regression
+  // we DO want to see — the pin is `title` / `signature` only, not any column name.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "resolved_at" does not exist',
+      "select * from public.loop_alerts where resolved_at is null",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise returns false on empty / nullish input", () => {
+  assert.equal(isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(null, null), false);
+  assert.equal(isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(undefined, undefined), false);
+  assert.equal(isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise("", ""), false);
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "title" does not exist',
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
+      'column "title" does not exist',
+      null,
+    ),
+    false,
+  );
+});
+
+
 // ── isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise ──
 // The ad hoc `select ... from error_events` lookup by an external SQL client that mistyped
 // the column name (our schema has `first_seen_at`, not `first_seen`). Drop AT CAPTURE only
@@ -955,6 +1154,7 @@ test("isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise returns fals
     false,
   );
 });
+
 
 // ── isForeignSupabasePostgresAmbiguousOidIntrospectionNoise ──
 // The exact Postgres ERROR `column reference "oid" is ambiguous` surfaces on Supabase's

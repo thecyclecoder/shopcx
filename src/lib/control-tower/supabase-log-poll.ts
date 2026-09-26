@@ -35,6 +35,7 @@ import {
   isForeignGoTrueEdgeNoise,
   isForeignGoTrueAuthLogNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
+  isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
@@ -175,6 +176,18 @@ const LOG_QUERIES: LogQuery[] = [
       // error on any other table, or on `control_tower_events` via a non-SELECT statement
       // (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingControlTowerEventsLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a Supabase SQL Editor lookup that confuses
+      // `loop_alerts` with `error_events` — `select * from public.loop_alerts where title
+      // = ... / signature = ...`, columns which live on `error_events`, not `loop_alerts`
+      // ([[../specs/error-feed-drop-supabase-loop-alerts-adhoc-column-title-nois]],
+      // Control Tower signature `supabase-logs:0e3379f172768a91`). Twin of the
+      // `control_tower_events` drop above, scoped to the confused-column shape instead of
+      // the confused-relation shape. Narrowly gated to require BOTH the exact
+      // column-missing message (`title` or `signature`) AND the bare SELECT-lookup shape
+      // on `loop_alerts` — a JOIN with `error_events` (real code shape), a real
+      // column-missing on a different relation, or a FATAL/PANIC/constraint violation
+      // still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an operator typo — a manual SQL client did a
       // `select ... from error_events` naming the wrong column (`first_seen` instead of
       // our real `first_seen_at`). The resulting undefined_column ERROR is repair work
