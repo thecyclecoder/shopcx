@@ -606,7 +606,7 @@ export async function buildCustomerTimeline(
     admin.from("subscriptions").select("id, shopify_contract_id, status, items, next_billing_date, billing_interval, billing_interval_count, created_at, updated_at").in("customer_id", linkedIds),
     admin.from("customer_events").select("id, event_type, source, summary, properties, created_at").in("customer_id", linkedIds).gte("created_at", windowStart).order("created_at", { ascending: true }),
     admin.from("returns").select("id, order_number, status, net_refund_cents, delivered_at, refunded_at, created_at").in("customer_id", linkedIds).neq("status", "cancelled").gte("created_at", windowStart),
-    admin.from("dunning_cycles").select("id, shopify_contract_id, status, started_at").in("customer_id", linkedIds).in("status", ["active", "skipped"]),
+    admin.from("dunning_cycles").select("id, shopify_contract_id, status, created_at").in("customer_id", linkedIds).in("status", ["active", "skipped"]),
   ]);
 
   const customer = customerRes.data as CustomerRow | null;
@@ -614,7 +614,7 @@ export async function buildCustomerTimeline(
   const subs = (subsRes.data || []) as SubRow[];
   const events = (eventsRes.data || []) as EventRow[];
   const returns = (returnsRes.data || []) as ReturnRow[];
-  const dunningCycles = (dunningRes.data || []) as Array<{ id: string; shopify_contract_id: string; status: string; started_at: string | null }>;
+  const dunningCycles = (dunningRes.data || []) as Array<{ id: string; shopify_contract_id: string; status: string; created_at: string | null }>;
 
   // Bound the variant catalog fetch to just the ids that appear in this
   // customer's window — the prior implementation loaded every variant in
@@ -638,7 +638,7 @@ export async function buildCustomerTimeline(
         type: "dunning_active",
         severity: "info",
         summary: `Active dunning cycle (${dc.status}) on subscription contract ${dc.shopify_contract_id}. Customer may have a failed payment they haven't been notified about, or they may already know via the payment-update email.`,
-        evidence: { contract_id: dc.shopify_contract_id, cycle_status: dc.status, started_at: dc.started_at },
+        evidence: { contract_id: dc.shopify_contract_id, started_at: dc.created_at, cycle_status: dc.status },
       });
     }
   }
