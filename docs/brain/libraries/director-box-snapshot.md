@@ -53,5 +53,10 @@ Phase 3 of the spec replaces ad-hoc enum lists in `src/lib/agents/` (every place
 - **Pure bucketizers are the test surface.** `bucketizeJobs` + `groupParkedByClass` take a list of rows + `now`, no DB. Easier to seed one row per status + assert grouping than to seed the live `agent_jobs`.
 - **Best-effort by design.** A failed read on any sub-source returns the empty shape — the coach turn must never block on a transient DB hiccup.
 
+## Status / open work
+**Phase 1** ✅ shipped — removed the non-existent `completed_at` column reference from the two `readJobRows` selects and the `readDirectorPasses` select. Terminal recency now uses `updated_at` (the real lifecycle timestamp). Regression test added via `AGENT_JOB_SNAPSHOT_SELECT` + `AGENT_JOB_DIRECTOR_PASS_SELECT` fingerprint assertions in `src/lib/agents/director-box-snapshot.test.ts` to prevent re-introduction of the missing column.
+
+**Phase 3** (planned) — replace ad-hoc enum lists in `src/lib/agents/*` (every place that hand-writes "queued/building/…") with imports from this module.
+
 ## Related
 [[../specs/director-coach-canonical-box-snapshot]] · [[../tables/agent_jobs]] · [[../tables/director_directives]] · [[../tables/director_activity]] · [[../tables/spec_card_state]] · [[director-directives]] · [[platform-director]] · [[../specs/no-parked-specs-auto-route-needs-attention]]
