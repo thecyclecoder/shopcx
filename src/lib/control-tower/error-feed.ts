@@ -1803,6 +1803,93 @@ export function isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column agent_jobs.payload does not exist` (or its
+ * sibling `agent_jobs.branch_name`) for a stale approval-history read that LEFT-JOINs
+ * `public.approval_decisions` to `public.agent_jobs` and SELECTs legacy `aj.*` columns that
+ * do not exist on the current schema (see `supabase/migrations/20260618120000_agent_jobs.sql`
+ * and the follow-on kind/session/checklist migrations — none creates a `payload` or
+ * `branch_name` column). The `agent_jobs` and `approval_decisions` tables both exist, but
+ * every ShopCX approval-history reader either goes through the audit-log SDK or reads real
+ * columns (`kind`, `status`, `spec_slug`, `spec_phase`, `session_config_dir`, …). The row
+ * only reaches Supabase's `postgres_logs` feed when an external / stale PostgREST client
+ * (a foreign app, a deprecated integration, a stale SQL Editor session held over from a
+ * previous schema shape) joins `approval_decisions ad LEFT JOIN agent_jobs aj` and asks
+ * for `aj.payload` / `aj.branch_name`. There is no lever from ShopCX to make that query
+ * resolve — the correct fix is to update the caller, not add fake columns to `agent_jobs`.
+ * Paging Platform on it (Control Tower signature `supabase-logs:0197dad10ff4a69c`) is
+ * repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise` — the same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` + a bounded
+ * statement-shape check), aimed at a different foreign caller. Unlike the direct-REST
+ * siblings, this one gates on the SELECT carrying BOTH `approval_decisions` AND
+ * `agent_jobs` (the approval-history join) — a bare `select ... from agent_jobs` that
+ * happens to name `payload` still pages, because that could be a real product-code read
+ * regressing on the schema.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for one of the two known
+ *      legacy `agent_jobs` columns — trimmed equal to
+ *      `column agent_jobs.payload does not exist`, `column agent_jobs.branch_name does not
+ *      exist`, or their `public.`-qualified variants (with any leading `ERROR: ` prefix
+ *      Postgres includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT that names BOTH `approval_decisions` AND
+ *      `agent_jobs` (any JOIN keyword variant — `left join` / `inner join` / bare `,` in
+ *      the FROM clause — is fine; the requirement is that the statement is a read that
+ *      joins the two tables, not a write).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have a `payload` / `branch_name` column) still pages — the pin is
+ *     `agent_jobs.payload` / `agent_jobs.branch_name` only,
+ *   - a column-missing error on `agent_jobs` for a DIFFERENT column (a real `agent_jobs`
+ *     column got renamed) still pages — the pin covers the two legacy names only,
+ *   - an `agent_jobs.payload` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, or a bare SELECT that reads `agent_jobs` without joining
+ *     `approval_decisions` — i.e. real product code, not the stale approval-history reader)
+ *     still pages,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `agent_jobs` or `approval_decisions` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column agent_jobs.payload does not exist" ||
+    stripped === "column public.agent_jobs.payload does not exist" ||
+    stripped === "column agent_jobs.branch_name does not exist" ||
+    stripped === "column public.agent_jobs.branch_name does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Statement MUST be a SELECT — a caller that INSERT / UPDATE / DELETE's agent_jobs with
+  // a bogus `payload` / `branch_name` column is a real code bug we WANT to page on, not
+  // the stale approval-history read this drop targets.
+  if (!/^select\b/.test(q)) return false;
+  // The SELECT MUST name BOTH `approval_decisions` AND `agent_jobs`. A bare
+  // `select payload from agent_jobs` still pages (that could be real product code reading
+  // agent_jobs after a schema regression); the drop is scoped to the approval-history
+  // join shape only. Order and JOIN keyword variant (LEFT JOIN / INNER JOIN / a comma in
+  // the FROM clause) don't matter — we look for both table names anywhere in the SELECT.
+  if (!/\bapproval_decisions\b/.test(q)) return false;
+  if (!/\bagent_jobs\b/.test(q)) return false;
+  return true;
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column specs.archived does not exist` for an
  * ad hoc / stale PostgREST direct-REST SELECT against `public.specs.archived`. The
  * `specs` table exists (see
