@@ -30,9 +30,9 @@ const main = async () => {
 
   const { data: phases, error: phasesError } = await admin
     .from("spec_phases")
-    .select("phase, status")
+    .select("position, title, status")
     .eq("spec_id", spec.id)
-    .order("phase", { ascending: true });
+    .order("position", { ascending: true });
 
   if (phasesError) {
     console.log("Error fetching phases:", phasesError);

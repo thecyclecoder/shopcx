@@ -33,13 +33,13 @@ import { resolve } from "path";
   // Get all phases
   const { data: phases } = await admin
     .from("spec_phases")
-    .select("phase, status")
+    .select("position, title, status")
     .eq("spec_id", specId)
-    .order("phase", { ascending: true });
+    .order("position", { ascending: true });
 
   console.log("\nPhases:");
   phases?.forEach((p) => {
-    console.log(`  ${p.phase}: ${p.status}`);
+    console.log(`  ${p.position} — ${p.title}: ${p.status}`);
   });
 
   // Check if all are shipped
