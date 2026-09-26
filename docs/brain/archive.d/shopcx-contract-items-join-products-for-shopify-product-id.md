@@ -1,0 +1,1 @@
+- **ShopCX contract items join products for Shopify product id** · verified 2026-09-26 · → [[../libraries/commerce__shopcx-contract-ingest]], [[../libraries/commerce__shopcx-line-ops]], [[../lifecycles/shopcx-subscriptions]]
