@@ -1,0 +1,1 @@
+- **Bound main build status GitHub reads so the cron cannot wedge** · verified 2026-09-26 · → [[../libraries/control-tower#main-build-statusts--the-red-main-pipeline-alarm]]
