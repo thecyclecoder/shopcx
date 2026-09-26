@@ -37,6 +37,15 @@ export const MAIN_BUILD_STATUS_WALK_LIMIT = 20;
  *  approval-request surface every other CEO-routed card lands on). */
 const APPROVAL_REQUEST_TYPE = "agent_approval_request";
 
+/** Per-request abort deadline for GitHub reads. The sweep cron runs at
+ *  concurrency:1 every 15 min, so an unbounded upstream stall consumes the
+ *  single slot and wedges every future tick behind it — treating a slow read
+ *  as a bounded `unknown` keeps the loop's own heartbeat alive. Kept short
+ *  enough that even the worst-case walk (1 commits list + up to
+ *  MAIN_BUILD_STATUS_WALK_LIMIT × 2 per-commit reads + 1 subject enrich) stays
+ *  well under one tick. */
+export const MAIN_BUILD_STATUS_GITHUB_TIMEOUT_MS = 10_000;
+
 /** The `director_activity.action_kind` this alarm records under. */
 export const MAIN_BUILD_RED_ACTION_KIND = "main_build_red";
 
@@ -54,15 +63,29 @@ function ghToken(): string | undefined {
 async function ghGet(
   path: string,
 ): Promise<{ ok: boolean; status: number; json: unknown }> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${ghToken() ?? ""}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    cache: "no-store",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`https://api.github.com${path}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${ghToken() ?? ""}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+      cache: "no-store",
+      signal: AbortSignal.timeout(MAIN_BUILD_STATUS_GITHUB_TIMEOUT_MS),
+    });
+  } catch (err) {
+    // AbortError (timeout) or a raw network failure — both collapse to the
+    // existing "no signal" shape so `readCommitBuildState` / `readMainBuildStatus`
+    // fall through to `state:'unknown'` and the sweep records
+    // `reason:'github_unreachable'`. Never promote a transient blip to red.
+    console.warn(
+      "[main-build-status] ghGet failed:",
+      err instanceof Error ? err.message : err,
+    );
+    return { ok: false, status: 0, json: {} };
+  }
   const text = await res.text();
   let json: unknown = {};
   try {
