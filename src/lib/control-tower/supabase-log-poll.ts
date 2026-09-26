@@ -47,6 +47,7 @@ import {
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise,
   isForeignSupabasePostgresPoliciesKindLookupNoise,
 } from "@/lib/control-tower/error-feed";
 
@@ -342,6 +343,21 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_phases` via a non-SELECT statement (real code-bug shape) still surfaces /
       // pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.archived`. The `specs` table exists but has no `archived`
+      // column — the terminal lifecycle state is `folded` on `specs.status` (M4 fold),
+      // not a boolean archive flag. Every ShopCX caller reads / writes via the
+      // `specs-table` SDK; no code path selects `.archived` from `public.specs`. The
+      // column-missing ERROR only reaches this feed when a foreign app / stale SQL
+      // Editor session queries `/rest/v1/specs?select=...archived...` or
+      // `?archived=eq.false`. There is no lever from ShopCX to make that query resolve —
+      // paging Platform on it
+      // ([[../specs/error-feed-scope-foreign-specs-archived-column-noise]]) is repair
+      // work for a query we don't own. Narrowly gated to require BOTH the exact column-
+      // missing message AND the bare-SELECT-on-specs shape — a column-missing error on
+      // any other table, a different column on `specs`, or on `specs` via a non-SELECT
+      // statement (real code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.policies.kind`. The `policies` table exists but has no `kind`
       // column by design — it is keyed by `slug`, and every ShopCX caller goes through
