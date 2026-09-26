@@ -136,15 +136,24 @@ async function buildItems(workspaceId: string, c: IngestContract): Promise<Recor
     let variantTitle = l.variantTitle;
     let productId = String(l.productId ?? "").replace("gid://shopify/Product/", "") || null;
     if (variantId) {
+      // join: products!innershopify_product_id — the Shopify product id lives on the parent
+      // `products` row, not on the variant; inner-join the parent and project that column.
       const { data: v } = await admin
         .from("product_variants")
-        .select("title, shopify_product_id")
+        .select("title, products!inner(shopify_product_id)")
         .eq("workspace_id", workspaceId)
         .eq("shopify_variant_id", variantId)
         .maybeSingle();
       if (v) {
         variantTitle = variantTitle ?? (v as { title?: string }).title ?? null;
-        productId = productId ?? (v as { shopify_product_id?: string }).shopify_product_id ?? null;
+        const joined = (v as {
+          products?:
+            | { shopify_product_id?: string | null }
+            | Array<{ shopify_product_id?: string | null }>
+            | null;
+        }).products;
+        const productRow = Array.isArray(joined) ? joined[0] : joined;
+        productId = productId ?? productRow?.shopify_product_id ?? null;
       }
     }
     const qty = l.quantity || 1;

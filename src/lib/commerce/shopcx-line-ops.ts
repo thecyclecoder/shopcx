@@ -200,12 +200,21 @@ async function mirrorContractToItems(workspaceId: string, contractId: string): P
     const items: Record<string, unknown>[] = [];
     for (const l of live.contract.lines) {
       const bare = String(l.variantId ?? "").replace("gid://shopify/ProductVariant/", "");
+      // join: products!innershopify_product_id — the Shopify product id lives on the parent
+      // `products` row, not on the variant; inner-join the parent and project that column.
       const { data: v } = await admin
         .from("product_variants")
-        .select("title, shopify_product_id")
+        .select("title, products!inner(shopify_product_id)")
         .eq("workspace_id", workspaceId)
         .eq("shopify_variant_id", bare)
         .maybeSingle();
+      const joined = (v as {
+        products?:
+          | { shopify_product_id?: string | null }
+          | Array<{ shopify_product_id?: string | null }>
+          | null;
+      } | null)?.products;
+      const productRow = Array.isArray(joined) ? joined[0] : joined;
       const qty = l.quantity || 1;
       const unitBase = l.currentPrice != null ? Math.round(parseFloat(l.currentPrice) * 100) : 0;
       // What they actually pay per unit — base less OUR discounts. A customer coupon is excluded
@@ -215,7 +224,7 @@ async function mirrorContractToItems(workspaceId: string, contractId: string): P
       items.push({
         line_id: l.id.replace("gid://shopify/SubscriptionLine/", ""),
         variant_id: bare,
-        product_id: (v as { shopify_product_id?: string } | null)?.shopify_product_id ?? null,
+        product_id: productRow?.shopify_product_id ?? null,
         sku: l.sku,
         title: l.title,
         variant_title: (v as { title?: string } | null)?.title ?? null,
