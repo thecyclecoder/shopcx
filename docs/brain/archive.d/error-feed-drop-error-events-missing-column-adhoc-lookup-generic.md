@@ -1,0 +1,1 @@
+- **Consolidate per-column error_events foreign-noise drops into one generic classifier** · verified 2026-09-26 · → [[lifecycles/control-tower]]
