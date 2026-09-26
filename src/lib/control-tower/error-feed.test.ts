@@ -24,6 +24,7 @@ import {
   isForeignGoTrueEdgeNoise,
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
   isForeignSupabasePostgresOrdersNameLookupNoise,
+  isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -1626,6 +1627,213 @@ test("isForeignSupabasePostgresOrdersNameLookupNoise returns false on empty / nu
   assert.equal(
     isForeignSupabasePostgresOrdersNameLookupNoise(
       "column orders.name does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads `/rest/v1/smart_patterns?select=
+// ...content...` against our `public.smart_patterns` table. The `smart_patterns` table
+// exists (workspace-scoped classifier patterns) but has no `content` column — text lives
+// in `phrases` / `embedding_text` / `description` / `name`. Foreign-owned surface, no
+// lever from us — drop AT CAPTURE only when BOTH the exact column-missing message on
+// `smart_patterns.content` AND the bare SELECT-lookup shape on `smart_patterns` are
+// present. A column-missing on any other table, a different column on smart_patterns, or
+// a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise drops the ad hoc SELECT lookup on the exact smart_patterns.content column-missing shape", () => {
+  // The captured PostgREST direct-REST shape — unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column smart_patterns.content does not exist",
+      "select id, content from public.smart_patterns where id = '00000000-0000-0000-0000-000000000000'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column public.smart_patterns.content does not exist",
+      "select id, content from public.smart_patterns where id = '00000000-0000-0000-0000-000000000000'",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column smart_patterns.content does not exist",
+      "select content from smart_patterns limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column smart_patterns.content does not exist",
+      "select id, content from public.smart_patterns where workspace_id = '00000000' order by created_at desc limit 100",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column smart_patterns.content does not exist",
+      "SELECT id, content FROM public.smart_patterns WHERE id = 'x'",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "ERROR: column smart_patterns.content does not exist",
+      "select content from public.smart_patterns where id = 'x'",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "  column smart_patterns.content does not exist  ",
+      "   select content from public.smart_patterns   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a content column still pages)", () => {
+  // A table that DOES have a `content` column missing it is a real schema regression.
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column ticket_messages.content does not exist",
+      "select content from public.ticket_messages where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column policies.content does not exist",
+      "select content from public.policies where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise KEEPS a DIFFERENT column-missing on smart_patterns (a real column rename still pages)", () => {
+  // A real smart_patterns column (e.g. `phrases`, `embedding_text`, `description`) going
+  // missing is a schema regression we DO want to see — the pin is `content` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column smart_patterns.phrases does not exist",
+      "select phrases from public.smart_patterns where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column smart_patterns.embedding_text does not exist",
+      "select embedding_text from public.smart_patterns where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column smart_patterns.description does not exist",
+      "select description from public.smart_patterns where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug that writes smart_patterns.content still pages)", () => {
+  // INSERT / UPDATE / DELETE against smart_patterns referencing a bogus column is real
+  // code trying to write the table — a bug we WANT to see, not the ad hoc read we drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column smart_patterns.content does not exist",
+      "insert into public.smart_patterns (content) values ('x')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column smart_patterns.content does not exist",
+      "update public.smart_patterns set content = 'x' where id = 'y'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column smart_patterns.content does not exist",
+      "delete from public.smart_patterns where content = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise KEEPS a FATAL / PANIC / constraint violation / other Postgres ERROR on smart_patterns (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "database is shutting down",
+      "select id from public.smart_patterns where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      'duplicate key value violates unique constraint "smart_patterns_pkey"',
+      "select id from public.smart_patterns where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.smart_patterns where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      'permission denied for relation "public.smart_patterns"',
+      "select id from public.smart_patterns where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      'relation "public.smart_patterns" does not exist',
+      "select id from public.smart_patterns where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column smart_patterns.content does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
+      "column smart_patterns.content does not exist",
       null,
     ),
     false,
