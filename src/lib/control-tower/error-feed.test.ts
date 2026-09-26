@@ -31,6 +31,7 @@ import {
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise,
+  isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise,
   isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise,
   isForeignSupabasePostgresPoliciesKindLookupNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
@@ -3191,6 +3192,218 @@ test("isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise returns f
   assert.equal(
     isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise(
       "column agent_jobs.payload does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/specs?select=...is_active...` (or `?is_active=eq.true`) against our
+// `public.specs` table. The table exists but carries no `is_active` boolean — spec
+// activity is derived from `spec_phases` rollup + `status` overrides, and the sibling
+// `journey_definitions.is_active` is the column the caller likely meant. Foreign-owned
+// surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `specs.is_active` AND the bare SELECT-lookup shape on `specs` are present.
+// A column-missing on any other table, a different column on `specs`, or a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise drops the ad hoc SELECT lookup on the exact specs.is_active column-missing shape", () => {
+  // The captured PostgREST direct-REST shape — unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column specs.is_active does not exist",
+      "select id, is_active from public.specs where is_active = true",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column public.specs.is_active does not exist",
+      "select id, is_active from public.specs where is_active = true",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column specs.is_active does not exist",
+      "select is_active from specs limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column specs.is_active does not exist",
+      "select slug, is_active from public.specs where workspace_id = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column specs.is_active does not exist",
+      "SELECT ID, IS_ACTIVE FROM PUBLIC.SPECS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "ERROR: column specs.is_active does not exist",
+      "select is_active from public.specs",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "  column specs.is_active does not exist  ",
+      "   select is_active from public.specs   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise KEEPS a column-missing error on any OTHER table (the journey_definitions.is_active the caller likely meant still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column journey_definitions.is_active does not exist",
+      "select is_active from public.journey_definitions where slug = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column playbooks.is_active does not exist",
+      "select is_active from public.playbooks where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise KEEPS a DIFFERENT column-missing on specs (a real schema regression still pages)", () => {
+  // The real `status` / `slug` / `workspace_id` columns going missing is exactly the
+  // kind of regression we DO want paged.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column specs.status does not exist",
+      "select status from public.specs where workspace_id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column specs.slug does not exist",
+      "select slug from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise KEEPS a JOIN whose FROM is NOT specs (a real product join still pages)", () => {
+  // A JOIN whose first FROM is a different table won't match the SELECT-lookup regex,
+  // and it's a real code shape we want to see rather than an ad hoc direct-REST read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column specs.is_active does not exist",
+      "select s.slug, s.is_active from public.workspaces w join public.specs s on s.workspace_id = w.id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing specs.is_active still pages)", () => {
+  // INSERT / UPDATE / DELETE against specs referencing a bogus `is_active` column is
+  // real code trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column specs.is_active does not exist",
+      "insert into public.specs (slug, workspace_id, is_active) values ($1, $2, true)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column specs.is_active does not exist",
+      "update public.specs set is_active = true where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column specs.is_active does not exist",
+      "delete from public.specs where is_active = false",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on specs (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "database is shutting down",
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      'duplicate key value violates unique constraint "specs_workspace_id_slug_key"',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      'permission denied for relation "public.specs"',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      'relation "public.specs" does not exist',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column specs.is_active does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(
+      "column specs.is_active does not exist",
       null,
     ),
     false,
