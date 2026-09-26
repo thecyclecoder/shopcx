@@ -12,16 +12,28 @@ async function main() {
   for (const slug of specs) {
     console.log(`\n${slug}:`);
 
-    // Get phases for this spec
+    // Resolve the spec row first — spec_phases is keyed by spec_id, not slug.
+    const { data: spec } = await admin
+      .from("specs")
+      .select("id, status")
+      .eq("slug", slug)
+      .single();
+
+    if (!spec) {
+      console.log(`  Spec not found`);
+      continue;
+    }
+
+    // Get phases for this spec — order by the current schema column (position).
     const { data: phases } = await admin
       .from("spec_phases")
-      .select("phase_title, status")
-      .eq("spec_slug", slug)
-      .order("phase_number", { ascending: true });
+      .select("position, title, status")
+      .eq("spec_id", spec.id)
+      .order("position", { ascending: true });
 
     if (phases && phases.length > 0) {
       phases.forEach(p => {
-        console.log(`  - ${p.phase_title}: ${p.status}`);
+        console.log(`  - ${p.title}: ${p.status}`);
       });
 
       // Check if all shipped
@@ -31,16 +43,7 @@ async function main() {
       console.log(`  No phases found`);
     }
 
-    // Check stored status in specs table
-    const { data: spec } = await admin
-      .from("specs")
-      .select("status")
-      .eq("slug", slug)
-      .single();
-
-    if (spec) {
-      console.log(`  → Stored specs.status: ${spec.status}`);
-    }
+    console.log(`  → Stored specs.status: ${spec.status}`);
   }
 }
 
