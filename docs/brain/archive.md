@@ -12,6 +12,20 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Fix cancellation timeline worker reading a missing orders column** · verified 2026-09-26 · → [[../libraries/cs-director-cancellation-timeline]]
+- **Fix build-state probe to read the canonical spec review stamp** · verified 2026-09-26 · → [[tables/specs]]
+- **Suppress child cron freshness alerts during a Control Tower watchdog scheduler gap** · verified 2026-09-26 · → [[../libraries/control-tower]]
+- **Fix creative scout watcher to use real agent_jobs columns** · verified 2026-09-26 · → [[../libraries/agent-jobs#agent_job_columns--jobselect----typed-column-source-of-truth]]
+- **Stop the director box snapshot from querying a missing agent_jobs.completed_at column** · verified 2026-09-26 · → [[../libraries/director-box-snapshot]]
+- **Drop ad hoc control_tower_events lookup noise from Supabase DB logs** · verified 2026-09-26 · → [[lifecycles/control-tower]]
+- **Drop Supabase array_agg aggregate introspection noise from the error feed** · verified 2026-09-26 · → [[../libraries/control-tower]]
+- **Fix fraud nightly scan workspace lookup column** · verified 2026-09-26 · → [[../inngest/fraud-detection]]
+- **Fix the graduate-state probe's director_activity column names** · verified 2026-09-26 · → [[../tables/director_activity]]
+- **Bound main build status GitHub reads so the cron cannot wedge** · verified 2026-09-26 · → [[../libraries/control-tower#main-build-statusts--the-red-main-pipeline-alarm]]
+- **Normalize Shopify product ids before computing popup offers** · verified 2026-09-26 · → [[../libraries/popup-decide]]
+- **ShopCX contract items join products for Shopify product id** · verified 2026-09-26 · → [[../libraries/commerce__shopcx-contract-ingest]], [[../libraries/commerce__shopcx-line-ops]], [[../lifecycles/shopcx-subscriptions]]
+- **Update stale spec phase probes to use position instead of phase** · verified 2026-09-26 · → [[../tables/spec_phases#columns]]
+- **Migrate Supabase log poller off the removed logs.all endpoint** · verified 2026-09-26 · → [[../inngest/supabase-log-poll]]
 - **A subscription is never more than one cycle behind** · verified 2026-09-24 · → [[../lifecycles/subscription-billing]]
 - **Assisted Subscription Purchase must resolve the target variant from a stated product + matching cancelled sub instead of refusing empty params and stranding a reactivation** · verified 2026-09-24 · → [[lifecycles/subscription-billing]]
 - **A customer can be recorded as sales-tax exempt** · verified 2026-09-21 · → [[lifecycles/subscription-billing]]
