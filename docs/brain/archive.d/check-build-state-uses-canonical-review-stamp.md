@@ -1,0 +1,1 @@
+- **Fix build-state probe to read the canonical spec review stamp** · verified 2026-09-26 · → [[tables/specs]]
