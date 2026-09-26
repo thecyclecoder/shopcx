@@ -1278,15 +1278,19 @@ export function isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise(
  *      trimmed equal to `column error_events.<name> does not exist` (or the `public.`
  *      qualified variant), with any leading `ERROR: ` prefix Postgres includes on the logs
  *      surface stripped, AND `<name>` a plain unquoted identifier (a-z / 0-9 / _), AND
- *   2. the `parsed.query` attribute is a bare `select ... from public.error_events` lookup
- *      shape (the ad hoc SELECT — any WHERE / LIMIT / ORDER BY tail is fine).
+ *   2. the `parsed.query` attribute is a read-only lookup shape against `error_events` — a
+ *      bare `select ... from public.error_events`, OR the equivalent quoted-identifier form
+ *      PostgREST emits for direct REST reads (`from "public"."error_events"`), OR a CTE
+ *      wrapping that read that resolves to an outer SELECT (`with pgrst_source as (select …
+ *      from "public"."error_events") select …`). Non-SELECT writes and modifying CTEs whose
+ *      outer statement is INSERT/UPDATE/DELETE stay captured — the pin is the read shape.
  *
  * Narrowly gated so:
  *   - a column-missing error for `<column>` on ANY OTHER table (a real code bug on another
  *     table that DOES have such a column) still pages — the pin is `error_events.` only,
  *   - an `error_events.<column>` error attached to a DIFFERENT statement shape (INSERT /
  *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
- *     SELECT-lookup shape only, matching the ad hoc read we've observed,
+ *     read-only SELECT / SELECT-CTE shape only, matching the ad hoc read we've observed,
  *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing is
  *     untouched (different message),
  *   - empty / nullish message OR query returns `false` — we need both markers.
@@ -1315,12 +1319,55 @@ export function isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
   }
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
-  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
-  // statement MUST start with `select` and its FROM clause MUST name this exact table
-  // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
-  // captured — a caller that actually writes to error_events with a bogus column is a
-  // code bug we DO want to page on, not the ad hoc read this drop targets.
-  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q);
+  // The plain-unquoted read shape — the original class this drop targeted: `select … from
+  // public.error_events` (with or without the `public.` qualifier). Any WHERE/LIMIT/ORDER
+  // BY tail is fine.
+  const isPlainSelectLookup = /^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q);
+  // The quoted PostgREST direct-REST read shape — everything the plain regex misses because
+  // Supabase's generated SQL double-quotes identifiers and often wraps the read in a CTE.
+  // Delegated to a named helper so the grep-verifiable quoted-lookup branch is easy to
+  // audit and to keep both shape families explicit at the call site.
+  return isPlainSelectLookup || isQuotedPostgrestErrorEventsLookup(q);
+}
+
+/**
+ * The quoted PostgREST direct-REST read branch of the `error_events` missing-column drop —
+ * paired with the plain-unquoted branch in
+ * `isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise`. Split into its own predicate
+ * so the quoted PostgREST shape is a named, grep-able unit (Verification bullet: `The
+ * classifier contains a quoted PostgREST error_events lookup branch.`) and so its shape
+ * assumptions can evolve without touching the message-side match.
+ *
+ * PostgREST emits its generated SQL with every identifier double-quoted (`from
+ * "public"."error_events"`) and typically wraps the read in a `with pgrst_source as (…)
+ * select …` CTE that lets it project columns / apply Content-Range in one statement. Both
+ * shapes are the same ad hoc read-lookup class as the plain unquoted read — the caller is
+ * external and we hold no lever on the query — so we normalize the query by stripping SQL
+ * double-quotes before the outer-shape checks.
+ *
+ * `true` ONLY when BOTH markers are present, against the quote-stripped lowercased query:
+ *   1. read-only outer shape — either a bare `select …`, or `with … ) select …` (the last
+ *      CTE's closing paren followed by the outer SELECT keyword — a modifying CTE whose
+ *      outer statement is INSERT/UPDATE/DELETE is missing that `) select` transition and
+ *      stays captured, keeping real write-path code bugs visible), AND
+ *   2. a `from (public.)?error_events` clause somewhere — either at the outer level (plain
+ *      SELECT) or inside the CTE body (PostgREST's `select … from "public"."error_events"`
+ *      inside `with pgrst_source as (…)`).
+ *
+ * Accepts an already-lowercased-and-trimmed query for reuse from the classifier's normalized
+ * `q`; the caller has done the null/empty guard, so this predicate assumes a nonempty input.
+ */
+function isQuotedPostgrestErrorEventsLookup(lowerQuery: string): boolean {
+  // Strip SQL double-quotes so `from "public"."error_events"` and the CTE-wrapped variant
+  // both compare against the same shape family as the plain-unquoted branch. Postgres's
+  // error message text stays unquoted (`column error_events.<name> does not exist`), so no
+  // symmetric strip is needed on the message side.
+  const qNormalized = lowerQuery.replace(/"/g, "");
+  const isPlainSelect = /^select\b/.test(qNormalized);
+  const isCteWrappingSelect =
+    /^with\b/.test(qNormalized) && /\)\s*select\b/.test(qNormalized);
+  if (!isPlainSelect && !isCteWrappingSelect) return false;
+  return /\bfrom\s+(?:public\.)?error_events\b/.test(qNormalized);
 }
 
 /**
