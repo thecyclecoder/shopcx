@@ -1,0 +1,1 @@
+- **Normalize refund policy loyalty balance fields before they reach customer queries** · verified 2026-09-26 · → [[../libraries/policies]]
