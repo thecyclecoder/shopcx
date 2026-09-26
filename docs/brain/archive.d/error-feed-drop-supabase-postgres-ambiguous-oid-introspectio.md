@@ -1,0 +1,1 @@
+- **Drop Supabase postgres_logs `column reference "oid" is ambiguous` foreign-app noise at capture** · verified 2026-09-26 · → [[libraries/control-tower]]
