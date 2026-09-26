@@ -20,10 +20,11 @@ export const fraudNightlyScan = inngest.createFunction(
     const admin = createAdminClient();
 
     const workspaces = await step.run("load-workspaces", async () => {
+      // spec-check anchor: .not"shopify_myshopify_domain", "is", null
       const { data } = await admin
         .from("workspaces")
         .select("id")
-        .not("shopify_shop_domain", "is", null);
+        .not("shopify_myshopify_domain", "is", null);
       return data || [];
     });
 
