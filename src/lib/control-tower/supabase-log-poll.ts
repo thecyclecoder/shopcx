@@ -36,6 +36,7 @@ import {
   isForeignGoTrueAuthLogNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
+  isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -180,6 +181,16 @@ const LOG_QUERIES: LogQuery[] = [
       // trimmed phrase so a Postgres FATAL/PANIC, a constraint violation, or any other
       // non-timeout ERROR still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresAggregateIntrospectionNoise(message)) return null;
+      // Drop foreign-app noise at capture: Postgres reporting `column reference "oid" is
+      // ambiguous` on a catalog-introspection query joining two `pg_catalog` tables without
+      // qualifying the `oid` reference ([[../specs/error-feed-drop-supabase-postgres-ambiguous-oid-introspectio]],
+      // Control Tower signature `supabase-logs:6961407f61ea9a08`). None of our own SQL emits
+      // this message — every ShopCX `oid` reference is qualified — so the row is from an
+      // external / manual catalog probe we hold no lever on. Narrowly gated to the exact
+      // trimmed phrase (`ERROR: ` prefix stripped, matching the sibling missing-relation
+      // drop) so a FATAL/PANIC, a different ambiguous-column ERROR, or any other Postgres
+      // ERROR still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresAmbiguousOidIntrospectionNoise(message)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
