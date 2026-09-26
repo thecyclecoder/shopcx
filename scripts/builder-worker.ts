@@ -23051,13 +23051,25 @@ async function runDirectorGradeJob(job: Job) {
 
   for (const c of candidates) {
     if (c.dimension === "auto-approval") {
+      // SCHEMA-SAFETY-FINGERPRINT: director-grade-approval-decisions-select — pinned by
+      // scripts/builder-worker.director-grade-approval-select.test.ts.
+      // approval_decisions has routed_to_function, not director_function — the schema is at
+      // supabase/migrations/20260703120000_approval_decisions.sql; the `director_function`
+      // column with the same name lives on director_decision_grades. Select only real columns
+      // and derive the director label from candidate.director_function (set by
+      // pickDirectorGradeBatch from routed_to_function) with routed_to_function as the
+      // row-level fallback.
       const { data: dec } = await a
         .from("approval_decisions")
-        .select("id, workspace_id, agent_job_id, reasoning, created_at")
+        .select("id, workspace_id, agent_job_id, reasoning, routed_to_function, created_at")
         .eq("id", c.approval_decision_id)
         .maybeSingle();
       if (!dec) continue;
-      const decision = dec as { id: string; workspace_id: string; agent_job_id: string | null; reasoning: string | null; created_at: string };
+      const decision = dec as { id: string; workspace_id: string; agent_job_id: string | null; reasoning: string | null; routed_to_function: string | null; created_at: string };
+      // Prefer the candidate's director_function (already resolved from routed_to_function in the
+      // picker), fall back to the row's routed_to_function, and only then to platform.
+      const derivedDirectorFunction = c.director_function || decision.routed_to_function || "platform";
+      c.director_function = derivedDirectorFunction;
       workspaceId = workspaceId ?? decision.workspace_id;
       let target: AutoApprovalCtx["target"] = { id: null, kind: null, spec_slug: null, status: null, pr_url: null, pr_number: null, spec_branch: null, error: null, log_tail: null, pending_actions: null };
       let repeatFailures = 0;

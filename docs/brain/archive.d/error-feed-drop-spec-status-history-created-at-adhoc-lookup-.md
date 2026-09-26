@@ -1,0 +1,1 @@
+- **Drop stale spec status history created_at REST lookup noise** · verified 2026-09-26 · → [[../libraries/control-tower]]
