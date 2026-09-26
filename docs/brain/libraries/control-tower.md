@@ -95,7 +95,7 @@ The capture + page + snapshot layer for the "hidden surfaces" ([[../specs/error-
 
 ## `supabase-log-poll.ts` — Management Logs poller (error-feed-monitoring Phase 2)
 
-Pulls DB-level Supabase errors our app never sees — Postgres/auth/API — from the [[../integrations/supabase-management-logs]] `logs.all` endpoint into [[../tables/error_events]] (`source='supabase-logs'`). Driven by the [[../inngest/supabase-log-poll]] cron.
+Pulls DB-level Supabase errors our app never sees — Postgres/auth/API — from the [[../integrations/supabase-management-logs]] unified `logs` ClickHouse endpoint (the 2026-09-23 replacement for the removed `logs.all` SQL endpoint) into [[../tables/error_events]] (`source='supabase-logs'`). Driven by the [[../inngest/supabase-log-poll]] cron.
 
 - `pollSupabaseLogs(admin?)` → `{ status: 'no-token'|'ok'|'error', incidents, rows, errors }` — reads + decrypts the token, polls the `(last_polled_at, now]` window (≤24h) across 3 source queries, **groups by `(source, signature)`** client-side, `recordError`s each, advances the cursor on partial success. **No-op (no-token)** until the owner pastes the token. Best-effort — per-source failures collected in `errors`, never thrown.
 - `getSupabaseLogConfig(admin?)` → `{ token, projectRef, lastPolledAt }` or null · `isSupabaseLogPollConfigured(admin?)` → boolean · `setSupabaseAccessToken(token, { projectRef? }, admin?)` (encrypt + upsert) · `clearSupabaseAccessToken(admin?)` · `projectRefFromEnv()` (parses `NEXT_PUBLIC_SUPABASE_URL`). Config: [[../tables/error_feed_supabase_config]] (single row, service-role only). Owner endpoint: `/api/developer/control-tower/supabase-token`.
