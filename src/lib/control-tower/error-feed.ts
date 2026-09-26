@@ -1313,14 +1313,53 @@ export function isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
   ) {
     return false;
   }
+  return isErrorEventsAdhocSelectLookupQuery(query);
+}
+
+/**
+ * Query-shape helper — returns `true` when `query` is a read-only lookup against
+ * `error_events` and can safely be treated as an external / stale caller (no ShopCX code
+ * path emits this shape). Two shapes are accepted; every other shape is rejected so a
+ * real code bug still pages:
+ *
+ *   1. **Simple SQL SELECT**: `select ... from public.error_events ...` (or the
+ *      unqualified `from error_events` variant), with any trailing WHERE / ORDER BY /
+ *      LIMIT tail. This is the bare exploratory query shape from the SQL Editor or a
+ *      hand-written probe.
+ *   2. **PostgREST-generated CTE**: PostgREST wraps a direct-REST column select in
+ *      `WITH pgrst_source AS ( SELECT "public"."<table>"."<col>", ... FROM
+ *      "public"."<table>" WHERE ... )` before dispatch. The wrapper CAN wrap a write
+ *      body (e.g. `WITH pgrst_source AS ( INSERT INTO ... )`), so this helper requires
+ *      the FIRST token inside the CTE body to be `SELECT` and the inner FROM clause to
+ *      name `error_events` (quoted `"public"."error_events"` / `"error_events"` or the
+ *      bare `public.error_events` / `error_events` form).
+ *
+ * Rejects:
+ *   - non-SELECT statements (INSERT / UPDATE / DELETE / DDL — a real code path writing
+ *     the missing column is a bug we WANT to see),
+ *   - a CTE whose inner statement is not a SELECT (a PostgREST write wrapper),
+ *   - queries whose FROM clause names any other relation (the pin is `error_events`),
+ *   - empty / nullish query — without a lookup context we cannot confirm the shape.
+ *
+ * Exported so the pinned identifier is grep-able from the spec's verification check.
+ * Not re-usable across other tables by design: the FROM-relation pin is baked in here
+ * so a copy-and-tweak sibling (e.g. `smart_patterns.content`) stays a separate helper
+ * with its own regression tests.
+ */
+export function isErrorEventsAdhocSelectLookupQuery(
+  query: string | null | undefined,
+): boolean {
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
-  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
-  // statement MUST start with `select` and its FROM clause MUST name this exact table
-  // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
-  // captured — a caller that actually writes to error_events with a bogus column is a
-  // code bug we DO want to page on, not the ad hoc read this drop targets.
-  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q);
+  // Simple SQL SELECT-lookup form — `select ... from (public.)?error_events ...`.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q)) return true;
+  // PostgREST-generated CTE form — `with pgrst_source as ( select ... from
+  // "public"."error_events" ... )`. Require the CTE body's leading token to be
+  // `select` so a PostgREST write wrapper (`... as ( insert into ... )`) stays captured
+  // as a real code-bug shape.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+(?:"public"\."error_events"|"error_events"|(?:public\.)?error_events\b)/.test(
+    q,
+  );
 }
 
 /**
