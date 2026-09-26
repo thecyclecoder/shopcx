@@ -144,7 +144,7 @@ Refunds are issued to your original payment method and typically land within **5
 
 ## Refund Playbook Exceptions
 - Tier 0 — LOYALTY SAVE (new, skip_stand_firm=true):
-    Conditions: order.source=subscription_contract AND order.days_since_charge<=7 AND order.has_loyalty_coupon=false AND customer.loyalty_points>=500.
+    Conditions: order.source=subscription_contract AND order.days_since_charge<=7 AND order.has_loyalty_coupon=false AND loyalty.points_balance>=500 (loyalty.points_balance is backed by public.loyalty_members.points_balance; customer.loyalty_points is not a customer column).
     Resolution: redeem highest tier ($5/$10/$15 from points) as partial refund + offer 30/60 day pause. Customer confirms; we execute redeem_points_as_refund + pause_timed.
     Fires IMMEDIATELY on first eligible turn — no stand-firm required first.
 - AUTO-GRANT — System Error (cancelled_but_charged):
@@ -200,7 +200,7 @@ Refunds are issued to your original payment method and typically land within **5
       { id: "refunds.playbook_stand_firm_between_tiers", value: 2 },
       { id: "refunds.tier_1_threshold", condition: "ltv_cents >= 10000 OR total_orders >= 1", resolution: "store_credit_return" },
       { id: "refunds.tier_2_threshold", condition: "ltv_cents >= 30000 OR total_orders >= 3", resolution: "refund_return" },
-      { id: "refunds.tier_0_loyalty_save", condition: "order.source = subscription_contract AND order.days_since_charge <= 7 AND NOT order.has_loyalty_coupon AND customer.loyalty_points >= 500", resolution: "loyalty_redeem_partial_refund + pause_30_or_60_offer", skip_stand_firm: true },
+      { id: "refunds.tier_0_loyalty_save", condition: "order.source = subscription_contract AND order.days_since_charge <= 7 AND NOT order.has_loyalty_coupon AND loyalty.points_balance >= 500", resolution: "loyalty_redeem_partial_refund + pause_30_or_60_offer", skip_stand_firm: true },
     ],
   },
   // ────────────────────────────────────────────────────────────────────────
