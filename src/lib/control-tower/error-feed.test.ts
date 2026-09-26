@@ -2703,6 +2703,77 @@ test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a FA
   );
 });
 
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"specs\" ...)` CTE wrapper form (Control Tower supabase-logs:db473602f67dc156)", () => {
+  // The captured PostgREST direct-REST shape: identical foreign-owned lookup but wrapped
+  // in the pgrst_source CTE with double-quoted `"public"."specs"` identifiers. The prior
+  // bare-SELECT regex missed this because the statement starts with `with` and the FROM
+  // clause carries the quoted schema.table shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."specs"."id", "public"."specs"."slug", "public"."specs"."archived_at" FROM "public"."specs" WHERE "public"."specs"."workspace_id" = $1 ORDER BY "public"."specs"."archived_at" DESC LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Same wrapper on the sibling `folded_at` and `deferred_at` shapes.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.folded_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."specs"."id", "public"."specs"."folded_at" FROM "public"."specs" ORDER BY "public"."specs"."folded_at" DESC LIMIT $1 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column public.specs.deferred_at does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."id", "public"."specs"."deferred_at" FROM "public"."specs" WHERE "public"."specs"."workspace_id" = $1)',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "ERROR: column specs.archived_at does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."archived_at" FROM "public"."specs")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a PostgREST CTE wrapper whose wrapped op is a WRITE (a real code-bug writing specs.archived_at still pages)", () => {
+  // A PostgREST INSERT/UPDATE wraps as the SAME `WITH pgrst_source AS (...)` outer shell
+  // (per db-health test fixture: `WITH pgrst_source AS (INSERT INTO "public"."account_usage_snapshots"...)`),
+  // but its wrapped op is INSERT/UPDATE/DELETE — a real caller trying to write one of these
+  // bogus timestamp columns is a code bug we WANT paged, not the ad hoc read this filter drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.archived_at does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."specs"("id", "archived_at") VALUES ($1, now()) RETURNING "public"."specs"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.folded_at does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."specs" SET "folded_at" = now() WHERE "public"."specs"."id" = $1 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a PostgREST CTE wrapper on a DIFFERENT table (a real schema regression on tickets.archived_at still pages)", () => {
+  // Same wrapper shape but the wrapped SELECT reads a different table — the pin is
+  // `specs.<archived_at|folded_at|deferred_at>` only; tickets.archived_at is a real column
+  // and a column-missing there is a genuine schema regression.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column tickets.archived_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."tickets"."id", "public"."tickets"."archived_at" FROM "public"."tickets" WHERE "public"."tickets"."workspace_id" = $1 )',
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise returns false on empty / nullish input", () => {
   assert.equal(
     isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(null, null),

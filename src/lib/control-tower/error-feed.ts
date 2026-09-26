@@ -1683,8 +1683,13 @@ export function isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
  *      — trimmed equal to `column specs.<archived_at|folded_at|deferred_at> does not exist`
  *      (or the `public.` qualified variant, with any leading `ERROR: ` prefix Postgres
  *      includes on the logs surface stripped), AND
- *   2. the `parsed.query` attribute is a bare `select ... from public.specs` lookup shape
- *      (any WHERE / LIMIT / ORDER BY tail is fine).
+ *   2. the `parsed.query` attribute is a SELECT-lookup shape on `public.specs` — either
+ *      (a) the bare `select ... from public.specs` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."specs" ... )` CTE wrapper form
+ *      (`[[../specs/error-feed-drop-specs-archive-timestamp-postgrest-cte-noise]]` — the
+ *      captured `supabase-logs:db473602f67dc156` shape). PostgREST direct-REST wraps the
+ *      request as that CTE with double-quoted `"public"."specs"` identifiers, so the plain
+ *      SELECT regex misses it; both forms are the same foreign-owned read.
  *
  * Narrowly gated so:
  *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
@@ -1695,7 +1700,9 @@ export function isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
  *     the three obsolete archive-timestamp names only,
  *   - a `specs.archived_at` error attached to a DIFFERENT statement shape
  *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin
- *     is the bare SELECT-lookup shape, matching the ad hoc direct-REST read we've observed,
+ *     is the SELECT-lookup shape, matching the ad hoc direct-REST read we've observed;
+ *     the CTE branch likewise requires the wrapped op to be a SELECT (an INSERT/UPDATE
+ *     inside `WITH pgrst_source AS ( ... )` — PostgREST's own write shape — stays paged),
  *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
  *     `specs` is untouched (different message),
  *   - empty / nullish message OR query returns `false` — we need both markers.
@@ -1731,7 +1738,16 @@ export function isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
   // — a caller that actually writes to specs with one of these bogus timestamp columns
   // is a code bug we DO want to page on, not the ad hoc direct-REST read this drop
   // targets.
-  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?specs\b/.test(q);
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?specs\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."specs" ... )` with double-quoted identifiers (Control Tower
+  // `supabase-logs:db473602f67dc156`). Same foreign-owned read, different rendering — the
+  // plain SELECT regex above misses it because the statement starts with `with` and the
+  // FROM clause carries the quoted `"public"."specs"` shape. Guarded so the CTE branch
+  // requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the same
+  // wrapper — e.g. `WITH pgrst_source AS (INSERT INTO "public"."specs"("archived_at") ...)`
+  // — is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?specs\b/.test(q);
 }
 
 /**
