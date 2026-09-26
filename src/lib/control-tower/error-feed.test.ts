@@ -26,6 +26,7 @@ import {
   isForeignSupabasePostgresOrdersNameLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -2033,6 +2034,216 @@ test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise retur
   assert.equal(
     isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
       "column spec_status_history.created_at does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/spec_phases?select=...idx...` against our `public.spec_phases` table. The
+// table exists but its ordering column is `position`, not `idx`. Foreign-owned surface,
+// no lever from us — drop AT CAPTURE only when BOTH the exact column-missing message on
+// `spec_phases.idx` AND the bare SELECT-lookup shape on `spec_phases` are present. A
+// column-missing on any other table, a different column on `spec_phases`, or a
+// non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise drops the ad hoc SELECT lookup on the exact spec_phases.idx column-missing shape", () => {
+  // The captured PostgREST direct-REST shape — unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "select id, idx from public.spec_phases order by idx asc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column public.spec_phases.idx does not exist",
+      "select id, idx from public.spec_phases order by idx asc limit 100",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "select idx from spec_phases limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "select spec_id, idx from public.spec_phases where spec_id = 'x' order by idx asc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "SELECT ID, IDX FROM PUBLIC.SPEC_PHASES",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "ERROR: column spec_phases.idx does not exist",
+      "select idx from public.spec_phases",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "  column spec_phases.idx does not exist  ",
+      "   select idx from public.spec_phases   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have an idx column still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column jobs.idx does not exist",
+      "select idx from public.jobs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column phases.idx does not exist",
+      "select idx from public.phases where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise KEEPS a DIFFERENT column-missing on spec_phases (the real `position` column renamed still pages)", () => {
+  // The real ordering column is `position`. If someone breaks that, we want to see it.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.position does not exist",
+      "select position from public.spec_phases where spec_id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.spec_id does not exist",
+      "select spec_id from public.spec_phases where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise KEEPS a JOIN across other tables (a real code shape referencing spec_phases still pages)", () => {
+  // A JOIN with another table is a real query shape — not the ad hoc direct-REST read.
+  // The regex is anchored on `from (public.)?spec_phases` as the FIRST FROM target; a
+  // JOIN whose first FROM is a different table won't match.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "select s.slug, p.idx from public.specs s join public.spec_phases p on p.spec_id = s.id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing spec_phases.idx still pages)", () => {
+  // INSERT / UPDATE / DELETE against spec_phases referencing a bogus column is real code
+  // trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "insert into public.spec_phases (spec_id, idx, title) values ($1, 1, 'x')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "update public.spec_phases set idx = 2 where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "delete from public.spec_phases where idx > 3",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on spec_phases (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "database is shutting down",
+      "select id from public.spec_phases where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      'duplicate key value violates unique constraint "spec_phases_spec_position"',
+      "select id from public.spec_phases where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.spec_phases where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      'permission denied for relation "public.spec_phases"',
+      "select id from public.spec_phases where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      'relation "public.spec_phases" does not exist',
+      "select id from public.spec_phases where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
       null,
     ),
     false,
