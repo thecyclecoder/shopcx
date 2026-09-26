@@ -46,6 +46,7 @@ import {
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -324,6 +325,21 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_phases` via a non-SELECT statement (real code-bug shape) still surfaces /
       // pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.is_active`. The `specs` table exists but carries no
+      // `is_active` boolean — spec activity is derived from the `spec_phases` rollup +
+      // `status` overrides, and the sibling `journey_definitions.is_active` is the
+      // column an external client typically confuses this with. The column-missing
+      // ERROR only reaches this feed when a foreign app / stale SQL Editor session /
+      // deprecated integration queries `/rest/v1/specs?select=...is_active...` or
+      // `?is_active=eq.true`. There is no lever from ShopCX to make that query resolve
+      // — paging Platform on it ([[../specs/error-feed-drop-specs-is-active-direct-rest-noise]])
+      // is repair work for a query we don't own. Narrowly gated to require BOTH the
+      // exact column-missing message AND the bare-SELECT-on-specs shape — a
+      // column-missing error on any other table, a different column on `specs`, or on
+      // `specs` via a non-SELECT statement (real code-bug shape) still surfaces /
+      // pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
