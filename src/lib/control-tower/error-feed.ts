@@ -1745,6 +1745,76 @@ export function isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column specs.archived does not exist` for an
+ * ad hoc / stale PostgREST direct-REST SELECT against `public.specs.archived`. The
+ * `specs` table exists (see
+ * `supabase/migrations/20260713120001_specs_and_spec_phases.sql`) but there is no
+ * `archived` column — a spec's terminal lifecycle state is `folded` on `specs.status`
+ * (M4 fold), not a boolean archive flag. Every ShopCX caller reads / writes via the
+ * `specs-table` SDK; grep confirms no code path selects `.archived` from `public.specs`.
+ * The error only reaches Supabase's `postgres_logs` feed when an external / stale
+ * PostgREST client (a foreign app, a deprecated integration, a stale SQL Editor session)
+ * queries `/rest/v1/specs?select=...archived...` or `?archived=eq.false`. There is no
+ * lever from ShopCX to make that query resolve — paging Platform on it is repair work
+ * for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise` — the same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` + bare
+ * SELECT-on-table shape), aimed at a different foreign caller on a different table.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column specs.archived does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.specs` lookup
+ *      shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have an `archived` column) still pages — the pin is
+ *     `specs.archived` only,
+ *   - a column-missing error on `specs` for a DIFFERENT column (e.g. the real `status`
+ *     column got renamed) still pages — the pin covers `archived` only,
+ *   - a `specs.archived` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
+ *     bare SELECT-lookup shape, matching the ad hoc direct-REST read we've observed,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `specs` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column specs.archived does not exist" ||
+    stripped === "column public.specs.archived does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `specs` (with or
+  // without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays captured
+  // — a caller that actually writes to `specs` with a bogus `archived` column is a code
+  // bug we DO want to page on, not the ad hoc direct-REST read this drop targets. `\b`
+  // around `specs` keeps the anchor from matching sibling tables like `spec_phases` /
+  // `spec_status_history`.
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?specs\b/.test(q);
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).
