@@ -14,8 +14,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   sweepMainBuildStatus,
+  readMainBuildStatus,
   MAIN_BUILD_RED_ESCALATION_KIND,
   MAIN_BUILD_RED_ACTION_KIND,
+  MAIN_BUILD_STATUS_GITHUB_TIMEOUT_MS,
   type MainBuildState,
 } from "./main-build-status";
 
@@ -246,6 +248,63 @@ test("two consecutive sweeps over the same first_red_sha produce EXACTLY ONE not
   assert.equal(second.reason, "deduped");
   assert.equal(tables.dashboard_notifications.length, 1);
   assert.equal(tables.director_activity.length, 1);
+});
+
+test("ghGet timeout / network failure collapses to state='unknown' + reason='github_unreachable'", async () => {
+  // Pin the boundary the spec adds: the fetch-level abort/network failure MUST
+  // become the existing unknown path — never a red alarm, and the sweep still
+  // returns a normal result so the cron's end-of-run heartbeat can fire.
+  assert.equal(typeof MAIN_BUILD_STATUS_GITHUB_TIMEOUT_MS, "number");
+  assert.ok(MAIN_BUILD_STATUS_GITHUB_TIMEOUT_MS > 0);
+
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  const abortError = new Error("The operation was aborted due to timeout");
+  abortError.name = "AbortError";
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    calls.push(String(input));
+    throw abortError;
+  }) as typeof fetch;
+
+  try {
+    // 1. readMainBuildStatus — the direct boundary. The commits list read is
+    //    the very first ghGet call; when it aborts we must return unknown
+    //    (never null-through into a red verdict).
+    const read = await readMainBuildStatus();
+    assert.equal(read.state, "unknown");
+    assert.equal(read.headSha, null);
+    assert.equal(read.firstRedSha, null);
+    assert.ok(calls.length >= 1, "ghGet should have been invoked at least once");
+
+    // 2. The sweep body sees the unknown state, records the standard reason,
+    //    and MUST NOT alarm or resolve — a GitHub blip cannot fake-clear a
+    //    real red-main alarm and it must not fabricate one either.
+    const tables: StubTables = {
+      dashboard_notifications: [
+        {
+          id: "card-1",
+          workspace_id: "ws-1",
+          type: "agent_approval_request",
+          dismissed: false,
+          metadata: { escalation_kind: MAIN_BUILD_RED_ESCALATION_KIND },
+        },
+      ],
+      director_activity: [],
+    };
+    const admin = makeStubAdmin(tables);
+    const res = await sweepMainBuildStatus({
+      admin: admin as never,
+      workspaceId: "ws-1",
+    });
+    assert.equal(res.state, "unknown");
+    assert.equal(res.alarmed, false);
+    assert.equal(res.resolved, false);
+    assert.equal(res.reason, "github_unreachable");
+    const card = tables.dashboard_notifications[0] as { dismissed: boolean };
+    assert.equal(card.dismissed, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("state='unknown' (GitHub unreachable) is a no-op — never fake-clears, never alarms", async () => {
