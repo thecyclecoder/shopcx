@@ -166,6 +166,7 @@
     "test:agent-jobs-columns": "tsx --test src/lib/agent-jobs-columns.test.ts",
     "test:build-lifecycle": "tsx --test src/lib/build-lifecycle.test.ts",
     "test:box-auth-refresh": "tsx --test scripts/builder-worker.auth-refresh.test.ts",
+    "test:box-director-grade-approval-select": "tsx --test scripts/builder-worker.director-grade-approval-select.test.ts",
     "test:appstle-discount-code-only": "tsx --test src/lib/appstle-discount.code-only.test.ts",
     "test:appstle-discount-rollback": "tsx --test src/lib/appstle-discount.rollback.test.ts",
     "test:loyalty-linked-aggregate": "tsx --test src/lib/loyalty.linked-aggregate.test.ts",
