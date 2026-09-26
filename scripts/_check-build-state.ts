@@ -22,7 +22,8 @@ const SLUGS=["refund-idempotency-guard-in-commerce-refund-facade","add-payment-m
   // vale_pass + auto_build per spec
   console.log("\n=== spec review/build flags ===");
   for (const slug of SLUGS) {
-    const { data: s } = await db.from("specs").select("vale_pass, auto_build, deferred, status, review_passed_at").eq("workspace_id",WS).eq("slug",slug).maybeSingle();
+    const { data: s, error: specErr } = await db.from("specs").select("vale_pass, auto_build, deferred, status, vale_review_passed_at").eq("workspace_id",WS).eq("slug",slug).maybeSingle();
+    if (specErr) { console.log(`  ${slug.slice(0,42).padEnd(42)} PROBE READ FAILED: ${specErr.message}`); continue; }
     console.log(`  ${slug.slice(0,42).padEnd(42)} vale_pass=${(s as any)?.vale_pass} auto_build=${(s as any)?.auto_build} deferred=${(s as any)?.deferred}`);
   }
   process.exit(0);
