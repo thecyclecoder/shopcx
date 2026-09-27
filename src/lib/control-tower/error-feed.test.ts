@@ -1339,6 +1339,64 @@ test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise drops the ad h
   );
 });
 
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"error_events\" ...)` CTE wrapper form (Control Tower supabase-logs:2c008698336c43a2)", () => {
+  // The captured PostgREST direct-REST shape: identical foreign-owned lookup but wrapped
+  // in the pgrst_source CTE with double-quoted `"public"."error_events"` identifiers. The
+  // prior bare-SELECT regex missed this because the statement starts with `with` and the
+  // FROM clause carries the quoted schema.table shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.message does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."error_events"."id", "public"."error_events"."message" FROM "public"."error_events" WHERE "public"."error_events"."workspace_id" = $1 ORDER BY "public"."error_events"."first_seen_at" DESC LIMIT $2 )',
+    ),
+    true,
+  );
+  // Same wrapper on other unquoted-identifier columns — the pin is on the `error_events`
+  // table + column-missing shape, not the specific column name.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."error_events"."metadata" FROM "public"."error_events" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column public.error_events.first_seen_at does not exist",
+      'WITH pgrst_source AS (SELECT "public"."error_events"."id", "public"."error_events"."first_seen_at" FROM "public"."error_events" WHERE "public"."error_events"."workspace_id" = $1)',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "ERROR: column error_events.message does not exist",
+      'WITH pgrst_source AS (SELECT "public"."error_events"."message" FROM "public"."error_events")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise KEEPS a PostgREST CTE wrapper whose wrapped op is a WRITE (a real code-bug writing an error_events column still pages)", () => {
+  // A PostgREST INSERT/UPDATE wraps as the SAME `WITH pgrst_source AS (...)` outer shell
+  // but its wrapped op is INSERT/UPDATE/DELETE — a real caller trying to WRITE one of
+  // these bogus columns is a code bug we WANT paged, not the ad hoc read this filter drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."error_events"("id", "metadata") VALUES ($1, $2) RETURNING "public"."error_events"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.first_seen_at does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."error_events" SET "first_seen_at" = now() WHERE "public"."error_events"."id" = $1 )',
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise KEEPS a column-missing error on OTHER tables (a real code bug on another table still pages)", () => {
   // A missing column on any OTHER table is a real code bug we WANT to see, not the ad hoc
   // read on error_events we drop. The pin is `error_events.` only.
