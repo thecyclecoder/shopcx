@@ -53,6 +53,7 @@ import {
   isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise,
   isForeignSupabasePostgresPoliciesKindLookupNoise,
   isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise,
+  isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -429,6 +430,25 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_phases`, a JOIN through `specs`, or on `spec_phases` via a non-SELECT
       // statement (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.agent_jobs` that asks for BOTH `slug` and the real `spec_slug`
+      // column. The `agent_jobs` table exists but has NEVER had a `slug` column — the
+      // durable subject field is `spec_slug`, and every ShopCX caller goes through the
+      // agent_jobs SDK / RPCs. The column-missing ERROR only reaches this feed when a
+      // foreign app / stale SQL Editor session queries
+      // `/rest/v1/agent_jobs?select=slug,spec_slug,...` (a client confusing `slug` with
+      // the real `spec_slug`). There is no lever from ShopCX to make that query resolve
+      // — paging Platform on it (Control Tower signature
+      // `supabase-logs:67f11eea914ea082`,
+      // [[../specs/error-feed-drop-agent-jobs-slug-direct-rest-lookup-noise]]) is repair
+      // work for a query we don't own. Narrowly gated to require ALL THREE of the exact
+      // column-missing message, a SELECT-on-agent_jobs shape (bare OR PostgREST CTE
+      // wrapper), AND a `spec_slug` mention in the same query — a column-missing on any
+      // other table, a different column on `agent_jobs`, a JOIN through
+      // `approval_decisions`, a bare `select slug from agent_jobs` without `spec_slug`,
+      // or on `agent_jobs` via a non-SELECT statement (real code-bug shape) still
+      // surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
