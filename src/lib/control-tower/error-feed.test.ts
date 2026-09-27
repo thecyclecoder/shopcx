@@ -1734,6 +1734,87 @@ test("isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise drops t
   );
 });
 
+test("isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"spec_phases\" ...)` CTE wrapper form (Control Tower supabase-logs:e3fbf16374cf56af)", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."spec_phases"` identifiers. The plain
+  // bare-SELECT regex misses this because the statement starts with `with` and the FROM
+  // clause carries the quoted schema.table shape. This is the captured query for the
+  // `spec_slug` twin at that Control Tower signature.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.spec_slug does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."spec_phases"."id", "public"."spec_phases"."spec_slug" FROM "public"."spec_phases" WHERE "public"."spec_phases"."spec_slug" = $1 ORDER BY "public"."spec_phases"."position" ASC LIMIT $2 )',
+    ),
+    true,
+  );
+  // The `workspace_id` twin in the same wrapper shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.workspace_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."spec_phases"."id", "public"."spec_phases"."workspace_id" FROM "public"."spec_phases" WHERE "public"."spec_phases"."workspace_id" = $1 LIMIT $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column public.spec_phases.spec_slug does not exist",
+      'WITH pgrst_source AS (SELECT "public"."spec_phases"."spec_slug" FROM "public"."spec_phases")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "ERROR: column spec_phases.workspace_id does not exist",
+      'WITH pgrst_source AS (SELECT "public"."spec_phases"."workspace_id" FROM "public"."spec_phases")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise KEEPS a PostgREST CTE wrapper whose wrapped op is INSERT/UPDATE/DELETE (a real code-write still pages)", () => {
+  // The `WITH pgrst_source AS (...)` outer shell also wraps PostgREST writes — an INSERT
+  // / UPDATE / DELETE against spec_phases referencing a bogus workspace_id / spec_slug
+  // column is real code trying to write the table, not the ad hoc direct-REST read this
+  // drop targets. The CTE branch requires the wrapped op to be a SELECT so those writes
+  // stay captured/paged.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.workspace_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."spec_phases"("id", "workspace_id") VALUES ($1, $2) RETURNING "public"."spec_phases"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.spec_slug does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."spec_phases" SET "spec_slug" = $1 WHERE "public"."spec_phases"."id" = $2 )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.spec_slug does not exist",
+      'WITH pgrst_source AS ( DELETE FROM "public"."spec_phases" WHERE "public"."spec_phases"."spec_slug" = $1 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise KEEPS a PostgREST CTE wrapper on a DIFFERENT table (a real schema regression on another table's workspace_id / spec_slug still pages)", () => {
+  // Same wrapper shape but the wrapped SELECT reads a different table — the pin is
+  // `spec_phases.workspace_id` / `spec_phases.spec_slug` only; any other table's
+  // workspace_id / spec_slug going missing is a genuine schema regression we want to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column specs.workspace_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."specs"."id", "public"."specs"."workspace_id" FROM "public"."specs" WHERE "public"."specs"."workspace_id" = $1 )',
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise KEEPS a column-missing error on any OTHER table (a table that DOES have workspace_id / spec_slug still pages)", () => {
   // `specs` itself has `workspace_id` — a real column-missing there is a schema regression.
   assert.equal(
