@@ -980,6 +980,86 @@ test("isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise returns fa
   );
 });
 
+test("isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise drops the PostgREST direct-REST CTE-wrapped SELECT shape", () => {
+  // Verbatim payload observed on Control Tower signature `supabase-logs:41dd87c2e483a884`
+  // (5 sightings 2026-09-26 → 2026-09-27) — PostgREST wraps the direct-REST row read in
+  // a `WITH pgrst_source AS ( SELECT ... FROM "public"."error_events" ... )` CTE with
+  // double-quoted schema-qualified identifiers. Same foreign-owned read, different
+  // rendering; the widened classifier drops it.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
+      "column error_events.first_seen does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."error_events"."id", "public"."error_events"."first_seen", "public"."error_events"."last_seen" FROM "public"."error_events" WHERE "public"."error_events"."id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant + CTE-wrapped query is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
+      "column public.error_events.first_seen does not exist",
+      'with pgrst_source as ( select "public"."error_events"."first_seen" from "public"."error_events" limit 1 )',
+    ),
+    true,
+  );
+  // Unqualified quoted table name inside the CTE (`FROM "error_events"`) — the sibling
+  // widening covers both `"public"."error_events"` and bare `"error_events"`.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
+      "column error_events.first_seen does not exist",
+      'WITH pgrst_source AS ( SELECT "first_seen" FROM "error_events" WHERE id = $1 )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise KEEPS a non-SELECT op inside the PostgREST CTE wrapper (a real code-write still pages)", () => {
+  // A PostgREST INSERT / UPDATE / DELETE wrapped in the same `WITH pgrst_source AS (...)`
+  // envelope names a `first_seen` column but is a real code-write we WANT to see, not the
+  // ad hoc read this drop targets. The CTE regex requires the wrapped op to be a SELECT.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
+      "column error_events.first_seen does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."error_events"("id","first_seen") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
+      "column error_events.first_seen does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."error_events" SET "first_seen" = $1 WHERE "id" = $2 RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
+      "column error_events.first_seen does not exist",
+      'WITH pgrst_source AS ( DELETE FROM "public"."error_events" WHERE "first_seen" < $1 RETURNING * )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise KEEPS a JOIN across error_events + another table (a real product query still pages)", () => {
+  // A JOIN whose FROM primary is a DIFFERENT table (with error_events joined in) is a
+  // real product-shaped query we WANT to see — the bare-SELECT regex requires the FROM
+  // clause to name error_events directly, and the CTE regex likewise anchors on the
+  // wrapper's FROM clause naming error_events.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
+      "column error_events.first_seen does not exist",
+      "select e.first_seen from public.orders o join public.error_events e on e.order_id = o.id",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
+      "column error_events.first_seen does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."error_events"."first_seen" FROM "public"."orders" JOIN "public"."error_events" ON "public"."error_events"."order_id" = "public"."orders"."id" )',
+    ),
+    false,
+  );
+});
+
 // ── isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise ──
 // The ad hoc `select ... metadata ... from public.error_events` lookup by an external tool
 // or a stale exploratory query. `error_events` is a real product table but no ShopCX code
@@ -1366,6 +1446,89 @@ test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise returns false 
     isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
       "column error_events.metadata does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise drops the PostgREST direct-REST CTE-wrapped SELECT shape", () => {
+  // Verbatim payload observed on Control Tower signature `supabase-logs:41dd87c2e483a884`
+  // (5 sightings 2026-09-26 → 2026-09-27) — PostgREST wraps the direct-REST row read in
+  // a `WITH pgrst_source AS ( SELECT ... FROM "public"."error_events" ... )` CTE with
+  // double-quoted schema-qualified identifiers. Same foreign-owned read, different
+  // rendering; the widened classifier drops it.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.first_seen does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."error_events"."id", "public"."error_events"."first_seen", "public"."error_events"."last_seen" FROM "public"."error_events" WHERE "public"."error_events"."id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Any unquoted column name in the message still classifies via the generic pin — the
+  // classifier does not care which column the caller mistyped, only that the shape is
+  // the ad hoc PostgREST read on error_events.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.foo_bar does not exist",
+      'with pgrst_source as ( select "public"."error_events"."foo_bar" from "public"."error_events" limit 1 )',
+    ),
+    true,
+  );
+  // Unqualified quoted table name inside the CTE (`FROM "error_events"`) — the sibling
+  // widening covers both `"public"."error_events"` and bare `"error_events"`.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      'WITH pgrst_source AS ( SELECT "metadata" FROM "error_events" WHERE id = $1 )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise KEEPS a non-SELECT op inside the PostgREST CTE wrapper (a real code-write still pages)", () => {
+  // A PostgREST INSERT / UPDATE / DELETE wrapped in the same `WITH pgrst_source AS (...)`
+  // envelope on error_events with a bogus column is a real code-write we WANT to see,
+  // not the ad hoc read this drop targets. The CTE regex requires the wrapped op to be
+  // a SELECT.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."error_events"("id","metadata") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.first_seen does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."error_events" SET "first_seen" = $1 WHERE "id" = $2 RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      'WITH pgrst_source AS ( DELETE FROM "public"."error_events" WHERE "metadata" IS NULL RETURNING * )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise KEEPS a JOIN across error_events + another table (a real product query still pages)", () => {
+  // A JOIN whose FROM primary is a DIFFERENT table (with error_events joined in) is a
+  // real product-shaped query we WANT to see — the bare-SELECT regex requires the FROM
+  // clause to name error_events directly, and the CTE regex likewise anchors on the
+  // wrapper's FROM clause naming error_events.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      "select e.metadata from public.orders o join public.error_events e on e.order_id = o.id",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."error_events"."metadata" FROM "public"."orders" JOIN "public"."error_events" ON "public"."error_events"."order_id" = "public"."orders"."id" )',
     ),
     false,
   );
