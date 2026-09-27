@@ -650,6 +650,42 @@ function computeSummary(rows: DemoRow[], totalCustomers: number) {
   };
 }
 
+type WorkspaceSnapshotRow = {
+  workspace_id: string;
+  product_id: null;
+  computed_at: string;
+} & ReturnType<typeof computeSummary>;
+
+// The all-customers demographics row is scoped by `workspace_id` with
+// `product_id IS NULL`, enforced by a PARTIAL unique index (see
+// supabase/migrations/20260420000008_demographics_snapshots.sql). PostgREST's
+// `.upsert(..., { onConflict: "workspace_id" })` needs a full-table unique
+// constraint on `workspace_id`, which does not exist, so the snapshot builder
+// errored on that write. This helper matches the table's real uniqueness
+// model: update the existing all-customers row, or insert one when missing.
+export async function upsertWorkspaceDemographicsSnapshot(
+  row: WorkspaceSnapshotRow,
+): Promise<void> {
+  const admin = createAdminClient();
+  const { workspace_id, product_id: _productId, ...update } = row;
+  const { data: existing } = await admin
+    .from("demographics_snapshots")
+    .select("id")
+    .eq("workspace_id", workspace_id)
+    .is("product_id", null)
+    .maybeSingle();
+  if (existing?.id) {
+    await admin
+      .from("demographics_snapshots")
+      .update(update)
+      .eq("id", existing.id);
+    return;
+  }
+  await admin
+    .from("demographics_snapshots")
+    .insert({ workspace_id, product_id: null, ...update });
+}
+
 export const demographicsSnapshotBuilder = inngest.createFunction(
   {
     id: "demographics-snapshot-builder",
@@ -681,12 +717,12 @@ export const demographicsSnapshotBuilder = inngest.createFunction(
 
         const summary = computeSummary((allRows || []) as DemoRow[], totalCustomers || 0);
 
-        await admin.from("demographics_snapshots").upsert({
+        await upsertWorkspaceDemographicsSnapshot({
           workspace_id: ws.id,
           product_id: null,
           ...summary,
           computed_at: new Date().toISOString(),
-        }, { onConflict: "workspace_id" });
+        });
       });
 
       // Per-product snapshots
