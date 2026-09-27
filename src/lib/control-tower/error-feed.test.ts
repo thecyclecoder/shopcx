@@ -37,6 +37,7 @@ import {
   isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
+  isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -5040,6 +5041,213 @@ test("isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise returns false on 
   assert.equal(
     isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise(
       "column agent_jobs.slug does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/workspaces?select=id,name,slug` against our `public.workspaces` table. The
+// table exists but by design carries NO `slug` column — the workspace slug shape lives
+// on `workspaces.help_slug` (the public mini-site slug). Foreign-owned surface, no
+// lever from us — drop AT CAPTURE only when BOTH the exact column-missing message on
+// `workspaces.slug` AND a SELECT-lookup shape on `workspaces` (bare OR PostgREST CTE
+// wrapper) are present. A column-missing on any other table, a different column on
+// `workspaces` (including the real `help_slug`), or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise drops the captured supabase-logs:b64f0e4a2576752f message+query pair (the ad hoc SELECT lookup on the exact workspaces.slug column-missing shape)", () => {
+  // The captured production sample: unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column workspaces.slug does not exist",
+      "select id, name, slug from public.workspaces",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column public.workspaces.slug does not exist",
+      "select id, name, slug from public.workspaces",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column workspaces.slug does not exist",
+      "select slug from workspaces limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column workspaces.slug does not exist",
+      "select id, name, slug from public.workspaces where slug = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column workspaces.slug does not exist",
+      "SELECT ID, NAME, SLUG FROM PUBLIC.WORKSPACES",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "ERROR: column workspaces.slug does not exist",
+      "select slug from public.workspaces",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "  column workspaces.slug does not exist  ",
+      "   select slug from public.workspaces   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"workspaces\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in
+  // the pgrst_source CTE with double-quoted `"public"."workspaces"` identifiers. The
+  // plain bare-SELECT regex misses this because the statement starts with `with` and
+  // the FROM clause carries the quoted schema.table shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column workspaces.slug does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."workspaces"."id", "public"."workspaces"."name", "public"."workspaces"."slug" FROM "public"."workspaces" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column public.workspaces.slug does not exist",
+      'WITH pgrst_source AS (SELECT "public"."workspaces"."slug" FROM "public"."workspaces")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "ERROR: column workspaces.slug does not exist",
+      'WITH pgrst_source AS (SELECT "public"."workspaces"."slug" FROM "public"."workspaces")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise KEEPS a column-missing on `workspaces.help_slug` (a DIFFERENT column on the same table — the real column rename still pages)", () => {
+  // `workspaces.help_slug` IS a real column (the public mini-site slug); if it ever
+  // regresses we absolutely want the page. The pin is `workspaces.slug` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column workspaces.help_slug does not exist",
+      "select id, name, help_slug from public.workspaces",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column public.workspaces.help_slug does not exist",
+      "select help_slug from public.workspaces",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a slug column still pages)", () => {
+  // If any other table's `slug` column regressed, we absolutely want the page — the
+  // pin is `workspaces.slug` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column specs.slug does not exist",
+      "select slug from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column goals.slug does not exist",
+      "select slug from public.goals where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise KEEPS a non-SELECT statement shape on workspaces (an INSERT/UPDATE/DELETE on workspaces with the same message is a real code-bug and still pages)", () => {
+  // INSERT / UPDATE / DELETE against workspaces referencing a bogus `slug` column is
+  // real code trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column workspaces.slug does not exist",
+      "insert into public.workspaces (id, name, slug) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column workspaces.slug does not exist",
+      "update public.workspaces set slug = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column workspaces.slug does not exist",
+      "delete from public.workspaces where slug is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column workspaces.slug does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."workspaces"("name", "slug") VALUES ($1, $2) RETURNING "public"."workspaces"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column workspaces.slug does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."workspaces" SET "slug" = $1 WHERE "public"."workspaces"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column workspaces.slug does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
+      "column workspaces.slug does not exist",
       null,
     ),
     false,
