@@ -1153,14 +1153,24 @@ export function isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
  *      trimmed equal to `column error_events.first_seen does not exist` (with or without
  *      the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the
  *      logs surface), AND
- *   2. the `parsed.query` attribute is a bare `select ... from public.error_events`
- *      lookup shape AND it contains the bare `first_seen` token (word-boundary, no
- *      `_at` suffix — a typo of the real `first_seen_at` column).
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.error_events` — either
+ *      (a) the bare `select ... from public.error_events` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."error_events" ... )`
+ *      CTE wrapper form with double-quoted identifiers (matching the sibling widening in
+ *      `isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise` /
+ *      `isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise`, Control Tower
+ *      signature `supabase-logs:41dd87c2e483a884`) — AND the query contains the bare
+ *      `first_seen` token (word-boundary, no `_at` suffix — a typo of the real
+ *      `first_seen_at` column). The token pin holds against either shape, including the
+ *      double-quoted `"first_seen"` identifier PostgREST emits.
  *
  * Narrowly gated so:
  *   - a column-missing error for ANY OTHER table (a real schema regression) still pages,
  *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
- *     DDL, a JOIN across other tables) still pages — the pin is the SELECT-lookup shape,
+ *     DDL, a JOIN across other tables) still pages — the pin is the SELECT-lookup shape.
+ *     A PostgREST wrapper carrying a non-SELECT op (e.g.
+ *     `WITH pgrst_source AS (INSERT INTO "public"."error_events"("first_seen") ...)`)
+ *     is a real code-write and stays captured/paged,
  *   - a typo message that names `first_seen_at` (the real column) instead of `first_seen`
  *     is a genuinely different error and stays captured,
  *   - a FATAL / PANIC / constraint violation is untouched (different message).
@@ -1183,11 +1193,18 @@ export function isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
-  // Bare SELECT on error_events + the bare `first_seen` token (word-boundary, no `_at`
-  // suffix — otherwise a query that references the real `first_seen_at` column would
-  // false-positive). A JOIN/UNION/non-SELECT statement still surfaces; likewise a SELECT
-  // that names the real column via `first_seen_at` (a different mistype) stays captured.
-  if (!/^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q)) return false;
+  // SELECT-lookup on error_events — either the bare `select ... from public.error_events`
+  // shape OR PostgREST's `WITH pgrst_source AS ( SELECT ... FROM "public"."error_events"
+  // ... )` CTE wrapper (double-quoted identifiers). Same foreign-owned read, different
+  // rendering. Guarded so the CTE branch requires the wrapped op to be a SELECT — a
+  // PostgREST INSERT/UPDATE inside the same wrapper is a real code-write and stays
+  // captured/paged. The `first_seen` token pin then holds against either shape (the
+  // word-boundary regex matches the bare `first_seen` inside the quoted
+  // `"first_seen"` identifier PostgREST emits, but still refuses `first_seen_at`).
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?error_events\b/.test(q);
+  if (!bareSelect && !pgrstCte) return false;
   return /\bfirst_seen\b(?!_at)/.test(q);
 }
 
@@ -1278,15 +1295,23 @@ export function isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise(
  *      trimmed equal to `column error_events.<name> does not exist` (or the `public.`
  *      qualified variant), with any leading `ERROR: ` prefix Postgres includes on the logs
  *      surface stripped, AND `<name>` a plain unquoted identifier (a-z / 0-9 / _), AND
- *   2. the `parsed.query` attribute is a bare `select ... from public.error_events` lookup
- *      shape (the ad hoc SELECT — any WHERE / LIMIT / ORDER BY tail is fine).
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.error_events` — either
+ *      (a) the bare `select ... from public.error_events` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."error_events" ... )`
+ *      CTE wrapper form with double-quoted identifiers (matching the sibling widening in
+ *      `isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise` /
+ *      `isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise`, Control Tower
+ *      signature `supabase-logs:41dd87c2e483a884`).
  *
  * Narrowly gated so:
  *   - a column-missing error for `<column>` on ANY OTHER table (a real code bug on another
  *     table that DOES have such a column) still pages — the pin is `error_events.` only,
  *   - an `error_events.<column>` error attached to a DIFFERENT statement shape (INSERT /
  *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
- *     SELECT-lookup shape only, matching the ad hoc read we've observed,
+ *     SELECT-lookup shape only, matching the ad hoc read we've observed. A PostgREST
+ *     wrapper carrying a non-SELECT op (e.g.
+ *     `WITH pgrst_source AS (INSERT INTO "public"."error_events"(...) ...)`) is a real
+ *     code-write and stays captured/paged,
  *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing is
  *     untouched (different message),
  *   - empty / nullish message OR query returns `false` — we need both markers.
@@ -1315,12 +1340,16 @@ export function isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
   }
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
-  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
-  // statement MUST start with `select` and its FROM clause MUST name this exact table
-  // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
-  // captured — a caller that actually writes to error_events with a bogus column is a
-  // code bug we DO want to page on, not the ad hoc read this drop targets.
-  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q);
+  // SELECT-lookup on error_events — either the bare `select ... from public.error_events`
+  // shape OR PostgREST's `WITH pgrst_source AS ( SELECT ... FROM "public"."error_events"
+  // ... )` CTE wrapper (double-quoted identifiers). Same foreign-owned read, different
+  // rendering. Guarded so the CTE branch requires the wrapped op to be a SELECT — a
+  // PostgREST INSERT/UPDATE inside the same wrapper is a real code-write and stays
+  // captured/paged. A JOIN across error_events + another table still surfaces (the
+  // bare-SELECT regex requires the FROM clause to name error_events with no join partner
+  // interposed; the CTE regex likewise anchors on the wrapper's FROM clause).
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q)) return true;
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?error_events\b/.test(q);
 }
 
 /**
