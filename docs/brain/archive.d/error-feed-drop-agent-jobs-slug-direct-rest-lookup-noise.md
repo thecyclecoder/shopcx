@@ -1,0 +1,1 @@
+- **Drop stale agent_jobs.slug direct-REST lookup noise** · verified 2026-09-27 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
