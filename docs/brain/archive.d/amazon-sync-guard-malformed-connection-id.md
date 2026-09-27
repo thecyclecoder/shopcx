@@ -1,0 +1,1 @@
+- **Guard Amazon sync events before querying amazon_connections with malformed connection ids** · verified 2026-09-27 · → [[../inngest/amazon-sync]]
