@@ -6,6 +6,18 @@ import { requestReport, pollReportStatus, downloadReport, processOrderReport } f
 import { spApiRequest, isLwaCredentialsExpiredError } from "@/lib/amazon/auth";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
+const AMAZON_CONNECTION_ID_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Guard for Amazon sync event `connection_id` fields. `amazon_connections.id`
+// is a UUID column, so a missing or non-UUID value (e.g. the literal string
+// "undefined" from a malformed event) is rejected by PostgREST as a bad UUID
+// on read and floods the Supabase DB logs. Callers must gate the
+// `load-connection` step on this before ever asking Supabase to compare.
+export function isValidAmazonConnectionId(value: unknown): value is string {
+  return typeof value === "string" && AMAZON_CONNECTION_ID_UUID_RE.test(value);
+}
+
 // ── amazon/sync-orders ──
 // Triggered manually or by daily cron. Requests report → polls → processes.
 export const amazonSyncOrders = inngest.createFunction(
@@ -21,6 +33,10 @@ export const amazonSyncOrders = inngest.createFunction(
       connection_id: string;
       days?: number;
     };
+
+    if (!isValidAmazonConnectionId(connection_id)) {
+      return { status: "skipped", reason: "invalid_connection_id" };
+    }
 
     const admin = createAdminClient();
 
@@ -164,6 +180,10 @@ export const amazonSyncAsins = inngest.createFunction(
       workspace_id: string;
       connection_id: string;
     };
+
+    if (!isValidAmazonConnectionId(connection_id)) {
+      return { status: "skipped", reason: "invalid_connection_id" };
+    }
 
     const admin = createAdminClient();
 

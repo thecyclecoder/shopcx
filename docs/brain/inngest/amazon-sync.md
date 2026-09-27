@@ -18,6 +18,10 @@ Pulls Amazon SP-API order + ASIN data; writes `amazon_*`, `daily_amazon_order_sn
 - **Retries:** 2
 - **Concurrency:** `concurrency: [{ limit: 1, key: "event.data.connection_id" }]`
 
+## Malformed-event guard (`isValidAmazonConnectionId`)
+
+Both `amazon-sync-orders` and `amazon-sync-asins` run `isValidAmazonConnectionId(connection_id)` immediately after unpacking `event.data`, BEFORE the `load-connection` step. `amazon_connections.id` is a UUID column, so a missing or non-UUID `connection_id` (e.g. the literal string `"undefined"` from a malformed event) makes PostgREST raise a bad-UUID error on read and floods the Supabase DB logs. The guard is a UUID-shape regex; on failure the handler returns `{ status: "skipped", reason: "invalid_connection_id" }` and never queries Supabase. Valid events flow through unchanged. Pinned by `src/lib/inngest/amazon-sync.connection-id-guard.test.ts`.
+
 
 ### `amazon-daily-sync`
 - **Trigger:** cron `0 10 * * *`
