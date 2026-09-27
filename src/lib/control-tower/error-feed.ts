@@ -1278,15 +1278,23 @@ export function isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise(
  *      trimmed equal to `column error_events.<name> does not exist` (or the `public.`
  *      qualified variant), with any leading `ERROR: ` prefix Postgres includes on the logs
  *      surface stripped, AND `<name>` a plain unquoted identifier (a-z / 0-9 / _), AND
- *   2. the `parsed.query` attribute is a bare `select ... from public.error_events` lookup
- *      shape (the ad hoc SELECT — any WHERE / LIMIT / ORDER BY tail is fine).
+ *   2. the `parsed.query` attribute is a SELECT-lookup shape on `public.error_events` —
+ *      either (a) the bare `select ... from public.error_events` shape, OR (b) the
+ *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM "public"."error_events"
+ *      ... )` CTE wrapper form (Control Tower signature `supabase-logs:2c008698336c43a2`).
+ *      PostgREST direct-REST wraps the request as that CTE with double-quoted
+ *      `"public"."error_events"` identifiers, so the plain SELECT regex misses it; both
+ *      forms are the same foreign-owned read. Matches the widening already applied to the
+ *      specs and spec_phases sibling drops.
  *
  * Narrowly gated so:
  *   - a column-missing error for `<column>` on ANY OTHER table (a real code bug on another
  *     table that DOES have such a column) still pages — the pin is `error_events.` only,
  *   - an `error_events.<column>` error attached to a DIFFERENT statement shape (INSERT /
  *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
- *     SELECT-lookup shape only, matching the ad hoc read we've observed,
+ *     SELECT-lookup shape only, matching the ad hoc read we've observed; the CTE branch
+ *     likewise requires the wrapped op to be a SELECT (an INSERT/UPDATE inside
+ *     `WITH pgrst_source AS ( ... )` — PostgREST's own write shape — stays paged),
  *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing is
  *     untouched (different message),
  *   - empty / nullish message OR query returns `false` — we need both markers.
@@ -1320,7 +1328,16 @@ export function isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
   // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
   // captured — a caller that actually writes to error_events with a bogus column is a
   // code bug we DO want to page on, not the ad hoc read this drop targets.
-  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q);
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."error_events" ... )` with double-quoted identifiers (Control Tower
+  // `supabase-logs:2c008698336c43a2`). Same foreign-owned read, different rendering — the
+  // plain SELECT regex above misses it because the statement starts with `with` and the
+  // FROM clause carries the quoted `"public"."error_events"` shape. Guarded so the CTE
+  // branch requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the
+  // same wrapper — e.g. `WITH pgrst_source AS (INSERT INTO "public"."error_events"
+  // ("metadata") ...)` — is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?error_events\b/.test(q);
 }
 
 /**
