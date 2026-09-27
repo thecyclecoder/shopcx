@@ -27,6 +27,11 @@ Enriches `customer_demographics` from Census + Versium for new customers. End-to
 
 _None._
 
+## Exports
+
+### `upsertWorkspaceDemographicsSnapshot(row: WorkspaceSnapshotRow): Promise<void>`
+Upserts the all-customers demographics summary snapshot (`product_id IS NULL`) for a workspace. Handles the uniqueness constraint correctly by querying for an existing row with matching `workspace_id` and `product_id IS NULL`, then updating or inserting as appropriate. Used by `demographics-snapshot-builder` to refresh the workspace-wide snapshot without triggering Postgres conflict errors on a non-existent full-table unique constraint.
+
 ## Tables written
 
 - [[../tables/customer_demographics]]

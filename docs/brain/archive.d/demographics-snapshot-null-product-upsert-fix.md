@@ -1,0 +1,1 @@
+- **Fix all-customers demographics snapshot upsert** · verified 2026-09-27 · → [[lifecycles/demographic-enrichment]]
