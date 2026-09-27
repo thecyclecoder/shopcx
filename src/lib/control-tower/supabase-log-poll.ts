@@ -53,6 +53,7 @@ import {
   isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise,
   isForeignSupabasePostgresPoliciesKindLookupNoise,
   isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -429,6 +430,21 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_phases`, a JOIN through `specs`, or on `spec_phases` via a non-SELECT
       // statement (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.body_md`. The `specs` table exists but has NO `body_md`
+      // column — phase body text lives on `spec_phases.body`, per phase. The column-
+      // missing ERROR only reaches this feed when a foreign app / stale SQL Editor
+      // session / deprecated integration queries
+      // `/rest/v1/specs?select=...body_md...` or `?body_md=ilike.*x*`. There is no
+      // lever from ShopCX to make that query resolve — paging Platform on it (Control
+      // Tower signature `supabase-logs:2fbb132337ba7975`,
+      // [[../specs/error-feed-drop-specs-body-md-direct-rest-noise]]) is repair work
+      // for a query we don't own. Narrowly gated to require BOTH the exact column-
+      // missing message AND a SELECT-on-specs shape (bare OR PostgREST CTE wrapper) —
+      // a column-missing error on any other table, a different column on `specs`, a
+      // JOIN through `spec_phases`, or on `specs` via a non-SELECT statement (real
+      // code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
