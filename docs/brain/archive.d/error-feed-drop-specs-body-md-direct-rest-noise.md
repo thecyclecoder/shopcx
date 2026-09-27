@@ -1,0 +1,1 @@
+- **Drop the ad hoc public.specs.body_md direct-REST lookup at capture** · verified 2026-09-27 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise`)
