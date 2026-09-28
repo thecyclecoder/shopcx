@@ -44,6 +44,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isInngestStepWrappedNonErrorLog,
   isInngestTerminalFailureMirrorLog,
@@ -7123,6 +7124,81 @@ test("isTransientKlaviyoReviewsFetch5xx returns false on empty / nullish / non-5
     isTransientKlaviyoReviewsFetch5xx(
       "/api/inngest",
       "Klaviyo reviews fetch failed: unknown",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise ──
+// Ad hoc `select ... sender_type ... from public.ticket_messages` lookup by an external
+// tool (Supabase Studio table editor, foreign SQL client, third-party integration) — or
+// the PostgREST CTE wrapper the same client emits. Our `ticket_messages` table has never
+// carried a `sender_type` column, so the column-missing ERROR is repair work for a query
+// we don't own (Control Tower signature `supabase-logs:68e241545842ebf7`). Narrowly
+// gated: a column-missing on a live `ticket_messages` column, or on `sender_type` for
+// any other table, still surfaces / pages on first sighting.
+
+test("isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise drops the exact sample from signature supabase-logs:68e241545842ebf7", () => {
+  // The captured sample: bare SELECT-lookup shape on public.ticket_messages naming a
+  // column that has never existed in our schema.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(
+      "column ticket_messages.sender_type does not exist",
+      "select id, sender_type, sender_name, internal from public.ticket_messages",
+    ),
+    true,
+  );
+  // PostgREST CTE wrapper form — same foreign-owned read via the REST endpoint.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(
+      "column ticket_messages.sender_type does not exist",
+      'with pgrst_source as ( select "id", "sender_type" from "public"."ticket_messages" limit 100 ) select * from pgrst_source',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix + `public.` qualifier on the column name are tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(
+      "ERROR: column public.ticket_messages.sender_type does not exist",
+      "select sender_type from public.ticket_messages",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise KEEPS a column-missing error for a DIFFERENT column on ticket_messages (a real product-schema regression still pages)", () => {
+  // A missing `body` / `author_type` / `created_at` on ticket_messages IS a real live-
+  // column regression we want to page on — the pin is exact to `sender_type`.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(
+      "column ticket_messages.body does not exist",
+      "select body from public.ticket_messages",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(
+      "column ticket_messages.author_type does not exist",
+      "select author_type from public.ticket_messages",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise KEEPS a sender_type miss on a DIFFERENT table (a real code bug on another table still pages)", () => {
+  // `sender_type` missing on any OTHER table is a real code bug we want to see, not the
+  // foreign ticket_messages lookup we drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(
+      "column tickets.sender_type does not exist",
+      "select sender_type from public.tickets",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(
+      "column sms_messages.sender_type does not exist",
+      "select id, sender_type from public.sms_messages",
     ),
     false,
   );

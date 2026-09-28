@@ -38,6 +38,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
+  isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
@@ -225,6 +226,19 @@ const LOG_QUERIES: LogQuery[] = [
       // column-missing error on any other table, or on `orders` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingOrdersSourceColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... sender_type ... from
+      // public.ticket_messages` lookup by an external tool (Supabase Studio table editor,
+      // foreign SQL client, third-party integration) or the PostgREST CTE wrapper the
+      // same client emits. Our `ticket_messages` table has never carried a `sender_type`
+      // column — no ShopCX code path names it, so the resulting column-missing ERROR is
+      // repair work for a query we don't own
+      // ([[../specs/error-feed-drop-ticket-messages-sender-type-adhoc-lookup-noi]],
+      // Control Tower signature `supabase-logs:68e241545842ebf7`). Narrowly gated to
+      // require BOTH the exact column-missing message AND the SELECT-lookup shape — a
+      // column-missing error on any other table, or on `ticket_messages` via a
+      // non-SELECT statement (real code-bug shape), still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... metadata ... from
       // public.error_events` lookup by an external tool / stale exploratory query. The
       // `error_events` table exists but no ShopCX code path / migration / view / function

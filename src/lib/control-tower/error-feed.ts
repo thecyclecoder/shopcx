@@ -1268,6 +1268,71 @@ export function isForeignSupabasePostgresMissingOrdersSourceColumnNoise(
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `ticket_messages.sender_type`. Our `ticket_messages` table has never carried a
+ * `sender_type` (nor `sender_name` / `internal`) column — no ShopCX code path (src/,
+ * scripts/, shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT that
+ * names `ticket_messages.sender_type`. The message appears on Supabase's `postgres_logs`
+ * feed only when an external / manual tool (Supabase Studio's table editor, a foreign SQL
+ * client, a third-party integration) does a raw
+ * `select ... sender_type ... from public.ticket_messages` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."ticket_messages" ... )` CTE wrapper
+ * that same client emits over the REST endpoint. There is no lever from ShopCX to make
+ * that query resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-ticket-messages-sender-type-adhoc-lookup-noi]], Control
+ * Tower signature `supabase-logs:68e241545842ebf7`) is repair work for a query we don't
+ * own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingOrdersSourceColumnNoise` — same narrow-
+ * gating shape, scoped to the `ticket_messages.sender_type` lookup instead of the
+ * `orders.source` one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column ticket_messages.sender_type does not exist` (with or
+ *      without the `public.` qualifier and any leading `ERROR: ` prefix Postgres
+ *      includes on the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.ticket_messages` —
+ *      either (a) the bare `select ... from public.ticket_messages` shape, OR (b) the
+ *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."ticket_messages" ... )` CTE wrapper form with double-quoted
+ *      identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `ticket_messages` (a real product-
+ *     schema regression on a live column) still pages,
+ *   - a column-missing error for `sender_type` on ANY OTHER table (a real code bug on
+ *     another table that has such a column) still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE /
+ *     DELETE / DDL, a JOIN across other tables) still pages — the pin is the
+ *     SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column ticket_messages.sender_type does not exist" ||
+    stripped === "column public.ticket_messages.sender_type does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?ticket_messages\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?ticket_messages\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `error_events.metadata`. `error_events` DOES exist as a product table, but no ShopCX code
  * path, migration, view, function or trigger references an `error_events.metadata` column
  * (grep both to confirm). The message appears on Supabase's `postgres_logs` feed only when
