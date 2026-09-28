@@ -40,7 +40,7 @@ export const submitBanRequest: RouteHandler = async ({ auth, route, req }) => {
   if (ticket) {
     await admin.from("ticket_messages").insert({
       ticket_id: ticket.id,
-      direction: "in",
+      direction: "inbound",
       visibility: "external",
       author_type: "customer",
       body: `Subject: ${subject}\n\n${message}`,
