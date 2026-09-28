@@ -312,9 +312,22 @@ Probed directly while fixing it:
 - a spent cycle **can** be pinned back into its own window (accepted, no error);
 - but the FOLLOWING cycle then refuses `OUT_OF_BOUNDS` when pulled back to the customer's date.
 
-So a stranded customer's original date **cannot be recovered**. `scripts/_repair-stranded.ts` moves
-them to their first genuinely open cycle: **median +28 days, mean +40.5**. Revenue is delayed, never
-lost, and the date only ever moves LATER — nobody is surprised by an early charge.
+A stranded customer can be re-dated, but only **inside the open cycle's window**.
+
+⚠️ **`billingAttemptExpectedDate` is the cycle END, not "the date".** The first repair used it as the
+target and pushed all 88 customers to the far edge of their next cycle — mean **+40 days**, worst
+**+140 on a 28-day cadence**, five cycles skipped. A cycle can be pinned anywhere inside
+`[startAt, endAt]`, and the window START is usually exactly one cadence after the customer's last
+charge: their real date. `scripts/_repair-strand-dates.ts` targets
+`last charge + cadence`, clamped into the window — which **removed 3,436 days of delay across 88
+customers (mean 39d each)** and took the delayed count from 88 to 4.
+
+The 4 that remain sit at the earliest date their window allows, and their gaps are **not** from this
+bug — all four were already overdue on Appstle before migration (last charged 06-30 to 08-28 on
+28-day cadences).
+
+Revenue is delayed, never lost, and a re-dated customer only ever moves LATER — nobody is surprised
+by an early charge.
 
 That asymmetry is the reason the guard matters more than the repair: this is cheap to prevent and
 impossible to undo cleanly.
