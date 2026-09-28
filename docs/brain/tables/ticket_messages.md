@@ -90,13 +90,17 @@ Per-table `reloptions` are tightened on `public.ticket_messages` — the cluster
 
 **No data is deleted** by the fix — `VACUUM` reclaims dead-tuple space + refreshes planner stats; live rows are untouched.
 
+## Known fixes
+
+**Sept 2026: Eliminated invalid `direction: "internal"` inserts.** Seven call-sites across dunning, chargeback-processing, portal helpers, and ban-request flow were using the forbidden value `direction: "internal"` (violates DB constraint); rewritten to `direction: "outbound"` with `visibility: "internal"` left unchanged (intent: audit-only messages). Files: `src/lib/dunning.ts:778`, `src/lib/inngest/dunning.ts:915`, `src/lib/inngest/chargeback-processing.ts:356/415/477`, `src/app/api/customers/[id]/portal-ban/route.ts:58`, `src/lib/portal/helpers.ts:209`, `src/lib/portal/handlers/ban-request.ts:43`. Added predeploy guard `scripts/_check-ticket-messages-direction.ts` (wired into `predeploy:static` chain) — proximity-based static check that fails if any `direction: "..."` literal within 25 lines of `.from("ticket_messages")` is not `inbound` or `outbound`. Prevents recurrence of the pattern.
+
 ## Gotchas
 
 - Not workspace-scoped — keyed by `ticket_id`. Workspace comes via the parent ticket.
 - Body field is `body_clean` (cleaned for AI prompts) and `body` (verbatim). Not `clean_body` / `cleaned_body`.
 - `resend_email_id` not `resend_id`. supabase-js will silently insert with unknown columns dropped — always check `error` on insert.
 - `author_type`: `"customer"`, `"agent"`, `"ai"`, `"system"`.
-- `direction`: `"inbound"`, `"outbound"`.
+- `direction`: `"inbound"`, `"outbound"` (and never `"internal"` — that violates the ticket_messages_direction_check constraint; audit-only intent uses `visibility: "internal"` instead).
 - `visibility`: **`"external"`** (customer-facing, default) and **`"internal"`** (notes only). NOT `"public"` — earlier docs were wrong. Querying `.eq("visibility", "public")` returns zero rows.
 - `author_id` is usually NULL for `customer`, `ai`, and `system` author types; only `agent` rows reliably have it set (the user UUID of the operator).
 - `transactions.type` is open-ended (only `initial_checkout` in prod so far); `transactions.status` is `"succeeded"` (NOT `"settled"`).
