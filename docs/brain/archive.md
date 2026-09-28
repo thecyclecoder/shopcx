@@ -15,7 +15,11 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Guard Amazon sync events before querying amazon_connections with malformed connection ids** · verified 2026-09-27 · → [[../inngest/amazon-sync]]
 - **Fix all-customers demographics snapshot upsert** · verified 2026-09-27 · → [[lifecycles/demographic-enrichment]]
 - **Drop stale agent_jobs.slug direct-REST lookup noise** · verified 2026-09-27 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
+- **Widen error_events ad-hoc column-missing capture-drop to include the PostgREST CTE wrapper shape** · verified 2026-09-27 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise`)
+- **Widen error_events column-missing capture-drop to PostgREST's WITH pgrst_source CTE shape** · verified 2026-09-27 · → [[../libraries/control-tower]]
 - **Drop stale spec_phases spec_slug PostgREST CTE noise** · verified 2026-09-27 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise]]
+- **Drop the ad hoc public.specs.body_md direct-REST lookup at capture** · verified 2026-09-27 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise`)
+- **Drop foreign-app `column workspaces.slug does not exist` PostgREST noise at capture** · verified 2026-09-27 · → [[../libraries/control-tower]] (`isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise`)
 - **Fix cancellation timeline worker reading a missing orders column** · verified 2026-09-26 · → [[../libraries/cs-director-cancellation-timeline]]
 - **Fix build-state probe to read the canonical spec review stamp** · verified 2026-09-26 · → [[tables/specs]]
 - **Suppress child cron freshness alerts during a Control Tower watchdog scheduler gap** · verified 2026-09-26 · → [[../libraries/control-tower]]
