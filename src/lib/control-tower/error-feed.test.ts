@@ -38,6 +38,7 @@ import {
   isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
+  isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
@@ -5322,6 +5323,139 @@ test("isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise returns false on 
     isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
       "column workspaces.slug does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/products?select=...ingredients...` (or `supplement_facts`, or `benefits`)
+// against our `public.products` table. The table exists but has NEVER carried any of
+// those three intelligence columns — they live on sibling tables
+// (`product_ingredients`, `product_benefit_selections`, etc.). Foreign-owned surface,
+// no lever from us — drop AT CAPTURE only when BOTH the exact column-missing message
+// on one of the three off-schema columns AND a SELECT-lookup shape on `products`
+// (bare OR PostgREST CTE wrapper) are present. A column-missing on any other table,
+// a different column on `products`, or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise drops the captured supabase-logs:a7533814f2487659 message+query pair (the ad hoc PostgREST-CTE lookup on products.ingredients / supplement_facts / benefits)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-
+  // missing message on `products.ingredients` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "column products.ingredients does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."products"."id", "public"."products"."ingredients" FROM "public"."products" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "column public.products.ingredients does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."products"."ingredients" FROM "public"."products" )',
+    ),
+    true,
+  );
+  // The other two pinned columns (`supplement_facts`, `benefits`) match the same way.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "column products.supplement_facts does not exist",
+      "select id, supplement_facts from public.products",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "column products.benefits does not exist",
+      "select id, benefits from products limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the regex check.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "ERROR: column products.ingredients does not exist",
+      "select ingredients from public.products",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "column products.ingredients does not exist",
+      "SELECT INGREDIENTS FROM PUBLIC.PRODUCTS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise KEEPS a column-missing on `products.title` (a DIFFERENT, real column on the same table — a real schema regression still pages)", () => {
+  // `products.title` IS a real column; if it ever regressed we absolutely want the
+  // page. The pin covers the three intelligence-column names only.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "column products.title does not exist",
+      "select id, title from public.products",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "column public.products.handle does not exist",
+      "select id, handle from public.products",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise KEEPS a column-missing error on any OTHER table (a sibling table that DOES carry these columns still pages)", () => {
+  // If `product_ingredients.ingredients` regressed we absolutely want the page —
+  // the pin is `products.` only, never a sibling intelligence table.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "column product_ingredients.ingredients does not exist",
+      "select ingredients from public.product_ingredients where product_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "column product_benefit_selections.benefits does not exist",
+      "select benefits from public.product_benefit_selections",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise KEEPS a non-SELECT statement shape on products (an INSERT/UPDATE/DELETE on products with the same message is a real code-bug and still pages)", () => {
+  // INSERT / UPDATE / DELETE against products referencing a bogus intelligence
+  // column is real code trying to write the table — a bug we WANT to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "column products.ingredients does not exist",
+      "insert into public.products (id, ingredients) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "column products.supplement_facts does not exist",
+      "update public.products set supplement_facts = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "column products.benefits does not exist",
+      "delete from public.products where benefits is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
+      "column products.ingredients does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."products"("ingredients") VALUES ($1) RETURNING "public"."products"."id" )',
     ),
     false,
   );

@@ -59,6 +59,7 @@ import {
   isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
+  isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
 } from "@/lib/control-tower/error-feed";
 
@@ -526,6 +527,24 @@ const LOG_QUERIES: LogQuery[] = [
       // `workspaces`, or on `workspaces` via a non-SELECT statement (real code-bug
       // shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.products` naming one of three columns that have NEVER lived on
+      // the products table — `ingredients`, `supplement_facts`, `benefits`. Product
+      // intelligence lives on sibling tables (`product_ingredients`,
+      // `product_benefit_selections`, etc.) and every ShopCX reader goes through the
+      // products SDK / joined queries. The column-missing ERROR only reaches this feed
+      // when a foreign app / stale SQL Editor session / deprecated integration queries
+      // `/rest/v1/products?select=...ingredients...`. There is no lever from ShopCX to
+      // make that query resolve — paging Platform on it (Control Tower signature
+      // `supabase-logs:a7533814f2487659`,
+      // [[../specs/error-feed-drop-products-intelligence-columns-adhoc-lookup-n]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message (on one of the three off-schema intelligence columns)
+      // AND a SELECT-on-products shape (bare OR PostgREST CTE wrapper) — a
+      // column-missing error on any other table, a different column on `products`, or
+      // on `products` via a non-SELECT statement (real code-bug shape) still surfaces
+      // / pages on first sighting.
+      if (isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(message, query)) return null;
       // Drop expected-by-design noise at capture: Postgres reporting the 23505
       // unique-violation raised by our own `dashboard_notifications_dedupe_key_open_uniq`
       // partial index on an INSERT INTO `public.dashboard_notifications`. That index
