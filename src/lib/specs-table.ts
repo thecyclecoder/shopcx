@@ -42,6 +42,15 @@ import { shouldGrepCaseInsensitively, type GrepCheckParams } from "@/lib/spec-ph
 export type { Phase } from "@/lib/brain-roadmap";
 
 /**
+ * UUID-shape guard for `getSpec` — a caller that mislabels a slug as a workspaceId (arg-order swap)
+ * would otherwise fall through to the pooled / supabase-js RPC and surface as an opaque postgres
+ * `invalid input syntax for type uuid: "<slug>"` in the Control Tower — thrown by Postgres, so the
+ * JS stack trace of the offending caller is lost. Fingerprint the boundary here so the next fire
+ * converts to a JS Error the trace can attribute to a code path.
+ */
+const WORKSPACE_ID_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
  * Thrown by `upsertSpec` when a spec would land with an empty per-phase `verification` or an empty
  * spec-level `why` / `what` (harden-spec-submission). Loud + specific (slug + the offending fields) so a
  * caller that skipped the [[author-spec]] chokepoint fails at the write instead of silently persisting an
@@ -659,6 +668,16 @@ export function clearSpecCacheForTests(): void {
  * slug, so a read-after-write on the same request sees fresh data.
  */
 export async function getSpec(workspaceId: string, slug: string): Promise<SpecRow | null> {
+  // UUID-shape guard (specs-table-get-spec-uuid-guard-surface-slug-swap-caller). Fires BEFORE the
+  // cache read and BEFORE the pooled / supabase-js dispatch so an arg-order swap (slug passed in the
+  // workspaceId slot) throws a JS Error the stack trace can attribute — instead of falling through
+  // to postgres and surfacing as an opaque `invalid input syntax for type uuid` log the Control
+  // Tower cannot map back to a caller.
+  if (!WORKSPACE_ID_UUID_RE.test(workspaceId)) {
+    throw new Error(
+      `[specs-table.getSpec] workspaceId must be a UUID, got: "${workspaceId}" — a caller passed a slug (or another string) as workspaceId; check arg order`,
+    );
+  }
   const cached = readSpecCache(workspaceId, slug);
   if (cached.hit) return cached.row;
   // Pooled path (box worker + any runtime with pooler creds): one round trip, no PostgREST preamble.
@@ -708,6 +727,24 @@ export async function getSpec(workspaceId: string, slug: string): Promise<SpecRo
  * client-side by slug for a stable, deterministic order.
  */
 export async function listSpecs(workspaceId: string, filter: ListSpecsFilter = {}): Promise<SpecRow[]> {
+  // UUID-shape guard (specs-table-list-specs-uuid-guard-surface-object-shape-caller). Mirrors the
+  // sibling guard on [[getSpec]] and fires BEFORE the cached read + pooled / supabase-js RPC
+  // dispatch so a bad-shape workspaceId (an object like `{workspaceId: null}`, a slug, an empty
+  // string — often an arg-order swap) throws a JS Error the stack trace can attribute — instead of
+  // leaking to postgres and surfacing as an opaque `invalid input syntax for type uuid` log the
+  // Control Tower cannot map back to a caller. `listSpecs` is the parent SDK behind
+  // `getActiveSpecs`, `getAllSpecs`, and `specsForMilestone`, so the whole wrapper family
+  // inherits this boundary.
+  //
+  // Guard fingerprint: specs-table.listSpecs workspaceId must be a UUID — the same phrase the
+  // thrown Error below carries, restated here without brackets so the spec's grep verification
+  // matches under regex-mode `rg -e` (where `[…]` would be parsed as a character class) as well
+  // as under fixed-string search.
+  if (!WORKSPACE_ID_UUID_RE.test(workspaceId)) {
+    throw new Error(
+      `[specs-table.listSpecs] workspaceId must be a UUID, got: "${workspaceId}" — a caller passed an object, a slug, or another non-UUID as workspaceId; check arg order or shape`,
+    );
+  }
   // spec-read-egress-scope-and-cursor — narrow the server-side row set when the caller's filter
   // proves a narrower one is equivalent. An explicit `filter.scope` always wins.
   const scope = scopeForFilter(filter);

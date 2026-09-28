@@ -37,6 +37,8 @@ import {
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
+  isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
+  isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
@@ -54,6 +56,7 @@ import {
   isForeignSupabasePostgresPoliciesKindLookupNoise,
   isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
@@ -214,6 +217,29 @@ const LOG_QUERIES: LogQuery[] = [
       // shape that names `first_seen` (not `first_seen_at`) — a column-missing error on
       // any other table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... source ... from
+      // public.orders` lookup by an external tool / stale exploratory query. Our `orders`
+      // table exposes `source_name`, not `source` — no ShopCX code path issues a SELECT on
+      // `orders.source`, so the resulting column-missing ERROR is repair work for a query
+      // we don't own ([[../specs/error-feed-drop-orders-source-column-adhoc-lookup-noise]],
+      // Control Tower signature `supabase-logs:76fa4304a4e9fb49`). Narrowly gated to
+      // require BOTH the exact column-missing message AND the SELECT-lookup shape — a
+      // column-missing error on any other table, or on `orders` via a non-SELECT
+      // statement (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingOrdersSourceColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... sender_type ... from
+      // public.ticket_messages` lookup by an external tool (Supabase Studio table editor,
+      // foreign SQL client, third-party integration) or the PostgREST CTE wrapper the
+      // same client emits. Our `ticket_messages` table has never carried a `sender_type`
+      // column — no ShopCX code path names it, so the resulting column-missing ERROR is
+      // repair work for a query we don't own
+      // ([[../specs/error-feed-drop-ticket-messages-sender-type-adhoc-lookup-noi]],
+      // Control Tower signature `supabase-logs:68e241545842ebf7`). Narrowly gated to
+      // require BOTH the exact column-missing message AND the SELECT-lookup shape — a
+      // column-missing error on any other table, or on `ticket_messages` via a
+      // non-SELECT statement (real code-bug shape), still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... metadata ... from
       // public.error_events` lookup by an external tool / stale exploratory query. The
       // `error_events` table exists but no ShopCX code path / migration / view / function
@@ -448,6 +474,24 @@ const LOG_QUERIES: LogQuery[] = [
       // JOIN through `spec_phases`, or on `specs` via a non-SELECT statement (real
       // code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.current_phase`. The `specs` table exists but has NO
+      // `current_phase` column — the current phase is DERIVED from the `spec_phases`
+      // rollup (the first nonterminal phase row per spec). The column-missing ERROR only
+      // reaches this feed when a foreign app / stale SQL Editor session / deprecated
+      // integration queries
+      // `/rest/v1/specs?select=slug,title,status,current_phase&slug=eq.<X>` (observed
+      // both as a bare SELECT and as the PostgREST-wrapped
+      // `WITH pgrst_source AS ( SELECT ... FROM "public"."specs" ... )` CTE form). There
+      // is no lever from ShopCX to make that query resolve — paging Platform on it
+      // (Control Tower signature `supabase-logs:ead8d1f074f2467e`,
+      // [[../specs/error-feed-drop-specs-current-phase-direct-rest-noise]]) is repair
+      // work for a query we don't own. Narrowly gated to require BOTH the exact column-
+      // missing message AND a SELECT-on-specs shape (bare OR PostgREST CTE wrapper) —
+      // a column-missing error on any other table, a different column on `specs`, a
+      // JOIN through `spec_phases`, or on `specs` via a non-SELECT statement (real
+      // code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.agent_jobs` that asks for BOTH `slug` and the real `spec_slug`
       // column. The `agent_jobs` table exists but has NEVER had a `slug` column — the

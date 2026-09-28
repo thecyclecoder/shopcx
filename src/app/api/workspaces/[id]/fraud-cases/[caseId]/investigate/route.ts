@@ -110,7 +110,7 @@ export async function GET(
       for (const c of customers || []) {
         const { data: orders } = await admin
           .from("orders")
-          .select("id, line_items, created_at, total_price_cents")
+          .select("id, line_items, created_at, total_cents")
           .eq("workspace_id", workspaceId)
           .eq("customer_id", c.id)
           .gte("created_at", windowStart)

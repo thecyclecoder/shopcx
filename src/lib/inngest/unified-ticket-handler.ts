@@ -45,6 +45,7 @@ import { detectRepeatQuestion } from "@/lib/playbook-repeat-guard";
 import { logAiUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
+import { dispatchSlackNotification } from "@/lib/slack-notify";
 import { clearDispatchIntent } from "./dispatch-inbound-message";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -1665,18 +1666,20 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           }).eq("id", tid);
           // Send the customer the standard holding message so they don't sit in silence
           await sendWithDelay(admin, wsId, tid, st.ch, SILENT_TURN_HOLDING_MESSAGE, cfg.sandbox);
-          // Slack notification
+          // Slack notification — route through the rules-driven dispatcher so the ping lands
+          // on the workspace's configured 'escalation' channel (slack_notification_rules) with
+          // the real credentials (slack_bot_token_encrypted), instead of a raw webhook column
+          // that never existed on the workspaces table. slackHeader is retained on the
+          // signature for caller-site readability; the dispatcher builds a standard escalation
+          // card via buildEscalationMessage.
+          void slackHeader;
           try {
-            const { data: ws } = await admin.from("workspaces").select("slack_webhook_url").eq("id", wsId).single();
-            if (ws?.slack_webhook_url) {
-              const { data: pb } = await admin.from("playbooks").select("name").eq("id", pbActive).single();
-              const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", st.custId!).single();
-              await fetch(ws.slack_webhook_url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ text: `${slackHeader}\nPlaybook: ${pb?.name || "Unknown"}\nCustomer: ${cust?.first_name || ""} (${cust?.email || ""})\nError: ${reason}\nTicket: https://shopcx.ai/dashboard/tickets/${tid}` }),
-              });
-            }
+            const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", st.custId!).single();
+            await dispatchSlackNotification(wsId, "escalation", {
+              ticketId: tid,
+              customer: { name: cust?.first_name ?? undefined, email: cust?.email ?? undefined },
+              reason,
+            });
           } catch {}
         };
 
