@@ -1585,22 +1585,27 @@ export function isForeignSupabasePostgresOrdersNameLookupNoise(
  * reaches Supabase's `postgres_logs` feed when a foreign / stale PostgREST client or manual
  * SQL Editor session queries `/rest/v1/spec_phases?select=...workspace_id...` (or the
  * `spec_slug` variant). There is no lever from ShopCX to make that query resolve — paging
- * Platform on it (Control Tower signature `supabase-logs:4371de33cf8e1d68`,
- * [[../specs/error-feed-drop-spec-phases-workspace-slug-adhoc-lookup-nois]]) is repair work
- * for a query we do not own.
+ * Platform on it (Control Tower signature `supabase-logs:4371de33cf8e1d68` for the bare
+ * SELECT shape and `supabase-logs:e3fbf16374cf56af` for the PostgREST CTE wrapper shape,
+ * [[../specs/error-feed-drop-spec-phases-workspace-slug-adhoc-lookup-nois]],
+ * [[../specs/error-feed-drop-spec-phases-workspace-slug-cte-postgrest-noise]]) is repair
+ * work for a query we do not own.
  *
- * Sibling of `isForeignSupabasePostgresOrdersNameLookupNoise` — the same narrow-gating shape
- * (exact `column <table>.<name> does not exist` + bare SELECT-on-table shape), aimed at a
- * different foreign caller and pinned to the two specific columns (`workspace_id` /
- * `spec_slug`) that only belong on the parent `specs` row.
+ * Sibling of `isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise` — the same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` + SELECT-lookup shape
+ * covering BOTH bare and PostgREST CTE wrapper forms), aimed at a different pair of
+ * off-schema columns on the same foreign caller.
  *
  * `true` ONLY when BOTH markers are present:
  *   1. the message is Postgres's canonical column-missing shape for one of the two pinned
  *      columns — trimmed equal to `column spec_phases.workspace_id does not exist` or
  *      `column spec_phases.spec_slug does not exist` (or the `public.` qualified variant),
  *      with any leading `ERROR: ` prefix Postgres includes on the logs surface stripped, AND
- *   2. the `parsed.query` attribute is a bare `select ... from public.spec_phases` lookup
- *      shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.spec_phases` — either
+ *      (a) the bare `select ... from public.spec_phases` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."spec_phases" ... )`
+ *      CTE wrapper form with double-quoted identifiers. Both forms are the same
+ *      foreign-owned read.
  *
  * Narrowly gated so:
  *   - a column-missing error for ANY OTHER table (a real code bug on a table that DOES
@@ -1610,8 +1615,9 @@ export function isForeignSupabasePostgresOrdersNameLookupNoise(
  *     off-schema columns only, not any column name,
  *   - a `spec_phases.workspace_id` / `spec_phases.spec_slug` error attached to a DIFFERENT
  *     statement shape (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still
- *     pages — the pin is the bare SELECT-lookup shape, matching the ad hoc read we've
- *     observed,
+ *     pages — the pin is the SELECT-lookup shape, matching the ad hoc read we've observed;
+ *     the CTE branch likewise requires the wrapped op to be a SELECT (a PostgREST
+ *     INSERT/UPDATE inside the same `WITH pgrst_source AS (...)` wrapper stays paged),
  *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
  *     `spec_phases` is untouched (different message),
  *   - empty / nullish message OR query returns `false` — we need both markers.
@@ -1646,7 +1652,16 @@ export function isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoi
   // or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
   // captured — a caller that actually writes to spec_phases with a bogus column is a
   // code bug we DO want to page on, not the ad hoc direct-REST read this drop targets.
-  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?spec_phases\b/.test(q);
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?spec_phases\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."spec_phases" ... )` with double-quoted identifiers. Same foreign-
+  // owned read, different rendering — the plain SELECT regex above misses it because
+  // the statement starts with `with` and the FROM clause carries the quoted
+  // `"public"."spec_phases"` shape. Guarded so the CTE branch requires the wrapped op
+  // to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper — e.g.
+  // `WITH pgrst_source AS (INSERT INTO "public"."spec_phases"("workspace_id") ...)` —
+  // is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?spec_phases\b/.test(q);
 }
 
 /**
