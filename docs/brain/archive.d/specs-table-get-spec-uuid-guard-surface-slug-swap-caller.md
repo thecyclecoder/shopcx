@@ -1,0 +1,1 @@
+- **Guard specs-table.getSpec against a non-UUID workspaceId so the slug-swap caller surfaces in the stack trace** · verified 2026-09-28 · → [[../libraries/specs-table]]
