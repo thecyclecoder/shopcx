@@ -39,6 +39,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
+  isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
@@ -5456,6 +5457,223 @@ test("isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise KEEP
     isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(
       "column products.ingredients does not exist",
       'WITH pgrst_source AS ( INSERT INTO "public"."products"("ingredients") VALUES ($1) RETURNING "public"."products"."id" )',
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/playbooks?select=slug,title,is_active&slug=in.(...)` against our
+// `public.playbooks` table. The table exists but by design carries NO `title` column —
+// the human-facing label is `name`, and every ShopCX caller (ticket-analyzer,
+// action-executor, workflow-executor, sol-direction-apply) selects `name`. Foreign-owned
+// surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `playbooks.title` AND a SELECT-lookup shape on `playbooks` (bare OR
+// PostgREST CTE wrapper) are present. A column-missing on any other table, a different
+// column on `playbooks` (including the real `name` / `slug` columns), or a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise drops the captured supabase-logs:89f4636e0ac3cc84 message+query pair (the ad hoc SELECT lookup on the exact playbooks.title column-missing shape)", () => {
+  // The captured production sample: unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.title does not exist",
+      "select slug, title, is_active from public.playbooks where slug in ('a','b')",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column public.playbooks.title does not exist",
+      "select slug, title, is_active from public.playbooks where slug in ('a','b')",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.title does not exist",
+      "select title from playbooks limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.title does not exist",
+      "select slug, title, is_active from public.playbooks where slug = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.title does not exist",
+      "SELECT SLUG, TITLE, IS_ACTIVE FROM PUBLIC.PLAYBOOKS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "ERROR: column playbooks.title does not exist",
+      "select title from public.playbooks",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "  column playbooks.title does not exist  ",
+      "   select title from public.playbooks   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"playbooks\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in
+  // the pgrst_source CTE with double-quoted `"public"."playbooks"` identifiers. The
+  // plain bare-SELECT regex misses this because the statement starts with `with` and
+  // the FROM clause carries the quoted schema.table shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.title does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."playbooks"."slug", "public"."playbooks"."title", "public"."playbooks"."is_active" FROM "public"."playbooks" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column public.playbooks.title does not exist",
+      'WITH pgrst_source AS (SELECT "public"."playbooks"."title" FROM "public"."playbooks")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "ERROR: column playbooks.title does not exist",
+      'WITH pgrst_source AS (SELECT "public"."playbooks"."title" FROM "public"."playbooks")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise KEEPS a column-missing on a DIFFERENT playbooks column (`name` / `slug` — real column rename regressions still page)", () => {
+  // `playbooks.name` IS the real human-facing label column and `playbooks.slug` IS the
+  // real slug column; if either regressed we absolutely want the page. The pin is
+  // `playbooks.title` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.name does not exist",
+      "select slug, name, is_active from public.playbooks",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column public.playbooks.name does not exist",
+      "select name from public.playbooks",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.slug does not exist",
+      "select slug from public.playbooks",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a title column still pages)", () => {
+  // If any other table's `title` column regressed, we absolutely want the page — the
+  // pin is `playbooks.title` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column specs.title does not exist",
+      "select title from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column goals.title does not exist",
+      "select title from public.goals where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise KEEPS a non-SELECT statement shape on playbooks (an INSERT/UPDATE/DELETE on playbooks with the same message is a real code-bug and still pages)", () => {
+  // INSERT / UPDATE / DELETE against playbooks referencing a bogus `title` column is
+  // real code trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.title does not exist",
+      "insert into public.playbooks (slug, title, is_active) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.title does not exist",
+      "update public.playbooks set title = $1 where slug = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.title does not exist",
+      "delete from public.playbooks where title is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.title does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."playbooks"("slug", "title") VALUES ($1, $2) RETURNING "public"."playbooks"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.title does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."playbooks" SET "title" = $1 WHERE "public"."playbooks"."slug" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.title does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
+      "column playbooks.title does not exist",
+      null,
     ),
     false,
   );

@@ -60,6 +60,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
+  isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
 } from "@/lib/control-tower/error-feed";
 
@@ -545,6 +546,23 @@ const LOG_QUERIES: LogQuery[] = [
       // on `products` via a non-SELECT statement (real code-bug shape) still surfaces
       // / pages on first sighting.
       if (isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.playbooks.title`. The `playbooks` table exists but has NO
+      // `title` column — the human-facing label is `name`, and every ShopCX reader /
+      // writer (`src/lib/ticket-analyzer.ts`, `src/lib/action-executor.ts`,
+      // `src/lib/workflow-executor.ts`, `src/lib/sol-direction-apply.ts`) selects
+      // `name`. The column-missing ERROR only reaches this feed when a foreign app /
+      // stale SQL Editor session / deprecated integration queries
+      // `/rest/v1/playbooks?select=slug,title,is_active&slug=in.(...)`. There is no
+      // lever from ShopCX to make that query resolve — paging Platform on it (Control
+      // Tower signature `supabase-logs:89f4636e0ac3cc84`,
+      // [[../specs/error-feed-drop-playbooks-title-direct-rest-noise]]) is repair work
+      // for a query we don't own. Narrowly gated to require BOTH the exact column-
+      // missing message AND a SELECT-on-playbooks shape (bare OR PostgREST CTE
+      // wrapper) — a column-missing error on any other table, a different column on
+      // `playbooks`, or on `playbooks` via a non-SELECT statement (real code-bug
+      // shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(message, query)) return null;
       // Drop expected-by-design noise at capture: Postgres reporting the 23505
       // unique-violation raised by our own `dashboard_notifications_dedupe_key_open_uniq`
       // partial index on an INSERT INTO `public.dashboard_notifications`. That index
