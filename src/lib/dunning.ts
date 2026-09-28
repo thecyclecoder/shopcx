@@ -775,7 +775,7 @@ export async function postDunningNoteOnTicket(
   if (!ticket) return;
   await admin.from("ticket_messages").insert({
     ticket_id: ticket.id,
-    direction: "internal",
+    direction: "outbound",
     visibility: "internal",
     author_type: "system",
     body: note,

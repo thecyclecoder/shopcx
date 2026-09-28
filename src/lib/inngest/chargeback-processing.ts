@@ -353,7 +353,7 @@ export const chargebackReceived = inngest.createFunction(
 
           await admin.from("ticket_messages").insert({
             ticket_id: ticket.id,
-            direction: "internal",
+            direction: "outbound",
             visibility: "internal",
             author_type: "system",
             body: noteLines.join("\n"),
@@ -412,7 +412,7 @@ export const chargebackWon = inngest.createFunction(
       if (cb.ticket_id) {
         await admin.from("ticket_messages").insert({
           ticket_id: cb.ticket_id,
-          direction: "internal",
+          direction: "outbound",
           visibility: "internal",
           author_type: "system",
           body: `Chargeback **WON**. Funds returned. Amount: ${amountStr}.`,
@@ -474,7 +474,7 @@ export const chargebackLost = inngest.createFunction(
       if (cb.ticket_id) {
         await admin.from("ticket_messages").insert({
           ticket_id: cb.ticket_id,
-          direction: "internal",
+          direction: "outbound",
           visibility: "internal",
           author_type: "system",
           body: `Chargeback **LOST**. Amount of ${amountStr} returned to cardholder.`,
