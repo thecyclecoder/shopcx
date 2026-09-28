@@ -1,0 +1,1 @@
+- **Drop foreign 'column orders.source does not exist' ad-hoc lookup noise from the error feed** · verified 2026-09-28 · → [[../libraries/control-tower]] (error-feed.ts capture filters)
