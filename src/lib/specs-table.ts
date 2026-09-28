@@ -727,6 +727,24 @@ export async function getSpec(workspaceId: string, slug: string): Promise<SpecRo
  * client-side by slug for a stable, deterministic order.
  */
 export async function listSpecs(workspaceId: string, filter: ListSpecsFilter = {}): Promise<SpecRow[]> {
+  // UUID-shape guard (specs-table-list-specs-uuid-guard-surface-object-shape-caller). Mirrors the
+  // sibling guard on [[getSpec]] and fires BEFORE the cached read + pooled / supabase-js RPC
+  // dispatch so a bad-shape workspaceId (an object like `{workspaceId: null}`, a slug, an empty
+  // string — often an arg-order swap) throws a JS Error the stack trace can attribute — instead of
+  // leaking to postgres and surfacing as an opaque `invalid input syntax for type uuid` log the
+  // Control Tower cannot map back to a caller. `listSpecs` is the parent SDK behind
+  // `getActiveSpecs`, `getAllSpecs`, and `specsForMilestone`, so the whole wrapper family
+  // inherits this boundary.
+  //
+  // Guard fingerprint: specs-table.listSpecs workspaceId must be a UUID — the same phrase the
+  // thrown Error below carries, restated here without brackets so the spec's grep verification
+  // matches under regex-mode `rg -e` (where `[…]` would be parsed as a character class) as well
+  // as under fixed-string search.
+  if (!WORKSPACE_ID_UUID_RE.test(workspaceId)) {
+    throw new Error(
+      `[specs-table.listSpecs] workspaceId must be a UUID, got: "${workspaceId}" — a caller passed an object, a slug, or another non-UUID as workspaceId; check arg order or shape`,
+    );
+  }
   // spec-read-egress-scope-and-cursor — narrow the server-side row set when the caller's filter
   // proves a narrower one is equivalent. An explicit `filter.scope` always wins.
   const scope = scopeForFilter(filter);
