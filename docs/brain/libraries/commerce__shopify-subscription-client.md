@@ -331,3 +331,25 @@ by an early charge.
 
 That asymmetry is the reason the guard matters more than the repair: this is cheap to prevent and
 impossible to undo cleanly.
+
+
+## ⚠️ A sub can be in the RIGHT cycle and still be dated a month too late
+
+The strand check asks "is my date in a spent cycle?" and the drift check asks "does Shopify's date
+match mine?" **A subscription can pass both and still be wrong**: sitting in a correct, unbilled
+cycle but pinned to the far end of its window, a full extra cycle after the customer's last charge.
+
+Nothing flags it. The reconciler sees an unbilled cycle (not stranded) and a date that matches ours
+(no drift). It is visible *only* by comparing the date against the customer's own cadence —
+`last charge + one interval` — which is what `scripts/_delay-audit.ts` does.
+
+Found 2026-09-28 while verifying a claim that "only 4 customers are delayed". The real figure across
+183 active subs was **22**, of which 3 were this shape. `scripts/_pull-late-dates-earlier.ts` moved
+14 subs to the earliest date their window allows, recovering **379 days** and taking
+strand-attributable delay to **0**.
+
+The 15 that remain are all legitimate: 7 held by an open dunning cycle (which holds the date on
+purpose) and 8 that were already overdue on Appstle before migration.
+
+**The lesson for any future audit: a metric that reads "fine" is not the same as a customer being
+charged on the right day.** Both automated checks were green on subs that were a month late.
