@@ -27,6 +27,7 @@ async function dispatchSlackNotification(workspaceId: string, eventType: EventTy
 - `src/lib/inngest/dunning.ts`
 - `src/lib/inngest/fraud-detection.ts`
 - `src/lib/inngest/journey-outcomes.ts`
+- `src/lib/inngest/unified-ticket-handler.ts` — sends escalation notifications via [[../tables/slack_notification_rules]]
 
 ## Gotchas
 
