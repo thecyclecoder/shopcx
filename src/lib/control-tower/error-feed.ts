@@ -2507,6 +2507,71 @@ export function isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
 }
 
 /**
+ * Expected-by-design noise — Postgres reporting `duplicate key value violates unique
+ * constraint "dashboard_notifications_dedupe_key_open_uniq"` on an INSERT INTO
+ * `public.dashboard_notifications`. That partial UNIQUE index (migration
+ * `20261211120000_dashboard_notifications_dedupe_key_open_unique.sql`) is the DB-level
+ * one-open-card-per-`dedupe_key` backstop — the escalation mint path in
+ * [[../agents/platform-director]] `escalateDiagnosisToCeo` is INTENTIONALLY designed so
+ * a concurrent second insert for the same open `dedupe_key` errors at 23505 and the app
+ * catches that error to bump the winning card instead of duplicating (see the migration
+ * comment: `the DB constraint is the last-resort backstop, never the visible failure
+ * path`). Capturing the 23505 as a Control Tower error-feed incident pages Platform on a
+ * race the DB is intentionally rejecting — a healthy loop noisily surfacing as an ERROR
+ * (Control Tower signature `supabase-logs:bbd5f21ef9289c31`).
+ *
+ * Sibling of the `isForeign*` capture-time drops, but different failure class — this ERROR
+ * IS from our own code, and the code IS designed to handle it. Not `foreign` (we own the
+ * caller), not `transient` (the ERROR itself is deterministic — the app catch is what makes
+ * it self-heal). It's `expected` in the by-design sense.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the trimmed `event_message` — with an optional leading `ERROR: ` prefix stripped —
+ *      EQUALS the exact unique-violation shape for this constraint:
+ *      `duplicate key value violates unique constraint "dashboard_notifications_dedupe_key_open_uniq"`,
+ *      AND
+ *   2. the `parsed.query` attribute contains an `INSERT INTO "public"."dashboard_notifications"`
+ *      shape (double-quoted identifiers is what Postgres emits back on constraint failure).
+ *
+ * Narrowly gated so:
+ *   - a 23505 unique-violation on any OTHER constraint (a real product-schema regression on
+ *     a different unique index) still pages,
+ *   - a 23505 on this constraint attached to a NON-INSERT statement shape (a copy/pg_dump
+ *     replay, a UPDATE ... on conflict do nothing pattern hitting the partial index) still
+ *     pages — the pin is the INSERT shape only, matching the mint path we intentionally own,
+ *   - an INSERT INTO dashboard_notifications that fails with a DIFFERENT constraint /
+ *     message (a null-violation, a check-constraint bug) still pages — different message.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The unique-violation message itself
+  // has a stable shape: `duplicate key value violates unique constraint "<name>"`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (
+    stripped !==
+    'duplicate key value violates unique constraint "dashboard_notifications_dedupe_key_open_uniq"'
+  ) {
+    return false;
+  }
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // INSERT INTO "public"."dashboard_notifications" — the mint path we intentionally own.
+  // A non-INSERT statement (COPY replay, an UPDATE ... on conflict, a manual pg_dump load)
+  // that hits the same partial index is a different caller class and stays captured/paged.
+  return q.includes('insert into "public"."dashboard_notifications"');
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).
