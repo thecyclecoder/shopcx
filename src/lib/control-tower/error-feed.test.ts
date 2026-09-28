@@ -38,6 +38,7 @@ import {
   isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
+  isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -5248,6 +5249,128 @@ test("isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise returns false on 
   assert.equal(
     isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
       "column workspaces.slug does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation ──
+// The DB-level `dashboard_notifications_dedupe_key_open_uniq` partial UNIQUE index
+// (migration 20261211120000) is INTENTIONALLY the last-resort backstop for the escalation
+// mint path in platform-director.ts — a concurrent second insert for the same open
+// dedupe_key rejects at 23505 and the app catch bumps the winning card. Drop AT CAPTURE
+// only when BOTH the exact unique-violation message on THIS constraint AND the
+// INSERT-INTO-dashboard_notifications shape are present. A 23505 on any other constraint,
+// or a 23505 on this constraint via a non-INSERT shape, still pages.
+
+test("isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation drops the captured supabase-logs:bbd5f21ef9289c31 message+query pair (the expected 23505 on our own INSERT INTO dashboard_notifications)", () => {
+  // The captured production sample: Postgres's canonical 23505 shape (with the ERROR:
+  // prefix stripped) + the INSERT INTO "public"."dashboard_notifications" the mint path
+  // in platform-director.ts's `escalateDiagnosisToCeo` emits.
+  assert.equal(
+    isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
+      'duplicate key value violates unique constraint "dashboard_notifications_dedupe_key_open_uniq"',
+      'insert into "public"."dashboard_notifications" ("workspace_id", "type", "metadata") values ($1, $2, $3)',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
+      'ERROR: duplicate key value violates unique constraint "dashboard_notifications_dedupe_key_open_uniq"',
+      'insert into "public"."dashboard_notifications" ("workspace_id", "type", "metadata") values ($1, $2, $3)',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
+      'duplicate key value violates unique constraint "dashboard_notifications_dedupe_key_open_uniq"',
+      'INSERT INTO "public"."dashboard_notifications" ("workspace_id", "type") VALUES ($1, $2)',
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on both is tolerated.
+  assert.equal(
+    isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
+      '  duplicate key value violates unique constraint "dashboard_notifications_dedupe_key_open_uniq"  ',
+      '   insert into "public"."dashboard_notifications" ("workspace_id") values ($1)   ',
+    ),
+    true,
+  );
+});
+
+test("isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation KEEPS a 23505 on any OTHER unique constraint (a real product-schema regression still pages)", () => {
+  // The pin is `dashboard_notifications_dedupe_key_open_uniq` only — any other unique
+  // index that regresses is a bug we absolutely want to see.
+  assert.equal(
+    isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
+      'duplicate key value violates unique constraint "dashboard_notifications_pkey"',
+      'insert into "public"."dashboard_notifications" ("id", "workspace_id") values ($1, $2)',
+    ),
+    false,
+  );
+  assert.equal(
+    isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
+      'duplicate key value violates unique constraint "specs_slug_workspace_uniq"',
+      'insert into "public"."specs" ("slug", "workspace_id") values ($1, $2)',
+    ),
+    false,
+  );
+  assert.equal(
+    isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
+      'duplicate key value violates unique constraint "workspaces_slug_uniq"',
+      'insert into "public"."workspaces" ("slug") values ($1)',
+    ),
+    false,
+  );
+});
+
+test("isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation KEEPS a 23505 on this constraint via a non-INSERT shape (COPY replay / pg_dump load / UPDATE ... on conflict still pages)", () => {
+  // The pin is the INSERT INTO "public"."dashboard_notifications" mint shape — a
+  // different statement that trips the same partial index is a different caller class
+  // and stays captured.
+  assert.equal(
+    isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
+      'duplicate key value violates unique constraint "dashboard_notifications_dedupe_key_open_uniq"',
+      'copy public.dashboard_notifications from stdin',
+    ),
+    false,
+  );
+  assert.equal(
+    isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
+      'duplicate key value violates unique constraint "dashboard_notifications_dedupe_key_open_uniq"',
+      'update "public"."dashboard_notifications" set "dismissed" = false where "id" = $1',
+    ),
+    false,
+  );
+  // A bare SELECT (an operator running an EXPLAIN or similar) is not the mint path either.
+  assert.equal(
+    isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
+      'duplicate key value violates unique constraint "dashboard_notifications_dedupe_key_open_uniq"',
+      'select 1 from "public"."dashboard_notifications" where dismissed = false',
+    ),
+    false,
+  );
+});
+
+test("isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation returns false on empty / nullish input", () => {
+  assert.equal(isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(null, null), false);
+  assert.equal(isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(undefined, undefined), false);
+  assert.equal(isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation("", ""), false);
+  // Empty query — even with the exact message we cannot confirm the mint shape, so the
+  // row stays captured.
+  assert.equal(
+    isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
+      'duplicate key value violates unique constraint "dashboard_notifications_dedupe_key_open_uniq"',
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
+      'duplicate key value violates unique constraint "dashboard_notifications_dedupe_key_open_uniq"',
       null,
     ),
     false,
