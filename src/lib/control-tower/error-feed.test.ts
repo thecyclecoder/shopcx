@@ -1960,6 +1960,53 @@ test("isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise drops t
   );
 });
 
+test("isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"spec_phases\" ...)` CTE wrapper form (Control Tower supabase-logs:e3fbf16374cf56af)", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."spec_phases"` identifiers. The plain
+  // bare-SELECT regex misses this because the statement starts with `with` and the FROM
+  // clause carries the quoted schema.table shape — this is the exact leak the sibling
+  // spec `error-feed-drop-spec-phases-workspace-slug-cte-postgrest-noise` was built to
+  // close.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.workspace_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."spec_phases"."id", "public"."spec_phases"."workspace_id" FROM "public"."spec_phases" WHERE "public"."spec_phases"."workspace_id" = $1 ORDER BY "public"."spec_phases"."position" ASC LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column public.spec_phases.workspace_id does not exist",
+      'WITH pgrst_source AS (SELECT "public"."spec_phases"."workspace_id" FROM "public"."spec_phases")',
+    ),
+    true,
+  );
+  // The same CTE wrapper form for the `spec_slug` twin — same foreign-owned lookup, other
+  // off-schema column.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.spec_slug does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."spec_phases"."id", "public"."spec_phases"."spec_slug" FROM "public"."spec_phases" WHERE "public"."spec_phases"."spec_slug" = $1 LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column public.spec_phases.spec_slug does not exist",
+      'WITH pgrst_source AS (SELECT "public"."spec_phases"."spec_slug" FROM "public"."spec_phases")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "ERROR: column spec_phases.workspace_id does not exist",
+      'WITH pgrst_source AS (SELECT "public"."spec_phases"."workspace_id" FROM "public"."spec_phases")',
+    ),
+    true,
+  );
+});
+
 test("isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise KEEPS a column-missing error on any OTHER table (a table that DOES have workspace_id / spec_slug still pages)", () => {
   // `specs` itself has `workspace_id` — a real column-missing there is a schema regression.
   assert.equal(
@@ -2049,6 +2096,30 @@ test("isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise KEEPS a
     isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
       "column spec_phases.spec_slug does not exist",
       "delete from public.spec_phases where spec_slug = 'x'",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too — a
+  // real code-write inside the `WITH pgrst_source AS (...)` wrapper is still a bug we
+  // WANT to see, not the ad hoc read the CTE branch drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.workspace_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."spec_phases"("id", "workspace_id") VALUES ($1, $2) RETURNING "public"."spec_phases"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.workspace_id does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."spec_phases" SET "workspace_id" = $1 WHERE "public"."spec_phases"."id" = $2 )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.spec_slug does not exist",
+      'WITH pgrst_source AS ( DELETE FROM "public"."spec_phases" WHERE "spec_slug" = $1 RETURNING * )',
     ),
     false,
   );
