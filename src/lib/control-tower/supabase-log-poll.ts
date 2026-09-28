@@ -37,6 +37,7 @@ import {
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
+  isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
@@ -214,6 +215,16 @@ const LOG_QUERIES: LogQuery[] = [
       // shape that names `first_seen` (not `first_seen_at`) — a column-missing error on
       // any other table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... source ... from
+      // public.orders` lookup by an external tool / stale exploratory query. Our `orders`
+      // table exposes `source_name`, not `source` — no ShopCX code path issues a SELECT on
+      // `orders.source`, so the resulting column-missing ERROR is repair work for a query
+      // we don't own ([[../specs/error-feed-drop-orders-source-column-adhoc-lookup-noise]],
+      // Control Tower signature `supabase-logs:76fa4304a4e9fb49`). Narrowly gated to
+      // require BOTH the exact column-missing message AND the SELECT-lookup shape — a
+      // column-missing error on any other table, or on `orders` via a non-SELECT
+      // statement (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingOrdersSourceColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... metadata ... from
       // public.error_events` lookup by an external tool / stale exploratory query. The
       // `error_events` table exists but no ShopCX code path / migration / view / function
