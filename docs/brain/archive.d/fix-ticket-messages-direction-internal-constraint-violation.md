@@ -1,0 +1,1 @@
+- **Fix ticket_messages inserts using invalid direction='internal'** · verified 2026-09-28 · → [[../tables/ticket_messages]]
