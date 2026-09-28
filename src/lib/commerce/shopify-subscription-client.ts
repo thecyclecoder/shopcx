@@ -1265,8 +1265,36 @@ export async function shopifyRetimeContract(
   nextBillingDate: string,
 ): Promise<SubscriptionActionResult & { stranded?: boolean }> {
   const landingBefore = await getBillingCycleForDate(workspaceId, contractId, nextBillingDate);
-  // Pin from whichever cycle the new date belongs to, so the walk does not try to rewrite history.
-  const startIndex = landingBefore.cycle?.index ?? 1;
+
+  // ⭐ NEVER PIN A SPENT CYCLE. If the target date resolves to a cycle Shopify has already BILLED
+  // (or that was skipped), pinning it DRAGS THAT BILLED CYCLE FORWARD onto the new date — and the
+  // renewal worker resolves by date and skips spent cycles, so the subscription is instantly and
+  // permanently unbillable.
+  //
+  // This is self-inflicted and compounding: the rolling retime after each charge lands on the cycle
+  // that just billed, moves it forward, and the next lookup finds that same billed cycle sitting on
+  // the customer's next date. Measured 2026-09-28 — 90 of 209 migrated subs were stranded exactly
+  // this way, every one of them by our own retime.
+  //
+  // So step past spent cycles to the first UNBILLED one and pin from there. The customer's date is
+  // unchanged; only which cycle carries it moves.
+  let startIndex = landingBefore.cycle?.index ?? 1;
+  if (landingBefore.success && landingBefore.cycle
+      && (landingBefore.cycle.status === "BILLED" || landingBefore.cycle.skipped)) {
+    const live = await getSubscriptionContract(workspaceId, contractId);
+    const upcoming = await getUpcomingBillingCycles(workspaceId, contractId, {
+      startDate: live.contract?.createdAt ?? undefined,
+      endDate: new Date(Date.now() + 400 * 86_400_000).toISOString(),
+      first: 30,
+    });
+    const firstOpen = (upcoming.cycles ?? []).find(
+      (c) => c.index > landingBefore.cycle!.index && c.status !== "BILLED" && !c.skipped,
+    );
+    if (!firstOpen) {
+      return { success: false, error: `no unbilled cycle after #${landingBefore.cycle.index} to carry ${nextBillingDate}` };
+    }
+    startIndex = firstOpen.index;
+  }
   await shopifySyncBillingSchedule(workspaceId, contractId, { firstDate: nextBillingDate, startIndex });
 
   const set = await shopifySetNextBillingDate(workspaceId, contractId, nextBillingDate);

@@ -12,6 +12,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Add missing workspaces.playbook_compiler_support_min column** · verified 2026-09-28 · → [[../tables/workspaces]]
+- **Drop expected 23505 on dashboard_notifications_dedupe_key_open_uniq from supabase-logs capture** · verified 2026-09-28 · → [[lifecycles/control-tower]]
 - **Guard Amazon sync events before querying amazon_connections with malformed connection ids** · verified 2026-09-27 · → [[../inngest/amazon-sync]]
 - **Fix all-customers demographics snapshot upsert** · verified 2026-09-27 · → [[lifecycles/demographic-enrichment]]
 - **Drop stale agent_jobs.slug direct-REST lookup noise** · verified 2026-09-27 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)

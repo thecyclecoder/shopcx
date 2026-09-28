@@ -290,3 +290,31 @@ One mutation per renewal buys a permanently-correct schedule:
 Every one of these is **non-fatal**. The renewal worker bills by an explicit
 `billingCycleSelector` it resolves itself, so a failed pin is a display drift, never a missed or
 duplicated charge.
+
+
+## 🔴 NEVER pin a spent cycle — the rolling retime stranded 90 subs
+
+`shopifyRetimeContract` pinned whichever cycle the target date resolved to. After a successful
+charge that is the cycle that **just billed** — so the retime dragged a BILLED cycle forward onto the
+customer's next date. The renewal worker resolves by date and skips spent cycles, so the
+subscription became silently unbillable: row active, date correct-looking, never charged again.
+
+**Measured 2026-09-28: 90 of 209 migrated subs, every one stranded by our own retime.** Drift had
+read 0 three days earlier, because the strand only appears after the *next* charge.
+
+Fixed: the retime now steps past BILLED/skipped cycles to the first open one before pinning. The
+customer's date is unchanged; only which cycle carries it moves.
+
+### ⚠️ The damage is only half-repairable
+
+Probed directly while fixing it:
+
+- a spent cycle **can** be pinned back into its own window (accepted, no error);
+- but the FOLLOWING cycle then refuses `OUT_OF_BOUNDS` when pulled back to the customer's date.
+
+So a stranded customer's original date **cannot be recovered**. `scripts/_repair-stranded.ts` moves
+them to their first genuinely open cycle: **median +28 days, mean +40.5**. Revenue is delayed, never
+lost, and the date only ever moves LATER — nobody is surprised by an early charge.
+
+That asymmetry is the reason the guard matters more than the repair: this is cheap to prevent and
+impossible to undo cleanly.
