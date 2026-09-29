@@ -40,6 +40,7 @@ import {
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
+  isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
@@ -5673,6 +5674,153 @@ test("isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise returns false on 
   assert.equal(
     isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(
       "column playbooks.title does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/product_ingredients?select=...&order=sort_order.asc` against our
+// `public.product_ingredients` table. The table exists but by design carries NO
+// `sort_order` column — the actual ordering column is `display_order`. Foreign-owned
+// surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `product_ingredients.sort_order` AND a SELECT-lookup shape on
+// `product_ingredients` (bare OR PostgREST CTE wrapper) are present. A column-missing on
+// any other table, a different column on `product_ingredients` (including the real
+// `display_order` column), or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise drops the captured supabase-logs:b9012d5b8913efc6 message+query pair (positive drop — bare SELECT shape with the exact message)", () => {
+  // The captured production sample: unqualified and public.-qualified message variants
+  // over the bare SELECT-lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(
+      "column product_ingredients.sort_order does not exist",
+      "select id, name, sort_order from public.product_ingredients where product_id = $1 order by sort_order asc",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(
+      "column public.product_ingredients.sort_order does not exist",
+      "select sort_order from public.product_ingredients",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(
+      "column product_ingredients.sort_order does not exist",
+      "select sort_order from product_ingredients limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(
+      "ERROR: column product_ingredients.sort_order does not exist",
+      "select sort_order from public.product_ingredients",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"product_ingredients\" ...)` CTE wrapper form (positive drop — CTE wrapper shape)", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."product_ingredients"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(
+      "column product_ingredients.sort_order does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."product_ingredients"."id", "public"."product_ingredients"."name", "public"."product_ingredients"."sort_order" FROM "public"."product_ingredients" ORDER BY "public"."product_ingredients"."sort_order" ASC )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(
+      "column public.product_ingredients.sort_order does not exist",
+      'WITH pgrst_source AS (SELECT "public"."product_ingredients"."sort_order" FROM "public"."product_ingredients")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise KEEPS a column-missing on `product_ingredients.display_order` (the REAL ordering column — a rename regression still pages)", () => {
+  // `product_ingredients.display_order` IS the real ordering column (see
+  // `supabase/migrations/20260420000001_product_intelligence_engine.sql` — the index is
+  // `idx_product_ingredients_product ON public.product_ingredients(product_id, display_order)`).
+  // If it regressed we absolutely want the page. The pin is `sort_order` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(
+      "column product_ingredients.display_order does not exist",
+      "select id, name, display_order from public.product_ingredients order by display_order asc",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise KEEPS a non-SELECT statement shape on product_ingredients (an INSERT with the same message is a real code-bug and still pages)", () => {
+  // An INSERT/UPDATE/DELETE against product_ingredients referencing a bogus `sort_order`
+  // column is real code trying to write the table — a bug we WANT to see, not the ad
+  // hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(
+      "column product_ingredients.sort_order does not exist",
+      "insert into public.product_ingredients (product_id, name, sort_order) values ($1, $2, $3)",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise KEEPS the same message on a JOIN with another table (a real code path joining product_ingredients still pages)", () => {
+  // The pin is the bare SELECT-lookup on product_ingredients or its PostgREST CTE
+  // wrapper — a JOIN across other tables is a real code path we own and want to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(
+      "column product_ingredients.sort_order does not exist",
+      "select pi.sort_order, p.title from public.product_ingredients pi join public.products p on p.id = pi.product_id where p.id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise KEEPS a column-missing on a DIFFERENT table (`products.sort_order` — pin is product_ingredients only)", () => {
+  // A column-missing error for any OTHER table's `sort_order` (even one that we might
+  // add sort_order to later) still pages — the pin is `product_ingredients.` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(
+      "column products.sort_order does not exist",
+      "select id, sort_order from public.products",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(
+      "column product_ingredients.sort_order does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(
+      "column product_ingredients.sort_order does not exist",
       null,
     ),
     false,
