@@ -62,6 +62,7 @@ import {
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
+  isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
 } from "@/lib/control-tower/error-feed";
 
@@ -580,6 +581,25 @@ const LOG_QUERIES: LogQuery[] = [
       // `product_ingredients` via a non-SELECT statement (real code-bug shape) still
       // surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.daily_meta_ad_spend.date`. The `daily_meta_ad_spend` table
+      // exists but has NO `date` column — the actual per-day column is `snapshot_date`
+      // (see `supabase/migrations/20260422270000_meta_ads_integration.sql` — the index
+      // is `idx_meta_spend_date ON daily_meta_ad_spend(workspace_id, snapshot_date DESC)`).
+      // The column-missing ERROR only reaches this feed when a foreign app / stale SQL
+      // Editor session / deprecated integration queries
+      // `/rest/v1/daily_meta_ad_spend?select=...&date=eq.YYYY-MM-DD` — a natural mistake
+      // because many rollup tables use a plain `date` column but ours uses
+      // `snapshot_date`. There is no lever from ShopCX to make that query resolve —
+      // paging Platform on it
+      // ([[../specs/error-feed-classify-foreign-daily-meta-ad-spend-date-adhoc-noise]])
+      // is repair work for a query we don't own. Narrowly gated to require BOTH the
+      // exact column-missing message AND a SELECT-on-daily_meta_ad_spend shape (bare OR
+      // PostgREST CTE wrapper) — a column-missing error on any other table, a different
+      // column on `daily_meta_ad_spend` (e.g. `snapshot_date` regression), or on
+      // `daily_meta_ad_spend` via a non-SELECT statement (real code-bug shape) still
+      // surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(message, query)) return null;
       // Drop expected-by-design noise at capture: Postgres reporting the 23505
       // unique-violation raised by our own `dashboard_notifications_dedupe_key_open_uniq`
       // partial index on an INSERT INTO `public.dashboard_notifications`. That index
