@@ -64,6 +64,7 @@ import {
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
+  isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
 } from "@/lib/control-tower/error-feed";
@@ -616,6 +617,26 @@ const LOG_QUERIES: LogQuery[] = [
       // `daily_meta_ad_spend` via a non-SELECT statement (real code-bug shape) still
       // surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.loyalty_members.lifetime_points`. The `loyalty_members` table
+      // exists but has NO `lifetime_points` column — the live running-total column is
+      // `total_earned` (with `points_balance` for the current spendable balance), see
+      // [[../tables/loyalty_members]] and every ShopCX caller under
+      // `src/app/api/loyalty/**` + `src/lib/action-executor.ts`. The column-missing
+      // ERROR only reaches this feed when a foreign app / stale PostgREST client /
+      // deprecated integration queries
+      // `/rest/v1/loyalty_members?select=lifetime_points&...` — a natural mistake
+      // because many loyalty schemas call the running total `lifetime_points` but ours
+      // uses `total_earned`. There is no lever from ShopCX to make that query resolve —
+      // paging Platform on it
+      // ([[../specs/error-feed-drop-loyalty-members-lifetime-points-adhoc-noise]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-loyalty_members shape (bare OR PostgREST
+      // CTE wrapper) — a column-missing error on any other table, a different column on
+      // `loyalty_members` (e.g. `total_earned` / `points_balance` regression), or on
+      // `loyalty_members` via a non-SELECT statement (real code-bug shape) still
+      // surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.tickets.assigned_agent`. The `tickets` table exists but has NO
       // `assigned_agent` column — the actual assignee column is
