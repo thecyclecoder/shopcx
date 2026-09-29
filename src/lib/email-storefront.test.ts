@@ -73,3 +73,26 @@ test("missing / empty identity fields default to reviewable — only known add-o
   assert.equal(isReviewableProduct({ product_type: "", handle: "" }), true);
   assert.equal(isReviewableProduct({ product_type: null, handle: null }), true);
 });
+
+// Upcart is the SECOND shipping-protection app in the wild; it ships
+// product_type "Upcart - Shipping Protection" and handle
+// "shipping-protection" — different from ShopWill's identity. Both
+// must be excluded so the review block never sources from either app,
+// even in a future world where the UUID guard fails.
+
+test("Upcart Shipping Protection by product_type is not reviewable", () => {
+  assert.equal(
+    isReviewableProduct({ product_type: "Upcart - Shipping Protection", handle: "shipping-protection" }),
+    false,
+  );
+});
+
+test("Upcart Shipping Protection product_type match is case-insensitive", () => {
+  assert.equal(isReviewableProduct({ product_type: "UPCART - SHIPPING PROTECTION" }), false);
+  assert.equal(isReviewableProduct({ product_type: "upcart - shipping protection" }), false);
+});
+
+test("shipping-protection handle alone is not reviewable — Upcart identity via handle", () => {
+  assert.equal(isReviewableProduct({ product_type: null, handle: "shipping-protection" }), false);
+  assert.equal(isReviewableProduct({ product_type: "Something Else", handle: "shipping-protection" }), false);
+});

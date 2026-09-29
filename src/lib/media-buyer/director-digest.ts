@@ -15,6 +15,7 @@ import type { MediaBuyerPlan } from "@/lib/media-buyer/agent";
 import { getSlackToken, postAsGrowthDirector } from "@/lib/slack";
 import { recordDirectorActivity } from "@/lib/director-activity";
 import { getPersona } from "@/lib/agents/personas";
+import { uuidLineItemProductIds } from "@/lib/email-storefront";
 import {
   formatCohortGraduateHeartbeatsForDigest,
   type CohortGraduateHeartbeat,
@@ -60,12 +61,14 @@ export async function resolveProductTitlesForWorkspace(
   productIds: readonly string[],
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
-  if (!productIds.length) return out;
+  // Shopify-numeric line-item id would 22P02 the whole query — see uuidLineItemProductIds in email-storefront.ts
+  const safeIds = uuidLineItemProductIds(productIds);
+  if (!safeIds.length) return out;
   const { data } = await admin
     .from("products")
     .select("id, title")
     .eq("workspace_id", workspaceId)
-    .in("id", productIds);
+    .in("id", safeIds);
   for (const p of (data ?? []) as Array<{ id: string; title: string | null }>) {
     if (p.title) out.set(p.id, p.title);
   }
