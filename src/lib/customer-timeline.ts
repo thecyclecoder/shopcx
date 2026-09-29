@@ -18,6 +18,7 @@
  */
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { uuidLineItemProductIds } from "@/lib/email-storefront";
 
 export type TimelineEntryType =
   | "order_placed"
@@ -222,7 +223,10 @@ async function buildVariantLookup(
     .eq("workspace_id", workspaceId)
     .in("shopify_variant_id", dedupedVids);
   if (!variants) return lookup;
-  const productIds = Array.from(new Set(variants.map((v: { product_id: string }) => v.product_id).filter(Boolean)));
+  // Shopify-numeric line-item id would 22P02 the whole query — see uuidLineItemProductIds in email-storefront.ts
+  const productIds = uuidLineItemProductIds(
+    Array.from(new Set(variants.map((v: { product_id: string }) => v.product_id).filter(Boolean))),
+  );
   const { data: products } = productIds.length
     ? await admin.from("products").select("id, title").in("id", productIds)
     : { data: [] };

@@ -9,6 +9,7 @@
  * code, so they fall back to the plain "you left something behind" email.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { uuidLineItemProductIds } from "@/lib/email-storefront";
 
 const RECOVERY_MASTER = "COMEBACK";
 const RECOVERY_PCT = 15;
@@ -97,7 +98,10 @@ export async function sendCartRecovery(opts: {
   // Fallback: elaborate recovery email. Show 3 FEATURED reviews with the FULL
   // body (not the smart-quote summary) — the full text usually mentions the
   // weight-loss result, which is the conversion driver.
-  const productIds = Array.from(new Set(opts.lineItems.map((l) => l.product_id).filter((id): id is string => !!id)));
+  // Shopify-numeric line-item id would 22P02 the whole query — see uuidLineItemProductIds in email-storefront.ts
+  const productIds = uuidLineItemProductIds(
+    Array.from(new Set(opts.lineItems.map((l) => l.product_id).filter((id): id is string => !!id))),
+  );
   let reviews: Array<{ reviewer_name: string | null; rating: number; title: string | null; body: string | null; product_title?: string | null }> = [];
   if (productIds.length > 0) {
     const { data: prods } = await admin.from("products").select("id, title").in("id", productIds);

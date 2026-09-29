@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getWorkspaceBySlug } from "@/app/(storefront)/_lib/page-data";
+import { uuidLineItemProductIds } from "@/lib/email-storefront";
 
 /**
  * Public, CORS-enabled reviews feed for EXTERNAL surfaces (the Shopify theme
@@ -93,7 +94,8 @@ export async function GET(
     .limit(80);
   const pool = (revs || []) as Review[];
   // Title lookup for context line.
-  const pids = [...new Set(pool.map((r) => r.product_id).filter(Boolean))] as string[];
+  // Shopify-numeric line-item id would 22P02 the whole query — see uuidLineItemProductIds in email-storefront.ts
+  const pids = uuidLineItemProductIds([...new Set(pool.map((r) => r.product_id).filter(Boolean))] as string[]);
   const { data: prods } = pids.length
     ? await admin.from("products").select("id, title").in("id", pids)
     : { data: [] as { id: string; title: string }[] };

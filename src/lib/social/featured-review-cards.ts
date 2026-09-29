@@ -16,6 +16,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { renderStillCompositionTo } from "@/lib/ad-render";
 import { uploadBuffer, signedUrl } from "@/lib/ad-storage";
 import { DEFAULT_BRAND, type ReviewProps } from "@/lib/ad-static";
+import { uuidLineItemProductIds } from "@/lib/email-storefront";
 
 const COMPOSITION = "StaticReview";
 const SOURCE = "featured_review_card";
@@ -202,7 +203,8 @@ export async function generateFeaturedReviewCards(
   }
 
   // Resolve product titles once.
-  const productIds = Array.from(new Set(ordered.map((r) => r.product_id)));
+  // Shopify-numeric line-item id would 22P02 the whole query — see uuidLineItemProductIds in email-storefront.ts
+  const productIds = uuidLineItemProductIds(Array.from(new Set(ordered.map((r) => r.product_id))));
   const { data: products } = await admin.from("products").select("id, title").in("id", productIds.length ? productIds : ["00000000-0000-0000-0000-000000000000"]);
   const titleById = new Map((products || []).map((p) => [p.id, p.title as string]));
 

@@ -17,6 +17,7 @@ import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { winProbabilityVsControl } from "@/lib/storefront/bandit";
 import { getLeverImportancePanel } from "@/lib/storefront/lever-memory";
+import { uuidLineItemProductIds } from "@/lib/email-storefront";
 
 const FUNNEL_STEPS = [
   "pdp_view",
@@ -702,7 +703,8 @@ async function buildPredictedLtv(
     }
 
     // Resolve product titles for the cohorts in view.
-    const productIds = [...new Set((rows as Row[]).map((r) => r.product_id))];
+    // Shopify-numeric line-item id would 22P02 the whole query — see uuidLineItemProductIds in email-storefront.ts
+    const productIds = uuidLineItemProductIds([...new Set((rows as Row[]).map((r) => r.product_id))]);
     const { data: productRows } = productIds.length
       ? await admin.from("products").select("id, title").in("id", productIds)
       : { data: [] as { id: string; title: string }[] };
@@ -819,7 +821,8 @@ async function buildCampaignGrades(
       .in("id", expIds);
     const expById = new Map(((exps || []) as Array<{ id: string; product_id: string; lever: string; lander_type: string; audience: string; status: string }>).map((e) => [e.id, e]));
 
-    const productIds = [...new Set(((exps || []) as Array<{ product_id: string }>).map((e) => e.product_id))];
+    // Shopify-numeric line-item id would 22P02 the whole query — see uuidLineItemProductIds in email-storefront.ts
+    const productIds = uuidLineItemProductIds([...new Set(((exps || []) as Array<{ product_id: string }>).map((e) => e.product_id))]);
     const { data: productRows } = productIds.length
       ? await admin.from("products").select("id, title").in("id", productIds)
       : { data: [] as { id: string; title: string }[] };
