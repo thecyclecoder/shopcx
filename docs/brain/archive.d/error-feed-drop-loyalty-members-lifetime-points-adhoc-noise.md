@@ -1,0 +1,1 @@
+- **Drop foreign PostgREST noise for loyalty_members.lifetime_points** · verified 2026-09-29 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise`)
