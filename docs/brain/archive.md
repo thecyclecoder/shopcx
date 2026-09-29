@@ -15,9 +15,12 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 - **Add missing workspaces.playbook_compiler_support_min column** · verified 2026-09-28 · → [[../tables/workspaces]]
 - **Drop expected 23505 on dashboard_notifications_dedupe_key_open_uniq from supabase-logs capture** · verified 2026-09-28 · → [[lifecycles/control-tower]]
 - **Drop foreign 'column orders.source does not exist' ad-hoc lookup noise from the error feed** · verified 2026-09-28 · → [[../libraries/control-tower]] (error-feed.ts capture filters)
+- **Drop stale playbooks.title direct-REST lookup noise from Supabase logs** · verified 2026-09-28 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise`)
+- **Drop error-feed noise: foreign PostgREST reads on products.ingredients/supplement_facts/benefits** · verified 2026-09-28 · → [[../libraries/control-tower#error-feedts--the-error-feed]]
 - **Drop PostgREST CTE-wrapped variant of spec_phases workspace_id/spec_slug lookup noise** · verified 2026-09-28 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise]]
 - **Drop foreign PostgREST specs.current_phase column-missing noise** · verified 2026-09-28 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise]] (§ wired in [[../inngest/supabase-log-poll.md]])
 - **Drop foreign ticket_messages.sender_type PostgREST select noise from the supabase-logs feed** · verified 2026-09-28 · → [[../libraries/control-tower]]
+- **Fix ticket_messages inserts using invalid direction='internal'** · verified 2026-09-28 · → [[../tables/ticket_messages]]
 - **Fix fraud+returns routes selecting nonexistent orders.total_price_cents column** · verified 2026-09-28 · → [[../lifecycles/fraud-detection]], [[../lifecycles/return-pipeline]]
 - **Guard specs-table.getSpec against a non-UUID workspaceId so the slug-swap caller surfaces in the stack trace** · verified 2026-09-28 · → [[../libraries/specs-table]]
 - **specs-table listSpecs UUID-shape guard** · verified 2026-09-28 · → [[../libraries/specs-table]]
