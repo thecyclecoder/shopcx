@@ -2986,12 +2986,18 @@ export function isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhoc
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
   // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
-  // statement MUST start with `select` and its FROM clause MUST name
-  // `product_ingredients` (with or without the `public.` schema qualifier). A JOIN /
-  // UNION / non-SELECT stays captured — a caller that actually writes to
+  // statement MUST start with `select`, its FROM clause MUST name `product_ingredients`
+  // (with or without the `public.` schema qualifier), AND the statement MUST NOT carry
+  // a `join` clause. A JOIN across other tables is a real code path we own (not the ad
+  // hoc direct-REST read this drop targets); a caller that actually writes to
   // product_ingredients with a bogus `sort_order` column is a code bug we DO want to
-  // page on, not the ad hoc direct-REST read this drop targets.
-  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?product_ingredients\b/.test(q)) return true;
+  // page on.
+  if (
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?product_ingredients\b/.test(q) &&
+    !/\bjoin\b/.test(q)
+  ) {
+    return true;
+  }
   // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
   // FROM "public"."product_ingredients" ... )` with double-quoted identifiers. Same
   // foreign-owned read, different rendering — the plain SELECT regex above misses it
