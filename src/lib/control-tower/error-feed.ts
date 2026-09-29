@@ -1333,6 +1333,71 @@ export function isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoi
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `ticket_messages.role`. Our `ticket_messages` table has never carried a `role` (nor
+ * `message_type` / `content`) column — every ShopCX conversation read uses `direction`,
+ * `author_type`, `body`, `body_clean`; no code path (src/, scripts/, shopify-extension/,
+ * supabase/migrations/, docs/brain/) issues a SELECT that names `ticket_messages.role`. The
+ * message appears on Supabase's `postgres_logs` feed only when an external / manual tool
+ * (Supabase Studio's table editor, a foreign SQL client, a third-party integration reading
+ * our messages table as if it were an OpenAI-style chat table) does a raw
+ * `select ... role ... from public.ticket_messages` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."ticket_messages" ... )` CTE wrapper
+ * that same client emits over the REST endpoint. There is no lever from ShopCX to make
+ * that query resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-ticket-messages-role-adhoc-lookup-noise]], Control Tower
+ * signature `supabase-logs:e147a164a6dcdca4`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise` — same
+ * narrow-gating shape on the same table, scoped to the `role` lookup instead of the
+ * `sender_type` one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column ticket_messages.role does not exist` (with or without
+ *      the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on
+ *      the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.ticket_messages` —
+ *      either (a) the bare `select ... from public.ticket_messages` shape, OR (b) the
+ *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."ticket_messages" ... )` CTE wrapper form with double-quoted
+ *      identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `ticket_messages` (a real product-
+ *     schema regression on a live column like `body`, `author_type`) still pages,
+ *   - a column-missing error for `role` on ANY OTHER table (a real code bug on another
+ *     table that has such a column — `workspace_members.role`, `tickets.role`) still
+ *     pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL, a JOIN across other tables) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column ticket_messages.role does not exist" ||
+    stripped === "column public.ticket_messages.role does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?ticket_messages\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?ticket_messages\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `error_events.metadata`. `error_events` DOES exist as a product table, but no ShopCX code
  * path, migration, view, function or trigger references an `error_events.metadata` column
  * (grep both to confirm). The message appears on Supabase's `postgres_logs` feed only when

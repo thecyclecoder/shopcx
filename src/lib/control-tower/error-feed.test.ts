@@ -49,6 +49,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
+  isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isInngestStepWrappedNonErrorLog,
   isInngestTerminalFailureMirrorLog,
@@ -7980,6 +7981,111 @@ test("isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise KEEPS a
     isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(
       "column sms_messages.sender_type does not exist",
       "select id, sender_type from public.sms_messages",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise ──
+// Ad hoc `select ... role ... from public.ticket_messages` lookup by an external tool
+// reading our messages table as if it were an OpenAI-style chat table
+// (role/message_type/content) — or the PostgREST CTE wrapper the same client emits. Our
+// `ticket_messages` table has never carried a `role` column (every ShopCX conversation read
+// uses `direction`, `author_type`, `body`, `body_clean`), so the column-missing ERROR is
+// repair work for a query we don't own (Control Tower signature
+// `supabase-logs:e147a164a6dcdca4`). Narrowly gated: a column-missing on a live
+// `ticket_messages` column, or on `role` for any other table (workspace_members / tickets),
+// still surfaces / pages on first sighting.
+
+test("isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise drops the exact sample from signature supabase-logs:e147a164a6dcdca4", () => {
+  // The captured sample: bare SELECT-lookup shape on public.ticket_messages naming a
+  // column that has never existed in our schema.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.role does not exist",
+      "select id, role, content, message_type from public.ticket_messages",
+    ),
+    true,
+  );
+  // PostgREST CTE wrapper form — same foreign-owned read via the REST endpoint.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.role does not exist",
+      'with pgrst_source as ( select "id", "role" from "public"."ticket_messages" limit 100 ) select * from pgrst_source',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix + `public.` qualifier on the column name are tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "ERROR: column public.ticket_messages.role does not exist",
+      "select role from public.ticket_messages",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise KEEPS a column-missing error for a DIFFERENT column on ticket_messages (a real product-schema regression still pages)", () => {
+  // A missing `body` / `author_type` / `direction` on ticket_messages IS a real live-
+  // column regression we want to page on — the pin is exact to `role`.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.body does not exist",
+      "select body from public.ticket_messages",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.author_type does not exist",
+      "select author_type from public.ticket_messages",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise KEEPS a role miss on a DIFFERENT table (a real code bug on another table still pages)", () => {
+  // `role` missing on any OTHER table is a real code bug we want to see, not the
+  // foreign ticket_messages lookup we drop. `workspace_members.role` is a real live
+  // column elsewhere; a column-missing error on it (or on `tickets.role`) is genuine.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column workspace_members.role does not exist",
+      "select role from public.workspace_members",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column tickets.role does not exist",
+      "select id, role from public.tickets",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise KEEPS the message on a non-SELECT statement shape (INSERT/UPDATE/DELETE — real code-bug shape)", () => {
+  // A ShopCX code-path bug that writes to `ticket_messages` and names a nonexistent
+  // `role` column is the shape we DO want to page on — the pin is the SELECT-lookup
+  // shape only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.role does not exist",
+      "insert into public.ticket_messages (id, role, body) values (gen_random_uuid(), 'user', 'hi')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.role does not exist",
+      "update public.ticket_messages set role = 'assistant' where id = '00000000-0000-0000-0000-000000000000'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.role does not exist",
+      "delete from public.ticket_messages where role = 'system'",
     ),
     false,
   );

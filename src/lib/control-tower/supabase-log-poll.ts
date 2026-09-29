@@ -39,6 +39,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
+  isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
@@ -244,6 +245,20 @@ const LOG_QUERIES: LogQuery[] = [
       // non-SELECT statement (real code-bug shape), still surfaces / pages on first
       // sighting.
       if (isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... role ... from
+      // public.ticket_messages` lookup by an external tool reading our messages table as
+      // if it were an OpenAI-style chat table (role/message_type/content). Our
+      // `ticket_messages` table has never carried a `role` column — every ShopCX
+      // conversation read uses `direction`, `author_type`, `body`, `body_clean` — so the
+      // column-missing ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-ticket-messages-role-adhoc-lookup-noise]], Control
+      // Tower signature `supabase-logs:e147a164a6dcdca4`). Same narrow-gating shape as
+      // the `sender_type` sibling on the same table: BOTH the exact column-missing
+      // message AND the SELECT-lookup shape (bare or PostgREST-CTE) — a column-missing
+      // error on a live `ticket_messages` column (body / author_type), on `role` for
+      // another table (workspace_members / tickets), or via a non-SELECT statement (real
+      // code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... metadata ... from
       // public.error_events` lookup by an external tool / stale exploratory query. The
       // `error_events` table exists but no ShopCX code path / migration / view / function
