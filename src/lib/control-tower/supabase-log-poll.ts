@@ -63,6 +63,7 @@ import {
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
+  isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
 } from "@/lib/control-tower/error-feed";
 
@@ -600,6 +601,22 @@ const LOG_QUERIES: LogQuery[] = [
       // `daily_meta_ad_spend` via a non-SELECT statement (real code-bug shape) still
       // surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.tickets.assigned_agent`. The `tickets` table exists but has NO
+      // `assigned_agent` column — the actual assignee column is
+      // `assigned_to_member_id` (a UUID FK to `workspace_members`). The column-missing
+      // ERROR only reaches this feed when a foreign app / stale SQL Editor session /
+      // deprecated integration queries
+      // `/rest/v1/tickets?select=...&assigned_agent=eq.<name>` — a natural mistake
+      // because many ticketing tables expose a plain `assigned_agent` string column but
+      // ours uses a UUID FK. There is no lever from ShopCX to make that query resolve —
+      // paging Platform on it is repair work for a query we don't own. Narrowly gated
+      // to require BOTH the exact column-missing message AND a SELECT-on-tickets shape
+      // (bare OR PostgREST CTE wrapper) — a column-missing error on any other table, a
+      // different column on `tickets` (e.g. `assigned_to_member_id` regression), or on
+      // `tickets` via a non-SELECT statement (real code-bug shape) still surfaces /
+      // pages on first sighting.
+      if (isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(message, query)) return null;
       // Drop expected-by-design noise at capture: Postgres reporting the 23505
       // unique-violation raised by our own `dashboard_notifications_dedupe_key_open_uniq`
       // partial index on an INSERT INTO `public.dashboard_notifications`. That index
