@@ -61,6 +61,7 @@ import {
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
+  isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
 } from "@/lib/control-tower/error-feed";
 
@@ -563,6 +564,22 @@ const LOG_QUERIES: LogQuery[] = [
       // `playbooks`, or on `playbooks` via a non-SELECT statement (real code-bug
       // shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.product_ingredients.sort_order`. The `product_ingredients`
+      // table exists but has NO `sort_order` column — the actual ordering column is
+      // `display_order`. The column-missing ERROR only reaches this feed when a foreign
+      // app / stale SQL Editor session / deprecated integration queries
+      // `/rest/v1/product_ingredients?select=...&order=sort_order.asc`. There is no
+      // lever from ShopCX to make that query resolve — paging Platform on it (Control
+      // Tower signature `supabase-logs:b9012d5b8913efc6`,
+      // [[../specs/error-feed-drop-product-ingredients-sort-order-direct-rest-noise]])
+      // is repair work for a query we don't own. Narrowly gated to require BOTH the
+      // exact column-missing message AND a SELECT-on-product_ingredients shape (bare OR
+      // PostgREST CTE wrapper) — a column-missing error on any other table, a different
+      // column on `product_ingredients` (e.g. `display_order` regression), or on
+      // `product_ingredients` via a non-SELECT statement (real code-bug shape) still
+      // surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(message, query)) return null;
       // Drop expected-by-design noise at capture: Postgres reporting the 23505
       // unique-violation raised by our own `dashboard_notifications_dedupe_key_open_uniq`
       // partial index on an INSERT INTO `public.dashboard_notifications`. That index
