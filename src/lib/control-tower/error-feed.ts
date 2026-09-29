@@ -3010,6 +3010,104 @@ export function isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhoc
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column daily_meta_ad_spend.date does not
+ * exist` for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.daily_meta_ad_spend.date`. The `daily_meta_ad_spend` table exists (see
+ * `supabase/migrations/20260422270000_meta_ads_integration.sql`) but by design carries
+ * NO `date` column — the actual per-day column is `snapshot_date` (the index is
+ * `idx_meta_spend_date ON daily_meta_ad_spend(workspace_id, snapshot_date DESC)`), and
+ * every ShopCX reader / writer (`src/lib/ad-spend-governor.ts`,
+ * `src/lib/acquisition-roas.ts`, `src/lib/profit-estimate.ts`, `src/lib/meta/performance.ts`,
+ * `src/app/api/workspaces/[id]/analytics/roas/route.ts`) selects / filters on
+ * `snapshot_date`. The column-missing ERROR only reaches this feed when a foreign app /
+ * stale SQL Editor session / deprecated integration queries
+ * `/rest/v1/daily_meta_ad_spend?select=...&date=eq.YYYY-MM-DD` (or the equivalent
+ * SELECT-lookup shape) — a natural mistake because many rollup tables use a plain `date`
+ * column but ours uses the `snapshot_date` name. There is no lever from ShopCX to make
+ * that query resolve — paging Platform on it
+ * ([[../specs/error-feed-classify-foreign-daily-meta-ad-spend-date-adhoc-noise]]) is
+ * repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise` and
+ * `isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise` — the same narrow-gating
+ * shape (exact `column <table>.<name> does not exist` + SELECT-lookup shape covering
+ * BOTH bare and PostgREST CTE wrapper forms), aimed at a different foreign caller on a
+ * different table+column.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column daily_meta_ad_spend.date does not exist` (or the
+ *      `public.` qualified variant, with any leading `ERROR: ` prefix Postgres includes
+ *      on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.daily_meta_ad_spend` —
+ *      either (a) the bare `select ... from public.daily_meta_ad_spend` shape (with no
+ *      JOIN — a JOIN across other tables is a real code path we own), OR (b) the
+ *      PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."daily_meta_ad_spend" ... )`
+ *      CTE wrapper form with double-quoted identifiers. Both forms are the same
+ *      foreign-owned read.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table still pages — the pin is
+ *     `daily_meta_ad_spend.` only,
+ *   - a column-missing error on `daily_meta_ad_spend` for a DIFFERENT column (e.g. the
+ *     real `snapshot_date` column being renamed away, `spend_cents`, `workspace_id`)
+ *     still pages — the pin covers `date` only,
+ *   - a `daily_meta_ad_spend.date` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, JOIN across other tables) still pages — the pin
+ *     is the SELECT-lookup shape, matching the ad hoc direct-REST read we've observed;
+ *     the CTE branch likewise requires the wrapped op to be a SELECT (a PostgREST
+ *     INSERT/UPDATE inside the same wrapper stays paged),
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `daily_meta_ad_spend` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `daily_meta_ad_spend.date` (with or without the `public.` qualifier).
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column daily_meta_ad_spend.date does not exist" ||
+    stripped === "column public.daily_meta_ad_spend.date does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select`, its FROM clause MUST name `daily_meta_ad_spend`
+  // (with or without the `public.` schema qualifier), AND the statement MUST NOT carry
+  // a `join` clause. A JOIN across other tables is a real code path we own (not the ad
+  // hoc direct-REST read this drop targets); a caller that actually writes to
+  // daily_meta_ad_spend with a bogus `date` column is a code bug we DO want to page on.
+  if (
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?daily_meta_ad_spend\b/.test(q) &&
+    !/\bjoin\b/.test(q)
+  ) {
+    return true;
+  }
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."daily_meta_ad_spend" ... )` with double-quoted identifiers. Same
+  // foreign-owned read, different rendering — the plain SELECT regex above misses it
+  // because the statement starts with `with` and the FROM clause carries the quoted
+  // `"public"."daily_meta_ad_spend"` shape. Guarded so the CTE branch requires the
+  // wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper —
+  // e.g. `WITH pgrst_source AS (INSERT INTO "public"."daily_meta_ad_spend"("date") ...)`
+  // — is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?daily_meta_ad_spend\b/.test(q);
+}
+
+/**
  * Expected-by-design noise — Postgres reporting `duplicate key value violates unique
  * constraint "dashboard_notifications_dedupe_key_open_uniq"` on an INSERT INTO
  * `public.dashboard_notifications`. That partial UNIQUE index (migration

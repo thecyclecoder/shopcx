@@ -41,6 +41,7 @@ import {
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
+  isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
@@ -5821,6 +5822,215 @@ test("isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise retu
   assert.equal(
     isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise(
       "column product_ingredients.sort_order does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/daily_meta_ad_spend?select=...&date=eq.YYYY-MM-DD` against our
+// `public.daily_meta_ad_spend` table. The table exists but by design carries NO `date`
+// column — the actual per-day column is `snapshot_date` (see the meta-ads-integration
+// migration, index `idx_meta_spend_date ON daily_meta_ad_spend(workspace_id,
+// snapshot_date DESC)`), and every ShopCX caller (ad-spend-governor, acquisition-roas,
+// profit-estimate, meta/performance, analytics/roas route) selects `snapshot_date`.
+// Foreign-owned surface, no lever from us — drop AT CAPTURE only when BOTH the exact
+// column-missing message on `daily_meta_ad_spend.date` AND a SELECT-lookup shape on
+// `daily_meta_ad_spend` (bare OR PostgREST CTE wrapper) are present. A column-missing
+// on any other table, a different column on `daily_meta_ad_spend` (including the real
+// `snapshot_date` column), or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise drops the captured message+query pair (positive drop — bare SELECT shape with the exact message)", () => {
+  // The captured production sample: unqualified and public.-qualified message variants
+  // over the bare SELECT-lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column daily_meta_ad_spend.date does not exist",
+      "select date, spend_cents from public.daily_meta_ad_spend where workspace_id = $1 and date = $2",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column public.daily_meta_ad_spend.date does not exist",
+      "select date from public.daily_meta_ad_spend",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column daily_meta_ad_spend.date does not exist",
+      "select date from daily_meta_ad_spend limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "ERROR: column daily_meta_ad_spend.date does not exist",
+      "select date from public.daily_meta_ad_spend",
+    ),
+    true,
+  );
+  // Case-insensitive on the query; trailing WHERE / ORDER BY / LIMIT stays the ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column daily_meta_ad_spend.date does not exist",
+      "SELECT DATE, SPEND_CENTS FROM PUBLIC.DAILY_META_AD_SPEND ORDER BY DATE DESC LIMIT 50",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "  column daily_meta_ad_spend.date does not exist  ",
+      "   select date from public.daily_meta_ad_spend   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"daily_meta_ad_spend\" ...)` CTE wrapper form (positive drop — CTE wrapper shape)", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."daily_meta_ad_spend"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column daily_meta_ad_spend.date does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."daily_meta_ad_spend"."date", "public"."daily_meta_ad_spend"."spend_cents" FROM "public"."daily_meta_ad_spend" ORDER BY "public"."daily_meta_ad_spend"."date" DESC )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column public.daily_meta_ad_spend.date does not exist",
+      'WITH pgrst_source AS (SELECT "public"."daily_meta_ad_spend"."date" FROM "public"."daily_meta_ad_spend")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "ERROR: column daily_meta_ad_spend.date does not exist",
+      'WITH pgrst_source AS (SELECT "public"."daily_meta_ad_spend"."date" FROM "public"."daily_meta_ad_spend")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise KEEPS a column-missing on `daily_meta_ad_spend.snapshot_date` (the REAL per-day column — a rename regression still pages)", () => {
+  // `daily_meta_ad_spend.snapshot_date` IS the real per-day column (the index is
+  // `idx_meta_spend_date ON daily_meta_ad_spend(workspace_id, snapshot_date DESC)`). If
+  // it regressed we absolutely want the page. The pin is `date` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column daily_meta_ad_spend.snapshot_date does not exist",
+      "select snapshot_date, spend_cents from public.daily_meta_ad_spend order by snapshot_date desc",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column public.daily_meta_ad_spend.snapshot_date does not exist",
+      "select snapshot_date from public.daily_meta_ad_spend",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise KEEPS a column-missing on a DIFFERENT table (`orders.date` — pin is daily_meta_ad_spend only)", () => {
+  // A column-missing error for any OTHER table's `date` column still pages — the pin is
+  // `daily_meta_ad_spend.` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column orders.date does not exist",
+      "select id, date from public.orders",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column daily_google_ad_spend.date does not exist",
+      "select date from public.daily_google_ad_spend",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise KEEPS a non-SELECT statement shape on daily_meta_ad_spend (an INSERT / UPDATE / DELETE with the same message is a real code-bug and still pages)", () => {
+  // An INSERT/UPDATE/DELETE against daily_meta_ad_spend referencing a bogus `date`
+  // column is real code trying to write the table — a bug we WANT to see, not the ad
+  // hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column daily_meta_ad_spend.date does not exist",
+      "insert into public.daily_meta_ad_spend (workspace_id, date, spend_cents) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column daily_meta_ad_spend.date does not exist",
+      "update public.daily_meta_ad_spend set date = $1 where workspace_id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column daily_meta_ad_spend.date does not exist",
+      "delete from public.daily_meta_ad_spend where date < $1",
+    ),
+    false,
+  );
+  // The PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column daily_meta_ad_spend.date does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."daily_meta_ad_spend"("workspace_id", "date", "spend_cents") VALUES ($1, $2, $3) RETURNING "public"."daily_meta_ad_spend"."id" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise KEEPS the same message on a JOIN with another table (a real code path joining daily_meta_ad_spend still pages)", () => {
+  // The pin is the bare SELECT-lookup on daily_meta_ad_spend or its PostgREST CTE
+  // wrapper — a JOIN across other tables is a real code path we own and want to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column daily_meta_ad_spend.date does not exist",
+      "select d.date, w.slug from public.daily_meta_ad_spend d join public.workspaces w on w.id = d.workspace_id where w.slug = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column daily_meta_ad_spend.date does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
+      "column daily_meta_ad_spend.date does not exist",
       null,
     ),
     false,
