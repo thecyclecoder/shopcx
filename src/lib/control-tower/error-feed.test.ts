@@ -43,6 +43,7 @@ import {
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
+  isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
@@ -50,6 +51,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
+  isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isInngestStepWrappedNonErrorLog,
   isInngestTerminalFailureMirrorLog,
@@ -6246,6 +6248,212 @@ test("isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise ret
   );
 });
 
+// ── isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/tickets?select=...&assigned_agent=eq.<name>` against our `public.tickets`
+// table. The table exists but by design carries NO `assigned_agent` column — the actual
+// assignee column is `assigned_to_member_id` (a UUID FK to `workspace_members`).
+// Foreign-owned surface, no lever from us — drop AT CAPTURE only when BOTH the exact
+// column-missing message on `tickets.assigned_agent` AND a SELECT-lookup shape on
+// `tickets` (bare OR PostgREST CTE wrapper) are present. A column-missing on any other
+// table, a different column on `tickets` (including the real `assigned_to_member_id`
+// column), or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise drops the captured message+query pair (positive drop — bare SELECT shape with the exact message)", () => {
+  // The captured production sample: unqualified and public.-qualified message variants
+  // over the bare SELECT-lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column tickets.assigned_agent does not exist",
+      "select id, assigned_agent from public.tickets where workspace_id = $1 and assigned_agent = $2",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column public.tickets.assigned_agent does not exist",
+      "select assigned_agent from public.tickets",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column tickets.assigned_agent does not exist",
+      "select assigned_agent from tickets limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "ERROR: column tickets.assigned_agent does not exist",
+      "select assigned_agent from public.tickets",
+    ),
+    true,
+  );
+  // Case-insensitive on the query; trailing WHERE / ORDER BY / LIMIT stays the ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column tickets.assigned_agent does not exist",
+      "SELECT ID, ASSIGNED_AGENT FROM PUBLIC.TICKETS ORDER BY CREATED_AT DESC LIMIT 50",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "  column tickets.assigned_agent does not exist  ",
+      "   select assigned_agent from public.tickets   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"tickets\" ...)` CTE wrapper form (positive drop — CTE wrapper shape)", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."tickets"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column tickets.assigned_agent does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."tickets"."id", "public"."tickets"."assigned_agent" FROM "public"."tickets" ORDER BY "public"."tickets"."created_at" DESC )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column public.tickets.assigned_agent does not exist",
+      'WITH pgrst_source AS (SELECT "public"."tickets"."assigned_agent" FROM "public"."tickets")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "ERROR: column tickets.assigned_agent does not exist",
+      'WITH pgrst_source AS (SELECT "public"."tickets"."assigned_agent" FROM "public"."tickets")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise KEEPS a column-missing on `tickets.assigned_to_member_id` (the REAL assignee column — a rename regression still pages)", () => {
+  // `tickets.assigned_to_member_id` IS the real assignee column (UUID FK to
+  // workspace_members). If it regressed we absolutely want the page. The pin is
+  // `assigned_agent` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column tickets.assigned_to_member_id does not exist",
+      "select assigned_to_member_id from public.tickets order by created_at desc",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column public.tickets.assigned_to_member_id does not exist",
+      "select assigned_to_member_id from public.tickets",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise KEEPS a column-missing on a DIFFERENT table (`orders.assigned_agent` — pin is tickets only)", () => {
+  // A column-missing error for any OTHER table's `assigned_agent` column still pages —
+  // the pin is `tickets.` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column orders.assigned_agent does not exist",
+      "select id, assigned_agent from public.orders",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column ticket_messages.assigned_agent does not exist",
+      "select assigned_agent from public.ticket_messages",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise KEEPS a non-SELECT statement shape on tickets (an INSERT / UPDATE / DELETE with the same message is a real code-bug and still pages)", () => {
+  // An INSERT/UPDATE/DELETE against tickets referencing a bogus `assigned_agent`
+  // column is real code trying to write the table — a bug we WANT to see, not the ad
+  // hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column tickets.assigned_agent does not exist",
+      "insert into public.tickets (workspace_id, assigned_agent) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column tickets.assigned_agent does not exist",
+      "update public.tickets set assigned_agent = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column tickets.assigned_agent does not exist",
+      "delete from public.tickets where assigned_agent = $1",
+    ),
+    false,
+  );
+  // The PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column tickets.assigned_agent does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."tickets"("workspace_id", "assigned_agent") VALUES ($1, $2) RETURNING "public"."tickets"."id" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise KEEPS the same message on a JOIN with another table (a real code path joining tickets still pages)", () => {
+  // The pin is the bare SELECT-lookup on tickets or its PostgREST CTE wrapper — a JOIN
+  // across other tables is a real code path we own and want to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column tickets.assigned_agent does not exist",
+      "select t.id, t.assigned_agent, w.slug from public.tickets t join public.workspaces w on w.id = t.workspace_id where w.slug = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column tickets.assigned_agent does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
+      "column tickets.assigned_agent does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
 // ── isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation ──
 // The DB-level `dashboard_notifications_dedupe_key_open_uniq` partial UNIQUE index
 // (migration 20261211120000) is INTENTIONALLY the last-resort backstop for the escalation
@@ -8189,6 +8397,111 @@ test("isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise KEEPS a
     isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(
       "column sms_messages.sender_type does not exist",
       "select id, sender_type from public.sms_messages",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise ──
+// Ad hoc `select ... role ... from public.ticket_messages` lookup by an external tool
+// reading our messages table as if it were an OpenAI-style chat table
+// (role/message_type/content) — or the PostgREST CTE wrapper the same client emits. Our
+// `ticket_messages` table has never carried a `role` column (every ShopCX conversation read
+// uses `direction`, `author_type`, `body`, `body_clean`), so the column-missing ERROR is
+// repair work for a query we don't own (Control Tower signature
+// `supabase-logs:e147a164a6dcdca4`). Narrowly gated: a column-missing on a live
+// `ticket_messages` column, or on `role` for any other table (workspace_members / tickets),
+// still surfaces / pages on first sighting.
+
+test("isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise drops the exact sample from signature supabase-logs:e147a164a6dcdca4", () => {
+  // The captured sample: bare SELECT-lookup shape on public.ticket_messages naming a
+  // column that has never existed in our schema.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.role does not exist",
+      "select id, role, content, message_type from public.ticket_messages",
+    ),
+    true,
+  );
+  // PostgREST CTE wrapper form — same foreign-owned read via the REST endpoint.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.role does not exist",
+      'with pgrst_source as ( select "id", "role" from "public"."ticket_messages" limit 100 ) select * from pgrst_source',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix + `public.` qualifier on the column name are tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "ERROR: column public.ticket_messages.role does not exist",
+      "select role from public.ticket_messages",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise KEEPS a column-missing error for a DIFFERENT column on ticket_messages (a real product-schema regression still pages)", () => {
+  // A missing `body` / `author_type` / `direction` on ticket_messages IS a real live-
+  // column regression we want to page on — the pin is exact to `role`.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.body does not exist",
+      "select body from public.ticket_messages",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.author_type does not exist",
+      "select author_type from public.ticket_messages",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise KEEPS a role miss on a DIFFERENT table (a real code bug on another table still pages)", () => {
+  // `role` missing on any OTHER table is a real code bug we want to see, not the
+  // foreign ticket_messages lookup we drop. `workspace_members.role` is a real live
+  // column elsewhere; a column-missing error on it (or on `tickets.role`) is genuine.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column workspace_members.role does not exist",
+      "select role from public.workspace_members",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column tickets.role does not exist",
+      "select id, role from public.tickets",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise KEEPS the message on a non-SELECT statement shape (INSERT/UPDATE/DELETE — real code-bug shape)", () => {
+  // A ShopCX code-path bug that writes to `ticket_messages` and names a nonexistent
+  // `role` column is the shape we DO want to page on — the pin is the SELECT-lookup
+  // shape only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.role does not exist",
+      "insert into public.ticket_messages (id, role, body) values (gen_random_uuid(), 'user', 'hi')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.role does not exist",
+      "update public.ticket_messages set role = 'assistant' where id = '00000000-0000-0000-0000-000000000000'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
+      "column ticket_messages.role does not exist",
+      "delete from public.ticket_messages where role = 'system'",
     ),
     false,
   );

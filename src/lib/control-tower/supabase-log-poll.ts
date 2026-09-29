@@ -39,6 +39,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
+  isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
@@ -64,6 +65,7 @@ import {
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
+  isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
 } from "@/lib/control-tower/error-feed";
 
@@ -245,6 +247,20 @@ const LOG_QUERIES: LogQuery[] = [
       // non-SELECT statement (real code-bug shape), still surfaces / pages on first
       // sighting.
       if (isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... role ... from
+      // public.ticket_messages` lookup by an external tool reading our messages table as
+      // if it were an OpenAI-style chat table (role/message_type/content). Our
+      // `ticket_messages` table has never carried a `role` column — every ShopCX
+      // conversation read uses `direction`, `author_type`, `body`, `body_clean` — so the
+      // column-missing ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-ticket-messages-role-adhoc-lookup-noise]], Control
+      // Tower signature `supabase-logs:e147a164a6dcdca4`). Same narrow-gating shape as
+      // the `sender_type` sibling on the same table: BOTH the exact column-missing
+      // message AND the SELECT-lookup shape (bare or PostgREST-CTE) — a column-missing
+      // error on a live `ticket_messages` column (body / author_type), on `role` for
+      // another table (workspace_members / tickets), or via a non-SELECT statement (real
+      // code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... metadata ... from
       // public.error_events` lookup by an external tool / stale exploratory query. The
       // `error_events` table exists but no ShopCX code path / migration / view / function
@@ -621,6 +637,22 @@ const LOG_QUERIES: LogQuery[] = [
       // `loyalty_members` via a non-SELECT statement (real code-bug shape) still
       // surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.tickets.assigned_agent`. The `tickets` table exists but has NO
+      // `assigned_agent` column — the actual assignee column is
+      // `assigned_to_member_id` (a UUID FK to `workspace_members`). The column-missing
+      // ERROR only reaches this feed when a foreign app / stale SQL Editor session /
+      // deprecated integration queries
+      // `/rest/v1/tickets?select=...&assigned_agent=eq.<name>` — a natural mistake
+      // because many ticketing tables expose a plain `assigned_agent` string column but
+      // ours uses a UUID FK. There is no lever from ShopCX to make that query resolve —
+      // paging Platform on it is repair work for a query we don't own. Narrowly gated
+      // to require BOTH the exact column-missing message AND a SELECT-on-tickets shape
+      // (bare OR PostgREST CTE wrapper) — a column-missing error on any other table, a
+      // different column on `tickets` (e.g. `assigned_to_member_id` regression), or on
+      // `tickets` via a non-SELECT statement (real code-bug shape) still surfaces /
+      // pages on first sighting.
+      if (isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(message, query)) return null;
       // Drop expected-by-design noise at capture: Postgres reporting the 23505
       // unique-violation raised by our own `dashboard_notifications_dedupe_key_open_uniq`
       // partial index on an INSERT INTO `public.dashboard_notifications`. That index
