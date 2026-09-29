@@ -1,0 +1,1 @@
+- **Guard products.id .in() filters against Shopify-numeric line-item ids** · verified 2026-09-29 · → [[../libraries/email-storefront]]
