@@ -42,6 +42,7 @@ import {
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
+  isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
@@ -6033,6 +6034,214 @@ test("isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise returns fal
   assert.equal(
     isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
       "column daily_meta_ad_spend.date does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/loyalty_members?select=lifetime_points&...` against our `public.loyalty_members`
+// table. The table exists but by design carries NO `lifetime_points` column — the real
+// running-total column is `total_earned` (with `points_balance` for the current spendable
+// balance), and every ShopCX caller (`src/app/api/loyalty/**`, `src/lib/action-executor.ts`)
+// reads those two. Foreign-owned surface, no lever from us — drop AT CAPTURE only when
+// BOTH the exact column-missing message on `loyalty_members.lifetime_points` AND a
+// SELECT-lookup shape on `loyalty_members` (bare OR PostgREST CTE wrapper) are present. A
+// column-missing on any other table, a different column on `loyalty_members` (including
+// the real `total_earned` / `points_balance` columns), or a non-SELECT statement still
+// pages.
+
+test("isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise drops the captured message+query pair (positive drop — bare SELECT shape with the exact message)", () => {
+  // The captured production sample: unqualified and public.-qualified message variants
+  // over the bare SELECT-lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column loyalty_members.lifetime_points does not exist",
+      "select lifetime_points from public.loyalty_members where workspace_id = $1 and customer_id = $2",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column public.loyalty_members.lifetime_points does not exist",
+      "select lifetime_points from public.loyalty_members",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column loyalty_members.lifetime_points does not exist",
+      "select lifetime_points from loyalty_members limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "ERROR: column loyalty_members.lifetime_points does not exist",
+      "select lifetime_points from public.loyalty_members",
+    ),
+    true,
+  );
+  // Case-insensitive on the query; trailing WHERE / ORDER BY / LIMIT stays the ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column loyalty_members.lifetime_points does not exist",
+      "SELECT LIFETIME_POINTS, POINTS_BALANCE FROM PUBLIC.LOYALTY_MEMBERS ORDER BY LIFETIME_POINTS DESC LIMIT 50",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "  column loyalty_members.lifetime_points does not exist  ",
+      "   select lifetime_points from public.loyalty_members   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"loyalty_members\" ...)` CTE wrapper form (positive drop — CTE wrapper shape)", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."loyalty_members"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column loyalty_members.lifetime_points does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loyalty_members"."lifetime_points", "public"."loyalty_members"."customer_id" FROM "public"."loyalty_members" ORDER BY "public"."loyalty_members"."lifetime_points" DESC )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column public.loyalty_members.lifetime_points does not exist",
+      'WITH pgrst_source AS (SELECT "public"."loyalty_members"."lifetime_points" FROM "public"."loyalty_members")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "ERROR: column loyalty_members.lifetime_points does not exist",
+      'WITH pgrst_source AS (SELECT "public"."loyalty_members"."lifetime_points" FROM "public"."loyalty_members")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise KEEPS a column-missing on `loyalty_members.total_earned` / `loyalty_members.points_balance` (the REAL loyalty columns — a rename regression still pages)", () => {
+  // `total_earned` IS the real running-total column and `points_balance` IS the real
+  // current-balance column on `loyalty_members`. If either regressed we absolutely want
+  // the page. The pin is `lifetime_points` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column loyalty_members.total_earned does not exist",
+      "select total_earned, points_balance from public.loyalty_members",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column public.loyalty_members.points_balance does not exist",
+      "select points_balance from public.loyalty_members",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise KEEPS a column-missing on a DIFFERENT table (`customers.lifetime_points` — pin is loyalty_members only)", () => {
+  // A column-missing error for any OTHER table's `lifetime_points` column still pages —
+  // the pin is `loyalty_members.` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column customers.lifetime_points does not exist",
+      "select id, lifetime_points from public.customers",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column loyalty_transactions.lifetime_points does not exist",
+      "select lifetime_points from public.loyalty_transactions",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise KEEPS a non-SELECT statement shape on loyalty_members (an INSERT / UPDATE / DELETE with the same message is a real code-bug and still pages)", () => {
+  // An INSERT/UPDATE/DELETE against loyalty_members referencing a bogus `lifetime_points`
+  // column is real code trying to write the table — a bug we WANT to see, not the ad hoc
+  // read.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column loyalty_members.lifetime_points does not exist",
+      "insert into public.loyalty_members (workspace_id, customer_id, lifetime_points) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column loyalty_members.lifetime_points does not exist",
+      "update public.loyalty_members set lifetime_points = $1 where customer_id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column loyalty_members.lifetime_points does not exist",
+      "delete from public.loyalty_members where lifetime_points < $1",
+    ),
+    false,
+  );
+  // The PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column loyalty_members.lifetime_points does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."loyalty_members"("workspace_id", "customer_id", "lifetime_points") VALUES ($1, $2, $3) RETURNING "public"."loyalty_members"."id" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise KEEPS the same message on a JOIN with another table (a real code path joining loyalty_members still pages)", () => {
+  // The pin is the bare SELECT-lookup on loyalty_members or its PostgREST CTE wrapper —
+  // a JOIN across other tables is a real code path we own and want to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column loyalty_members.lifetime_points does not exist",
+      "select m.lifetime_points, c.email from public.loyalty_members m join public.customers c on c.id = m.customer_id where c.workspace_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column loyalty_members.lifetime_points does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(
+      "column loyalty_members.lifetime_points does not exist",
       null,
     ),
     false,
