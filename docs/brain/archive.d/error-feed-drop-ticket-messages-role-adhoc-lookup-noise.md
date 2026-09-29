@@ -1,0 +1,1 @@
+- **Drop foreign-app ticket_messages.role adhoc SELECT noise at capture** · verified 2026-09-29 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise]]
