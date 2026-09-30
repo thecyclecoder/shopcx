@@ -3534,6 +3534,69 @@ export function isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
 }
 
 /**
+ * Expected-by-design noise — Postgres reporting `duplicate key value violates unique
+ * constraint "idx_billing_forecasts_pending"` on an INSERT INTO `public.billing_forecasts`.
+ * That partial UNIQUE index is the DB-level one-pending-forecast-per-contract backstop —
+ * the createForecast path in [[../billing-forecast]] is INTENTIONALLY designed so a
+ * concurrent second insert for the same (workspace, contract) pending pair errors at 23505
+ * and the app catches that error to converge on the winning row instead of duplicating (see
+ * the WHY comment on `createForecast`'s catch branch citing the concurrent-webhook race).
+ * Capturing the 23505 as a Control Tower error-feed incident pages Platform on a race the
+ * DB is intentionally rejecting — a healthy loop noisily surfacing as an ERROR.
+ *
+ * Sibling of the `isForeign*` capture-time drops, but different failure class — this ERROR
+ * IS from our own code, and the code IS designed to handle it. Not `foreign` (we own the
+ * caller), not `transient` (the ERROR itself is deterministic — the app catch is what makes
+ * it self-heal). It's `expected` in the by-design sense.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the trimmed `event_message` — with an optional leading `ERROR: ` prefix stripped —
+ *      EQUALS the exact unique-violation shape for this constraint:
+ *      `duplicate key value violates unique constraint "idx_billing_forecasts_pending"`,
+ *      AND
+ *   2. the `parsed.query` attribute contains an `INSERT INTO "public"."billing_forecasts"`
+ *      shape (double-quoted identifiers is what Postgres emits back on constraint failure).
+ *
+ * Narrowly gated so:
+ *   - a 23505 unique-violation on any OTHER constraint (a real product-schema regression on
+ *     a different unique index) still pages,
+ *   - a 23505 on this constraint attached to a NON-INSERT statement shape (a copy/pg_dump
+ *     replay, an UPDATE ... on conflict do nothing pattern hitting the partial index) still
+ *     pages — the pin is the INSERT shape only, matching the createForecast path we
+ *     intentionally own,
+ *   - an INSERT INTO billing_forecasts that fails with a DIFFERENT constraint / message
+ *     (a null-violation, a check-constraint bug) still pages — different message.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isExpectedBillingForecastsPendingUniqViolation(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The unique-violation message itself
+  // has a stable shape: `duplicate key value violates unique constraint "<name>"`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (
+    stripped !==
+    'duplicate key value violates unique constraint "idx_billing_forecasts_pending"'
+  ) {
+    return false;
+  }
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // INSERT INTO "public"."billing_forecasts" — the createForecast path we intentionally own.
+  // A non-INSERT statement (COPY replay, an UPDATE ... on conflict, a manual pg_dump load)
+  // that hits the same partial index is a different caller class and stays captured/paged.
+  return q.includes('insert into "public"."billing_forecasts"');
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).
