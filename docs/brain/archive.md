@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Drop stale qb_amazon_sales_snapshots.gross_revenue_cents direct-REST lookup noise** · verified 2026-09-30 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
 - **Classify foreign `daily_meta_ad_spend.date` PostgREST ad-hoc noise** · verified 2026-09-29 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise`)
 - **Drop foreign PostgREST noise for loyalty_members.lifetime_points** · verified 2026-09-29 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise`)
 - **Drop foreign-app noise: product_ingredients.sort_order direct-REST ad-hoc lookup** · verified 2026-09-29 · → [[../libraries/control-tower]]
