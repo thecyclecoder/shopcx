@@ -59,6 +59,7 @@
     "test:amazon-sync-connection-id-guard": "tsx --test src/lib/inngest/amazon-sync.connection-id-guard.test.ts",
     "test:popup-offer-normalize-product-id": "tsx --test src/lib/popup/offer.normalize-product-id.test.ts",
     "test:vendor-refund-mirror": "tsx --test src/lib/vendor-refund-mirror.test.ts",
+    "test:vendor-refund-mirror-braintree-refunds": "tsx --test src/lib/vendor-refund-mirror.braintree-refunds.test.ts",
     "test:dunning-decisions": "tsx --test src/lib/dunning.decisions.test.ts",
     "test:holding-defer": "tsx --test src/lib/holding-message-defer.test.ts",
     "test:review-request-validator": "tsx --test src/lib/review-request-validator.test.ts",
