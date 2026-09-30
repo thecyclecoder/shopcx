@@ -1007,11 +1007,21 @@ export async function executeMigration(
         );
       }
     } else {
-      const plannedTotal = structuralTotal
-        - plan.lines.reduce((t, l) => t + (l.carriedCodeUnitCents ?? 0) * l.quantity, 0);
-      if (Math.abs(liveTotal - plannedTotal) > tolerance) {
+      // ⭐ Compare against the code's FACE VALUE, not the sum of rounded per-unit allocations.
+      //
+      // The plan divides a fixed-amount code into `carriedCodeUnitCents` per unit and rounds — so a
+      // $15 code across lines of qty 1/4/3 reconstructs as $14.73, losing 27 cents to rounding,
+      // while Shopify allocates the true $15.00. Measured 2026-09-30 on three contracts: the
+      // verifier failed all three and **Shopify was the more accurate side every time**.
+      //
+      // The face value is exact, so the only slack needed is Shopify's own per-line cent rounding.
+      const codeFaceCents = carriedCodes.reduce((t, c) => t + Math.round((c.amount ?? 0) * 100), 0);
+      const plannedTotal = structuralTotal - codeFaceCents;
+      // A few cents per line: Shopify rounds each line's share of the spread independently.
+      const codeTolerance = Math.max(tolerance, verify.contract.lines.length * 3);
+      if (Math.abs(liveTotal - plannedTotal) > codeTolerance) {
         mismatches.push(
-          `CONTRACT TOTAL ${liveTotal} != planned ${plannedTotal} (fixed-amount code spread across ${verify.contract.lines.length} line(s), tolerance ${tolerance})`,
+          `CONTRACT TOTAL ${liveTotal} != planned ${plannedTotal} (structural ${structuralTotal} less code face value ${codeFaceCents}, spread across ${verify.contract.lines.length} line(s), tolerance ${codeTolerance})`,
         );
       }
     }
