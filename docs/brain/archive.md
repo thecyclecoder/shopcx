@@ -13,6 +13,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **A green loop must not hide a stale output table** · verified 2026-09-30 · → [[lifecycles/shoptics-migration]], [[libraries/control-tower]]
+- **Catch billing_forecasts pending unique-index race in createForecast** · verified 2026-09-30 · → [[../libraries/billing-forecast]]
 - **Drop stale qb_amazon_sales_snapshots.gross_revenue_cents direct-REST lookup noise** · verified 2026-09-30 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
 - **Classify foreign `daily_meta_ad_spend.date` PostgREST ad-hoc noise** · verified 2026-09-29 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise`)
 - **Drop foreign PostgREST noise for loyalty_members.lifetime_points** · verified 2026-09-29 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise`)
