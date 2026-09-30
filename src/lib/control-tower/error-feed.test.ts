@@ -42,6 +42,7 @@ import {
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
+  isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
@@ -6035,6 +6036,129 @@ test("isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise returns fal
     isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
       "column daily_meta_ad_spend.date does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client / hand-typed URL reads
+// `/rest/v1/qb_amazon_sales_snapshots?select=gross_revenue_cents,units,updated_at&...` against
+// our `public.qb_amazon_sales_snapshots` table. The table exists (qb-close Amazon
+// sales-receipt / COGS source, migration 20261213120001_qb_close_source_tables.sql) but by
+// design carries NO `gross_revenue_cents` column — the real per-ASIN/per-day money columns
+// are `revenue` (numeric(14,2)) plus `recurring_revenue` / `sns_checkout_revenue` /
+// `one_time_revenue`, and every ShopCX caller (`src/lib/qb-close/sync-amazon-sales.ts`,
+// `src/lib/qb-close/month-end.ts`) selects on `units_shipped` / `revenue`.
+// `gross_revenue_cents` lives on the unrelated `daily_amazon_product_snapshots` /
+// `daily_amazon_order_snapshots` family. Foreign-owned surface, no lever from us — drop AT
+// CAPTURE only when BOTH the exact column-missing message on
+// `qb_amazon_sales_snapshots.gross_revenue_cents` AND a SELECT-lookup shape on
+// `qb_amazon_sales_snapshots` (bare OR PostgREST CTE wrapper) are present. A column-missing
+// on any other table, a different column on `qb_amazon_sales_snapshots`, or a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise drops the exact failing sample (positive drop — bare SELECT shape with the exact message)", () => {
+  // The captured production sample: a bare SELECT-lookup on the table for the missing
+  // column, in both unqualified and public.-qualified message variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(
+      "column qb_amazon_sales_snapshots.gross_revenue_cents does not exist",
+      "select gross_revenue_cents, units, updated_at from public.qb_amazon_sales_snapshots where workspace_id = $1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(
+      "column public.qb_amazon_sales_snapshots.gross_revenue_cents does not exist",
+      "select gross_revenue_cents from public.qb_amazon_sales_snapshots",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(
+      "column qb_amazon_sales_snapshots.gross_revenue_cents does not exist",
+      "select gross_revenue_cents from qb_amazon_sales_snapshots limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(
+      "ERROR: column qb_amazon_sales_snapshots.gross_revenue_cents does not exist",
+      "select gross_revenue_cents from public.qb_amazon_sales_snapshots",
+    ),
+    true,
+  );
+  // The PostgREST CTE wrapper form (direct-REST wire shape) is dropped too.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(
+      "column qb_amazon_sales_snapshots.gross_revenue_cents does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."qb_amazon_sales_snapshots"."gross_revenue_cents", "public"."qb_amazon_sales_snapshots"."units", "public"."qb_amazon_sales_snapshots"."updated_at" FROM "public"."qb_amazon_sales_snapshots" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise KEEPS a column-missing on qb_amazon_sales_snapshots for a DIFFERENT column (e.g. `revenue` regression — the real money column)", () => {
+  // `revenue` (numeric) IS the real per-ASIN/per-day money column. If it regressed we
+  // absolutely want the page. The pin is `gross_revenue_cents` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(
+      "column qb_amazon_sales_snapshots.revenue does not exist",
+      "select revenue, units_shipped from public.qb_amazon_sales_snapshots",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(
+      "column qb_amazon_sales_snapshots.units_shipped does not exist",
+      "select units_shipped from public.qb_amazon_sales_snapshots",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise KEEPS a non-SELECT statement shape on qb_amazon_sales_snapshots (an INSERT with the same message is a real code-bug and still pages)", () => {
+  // An INSERT/UPDATE/DELETE against qb_amazon_sales_snapshots referencing a bogus
+  // `gross_revenue_cents` column is real code trying to write the table — a bug we WANT
+  // to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(
+      "column qb_amazon_sales_snapshots.gross_revenue_cents does not exist",
+      "insert into public.qb_amazon_sales_snapshots (workspace_id, asin, sale_date, gross_revenue_cents) values ($1, $2, $3, $4)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(
+      "column qb_amazon_sales_snapshots.gross_revenue_cents does not exist",
+      "update public.qb_amazon_sales_snapshots set gross_revenue_cents = $1 where workspace_id = $2",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(
+      "column qb_amazon_sales_snapshots.gross_revenue_cents does not exist",
+      "",
     ),
     false,
   );

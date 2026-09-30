@@ -3173,6 +3173,114 @@ export function isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column qb_amazon_sales_snapshots.gross_revenue_cents
+ * does not exist` for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.qb_amazon_sales_snapshots.gross_revenue_cents`. The `qb_amazon_sales_snapshots`
+ * table exists (see `supabase/migrations/20261213120001_qb_close_source_tables.sql` — the
+ * qb-close Amazon sales-receipt / COGS source driving [[../tables/qb_amazon_sales_snapshots]])
+ * but by design carries NO `gross_revenue_cents` column — the real per-ASIN/per-day money
+ * columns are `revenue` (numeric(14,2) — total sales) plus the split-out
+ * `recurring_revenue` / `sns_checkout_revenue` / `one_time_revenue` variants, and every
+ * ShopCX reader / writer (`src/lib/qb-close/sync-amazon-sales.ts`,
+ * `src/lib/qb-close/month-end.ts`) selects on `units_shipped` / `revenue`. The
+ * `gross_revenue_cents` integer-cents column lives on the unrelated
+ * `daily_amazon_product_snapshots` / `daily_amazon_order_snapshots` family (see
+ * `supabase/migrations/20260621130100_daily_amazon_product_snapshots.sql` and
+ * `supabase/migrations/20260422240000_amazon_integration.sql`). The column-missing ERROR
+ * only reaches this feed when a foreign app / stale SQL Editor session / deprecated
+ * integration / hand-typed URL queries
+ * `/rest/v1/qb_amazon_sales_snapshots?select=gross_revenue_cents,units,updated_at&...` (or
+ * the equivalent SELECT-lookup shape) — a natural mistake because the sibling
+ * `daily_amazon_*_snapshots` tables DO expose `gross_revenue_cents`, and a caller who
+ * knew that family may confuse the two. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-qb-amazon-sales-gross-revenue-cents-adhoc-lookup]]) is
+ * repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise` and
+ * `isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise` — the same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` + SELECT-lookup shape
+ * covering BOTH bare and PostgREST CTE wrapper forms), aimed at a different foreign
+ * caller on a different table+column.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to
+ *      `column qb_amazon_sales_snapshots.gross_revenue_cents does not exist` (or the
+ *      `public.` qualified variant, with any leading `ERROR: ` prefix Postgres includes
+ *      on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on
+ *      `public.qb_amazon_sales_snapshots` — either (a) the bare
+ *      `select ... from public.qb_amazon_sales_snapshots` shape (with no JOIN — a JOIN
+ *      across other tables is a real code path we own), OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."qb_amazon_sales_snapshots" ... )`
+ *      CTE wrapper form with double-quoted identifiers. Both forms are the same
+ *      foreign-owned read.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table still pages — the pin is
+ *     `qb_amazon_sales_snapshots.` only,
+ *   - a column-missing error on `qb_amazon_sales_snapshots` for a DIFFERENT column (e.g.
+ *     the real `revenue` / `units_shipped` columns being renamed away, or
+ *     `sale_date` / `asin` / `workspace_id`) still pages — the pin covers
+ *     `gross_revenue_cents` only,
+ *   - a `qb_amazon_sales_snapshots.gross_revenue_cents` error attached to a DIFFERENT
+ *     statement shape (INSERT / UPDATE / DELETE / DDL, JOIN across other tables) still
+ *     pages — the pin is the SELECT-lookup shape, matching the ad hoc direct-REST read
+ *     we've observed; the CTE branch likewise requires the wrapped op to be a SELECT (a
+ *     PostgREST INSERT/UPDATE inside the same wrapper stays paged),
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `qb_amazon_sales_snapshots` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `qb_amazon_sales_snapshots.gross_revenue_cents` (with or without the `public.`
+  // qualifier).
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column qb_amazon_sales_snapshots.gross_revenue_cents does not exist" ||
+    stripped === "column public.qb_amazon_sales_snapshots.gross_revenue_cents does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select`, its FROM clause MUST name
+  // `qb_amazon_sales_snapshots` (with or without the `public.` schema qualifier), AND
+  // the statement MUST NOT carry a `join` clause. A JOIN across other tables is a real
+  // code path we own (not the ad hoc direct-REST read this drop targets); a caller that
+  // actually writes to qb_amazon_sales_snapshots with a bogus `gross_revenue_cents`
+  // column is a code bug we DO want to page on.
+  if (
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?qb_amazon_sales_snapshots\b/.test(q) &&
+    !/\bjoin\b/.test(q)
+  ) {
+    return true;
+  }
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."qb_amazon_sales_snapshots" ... )` with double-quoted identifiers.
+  // Same foreign-owned read, different rendering — the plain SELECT regex above misses
+  // it because the statement starts with `with` and the FROM clause carries the quoted
+  // `"public"."qb_amazon_sales_snapshots"` shape. Guarded so the CTE branch requires the
+  // wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper — e.g.
+  // `WITH pgrst_source AS (INSERT INTO "public"."qb_amazon_sales_snapshots"("gross_revenue_cents") ...)`
+  // — is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?qb_amazon_sales_snapshots\b/.test(q);
+}
+
+/**
  * Foreign-caller noise — Postgres reporting `column loyalty_members.lifetime_points does
  * not exist` on a SELECT-lookup shape against `public.loyalty_members`. The
  * `loyalty_members` table exists but by design carries NO `lifetime_points` column: the
