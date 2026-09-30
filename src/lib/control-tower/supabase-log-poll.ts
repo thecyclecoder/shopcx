@@ -68,6 +68,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
+  isExpectedBillingForecastsPendingUniqViolation,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -694,6 +695,19 @@ const LOG_QUERIES: LogQuery[] = [
       // this constraint via a non-INSERT shape (COPY replay, pg_dump load, an UPDATE...
       // on conflict) still surfaces / pages on first sighting.
       if (isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(message, query)) return null;
+      // Drop expected-by-design noise at capture: Postgres reporting the 23505
+      // unique-violation raised by our own `idx_billing_forecasts_pending` partial index on
+      // an INSERT INTO `public.billing_forecasts`. That index is the DB-level
+      // one-pending-forecast-per-contract backstop for the `createForecast` path in
+      // [[../billing-forecast]] — a concurrent second insert for the same
+      // (workspace, contract) pending pair is INTENTIONALLY rejected at 23505 and the app
+      // catch converges on the winning row. Paging Platform on it trains owners to ignore
+      // the feed. Narrowly gated to require BOTH the exact unique-violation message on THIS
+      // constraint AND the INSERT-INTO-billing_forecasts shape — a 23505 on any other
+      // constraint (real schema regression), or a 23505 on this constraint via a non-INSERT
+      // shape (COPY replay, pg_dump load, an UPDATE... on conflict) still surfaces / pages
+      // on first sighting.
+      if (isExpectedBillingForecastsPendingUniqViolation(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,

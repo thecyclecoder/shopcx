@@ -46,6 +46,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
+  isExpectedBillingForecastsPendingUniqViolation,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -6694,6 +6695,128 @@ test("isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation returns false o
   assert.equal(
     isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation(
       'duplicate key value violates unique constraint "dashboard_notifications_dedupe_key_open_uniq"',
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isExpectedBillingForecastsPendingUniqViolation ──
+// The DB-level `idx_billing_forecasts_pending` partial UNIQUE index is INTENTIONALLY the
+// last-resort backstop for the `createForecast` path in billing-forecast.ts — a concurrent
+// second insert for the same (workspace, contract) pending pair rejects at 23505 and the
+// app catch converges on the winning row. Drop AT CAPTURE only when BOTH the exact
+// unique-violation message on THIS constraint AND the INSERT-INTO-billing_forecasts shape
+// are present. A 23505 on any other constraint, or a 23505 on this constraint via a
+// non-INSERT shape, still pages.
+
+test("isExpectedBillingForecastsPendingUniqViolation drops the expected 23505 on our own INSERT INTO billing_forecasts", () => {
+  // The captured production sample: Postgres's canonical 23505 shape (with the ERROR:
+  // prefix stripped) + the INSERT INTO "public"."billing_forecasts" the createForecast
+  // path in billing-forecast.ts emits.
+  assert.equal(
+    isExpectedBillingForecastsPendingUniqViolation(
+      'duplicate key value violates unique constraint "idx_billing_forecasts_pending"',
+      'insert into "public"."billing_forecasts" ("workspace_id", "shopify_contract_id", "status") values ($1, $2, $3)',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isExpectedBillingForecastsPendingUniqViolation(
+      'ERROR: duplicate key value violates unique constraint "idx_billing_forecasts_pending"',
+      'insert into "public"."billing_forecasts" ("workspace_id", "shopify_contract_id") values ($1, $2)',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isExpectedBillingForecastsPendingUniqViolation(
+      'duplicate key value violates unique constraint "idx_billing_forecasts_pending"',
+      'INSERT INTO "public"."billing_forecasts" ("workspace_id", "shopify_contract_id") VALUES ($1, $2)',
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on both is tolerated.
+  assert.equal(
+    isExpectedBillingForecastsPendingUniqViolation(
+      '  duplicate key value violates unique constraint "idx_billing_forecasts_pending"  ',
+      '   insert into "public"."billing_forecasts" ("workspace_id") values ($1)   ',
+    ),
+    true,
+  );
+});
+
+test("isExpectedBillingForecastsPendingUniqViolation KEEPS a 23505 on any OTHER unique constraint (a real product-schema regression still pages)", () => {
+  // The pin is `idx_billing_forecasts_pending` only — any other unique index that
+  // regresses is a bug we absolutely want to see.
+  assert.equal(
+    isExpectedBillingForecastsPendingUniqViolation(
+      'duplicate key value violates unique constraint "billing_forecasts_pkey"',
+      'insert into "public"."billing_forecasts" ("id", "workspace_id") values ($1, $2)',
+    ),
+    false,
+  );
+  assert.equal(
+    isExpectedBillingForecastsPendingUniqViolation(
+      'duplicate key value violates unique constraint "dashboard_notifications_dedupe_key_open_uniq"',
+      'insert into "public"."dashboard_notifications" ("workspace_id", "type") values ($1, $2)',
+    ),
+    false,
+  );
+  assert.equal(
+    isExpectedBillingForecastsPendingUniqViolation(
+      'duplicate key value violates unique constraint "specs_slug_workspace_uniq"',
+      'insert into "public"."specs" ("slug", "workspace_id") values ($1, $2)',
+    ),
+    false,
+  );
+});
+
+test("isExpectedBillingForecastsPendingUniqViolation KEEPS a 23505 on this constraint via a non-INSERT shape (COPY replay / pg_dump load / UPDATE ... on conflict still pages)", () => {
+  // The pin is the INSERT INTO "public"."billing_forecasts" mint shape — a different
+  // statement that trips the same partial index is a different caller class and stays
+  // captured.
+  assert.equal(
+    isExpectedBillingForecastsPendingUniqViolation(
+      'duplicate key value violates unique constraint "idx_billing_forecasts_pending"',
+      'copy public.billing_forecasts from stdin',
+    ),
+    false,
+  );
+  assert.equal(
+    isExpectedBillingForecastsPendingUniqViolation(
+      'duplicate key value violates unique constraint "idx_billing_forecasts_pending"',
+      'update "public"."billing_forecasts" set "status" = $1 where "id" = $2',
+    ),
+    false,
+  );
+  // A bare SELECT (an operator running an EXPLAIN or similar) is not the mint path either.
+  assert.equal(
+    isExpectedBillingForecastsPendingUniqViolation(
+      'duplicate key value violates unique constraint "idx_billing_forecasts_pending"',
+      'select 1 from "public"."billing_forecasts" where status = \'pending\'',
+    ),
+    false,
+  );
+});
+
+test("isExpectedBillingForecastsPendingUniqViolation returns false on empty / nullish input", () => {
+  assert.equal(isExpectedBillingForecastsPendingUniqViolation(null, null), false);
+  assert.equal(isExpectedBillingForecastsPendingUniqViolation(undefined, undefined), false);
+  assert.equal(isExpectedBillingForecastsPendingUniqViolation("", ""), false);
+  // Empty query — even with the exact message we cannot confirm the mint shape, so the
+  // row stays captured.
+  assert.equal(
+    isExpectedBillingForecastsPendingUniqViolation(
+      'duplicate key value violates unique constraint "idx_billing_forecasts_pending"',
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isExpectedBillingForecastsPendingUniqViolation(
+      'duplicate key value violates unique constraint "idx_billing_forecasts_pending"',
       null,
     ),
     false,
