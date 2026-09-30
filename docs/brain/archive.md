@@ -12,6 +12,12 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Classify foreign `daily_meta_ad_spend.date` PostgREST ad-hoc noise** · verified 2026-09-29 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise`)
+- **Drop foreign PostgREST noise for loyalty_members.lifetime_points** · verified 2026-09-29 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise`)
+- **Drop foreign-app noise: product_ingredients.sort_order direct-REST ad-hoc lookup** · verified 2026-09-29 · → [[../libraries/control-tower]]
+- **Drop foreign-app ticket_messages.role adhoc SELECT noise at capture** · verified 2026-09-29 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise]]
+- **Drop foreign PostgREST reads on tickets.assigned_agent from the Control Tower error feed** · verified 2026-09-29 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise]]
+- **Guard products.id .in() filters against Shopify-numeric line-item ids** · verified 2026-09-29 · → [[../libraries/email-storefront]]
 - **Add missing workspaces.playbook_compiler_support_min column** · verified 2026-09-28 · → [[../tables/workspaces]]
 - **Drop expected 23505 on dashboard_notifications_dedupe_key_open_uniq from supabase-logs capture** · verified 2026-09-28 · → [[lifecycles/control-tower]]
 - **Drop foreign 'column orders.source does not exist' ad-hoc lookup noise from the error feed** · verified 2026-09-28 · → [[../libraries/control-tower]] (error-feed.ts capture filters)
