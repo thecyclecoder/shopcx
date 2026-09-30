@@ -124,6 +124,14 @@ export const syncQbCloseSources = inngest.createFunction(
           rows: results.reduce((a, r) => a + r.rows, 0),
           failures: failures.length,
         },
+        // Fan-out convention (docs/brain/libraries/control-tower.md § heartbeat): a not-ok beat
+        // names WHICH sub-task branches failed, so an operator can act on the cause without
+        // reading function logs. A count alone leaves three consecutive not-ok mornings
+        // indistinguishable — the 2026-09 close-driver 23-day stall was invisible for that
+        // reason. Distinct + bounded so a wide outage cannot write an unbounded blob.
+        detail: failures.length
+          ? Array.from(new Set(failures.map((f) => f.sync))).sort().join(",").slice(0, 300)
+          : undefined,
       }),
     );
 

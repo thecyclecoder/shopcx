@@ -342,6 +342,38 @@ export interface MonitoredLoop {
   errorRateThreshold?: number;
   /** inline-agent only: minimum beats in the window before the error-rate check is meaningful (avoids 1/1 = 100%). Default 5. */
   minRunsForErrorRate?: number;
+  /**
+   * Optional (Phase 2 of [[../specs/a-green-loop-must-not-hide-a-stale-output-table]]): the dated
+   * output table this loop exists to advance, plus the maximum tolerated lag between now and the
+   * table's newest date. A loop that keeps beating while its table stops moving is indistinguishable
+   * from a healthy one — the exact 2026-09 close-driver stall (23 days stale behind a green row).
+   * When set, the monitor reads MAX(<dateColumn>) on <table> each tick and flips the tile RED with
+   * `reason='output_stale'` when the newest value is older than `maxLagMs`, even while the loop's
+   * own beats are fresh (green/amber on the P1 checks). Absent ⇒ today's behaviour exactly (opt-in).
+   * Choose the lag per table, not globally: some outputs are genuinely daily-dated and unreconstructible
+   * if missed (FBA / 3PL point-in-time inventory), while others are re-pullable over a date range
+   * (Amazon shipped units, sales-snapshot pulls) — a single global threshold would either cry wolf
+   * or stay silent. Validated by `assertRegistryInvariants` (throws at module import on a bad shape:
+   * missing table / missing dateColumn / non-finite/non-positive maxLagMs) so a misdeclaration is
+   * a line-numbered import-time failure, not a silent runtime blind spot.
+   */
+  outputFreshness?: OutputFreshness;
+}
+
+/**
+ * Declared dated output table for a monitored loop (Phase 2 of
+ * [[../specs/a-green-loop-must-not-hide-a-stale-output-table]]). Field-per-field:
+ *   - `table`      — the `public.<table>` the loop's whole purpose is to advance.
+ *   - `dateColumn` — the DATE / TIMESTAMPTZ column whose MAX represents "how far the table has
+ *                    been advanced." The monitor reads MAX(<dateColumn>) each tick.
+ *   - `maxLagMs`   — how far the newest value may fall behind `now` before the monitor flips
+ *                    the tile RED with `reason='output_stale'`. Choose PER TABLE (see the field
+ *                    doc on `MonitoredLoop.outputFreshness`).
+ */
+export interface OutputFreshness {
+  table: string;
+  dateColumn: string;
+  maxLagMs: number;
 }
 
 /**
@@ -868,7 +900,25 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   },
   // ─ Daily crons (window ~26h) ─
   { id: "sync-fba-inventory", kind: "cron", owner: "logistics", label: "FBA inventory sync", description: "Daily Amazon SP-API getInventorySummaries → canonical inventory_levels (location='fba') + dated snapshot. The Amazon-channel on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
-  { id: "sync-qb-close-sources", kind: "cron", owner: "cfo", label: "Month-end close source sync", description: "Daily 09:30 sync of the close's qb_* source tables from ShopCX's own integrations (Shopify + internal sales over a 35d trailing window; FBA + 3PL inventory dated today). A dated inventory snapshot cannot be reconstructed later, so a missed day is a permanently missing period-end physical count.", expectedCadence: "daily (30 9 * * *)", livenessWindowMs: 30 * HOUR },
+  {
+    id: "sync-qb-close-sources",
+    kind: "cron",
+    owner: "cfo",
+    label: "Month-end close source sync",
+    description: "Daily 09:30 sync of the close's qb_* source tables from ShopCX's own integrations (Shopify + internal sales over a 35d trailing window; FBA + 3PL inventory dated today). A dated inventory snapshot cannot be reconstructed later, so a missed day is a permanently missing period-end physical count.",
+    expectedCadence: "daily (30 9 * * *)",
+    livenessWindowMs: 30 * HOUR,
+    // Phase 2 of a-green-loop-must-not-hide-a-stale-output-table — the loop's whole purpose is to
+    // advance the close's Amazon shipped-units driver. The 2026-09 stall (complete through 09-07,
+    // empty from 09-08 to 09-30 while this loop kept beating and reported green on 09-30) was
+    // invisible to the P1 tile because liveness only asked whether the loop RAN, not whether the
+    // table it exists to fill actually moved. `qb_amazon_sales_snapshots.sale_date` is the Amazon
+    // shipped-units date column; Amazon SP-API is re-pullable over a range so a 48h lag is
+    // conservative (a genuine daily miss trips outside 30h; the 48h leaves slack for a same-day
+    // catch-up run). This is NOT the FBA/3PL point-in-time lag — those are unreconstructible if
+    // missed and would want their own per-table maxLagMs on a dedicated tile.
+    outputFreshness: { table: "qb_amazon_sales_snapshots", dateColumn: "sale_date", maxLagMs: 48 * HOUR },
+  },
   { id: "sync-3pl-inventory", kind: "cron", owner: "logistics", label: "3PL inventory sync", description: "Daily Amplifier /reports/inventory/current → canonical inventory_levels (location='amplifier_3pl') + dated snapshot. The storefront/subscriber on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
   {
     id: "acquisition-research-cadence-cron",
@@ -1549,6 +1599,27 @@ export const REGISTRY_LIVENESS_JITTER_GRACE = 1.2;
  */
 export function assertRegistryInvariants(loops: MonitoredLoop[] = MONITORED_LOOPS): void {
   for (const loop of loops) {
+    // outputFreshness shape validation (a-green-loop-must-not-hide-a-stale-output-table Phase 2).
+    // Fails LOUDLY at module import — a misdeclared table / dateColumn / maxLagMs at runtime would
+    // silently disable the freshness check (the exact class of blind spot Phase 2 exists to close).
+    if (loop.outputFreshness) {
+      const f = loop.outputFreshness;
+      if (typeof f.table !== "string" || !f.table.trim()) {
+        throw new Error(
+          `assertRegistryInvariants: loop '${loop.id}' outputFreshness.table is missing / not a non-empty string — declare the public.<table> whose staleness should red this tile.`,
+        );
+      }
+      if (typeof f.dateColumn !== "string" || !f.dateColumn.trim()) {
+        throw new Error(
+          `assertRegistryInvariants: loop '${loop.id}' outputFreshness.dateColumn is missing / not a non-empty string — declare the DATE/TIMESTAMPTZ column whose MAX(...) represents the table's advancement.`,
+        );
+      }
+      if (!Number.isFinite(f.maxLagMs) || f.maxLagMs <= 0) {
+        throw new Error(
+          `assertRegistryInvariants: loop '${loop.id}' outputFreshness.maxLagMs is not a positive finite number (${f.maxLagMs}) — declare the lag PER TABLE (some outputs are unreconstructible if missed, others are re-pullable over a range — a single global threshold would either cry wolf or stay silent).`,
+        );
+      }
+    }
     if (loop.kind !== "cron") continue;
     const expr = extractCronExpr(loop.expectedCadence);
     if (!expr) continue; // "box job" / non-Inngest cadence — nothing to assert
