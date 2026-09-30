@@ -353,3 +353,27 @@ purpose) and 8 that were already overdue on Appstle before migration.
 
 **The lesson for any future audit: a metric that reads "fine" is not the same as a customer being
 charged on the right day.** Both automated checks were green on subs that were a month late.
+
+
+## 🔴 Verify every pin — the edit that schedules a customer can strand them
+
+Pinning cycle N to date X makes X the **END BOUNDARY** of cycle N−1's window, and a date lookup
+resolves a boundary to the **earlier** cycle. If N−1 is BILLED, the edit meant to schedule the
+customer has just made them unbillable — and `subscriptionBillingCycleScheduleEdit` returns success.
+
+Measured 2026-09-30: a repair script pinned 14 subs to earlier dates and **re-stranded 3 of them**
+this way, one day after a different repair fixed 90. It trusted the mutation's own success; the
+earlier repair had verified and did not.
+
+`shopifySyncBillingSchedule` now re-reads after the first pin and fails loudly if the date resolves
+to a spent cycle. It lives in the SDK rather than in any one caller because **every** caller needs
+it — the renewal worker, the portal, and every repair script.
+
+**Never trust a schedule edit's own success.** Ask where the date actually lands.
+
+### Recovering a sub whose next live cycle is far away
+
+A stranded sub is not always fixable by walking the date forward: if the following cycle sits months
+out (one was at +104 days on a 56-day cadence), the walk never reaches it. Pin that cycle back
+instead — its window starts at the spent cycle's date, so `last charge + one cadence` is usually
+inside it and restores the customer's real rhythm.

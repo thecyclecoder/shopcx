@@ -1242,6 +1242,24 @@ export async function shopifySyncBillingSchedule(
       // Expected at the horizon, and on any cycle already billed. Not a failure.
       return { success: true, pinned, stoppedAt: `cycle ${index}: ${ue[0]?.message ?? env.errors?.[0]?.message}` };
     }
+    // ⚠️ VERIFY THE PIN RESOLVES BACK. Pinning cycle N to date X makes X the END BOUNDARY of cycle
+    // N−1's window, and a date lookup resolves a boundary to the EARLIER cycle. If N−1 is BILLED,
+    // the edit that was meant to schedule the customer has just stranded them — the mutation
+    // reports success and the subscription becomes unbillable.
+    //
+    // Measured 2026-09-30: a repair script pinned 14 subs to earlier dates and re-stranded 3 of
+    // them exactly this way, because it trusted the mutation's own success. Every caller needs this,
+    // so it lives here rather than in any one of them.
+    if (pinned === 0) {
+      const back = await getBillingCycleForDate(workspaceId, contractId, when.toISOString());
+      if (back.success && back.cycle && (back.cycle.status === "BILLED" || back.cycle.skipped)) {
+        return {
+          success: false,
+          pinned,
+          error: `pinned cycle #${index} to ${when.toISOString().slice(0, 10)} but that date resolves to cycle #${back.cycle.index} (${back.cycle.status}) — the subscription would be unbillable`,
+        };
+      }
+    }
     pinned++;
     when = stepSchedule(when, interval, intervalCount);
   }
