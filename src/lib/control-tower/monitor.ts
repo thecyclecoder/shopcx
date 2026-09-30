@@ -28,6 +28,7 @@ import {
   type LoopKind,
   type MonitoredLoop,
   type OutputAssertionId,
+  type OutputFreshness,
   type OwnerFunction,
 } from "@/lib/control-tower/registry";
 import { aggregateRenewalOutcomes, type RenewalOutcomeCounts } from "@/lib/control-tower/heartbeat";
@@ -2417,11 +2418,95 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   };
 }
 
+/**
+ * Per-loop output-freshness reading (Phase 2 of a-green-loop-must-not-hide-a-stale-output-table).
+ * `newestAtMs` is the parsed MAX(<dateColumn>) as ms since epoch (or null if the table is empty
+ * or the value doesn't parse). `readOk` is false when the read itself threw or errored — we then
+ * SKIP the freshness escalation entirely (a transient DB blip must not false-red the tile).
+ */
+export interface OutputFreshnessReading {
+  newestAtMs: number | null;
+  readOk: boolean;
+}
+export type OutputFreshnessMap = Map<string, OutputFreshnessReading>;
+
+/**
+ * READ-ONLY: for every loop that declared an `outputFreshness`, fetch MAX(<dateColumn>) on the
+ * declared table (one row, sorted DESC on the date column). Best-effort per loop — a failed read
+ * records readOk=false and evalOutputFreshness skips the escalation for THAT loop.
+ * (a-green-loop-must-not-hide-a-stale-output-table Phase 2.)
+ */
+async function fetchOutputFreshnessMap(
+  admin: Admin,
+  loops: MonitoredLoop[],
+): Promise<OutputFreshnessMap> {
+  const out: OutputFreshnessMap = new Map();
+  const declared = loops.filter((l): l is MonitoredLoop & { outputFreshness: OutputFreshness } => !!l.outputFreshness);
+  await Promise.all(
+    declared.map(async (loop) => {
+      const { table, dateColumn } = loop.outputFreshness;
+      try {
+        const { data, error } = await admin
+          .from(table)
+          .select(dateColumn)
+          .order(dateColumn, { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (error) {
+          out.set(loop.id, { newestAtMs: null, readOk: false });
+          return;
+        }
+        const raw = data ? (data as unknown as Record<string, unknown>)[dateColumn] : null;
+        // DATE columns come back as 'YYYY-MM-DD' from PostgREST; TIMESTAMPTZ as an ISO string. A
+        // bare 'YYYY-MM-DD' is parsed as UTC midnight by Date.parse — the safe interpretation
+        // (start-of-day UTC ⇒ conservative age; only reads STALER, never fresher).
+        const ms = typeof raw === "string" && raw ? Date.parse(raw) : null;
+        out.set(loop.id, { newestAtMs: Number.isFinite(ms) ? ms as number : null, readOk: true });
+      } catch (e) {
+        console.warn(`[control-tower] fetchOutputFreshnessMap failed for ${loop.id} (${table}.${dateColumn}):`, e instanceof Error ? e.message : e);
+        out.set(loop.id, { newestAtMs: null, readOk: false });
+      }
+    }),
+  );
+  return out;
+}
+
+/**
+ * Layered check (Phase 2 of a-green-loop-must-not-hide-a-stale-output-table): a loop that beat
+ * recently but whose declared dated table has stopped advancing resolves UNHEALTHY. Distinct from
+ * a missed beat: "ran but produced nothing new" is a different fault from "did not run". Returns
+ * a red override (statusText + violation) when the freshness check fails, else null. Pure given
+ * (loop, reading).
+ *
+ * Deliberately skips when:
+ *   - the loop has no `outputFreshness` declared (opt-in),
+ *   - the freshness read failed (readOk=false — a transient DB blip must not false-red),
+ *   - the table is empty (newestAtMs=null with readOk=true — a brand-new loop / fresh workspace
+ *     that has not yet produced its first dated row is UNKNOWN, not stale).
+ */
+export function evalOutputFreshness(
+  loop: MonitoredLoop,
+  reading: OutputFreshnessReading | undefined,
+): { statusText: string; violation: { reason: string; detail: string } } | null {
+  const f = loop.outputFreshness;
+  if (!f || !reading || !reading.readOk || reading.newestAtMs == null) return null;
+  const lagMs = Date.now() - reading.newestAtMs;
+  if (lagMs <= f.maxLagMs) return null;
+  const newestIso = new Date(reading.newestAtMs).toISOString().slice(0, 10);
+  return {
+    statusText: `ran but ${f.table} hasn't advanced in ${fmtDur(lagMs)} (newest ${f.dateColumn}=${newestIso})`,
+    violation: {
+      reason: "output_stale",
+      detail: `Cron ${loop.id} kept beating but its declared output table ${f.table} has not advanced: newest ${f.dateColumn} is ${newestIso} (${fmtDur(lagMs)} ago, past the ${fmtDur(f.maxLagMs)} maxLag). Distinct from a missed beat — the loop RAN, the table did not move. (a-green-loop-must-not-hide-a-stale-output-table Phase 2.)`,
+    },
+  };
+}
+
 /** READ-ONLY: evaluate every registered loop → tiles. Used by the dashboard + the monitor. */
 export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<ControlTowerSnapshot> {
   const admin = adminClient ?? createAdminClient();
 
-  const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit, { data: oldestMonitorBeat }, { data: firstSeenRows }, { data: workerCtrl }] = await Promise.all([
+  const [{ data: workerRow }, { data: beats, error: beatsError }, { data: openAlerts }, { data: jobs }, assertionInputs, inlineState, selfAudit, { data: oldestMonitorBeat }, { data: firstSeenRows }, { data: workerCtrl }, freshnessMap] = await Promise.all([
     admin.from("worker_heartbeats").select("running_sha, status, active_builds, detail, last_poll_at, started_at, accounts").eq("id", WORKER_BOX_ID).maybeSingle(),
     // ONE bounded, index-friendly read (control-tower-loop-beats-rpc-perf P1): a lateral join takes
     // the distinct cron + agent-kind loop_ids and, per loop, reads only its latest HISTORY_LIMIT
@@ -2460,6 +2545,13 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
     // is suppressed and behindTooLong still reds at grace. Singleton row keyed by WORKER_BOX_ID;
     // missing row ⇒ drain off (no-op).
     admin.from("worker_controls").select("drain_for_update").eq("box_id", WORKER_BOX_ID).maybeSingle(),
+    // Phase 2 of a-green-loop-must-not-hide-a-stale-output-table — for every loop that declared an
+    // outputFreshness (today: sync-qb-close-sources → qb_amazon_sales_snapshots.sale_date), fetch
+    // MAX(<dateColumn>) so evalOutputFreshness can red the tile when the loop keeps beating but its
+    // declared dated table has stopped advancing. Best-effort per loop (failed read ⇒ readOk=false
+    // ⇒ escalation skipped). One tiny index-friendly read per declared loop (ORDER BY <dateColumn>
+    // DESC LIMIT 1) — cheap even at book scale.
+    fetchOutputFreshnessMap(admin, MONITORED_LOOPS),
   ]);
 
   // Trustworthy deploy-age reference for the never-fired cron check (evalCron).
@@ -2596,6 +2688,17 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
           core = { ...core, color: "red", statusText: a.statusText, violation: a.violation };
           break;
         }
+      }
+    }
+    // Phase 2 of a-green-loop-must-not-hide-a-stale-output-table — layer outputFreshness on top of
+    // the P1 tile (a green loop must not hide a stale output table). Same rule as the output-
+    // assertion layer above: only escalates green/amber → red, a P1 red is the higher-priority
+    // violation. Distinct `reason='output_stale'` distinguishes "ran but produced nothing new"
+    // from "did not run".
+    if (loop.outputFreshness && core.color !== "red") {
+      const stale = evalOutputFreshness(loop, freshnessMap.get(loop.id));
+      if (stale) {
+        core = { ...core, color: "red", statusText: stale.statusText, violation: stale.violation };
       }
     }
     return { ...core, owner: loop.owner, history, openAlert: alertByLoop.get(loop.id) ?? null };
