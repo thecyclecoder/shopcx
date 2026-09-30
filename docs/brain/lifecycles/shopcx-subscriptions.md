@@ -642,6 +642,51 @@ thin to act on. Worth re-checking once the clean population is several hundred.
 - **`orders.subscription_id` looked unpopulated** and wasn't — that was the same truncation. The
   link is actually 346 of 347.
 
+## A used-up coupon cannot fail a renewal (asked 2026-09-30)
+
+*"What does our system do when a coupon fails on a renewal — e.g. a one-use coupon already used? It
+should drop the coupon and retry."*
+
+**It cannot happen on this engine, and the reason is worth knowing.** Carried customer codes are
+minted as `SubscriptionManualDiscount` — **line discounts, not validated codes**. Shopify never
+re-validates them at charge time; it applies them for `recurringCycleLimit` cycles and then simply
+stops. An exhausted coupon reduces the discount to zero, it does not reject the charge.
+
+Two independent protections:
+
+1. `carryableCodes` refuses a code whose `usageCount >= recurringCycleLimit` at migration, and
+   carries the REMAINING cycles rather than the original limit (`max(1, limit - used)`) — copying
+   the limit verbatim would re-grant the whole run.
+2. Shopify enforces the remaining limit itself, silently.
+
+**Measured: 0 of 1,000 payment failures since 2026-09-01 were discount- or coupon-related.**
+
+⚠️ The general gap is still real but unexercised: if a discount ever DID cause a billing failure,
+nothing would strip it and retry — dunning would re-attempt the same contract with the same discount
+indefinitely. Worth a guard before that becomes reachable (e.g. if we ever attach real
+`SubscriptionAppliedCodeDiscount`s, which Shopify DOES validate at charge time).
+
+## ⭐ Plan to full migration off Appstle
+
+Tracked here rather than as a spec because it is an operational sequence, not a build.
+
+| # | Task | Gate / definition of done | State |
+|---|---|---|---|
+| 1 | Make the subsystem self-reporting | drift + strand + cadence checks escalate a repair job; only OUR lateness pages | ✅ done 2026-09-30 |
+| 2 | Codes wave (~30) | the thinnest-covered path: 7 of 133 code-carrying contracts migrated, 2 defects already found there | 🚧 in progress |
+| 3 | One clean week, 10-01 → 10-07 | **nothing escalates unprompted.** Not "drift is 0 when I look" — the alert stays quiet on its own | ⏳ |
+| 4 | Full migration in daily batches | ~300/day for 6 days, reconciler + parity between each; six chances to stop, not one 7-hour run | ⏳ |
+| 5 | Payment-troubled tail (~50) | deliberately deferred by every wave; migrate after they recover or decide to take them | ⏳ |
+| 6 | Retire Appstle | key rotation (outstanding), webhook teardown, `billing_source` cleanup | ⏳ |
+
+**Why the order.** Step 1 came first because every defect this month was found by a human asking —
+the gate for step 3 is meaningless without it. Step 2 before step 4 because codes have produced two
+of the five defects and 126 contracts still carry them; finding the third on 30 is cheap.
+
+**Standing pre-flight for every wave:** `--refresh` (snapshots go stale and drift-refuse),
+customer-atomic selection (never split a customer across engines), dunning deferral (a migration does
+not fix a dead card), then `_price-parity.ts` and the drift cron after.
+
 ## Open decisions
 
 - **~$9,700/cycle**: 974 lines are priced above the standard ladder because their subs never got a
