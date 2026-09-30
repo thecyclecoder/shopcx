@@ -64,6 +64,7 @@ import {
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
+  isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
@@ -617,6 +618,31 @@ const LOG_QUERIES: LogQuery[] = [
       // `daily_meta_ad_spend` via a non-SELECT statement (real code-bug shape) still
       // surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.qb_amazon_sales_snapshots.gross_revenue_cents`. The
+      // `qb_amazon_sales_snapshots` table exists (see
+      // `supabase/migrations/20261213120001_qb_close_source_tables.sql` — the qb-close
+      // Amazon sales-receipt / COGS source, [[../tables/qb_amazon_sales_snapshots]]) but
+      // has NO `gross_revenue_cents` column — the real per-ASIN/per-day money columns
+      // are `revenue` (numeric(14,2)) plus `recurring_revenue` / `sns_checkout_revenue` /
+      // `one_time_revenue`, and every ShopCX caller (`src/lib/qb-close/sync-amazon-sales.ts`,
+      // `src/lib/qb-close/month-end.ts`) selects on `units_shipped` / `revenue`. The
+      // `gross_revenue_cents` column lives on the unrelated
+      // `daily_amazon_product_snapshots` / `daily_amazon_order_snapshots` family. The
+      // column-missing ERROR only reaches this feed when a foreign app / stale SQL Editor
+      // session / deprecated integration / hand-typed URL queries
+      // `/rest/v1/qb_amazon_sales_snapshots?select=gross_revenue_cents,units,updated_at&...` —
+      // a natural mistake because the sibling `daily_amazon_*_snapshots` tables DO expose
+      // `gross_revenue_cents`. There is no lever from ShopCX to make that query resolve —
+      // paging Platform on it
+      // ([[../specs/error-feed-drop-qb-amazon-sales-gross-revenue-cents-adhoc-lookup]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-qb_amazon_sales_snapshots shape (bare OR
+      // PostgREST CTE wrapper) — a column-missing error on any other table, a different
+      // column on `qb_amazon_sales_snapshots` (e.g. `revenue` / `units_shipped`
+      // regression), or on `qb_amazon_sales_snapshots` via a non-SELECT statement (real
+      // code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.loyalty_members.lifetime_points`. The `loyalty_members` table
       // exists but has NO `lifetime_points` column — the live running-total column is
