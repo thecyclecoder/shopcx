@@ -1,0 +1,1 @@
+- **Drop supabase-logs noise for Studio ad hoc appstle_api_calls lookup naming non-existent `method` / `status_code` columns** · verified 2026-10-01 · → [[inngest/supabase-log-poll]]

@@ -1,0 +1,1 @@
+- **Scope capture — drop foreign PostgREST reads of products.pricing_rule_id from the Control Tower error feed** · verified 2026-10-01 · → [[inngest/supabase-log-poll]]
