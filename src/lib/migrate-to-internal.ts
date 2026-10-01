@@ -121,6 +121,51 @@ export interface DroppedLine {
   paid: boolean;
 }
 
+/**
+ * Products a migration must NOT carry onto internal rails, by internal product UUID. A line
+ * resolving to one of these is EXCLUDED from items[] (recorded as an audit note, no ops page —
+ * it is policy, not a mapping failure), and a sub whose ONLY product lines are excluded is NOT
+ * migrated at all (left on its old engine, untouched).
+ *
+ * Apple Cider Vinegar Gummies — out of stock with no restock planned (CEO 2026-10-01). Left in,
+ * the internal engine bills it at catalog price every cycle for a product we can't ship (sub
+ * 25afd98d was charged $27.57 for it on its first internal renewal, SHOPCX426, 2026-09-22).
+ */
+export const MIGRATION_EXCLUDED_PRODUCT_IDS: ReadonlySet<string> = new Set([
+  "ad466a2f-061e-4692-a3d3-f672797fcecf", // Apple Cider Vinegar Gummies
+]);
+
+/** A live line deliberately left off the migrated sub (see MIGRATION_EXCLUDED_PRODUCT_IDS). */
+export interface ExcludedLine {
+  title: string;
+  productId: string;
+  variantId: string;
+  priceCents: number;
+  quantity: number;
+}
+
+/** Drop excluded-product items from an already-internal items[] (the cancelled local-row path). */
+function withoutExcludedItems(items: Array<Record<string, unknown>>): {
+  items: Array<Record<string, unknown>>;
+  excludedLines: ExcludedLine[];
+} {
+  const kept: Array<Record<string, unknown>> = [];
+  const excludedLines: ExcludedLine[] = [];
+  for (const i of items) {
+    const productId = String(i.product_id || "");
+    if (MIGRATION_EXCLUDED_PRODUCT_IDS.has(productId)) {
+      excludedLines.push({
+        title: String(i.title || ""),
+        productId,
+        variantId: String(i.variant_id || ""),
+        priceCents: Number(i.price_cents || 0),
+        quantity: Number(i.quantity || 1),
+      });
+    } else kept.push(i);
+  }
+  return { items: kept, excludedLines };
+}
+
 export interface MigrateResult {
   migrated: Array<{ contractId: string; subId: string; billableCustomerId: string }>;
   skipped: Array<{ contractId: string; reason: string }>;
@@ -237,9 +282,10 @@ async function appstleLinesToInternalItems(
   admin: Admin,
   workspaceId: string,
   lines: Array<Record<string, unknown>>,
-): Promise<{ items: Array<Record<string, unknown>>; shippingProtectionCents: number; droppedLines: DroppedLine[] }> {
+): Promise<{ items: Array<Record<string, unknown>>; shippingProtectionCents: number; droppedLines: DroppedLine[]; excludedLines: ExcludedLine[] }> {
   const items: Array<Record<string, unknown>> = [];
   const droppedLines: DroppedLine[] = [];
+  const excludedLines: ExcludedLine[] = [];
   let shippingProtectionCents = 0;
   for (const l of lines) {
     const quantity = (l.quantity as number) || 1;
@@ -298,6 +344,18 @@ async function appstleLinesToInternalItems(
       continue;
     }
 
+    // Policy exclusion (e.g. ACV Gummies — no stock): keep it off the migrated sub.
+    if (MIGRATION_EXCLUDED_PRODUCT_IDS.has(String(v.product_id))) {
+      excludedLines.push({
+        title: title || (v.title as string) || "",
+        productId: String(v.product_id),
+        variantId: String(v.id),
+        priceCents: currentPriceCents,
+        quantity,
+      });
+      continue;
+    }
+
     // SMART PRICING (heal-by-migration): use the shared inference on the line we
     // already fetched. Reads pricingPolicy.basePrice directly when present
     // (isolates the true base from stacked discounts; distinguishes standard from
@@ -329,7 +387,7 @@ async function appstleLinesToInternalItems(
     }
     items.push(item);
   }
-  return { items, shippingProtectionCents, droppedLines };
+  return { items, shippingProtectionCents, droppedLines, excludedLines };
 }
 
 /**
@@ -437,7 +495,10 @@ export async function migrateContractToInternalComp(
     if (liveUsable) {
       // Comp subs ship free (base $0), so a protection charge never applies — we
       // take only the converted product items and drop any protection line.
-      ({ items } = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []));
+      let excludedLines: ExcludedLine[];
+      ({ items, excludedLines } = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []));
+      // Only excluded products (e.g. ACV Gummies alone) → don't migrate; checked BEFORE the cancel.
+      if (!items.length && excludedLines.length) return { ok: false, error: "only_excluded_products (not migrated)" };
       interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || "week").toLowerCase();
       intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
       nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();
@@ -450,7 +511,9 @@ export async function migrateContractToInternalComp(
       }
     } else {
       if (!isCancelled) return { ok: false, error: "appstle_unavailable (active/paused sub left alone — re-runnable)" };
-      items = (sub.items as Array<Record<string, unknown>>) || [];
+      const local = withoutExcludedItems((sub.items as Array<Record<string, unknown>>) || []);
+      if (!local.items.length && local.excludedLines.length) return { ok: false, error: "only_excluded_products (not migrated)" };
+      items = local.items;
       interval = String(sub.billing_interval || "week").toLowerCase();
       intervalCount = Number(sub.billing_interval_count || 1);
       nextBillingDate = (sub.next_billing_date as string) || new Date().toISOString();
@@ -610,11 +673,16 @@ export async function migrateCustomerAppstleSubsToInternal(
       // Lines the migration couldn't map to an internal variant → dropped, noted on
       // the audit (and a paid drop pages a human). Empty unless something unmappable.
       let droppedLines: DroppedLine[] = [];
+      // Lines deliberately left off (MIGRATION_EXCLUDED_PRODUCT_IDS) → audit note, no page.
+      let excludedLines: ExcludedLine[] = [];
       if (liveUsable) {
         // Translate Appstle lines → internal catalog UUID references (no baked
         // price; grandfathered lines get a price_override_cents). A "Shipping
         // Protection" line is pulled out into the flag below, not items[].
-        ({ items, shippingProtectionCents, droppedLines } = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []));
+        ({ items, shippingProtectionCents, droppedLines, excludedLines } = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []));
+        // The sub's only products are excluded (e.g. ACV Gummies alone) → don't migrate it.
+        // Checked BEFORE the cancel so the old engine is left exactly as it was.
+        if (!items.length && excludedLines.length) { result.skipped.push({ contractId, reason: "only_excluded_products" }); continue; }
         interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || "week").toLowerCase();
         intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
         nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();
@@ -633,7 +701,10 @@ export async function migrateCustomerAppstleSubsToInternal(
         // bill) — migrate them onto internal rails using the local row. An
         // active/paused sub we can't read is left alone (re-runnable).
         if (!isCancelled) { result.skipped.push({ contractId, reason: `${engine}_unavailable` }); continue; }
-        items = (sub.items as Array<Record<string, unknown>>) || [];
+        const local = withoutExcludedItems((sub.items as Array<Record<string, unknown>>) || []);
+        if (!local.items.length && local.excludedLines.length) { result.skipped.push({ contractId, reason: "only_excluded_products" }); continue; }
+        items = local.items;
+        excludedLines = local.excludedLines;
         interval = String(sub.billing_interval || "week").toLowerCase();
         intervalCount = Number(sub.billing_interval_count || 1);
         nextBillingDate = (sub.next_billing_date as string) || new Date().toISOString();
@@ -714,7 +785,10 @@ export async function migrateCustomerAppstleSubsToInternal(
           if (isShippingProtectionLine(l)) return s;
           const amt = Math.round(parseFloat(String((l.currentPrice as Record<string, unknown> | undefined)?.amount ?? "0")) * 100);
           return s + amt * Number(l.quantity || 1);
-        }, 0);
+        }, 0)
+          // Excluded lines are not on the migrated sub, so they are not in the engine's subtotal
+          // either — take them out of the baseline or `pricing_preserved` false-fails.
+          - (liveUsable ? excludedLines.reduce((s, x) => s + x.priceCents * x.quantity, 0) : 0);
         const { recordMigrationAudit, verifyMigration } = await import("@/lib/migration-audit");
         const auditId = await recordMigrationAudit({
           workspaceId,
@@ -724,6 +798,7 @@ export async function migrateCustomerAppstleSubsToInternal(
           preMigrationChargeCents: preCharge,
           isRecovery: !!opts.isRecovery,
           droppedLines,
+          excludedLines,
         });
         if (auditId) await verifyMigration(auditId);
       } catch (e) {
