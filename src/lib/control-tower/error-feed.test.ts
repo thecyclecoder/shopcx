@@ -51,6 +51,7 @@ import {
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
+  isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
@@ -1069,6 +1070,155 @@ test("isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise KEEPS a JO
     isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
       "column error_events.first_seen does not exist",
       'WITH pgrst_source AS ( SELECT "public"."error_events"."first_seen" FROM "public"."orders" JOIN "public"."error_events" ON "public"."error_events"."order_id" = "public"."orders"."id" )',
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise ──
+// Supabase Studio's Table Editor click on `public.appstle_api_calls` whose generated
+// PostgREST CTE wrapper names non-existent columns (`method`, `status_code`). Our table
+// has `request_method` + `response_status`, not `method` / `status_code` — Control Tower
+// signature `supabase-logs:b6686000909442f4`. Drop AT CAPTURE only when BOTH the exact
+// column-missing message AND the SELECT-lookup shape on `appstle_api_calls` are present;
+// a different-table column-missing, a different column on the same table, or a
+// non-SELECT shape still pages.
+
+test("isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise drops both column-missing messages paired with the PostgREST CTE wrapper", () => {
+  // `method` column-missing + the Studio-emitted PostgREST CTE wrapper form.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.method does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."appstle_api_calls"."id", "public"."appstle_api_calls"."method" FROM "public"."appstle_api_calls" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // `status_code` column-missing + the Studio-emitted PostgREST CTE wrapper form.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.status_code does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."appstle_api_calls"."id", "public"."appstle_api_calls"."status_code" FROM "public"."appstle_api_calls" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class for both columns.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column public.appstle_api_calls.method does not exist",
+      'with pgrst_source as ( select "public"."appstle_api_calls"."method" from "public"."appstle_api_calls" limit 1 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column public.appstle_api_calls.status_code does not exist",
+      'with pgrst_source as ( select "public"."appstle_api_calls"."status_code" from "public"."appstle_api_calls" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "ERROR: column appstle_api_calls.method does not exist",
+      'WITH pgrst_source AS ( SELECT "method" FROM "public"."appstle_api_calls" )',
+    ),
+    true,
+  );
+  // The bare SELECT shape (no PostgREST wrapper) drops too — the predicate accepts both.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.method does not exist",
+      "select method from public.appstle_api_calls",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise KEEPS the same column-missing message when the FROM is a different table (a real schema regression on another table still pages)", () => {
+  // Hypothetical: another table that could carry `method` (e.g. a `http_logs.method`)
+  // — a column-missing error on that table is real repair work, not Studio noise on
+  // appstle_api_calls.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column http_logs.method does not exist",
+      "select method from public.http_logs",
+    ),
+    false,
+  );
+  // Message pin is exact — `appstle_api_calls.method` on the message, but the FROM in
+  // the query is a different table. The message does not match the FROM-table shape;
+  // predicate must bail (either the message check or the SELECT-shape check — here the
+  // message doesn't name the FROM table so the pin fails).
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column other_table.status_code does not exist",
+      'WITH pgrst_source AS ( SELECT "status_code" FROM "public"."other_table" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise KEEPS a DIFFERENT column-missing on appstle_api_calls (a real column rename / schema regression still pages)", () => {
+  // The predicate is pinned to `method` + `status_code` only. A column-missing error
+  // on any other column of `appstle_api_calls` (including a hypothetical bogus one like
+  // `success` had it been renamed) is a real schema regression that must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.success does not exist",
+      'WITH pgrst_source AS ( SELECT "success" FROM "public"."appstle_api_calls" )',
+    ),
+    false,
+  );
+  // Same for the real `request_method` column (which does exist today) — if a bad
+  // migration ever drops it, the resulting ERROR is NOT what this filter targets.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.request_method does not exist",
+      'WITH pgrst_source AS ( SELECT "request_method" FROM "public"."appstle_api_calls" )',
+    ),
+    false,
+  );
+  // And for `response_status` (the real column paired with the `status_code` typo).
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.response_status does not exist",
+      'WITH pgrst_source AS ( SELECT "response_status" FROM "public"."appstle_api_calls" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise KEEPS a non-SELECT statement shape on the same table (a real code-bug writing appstle_api_calls still pages)", () => {
+  // An INSERT / UPDATE / DELETE naming the missing column indicates real code trying to
+  // write the table — a bug we WANT to see, not the Studio-click read we drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.method does not exist",
+      "insert into public.appstle_api_calls (id, method) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.status_code does not exist",
+      "update public.appstle_api_calls set status_code = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.method does not exist",
+      "delete from public.appstle_api_calls where method = $1",
+    ),
+    false,
+  );
+  // A PostgREST INSERT / UPDATE inside the same `WITH pgrst_source AS (...)` envelope
+  // is a real code-write and must stay captured/paged — the CTE branch requires the
+  // wrapped op to be a SELECT.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+      "column appstle_api_calls.method does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."appstle_api_calls"("id","method") VALUES ($1,$2) RETURNING * )',
     ),
     false,
   );
