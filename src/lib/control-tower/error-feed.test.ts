@@ -39,6 +39,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
+  isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
@@ -5670,6 +5671,214 @@ test("isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise returns false on 
   assert.equal(
     isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
       "column workspaces.slug does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/meta_ad_accounts?select=...name...` against our `public.meta_ad_accounts`
+// table. The table exists but has NO bare `name` column — the human-readable account
+// label lives on `meta_account_name`. Foreign-owned surface, no lever from us — drop
+// AT CAPTURE only when BOTH the exact column-missing message on `meta_ad_accounts.name`
+// AND a SELECT-lookup shape on `meta_ad_accounts` (bare OR PostgREST CTE wrapper) are
+// present. A column-missing on any other table, a different column on
+// `meta_ad_accounts` (including the real `meta_account_name`), or a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise drops the ad hoc SELECT lookup on the exact meta_ad_accounts.name column-missing shape", () => {
+  // The captured production sample: unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column meta_ad_accounts.name does not exist",
+      "select id, meta_account_id, name from public.meta_ad_accounts",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column public.meta_ad_accounts.name does not exist",
+      "select name from public.meta_ad_accounts",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column meta_ad_accounts.name does not exist",
+      "select name from meta_ad_accounts limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column meta_ad_accounts.name does not exist",
+      "select id, name from public.meta_ad_accounts where is_active = true order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column meta_ad_accounts.name does not exist",
+      "SELECT ID, NAME FROM PUBLIC.META_AD_ACCOUNTS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "ERROR: column meta_ad_accounts.name does not exist",
+      "select name from public.meta_ad_accounts",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "  column meta_ad_accounts.name does not exist  ",
+      "   select name from public.meta_ad_accounts   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"meta_ad_accounts\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in
+  // the pgrst_source CTE with double-quoted `"public"."meta_ad_accounts"` identifiers.
+  // The plain bare-SELECT regex misses this because the statement starts with `with`
+  // and the FROM clause carries the quoted schema.table shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column meta_ad_accounts.name does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."meta_ad_accounts"."id", "public"."meta_ad_accounts"."name" FROM "public"."meta_ad_accounts" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column public.meta_ad_accounts.name does not exist",
+      'WITH pgrst_source AS (SELECT "public"."meta_ad_accounts"."name" FROM "public"."meta_ad_accounts")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "ERROR: column meta_ad_accounts.name does not exist",
+      'WITH pgrst_source AS (SELECT "public"."meta_ad_accounts"."name" FROM "public"."meta_ad_accounts")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise KEEPS a column-missing on `meta_ad_accounts.meta_account_name` (the real column — a rename regression on the actual column still pages)", () => {
+  // `meta_ad_accounts.meta_account_name` IS a real column; if it ever regresses we
+  // absolutely want the page. The pin is `meta_ad_accounts.name` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column meta_ad_accounts.meta_account_name does not exist",
+      "select id, meta_account_name from public.meta_ad_accounts",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column public.meta_ad_accounts.meta_account_name does not exist",
+      "select meta_account_name from public.meta_ad_accounts",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a `name` column still pages)", () => {
+  // If any other table's `name` column regressed, we absolutely want the page — the
+  // pin is `meta_ad_accounts.name` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column products.name does not exist",
+      "select name from public.products where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column workspaces.name does not exist",
+      "select name from public.workspaces where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise KEEPS a non-SELECT statement shape on meta_ad_accounts (an INSERT/UPDATE/DELETE on meta_ad_accounts with the same message is a real code-bug and still pages)", () => {
+  // INSERT / UPDATE / DELETE against meta_ad_accounts referencing a bogus `name` column
+  // is real code trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column meta_ad_accounts.name does not exist",
+      "insert into public.meta_ad_accounts (id, meta_account_id, name) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column meta_ad_accounts.name does not exist",
+      "update public.meta_ad_accounts set name = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column meta_ad_accounts.name does not exist",
+      "delete from public.meta_ad_accounts where name is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column meta_ad_accounts.name does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."meta_ad_accounts"("meta_account_id", "name") VALUES ($1, $2) RETURNING "public"."meta_ad_accounts"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column meta_ad_accounts.name does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."meta_ad_accounts" SET "name" = $1 WHERE "public"."meta_ad_accounts"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column meta_ad_accounts.name does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(
+      "column meta_ad_accounts.name does not exist",
       null,
     ),
     false,
