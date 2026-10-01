@@ -64,6 +64,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingProductsPricingRuleIdLookupNoise,
@@ -624,6 +625,24 @@ const LOG_QUERIES: LogQuery[] = [
       // `kind`, or on `agent_jobs` via a non-SELECT statement (real code-bug shape)
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the sibling `agent_jobs.result` confusion.
+      // The `agent_jobs` table has NEVER had a `result` column — the row carries
+      // `instructions`, `pending_actions`, and `metadata`, and every ShopCX reader goes
+      // through the agent_jobs SDK which never selects `result`. The column-missing
+      // ERROR only reaches this feed when a foreign app / stale SQL Editor session /
+      // deprecated integration queries
+      // `/rest/v1/agent_jobs?select=id,status,created_at,kind,result&kind=eq.*`.
+      // There is no lever from ShopCX to make that query resolve — paging Platform on
+      // it (Control Tower signature `supabase-logs:80d46fea9abb11c1`,
+      // [[../specs/error-feed-drop-agent-jobs-result-direct-rest-lookup-noise]]) is
+      // repair work for a query we don't own. Narrowly gated to require ALL THREE of
+      // the exact column-missing message, a SELECT-on-agent_jobs shape (bare OR
+      // PostgREST CTE wrapper), AND a `kind` mention in the same query — a
+      // column-missing on any other table, a different column on `agent_jobs`, a JOIN
+      // through `approval_decisions`, a bare `select result from agent_jobs` without
+      // `kind`, or on `agent_jobs` via a non-SELECT statement (real code-bug shape)
+      // still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.workspaces.slug`. The `workspaces` table exists but has NO
       // `slug` column — the workspace slug shape lives on `workspaces.help_slug` (the
