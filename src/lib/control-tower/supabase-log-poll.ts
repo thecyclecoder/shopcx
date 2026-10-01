@@ -40,6 +40,7 @@ import {
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
@@ -277,6 +278,23 @@ const LOG_QUERIES: LogQuery[] = [
       // (including the real `cart_drafts.subtotal_cents`), or on `orders` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... shipping_name ... from
+      // public.orders` lookup by an external tool / stale exploratory query — or the
+      // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE
+      // wrapper the same client emits over the REST endpoint. Our `orders` table has NO
+      // top-level `shipping_name` column — the ship-to recipient name lives nested
+      // inside the `orders.shipping_address` JSONB; the same paging query also names a
+      // non-existent `orders.raw` column. No ShopCX code path issues a SELECT on
+      // `orders.shipping_name`, so the resulting column-missing ERROR is repair work for
+      // a query we don't own
+      // ([[../specs/error-feed-drop-orders-shipping-name-column-adhoc-lookup-noi]],
+      // Control Tower signature `supabase-logs:8bfb641dae95b170`). Narrowly gated to
+      // require BOTH the exact column-missing message AND the SELECT-lookup shape — a
+      // column-missing error on any other column of `orders` (including the live
+      // `shipping_address`), or on `shipping_name` from any other table, or on `orders`
+      // via a non-SELECT statement (real code-bug shape), still surfaces / pages on
+      // first sighting.
+      if (isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... paused_at ... from
       // public.subscriptions` lookup by an external tool / stale exploratory query — or
       // the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions"

@@ -1413,6 +1413,71 @@ export function isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNo
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `orders.shipping_name`. Our `orders` table does NOT carry a `shipping_name` column —
+ * the ship-to recipient name lives nested inside the `orders.shipping_address` JSONB
+ * (every in-tree reader pulls it out of that JSONB), and the same paging query also
+ * names a non-existent `orders.raw` column. No ShopCX code path (src/, scripts/,
+ * shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT that names
+ * `orders.shipping_name`. The message appears on Supabase's `postgres_logs` feed only
+ * when an external / manual tool (Supabase Studio's Table Editor / API Docs, a foreign
+ * SQL client, a stale exploratory query) does a raw
+ * `select ... shipping_name ... from public.orders` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE wrapper the same
+ * client emits over the REST endpoint. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-orders-shipping-name-column-adhoc-lookup-noi]], Control
+ * Tower signature `supabase-logs:8bfb641dae95b170`) is repair work for a query we don't
+ * own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise` —
+ * same narrow-gating shape on the same `public.orders` table, scoped to the
+ * `shipping_name` JSONB-key / recipient-name confusion instead of the `subtotal_cents`
+ * one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column orders.shipping_name does not exist` (with or without
+ *      the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on
+ *      the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.orders` — either
+ *      (a) the bare `select ... from public.orders` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )`
+ *      CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `orders` (a real product-schema
+ *     regression on a live column like `shipping_address`) still pages,
+ *   - a column-missing error for `shipping_name` on ANY OTHER table still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE
+ *     / DDL on `orders`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column orders.shipping_name does not exist" ||
+    stripped === "column public.orders.shipping_name does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?orders\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?orders\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `subscriptions.paused_at`. Our `subscriptions` table does NOT carry a `paused_at`
  * column — the sibling table on a different schema (dunning, crisis_management) has that
  * name, but on `subscriptions` the live pause-related column is `pause_resume_at`. No
