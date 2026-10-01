@@ -1348,6 +1348,71 @@ export function isForeignSupabasePostgresMissingOrdersSourceColumnNoise(
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `orders.subtotal_cents`. Our `orders` table does NOT carry a top-level `subtotal_cents`
+ * column — the pre-tax/pre-shipping line-total breakdown lives nested inside the
+ * `orders.payment_details` JSONB (every in-tree reader does
+ * `payment_details.subtotal_cents` out of that JSONB), and the sibling look-alike
+ * `cart_drafts.subtotal_cents` IS a real column on a different table. No ShopCX code
+ * path (src/, scripts/, shopify-extension/, docs/brain/) issues a SELECT on
+ * `orders.subtotal_cents`. The message appears on Supabase's `postgres_logs` feed only
+ * when an external / manual tool (Supabase Studio's Table Editor / API Docs, a foreign
+ * SQL client, a stale exploratory query) does a raw
+ * `select ... subtotal_cents ... from public.orders` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE wrapper the same
+ * client emits over the REST endpoint. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-orders-subtotal-cents-column-adhoc-noise]], Control Tower
+ * signature `supabase-logs:bf3104f9e4d646ce`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingOrdersSourceColumnNoise` — same narrow-
+ * gating shape on the same `public.orders` table, scoped to the `subtotal_cents`
+ * JSONB-key / cart_drafts-column confusion instead of the `source` / `source_name` one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column orders.subtotal_cents does not exist` (with or without
+ *      the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on
+ *      the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.orders` — either
+ *      (a) the bare `select ... from public.orders` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )`
+ *      CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `orders` (a real product-schema
+ *     regression on a live column) still pages,
+ *   - a column-missing error for `subtotal_cents` on ANY OTHER table — including the
+ *     real `cart_drafts.subtotal_cents` column if it ever regresses — still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE
+ *     / DDL on `orders`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column orders.subtotal_cents does not exist" ||
+    stripped === "column public.orders.subtotal_cents does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?orders\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?orders\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `ticket_messages.sender_type`. Our `ticket_messages` table has never carried a
  * `sender_type` (nor `sender_name` / `internal`) column — no ShopCX code path (src/,
  * scripts/, shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT that
