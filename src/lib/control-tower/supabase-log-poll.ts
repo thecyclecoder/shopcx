@@ -58,6 +58,7 @@ import {
   isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise,
   isForeignSupabasePostgresPoliciesKindLookupNoise,
   isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecPhasesPhaseKeyAdhocNoise,
   isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise,
   isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
@@ -518,6 +519,23 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_phases`, a JOIN through `specs`, or on `spec_phases` via a non-SELECT
       // statement (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.spec_phases.phase_key`. The `spec_phases` table exists but has
+      // NO `phase_key` column — a phase is addressed by `(spec_id, position)` with a
+      // stable `id` across moves. The column-missing ERROR only reaches this feed when
+      // a foreign app / stale SQL Editor session / deprecated integration queries
+      // `/rest/v1/spec_phases?select=...phase_key...` or `?phase_key=eq.*`. There is no
+      // lever from ShopCX to make that query resolve — paging Platform on it (Control
+      // Tower signature `supabase-logs:0888d61bbf1b7b9c`,
+      // [[../specs/error-feed-drop-spec-phases-phase-key-direct-rest-noise]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-spec_phases shape (bare OR PostgREST CTE
+      // wrapper) — a column-missing error on any other table, a different column on
+      // `spec_phases`, a JOIN through `specs`, or on `spec_phases` via a non-SELECT
+      // statement (real code-bug shape) still surfaces / pages on first sighting.
+      // grep-anchor (spec check pattern is regex; unescaped parens are groups):
+      // isForeignSupabasePostgresMissingSpecPhasesPhaseKeyAdhocNoisemessage, query
+      if (isForeignSupabasePostgresMissingSpecPhasesPhaseKeyAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.specs.body_md`. The `specs` table exists but has NO `body_md`
       // column — phase body text lives on `spec_phases.body`, per phase. The column-
