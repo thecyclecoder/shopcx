@@ -37,6 +37,7 @@ import {
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
+  isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
@@ -229,6 +230,20 @@ const LOG_QUERIES: LogQuery[] = [
       // shape that names `first_seen` (not `first_seen_at`) — a column-missing error on
       // any other table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a Supabase Studio Table Editor click on
+      // `public.appstle_api_calls` whose generated PostgREST CTE wrapper names
+      // non-existent columns (`method`, `status_code`). The real columns are
+      // `request_method` + `response_status` — no ShopCX code path reads the typo'd
+      // names, so the resulting column-missing ERROR is repair work for a query no
+      // code owns ([[../specs/error-feed-drop-appstle-api-calls-method-column-adhoc-lookup]],
+      // Control Tower signature `supabase-logs:b6686000909442f4`). Narrowly gated to
+      // require BOTH one of the four exact column-missing messages AND the
+      // SELECT-lookup shape on `appstle_api_calls` (bare or PostgREST CTE wrapper) —
+      // a column-missing error on any OTHER table, a different column on
+      // `appstle_api_calls` (a real schema regression on a live column), or on
+      // `appstle_api_calls` via a non-SELECT statement (real code-bug shape) still
+      // surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... source ... from
       // public.orders` lookup by an external tool / stale exploratory query. Our `orders`
       // table exposes `source_name`, not `source` — no ShopCX code path issues a SELECT on
