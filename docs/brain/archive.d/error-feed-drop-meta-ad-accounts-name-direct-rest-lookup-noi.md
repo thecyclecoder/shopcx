@@ -1,0 +1,1 @@
+- **Drop `meta_ad_accounts.name` direct-REST column-missing noise at capture** · verified 2026-10-01 · → [[../lifecycles/control-tower]]
