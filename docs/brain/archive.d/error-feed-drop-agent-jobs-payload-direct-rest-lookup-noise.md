@@ -1,0 +1,1 @@
+- **Drop the foreign-app `agent_jobs.payload` direct-REST read noise from the Control Tower error feed** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise`)

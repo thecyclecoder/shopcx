@@ -1,37 +1,48 @@
+import { readFileSync } from "fs";
+import { resolve } from "path";
+
 (async () => {
+  const envPath = resolve(__dirname, "../.env.local");
+  for (const line of readFileSync(envPath, "utf8").split("\n")) {
+    const t = line.trim(); if (!t || t.startsWith("#")) continue;
+    const eq = t.indexOf("="); if (eq < 0) continue;
+    const k = t.slice(0, eq); if (!process.env[k]) process.env[k] = t.slice(eq + 1);
+  }
   const { createAdminClient } = await import("../src/lib/supabase/admin");
   const admin = createAdminClient();
 
-  // Nested embed columns per spec row: spec_phasesposition, title, status — ordered by
-  // spec_phases.position so the fold-spec probe reads phase position/title/status from the
-  // current schema (the removed `phase` column is no longer requested).
-  const { data, error } = await admin
+  const { data: specs, error } = await admin
     .from("specs")
-    .select(
-      `slug, status, spec_phases(position, title, status)`
-    )
+    .select(`
+      id,
+      slug,
+      status,
+      spec_phases(id, status)
+    `)
     .in("slug", [
-      "bianca-cold-scaler-campaign-cac-ltv-sensor",
-      "bianca-cold-test-recent-purchaser-exclusion",
-    ])
-    .order("position", { referencedTable: "spec_phases", ascending: true });
+      "error-feed-drop-orders-subtotal-cents-column-adhoc-noise",
+      "error-feed-drop-agent-jobs-payload-direct-rest-lookup-noise"
+    ]);
 
   if (error) {
     console.error("Query error:", error);
     process.exit(1);
   }
 
-  console.log(JSON.stringify(data, null, 2));
-
-  // Check if all phases are shipped
-  for (const spec of data ?? []) {
-    const phases = (spec.spec_phases ?? []) as Array<{ position: number; title: string; status: string }>;
-    const allShipped = phases.length > 0 && phases.every((p) => p.status === "shipped");
-    console.log(
-      `\n${spec.slug}:`,
-      `stored_status=${spec.status}`,
-      `phases=${JSON.stringify(phases)}`,
-      `all_phases_shipped=${allShipped}`
-    );
+  console.log("Spec shipping status:");
+  for (const spec of specs || []) {
+    const phases = spec.spec_phases || [];
+    const allShipped = phases.every((p: any) => p.status === "shipped");
+    console.log(`\n${spec.slug}:`);
+    console.log(`  stored_status: ${spec.status}`);
+    console.log(`  total_phases: ${phases.length}`);
+    console.log(`  shipped_phases: ${phases.filter((p: any) => p.status === "shipped").length}`);
+    console.log(`  derived_status: ${allShipped ? "SHIPPED" : "NOT_SHIPPED"}`);
+    if (phases.length > 0) {
+      console.log(`  phases:`);
+      for (const p of phases) {
+        console.log(`    - ${p.id}: ${p.status}`);
+      }
+    }
   }
 })();
