@@ -68,6 +68,7 @@ import {
   isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
+  isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isExpectedBillingForecastsPendingUniqViolation,
 } from "@/lib/control-tower/error-feed";
@@ -568,6 +569,22 @@ const LOG_QUERIES: LogQuery[] = [
       // `workspaces`, or on `workspaces` via a non-SELECT statement (real code-bug
       // shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.meta_ad_accounts.name`. The `meta_ad_accounts` table exists but
+      // has NO bare `name` column — the human-readable account label lives on
+      // `meta_account_name`, and every ShopCX reader goes through the meta-ads SDK /
+      // joined queries which never select a bare `name` off the row. The column-missing
+      // ERROR only reaches this feed when a foreign app / stale Supabase Studio session /
+      // deprecated integration queries `/rest/v1/meta_ad_accounts?select=...name...`.
+      // There is no lever from ShopCX to make that query resolve — paging Platform on it
+      // (Control Tower signature `supabase-logs:692476583471d273`,
+      // [[../specs/error-feed-drop-meta-ad-accounts-name-direct-rest-lookup-noi]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-meta_ad_accounts shape (bare OR PostgREST
+      // CTE wrapper) — a column-missing error on any other table, a different column on
+      // `meta_ad_accounts`, or on `meta_ad_accounts` via a non-SELECT statement (real
+      // code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.products` naming one of three columns that have NEVER lived on
       // the products table — `ingredients`, `supplement_facts`, `benefits`. Product
