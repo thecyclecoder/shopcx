@@ -61,6 +61,30 @@ The customer's own cadence is the only honest reference.
 Escalating the first two would fire daily forever and train everyone to ignore the alert — and the
 one that mattered would go with it. That split is what makes the alert worth reading.
 
+## Verified 2026-10-01 — and the heartbeat proved the point
+
+Heartbeats read back from [[../tables/loop_heartbeats]] (`loop_id = 'shopcx-drift-reconcile-cron'`):
+
+```
+2026-10-01 08:02  checked 212  stranded 0  date 0  status 0  late 0  lateInDunning 6  lateInherited 9
+2026-09-30 08:01  checked 209  stranded 3
+2026-09-29 08:01  checked 209  stranded 0
+```
+
+**The 09-30 beat is the whole argument for this page.** The cron *detected* 3 stranded subscriptions
+at 08:01 — hours before a human found them by hand — and had no way to tell anyone. Detection was
+never the gap. Escalation was.
+
+### The alert path is tested, not assumed
+
+`enqueueRepairJob` was exercised end to end with a throwaway signature: the job was created, the box
+picked it up within seconds (`status=building`), a second call was correctly refused
+(`live repair job exists for this signature`, so a persisting condition will not re-open one daily),
+and the test row was deleted with no stray branch or PR left behind.
+
+⚠️ **A monitor whose alert path has never fired is only half-built.** Worth re-testing the same way
+after any change to the escalation wiring.
+
 ## Tables written
 
 - [[../tables/subscriptions]] — status repair only (`status`, `cancelled_at`, `next_billing_date`)
