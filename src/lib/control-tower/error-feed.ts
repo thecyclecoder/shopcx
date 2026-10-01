@@ -1209,6 +1209,86 @@ export function isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing column for a Supabase Studio Table
+ * Editor click that lists non-existent columns (`method`, `status_code`) on
+ * `public.appstle_api_calls`. The table was created with `request_method` + `response_status`
+ * (see `supabase/migrations/20260501130000_appstle_api_calls.sql`), not `method` /
+ * `status_code` — no ShopCX code path (src/, scripts/, shopify-extension/, docs/brain/)
+ * issues a SELECT on `appstle_api_calls.method` or `appstle_api_calls.status_code`. The
+ * message only reaches Supabase's `postgres_logs` feed when a human clicks the Table
+ * Editor row on `appstle_api_calls` and the Studio-emitted PostgREST CTE wrapper names a
+ * column that doesn't exist (operator-typo / renamed-column confusion). There is no
+ * lever from ShopCX to make that query resolve — paging Platform on it (Control Tower
+ * signature `supabase-logs:b6686000909442f4`,
+ * [[../specs/error-feed-drop-appstle-api-calls-method-column-adhoc-lookup]]) is repair
+ * work for a query no code owns and is indistinguishable from the dozen sibling
+ * SQL-Editor-typo drops already filtered the same way.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise` — same
+ * narrow-gating shape (exact column-missing message + SELECT-lookup shape covering BOTH
+ * bare and PostgREST CTE wrapper forms), scoped to the appstle_api_calls `method` /
+ * `status_code` typo instead.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for ONE of the two
+ *      confused columns — trimmed equal to one of
+ *      `column appstle_api_calls.method does not exist`,
+ *      `column public.appstle_api_calls.method does not exist`,
+ *      `column appstle_api_calls.status_code does not exist`, or
+ *      `column public.appstle_api_calls.status_code does not exist` (any leading
+ *      `ERROR: ` prefix Postgres includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.appstle_api_calls` —
+ *      either (a) the bare `select ... from (public.)?appstle_api_calls` shape, OR (b)
+ *      the PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."appstle_api_calls" ... )` CTE wrapper form with double-quoted
+ *      identifiers (the shape Studio's Table Editor click emits).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `appstle_api_calls` (e.g. a real
+ *     schema regression on a live column — `request_method`, `response_status`,
+ *     `endpoint`, `success`) still pages,
+ *   - a column-missing error for `method` / `status_code` on ANY OTHER table (a real
+ *     code bug on another table that has such a column) still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE /
+ *     DELETE / DDL, a JOIN across other tables) still pages — the pin is the
+ *     SELECT-lookup shape; the CTE branch likewise requires the wrapped op to be a
+ *     SELECT (a PostgREST INSERT/UPDATE inside the same wrapper is a real code-write
+ *     and stays captured/paged),
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `appstle_api_calls` is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column appstle_api_calls.method does not exist" ||
+    stripped === "column public.appstle_api_calls.method does not exist" ||
+    stripped === "column appstle_api_calls.status_code does not exist" ||
+    stripped === "column public.appstle_api_calls.status_code does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?appstle_api_calls\b/.test(q);
+  // PostgREST wraps direct-REST row reads as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."appstle_api_calls" ... )` with double-quoted identifiers — the shape
+  // Supabase Studio's Table Editor click emits. The closing `"` is itself the token
+  // delimiter (no trailing `\b` — a `\b` between `"` and whatever follows is never a
+  // word boundary since both sides are non-word chars).
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."appstle_api_calls"/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `orders.source`. Our `orders` table exposes `source_name`, not `source` — no ShopCX code
  * path (src/, scripts/, shopify-extension/, docs/brain/) issues a SELECT on `orders.source`.
