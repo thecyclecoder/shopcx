@@ -2715,6 +2715,104 @@ export function isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column agent_jobs.title does not exist` for an
+ * ad hoc / stale PostgREST direct-REST SELECT against `public.agent_jobs` that asks for
+ * BOTH `title` and the real `spec_slug` column. The `agent_jobs` table exists
+ * (see `supabase/migrations/20260618120000_agent_jobs.sql` and its follow-ons) but has
+ * NEVER had a `title` column — the row has `spec_slug`, `kind`, `status`, etc., and the
+ * human-readable label every ShopCX surface renders comes from the joined `spec.title`
+ * through the agent_jobs SDK, never a column on the row itself. The column-missing ERROR
+ * only reaches this feed when a foreign app / stale SQL Editor session queries
+ * `/rest/v1/agent_jobs?select=title,spec_slug,...` (a client confusing `agent_jobs.title`
+ * with the joined `specs.title`). There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:2944e13680f85d53`,
+ * [[../specs/error-feed-drop-agent-jobs-title-direct-rest-lookup-noise]]) is repair work
+ * for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise` — same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` + SELECT-lookup
+ * shape covering BOTH bare and PostgREST CTE wrapper forms + `spec_slug` co-mention), on
+ * the same table, aimed at a different confused column.
+ *
+ * `true` ONLY when ALL THREE markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column agent_jobs.title does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.agent_jobs` — either
+ *      (a) the bare `select ... from public.agent_jobs` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."agent_jobs" ... )`
+ *      CTE wrapper form with double-quoted identifiers, AND
+ *   3. the query ALSO mentions `spec_slug` — the real column name the caller included
+ *      alongside the bogus `title` in the same select list. A bare `select title from
+ *      agent_jobs` without `spec_slug` (hypothetical real code after a schema
+ *      regression) stays paged.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on
+ *     a table that DOES have a `title` column — e.g. `specs.title`, `playbooks.title`)
+ *     still pages — the pin is `agent_jobs.title` only,
+ *   - a column-missing error on `agent_jobs` for a DIFFERENT column (e.g. a real
+ *     column that got renamed — `status`, `kind`, `spec_slug`, `workspace_id`,
+ *     `payload`, `branch_name`) still pages — the pin covers `title` only,
+ *   - a `agent_jobs.title` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, a JOIN across other tables such as `approval_decisions`)
+ *     still pages — the pin is the SELECT-lookup shape; the CTE branch likewise
+ *     requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the
+ *     same wrapper stays paged),
+ *   - a `agent_jobs.title` error on a SELECT that does NOT also mention `spec_slug`
+ *     stays paged — the drop is scoped to the confused-column pairing only,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `agent_jobs` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `agent_jobs.title` (with or without the `public.` qualifier).
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column agent_jobs.title does not exist" ||
+    stripped === "column public.agent_jobs.title does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Fingerprint of the confused foreign read: the query MUST also mention `spec_slug`,
+  // the real column the caller included alongside the bogus `title`. A bare
+  // `select title from agent_jobs` without `spec_slug` stays paged (could hypothetically
+  // be real code after a schema regression).
+  if (!/\bspec_slug\b/.test(q)) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `agent_jobs`
+  // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT
+  // stays captured — a caller that actually writes to agent_jobs with a bogus `title`
+  // column is a code bug we DO want to page on, not the ad hoc direct-REST read this
+  // drop targets.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?agent_jobs\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."agent_jobs" ... )` with double-quoted identifiers. Same foreign-
+  // owned read, different rendering — the plain SELECT regex above misses it because
+  // the statement starts with `with` and the FROM clause carries the quoted
+  // `"public"."agent_jobs"` shape. Guarded so the CTE branch requires the wrapped op
+  // to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper — e.g.
+  // `WITH pgrst_source AS (INSERT INTO "public"."agent_jobs"("title") ...)` — is a
+  // real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?agent_jobs\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column workspaces.slug does not exist` for an
  * ad hoc / stale PostgREST direct-REST SELECT against `public.workspaces.slug`. The
  * `workspaces` table exists but by design carries NO `slug` column — the workspace slug
