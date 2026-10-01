@@ -44,7 +44,8 @@ const CORS: Record<string, string> = {
 };
 
 /** Body is required — a starred row with no words is not social proof. */
-const REVIEW_COLS = "id, reviewer_name, rating, title, body, summary, created_at, featured";
+const REVIEW_COLS =
+  "id, reviewer_name, rating, title, body, summary, created_at, featured, verified_purchase";
 const SHOWN_STATUSES = ["published", "featured"];
 
 export function OPTIONS() {
@@ -190,6 +191,11 @@ export async function GET(
     body: r.body || r.summary,
     created_at: r.created_at,
     featured: r.featured,
+    // Exposed so callers can hold weight-loss claims to the corpus's own evidence
+    // bar: a quantified claim ("lost 30 pounds") may only be shown from a VERIFIED
+    // buyer. Without this field a consumer cannot tell, and the checkout block and
+    // the PDP's review chapter both need to.
+    verified: r.verified_purchase === true,
   }));
 
   return NextResponse.json(
