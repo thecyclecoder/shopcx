@@ -1,0 +1,24 @@
+api_version = "2025-10"
+
+[[extensions]]
+uid = "f43c3624-87cb-da0c-4e48-ccee2a59501af12c723a"
+type = "ui_extension"
+name = "Money-Back Guarantee"
+handle = "guarantee-checkout"
+
+[[extensions.targeting]]
+module = "./src/Checkout.jsx"
+target = "purchase.checkout.block.render"
+
+# network_access only. This block reads one statement from our own API and writes
+# nothing — no api_access (it needs no Shopify data) and no block_progress (it must
+# never be able to stop a checkout).
+[extensions.capabilities]
+network_access = true
+
+[settings]
+[[settings.fields]]
+key = "api_endpoint"
+type = "single_line_text_field"
+name = "API Endpoint"
+description = "Base URL for the guarantee API (e.g. https://shopcx.ai)"
