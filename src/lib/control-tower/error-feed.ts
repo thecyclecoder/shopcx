@@ -3057,6 +3057,83 @@ export function isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookup
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column agent_jobs.result does not exist` for
+ * an ad hoc / stale PostgREST direct-REST SELECT against `public.agent_jobs` asking for
+ * `result` alongside the real `kind` column. The `agent_jobs` table exists but has NEVER
+ * had a `result` column — the row carries `instructions`, `pending_actions`, and
+ * `metadata`, and every ShopCX reader goes through the agent_jobs SDK which never
+ * selects `result`. The column-missing ERROR only reaches this feed when a foreign app /
+ * stale SQL Editor session / deprecated integration queries
+ * `/rest/v1/agent_jobs?select=id,status,created_at,kind,result&kind=eq.*`. There is no
+ * lever from ShopCX to make that query resolve — paging Platform on it (Control Tower
+ * signature `supabase-logs:80d46fea9abb11c1`,
+ * [[../specs/error-feed-drop-agent-jobs-result-direct-rest-lookup-noise]]) is repair
+ * work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise` —
+ * same narrow-gating shape (exact `column <table>.<name> does not exist` + SELECT-lookup
+ * shape covering BOTH bare and PostgREST CTE wrapper forms + co-mention of the real
+ * column the caller paired with the bogus one), on the same table, aimed at a different
+ * confused column. The co-mention here is `kind` — the sample query carries
+ * `?select=id,status,created_at,kind,result` with a `WHERE "kind" = $1` branch, so
+ * `kind` is the stable fingerprint of the confused foreign read.
+ *
+ * `true` ONLY when ALL THREE markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column agent_jobs.result does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.agent_jobs` — either
+ *      (a) the bare `select ... from public.agent_jobs` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."agent_jobs" ... )`
+ *      CTE wrapper form with double-quoted identifiers, AND
+ *   3. the query ALSO mentions `kind` — the real column name the caller included
+ *      alongside the bogus `result` in the same select list / where branch. A bare
+ *      `select result from agent_jobs` without `kind` (hypothetical real code after a
+ *      schema regression) stays paged.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on
+ *     a table that DOES have a `result` column) still pages — the pin is
+ *     `agent_jobs.result` only,
+ *   - a column-missing error on `agent_jobs` for a DIFFERENT column (e.g. `title`,
+ *     `payload`, `slug`, `branch_name`, `status`, `spec_slug`, `workspace_id`) still
+ *     pages — the pin covers `result` only,
+ *   - a `agent_jobs.result` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, a JOIN across other tables such as `approval_decisions`)
+ *     still pages — the pin is the SELECT-lookup shape; the CTE branch likewise
+ *     requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the
+ *     same wrapper stays paged),
+ *   - a `agent_jobs.result` error on a SELECT that does NOT also mention `kind` stays
+ *     paged — the drop is scoped to the confused-column pairing only,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `agent_jobs` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column agent_jobs.result does not exist" ||
+    stripped === "column public.agent_jobs.result does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  if (!/\bkind\b/.test(q)) return false;
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?agent_jobs\b/.test(q)) return true;
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?agent_jobs\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column workspaces.slug does not exist` for an
  * ad hoc / stale PostgREST direct-REST SELECT against `public.workspaces.slug`. The
  * `workspaces` table exists but by design carries NO `slug` column — the workspace slug
