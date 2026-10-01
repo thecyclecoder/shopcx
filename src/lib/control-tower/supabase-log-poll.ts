@@ -62,6 +62,7 @@ import {
   isForeignSupabasePostgresMissingSpecPhasesPhaseKeyAdhocNoise,
   isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise,
   isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
@@ -585,6 +586,24 @@ const LOG_QUERIES: LogQuery[] = [
       // JOIN through `spec_phases`, or on `specs` via a non-SELECT statement (real
       // code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.phase`. The `specs` table exists but has NEVER had a
+      // `phase` scalar column — phase data lives on the child `public.spec_phases` rows
+      // (one row per phase, joined to the parent spec). The column-missing ERROR only
+      // reaches this feed when a foreign app / stale SQL Editor session / deprecated
+      // integration queries
+      // `/rest/v1/specs?select=slug,status,workspace_id,phase,title&slug=eq.<X>`
+      // (observed both as a bare SELECT and as the PostgREST-wrapped
+      // `WITH pgrst_source AS ( SELECT ... FROM "public"."specs" ... )` CTE form). There
+      // is no lever from ShopCX to make that query resolve — paging Platform on it
+      // (Control Tower signature `supabase-logs:3b79338b7e21ac85`,
+      // [[../specs/error-feed-drop-specs-phase-direct-rest-noise]]) is repair work for
+      // a query we don't own. Narrowly gated to require BOTH the exact column-missing
+      // message AND a SELECT-on-specs shape (bare OR PostgREST CTE wrapper) — a
+      // column-missing error on any other table, a different column on `specs`, a JOIN
+      // through `spec_phases`, or on `specs` via a non-SELECT statement (real code-bug
+      // shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.agent_jobs` that asks for BOTH `slug` and the real `spec_slug`
       // column. The `agent_jobs` table exists but has NEVER had a `slug` column — the
