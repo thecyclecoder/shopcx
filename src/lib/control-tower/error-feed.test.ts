@@ -44,6 +44,7 @@ import {
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
@@ -7000,6 +7001,103 @@ test("isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise KEEP
     isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(
       "column public.subscriptions.pause_resume_at does not exist",
       'WITH pgrst_source AS ( SELECT "public"."subscriptions"."pause_resume_at" FROM "public"."subscriptions" )',
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/customers?select=...address...` against our `public.customers` table.
+// The table exists but has NO bare `address` column — the live address-related
+// columns are `default_address` (JSONB) and `addresses` (JSONB array). Foreign-owned
+// surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `customers.address` AND a SELECT-lookup shape on `customers` (bare OR
+// PostgREST CTE wrapper) are present. A column-missing on a live `customers` column
+// (`default_address`, `addresses`, `shipping_address`), on `address` from any other
+// table, or via a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise drops the captured supabase-logs:b40ebaa6f87c26c6 message+query pair (PostgREST CTE SELECT on customers.address)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `customers.address` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
+      "column customers.address does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."customers"."id", "public"."customers"."address" FROM "public"."customers" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
+      "column public.customers.address does not exist",
+      'WITH pgrst_source AS (SELECT "public"."customers"."address" FROM "public"."customers")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
+      "column customers.address does not exist",
+      "select id, address from public.customers",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
+      "column customers.address does not exist",
+      "select address from customers limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
+      "ERROR: column customers.address does not exist",
+      'WITH pgrst_source AS (SELECT "public"."customers"."address" FROM "public"."customers")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
+      "column customers.address does not exist",
+      "SELECT ID, ADDRESS FROM PUBLIC.CUSTOMERS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise KEEPS a column-missing on a live customers column (default_address / shipping_address — a real schema regression still pages)", () => {
+  // `default_address` and `addresses` ARE live columns on `customers`. If either ever
+  // regresses we WANT the page — the pin is `customers.address` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
+      "column customers.default_address does not exist",
+      "select default_address from public.customers",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
+      "column public.customers.shipping_address does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."customers"."shipping_address" FROM "public"."customers" )',
+    ),
+    false,
+  );
+  // A column-missing on `address` from a DIFFERENT table (e.g. a real `orders.address`
+  // regression) must still page — the pin is `customers.address` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
+      "column orders.address does not exist",
+      "select address from public.orders",
+    ),
+    false,
+  );
+  // A non-SELECT statement against `customers` (real code-bug shape) must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
+      "column customers.address does not exist",
+      "update public.customers set address = $1 where id = $2",
     ),
     false,
   );

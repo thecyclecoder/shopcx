@@ -1479,6 +1479,70 @@ export function isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhoc
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `customers.address`. Our `customers` table has NO bare `address` column — the live
+ * address-related columns are `default_address` (JSONB) and `addresses` (JSONB array);
+ * no ShopCX code path (src/, scripts/, shopify-extension/, supabase/migrations/,
+ * docs/brain/) issues a SELECT that names `customers.address`. The message appears on
+ * Supabase's `postgres_logs` feed only when an external / manual tool (Supabase Studio
+ * Table Editor / API Docs, a foreign SQL client, a stale exploratory query, a
+ * third-party integration) does a raw `select ... address ... from public.customers`
+ * lookup — or the PostgREST `WITH pgrst_source AS ( SELECT ... FROM
+ * "public"."customers" ... )` CTE wrapper the same client emits over the REST endpoint.
+ * There is no lever from ShopCX to make that query resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-customers-address-column-adhoc-lookup-noise]], Control
+ * Tower signature `supabase-logs:b40ebaa6f87c26c6`) is repair work for a query we don't
+ * own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise` —
+ * same narrow-gating shape, scoped to the `customers.address` lookup instead of the
+ * `subscriptions.paused_at` one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column customers.address does not exist` (with or without
+ *      the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on
+ *      the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.customers` —
+ *      either (a) the bare `select ... from public.customers` shape, OR (b) the
+ *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."customers" ... )` CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `customers` (a real product-
+ *     schema regression on a live column like `default_address` / `addresses` /
+ *     `shipping_address`) still pages,
+ *   - a column-missing error for `address` on ANY OTHER table (orders, shipments, …)
+ *     still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE /
+ *     DELETE / DDL on `customers`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column customers.address does not exist" ||
+    stripped === "column public.customers.address does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?customers\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?customers\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `ticket_messages.sender_type`. Our `ticket_messages` table has never carried a
  * `sender_type` (nor `sender_name` / `internal`) column — no ShopCX code path (src/,
  * scripts/, shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT that
