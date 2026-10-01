@@ -43,6 +43,7 @@ import {
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
+  isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
@@ -313,6 +314,20 @@ const LOG_QUERIES: LogQuery[] = [
       // or on error_events via a non-SELECT statement (real code-bug shape) still surfaces
       // / pages on first sighting.
       if (isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... metadata ... from
+      // public.customer_events` lookup by an external tool / stale integration / Supabase
+      // SQL Editor session. The `customer_events` table exists but its jsonb payload is
+      // `properties`, not `metadata` (grep + supabase/migrations/20260325000001_customer_events.sql
+      // confirm no ShopCX code / migration / view / function / trigger references the name),
+      // so the column-missing ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-customer-events-metadata-direct-rest-lookup-]], Control
+      // Tower signature `supabase-logs:bf8e316735341025`). Narrowly gated to require BOTH
+      // the exact column-missing message AND the SELECT-lookup shape (bare or PostgREST
+      // CTE wrapper) — a column-missing error for any other column on customer_events
+      // (a real schema regression on `properties` / `event_type` / `source` / `summary` /
+      // `created_at`), for `metadata` on any other table, or on customer_events via a
+      // non-SELECT statement (real code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... <column> ... from
       // public.error_events` lookup by an external tool / stale exploratory query. The
       // `error_events` table exists and its live column set is stable and known; a raw
