@@ -40,6 +40,7 @@ import {
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
@@ -274,6 +275,23 @@ const LOG_QUERIES: LogQuery[] = [
       // (including the real `cart_drafts.subtotal_cents`), or on `orders` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... paused_at ... from
+      // public.subscriptions` lookup by an external tool / stale exploratory query — or
+      // the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions"
+      // ... )` CTE wrapper the same client emits over the REST endpoint. Our
+      // `subscriptions` table has NO `paused_at` column — the live pause-related column
+      // is `pause_resume_at`; `paused_at` names appear on sibling tables (dunning,
+      // crisis_management). No ShopCX code path issues a SELECT on
+      // `subscriptions.paused_at`, so the resulting column-missing ERROR is repair work
+      // for a query we don't own
+      // ([[../specs/error-feed-drop-subscriptions-paused-at-column-adhoc-lookup-]],
+      // Control Tower signature `supabase-logs:735cc43853c89338`). Narrowly gated to
+      // require BOTH the exact column-missing message AND the SELECT-lookup shape — a
+      // column-missing error on any other column of `subscriptions` (including the real
+      // `pause_resume_at`), or on `paused_at` from any other table, or on
+      // `subscriptions` via a non-SELECT statement (real code-bug shape), still
+      // surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... sender_type ... from
       // public.ticket_messages` lookup by an external tool (Supabase Studio table editor,
       // foreign SQL client, third-party integration) or the PostgREST CTE wrapper the
