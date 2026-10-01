@@ -39,6 +39,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
@@ -5862,6 +5863,235 @@ test("isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise retu
   assert.equal(
     isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise(
       "column agent_jobs.payload does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise ──
+// Sibling of the `agent_jobs.payload` drop above — a foreign / stale PostgREST
+// direct-REST client reads
+// `/rest/v1/agent_jobs?select=id,status,created_at,kind,result&kind=eq.*` against our
+// `public.agent_jobs` table. The table exists but has NEVER had a `result` column —
+// the row carries `instructions`, `pending_actions`, and `metadata`, and every ShopCX
+// reader goes through the agent_jobs SDK which never selects `result`. Foreign-owned
+// surface, no lever from us — drop AT CAPTURE only when ALL THREE of the exact
+// column-missing message on `agent_jobs.result`, a SELECT-lookup shape on `agent_jobs`
+// (bare OR PostgREST CTE wrapper), AND a `kind` mention in the same query are present.
+// A column-missing on any other table, a different column on `agent_jobs`, a JOIN
+// through `approval_decisions`, a bare `select result from agent_jobs` without `kind`,
+// or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise drops the ad hoc SELECT lookup on the exact agent_jobs.result column-missing shape (bare)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      "select id, status, created_at, kind, result from public.agent_jobs where kind = $1 order by created_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column public.agent_jobs.result does not exist",
+      "select id, status, created_at, kind, result from public.agent_jobs where kind = $1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      "select kind, result from agent_jobs limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      "SELECT KIND, RESULT FROM PUBLIC.AGENT_JOBS",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "ERROR: column agent_jobs.result does not exist",
+      "select kind, result from public.agent_jobs",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "  column agent_jobs.result does not exist  ",
+      "   select kind, result from public.agent_jobs   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"agent_jobs\" ...)` CTE wrapper form", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs"."id", "public"."agent_jobs"."status", "public"."agent_jobs"."created_at", "public"."agent_jobs"."kind", "public"."agent_jobs"."result" FROM "public"."agent_jobs" WHERE "public"."agent_jobs"."kind" = $1 ORDER BY "public"."agent_jobs"."created_at" DESC LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column public.agent_jobs.result does not exist",
+      'WITH pgrst_source AS (SELECT "public"."agent_jobs"."kind", "public"."agent_jobs"."result" FROM "public"."agent_jobs")',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "ERROR: column agent_jobs.result does not exist",
+      'WITH pgrst_source AS (SELECT "public"."agent_jobs"."kind", "public"."agent_jobs"."result" FROM "public"."agent_jobs")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise KEEPS a non-SELECT statement shape (a real code-bug writing agent_jobs.result still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      "insert into public.agent_jobs (kind, result) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      "update public.agent_jobs set result = $1 where kind = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      "delete from public.agent_jobs where result = $1 and kind = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."agent_jobs"("kind", "result") VALUES ($1, $2) RETURNING "public"."agent_jobs"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."agent_jobs" SET "result" = $1 WHERE "public"."agent_jobs"."kind" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise KEEPS a DIFFERENT column-missing on agent_jobs (a real column rename still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.title does not exist",
+      "select title, kind from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.payload does not exist",
+      "select payload, kind from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.slug does not exist",
+      "select slug, kind from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.branch_name does not exist",
+      "select branch_name, kind from public.agent_jobs",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.status does not exist",
+      "select status, kind from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise KEEPS a column-missing error on any OTHER table (a real schema regression on a different table still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column specs.result does not exist",
+      "select kind, result from public.specs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column playbooks.result does not exist",
+      "select kind, result from public.playbooks where workspace_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise KEEPS a bare SELECT on agent_jobs.result without the `kind` co-mention (hypothetical real code after a schema regression still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      "select result from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      "select id, result from agent_jobs limit 10",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      'WITH pgrst_source AS (SELECT "public"."agent_jobs"."result" FROM "public"."agent_jobs")',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise("", ""),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
       null,
     ),
     false,
