@@ -2993,6 +2993,92 @@ export function isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhoc
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column products.pricing_rule_id does not exist`
+ * for an ad hoc / stale PostgREST direct-REST SELECT against `public.products`. The
+ * `products` table exists (see `docs/brain/tables/products.md`) but has NEVER carried a
+ * `pricing_rule_id` column — the product-to-pricing-rule assignment lives on the
+ * `product_pricing_rule` join table, and every ShopCX reader goes through that join
+ * (never selects `pricing_rule_id` directly off `products`). The column-missing ERROR
+ * only reaches this feed when a foreign app / stale SQL Editor session / deprecated
+ * integration queries
+ * `/rest/v1/products?select=id,title,pricing_rule_id&id=eq.<x>`. There is no lever
+ * from ShopCX to make that query resolve — paging Platform on it (Control Tower
+ * signature `supabase-logs:78422c77f222cb38`,
+ * [[../specs/error-feed-drop-products-pricing-rule-id-direct-rest-noise]]) is repair
+ * work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise` —
+ * the same narrow-gating shape (exact `column <table>.<name> does not exist` +
+ * SELECT-lookup shape covering BOTH bare and PostgREST CTE wrapper forms), aimed at a
+ * different foreign caller on a different column of `products`.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column products.pricing_rule_id does not exist` (or the
+ *      `public.` qualified variant, with any leading `ERROR: ` prefix Postgres includes
+ *      on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.products` — either
+ *      (a) the bare `select ... from public.products` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."products" ... )`
+ *      CTE wrapper form with double-quoted identifiers. Both forms are the same
+ *      foreign-owned read.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real schema regression on a table
+ *     that DOES have a `pricing_rule_id` column — e.g. `product_pricing_rule`) still
+ *     pages — the pin is `products.` only,
+ *   - a column-missing error on `products` for a DIFFERENT column (a real column that
+ *     got renamed — `title`, `handle`, `body_html`) still pages — the pin covers
+ *     `pricing_rule_id` only,
+ *   - a `products.pricing_rule_id` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the
+ *     pin is the SELECT-lookup shape, matching the ad hoc direct-REST read we've
+ *     observed; the CTE branch likewise requires the wrapped op to be a SELECT (a
+ *     PostgREST INSERT/UPDATE inside the same wrapper stays paged),
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `products` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingProductsPricingRuleIdLookupNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `products.pricing_rule_id` (with or without the `public.` qualifier).
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (!/^column (?:public\.)?products\.pricing_rule_id does not exist$/.test(stripped)) {
+    return false;
+  }
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `products` (with
+  // or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to products with a bogus
+  // `pricing_rule_id` column is a code bug we DO want to page on, not the ad hoc
+  // direct-REST read this drop targets.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?products\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."products" ... )` with double-quoted identifiers. Same foreign-owned
+  // read, different rendering — the plain SELECT regex above misses it because the
+  // statement starts with `with` and the FROM clause carries the quoted
+  // `"public"."products"` shape. Guarded so the CTE branch requires the wrapped op to
+  // be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper — e.g.
+  // `WITH pgrst_source AS (INSERT INTO "public"."products"("pricing_rule_id") ...)` —
+  // is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?products\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column playbooks.title does not exist` for an
  * ad hoc / stale PostgREST direct-REST SELECT against `public.playbooks.title`. The
  * `playbooks` table exists (see `supabase/migrations/20260403300000_playbook_system.sql`
