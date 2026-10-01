@@ -1,0 +1,1 @@
+- **Scope out foreign PostgREST noise: column spec_phases.phase_key does not exist** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
