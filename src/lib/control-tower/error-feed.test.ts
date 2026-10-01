@@ -43,6 +43,7 @@ import {
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
@@ -6919,6 +6920,86 @@ test("isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise return
     isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise(
       "column orders.subtotal_cents does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/subscriptions?select=...paused_at...` against our `public.subscriptions`
+// table. The table exists but has NO `paused_at` column — the live pause-related column
+// is `pause_resume_at`; `paused_at` names appear on sibling tables (dunning,
+// crisis_management). Foreign-owned surface, no lever from us — drop AT CAPTURE only
+// when BOTH the exact column-missing message on `subscriptions.paused_at` AND a
+// SELECT-lookup shape on `subscriptions` (bare OR PostgREST CTE wrapper) are present. A
+// column-missing on a live `subscriptions` column (`pause_resume_at`), on `paused_at`
+// from any other table, or via a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise drops the captured supabase-logs:735cc43853c89338 message+query pair (PostgREST CTE SELECT on subscriptions.paused_at)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `subscriptions.paused_at` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(
+      "column subscriptions.paused_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."id", "public"."subscriptions"."paused_at" FROM "public"."subscriptions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(
+      "column public.subscriptions.paused_at does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."paused_at" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(
+      "column subscriptions.paused_at does not exist",
+      "select id, paused_at from public.subscriptions",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(
+      "column subscriptions.paused_at does not exist",
+      "select paused_at from subscriptions limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(
+      "ERROR: column subscriptions.paused_at does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."paused_at" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(
+      "column subscriptions.paused_at does not exist",
+      "SELECT ID, PAUSED_AT FROM PUBLIC.SUBSCRIPTIONS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise KEEPS a column-missing on a live subscriptions column (pause_resume_at — a real schema regression still pages)", () => {
+  // `pause_resume_at` IS the live pause-related column on `subscriptions`. If that ever
+  // regresses we WANT the page — the pin is `subscriptions.paused_at` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(
+      "column subscriptions.pause_resume_at does not exist",
+      "select pause_resume_at from public.subscriptions",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(
+      "column public.subscriptions.pause_resume_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."pause_resume_at" FROM "public"."subscriptions" )',
     ),
     false,
   );
