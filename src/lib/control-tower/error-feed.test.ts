@@ -57,6 +57,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
+  isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
@@ -1411,6 +1412,209 @@ test("isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise returns fals
   assert.equal(
     isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise(
       "column error_events.metadata does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise ──
+// The ad hoc `select ... metadata ... from public.customer_events` lookup by an external
+// tool / stale integration / Supabase SQL Editor session. `customer_events` is a real
+// product table but its jsonb payload column is `properties`, not `metadata` — no ShopCX
+// code / migration / view / function / trigger references the name — so the column-missing
+// ERROR is repair work for a query we don't own. Drop AT CAPTURE only when BOTH the exact
+// column-missing message AND the SELECT-lookup shape (bare or PostgREST CTE wrapper) are
+// present; a column-missing error on any other column of customer_events (a real schema
+// regression), on `metadata` for any other table, or via a non-SELECT statement (real
+// code-bug) still pages.
+
+test("isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise drops the ad hoc SELECT lookup on the exact column-missing shape", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column customer_events.metadata does not exist",
+      "select metadata from public.customer_events",
+    ),
+    true,
+  );
+  // The `public.` qualified variant of the message is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column public.customer_events.metadata does not exist",
+      "select event_type, created_at, metadata from public.customer_events",
+    ),
+    true,
+  );
+  // Bare / unqualified `from customer_events` (no `public.` prefix) is the same shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column customer_events.metadata does not exist",
+      "select id, metadata from customer_events",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column customer_events.metadata does not exist",
+      "select metadata from public.customer_events where created_at > now() - interval '1 hour' order by created_at desc limit 100",
+    ),
+    true,
+  );
+  // Case-insensitive on the query (Postgres normalizes to lowercase in the log, but a hand
+  // -typed uppercase SELECT should still drop).
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column customer_events.metadata does not exist",
+      "SELECT event_type, created_at, metadata FROM public.customer_events",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "ERROR: column customer_events.metadata does not exist",
+      "select metadata from public.customer_events",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "  column customer_events.metadata does not exist  ",
+      "   select metadata from public.customer_events   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise drops the PostgREST CTE wrapper form (same external callers)", () => {
+  // PostgREST wraps SELECTs in `WITH pgrst_source AS ( SELECT ... FROM "public"."<t>" ... )`
+  // with double-quoted identifiers — the same ad hoc read, different wire shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column customer_events.metadata does not exist",
+      'with pgrst_source as ( select "customer_events"."event_type", "customer_events"."created_at", "customer_events"."metadata" from "public"."customer_events" ) select * from pgrst_source',
+    ),
+    true,
+  );
+  // With the `ERROR: ` prefix on the message as well.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "ERROR: column public.customer_events.metadata does not exist",
+      'WITH pgrst_source AS ( SELECT "customer_events"."metadata" FROM "public"."customer_events" LIMIT 1 ) SELECT * FROM pgrst_source',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise KEEPS a column-missing error on OTHER tables (a real code bug on another table still pages)", () => {
+  // The sibling `error_events.metadata` is handled by its own classifier — this one is
+  // scoped to customer_events only.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column error_events.metadata does not exist",
+      "select metadata from public.error_events",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column orders.metadata does not exist",
+      "select metadata from public.orders",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise KEEPS a column-missing error for a DIFFERENT column on customer_events (a real schema regression on properties still pages)", () => {
+  // A missing `properties` (the real jsonb column) / `event_type` / `created_at` on
+  // customer_events is a live-column regression we DO want to page on.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column customer_events.properties does not exist",
+      "select properties from public.customer_events",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column customer_events.event_type does not exist",
+      "select event_type from public.customer_events",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug on this name still pages)", () => {
+  // An INSERT / UPDATE / DELETE against customer_events with a `metadata` field indicates
+  // real code trying to WRITE the column — a bug we WANT to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column customer_events.metadata does not exist",
+      "insert into public.customer_events (id, metadata) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column customer_events.metadata does not exist",
+      "update public.customer_events set metadata = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column customer_events.metadata does not exist",
+      "delete from public.customer_events where metadata is null",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise KEEPS a non-column-missing message shape on this table (FATAL / PANIC / other Postgres error still pages)", () => {
+  // A relation-missing / permission-denied / FATAL / PANIC error on the same table name
+  // is NOT the ad hoc missing-column lookup we drop; the pin is exact.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      'relation "public.customer_events" does not exist',
+      "select metadata from public.customer_events",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      'permission denied for relation "public.customer_events"',
+      "select metadata from public.customer_events",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "FATAL: sorry, too many clients already",
+      "select metadata from public.customer_events",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(null, null), false);
+  assert.equal(isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(undefined, undefined), false);
+  assert.equal(isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise("", ""), false);
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column customer_events.metadata does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+      "column customer_events.metadata does not exist",
       null,
     ),
     false,
