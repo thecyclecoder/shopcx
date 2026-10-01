@@ -42,6 +42,7 @@ import {
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
@@ -312,6 +313,23 @@ const LOG_QUERIES: LogQuery[] = [
       // `subscriptions` via a non-SELECT statement (real code-bug shape), still
       // surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... address ... from
+      // public.customers` lookup by an external tool (Supabase Studio Table Editor /
+      // API Docs, foreign SQL client, stale exploratory session, third-party
+      // integration) or the PostgREST `WITH pgrst_source AS ( SELECT ... FROM
+      // "public"."customers" ... )` CTE wrapper the same client emits over the REST
+      // endpoint. Our `customers` table has NO bare `address` column — the live
+      // address-related columns are `default_address` (JSONB) and `addresses`
+      // (JSONB array). No ShopCX code path issues a SELECT on `customers.address`,
+      // so the resulting column-missing ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-customers-address-column-adhoc-lookup-noise]],
+      // Control Tower signature `supabase-logs:b40ebaa6f87c26c6`). Narrowly gated to
+      // require BOTH the exact column-missing message AND the SELECT-lookup shape — a
+      // column-missing error on any live `customers` column (including
+      // `default_address` / `addresses`), on `address` from any other table, or on
+      // `customers` via a non-SELECT statement (real code-bug shape), still surfaces
+      // / pages on first sighting.
+      if (isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... sender_type ... from
       // public.ticket_messages` lookup by an external tool (Supabase Studio table editor,
       // foreign SQL client, third-party integration) or the PostgREST CTE wrapper the
