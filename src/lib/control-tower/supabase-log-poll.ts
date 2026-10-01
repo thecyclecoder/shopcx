@@ -62,6 +62,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
+  isForeignSupabasePostgresMissingProductsPricingRuleIdLookupNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
@@ -586,6 +587,22 @@ const LOG_QUERIES: LogQuery[] = [
       // on `products` via a non-SELECT statement (real code-bug shape) still surfaces
       // / pages on first sighting.
       if (isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.products.pricing_rule_id`. The `products` table has NEVER
+      // carried a `pricing_rule_id` column — the product-to-pricing-rule assignment
+      // lives on the `product_pricing_rule` join table, and every ShopCX reader goes
+      // through that join. The column-missing ERROR only reaches this feed when a
+      // foreign app / stale SQL Editor session / deprecated integration queries
+      // `/rest/v1/products?select=id,title,pricing_rule_id&id=eq.<x>`. There is no
+      // lever from ShopCX to make that query resolve — paging Platform on it (Control
+      // Tower signature `supabase-logs:78422c77f222cb38`,
+      // [[../specs/error-feed-drop-products-pricing-rule-id-direct-rest-noise]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-products shape (bare OR PostgREST CTE
+      // wrapper) — a column-missing error on any other table, a different column on
+      // `products`, or on `products` via a non-SELECT statement (real code-bug shape)
+      // still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingProductsPricingRuleIdLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.playbooks.title`. The `playbooks` table exists but has NO
       // `title` column — the human-facing label is `name`, and every ShopCX reader /
