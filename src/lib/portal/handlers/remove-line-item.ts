@@ -81,7 +81,7 @@ export const removeLineItem: RouteHandler = async ({ auth, route, req }) => {
     return jsonErr({ error: "missing_variantId_for_remove" }, 400);
   }
 
-  let result: { success: boolean; error?: string; alreadyAbsent?: boolean };
+  let result: { success: boolean; error?: string; alreadyAbsent?: boolean; pending?: boolean };
   try {
     result = await subRemoveItem(auth.workspaceId, contractId, removeArg);
   } catch (e) {
@@ -109,11 +109,13 @@ export const removeLineItem: RouteHandler = async ({ auth, route, req }) => {
       eventType: "portal.items.removed",
       summary: result.alreadyAbsent
         ? "Customer removed an item already absent from the subscription (idempotent)"
-        : "Customer removed item from subscription via portal",
-      properties: { shopify_contract_id: contractId, line_id: lineId, variant_id: variantId, already_absent: !!result.alreadyAbsent },
+        : result.pending
+          ? "Customer removed item from subscription via portal (Appstle accepted; apply pending)"
+          : "Customer removed item from subscription via portal",
+      properties: { shopify_contract_id: contractId, line_id: lineId, variant_id: variantId, already_absent: !!result.alreadyAbsent, pending: !!result.pending },
       createNote: true,
     });
   }
 
-  return jsonOk({ ok: true, route, contractId, alreadyRemoved: !!result.alreadyAbsent });
+  return jsonOk({ ok: true, route, contractId, alreadyRemoved: !!result.alreadyAbsent, pending: !!result.pending });
 };
