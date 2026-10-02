@@ -1,0 +1,1 @@
+- **Scope out foreign `product_variants.price` direct-REST noise at capture** · verified 2026-10-02 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise`)
