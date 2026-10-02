@@ -12,6 +12,20 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Widen sync-qb-close-sources output-freshness threshold to accommodate Amazon shipping-lag** · verified 2026-10-02 · → [[../libraries/control-tower]]
+- **Drop the foreign-app `agent_jobs.payload` direct-REST read noise from the Control Tower error feed** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise`)
+- **Drop foreign-app agent_jobs.result direct-REST column-missing noise** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
+- **Drop foreign PostgREST agent_jobs.title column-missing noise at capture** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
+- **Drop supabase-logs noise for Studio ad hoc appstle_api_calls lookup naming non-existent `method` / `status_code` columns** · verified 2026-10-01 · → [[inngest/supabase-log-poll]]
+- **Drop foreign-app PostgREST noise: `customer_events.metadata` ad hoc lookup** · verified 2026-10-01 · → [[../libraries/control-tower]]
+- **Drop foreign-app `customers.address` column-missing noise at capture** · verified 2026-10-01 · → [[../inngest/supabase-log-poll]]
+- **Drop `meta_ad_accounts.name` direct-REST column-missing noise at capture** · verified 2026-10-01 · → [[../lifecycles/control-tower]]
+- **Drop foreign-app Postgres noise: ad-hoc PostgREST select on orders.shipping_name** · verified 2026-10-01 · → [[../inngest/supabase-log-poll]]
+- **Drop foreign `orders.subtotal_cents` column-missing noise from the error feed** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise`)
+- **Scope capture — drop foreign PostgREST reads of products.pricing_rule_id from the Control Tower error feed** · verified 2026-10-01 · → [[inngest/supabase-log-poll]]
+- **Scope out foreign PostgREST noise: column spec_phases.phase_key does not exist** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
+- **Drop foreign-app noise — PostgREST direct-REST reads of a non-existent specs.phase column** · verified 2026-10-01 · → [[../libraries/control-tower]]
+- **Drop foreign-app `subscriptions.paused_at` PostgREST lookup noise at capture** · verified 2026-10-01 · → [[../libraries/control-tower]]
 - **A green loop must not hide a stale output table** · verified 2026-09-30 · → [[lifecycles/shoptics-migration]], [[libraries/control-tower]]
 - **Catch billing_forecasts pending unique-index race in createForecast** · verified 2026-09-30 · → [[../libraries/billing-forecast]]
 - **Drop stale qb_amazon_sales_snapshots.gross_revenue_cents direct-REST lookup noise** · verified 2026-09-30 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
