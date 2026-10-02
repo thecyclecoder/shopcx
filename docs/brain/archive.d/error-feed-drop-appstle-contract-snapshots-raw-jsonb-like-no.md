@@ -1,0 +1,1 @@
+- **Drop foreign-app jsonb LIKE on appstle_contract_snapshots.raw from the Supabase postgres error feed** · verified 2026-10-02 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise`)
