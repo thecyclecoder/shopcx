@@ -71,6 +71,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
+  isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingProductsPricingRuleIdLookupNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
@@ -746,6 +747,22 @@ const LOG_QUERIES: LogQuery[] = [
       // `workspaces`, or on `workspaces` via a non-SELECT statement (real code-bug
       // shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.product_variants.price`. The `product_variants` table exists but
+      // has NO bare `price` column — pricing lives on `product_variants.price_cents`
+      // (with a sibling `compare_at_price_cents`). The column-missing ERROR only reaches
+      // this feed when a foreign app / stale SQL Editor session / deprecated integration
+      // queries `/rest/v1/product_variants?select=...price...`. There is no lever from
+      // ShopCX to make that query resolve — paging Platform on it (Control Tower
+      // signature `supabase-logs:b977e23b8fc0fea9`,
+      // [[../specs/error-feed-drop-product-variants-price-direct-rest-noise]]) is repair
+      // work for a query we don't own. Narrowly gated to require BOTH the exact column-
+      // missing message AND a SELECT-on-product_variants shape (bare OR PostgREST CTE
+      // wrapper) — a column-missing error on any other table, a different column on
+      // `product_variants` (including the real `price_cents`), or on `product_variants`
+      // via a non-SELECT statement (real code-bug shape) still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.meta_ad_accounts.name`. The `meta_ad_accounts` table exists but
       // has NO bare `name` column — the human-readable account label lives on
