@@ -43,6 +43,7 @@ import {
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
@@ -6921,6 +6922,262 @@ test("isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise return
   assert.equal(
     isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise(
       "column orders.subtotal_cents does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise ──
+// A foreign / stale client expecting Shopify's REST orders shape reads
+// `/rest/v1/orders?select=...total_price...` (or `subtotal_price`) against our
+// `public.orders` table. The table exists but has NO top-level `total_price` /
+// `subtotal_price` columns — the money breakdown lives in `orders.total_cents` and
+// the pre-tax/pre-shipping subtotal nests inside `orders.payment_details` JSONB.
+// Foreign-owned surface, no lever from us — drop AT CAPTURE only when BOTH the exact
+// column-missing message on `orders.total_price` / `orders.subtotal_price` AND a
+// SELECT-lookup shape on `orders` (bare OR PostgREST CTE wrapper) are present. A
+// column-missing on any other table, a different column on `orders`, or a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise drops the captured supabase-logs:6da26669da941b7b message+query pair (ad hoc SELECT on orders.total_price / orders.subtotal_price)", () => {
+  // Unqualified and public.-qualified message variants over the bare-SELECT shape —
+  // both `total_price` and its `subtotal_price` twin.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.total_price does not exist",
+      "select id, total_price from public.orders",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column public.orders.total_price does not exist",
+      "select total_price from public.orders",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.subtotal_price does not exist",
+      "select id, subtotal_price from public.orders",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column public.orders.subtotal_price does not exist",
+      "select subtotal_price from public.orders",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.total_price does not exist",
+      "select total_price from orders limit 10",
+    ),
+    true,
+  );
+  // Trailing WHERE / ORDER BY / LIMIT still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.total_price does not exist",
+      "select id, total_price from public.orders where workspace_id = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.total_price does not exist",
+      "SELECT ID, TOTAL_PRICE FROM PUBLIC.ORDERS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "ERROR: column orders.total_price does not exist",
+      "select total_price from public.orders",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "ERROR: column orders.subtotal_price does not exist",
+      "select subtotal_price from public.orders",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "  column orders.total_price does not exist  ",
+      "   select total_price from public.orders   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"orders\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."orders"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.total_price does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."orders"."id", "public"."orders"."total_price" FROM "public"."orders" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column public.orders.total_price does not exist",
+      'WITH pgrst_source AS (SELECT "public"."orders"."total_price" FROM "public"."orders")',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.subtotal_price does not exist",
+      'WITH pgrst_source AS (SELECT "public"."orders"."subtotal_price" FROM "public"."orders")',
+    ),
+    true,
+  );
+  // ERROR: prefix stripped as usual.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "ERROR: column orders.subtotal_price does not exist",
+      'WITH pgrst_source AS (SELECT "public"."orders"."subtotal_price" FROM "public"."orders")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise KEEPS a column-missing on a DIFFERENT column of orders (a real product-schema regression on another orders column still pages)", () => {
+  // If any other `orders` column regressed we absolutely want the page — the pin is
+  // `orders.total_price` / `orders.subtotal_price` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.total_cents does not exist",
+      "select total_cents from public.orders",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column public.orders.payment_details does not exist",
+      "select payment_details from public.orders",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise KEEPS a total_price / subtotal_price miss on a DIFFERENT table (a regression on another table's price column still pages)", () => {
+  // If a different table ever defines (and then regresses) a `total_price` /
+  // `subtotal_price` column we WANT the page — the pin is `orders` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column cart_drafts.total_price does not exist",
+      "select total_price from public.cart_drafts",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column public.cart_drafts.subtotal_price does not exist",
+      "select subtotal_price from public.cart_drafts",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise KEEPS a non-SELECT statement shape on orders (an INSERT/UPDATE/DELETE with the same message is a real code-bug and still pages)", () => {
+  // INSERT / UPDATE / DELETE against orders referencing a bogus `total_price` /
+  // `subtotal_price` column is real code trying to write the table — a bug we WANT to
+  // see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.total_price does not exist",
+      "insert into public.orders (id, workspace_id, total_price) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.subtotal_price does not exist",
+      "update public.orders set subtotal_price = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.total_price does not exist",
+      "delete from public.orders where total_price is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.total_price does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."orders"("workspace_id", "total_price") VALUES ($1, $2) RETURNING "public"."orders"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.subtotal_price does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."orders" SET "subtotal_price" = $1 WHERE "public"."orders"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise KEEPS a FATAL / PANIC / constraint-violation (different message shape — a real DB problem still pages)", () => {
+  // FATAL / PANIC / unique-violation / foreign-key-violation on orders are real DB
+  // problems — pin is the exact column-missing message only.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "FATAL: database is shutting down",
+      "select total_price from public.orders",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      'duplicate key value violates unique constraint "orders_pkey"',
+      "select total_price from public.orders",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.total_price does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
+      "column orders.subtotal_price does not exist",
       null,
     ),
     false,
