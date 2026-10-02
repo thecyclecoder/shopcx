@@ -1,0 +1,1 @@
+- **Drop foreign `orders.total_price` and `orders.subtotal_price` column-missing noise from the error feed** · verified 2026-10-02 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise`)
