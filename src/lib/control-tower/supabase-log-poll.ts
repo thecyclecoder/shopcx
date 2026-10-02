@@ -72,6 +72,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
@@ -766,6 +767,26 @@ const LOG_QUERIES: LogQuery[] = [
       // `kind`, or on `agent_jobs` via a non-SELECT statement (real code-bug shape)
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the sibling `agent_jobs.config_dir`
+      // confusion. The `agent_jobs` table has NEVER had a `config_dir` column — the row
+      // carries `claude_session_config_dir` (see
+      // `supabase/migrations/20260622210000_agent_jobs_session_config_dir.sql`), and
+      // every ShopCX reader goes through the agent_jobs SDK which never selects
+      // `config_dir`. The column-missing ERROR only reaches this feed when a foreign
+      // app / stale SQL Editor session / deprecated integration confuses the short
+      // name `config_dir` with the real `claude_session_config_dir`. There is no lever
+      // from ShopCX to make that query resolve — paging Platform on it
+      // ([[../specs/error-feed-drop-agent-jobs-config-dir-direct-rest-lookup-noise]])
+      // is repair work for a query we don't own. Narrowly gated to require ALL THREE
+      // of the exact column-missing message, a SELECT-on-agent_jobs shape (bare OR
+      // PostgREST CTE wrapper), AND a `claude_session_config_dir` mention in the same
+      // query — a column-missing on any other table (e.g. `agent_job_costs.config_dir`
+      // after a real regression), a different column on `agent_jobs`, a JOIN through
+      // `approval_decisions` / `agent_job_costs`, a bare `select config_dir from
+      // agent_jobs` without `claude_session_config_dir`, or on `agent_jobs` via a
+      // non-SELECT statement (real code-bug shape) still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.workspaces.slug`. The `workspaces` table exists but has NO
       // `slug` column — the workspace slug shape lives on `workspaces.help_slug` (the
