@@ -23,7 +23,7 @@ import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAppstleConfig } from "@/lib/subscription-items";
 import { isEnginePromotion, type BillingSource } from "@/lib/internal-subscription";
-import { subscriptionAction } from "@/lib/commerce/subscription";
+import { subscriptionCancelAtVendorForMigration } from "@/lib/commerce/subscription";
 import { inferAppstleLineBase, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
 import { OPEN_DUNNING_STATUSES, updateDunningCycle } from "@/lib/dunning";
 
@@ -90,6 +90,46 @@ async function repointOpenDunningCyclesForMigration(
     repointed++;
   }
   return { repointed, closedOnCollision };
+}
+
+/**
+ * Cancel the OLD engine's contract for a migration — vendor-only, never a customer-style cancel.
+ *
+ * Two hazards this closes:
+ *  1. A customer-style cancel (`subscriptionAction`) writes cancel-truth onto OUR row
+ *     (status='cancelled' + `cancelled_at`) and ends dunning. The flip restored `status` but never
+ *     `cancelled_at`, so every live migrated sub carried a phantom cancellation date.
+ *  2. The Appstle cancel fires a `subscription.cancelled` webhook. Its migrated-contract guard
+ *     keys on `migrated_from_contract_id`, which used to be written only by the flip, AFTER the
+ *     cancel. A webhook processed in that gap was not recognised: it either wrote cancelled onto
+ *     the row (the flip then restored status) or, landing after the rename, INSERTed a dead shell.
+ *     So for an Appstle contract we stamp `migrated_from_contract_id` BEFORE cancelling, and put
+ *     the previous value back if the cancel fails, so a genuine later cancel is never ignored.
+ *     ShopCX contracts are skipped: their row may already carry its origin Appstle id there, and
+ *     the cancel's Shopify webhook goes through ShopCX ingest, not this guard.
+ */
+async function cancelOldEngineForMigration(
+  admin: Admin,
+  args: { workspaceId: string; subId: string; contractId: string; engine: "appstle" | "shopcx"; priorMigratedFrom: string | null },
+): Promise<{ success: boolean; error?: string }> {
+  const premark = args.engine === "appstle" && args.priorMigratedFrom !== args.contractId;
+  if (premark) {
+    const { error } = await admin
+      .from("subscriptions")
+      .update({ migrated_from_contract_id: args.contractId })
+      .eq("id", args.subId)
+      .eq("shopify_contract_id", args.contractId);
+    if (error) return { success: false, error: `pre-cancel mark failed: ${error.message}` };
+  }
+  const r = await subscriptionCancelAtVendorForMigration(args.workspaceId, args.contractId, args.engine);
+  if (!r.success && premark) {
+    await admin
+      .from("subscriptions")
+      .update({ migrated_from_contract_id: args.priorMigratedFrom })
+      .eq("id", args.subId)
+      .eq("shopify_contract_id", args.contractId);
+  }
+  return r;
 }
 
 /**
@@ -506,7 +546,7 @@ export async function migrateContractToInternalComp(
   // Find the sub by its Appstle/Shopify contract id within the workspace.
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, status, is_internal, comp, customer_id, items, billing_interval, billing_interval_count, next_billing_date, billing_source")
+    .select("id, shopify_contract_id, status, is_internal, comp, customer_id, items, billing_interval, billing_interval_count, next_billing_date, billing_source, migrated_from_contract_id")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", contractId)
     .maybeSingle();
@@ -536,10 +576,14 @@ export async function migrateContractToInternalComp(
         ).json();
     // See the sweep path: an Appstle 400 returns a PARSEABLE problem+json body whose `status` is
     // 400, so "not CANCELLED" is not usability. Require the shape of a real contract.
+    // A contract WE already cancelled for this migration (pre-marked, then the flip failed) reads
+    // CANCELLED but is still the source of truth — resume from it instead of stranding the sub.
+    const cancelledForMigration =
+      compEngine === "appstle" && live?.status === "CANCELLED" && sub.migrated_from_contract_id === contractId;
     const liveUsable =
       !!live &&
       !live.errorKey &&
-      live.status !== "CANCELLED" &&
+      (live.status !== "CANCELLED" || cancelledForMigration) &&
       !!live.billingPolicy &&
       Array.isArray(live.lines?.nodes);
 
@@ -560,8 +604,12 @@ export async function migrateContractToInternalComp(
 
       // Cancel Appstle FIRST so a later flip failure stops the sub rather than
       // letting Appstle keep billing it.
-      if (!isCancelled) {
-        const cancelR = await subscriptionAction(workspaceId, contractId, "cancel", "migrated to shopcx (comp)", "ShopCX comp migration");
+      if (!isCancelled && !cancelledForMigration) {
+        const cancelR = await cancelOldEngineForMigration(admin, {
+          workspaceId, subId: String(sub.id), contractId,
+          engine: compEngine === "shopcx" ? "shopcx" : "appstle",
+          priorMigratedFrom: (sub.migrated_from_contract_id as string | null) ?? null,
+        });
         if (!cancelR.success) return { ok: false, error: `Appstle cancel failed: ${cancelR.error}` };
       }
     } else {
@@ -599,6 +647,9 @@ export async function migrateContractToInternalComp(
         comp: true,
         comp_note: opts.compNote ?? null,
         status: sub.status,
+        // A live sub must not carry a cancellation date (a racing Appstle cancel webhook, or the
+        // old customer-style cancel, could have stamped one). A cancelled sub keeps its own.
+        ...(isCancelled ? {} : { cancelled_at: null }),
         items: compItems,
         next_billing_date: nextBillingDate,
         billing_interval: interval,
@@ -659,7 +710,7 @@ export async function migrateCustomerAppstleSubsToInternal(
   // Each has its own source of truth below; they must never share one.
   const { data: subs } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, status, is_internal, items, billing_interval, billing_interval_count, next_billing_date, billing_source")
+    .select("id, shopify_contract_id, status, is_internal, items, billing_interval, billing_interval_count, next_billing_date, billing_source, migrated_from_contract_id")
     .eq("workspace_id", workspaceId)
     .in("customer_id", groupIds)
     .in("billing_source", ["appstle", "shopcx"]);
@@ -711,10 +762,15 @@ export async function migrateCustomerAppstleSubsToInternal(
       // "CANCELLED". The old check passed it, and the code below then cancelled the live contract
       // and flipped the row to internal with ZERO items, weekly, billing immediately. Require the
       // shape of a real contract instead: a billing policy AND a lines array.
+      // A contract WE already cancelled for this migration (pre-marked, then the flip failed)
+      // reads CANCELLED but is still the source of truth — resume from it. Without this a re-run
+      // skips it as unavailable and the sub is billed by nobody.
+      const cancelledForMigration =
+        engine === "appstle" && live?.status === "CANCELLED" && sub.migrated_from_contract_id === contractId;
       const liveUsable =
         !!live &&
         !live.errorKey &&
-        live.status !== "CANCELLED" &&
+        (live.status !== "CANCELLED" || cancelledForMigration) &&
         !!live.billingPolicy &&
         Array.isArray(live.lines?.nodes);
 
@@ -742,13 +798,17 @@ export async function migrateCustomerAppstleSubsToInternal(
         intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
         nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();
 
-        // Cancel the OLD engine FIRST (safe failure mode: a later flip failure stops the sub
-        // rather than letting both systems bill it). `subscriptionAction` dispatches, so this
-        // cancels the Appstle contract or the Shopify one depending on who holds it — and it
-        // still reads the PRE-flip billing_source here, which is what makes that correct.
-        // Already-cancelled subs have nothing to cancel.
-        if (!isCancelled) {
-          const cancelR = await subscriptionAction(workspaceId, contractId, "cancel", "migrated to shopcx", "ShopCX migration");
+        // Cancel the OLD engine FIRST, so both systems can never bill at once. Vendor-only (see
+        // cancelOldEngineForMigration): our row is left untouched, and if the flip below then
+        // fails, a re-run resumes from the pre-marked, cancelled Appstle contract
+        // (`cancelledForMigration`) instead of stranding the sub. Already-cancelled subs have
+        // nothing to cancel.
+        if (!isCancelled && !cancelledForMigration) {
+          const cancelR = await cancelOldEngineForMigration(admin, {
+            workspaceId, subId: String(sub.id), contractId,
+            engine: engine === "shopcx" ? "shopcx" : "appstle",
+            priorMigratedFrom: (sub.migrated_from_contract_id as string | null) ?? null,
+          });
           if (!cancelR.success) { result.failed.push({ contractId, error: `Appstle cancel failed: ${cancelR.error}` }); continue; }
         }
       } else {
@@ -782,6 +842,9 @@ export async function migrateCustomerAppstleSubsToInternal(
         // sub left reading 'appstle' after moving to Braintree is a row whose engine is a lie.
         billing_source: "internal",
           status: sub.status,
+          // A live sub must not carry a cancellation date (a racing Appstle cancel webhook, or the
+          // old customer-style cancel, could have stamped one). A cancelled sub keeps its own.
+          ...(isCancelled ? {} : { cancelled_at: null }),
           customer_id: billableCustomerId,
           // Pin the default card so the renewal charges it explicitly (the
           // default-card fallback stays the safety net for any unpinned sub).

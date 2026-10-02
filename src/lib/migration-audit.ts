@@ -291,9 +291,10 @@ async function autoHealMigration(
   // Cancel a lingering Appstle contract (double-bill risk).
   if ((failed("appstle_cancelled") || failed("no_double_bill")) && audit.appstle_contract_id) {
     try {
-      const { appstleSubscriptionAction } = await import("@/lib/appstle");
-      // Use the OLD appstle contract id directly (the sub row now holds internal-*).
-      const r = await appstleSubscriptionAction(audit.workspace_id as string, String(audit.appstle_contract_id), "cancel", "migrated to shopcx", "ShopCX auto-heal");
+      const { subscriptionCancelAtVendorForMigration } = await import("@/lib/commerce/subscription");
+      // Use the OLD appstle contract id directly (the sub row now holds internal-*). Vendor-only:
+      // a customer-style cancel would also write cancel-truth / end dunning by that old id.
+      const r = await subscriptionCancelAtVendorForMigration(audit.workspace_id as string, String(audit.appstle_contract_id), "appstle");
       if (r.success) changed = true;
     } catch (e) {
       console.error("[migration-audit] auto-heal cancel failed:", e instanceof Error ? e.message : e);
