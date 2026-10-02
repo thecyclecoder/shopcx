@@ -59,6 +59,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
+  isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
@@ -1227,6 +1228,122 @@ test("isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise KEEPS a no
     isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
       "column appstle_api_calls.method does not exist",
       'WITH pgrst_source AS ( INSERT INTO "public"."appstle_api_calls"("id","method") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise ──
+// A Supabase Studio Table Editor quick-filter typed against the jsonb `raw` column on
+// `public.appstle_contract_snapshots` (or an external PostgREST probe doing the same)
+// emits `WHERE "raw" LIKE $1`, which Postgres rejects with
+// `operator does not exist: jsonb ~~ unknown` — there is no `jsonb ~~ text` operator
+// pairing. Control Tower signature `supabase-logs:d5790e1e94b4b510`. Drop AT CAPTURE
+// only when BOTH the exact operator-missing message AND the SELECT-shape on
+// `appstle_contract_snapshots` naming `raw like` are present; a jsonb-LIKE error on any
+// OTHER table, a DIFFERENT operator mismatch on this table, or a non-SELECT shape still
+// pages.
+
+test("isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise drops the operator-missing message paired with the PostgREST CTE wrapper AND the bare SELECT shape", () => {
+  // The Studio-emitted PostgREST CTE wrapper form (double-quoted identifiers), raw LIKE.
+  assert.equal(
+    isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(
+      "operator does not exist: jsonb ~~ unknown",
+      'WITH pgrst_source AS ( SELECT "public"."appstle_contract_snapshots".* FROM "public"."appstle_contract_snapshots" WHERE "public"."appstle_contract_snapshots"."raw" like $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(
+      "ERROR: operator does not exist: jsonb ~~ unknown",
+      'WITH pgrst_source AS ( SELECT * FROM "public"."appstle_contract_snapshots" WHERE "raw" like $1 )',
+    ),
+    true,
+  );
+  // The bare SELECT shape (no PostgREST wrapper) drops too — the predicate accepts both.
+  assert.equal(
+    isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(
+      "operator does not exist: jsonb ~~ unknown",
+      "select * from public.appstle_contract_snapshots where raw like '%foo%'",
+    ),
+    true,
+  );
+  // Unqualified `appstle_contract_snapshots` (no `public.`) + bare SELECT is still the
+  // same ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(
+      "operator does not exist: jsonb ~~ unknown",
+      "select id, raw from appstle_contract_snapshots where raw like $1",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise KEEPS the same operator-missing message when the FROM is a different table (a real jsonb-LIKE code bug elsewhere still pages)", () => {
+  // Same jsonb ~~ unknown message, but the query LIKEs a jsonb column on another table —
+  // that's a real code-bug shape in our own code, not Studio noise on
+  // appstle_contract_snapshots.
+  assert.equal(
+    isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(
+      "operator does not exist: jsonb ~~ unknown",
+      "select * from public.orders where payment_details like '%foo%'",
+    ),
+    false,
+  );
+  // PostgREST CTE wrapper form, but FROM is a different table — must still page.
+  assert.equal(
+    isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(
+      "operator does not exist: jsonb ~~ unknown",
+      'WITH pgrst_source AS ( SELECT * FROM "public"."orders" WHERE "payment_details" like $1 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise KEEPS a DIFFERENT operator-missing error on the same table (a real code-bug with a different operator mismatch still pages)", () => {
+  // A different operator mismatch (e.g. jsonb @> unknown, jsonb = text) on
+  // `appstle_contract_snapshots` is a real code bug we WANT to see.
+  assert.equal(
+    isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(
+      "operator does not exist: jsonb @> unknown",
+      "select * from public.appstle_contract_snapshots where raw @> $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(
+      "operator does not exist: jsonb = text",
+      "select * from public.appstle_contract_snapshots where raw = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise KEEPS a non-SELECT statement shape on the same table (a real code-bug writing appstle_contract_snapshots still pages)", () => {
+  // An INSERT / UPDATE / DELETE naming raw LIKE indicates real code trying to mutate the
+  // table — a bug we WANT to see, not the Studio-click read we drop.
+  assert.equal(
+    isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(
+      "operator does not exist: jsonb ~~ unknown",
+      "update public.appstle_contract_snapshots set raw = $1 where raw like $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(
+      "operator does not exist: jsonb ~~ unknown",
+      "delete from public.appstle_contract_snapshots where raw like $1",
+    ),
+    false,
+  );
+  // A PostgREST INSERT inside the same `WITH pgrst_source AS (...)` envelope is a real
+  // code-write and must stay captured/paged — the CTE branch requires the wrapped op to
+  // be a SELECT.
+  assert.equal(
+    isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(
+      "operator does not exist: jsonb ~~ unknown",
+      'WITH pgrst_source AS ( INSERT INTO "public"."appstle_contract_snapshots"("id","raw") VALUES ($1,$2) RETURNING * )',
     ),
     false,
   );
