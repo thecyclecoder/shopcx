@@ -316,7 +316,6 @@ const GRANDFATHER_ALLOWLIST_2026_07_27: ReadonlySet<string> = new Set([
   "src/lib/portal/failed-payment-guard.test.ts",
   "src/lib/portal/handlers/bootstrap.test.ts",
   "src/lib/portal/mutation-guard.test.ts",
-  "src/lib/portal/order-now-guard.test.ts",
   "src/lib/portal/safe-starts-with.test.ts",
   "src/lib/portal/sol-proposed-spec.test.ts",
   "src/lib/portal/suppressed-variants.test.ts",

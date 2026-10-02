@@ -35,6 +35,11 @@ export interface RecordAuditInput {
    * escalated by the migration caller.
    */
   droppedLines?: Array<{ title: string; shopifyVariantId: string; sku: string | null; priceCents: number; quantity: number; paid: boolean }>;
+  /**
+   * Lines deliberately left off the migrated sub by policy (MIGRATION_EXCLUDED_PRODUCT_IDS in
+   * migrate-to-internal — e.g. ACV Gummies, no stock). Logged once into `notes`; no page.
+   */
+  excludedLines?: Array<{ title: string; productId: string; variantId: string; priceCents: number; quantity: number }>;
 }
 
 /** Create the pending audit row at migration time. Returns its id. */
@@ -49,10 +54,11 @@ export async function recordMigrationAudit(input: RecordAuditInput): Promise<str
     is_recovery: !!input.isRecovery,
     status: "pending",
   };
-  // Record any dropped-unmappable-items note (column defaults to [] when none).
-  if (input.droppedLines?.length) {
-    row.notes = [{ type: "dropped_unmappable_items", items: input.droppedLines }];
-  }
+  // Record dropped-unmappable / policy-excluded notes (column defaults to [] when none).
+  const notes: Array<Record<string, unknown>> = [];
+  if (input.droppedLines?.length) notes.push({ type: "dropped_unmappable_items", items: input.droppedLines });
+  if (input.excludedLines?.length) notes.push({ type: "excluded_product_items", items: input.excludedLines });
+  if (notes.length) row.notes = notes;
   const { data, error } = await admin
     .from("migration_audits")
     .insert(row)
