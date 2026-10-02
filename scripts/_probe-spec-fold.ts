@@ -16,7 +16,7 @@ async function main() {
   // Get spec and its phases
   const { data: specs, error } = await admin
     .from("specs")
-    .select("id, slug, status, title, owner_function")
+    .select("id, slug, status, title, owner")
     .eq("slug", slug);
 
   if (error) {
@@ -33,7 +33,7 @@ async function main() {
   console.log(`Spec: ${spec.slug} (${spec.id})`);
   console.log(`Title: ${spec.title}`);
   console.log(`Status (stored): ${spec.status}`);
-  console.log(`Owner: ${spec.owner_function}`);
+  console.log(`Owner: ${spec.owner}`);
 
   // Get phases
   const { data: phases } = await admin
