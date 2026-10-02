@@ -41,6 +41,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
+  isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
@@ -6623,6 +6624,216 @@ test("isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise returns false on 
   assert.equal(
     isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
       "column workspaces.slug does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/product_variants?select=...price...` against our `public.product_variants`
+// table. The table exists but by design carries NO bare `price` column — pricing lives
+// on `product_variants.price_cents` (with a sibling `compare_at_price_cents`). Foreign-
+// owned surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-
+// missing message on `product_variants.price` AND a SELECT-lookup shape on
+// `product_variants` (bare OR PostgREST CTE wrapper) are present. A column-missing on
+// any other table, a different column on `product_variants` (including the real
+// `price_cents`), or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise drops the captured supabase-logs:b977e23b8fc0fea9 message+query pair (the ad hoc SELECT lookup on the exact product_variants.price column-missing shape)", () => {
+  // The captured production sample: unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column product_variants.price does not exist",
+      "select id, sku, price from public.product_variants",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column public.product_variants.price does not exist",
+      "select id, sku, price from public.product_variants",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column product_variants.price does not exist",
+      "select price from product_variants limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column product_variants.price does not exist",
+      "select id, sku, price from public.product_variants where price > 0 order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column product_variants.price does not exist",
+      "SELECT ID, SKU, PRICE FROM PUBLIC.PRODUCT_VARIANTS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "ERROR: column product_variants.price does not exist",
+      "select price from public.product_variants",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "  column product_variants.price does not exist  ",
+      "   select price from public.product_variants   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"product_variants\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in
+  // the pgrst_source CTE with double-quoted `"public"."product_variants"` identifiers.
+  // The plain bare-SELECT regex misses this because the statement starts with `with`
+  // and the FROM clause carries the quoted schema.table shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column product_variants.price does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."product_variants"."id", "public"."product_variants"."sku", "public"."product_variants"."price" FROM "public"."product_variants" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column public.product_variants.price does not exist",
+      'WITH pgrst_source AS (SELECT "public"."product_variants"."price" FROM "public"."product_variants")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "ERROR: column product_variants.price does not exist",
+      'WITH pgrst_source AS (SELECT "public"."product_variants"."price" FROM "public"."product_variants")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise KEEPS a column-missing on `product_variants.price_cents` (a DIFFERENT column on the same table — the real column rename still pages)", () => {
+  // `product_variants.price_cents` IS a real column (the actual pricing shape); if it
+  // ever regresses we absolutely want the page. The pin is `product_variants.price`
+  // only.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column product_variants.price_cents does not exist",
+      "select id, sku, price_cents from public.product_variants",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column public.product_variants.price_cents does not exist",
+      "select price_cents from public.product_variants",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a price column still pages)", () => {
+  // If any other table's `price` column regressed, we absolutely want the page — the
+  // pin is `product_variants.price` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column products.price does not exist",
+      "select price from public.products where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column line_items.price does not exist",
+      "select price from public.line_items where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise KEEPS a non-SELECT statement shape on product_variants (an INSERT/UPDATE/DELETE on product_variants with the same message is a real code-bug and still pages)", () => {
+  // INSERT / UPDATE / DELETE against product_variants referencing a bogus `price`
+  // column is real code trying to write the table — a bug we WANT to see, not the ad
+  // hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column product_variants.price does not exist",
+      "insert into public.product_variants (id, sku, price) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column product_variants.price does not exist",
+      "update public.product_variants set price = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column product_variants.price does not exist",
+      "delete from public.product_variants where price is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column product_variants.price does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."product_variants"("sku", "price") VALUES ($1, $2) RETURNING "public"."product_variants"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column product_variants.price does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."product_variants" SET "price" = $1 WHERE "public"."product_variants"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column product_variants.price does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(
+      "column product_variants.price does not exist",
       null,
     ),
     false,
