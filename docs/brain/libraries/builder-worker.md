@@ -329,6 +329,10 @@ Every job kind funnels its status/error/log_tail transitions through `update(id,
 
 After a successful write the `needs_attention` classifier fan-out (`stampNeedsAttentionClass`) still runs unchanged — the retry sits INSIDE the guard and BEFORE the classifier, so both existing behaviors are preserved.
 
+## The fold-eligibility probe — `scripts/_probe-spec-fold.ts` ([[../specs/probe-spec-fold-script-owner-column-name-fix]])
+
+Diagnostic CLI tool for operators to inspect a shipped spec's fold-readiness (stored status + phase-by-phase status via `spec_phases` rollup). Accepts a spec slug and returns the spec's title, owner, and each phase's status so an operator can verify fold prerequisites before dispatch. **Column contract:** reads the real schema columns from [[../tables/specs]] — `id`, `slug`, `status`, `title`, `owner` (the per-spec owner function, FK to [[../tables/owner_functions]]). Pre-fix (until 2026-10-02), the script selected the non-existent `owner_function` column, causing every invocation to error with `column specs.owner_function does not exist` on PostgREST. The 2026-10-02 fix corrected both the `.select()` list and the console-log reader to use `owner` (the real schema name from `supabase/migrations/20260713120001_specs_and_spec_phases.sql`), restoring the probe as a functional operator tool for fold auditing.
+
 ## Related
 
 [[../lifecycles/agent-todo-system]] · [[../lifecycles/spec-goal-branch-pm-flow]] · [[agent-jobs]] · [[github-pr-resolve]] · [[approval-inbox]] · [[agent-grader]] · [[claude-health]] · [[../inngest/acquisition-research-cadence]] · [[../inngest/research-sensor]] · [[../recipes/lander-capture]] · [[../recipes/lander-teardown]] · [[research-urls]] · [[cleo-blueprint]] · [[lander-blueprints]] · [[../tables/lander_blueprints]] · [[../tables/lander_content_gaps]] · [[../tables/product_media]] · [[../specs/carrie-dr-content]] · [[../specs/serialize-goal-member-spec-builds]] · [[gemini]] · [[storefront-optimizer-agent]] · [[acquisition-gap-grader]] · [[check-reconciliation]] · [[../operational-rules]]
