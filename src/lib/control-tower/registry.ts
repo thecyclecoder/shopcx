@@ -913,11 +913,15 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     // empty from 09-08 to 09-30 while this loop kept beating and reported green on 09-30) was
     // invisible to the P1 tile because liveness only asked whether the loop RAN, not whether the
     // table it exists to fill actually moved. `qb_amazon_sales_snapshots.sale_date` is the Amazon
-    // shipped-units date column; Amazon SP-API is re-pullable over a range so a 48h lag is
-    // conservative (a genuine daily miss trips outside 30h; the 48h leaves slack for a same-day
-    // catch-up run). This is NOT the FBA/3PL point-in-time lag — those are unreconstructible if
-    // missed and would want their own per-table maxLagMs on a dedicated tile.
-    outputFreshness: { table: "qb_amazon_sales_snapshots", dateColumn: "sale_date", maxLagMs: 48 * HOUR },
+    // shipped-units date column. The cron fires once a day at 09:30 UTC and the Shipped/Shipping-
+    // only filter in `syncAmazonSalesForClose` (`src/lib/qb-close/sync-amazon-sales.ts`) means
+    // orders placed late on day N typically only land in day N+1's sync, so the newest `sale_date`
+    // naturally trails by ~1-2 days overnight. 72h gives a full extra cadence of slack past that
+    // natural shipping lag while still tripping cleanly on a multi-day stall (the 2026-09 23-day
+    // stall this check targets is caught long before 72h is approached). This is NOT the FBA/3PL
+    // point-in-time lag — those are unreconstructible if missed and would want their own
+    // per-table maxLagMs on a dedicated tile.
+    outputFreshness: { table: "qb_amazon_sales_snapshots", dateColumn: "sale_date", maxLagMs: 72 * HOUR },
   },
   { id: "sync-3pl-inventory", kind: "cron", owner: "logistics", label: "3PL inventory sync", description: "Daily Amplifier /reports/inventory/current → canonical inventory_levels (location='amplifier_3pl') + dated snapshot. The storefront/subscriber on-hand behind days-of-cover.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
   {
