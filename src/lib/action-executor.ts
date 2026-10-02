@@ -1609,6 +1609,10 @@ export const directActionHandlers: Record<
       if (billed.success) {
         return { success: true, summary: "Triggered order now (customer asked to ship today)" };
       }
+      // An order for this sub was JUST placed — the customer's "ship today" is already
+      // satisfied. Never fall through to the date bump: that schedules a second charge.
+      const { isOrderInProgressError } = await import("@/lib/portal/order-now-guard");
+      if (isOrderInProgressError(billed.error)) return { success: false, error: billed.error };
       // order-now failed → fall through to bumping date as a soft fallback
       console.warn(`[change_next_date] order-now fallback failed for ${p.contract_id}:`, billed.error);
       const tomorrow = new Date(centralToday);
