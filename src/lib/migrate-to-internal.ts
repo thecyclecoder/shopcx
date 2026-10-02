@@ -135,13 +135,35 @@ export const MIGRATION_EXCLUDED_PRODUCT_IDS: ReadonlySet<string> = new Set([
   "ad466a2f-061e-4692-a3d3-f672797fcecf", // Apple Cider Vinegar Gummies
 ]);
 
-/** A live line deliberately left off the migrated sub (see MIGRATION_EXCLUDED_PRODUCT_IDS). */
+/**
+ * A live line deliberately left off the migrated sub: an excluded product
+ * (MIGRATION_EXCLUDED_PRODUCT_IDS) or an Appstle one-time promo (see `appstlePromoFlags`).
+ * `productId` / `variantId` are "" when the line was excluded before catalog resolution.
+ */
 export interface ExcludedLine {
   title: string;
   productId: string;
   variantId: string;
   priceCents: number;
   quantity: number;
+  reason: "excluded_product" | "one_time_promo";
+}
+
+/**
+ * Appstle marks promo lines with line custom attributes:
+ *   `_appstle-free-product: true`     — the line is a free gift ($0)
+ *   `_appstle-one-time-product: true` — it ships ONCE, with the next order, then drops off
+ * Appstle honours both. The internal engine knows neither: an unflagged line is priced off
+ * the catalog every cycle. So a one-time promo must never be carried over (it already
+ * shipped, or was meant to ship once), and a recurring free line must land as `is_gift`
+ * (priced $0, excluded from quantity breaks). Ground truth: all 88 flagged lines across 2,480
+ * stored contract snapshots carry BOTH flags (the $0 ACV Gummies bonus); migrated without
+ * this, sub 25afd98d paid $27.57 for one on its first internal renewal.
+ */
+export function appstlePromoFlags(l: Record<string, unknown>): { freeProduct: boolean; oneTime: boolean } {
+  const attrs = Array.isArray(l.customAttributes) ? (l.customAttributes as Array<{ key?: unknown; value?: unknown }>) : [];
+  const on = (key: string) => attrs.some((a) => a?.key === key && String(a?.value).toLowerCase() === "true");
+  return { freeProduct: on("_appstle-free-product"), oneTime: on("_appstle-one-time-product") };
 }
 
 /** Drop excluded-product items from an already-internal items[] (the cancelled local-row path). */
@@ -160,6 +182,7 @@ function withoutExcludedItems(items: Array<Record<string, unknown>>): {
         variantId: String(i.variant_id || ""),
         priceCents: Number(i.price_cents || 0),
         quantity: Number(i.quantity || 1),
+        reason: "excluded_product",
       });
     } else kept.push(i);
   }
@@ -307,6 +330,22 @@ async function appstleLinesToInternalItems(
     if (!shopifyVid) continue;
     const lineSku = String((l.sku as string) || "").trim();
 
+    // Appstle one-time promo → never carried over (it ships once on Appstle's side, then
+    // drops off; internally it would recur at catalog price). Checked before catalog
+    // resolution so an unmappable one-time promo is excluded quietly, not paged as a paid drop.
+    const promo = appstlePromoFlags(l);
+    if (promo.oneTime) {
+      excludedLines.push({
+        title: title || variantTitle || shopifyVid,
+        productId: "",
+        variantId: "",
+        priceCents: currentPriceCents,
+        quantity,
+        reason: "one_time_promo",
+      });
+      continue;
+    }
+
     // Resolve the internal variant by shopify_variant_id first, then by sku
     // (workspace-scoped) — a migrated line can carry a Shopify id we never synced
     // while its sku still resolves the variant (mirrors the audit's auto-heal).
@@ -352,6 +391,22 @@ async function appstleLinesToInternalItems(
         variantId: String(v.id),
         priceCents: currentPriceCents,
         quantity,
+        reason: "excluded_product",
+      });
+      continue;
+    }
+
+    // Recurring free gift (free, NOT one-time) → ships $0 every cycle as an `is_gift` item.
+    // No price inference: the engine prices gifts at $0 and leaves them out of qty breaks.
+    if (promo.freeProduct) {
+      items.push({
+        variant_id: v.id,
+        product_id: v.product_id,
+        title: title || undefined,
+        variant_title: variantTitle || (v.title as string) || undefined,
+        sku: (v.sku as string) || undefined,
+        quantity,
+        is_gift: true,
       });
       continue;
     }
