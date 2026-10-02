@@ -19,7 +19,7 @@ sudo -iu builder           # become the worker user — EVERYTHING lives under /
 As `builder`:
 - **Repo (the worker's OWN checkout):** `~/shopcx` (`/home/builder/shopcx`) — the SHA the dashboard/heartbeat reports (`git -C ~/shopcx rev-parse --short HEAD`).
 - **Build worktrees:** `~/builds/build-<slug>` — named for the **spec slug**, stable across all of a spec's phases (see the `--resume` invariant below). plan/pr-resolve/fold lanes still use `~/builds/<job-id>` (dir name = `agent_jobs.id`); spec-chat/dev-ask/director-* use stable per-session names. A running `claude` whose `cwd` is a `~/builds/*` with **no matching active `agent_jobs` row** (no active build for that slug, or a deleted job) is a ZOMBIE — safe to `kill <pid>` that PID *only*.
-- **Max creds:** `~/.claude` (the round-robin login config dirs).
+- **Max creds:** `~/.claude` (the round-robin login config dirs) — each holds the `/login` `.credentials.json` and, once installed, a one-year `.oauth-token` (see § Long-lived setup-token auth).
 
 Service ops (as **root**): `systemctl {status,restart,stop} shopcx-builder` · live logs `journalctl -u shopcx-builder -f`. List build sessions + their worktrees: `for p in $(pgrep -f claude); do echo "$p $(readlink /proc/$p/cwd)"; done`. (Service `User=builder`; a hard `systemctl restart` orphans in-flight builds — prefer the dashboard "Queue restart" which drains first.)
 
@@ -149,6 +149,32 @@ The `~/.claude-<slot>` matches the config dir the card names (`~/.claude` for Ro
 - Phase 1 — Added `reauth_required` to `AccountHoldReason`; stopped defaulting `hold_reason` to `usage_cap` on the snapshot + heartbeat restore + pool-holds summary + parked-job log_tail; `decideSweepAction` now emits `reauth_required` (not `auth_expired`) when the credentials file has no `refreshToken`.
 - Phase 2 — First time an account enters `reauth_required`, `emitCeoReauthCardBestEffort` writes ONE `dashboard_notifications` card (`type='agent_approval_request'`, `metadata.routed_to_function='ceo'`, deduped by config dir) carrying the exact command chain above + how long the account has been dead. `dismissCeoReauthCardBestEffort` clears the card on recovery. Box page renders the `reauth_required` chip amber ("needs re-login"), distinct from rose ("capped").
 - Phase 3 — Added the pure classifier `classifyAccountHealth`; unit-tested the four spec-named cases + the warning case (`scripts/builder-worker.auth-refresh.test.ts`, wired into `test:box-auth-refresh`); added `sweepUpcomingExpiries` on the heartbeat cadence that runs against BOTH healthy AND held accounts (the ordering-trap fix), raises the reauth card EARLY for no-refreshToken accounts within 24h of expiry, and clears the hold + card the moment a CEO /login puts fresh credentials in place. Updated `applyRefreshOutcome` to clear a `reauth_required` hold on a successful refresh (so a CEO re-login shortcuts the weekly-window wait).
+
+## Long-lived setup-token auth (box-setup-token-auth, 2026-10-02) — the durable fix for dead accounts
+
+**Root cause of the recurring dead accounts.** A `/login` credential's refresh token **rotates**: every refresh mints a new one and retires the old one, and the CLI does no file locking on `.credentials.json`. When the ~8h access token expires while several lanes (plus the worker's own `attemptCredentialRefresh` exercise) run on the same account, their refreshes race; the losers present a just-retired refresh token and the account is left with a dead/missing one — `refresh_failed` / `reauth_required` ([anthropics/claude-code#48786](https://github.com/anthropics/claude-code/issues/48786)). That is what took out all four accounts on 2026-09-24→10-02 (and the 2026-07-25 / 2026-08-03 incidents). A keep-alive cron would not help — it is one more racer.
+
+**The fix: one `claude setup-token` per account.** `claude setup-token` mints a **one-year**, inference-only, subscription-billed OAuth token ([docs](https://code.claude.com/docs/en/authentication.md#generate-a-long-lived-token)). Passed as `CLAUDE_CODE_OAUTH_TOKEN` it ranks above the `/login` credential, and it has no refresh token to race on. Limits: inference only — no Remote Control, no claude.ai connectors (box lanes use neither; local MCP servers still work); not read under `--bare`.
+
+**How the worker uses it** (`scripts/builder-worker.oauth-token.ts`, tests `npm run test:box-oauth-token`):
+- Each account's token lives in **`<configDir>/.oauth-token`** (0600). The file's mtime is the mint time.
+- `runBoxSession` sets `CLAUDE_CODE_OAUTH_TOKEN` from the session's account's file (after the sandbox branch, so `build`/`qc` sandboxes still get it) and always drops any inherited global one so accounts can't cross. `CLAUDE_CONFIG_DIR` stays set — `--resume` transcripts still live in the config dir.
+- `sweepExpiredCredentials` **skips** `.credentials.json` for a token account (no expiry eject, no refresh exercise). A newly-installed token **releases an auth hold** (`reauth_required` / `refresh_failed` / `auth_expired`) within ~30s, no restart — including holds restored from the heartbeat. A usage-cap hold is never released by a token.
+- If the token itself 401s, the reactive path holds the account and records which token was rejected; only a **newer** token file releases it (no flapping). The CEO card then carries the setup-token remedy, not `/login`.
+- `sweepUpcomingExpiries` raises the CEO renewal card (same `box_account_reauth_required:<dir>` dedupe key) **30 days** before the token's estimated one-year expiry, and dismisses it once a fresh token is in place.
+- An account **without** `.oauth-token` behaves exactly as before (opt-in per account).
+
+**Install / renew a token (per account, one at a time):**
+
+```bash
+ssh root@claude-server
+sudo -iu builder
+cd ~/shopcx
+CLAUDE_CONFIG_DIR=~/.claude-personal claude setup-token     # approve in a browser signed in to THAT account's email; copy the printed token
+bash scripts/box-install-oauth-token.sh ~/.claude-personal  # paste it (hidden); verifies with a tiny claude -p, then writes ~/.claude-personal/.oauth-token
+```
+
+Repeat with `~/.claude` (RR1), `~/.claude-personal` (RR2), `~/.claude-third` (RR3), `~/.claude-fourth` (RR4). The script refuses to save a token that fails its verification run. Verify billing once after switching: claude.ai/settings/usage moves, the API console stays flat.
 
 ## Second runtime: Codex on a ChatGPT plan (box-codex-runner)
 
