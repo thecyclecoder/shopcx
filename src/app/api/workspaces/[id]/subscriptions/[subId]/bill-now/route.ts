@@ -3,7 +3,7 @@ import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { subscriptionOrderNow } from "@/lib/commerce/subscription";
 import { logCustomerEvent } from "@/lib/customer-events";
-import { guardAppstleOrderNow } from "@/lib/portal/order-now-guard";
+import { guardAppstleOrderNow, isOrderInProgressError, ORDER_IN_PROGRESS, ORDER_IN_PROGRESS_MESSAGE } from "@/lib/portal/order-now-guard";
 
 export async function POST(
   request: Request,
@@ -37,6 +37,9 @@ export async function POST(
   const result = await subscriptionOrderNow(workspaceId, sub.shopify_contract_id);
 
   if (!result.success) {
+    if (isOrderInProgressError(result.error)) {
+      return NextResponse.json({ error: ORDER_IN_PROGRESS, message: ORDER_IN_PROGRESS_MESSAGE }, { status: 409 });
+    }
     return NextResponse.json({ error: result.error || "Billing failed" }, { status: 500 });
   }
 

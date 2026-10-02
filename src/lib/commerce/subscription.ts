@@ -1022,6 +1022,22 @@ export async function subscriptionOrderNow(
 
   if (src === "internal" || src === "shopcx") {
     if (sub.status !== "active") return { success: false, error: `not_active (${sub.status})` };
+    // ⭐ Repeat-press guard, shared with the portal: refuse when a charge for this sub is in
+    // flight or an order for it landed inside the window. This is the chokepoint for the
+    // dashboard bill-now route AND every agent action (bill_now / order_now /
+    // change_next_date's ship-today path), none of which had any recent-charge check — an
+    // agent picking up "I just ordered but didn't get an email" could otherwise charge again.
+    const { guardRecentOrderNow, ORDER_IN_PROGRESS } = await import("@/lib/portal/order-now-guard");
+    const recent = await guardRecentOrderNow(admin, {
+      subscription_id: sub.id as string,
+      workspace_id: workspaceId,
+    });
+    if (recent.action === "block") {
+      return {
+        success: false,
+        error: `${ORDER_IN_PROGRESS}: an order for this subscription was already placed in the last 15 minutes, so it was not charged again`,
+      };
+    }
     const { inngest } = await import("@/lib/inngest/client");
     if (src === "shopcx") {
       const { RENEWAL_ATTEMPT_EVENT } = await import("@/lib/inngest/shopify-subscription-renewals");

@@ -3,7 +3,7 @@ import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstle
 import { appstleAttemptBilling } from "@/lib/appstle";
 import { subscriptionGetUpcomingOrders } from "@/lib/commerce/subscription";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { guardAppstleOrderNow, guardInternalOrderNow } from "@/lib/portal/order-now-guard";
+import { guardAppstleOrderNow, guardInternalOrderNow, guardRecentOrderNow } from "@/lib/portal/order-now-guard";
 
 export const orderNow: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -36,6 +36,7 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
     // placed.') — a silent no-op is what made the customer press again.
     const internalGuard = await guardInternalOrderNow(createAdminClient(), {
       subscription_id: resolved.id,
+      workspace_id: auth.workspaceId,
     });
     if (internalGuard.action === "block") {
       return jsonErr({ error: internalGuard.reason, message: internalGuard.message }, 409);
@@ -85,6 +86,16 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
   // reaches subscriptionAttemptBilling the contract id has already been traded for an attempt id.
   const { resolveBillingSource } = await import("@/lib/internal-subscription");
   if ((await resolveBillingSource(auth.workspaceId, String(contractId))) === "shopcx") {
+    // Same repeat-press refusal as the internal branch. The BILLED pre-check below only
+    // covers the CURRENT cycle; once the first press advances next_billing_date, a second
+    // press targets the next cycle and would charge again.
+    const recentGuard = await guardRecentOrderNow(createAdminClient(), {
+      subscription_id: resolved.id,
+      workspace_id: auth.workspaceId,
+    });
+    if (recentGuard.action === "block") {
+      return jsonErr({ error: recentGuard.reason, message: recentGuard.message }, 409);
+    }
     const { shopifyAttemptBilling, awaitBillingAttempt } = await import("@/lib/commerce/shopify-subscription-client");
     const { cycleKeyFromNextBillingDate } = await import("@/lib/subscription-cycle-charge-claim");
     const due = (resolved as { next_billing_date?: string | null }).next_billing_date ?? null;
