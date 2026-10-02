@@ -38,6 +38,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
+  isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
@@ -253,6 +254,21 @@ const LOG_QUERIES: LogQuery[] = [
       // `appstle_api_calls` via a non-SELECT statement (real code-bug shape) still
       // surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a Supabase Studio Table Editor quick-filter
+      // typed against the jsonb `raw` column on `public.appstle_contract_snapshots` (or
+      // an external PostgREST probe doing the same) emits `WHERE "raw" LIKE $1`, which
+      // Postgres rejects with `operator does not exist: jsonb ~~ unknown` — there is no
+      // `jsonb ~~ text` operator pairing. No ShopCX code path text-matches the jsonb
+      // `raw` payload (every in-tree reader filters by `workspace_id` /
+      // `appstle_contract_id`), so the resulting ERROR is repair work for a query no
+      // code owns ([[../specs/error-feed-drop-appstle-contract-snapshots-raw-jsonb-like-no]],
+      // Control Tower signature `supabase-logs:d5790e1e94b4b510`). Narrowly gated to
+      // require BOTH the exact `operator does not exist: jsonb ~~ unknown` message AND
+      // the SELECT-shape on `appstle_contract_snapshots` naming `raw like` (bare or
+      // PostgREST CTE wrapper) — a jsonb-LIKE error on any OTHER table, a DIFFERENT
+      // operator mismatch on this table, or a non-SELECT statement on this table (real
+      // code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... source ... from
       // public.orders` lookup by an external tool / stale exploratory query. Our `orders`
       // table exposes `source_name`, not `source` — no ShopCX code path issues a SELECT on

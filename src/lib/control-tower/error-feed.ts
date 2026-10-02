@@ -1289,6 +1289,76 @@ export function isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres rejecting a `WHERE "appstle_contract_snapshots"."raw" LIKE $1`
+ * query with `operator does not exist: jsonb ~~ unknown`. The jsonb LIKE is an invalid
+ * operator pairing (PostgreSQL has no `jsonb ~~ text` operator), and the query shape is the
+ * exact fingerprint of a Supabase Studio Table Editor quick-filter typed against a jsonb
+ * column (or an external PostgREST probe doing the same): the Table Editor UI passes the
+ * filter value as text, which collides with `raw`'s jsonb type at planning time. No ShopCX
+ * code path (src/, scripts/, shopify-extension/, docs/brain/) issues a `raw LIKE` text
+ * match on this table — every in-tree reader filters by `workspace_id` /
+ * `appstle_contract_id` and reads/writes the jsonb payload with jsonb operators, not text
+ * LIKE. There is no lever from ShopCX to make a jsonb-LIKE query resolve — paging Platform
+ * on it ([[../specs/error-feed-drop-appstle-contract-snapshots-raw-jsonb-like-no]], Control
+ * Tower signature `supabase-logs:d5790e1e94b4b510`) is repair work for a query no code owns
+ * and is indistinguishable from the dozen sibling SQL-Editor-typo drops already filtered
+ * the same way.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise` — same
+ * narrow-gating shape (exact message + SELECT-lookup shape covering BOTH bare and
+ * PostgREST CTE wrapper forms), scoped to the jsonb-LIKE-on-appstle_contract_snapshots.raw
+ * typo instead.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical operator-missing shape for the jsonb LIKE —
+ *      trimmed equal to `operator does not exist: jsonb ~~ unknown` (any leading
+ *      `ERROR: ` prefix Postgres includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-shape on `public.appstle_contract_snapshots`
+ *      naming `raw like` — either (a) the bare `select ... from (public.)?
+ *      appstle_contract_snapshots ... raw ... like` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."appstle_contract_snapshots" ...
+ *      "raw" like ... )` CTE wrapper form with double-quoted identifiers (the shape
+ *      Studio's Table Editor filter emits).
+ *
+ * Narrowly gated so:
+ *   - a jsonb-LIKE operator-missing error on ANY OTHER table (a real code bug issuing a
+ *     jsonb LIKE elsewhere) still pages,
+ *   - a DIFFERENT operator-missing error on `appstle_contract_snapshots` (a real code bug
+ *     with a different operator mismatch) still pages,
+ *   - the same message attached to a non-SELECT statement on this table (INSERT / UPDATE /
+ *     DELETE / DDL that triggers a jsonb LIKE — a real code-bug shape) still pages,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `appstle_contract_snapshots` is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped !== "operator does not exist: jsonb ~~ unknown") return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect =
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?appstle_contract_snapshots\b[\s\S]*\braw\b[\s\S]*\blike\b/.test(q);
+  // PostgREST wraps direct-REST row reads as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."appstle_contract_snapshots" ... "raw" like ... )` with double-quoted
+  // identifiers — the shape Supabase Studio's Table Editor quick-filter emits for a
+  // jsonb column. The predicate requires BOTH the quoted table AND the quoted `raw`
+  // column being used with `like`, so a quoted PostgREST query against the same table
+  // that LIKEs a different (text) column stays captured.
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."appstle_contract_snapshots"[\s\S]*"raw"\s+like\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `orders.source`. Our `orders` table exposes `source_name`, not `source` — no ShopCX code
  * path (src/, scripts/, shopify-extension/, docs/brain/) issues a SELECT on `orders.source`.
