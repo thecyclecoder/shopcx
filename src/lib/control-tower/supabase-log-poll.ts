@@ -41,6 +41,7 @@ import {
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
@@ -296,6 +297,23 @@ const LOG_QUERIES: LogQuery[] = [
       // (including the real `cart_drafts.subtotal_cents`), or on `orders` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... total_price ... from
+      // public.orders` lookup (or its `subtotal_price` twin) by an external client
+      // expecting Shopify's REST orders shape — or the PostgREST `WITH pgrst_source AS (
+      // SELECT ... FROM "public"."orders" ... )` CTE wrapper the same client emits over
+      // the REST endpoint. Our `orders` table has NO top-level `total_price` or
+      // `subtotal_price` column — the money breakdown lives in `orders.total_cents` and
+      // the pre-tax/pre-shipping subtotal nests inside `orders.payment_details` JSONB.
+      // No ShopCX code path issues a SELECT on either column, so the resulting
+      // column-missing ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-orders-total-price-column-adhoc-noise]], Control
+      // Tower signature `supabase-logs:6da26669da941b7b`). Narrowly gated to require
+      // BOTH the exact column-missing message AND the SELECT-lookup shape — a
+      // column-missing error on any other column of `orders` (including the live
+      // `total_cents` / `payment_details`), on `total_price` / `subtotal_price` from
+      // any other table, or on `orders` via a non-SELECT statement (real code-bug
+      // shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... shipping_name ... from
       // public.orders` lookup by an external tool / stale exploratory query — or the
       // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE
