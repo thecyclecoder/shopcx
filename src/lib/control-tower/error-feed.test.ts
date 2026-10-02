@@ -40,6 +40,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
@@ -6416,6 +6417,296 @@ test("isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise retur
   assert.equal(
     isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise(
       "column agent_jobs.result does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise ──
+// Sibling of the `agent_jobs.result` drop above — a foreign / stale PostgREST
+// direct-REST client confuses the short name `config_dir` with the real
+// `claude_session_config_dir` column on our `public.agent_jobs` table. The table exists
+// but has NEVER had a `config_dir` column — the row carries `claude_session_config_dir`
+// (see `supabase/migrations/20260622210000_agent_jobs_session_config_dir.sql`), and
+// every ShopCX reader goes through the agent_jobs SDK which never selects
+// `config_dir`. Foreign-owned surface, no lever from us — drop AT CAPTURE only when
+// ALL THREE of the exact column-missing message on `agent_jobs.config_dir`, a
+// SELECT-lookup shape on `agent_jobs` (bare OR PostgREST CTE wrapper), AND a
+// `claude_session_config_dir` mention in the same query are present. A column-missing
+// on any other table (e.g. `agent_job_costs.config_dir`), a different column on
+// `agent_jobs`, a JOIN through `approval_decisions` / `agent_job_costs`, a bare
+// `select config_dir from agent_jobs` without `claude_session_config_dir`, or a
+// non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise drops the ad hoc SELECT lookup on the exact agent_jobs.config_dir column-missing shape (bare)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      "select id, status, created_at, kind, config_dir, claude_session_config_dir from public.agent_jobs where kind = $1 order by created_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column public.agent_jobs.config_dir does not exist",
+      "select config_dir, claude_session_config_dir from public.agent_jobs where kind = $1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      "select config_dir, claude_session_config_dir from agent_jobs limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      "SELECT CONFIG_DIR, CLAUDE_SESSION_CONFIG_DIR FROM PUBLIC.AGENT_JOBS",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "ERROR: column agent_jobs.config_dir does not exist",
+      "select config_dir, claude_session_config_dir from public.agent_jobs",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "  column agent_jobs.config_dir does not exist  ",
+      "   select config_dir, claude_session_config_dir from public.agent_jobs   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"agent_jobs\" ...)` CTE wrapper form", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs"."id", "public"."agent_jobs"."status", "public"."agent_jobs"."created_at", "public"."agent_jobs"."kind", "public"."agent_jobs"."config_dir", "public"."agent_jobs"."claude_session_config_dir" FROM "public"."agent_jobs" WHERE "public"."agent_jobs"."kind" = $1 ORDER BY "public"."agent_jobs"."created_at" DESC LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column public.agent_jobs.config_dir does not exist",
+      'WITH pgrst_source AS (SELECT "public"."agent_jobs"."config_dir", "public"."agent_jobs"."claude_session_config_dir" FROM "public"."agent_jobs")',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "ERROR: column agent_jobs.config_dir does not exist",
+      'WITH pgrst_source AS (SELECT "public"."agent_jobs"."config_dir", "public"."agent_jobs"."claude_session_config_dir" FROM "public"."agent_jobs")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise KEEPS a non-SELECT statement shape (a real code-bug writing agent_jobs.config_dir still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      "insert into public.agent_jobs (kind, config_dir, claude_session_config_dir) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      "update public.agent_jobs set config_dir = $1 where claude_session_config_dir = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      "delete from public.agent_jobs where config_dir = $1 and claude_session_config_dir = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."agent_jobs"("kind", "config_dir", "claude_session_config_dir") VALUES ($1, $2, $3) RETURNING "public"."agent_jobs"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."agent_jobs" SET "config_dir" = $1 WHERE "public"."agent_jobs"."claude_session_config_dir" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise KEEPS a DIFFERENT column-missing on agent_jobs (a real column rename still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.title does not exist",
+      "select title, claude_session_config_dir from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.kind does not exist",
+      "select kind, claude_session_config_dir from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.spec_slug does not exist",
+      "select spec_slug, claude_session_config_dir from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.workspace_id does not exist",
+      "select workspace_id, claude_session_config_dir from public.agent_jobs",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.status does not exist",
+      "select status, claude_session_config_dir from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.claude_session_id does not exist",
+      "select claude_session_id, claude_session_config_dir from public.agent_jobs",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.claude_session_config_dir does not exist",
+      "select claude_session_config_dir from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise KEEPS a column-missing error on any OTHER table (a real schema regression on a different table still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_job_costs.config_dir does not exist",
+      "select config_dir, claude_session_config_dir from public.agent_job_costs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column specs.config_dir does not exist",
+      "select config_dir, claude_session_config_dir from public.specs where workspace_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise KEEPS a bare SELECT on agent_jobs.config_dir without the `claude_session_config_dir` co-mention (hypothetical real code after a schema regression still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      "select config_dir from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      "select id, config_dir from agent_jobs limit 10",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      'WITH pgrst_source AS (SELECT "public"."agent_jobs"."config_dir" FROM "public"."agent_jobs")',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise KEEPS a JOIN across other tables (a real code shape joining approval_decisions / agent_job_costs still pages)", () => {
+  // The regex is anchored on `from (public.)?agent_jobs` as the first FROM target; a
+  // JOIN whose first FROM is `approval_decisions` / `agent_job_costs` won't match —
+  // which is the outcome we want, because a caller that joins the two and asks for a
+  // real column shape is product code, not the ad hoc direct-REST read.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      "select a.config_dir, j.claude_session_config_dir from public.approval_decisions a join public.agent_jobs j on j.id = a.agent_job_id",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      "select c.config_dir, j.claude_session_config_dir from public.agent_job_costs c join public.agent_jobs j on j.id = c.job_id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on agent_jobs (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "FATAL: database system is shutting down",
+      "select config_dir, claude_session_config_dir from public.agent_jobs",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "permission denied for table agent_jobs",
+      "select config_dir, claude_session_config_dir from public.agent_jobs",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "relation \"agent_jobs\" does not exist",
+      "select config_dir, claude_session_config_dir from public.agent_jobs",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise("", ""),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
+      "column agent_jobs.config_dir does not exist",
       null,
     ),
     false,
