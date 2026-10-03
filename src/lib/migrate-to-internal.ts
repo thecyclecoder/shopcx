@@ -120,6 +120,7 @@ export async function cancelOldEngineForMigration(
       .from("subscriptions")
       .update({ migrated_from_contract_id: args.contractId })
       .eq("id", args.subId)
+      .eq("workspace_id", args.workspaceId)
       .eq("shopify_contract_id", args.contractId);
     if (error) return { success: false, error: `pre-cancel mark failed: ${error.message}` };
   }
@@ -129,6 +130,7 @@ export async function cancelOldEngineForMigration(
       .from("subscriptions")
       .update({ migrated_from_contract_id: args.priorMigratedFrom })
       .eq("id", args.subId)
+      .eq("workspace_id", args.workspaceId)
       .eq("shopify_contract_id", args.contractId);
   }
   return r;

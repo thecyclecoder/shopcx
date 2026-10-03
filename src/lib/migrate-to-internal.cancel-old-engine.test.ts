@@ -50,8 +50,8 @@ test("appstle: pre-marks migrated_from_contract_id BEFORE the vendor cancel, wri
   assert.deepEqual(seen, ["33357988013:appstle:writes-before=1"]);
   assert.equal(writes.length, 1);
   assert.deepEqual(writes[0].patch, { migrated_from_contract_id: "33357988013" });
-  // Scoped to THIS row, still on its pre-flip contract id.
-  assert.deepEqual(writes[0].filters, [["id", "sub-1"], ["shopify_contract_id", "33357988013"]]);
+  // Scoped to THIS row + workspace (tenant-isolation invariant), still on its pre-flip contract id.
+  assert.deepEqual(writes[0].filters, [["id", "sub-1"], ["workspace_id", "ws"], ["shopify_contract_id", "33357988013"]]);
   // Never cancel-truth on our row.
   assert.ok(!writes.some((w) => "status" in w.patch || "cancelled_at" in w.patch));
 });
@@ -62,7 +62,7 @@ test("appstle: vendor cancel fails → the pre-mark is restored to its prior val
   assert.equal(r.success, false);
   assert.equal(writes.length, 2);
   assert.deepEqual(writes[1].patch, { migrated_from_contract_id: null });
-  assert.deepEqual(writes[1].filters, [["id", "sub-1"], ["shopify_contract_id", "33357988013"]]);
+  assert.deepEqual(writes[1].filters, [["id", "sub-1"], ["workspace_id", "ws"], ["shopify_contract_id", "33357988013"]]);
 });
 
 test("appstle: pre-mark write fails → vendor cancel is NOT attempted", async () => {
