@@ -2430,6 +2430,38 @@ export interface OutputFreshnessReading {
 }
 export type OutputFreshnessMap = Map<string, OutputFreshnessReading>;
 
+const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/**
+ * Parse an output-freshness MAX(<dateColumn>) value into a comparable ms-since-epoch.
+ * A bare 'YYYY-MM-DD' (PostgREST serialization for a Postgres `date` column) resolves to the END of
+ * that calendar day in UTC — the day is OVER when its last instant has passed, not when its first
+ * instant arrives. Parsing a `date` as start-of-day midnight (the prior behaviour) made daily output
+ * tables look a full day stale at the first second after midnight on day N+1, which falsely paged
+ * the sync-qb-close-sources tile at 2026-10-03T00:00:30Z against a healthy newest sale_date of
+ * 2026-09-30 (72h maxLag, ~72h0m30s against start-of-day). A value with time info (ISO timestamp
+ * from a `timestamptz` column) keeps exact-timestamp behaviour — only the time-less `date` case
+ * needed the end-of-day interpretation. Returns null for non-strings, empty strings, and anything
+ * that fails to parse so a bad row cannot forge a fresh/stale reading. (control-tower-output-
+ * freshness-date-grain-fix Phase 1.)
+ */
+export function parseOutputFreshnessValueMs(raw: unknown): number | null {
+  if (typeof raw !== "string" || !raw) return null;
+  const m = DATE_ONLY_RE.exec(raw);
+  if (m) {
+    const [, yy, mm, dd] = m;
+    const y = Number(yy);
+    const mo = Number(mm);
+    const d = Number(dd);
+    if (!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) return null;
+    // End of day UTC = last millisecond of 'YYYY-MM-DD' = next-day-midnight − 1.
+    const ms = Date.UTC(y, mo - 1, d + 1) - 1;
+    return Number.isFinite(ms) ? ms : null;
+  }
+  const ts = Date.parse(raw);
+  return Number.isFinite(ts) ? ts : null;
+}
+
 /**
  * READ-ONLY: for every loop that declared an `outputFreshness`, fetch MAX(<dateColumn>) on the
  * declared table (one row, sorted DESC on the date column). Best-effort per loop — a failed read
@@ -2457,11 +2489,11 @@ async function fetchOutputFreshnessMap(
           return;
         }
         const raw = data ? (data as unknown as Record<string, unknown>)[dateColumn] : null;
-        // DATE columns come back as 'YYYY-MM-DD' from PostgREST; TIMESTAMPTZ as an ISO string. A
-        // bare 'YYYY-MM-DD' is parsed as UTC midnight by Date.parse — the safe interpretation
-        // (start-of-day UTC ⇒ conservative age; only reads STALER, never fresher).
-        const ms = typeof raw === "string" && raw ? Date.parse(raw) : null;
-        out.set(loop.id, { newestAtMs: Number.isFinite(ms) ? ms as number : null, readOk: true });
+        // DATE columns come back as 'YYYY-MM-DD' from PostgREST (parsed as the END of that calendar
+        // day in UTC); TIMESTAMPTZ comes back as an ISO string (parsed as its exact timestamp). See
+        // parseOutputFreshnessValueMs for the full rationale.
+        const ms = parseOutputFreshnessValueMs(raw);
+        out.set(loop.id, { newestAtMs: ms, readOk: true });
       } catch (e) {
         console.warn(`[control-tower] fetchOutputFreshnessMap failed for ${loop.id} (${table}.${dateColumn}):`, e instanceof Error ? e.message : e);
         out.set(loop.id, { newestAtMs: null, readOk: false });
@@ -2487,10 +2519,11 @@ async function fetchOutputFreshnessMap(
 export function evalOutputFreshness(
   loop: MonitoredLoop,
   reading: OutputFreshnessReading | undefined,
+  nowMs: number = Date.now(),
 ): { statusText: string; violation: { reason: string; detail: string } } | null {
   const f = loop.outputFreshness;
   if (!f || !reading || !reading.readOk || reading.newestAtMs == null) return null;
-  const lagMs = Date.now() - reading.newestAtMs;
+  const lagMs = nowMs - reading.newestAtMs;
   if (lagMs <= f.maxLagMs) return null;
   const newestIso = new Date(reading.newestAtMs).toISOString().slice(0, 10);
   return {
