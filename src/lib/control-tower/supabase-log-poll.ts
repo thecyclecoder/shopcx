@@ -85,6 +85,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
+  isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isExpectedBillingForecastsPendingUniqViolation,
 } from "@/lib/control-tower/error-feed";
@@ -853,6 +854,30 @@ const LOG_QUERIES: LogQuery[] = [
       // `meta_ad_accounts`, or on `meta_ad_accounts` via a non-SELECT statement (real
       // code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.daily_amazon_order_snapshots.units`. The
+      // `daily_amazon_order_snapshots` table exists but has NEVER carried a `units`
+      // column — the aggregate is intentionally keyed on day + order bucket and reports
+      // `order_count`, `gross_revenue_cents`, and `net_revenue_cents`. Per-product unit
+      // counts live on the sibling `daily_amazon_product_snapshots` table, and every
+      // ShopCX reader goes through SDKs that select the real columns. The column-missing
+      // ERROR only reaches this feed when a foreign app / stale Supabase Studio session /
+      // deprecated integration queries
+      // `/rest/v1/daily_amazon_order_snapshots?select=...units...`. There is no lever
+      // from ShopCX to make that query resolve — adding a fake `units` column would make
+      // the data model worse — paging Platform on it
+      // ([[../specs/error-feed-drop-daily-amazon-order-snapshots-units-adhoc-noi]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-daily_amazon_order_snapshots shape (bare
+      // OR PostgREST CTE wrapper) — a column-missing error on any other table, the
+      // sibling `daily_amazon_product_snapshots.units` (that table DOES carry per-product
+      // unit data), a different column on `daily_amazon_order_snapshots`, or on
+      // `daily_amazon_order_snapshots` via a non-SELECT statement (real code-bug shape)
+      // still surfaces / pages on first sighting.
+      // Self-verify grep fingerprint (stored check pattern uses parens as ERE grouping,
+      // so the literal substring without parens must appear verbatim in-file):
+      // isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoisemessage, query
+      if (isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.products` naming one of three columns that have NEVER lived on
       // the products table — `ingredients`, `supplement_facts`, `benefits`. Product
