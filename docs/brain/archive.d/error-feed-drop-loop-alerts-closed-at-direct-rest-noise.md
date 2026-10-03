@@ -1,0 +1,1 @@
+- **Drop stale loop_alerts closed_at direct REST noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
