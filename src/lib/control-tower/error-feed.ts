@@ -4170,6 +4170,90 @@ export function isForeignSupabasePostgresMissingAgentJobsBranchNameDirectRestLoo
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column agent_jobs.branch does not exist` for an
+ * ad hoc / stale PostgREST direct-REST SELECT against `public.agent_jobs` asking for a
+ * bare `branch` column alongside the real `kind` column. The `agent_jobs` table exists
+ * but has NEVER had a `branch` column — build-branch provenance lives on
+ * `agent_jobs.spec_branch` (and the derived `claude/build-<slug>` branch name computed
+ * from the spec slug), NOT on an `agent_jobs.branch` field, and every ShopCX reader goes
+ * through the agent_jobs SDK which never selects a bare `branch`. The column-missing
+ * ERROR only reaches this feed when a foreign app / stale SQL Editor session /
+ * deprecated integration queries
+ * `/rest/v1/agent_jobs?select=id,status,created_at,kind,branch&kind=eq.*` (a client
+ * confusing the bare `branch` name with the real `spec_branch` column, or confusing
+ * `agent_jobs` with a GitHub-world branch-provenance join). There is no lever from
+ * ShopCX to make that query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:d22f536dec7344d5`,
+ * [[../specs/error-feed-drop-agent-jobs-branch-direct-rest-noise]]) is repair work for a
+ * query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingAgentJobsBranchNameDirectRestLookupNoise`
+ * and `isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise` — same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` + SELECT-lookup
+ * shape covering BOTH bare and PostgREST CTE wrapper forms + co-mention of the real
+ * `kind` column the caller paired with the bogus one), on the same table, aimed at a
+ * different confused column. The co-mention here is `kind` — the sample query carries
+ * `?select=id,status,created_at,kind,branch` with a `WHERE "kind" = $1` branch, so
+ * `kind` is the stable fingerprint of the confused foreign read.
+ *
+ * `true` ONLY when ALL THREE markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column agent_jobs.branch does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.agent_jobs` — either
+ *      (a) the bare `select ... from public.agent_jobs` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."agent_jobs" ... )`
+ *      CTE wrapper form with double-quoted identifiers, AND
+ *   3. the query ALSO mentions `kind` — the real column name the caller included
+ *      alongside the bogus `branch` in the same select list / where branch. A bare
+ *      `select branch from agent_jobs` without `kind` (hypothetical real code after a
+ *      schema regression) stays paged.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have a `branch` column) still pages — the pin is
+ *     `agent_jobs.branch` only,
+ *   - a column-missing error on `agent_jobs` for a DIFFERENT column (e.g. `payload`,
+ *     `result`, `title`, `slug`, `branch_name`, `merge_sha`, `status`, `spec_slug`,
+ *     `workspace_id`, `claude_session_config_dir`) still pages — the pin covers the
+ *     bare `branch` only,
+ *   - a `agent_jobs.branch` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, a JOIN across other tables such as `approval_decisions` /
+ *     `agent_job_costs` / `spec_phases`) still pages — the pin is the SELECT-lookup
+ *     shape; the CTE branch likewise requires the wrapped op to be a SELECT (a
+ *     PostgREST INSERT/UPDATE inside the same wrapper stays paged — that would be a
+ *     real code-write bug on our side),
+ *   - a `agent_jobs.branch` error on a SELECT that does NOT also mention `kind` stays
+ *     paged — the drop is scoped to the confused-column pairing only,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `agent_jobs` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingAgentJobsBranchDirectRestLookupNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column agent_jobs.branch does not exist" ||
+    stripped === "column public.agent_jobs.branch does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  if (!/\bkind\b/.test(q)) return false;
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?agent_jobs\b/.test(q)) return true;
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?agent_jobs\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column workspaces.slug does not exist` for an
  * ad hoc / stale PostgREST direct-REST SELECT against `public.workspaces.slug`. The
  * `workspaces` table exists but by design carries NO `slug` column — the workspace slug
