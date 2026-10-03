@@ -96,6 +96,7 @@ import {
   appstleUnskipOrder,
   appstleGetUpcomingOrders,
   appstleOrderNowByContract,
+  appstleCancelContractVendorOnly,
 } from "@/lib/appstle";
 import {
   subAddItem,
@@ -476,6 +477,28 @@ export async function subscriptionAction(
     return { success: true };
   }
   return appstleSubscriptionAction(workspaceId, contractId, action, cancelReason, cancelledBy);
+}
+
+/**
+ * Cancel the OLD engine's contract during an engine migration — at the VENDOR ONLY.
+ *
+ * ⚠️ Not `subscriptionAction(..., "cancel")`. That is a customer cancel: it also writes
+ * cancel-truth onto our row (status='cancelled', `cancelled_at`, next date nulled), ends open
+ * dunning, and recomputes `customers.subscription_status`. During a migration the subscription
+ * is NOT ending, it is changing engines, and the row is flipped in place right after. The flip
+ * restored `status` but never cleared `cancelled_at`, so every live migrated sub carried a
+ * phantom cancellation date (33 of them, each stamped seconds before its own flip).
+ *
+ * The engine is passed explicitly: the caller already knows it, and after the flip the old
+ * contract id no longer resolves to a row.
+ */
+export async function subscriptionCancelAtVendorForMigration(
+  workspaceId: string,
+  contractId: string,
+  engine: "appstle" | "shopcx",
+): Promise<OpResult> {
+  if (engine === "shopcx") return shopifySubscriptionAction(workspaceId, contractId, "cancel");
+  return appstleCancelContractVendorOnly(workspaceId, contractId);
 }
 
 // ── Schedule ────────────────────────────────────────────────────────
