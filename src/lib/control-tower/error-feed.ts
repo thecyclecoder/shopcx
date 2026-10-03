@@ -3353,6 +3353,99 @@ export function isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column specs.review_status does not exist` for
+ * an ad hoc / stale PostgREST direct-REST SELECT against `public.specs.review_status`.
+ * The `specs` table exists (see `supabase/migrations/20260713120001_specs_and_spec_phases.sql`
+ * and its follow-ons) but has NEVER had a `review_status` column — spec review state
+ * lives in the Vale / Ada review fields on the row ([[../tables/specs]]), and every
+ * ShopCX reader goes through the [[../libraries/specs-table]] SDK. The column-missing
+ * ERROR only reaches this feed when a foreign app / stale SQL Editor session /
+ * deprecated integration issues a direct-REST lookup that types `review_status` on
+ * `public.specs` (`/rest/v1/specs?select=slug,status,review_status,...`, observed both
+ * as a bare SELECT and as the PostgREST-wrapped `WITH pgrst_source AS ( SELECT ...
+ * FROM "public"."specs" ... )` CTE form). There is no lever from ShopCX to make that
+ * query resolve — adding a fake `review_status` column would make the data model worse
+ * since review state is already modeled on the Vale / Ada fields — paging Platform on
+ * it (Control Tower signature `supabase-logs:2138caca9f1a5ba0`,
+ * [[../specs/error-feed-drop-specs-review-status-direct-rest-noise]]) is repair work
+ * for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise`,
+ * `isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise`, and
+ * `isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise` — the same narrow-gating
+ * shape (exact `column <table>.<name> does not exist` + SELECT-lookup shape covering
+ * BOTH bare and PostgREST CTE wrapper forms), aimed at a different foreign caller on
+ * the same `specs` table but a different phantom column.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column specs.review_status does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.specs` — either
+ *      (a) the bare `select ... from public.specs` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."specs" ... )`
+ *      CTE wrapper form with double-quoted identifiers. Both forms are the same
+ *      foreign-owned read.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on
+ *     a table that DOES have a `review_status` column) still pages — the pin is
+ *     `specs.review_status` only,
+ *   - a column-missing error on `specs` for a DIFFERENT column (e.g. a real column
+ *     that got renamed — `status`, `slug`, `workspace_id`) still pages — the pin
+ *     covers `review_status` only,
+ *   - a `specs.review_status` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, a JOIN across other tables such as `spec_phases`) still
+ *     pages — the pin is the SELECT-lookup shape, matching the ad hoc direct-REST
+ *     read we've observed; the CTE branch likewise requires the wrapped op to be a
+ *     SELECT (a PostgREST INSERT/UPDATE inside the same wrapper stays paged),
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing
+ *     on `specs` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `specs.review_status` (with or without the `public.` qualifier).
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column specs.review_status does not exist" ||
+    stripped === "column public.specs.review_status does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `specs` (with or
+  // without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to specs with a bogus `review_status`
+  // column is a code bug we DO want to page on, not the ad hoc direct-REST read this
+  // drop targets. `\b` around `specs` keeps the anchor from matching sibling tables
+  // like `spec_phases` / `spec_status_history`.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?specs\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."specs" ... )` with double-quoted identifiers. Same foreign-owned
+  // read, different rendering — the plain SELECT regex above misses it because the
+  // statement starts with `with` and the FROM clause carries the quoted
+  // `"public"."specs"` shape. Guarded so the CTE branch requires the wrapped op to be
+  // a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper — e.g.
+  // `WITH pgrst_source AS (INSERT INTO "public"."specs"("review_status") ...)` — is a
+  // real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?specs\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column agent_jobs.slug does not exist` for an
  * ad hoc / stale PostgREST direct-REST SELECT against `public.agent_jobs` that asks for
  * BOTH `slug` and the real `spec_slug` column. The `agent_jobs` table exists
