@@ -59,6 +59,7 @@ import { recoverSpecsForSession, type RecoveredSpec } from "./planner-transcript
 import { isStrandedFoldCandidate } from "./builder-worker.stranded-fold"; // fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 1 — pure decision predicate for sweepStrandedFolds
 import { shouldReAskForJsonEnvelope, storefrontOptimizerReAskPrompt } from "../src/lib/storefront-optimizer-reask"; // storefront-optimizer-re-asks-once-before-parking Phase 1 — pure decision helper for the one bounded re-ask before park
 import { applyRefreshOutcome, classifyAccountHealth, decideHeldAccountRecovery, decideSweepAction } from "./builder-worker.auth-refresh";
+import { parseOverflowDirs, parsePrimarySoftMax, pickTieredAccount } from "./builder-worker.account-tier"; // box-account-tiers — Max primaries carry the load, Pro accounts take overflow only.
 import { applyOauthTokenEnv, decideTokenHoldRelease, readOauthToken, tokenExpiryStatus, type OauthToken } from "./builder-worker.oauth-token"; // box-setup-token-auth — per-account one-year `claude setup-token` tokens replace the race-prone /login refresh tokens (anthropics/claude-code#48786); see docs/brain/recipes/build-box-setup.md § Long-lived setup-token auth. // a-test-that-no-runner-executes-is-not-a-test Phase 1 — pure decision predicates for sweepExpiredCredentials + attemptCredentialRefresh, extracted so scripts/builder-worker.auth-refresh.test.ts can pin the four cases the outage named. build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 — classifyAccountHealth is the shared account-health classifier the sweepUpcomingExpiries + brain runbook document as the SoT for the reason vocabulary. Re-authored Phase 1 — decideHeldAccountRecovery is the pure predicate the sweep consults for accounts ALREADY held, so a CEO re-auth returns them to rotation on the next sweep tick instead of waiting out the 25-hour weekly-cap window.
 // planner-authoring-survives-large-multi-spec-output Phase 2 — bounded per-result size for the
 // planner authoring turn: split the approved specs into small batches (K=2), one runClaude call
@@ -1317,6 +1318,7 @@ function accountsSnapshot(now: number) {
       // quota claim we cannot substantiate. Defaulting to 'usage_cap' is what sent the founder to
       // check usage twice on 2026-08-03 while two accounts had actually been dead for 49h/66h.
       hold_reason: a.cappedUntil > now ? (a.holdReason ?? null) : null,
+      tier: OVERFLOW_CONFIG_DIRS.has(a.configDir) ? "overflow" : "primary", // box-account-tiers
     })),
     healthy: healthyAccounts(now).length,
     total: accounts.length,
@@ -1385,6 +1387,11 @@ async function restoreAccountCapsOnBoot(): Promise<void> {
   }
 }
 
+// box-account-tiers (CEO 2026-10-02) — RR1/RR2 are Max (primary), RR3/RR4 are Pro (overflow only: they
+// get a NEW session only when every healthy primary already carries BOX_PRIMARY_ACCOUNT_SOFT_MAX sessions,
+// or is capped/held). Override with BOX_OVERFLOW_CONFIG_DIRS (comma list, or "none" for a flat pool).
+const OVERFLOW_CONFIG_DIRS = parseOverflowDirs(process.env.BOX_OVERFLOW_CONFIG_DIRS);
+const PRIMARY_ACCOUNT_SOFT_MAX = parsePrimarySoftMax(process.env.BOX_PRIMARY_ACCOUNT_SOFT_MAX);
 function healthyAccounts(now: number): AccountState[] {
   return accounts.filter((a) => a.cappedUntil <= now);
 }
@@ -1501,8 +1508,9 @@ function pickNewSessionAccount(now: number): AccountState | null {
   // Floor at 0: the reconcile can briefly leave a counter negative when both decrements of a just-ended
   // double-counted lane land after a heartbeat reconciled it to the ground truth — a negative must not make
   // an account look "emptiest". Self-heals on the next reconcile tick regardless.
-  healthy.sort((a, b) => Math.max(0, a.inFlight) - Math.max(0, b.inFlight) || a.lastAssignedAt - b.lastAssignedAt);
-  return healthy[0];
+  // box-account-tiers — least-loaded among Max primaries under their soft max, else Pro overflow, else
+  // stack on a primary (see scripts/builder-worker.account-tier.ts for the full rule + tests).
+  return pickTieredAccount(healthy, OVERFLOW_CONFIG_DIRS, PRIMARY_ACCOUNT_SOFT_MAX);
 }
 
 // The rollover entry-point for EVERY autonomous box runner (repair/regression/security/seed/improve/
