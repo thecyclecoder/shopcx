@@ -42,6 +42,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
@@ -7032,6 +7033,310 @@ test("isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise re
   assert.equal(
     isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(
       "column agent_jobs.config_dir does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise ──
+// Sibling of the `agent_jobs.result` / `agent_jobs.payload` drops above — a foreign /
+// stale PostgREST direct-REST client confuses the GitHub-world `merge_sha` with a
+// column on our `public.agent_jobs` table. The table exists but has NEVER had a
+// `merge_sha` column — merge-SHA ship provenance lives on `spec_phases.merge_sha` (see
+// `supabase/migrations/20260726120001_spec_phases_build_sha.sql`), and every ShopCX
+// reader goes through the agent_jobs SDK which never selects `merge_sha`. Foreign-
+// owned surface, no lever from us — drop AT CAPTURE only when ALL THREE of the exact
+// column-missing message on `agent_jobs.merge_sha`, a SELECT-lookup shape on
+// `agent_jobs` (bare OR PostgREST CTE wrapper), AND a `kind` mention in the same query
+// are present. A column-missing on any other table (e.g. `spec_phases.merge_sha` after
+// a real regression), a different column on `agent_jobs`, a JOIN through
+// `approval_decisions` / `agent_job_costs` / `spec_phases`, a bare
+// `select merge_sha from agent_jobs` without `kind`, or a non-SELECT statement still
+// pages.
+
+test("isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise drops the ad hoc SELECT lookup on the exact agent_jobs.merge_sha column-missing shape (bare)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      "select id, status, created_at, kind, merge_sha from public.agent_jobs where kind = $1 order by created_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column public.agent_jobs.merge_sha does not exist",
+      "select merge_sha, kind from public.agent_jobs where kind = $1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      "select merge_sha, kind from agent_jobs limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      "SELECT MERGE_SHA, KIND FROM PUBLIC.AGENT_JOBS",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "ERROR: column agent_jobs.merge_sha does not exist",
+      "select merge_sha, kind from public.agent_jobs",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "  column agent_jobs.merge_sha does not exist  ",
+      "   select merge_sha, kind from public.agent_jobs   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"agent_jobs\" ...)` CTE wrapper form", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs"."id", "public"."agent_jobs"."status", "public"."agent_jobs"."created_at", "public"."agent_jobs"."kind", "public"."agent_jobs"."merge_sha" FROM "public"."agent_jobs" WHERE "public"."agent_jobs"."kind" = $1 ORDER BY "public"."agent_jobs"."created_at" DESC LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column public.agent_jobs.merge_sha does not exist",
+      'WITH pgrst_source AS (SELECT "public"."agent_jobs"."merge_sha", "public"."agent_jobs"."kind" FROM "public"."agent_jobs")',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "ERROR: column agent_jobs.merge_sha does not exist",
+      'WITH pgrst_source AS (SELECT "public"."agent_jobs"."merge_sha", "public"."agent_jobs"."kind" FROM "public"."agent_jobs")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise KEEPS a non-SELECT statement shape (a real code-bug writing agent_jobs.merge_sha still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      "insert into public.agent_jobs (kind, merge_sha) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      "update public.agent_jobs set merge_sha = $1 where kind = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      "delete from public.agent_jobs where merge_sha = $1 and kind = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."agent_jobs"("kind", "merge_sha") VALUES ($1, $2) RETURNING "public"."agent_jobs"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."agent_jobs" SET "merge_sha" = $1 WHERE "public"."agent_jobs"."kind" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise KEEPS a DIFFERENT column-missing on agent_jobs (a real column rename still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.payload does not exist",
+      "select payload, kind from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.result does not exist",
+      "select result, kind from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.title does not exist",
+      "select title, kind from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.spec_slug does not exist",
+      "select spec_slug, kind from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.workspace_id does not exist",
+      "select workspace_id, kind from public.agent_jobs",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.status does not exist",
+      "select status, kind from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.kind does not exist",
+      "select kind from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise KEEPS a column-missing error on any OTHER table (a real schema regression on a different table still pages — spec_phases.merge_sha is a real column)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column spec_phases.merge_sha does not exist",
+      "select merge_sha, kind from public.spec_phases where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column deploy_watches.merge_sha does not exist",
+      "select merge_sha, kind from public.deploy_watches where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column specs.merge_sha does not exist",
+      "select merge_sha, kind from public.specs where workspace_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise KEEPS a bare SELECT on agent_jobs.merge_sha without the `kind` co-mention (hypothetical real code after a schema regression still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      "select merge_sha from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      "select id, merge_sha from agent_jobs limit 10",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      'WITH pgrst_source AS (SELECT "public"."agent_jobs"."merge_sha" FROM "public"."agent_jobs")',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise KEEPS a JOIN across other tables (a real code shape joining approval_decisions / agent_job_costs / spec_phases still pages)", () => {
+  // The regex is anchored on `from (public.)?agent_jobs` as the first FROM target; a
+  // JOIN whose first FROM is `approval_decisions` / `agent_job_costs` / `spec_phases`
+  // won't match — which is the outcome we want, because a caller that joins the two
+  // and asks for a real column shape is product code, not the ad hoc direct-REST read.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      "select a.merge_sha, j.kind from public.approval_decisions a join public.agent_jobs j on j.id = a.agent_job_id",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      "select c.merge_sha, j.kind from public.agent_job_costs c join public.agent_jobs j on j.id = c.job_id",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      "select p.merge_sha, j.kind from public.spec_phases p join public.agent_jobs j on j.spec_slug = p.spec_slug",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on agent_jobs (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "FATAL: database system is shutting down",
+      "select merge_sha, kind from public.agent_jobs",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "permission denied for table agent_jobs",
+      "select merge_sha, kind from public.agent_jobs",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "relation \"agent_jobs\" does not exist",
+      "select merge_sha, kind from public.agent_jobs",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise("", ""),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(
+      "column agent_jobs.merge_sha does not exist",
       null,
     ),
     false,
