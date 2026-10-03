@@ -687,7 +687,7 @@ export async function subscriptionRemoveItem(
   workspaceId: string,
   contractId: string,
   variantOrLine: string | { variantId?: string; lineGid?: string },
-): Promise<OpResult & { alreadyAbsent?: boolean }> {
+): Promise<OpResult & { alreadyAbsent?: boolean; pending?: boolean }> {
   return subRemoveItem(workspaceId, contractId, variantOrLine);
 }
 

@@ -1,0 +1,1 @@
+- **Fix date-grain output freshness false alarms** · verified 2026-10-03 · → [[../libraries/control-tower#parseOutputFreshnessValueMs]]
