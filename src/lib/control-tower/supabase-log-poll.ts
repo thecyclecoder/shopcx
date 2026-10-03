@@ -36,7 +36,7 @@ import {
   isForeignGoTrueAuthLogNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
-  isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise,
+  isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
@@ -242,15 +242,18 @@ const LOG_QUERIES: LogQuery[] = [
       // owned (lifecycle is tracked via `status` + `resolved_at`). PostgREST wraps the
       // request as `WITH pgrst_source AS ( SELECT ... FROM "public"."loop_alerts" ... )`,
       // Postgres rejects with `column loop_alerts.closed_at does not exist`
-      // ([[../specs/error-feed-drop-loop-alerts-closed-at-direct-rest-noise]], Control
-      // Tower signature `supabase-logs:7dc04785e9561d24`). Companion of the
-      // `LoopAlertsColumnLookup` drop above, scoped to the direct-REST `closed_at` miss
-      // instead of the SQL-Editor confusion. Narrowly gated to require BOTH the exact
-      // `column loop_alerts.closed_at does not exist` message AND the SELECT-lookup shape
-      // on `loop_alerts` (bare or PostgREST CTE wrapper) — a real column-missing on
-      // `tickets.closed_at`, a `loop_alerts` column rename, a non-SELECT write, or a
-      // FATAL/PANIC/constraint violation still surfaces / pages on first sighting.
-      if (isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(message, query)) return null;
+      // ([[../specs/error-feed-drop-loop-alerts-closed-at-direct-rest-noise]] /
+      // [[../specs/error-feed-drop-loop-alerts-error-signature-direct-rest-noise]],
+      // Control Tower signatures `supabase-logs:7dc04785e9561d24` (closed_at) and
+      // `supabase-logs:2f7afeedcba03d28` (error_signature)). Companion of the
+      // `LoopAlertsColumnLookup` drop above, scoped to the direct-REST missing-column
+      // miss instead of the SQL-Editor confusion. Narrowly gated to require BOTH the
+      // exact `column loop_alerts.<closed_at|error_signature> does not exist` message
+      // AND the SELECT-lookup shape on `loop_alerts` (bare or PostgREST CTE wrapper) —
+      // a real column-missing on `tickets.closed_at` / `error_events.error_signature`,
+      // a `loop_alerts` column rename, a non-SELECT write, or a FATAL/PANIC/constraint
+      // violation still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an operator typo — a manual SQL client did a
       // `select ... from error_events` naming the wrong column (`first_seen` instead of
       // our real `first_seen_at`). The resulting undefined_column ERROR is repair work

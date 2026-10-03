@@ -62,7 +62,7 @@ import {
   isExpectedBillingForecastsPendingUniqViolation,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
-  isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise,
+  isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
@@ -837,7 +837,7 @@ test("isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise returns false 
 });
 
 
-// ── isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise ──
+// ── isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise ──
 // The stale Supabase Studio / direct-REST read of `loop_alerts?select=...closed_at...`
 // against a column `loop_alerts` has never owned (Control Tower signature
 // `supabase-logs:7dc04785e9561d24`). Drop AT CAPTURE only when BOTH the exact
@@ -846,13 +846,13 @@ test("isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise returns false 
 // `tickets.closed_at`, a `loop_alerts` column rename (e.g. `resolved_at`), a non-SELECT
 // write, or a FATAL/PANIC/constraint violation still surfaces / pages.
 
-test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise drops the PostgREST CTE wrapper lookup projecting the non-existent closed_at column", () => {
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise drops the PostgREST CTE wrapper lookup projecting the non-existent closed_at column", () => {
   // The captured incident shape (Control Tower `supabase-logs:7dc04785e9561d24`): a stale
   // Supabase Studio / direct-REST client reads `loop_alerts?select=...closed_at...`,
   // PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM "public"."loop_alerts"
   // ... )` CTE, and Postgres rejects with `column loop_alerts.closed_at does not exist`.
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column loop_alerts.closed_at does not exist",
       'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."id", "public"."loop_alerts"."closed_at" FROM "public"."loop_alerts" LIMIT $1 OFFSET $2 )',
     ),
@@ -860,7 +860,7 @@ test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise drops th
   );
   // The `public.`-qualified message variant is the same class.
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column public.loop_alerts.closed_at does not exist",
       'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."closed_at" FROM "public"."loop_alerts" LIMIT 1 )',
     ),
@@ -868,7 +868,7 @@ test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise drops th
   );
   // Already-lowercased variant (Postgres normalizes to lowercase in the log) still drops.
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column loop_alerts.closed_at does not exist",
       'with pgrst_source as ( select "public"."loop_alerts"."closed_at" from "public"."loop_alerts" limit 1 )',
     ),
@@ -876,7 +876,7 @@ test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise drops th
   );
   // Postgres's `ERROR: ` prefix is stripped before the equality check.
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "ERROR: column loop_alerts.closed_at does not exist",
       'WITH pgrst_source AS ( SELECT "closed_at" FROM "public"."loop_alerts" )',
     ),
@@ -885,7 +885,7 @@ test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise drops th
   // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface,
   // different client / shape.
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column loop_alerts.closed_at does not exist",
       "select * from public.loop_alerts where closed_at is null",
     ),
@@ -893,7 +893,7 @@ test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise drops th
   );
   // The unqualified-FROM (no `public.`) variant is the same class.
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column loop_alerts.closed_at does not exist",
       "select id, closed_at from loop_alerts order by closed_at desc limit 10",
     ),
@@ -901,26 +901,26 @@ test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise drops th
   );
 });
 
-test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise KEEPS a PostgREST CTE INSERT/UPDATE/DELETE on loop_alerts (a real code-bug write still pages)", () => {
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS a PostgREST CTE INSERT/UPDATE/DELETE on loop_alerts (a real code-bug write still pages)", () => {
   // A PostgREST write wrapped in the same `WITH pgrst_source AS (...)` envelope is a real
   // code-bug shape (someone trying to write a bogus column), not the ad hoc read this
   // drop targets — the CTE branch requires the wrapped op to be a SELECT.
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column loop_alerts.closed_at does not exist",
       'WITH pgrst_source AS ( INSERT INTO "public"."loop_alerts"("id","closed_at") VALUES ($1,$2) RETURNING * )',
     ),
     false,
   );
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column loop_alerts.closed_at does not exist",
       'WITH pgrst_source AS ( UPDATE "public"."loop_alerts" SET "closed_at" = $1 WHERE "id" = $2 RETURNING * )',
     ),
     false,
   );
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column loop_alerts.closed_at does not exist",
       'WITH pgrst_source AS ( DELETE FROM "public"."loop_alerts" WHERE "closed_at" < $1 RETURNING * )',
     ),
@@ -929,14 +929,14 @@ test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise KEEPS a 
   // A bare INSERT / UPDATE on `loop_alerts` naming `closed_at` is likewise a real code
   // write trying to persist a bogus column — a bug we WANT to see, not the ad hoc read.
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column loop_alerts.closed_at does not exist",
       "insert into public.loop_alerts (closed_at) values ($1)",
     ),
     false,
   );
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column loop_alerts.closed_at does not exist",
       "update public.loop_alerts set closed_at = now() where id = $1",
     ),
@@ -944,19 +944,19 @@ test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise KEEPS a 
   );
 });
 
-test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise KEEPS the closed_at column-missing message on a DIFFERENT relation (a real product-schema regression still pages)", () => {
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS the closed_at column-missing message on a DIFFERENT relation (a real product-schema regression still pages)", () => {
   // A real column-missing on another table that DOES carry a `closed_at` column
   // (e.g. `tickets.closed_at`) is a genuine regression we want to see — the pin names
   // `loop_alerts.closed_at` only.
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column tickets.closed_at does not exist",
       "select * from public.tickets where closed_at is null",
     ),
     false,
   );
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column public.tickets.closed_at does not exist",
       'WITH pgrst_source AS ( SELECT "public"."tickets"."closed_at" FROM "public"."tickets" )',
     ),
@@ -964,18 +964,18 @@ test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise KEEPS th
   );
 });
 
-test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise KEEPS a DIFFERENT missing column on loop_alerts (e.g. resolved_at — a real column rename still pages)", () => {
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS a DIFFERENT missing column on loop_alerts (e.g. resolved_at — a real column rename still pages)", () => {
   // A real loop_alerts column (e.g. `resolved_at`) going missing is a schema regression
   // we DO want to see — the pin covers `closed_at` only, not any column name.
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column loop_alerts.resolved_at does not exist",
       'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."resolved_at" FROM "public"."loop_alerts" )',
     ),
     false,
   );
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column loop_alerts.resolved_at does not exist",
       "select * from public.loop_alerts where resolved_at is null",
     ),
@@ -983,18 +983,18 @@ test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise KEEPS a 
   );
 });
 
-test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise KEEPS a FATAL / PANIC / constraint violation on loop_alerts (a different Postgres error still pages)", () => {
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS a FATAL / PANIC / constraint violation on loop_alerts (a different Postgres error still pages)", () => {
   // Different message class — the pin is exact, only the closed_at column-missing shape
   // is dropped.
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "database is shutting down",
       'WITH pgrst_source AS ( SELECT "closed_at" FROM "public"."loop_alerts" )',
     ),
     false,
   );
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       'permission denied for relation "public.loop_alerts"',
       "select * from public.loop_alerts where closed_at is null",
     ),
@@ -1002,19 +1002,155 @@ test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise KEEPS a 
   );
 });
 
-test("isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise returns false on empty / nullish input", () => {
-  assert.equal(isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(null, null), false);
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise returns false on empty / nullish input", () => {
+  assert.equal(isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(null, null), false);
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(undefined, undefined),
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(undefined, undefined),
     false,
   );
-  assert.equal(isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise("", ""), false);
+  assert.equal(isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise("", ""), false);
   // Empty query — even with the exact message we cannot confirm the shape, so the row
   // stays captured.
   assert.equal(
-    isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
       "column loop_alerts.closed_at does not exist",
       "",
+    ),
+    false,
+  );
+});
+
+// ── error_signature branch of the same filter ──
+// Companion incident on the same `loop_alerts` direct-REST shape (Control Tower
+// signature `supabase-logs:2f7afeedcba03d28`): a stale PostgREST client reads
+// `loop_alerts?select=...error_signature...`, PostgREST wraps it in the same
+// `WITH pgrst_source AS (...)` CTE, and Postgres rejects with
+// `column loop_alerts.error_signature does not exist` (the name belongs to
+// `error_events`, not `loop_alerts`). Same drop class — bare SELECT or PostgREST CTE
+// SELECT only, pinned by the exact column-missing message.
+
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise drops the PostgREST CTE wrapper lookup projecting the non-existent error_signature column", () => {
+  // The captured incident shape (`supabase-logs:2f7afeedcba03d28`): a stale direct-REST
+  // client reads `loop_alerts?select=...error_signature...`.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.error_signature does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."id", "public"."loop_alerts"."error_signature" FROM "public"."loop_alerts" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column public.loop_alerts.error_signature does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."error_signature" FROM "public"."loop_alerts" LIMIT 1 )',
+    ),
+    true,
+  );
+  // Already-lowercased variant (Postgres normalizes to lowercase in the log) still drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.error_signature does not exist",
+      'with pgrst_source as ( select "public"."loop_alerts"."error_signature" from "public"."loop_alerts" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "ERROR: column loop_alerts.error_signature does not exist",
+      'WITH pgrst_source AS ( SELECT "error_signature" FROM "public"."loop_alerts" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface,
+  // different client / shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.error_signature does not exist",
+      "select * from public.loop_alerts where error_signature is null",
+    ),
+    true,
+  );
+  // The unqualified-FROM (no `public.`) variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.error_signature does not exist",
+      "select id, error_signature from loop_alerts order by error_signature desc limit 10",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS a non-SELECT statement shape on the error_signature message (a real code-bug write still pages)", () => {
+  // A PostgREST write wrapped in the same `WITH pgrst_source AS (...)` envelope is a real
+  // code-bug shape (someone trying to write a bogus column), not the ad hoc read this
+  // drop targets — the CTE branch requires the wrapped op to be a SELECT.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.error_signature does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."loop_alerts"("id","error_signature") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.error_signature does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."loop_alerts" SET "error_signature" = $1 WHERE "id" = $2 RETURNING * )',
+    ),
+    false,
+  );
+  // A bare INSERT / UPDATE / DELETE on `loop_alerts` naming `error_signature` is likewise
+  // a real code write trying to persist a bogus column — a bug we WANT to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.error_signature does not exist",
+      "insert into public.loop_alerts (error_signature) values ($1)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.error_signature does not exist",
+      "update public.loop_alerts set error_signature = $1 where id = $2",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS the error_signature column-missing message on a DIFFERENT relation (a real product-schema regression still pages)", () => {
+  // `error_signature` is a real `error_events` column — a column-missing on it there is a
+  // genuine regression we want to see. The pin names `loop_alerts.error_signature` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column error_events.error_signature does not exist",
+      "select * from public.error_events where error_signature is null",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column public.error_events.error_signature does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."error_events"."error_signature" FROM "public"."error_events" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS an unrelated missing column on loop_alerts (e.g. workspace_id — a real column rename still pages)", () => {
+  // Any `loop_alerts` column outside the pinned {closed_at, error_signature} set is a real
+  // regression we DO want to see — the pin is deliberately narrow.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.workspace_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."workspace_id" FROM "public"."loop_alerts" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.status does not exist",
+      "select * from public.loop_alerts where status = 'open'",
     ),
     false,
   );
