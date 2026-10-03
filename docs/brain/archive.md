@@ -12,6 +12,20 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Fix date-grain output freshness false alarms** · verified 2026-10-03 · → [[../libraries/control-tower#parseOutputFreshnessValueMs]]
+- **Drop stale agent_jobs branch_name direct-REST log noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
+- **Drop stale direct agent_jobs merge_sha lookup noise** · verified 2026-10-03 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise`)
+- **Drop stale daily Amazon order units lookup noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
+- **Drop stale loop_alerts closed_at direct REST noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
+- **Drop stale loop_alerts error_signature direct-REST noise** · verified 2026-10-03 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise`)
+- **Drop stale specs.fold_status PostgREST noise from Supabase logs** · verified 2026-10-03 · → [[../tables/specs]]
+- **Drop stale specs.review_status direct-REST noise from Supabase logs** · verified 2026-10-03 · → [[lifecycles/control-tower]]
+- **Error-feed drop: agent_jobs.config_dir direct-REST lookup noise** · verified 2026-10-02 · → [[../libraries/control-tower]]
+- **Drop foreign-app jsonb LIKE on appstle_contract_snapshots.raw from the Supabase postgres error feed** · verified 2026-10-02 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise`)
+- **Drop foreign `orders.total_price` and `orders.subtotal_price` column-missing noise from the error feed** · verified 2026-10-02 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise`)
+- **Scope out foreign `product_variants.price` direct-REST noise at capture** · verified 2026-10-02 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise`)
+- **Portal removelineitem false-fails when Appstle remove propagates slower than 800ms verify window** · verified 2026-10-02 · → [[../libraries/subscription-items]]
+- **Fix _probe-spec-fold.ts: select specs.owner not specs.owner_function** · verified 2026-10-02 · → [[../libraries/builder-worker]]
 - **Widen sync-qb-close-sources output-freshness threshold to accommodate Amazon shipping-lag** · verified 2026-10-02 · → [[../libraries/control-tower]]
 - **Drop the foreign-app `agent_jobs.payload` direct-REST read noise from the Control Tower error feed** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise`)
 - **Drop foreign-app agent_jobs.result direct-REST column-missing noise** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
