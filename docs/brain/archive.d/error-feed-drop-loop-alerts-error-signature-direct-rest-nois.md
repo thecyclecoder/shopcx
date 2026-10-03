@@ -1,0 +1,1 @@
+- **Drop stale loop_alerts error_signature direct-REST noise** · verified 2026-10-03 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise`)
