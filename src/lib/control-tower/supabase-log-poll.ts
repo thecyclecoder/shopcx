@@ -76,6 +76,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingAgentJobsBranchNameDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
@@ -848,6 +849,30 @@ const LOG_QUERIES: LogQuery[] = [
       // `agent_jobs` via a non-SELECT statement (real code-bug shape) still surfaces /
       // pages on first sighting.
       if (isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.agent_jobs` asking for `branch_name` alongside the real `kind`
+      // column. The `agent_jobs` table exists but has NEVER had a `branch_name` column —
+      // build-branch provenance lives on the `claude/build-<slug>` branch name derived
+      // from the spec slug + the merge SHA stamped on `spec_phases.merge_sha`, NOT on an
+      // `agent_jobs.branch_name` field, and every ShopCX reader goes through the
+      // agent_jobs SDK which never selects `branch_name`. The column-missing ERROR only
+      // reaches this feed when a foreign app / stale SQL Editor session / deprecated
+      // integration queries
+      // `/rest/v1/agent_jobs?select=id,status,created_at,kind,branch_name&kind=eq.*` (a
+      // client confusing `agent_jobs` with a GitHub-world branch-provenance join). There
+      // is no lever from ShopCX to make that query resolve — paging Platform on it
+      // (Control Tower signature `supabase-logs:2ce4ef0484f3dbd2`,
+      // [[../specs/error-feed-drop-agent-jobs-branch-name-direct-rest-noise]]) is repair
+      // work for a query we don't own. Narrowly gated to require ALL THREE of the
+      // exact column-missing message, a SELECT-on-agent_jobs shape (bare OR PostgREST
+      // CTE wrapper), AND a `kind` mention in the same query — a column-missing on any
+      // other table (a table that DOES have a `branch_name` column after a real
+      // regression), a different column on `agent_jobs`, a JOIN through
+      // `approval_decisions` / `agent_job_costs` / `spec_phases`, a bare `select
+      // branch_name from agent_jobs` without `kind`, or on `agent_jobs` via a non-SELECT
+      // statement (real code-bug shape) still surfaces / pages on first sighting.
+      // Static-analysis fingerprint — `isForeignSupabasePostgresMissingAgentJobsBranchNameDirectRestLookupNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
+      if (isForeignSupabasePostgresMissingAgentJobsBranchNameDirectRestLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.workspaces.slug`. The `workspaces` table exists but has NO
       // `slug` column — the workspace slug shape lives on `workspaces.help_slug` (the
