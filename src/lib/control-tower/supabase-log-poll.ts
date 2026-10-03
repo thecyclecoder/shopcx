@@ -75,6 +75,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsResultDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
@@ -825,6 +826,28 @@ const LOG_QUERIES: LogQuery[] = [
       // non-SELECT statement (real code-bug shape) still surfaces / pages on first
       // sighting.
       if (isForeignSupabasePostgresMissingAgentJobsConfigDirDirectRestLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.agent_jobs` asking for `merge_sha` alongside the real `kind`
+      // column. The `agent_jobs` table exists but has NEVER had a `merge_sha` column —
+      // the merge-SHA ship provenance lives on `spec_phases.merge_sha` (see
+      // `supabase/migrations/20260726120001_spec_phases_build_sha.sql`), NOT on the
+      // `agent_jobs` row itself, and every ShopCX reader goes through the agent_jobs
+      // SDK which never selects `merge_sha`. The column-missing ERROR only reaches this
+      // feed when a foreign app / stale SQL Editor session / deprecated integration
+      // queries `/rest/v1/agent_jobs?select=id,status,created_at,kind,merge_sha&kind=eq.*`
+      // (a client confusing `agent_jobs` with `spec_phases` or a stale phase-provenance
+      // join). There is no lever from ShopCX to make that query resolve — paging
+      // Platform on it (Control Tower signature `supabase-logs:70e0acbdbfd12de1`,
+      // [[../specs/error-feed-drop-agent-jobs-merge-sha-direct-rest-noise]]) is repair
+      // work for a query we don't own. Narrowly gated to require ALL THREE of the
+      // exact column-missing message, a SELECT-on-agent_jobs shape (bare OR PostgREST
+      // CTE wrapper), AND a `kind` mention in the same query — a column-missing on any
+      // other table (e.g. `spec_phases.merge_sha` after a real regression), a different
+      // column on `agent_jobs`, a JOIN through `approval_decisions` / `agent_job_costs` /
+      // `spec_phases`, a bare `select merge_sha from agent_jobs` without `kind`, or on
+      // `agent_jobs` via a non-SELECT statement (real code-bug shape) still surfaces /
+      // pages on first sighting.
+      if (isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.workspaces.slug`. The `workspaces` table exists but has NO
       // `slug` column — the workspace slug shape lives on `workspaces.help_slug` (the
