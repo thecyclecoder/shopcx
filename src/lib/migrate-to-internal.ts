@@ -108,9 +108,11 @@ async function repointOpenDunningCyclesForMigration(
  *     ShopCX contracts are skipped: their row may already carry its origin Appstle id there, and
  *     the cancel's Shopify webhook goes through ShopCX ingest, not this guard.
  */
-async function cancelOldEngineForMigration(
+export async function cancelOldEngineForMigration(
   admin: Admin,
   args: { workspaceId: string; subId: string; contractId: string; engine: "appstle" | "shopcx"; priorMigratedFrom: string | null },
+  /** Injectable for tests; production always uses the SDK's vendor-only cancel. */
+  cancelAtVendor: typeof subscriptionCancelAtVendorForMigration = subscriptionCancelAtVendorForMigration,
 ): Promise<{ success: boolean; error?: string }> {
   const premark = args.engine === "appstle" && args.priorMigratedFrom !== args.contractId;
   if (premark) {
@@ -121,7 +123,7 @@ async function cancelOldEngineForMigration(
       .eq("shopify_contract_id", args.contractId);
     if (error) return { success: false, error: `pre-cancel mark failed: ${error.message}` };
   }
-  const r = await subscriptionCancelAtVendorForMigration(args.workspaceId, args.contractId, args.engine);
+  const r = await cancelAtVendor(args.workspaceId, args.contractId, args.engine);
   if (!r.success && premark) {
     await admin
       .from("subscriptions")
