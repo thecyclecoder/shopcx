@@ -58,6 +58,8 @@
     "test:all": "tsx scripts/_run-registered-tests.ts",
     "test:order-now-guard": "tsx --test src/lib/portal/order-now-guard.test.ts",
     "test:migrate-to-internal-promo-flags": "tsx --test src/lib/migrate-to-internal.promo-flags.test.ts",
+    "test:migrate-to-internal-cancel-old-engine": "tsx --test src/lib/migrate-to-internal.cancel-old-engine.test.ts",
+    "test:backfill-migrated-live-subs-phantom-cancelled-at": "tsx --test scripts/_backfill-migrated-live-subs-phantom-cancelled-at.test.ts",
     "test:amazon-sync-connection-id-guard": "tsx --test src/lib/inngest/amazon-sync.connection-id-guard.test.ts",
     "test:popup-offer-normalize-product-id": "tsx --test src/lib/popup/offer.normalize-product-id.test.ts",
     "test:vendor-refund-mirror": "tsx --test src/lib/vendor-refund-mirror.test.ts",
