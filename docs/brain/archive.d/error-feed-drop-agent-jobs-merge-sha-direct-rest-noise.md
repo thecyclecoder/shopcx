@@ -1,0 +1,1 @@
+- **Drop stale direct agent_jobs merge_sha lookup noise** · verified 2026-10-03 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise`)
