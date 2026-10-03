@@ -3692,6 +3692,69 @@ test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise also drops
   );
 });
 
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise also drops the sibling specs.fold_status direct-REST shape (supabase-logs:7eab1943f640108d)", () => {
+  // fold_status — there is no `fold_status` column on `public.specs`; lifecycle state is
+  // represented by `status` (with a `folded` value) + a `deferred boolean` flag. A stale
+  // PostgREST client that still reads `fold_status` is the foreign-owned class we drop.
+  // Captured PostgREST CTE shape (the direct-REST read wraps the SELECT in pgrst_source
+  // with double-quoted identifiers).
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.fold_status does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."specs"."id", "public"."specs"."slug", "public"."specs"."fold_status" FROM "public"."specs" WHERE "public"."specs"."workspace_id" = $1 ORDER BY "public"."specs"."updated_at" DESC LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column public.specs.fold_status does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."id", "public"."specs"."fold_status" FROM "public"."specs")',
+    ),
+    true,
+  );
+  // Bare SELECT variant (unqualified and public.-qualified FROM).
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.fold_status does not exist",
+      "select id, slug, fold_status from public.specs order by updated_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.fold_status does not exist",
+      "select fold_status from specs limit 10",
+    ),
+    true,
+  );
+  // ERROR: prefix is stripped before the equality check — the same noise with a prefix
+  // still drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "ERROR: column specs.fold_status does not exist",
+      "select fold_status from public.specs",
+    ),
+    true,
+  );
+  // Negative write-shape — a real caller writing `fold_status` on `public.specs` is a code
+  // bug we WANT paged (same guard as the sibling archived_at/folded_at write assertions),
+  // so a PostgREST CTE wrapping an INSERT/UPDATE stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.fold_status does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."specs"("id", "fold_status") VALUES ($1, $2) RETURNING "public"."specs"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.fold_status does not exist",
+      "update public.specs set fold_status = 'folded' where id = $1",
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have one of these timestamp columns still pages)", () => {
   // tickets DOES carry archived_at (20260330000028_ticket_auto_archive.sql) — a real
   // schema regression there must still page.
