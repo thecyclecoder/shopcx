@@ -36,6 +36,7 @@ import {
   isForeignGoTrueAuthLogNoise,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
+  isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
@@ -235,6 +236,20 @@ const LOG_QUERIES: LogQuery[] = [
       // column-missing on a different relation, or a FATAL/PANIC/constraint violation
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale Supabase Studio / direct-REST client
+      // reading `loop_alerts?select=...closed_at...` — a column `loop_alerts` has never
+      // owned (lifecycle is tracked via `status` + `resolved_at`). PostgREST wraps the
+      // request as `WITH pgrst_source AS ( SELECT ... FROM "public"."loop_alerts" ... )`,
+      // Postgres rejects with `column loop_alerts.closed_at does not exist`
+      // ([[../specs/error-feed-drop-loop-alerts-closed-at-direct-rest-noise]], Control
+      // Tower signature `supabase-logs:7dc04785e9561d24`). Companion of the
+      // `LoopAlertsColumnLookup` drop above, scoped to the direct-REST `closed_at` miss
+      // instead of the SQL-Editor confusion. Narrowly gated to require BOTH the exact
+      // `column loop_alerts.closed_at does not exist` message AND the SELECT-lookup shape
+      // on `loop_alerts` (bare or PostgREST CTE wrapper) — a real column-missing on
+      // `tickets.closed_at`, a `loop_alerts` column rename, a non-SELECT write, or a
+      // FATAL/PANIC/constraint violation still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingLoopAlertsClosedAtDirectRestNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an operator typo — a manual SQL client did a
       // `select ... from error_events` naming the wrong column (`first_seen` instead of
       // our real `first_seen_at`). The resulting undefined_column ERROR is repair work
