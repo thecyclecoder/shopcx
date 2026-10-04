@@ -768,11 +768,19 @@ export function isTransientSupabaseLogNoise(
     return Number.isFinite(status) && status >= 500 && status <= 599;
   }
   if (kind === "postgres") {
-    // FATAL/PANIC are crashes, never the self-healing transient class.
     const severity = String(ctx.severity ?? "").toUpperCase();
+    const msg = String(ctx.message ?? "").toLowerCase();
+    // Postgres emits a `connection to client lost` FATAL whenever the client half-closes the
+    // TCP socket mid-query (a browser tab closing, a Vercel function timing out, a pooler
+    // reaping an idle backend) — a healthy teardown signal, not a database crash or a ShopCX
+    // code defect. Must be checked BEFORE the generic FATAL/PANIC keep return below so the
+    // exact-phrase client-disconnect is routed into the transient class; the recur window
+    // still escalates a chronic client-lost spike (an upstream outage repeatedly killing
+    // connections) that recurs inside `TRANSIENT_RECUR_WINDOW_MS`.
+    if (msg.includes("connection to client lost")) return true;
+    // FATAL/PANIC are crashes, never the self-healing transient class.
     if (severity === "FATAL" || severity === "PANIC") return false;
     // Only the statement-timeout / saturation noise; a plain ERROR (constraint, etc.) pages.
-    const msg = String(ctx.message ?? "").toLowerCase();
     if (!msg.trim()) return false;
     return (
       msg.includes("statement timeout") ||
