@@ -1,0 +1,1 @@
+- **Drop stale specs verified_at direct-REST noise** · verified 2026-10-04 · → [[tables/specs]]
