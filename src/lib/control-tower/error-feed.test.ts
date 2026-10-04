@@ -37,6 +37,7 @@ import {
   isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
@@ -5776,6 +5777,309 @@ test("isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise returns false on emp
   assert.equal(
     isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise(
       "column specs.body_md does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads `public.specs` with phantom
+// `problem` / `proposed_change` scalar columns. The table exists but by design carries
+// NO such columns — that prose lives inline in each `spec_phases.body` row. Foreign-
+// owned surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-
+// missing message on ONE of `specs.problem` / `specs.proposed_change` AND a SELECT-
+// lookup shape on `specs` (bare OR PostgREST CTE wrapper) are present. A column-missing
+// on any other table, a different column on `specs`, a JOIN through `spec_phases`, or a
+// non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise drops the ad hoc SELECT lookup on the exact specs.problem / specs.proposed_change column-missing shape", () => {
+  // The captured production samples: both column variants, unqualified and public.-
+  // qualified message shapes.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.problem does not exist",
+      "select slug, title, problem from public.specs where slug = 'x' limit 1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column public.specs.problem does not exist",
+      "select slug, title, problem from public.specs where slug = 'x' limit 1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.proposed_change does not exist",
+      "select slug, title, proposed_change from public.specs where slug = 'x' limit 1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column public.specs.proposed_change does not exist",
+      "select slug, title, proposed_change from public.specs where slug = 'x' limit 1",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.problem does not exist",
+      "select problem from specs limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.proposed_change does not exist",
+      "select slug, proposed_change from public.specs where slug = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.problem does not exist",
+      "SELECT SLUG, PROBLEM FROM PUBLIC.SPECS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "ERROR: column specs.problem does not exist",
+      "select problem from public.specs",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "  column specs.proposed_change does not exist  ",
+      "   select proposed_change from public.specs   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"specs\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in
+  // the pgrst_source CTE with double-quoted `"public"."specs"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.problem does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."specs"."slug", "public"."specs"."problem" FROM "public"."specs" WHERE "public"."specs"."slug" = $1 LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column public.specs.proposed_change does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."proposed_change" FROM "public"."specs")',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "ERROR: column specs.problem does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."problem" FROM "public"."specs")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a problem / proposed_change column still pages)", () => {
+  // If any other table ever carried a real `problem` or `proposed_change` column and
+  // regressed, we absolutely want to see it — the pin is `specs.problem` /
+  // `specs.proposed_change` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column tickets.problem does not exist",
+      "select problem from public.tickets where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column pending_folds.proposed_change does not exist",
+      "select proposed_change from public.pending_folds where id = $1",
+    ),
+    false,
+  );
+  // Sibling `spec_phases` (the real home of problem/proposed_change prose on `body`)
+  // is a DIFFERENT table — the pin here is `specs` only, so this stays paged rather
+  // than silently swallowed by the specs classifier.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column spec_phases.problem does not exist",
+      "select problem from public.spec_phases where spec_id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column spec_phases.proposed_change does not exist",
+      "select proposed_change from public.spec_phases where spec_id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise KEEPS a DIFFERENT column-missing on specs (a real column rename still pages)", () => {
+  // Real `specs` columns — if any of these regress we absolutely want the page.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.status does not exist",
+      "select status from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.slug does not exist",
+      "select slug from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.workspace_id does not exist",
+      "select workspace_id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise KEEPS a JOIN across other tables (a real code shape joining spec_phases still pages)", () => {
+  // The regex is anchored on `from (public.)?specs` as the first FROM target; a JOIN
+  // whose first FROM is `spec_phases` won't match — which is the outcome we want,
+  // because a caller that joins the two is product code, not the ad hoc direct-REST
+  // read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.problem does not exist",
+      "select p.body, s.problem from public.spec_phases p join public.specs s on s.id = p.spec_id",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.proposed_change does not exist",
+      "select p.body, s.proposed_change from public.spec_phases p join public.specs s on s.id = p.spec_id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing specs.problem / specs.proposed_change still pages)", () => {
+  // INSERT / UPDATE / DELETE against specs referencing a bogus column is real code
+  // trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.problem does not exist",
+      "insert into public.specs (slug, problem) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.proposed_change does not exist",
+      "update public.specs set proposed_change = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.problem does not exist",
+      "delete from public.specs where problem is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.problem does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."specs"("slug", "problem") VALUES ($1, $2) RETURNING "public"."specs"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.proposed_change does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."specs" SET "proposed_change" = $1 WHERE "public"."specs"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on specs (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "database is shutting down",
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      'duplicate key value violates unique constraint "specs_workspace_slug"',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      'permission denied for relation "public.specs"',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      'relation "public.specs" does not exist',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.problem does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
+      "column specs.proposed_change does not exist",
       null,
     ),
     false,
