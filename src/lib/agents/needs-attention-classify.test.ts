@@ -122,3 +122,41 @@ test("classifyByHeuristic routes the bare-envelope-missing classifier reason to 
   assert.ok(result, "expected a heuristic classification result");
   assert.equal(result.klass, "tooling_failure");
 });
+
+// error-feed-scope-postgres-client-lost-fatal-transient Fix 1 — the security-review preflight
+// cannot start when `.claude/skills/security-review/SKILL.md` is absent on the agent's box or no
+// Supabase env is wired in to verify the spec row before opening the diff. That is a TOOLING_FAILURE
+// (the agent's environment is incomplete), NOT a real_blocker (the spec has no missing code
+// prerequisite the branch should build inline). The park reason the worker records is "needs-human"
+// — which previously matched REAL_BLOCKER_PATTERNS /needs[- ]human/i FIRST and spawned a Fix-phase
+// against the origin demanding a prerequisite that doesn't exist. Adding the preflight phrase to
+// TOOLING_FAILURE_PATTERNS routes it to auto-spec-tooling-fix (the correct destination) and
+// prevents the same `blocker:real_blocker` check_key from re-appearing on this spec's next
+// `spec_test_runs` row (parked security-review job d3ef27e6 observed sample).
+test("classifyByHeuristic routes a security-review preflight env/SKILL-absent failure to tooling_failure", () => {
+  const result = classifyByHeuristic({
+    jobKind: "security-review",
+    specSlug: "error-feed-scope-postgres-client-lost-fatal-transient",
+    error: "needs-human",
+    logTail:
+      "Cannot run the required preflight: .claude/skills/security-review/SKILL.md is absent and no Supabase env/.env is available to verify the specs row is active before opening the branch diff.",
+    agentSummary: null,
+  });
+  assert.ok(result, "expected a heuristic classification result");
+  assert.equal(result.klass, "tooling_failure");
+  assert.equal(result.source, "heuristic");
+});
+
+// Boundary — a nearby park reason with "needs-human" but no preflight phrase (a GENUINE missing
+// prerequisite surfaced by the agent) must STILL route to real_blocker.
+test("classifyByHeuristic KEEPS a nearby needs-human park (no preflight phrase) as real_blocker", () => {
+  const result = classifyByHeuristic({
+    jobKind: "security-review",
+    specSlug: "any-spec",
+    error: "needs-human",
+    logTail: "the branch references a missing API surface the spec didn't declare — no fix possible on this branch alone",
+    agentSummary: null,
+  });
+  assert.ok(result, "expected a heuristic classification result");
+  assert.equal(result.klass, "real_blocker");
+});

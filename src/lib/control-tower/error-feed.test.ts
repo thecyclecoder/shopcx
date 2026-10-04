@@ -281,6 +281,20 @@ test("isTransientSupabaseLogNoise KEEPS a real Postgres bug (constraint ERROR / 
   assert.equal(isTransientSupabaseLogNoise("postgres", { severity: "PANIC", message: "could not write to file" }), false);
 });
 
+test("isTransientSupabaseLogNoise scopes Postgres `connection to client lost` FATAL as transient (supabase-logs:e039755e9900a8fa)", () => {
+  // The exact client-disconnect FATAL Postgres emits when the client half-closes mid-query —
+  // a healthy teardown signal, not a crash. Must route transient BEFORE the FATAL/PANIC keep.
+  assert.equal(
+    isTransientSupabaseLogNoise("postgres", { severity: "FATAL", message: "connection to client lost" }),
+    true,
+  );
+  // A nearby FATAL that is a real crash (DB restart) must remain non-transient and page.
+  assert.equal(
+    isTransientSupabaseLogNoise("postgres", { severity: "FATAL", message: "the database system is shutting down" }),
+    false,
+  );
+});
+
 test("isTransientSupabaseLogNoise scopes GoTrue browser-abort noise as transient (context canceled / deadline exceeded)", () => {
   // A signed-in browser unmounting mid-request logs the exact "timeout: context canceled"
   // phrase against GET /user — that's the client going away, not a real auth failure.
