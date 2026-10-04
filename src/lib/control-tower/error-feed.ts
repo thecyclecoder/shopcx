@@ -2552,31 +2552,34 @@ export function isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
 
 /**
  * Foreign-app noise — Postgres reporting `column
- * specs.<archived_at|folded_at|deferred_at|fold_status> does not exist` for an ad hoc /
- * stale PostgREST direct-REST SELECT against `public.specs`. The `specs` card table
- * exists (see `supabase/migrations/20260713120001_specs_and_spec_phases.sql`) but its
- * lifecycle state is NOT recorded via `archived_at` / `folded_at` / `deferred_at`
- * timestamp columns nor a `fold_status` column — the schema uses `status text` (with a
- * `folded` value and a `deferred` value) plus a `deferred boolean` flag; grep confirms no
- * ShopCX code path reads any of these four obsolete names off `specs`, and the migration
- * creates none of them. The error only reaches Supabase's `postgres_logs` feed when an
- * external / stale PostgREST client (a foreign app, a deprecated integration, a stale
- * SQL Editor session) queries `/rest/v1/specs?select=...archived_at...` (or `folded_at`,
- * or `deferred_at`, or `fold_status`). There is no lever from ShopCX to make that query
- * resolve — paging Platform on it (Control Tower signatures
+ * specs.<archived_at|folded_at|deferred_at|fold_status|verified_at> does not exist` for
+ * an ad hoc / stale PostgREST direct-REST SELECT against `public.specs`. The `specs`
+ * card table exists (see `supabase/migrations/20260713120001_specs_and_spec_phases.sql`)
+ * but its lifecycle state is NOT recorded via `archived_at` / `folded_at` / `deferred_at`
+ * timestamp columns nor a `fold_status` column nor a generic `verified_at` timestamp —
+ * the schema uses `status text` (with a `folded` value and a `deferred` value) plus a
+ * `deferred boolean` flag, and review/build state is captured by `vale_review_passed_at`
+ * + the phase rows, not a `verified_at` column; grep confirms no ShopCX code path reads
+ * any of these five obsolete names off `specs`, and the migration creates none of them.
+ * The error only reaches Supabase's `postgres_logs` feed when an external / stale
+ * PostgREST client (a foreign app, a deprecated integration, a stale SQL Editor
+ * session) queries `/rest/v1/specs?select=...archived_at...` (or `folded_at`, or
+ * `deferred_at`, or `fold_status`, or `verified_at`). There is no lever from ShopCX to
+ * make that query resolve — paging Platform on it (Control Tower signatures
  * `supabase-logs:fbf1fe604803f481` for the archive-timestamp triple +
- * `supabase-logs:7eab1943f640108d` for the `fold_status` sibling) is repair work for a
+ * `supabase-logs:7eab1943f640108d` for the `fold_status` sibling +
+ * `supabase-logs:436a137c58fe6ac0` for the `verified_at` sibling) is repair work for a
  * query we don't own.
  *
  * Sibling of `isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise` — the
  * same narrow-gating shape (exact `column <table>.<name> does not exist` + bare
- * SELECT-on-table shape), scoped to the four obsolete `specs` lifecycle column names.
+ * SELECT-on-table shape), scoped to the five obsolete `specs` lifecycle column names.
  *
  * `true` ONLY when BOTH markers are present:
  *   1. the message is Postgres's canonical column-missing shape for THIS table+column set
  *      — trimmed equal to
- *      `column specs.<archived_at|folded_at|deferred_at|fold_status> does not exist` (or
- *      the `public.` qualified variant, with any leading `ERROR: ` prefix Postgres
+ *      `column specs.<archived_at|folded_at|deferred_at|fold_status|verified_at> does not exist`
+ *      (or the `public.` qualified variant, with any leading `ERROR: ` prefix Postgres
  *      includes on the logs surface stripped), AND
  *   2. the `parsed.query` attribute is a SELECT-lookup shape on `public.specs` — either
  *      (a) the bare `select ... from public.specs` shape, OR (b) the PostgREST-generated
@@ -2589,10 +2592,11 @@ export function isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
  * Narrowly gated so:
  *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
  *     table that DOES have one of these columns — e.g. `tickets.archived_at`) still pages
- *     — the pin is `specs.<archived_at|folded_at|deferred_at|fold_status>` only,
+ *     — the pin is `specs.<archived_at|folded_at|deferred_at|fold_status|verified_at>`
+ *     only,
  *   - a column-missing error on `specs` for a DIFFERENT column (e.g. a real column that
- *     got renamed — `status`, `deferred`, `owner`, `parent`) still pages — the pin covers
- *     the four obsolete lifecycle names only,
+ *     got renamed — `status`, `deferred`, `owner`, `parent`, `vale_review_passed_at`)
+ *     still pages — the pin covers the five obsolete lifecycle names only,
  *   - a `specs.archived_at` error attached to a DIFFERENT statement shape
  *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin
  *     is the SELECT-lookup shape, matching the ad hoc direct-REST read we've observed;
@@ -2625,7 +2629,9 @@ export function isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
     stripped === "column specs.deferred_at does not exist" ||
     stripped === "column public.specs.deferred_at does not exist" ||
     stripped === "column specs.fold_status does not exist" ||
-    stripped === "column public.specs.fold_status does not exist";
+    stripped === "column public.specs.fold_status does not exist" ||
+    stripped === "column specs.verified_at does not exist" ||
+    stripped === "column public.specs.verified_at does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;

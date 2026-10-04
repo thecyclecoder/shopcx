@@ -3760,6 +3760,79 @@ test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise also drops
   );
 });
 
+test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise also drops the sibling specs.verified_at direct-REST shape (supabase-logs:436a137c58fe6ac0)", () => {
+  // verified_at — there is no `verified_at` column on `public.specs`; review/build state
+  // is captured by `vale_review_passed_at` + the phase rows, not a generic `verified_at`
+  // timestamp. A stale PostgREST client that still reads `verified_at` is the
+  // foreign-owned class we drop. Captured PostgREST CTE shape (the direct-REST read
+  // wraps the SELECT in pgrst_source with double-quoted identifiers).
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.verified_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."specs"."id", "public"."specs"."slug", "public"."specs"."verified_at" FROM "public"."specs" WHERE "public"."specs"."workspace_id" = $1 ORDER BY "public"."specs"."verified_at" DESC LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column public.specs.verified_at does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."id", "public"."specs"."verified_at" FROM "public"."specs")',
+    ),
+    true,
+  );
+  // Bare SELECT variant (unqualified and public.-qualified FROM).
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.verified_at does not exist",
+      "select id, slug, verified_at from public.specs order by verified_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.verified_at does not exist",
+      "select verified_at from specs limit 10",
+    ),
+    true,
+  );
+  // ERROR: prefix is stripped before the equality check — the same noise with a prefix
+  // still drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "ERROR: column specs.verified_at does not exist",
+      "select verified_at from public.specs",
+    ),
+    true,
+  );
+  // Negative write-shape — a real caller writing `verified_at` on `public.specs` is a
+  // code bug we WANT paged (same guard as the sibling archived_at/folded_at/fold_status
+  // write assertions), so a PostgREST CTE wrapping an INSERT/UPDATE stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.verified_at does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."specs"("id", "verified_at") VALUES ($1, now()) RETURNING "public"."specs"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.verified_at does not exist",
+      "update public.specs set verified_at = now() where id = $1",
+    ),
+    false,
+  );
+  // Negative — a column-missing error on `specs.verified_at` attached to a JOIN across
+  // other tables is not the bare SELECT-lookup shape we drop (same guard as the sibling
+  // tests), so it stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.verified_at does not exist",
+      "delete from public.specs where verified_at < now() - interval '90 days'",
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have one of these timestamp columns still pages)", () => {
   // tickets DOES carry archived_at (20260330000028_ticket_auto_archive.sql) — a real
   // schema regression there must still page.
@@ -3784,12 +3857,21 @@ test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a co
     ),
     false,
   );
+  // A table that DOES carry a `verified_at` column (e.g. a verified-identity table) —
+  // a real schema regression there must still page; the pin is `specs.verified_at` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column customers.verified_at does not exist",
+      "select verified_at from public.customers where id = 'x'",
+    ),
+    false,
+  );
 });
 
 test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a DIFFERENT column-missing on specs (a real column rename still pages)", () => {
-  // Any real specs column (`status`, `deferred`, `owner`, `parent`, `slug`, `title`)
-  // going missing is a schema regression we DO want to see — the pin covers the three
-  // obsolete archive-timestamp names only.
+  // Any real specs column (`status`, `deferred`, `owner`, `parent`, `slug`, `title`,
+  // `vale_review_passed_at`) going missing is a schema regression we DO want to see —
+  // the pin covers the five obsolete lifecycle names only.
   assert.equal(
     isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
       "column specs.status does not exist",
@@ -3815,6 +3897,15 @@ test("isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise KEEPS a DI
     isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
       "column specs.slug does not exist",
       "select slug from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  // `vale_review_passed_at` IS the real review-state column on `specs`; a missing one
+  // there is a genuine schema regression that must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
+      "column specs.vale_review_passed_at does not exist",
+      "select vale_review_passed_at from public.specs where id = 'x'",
     ),
     false,
   );
