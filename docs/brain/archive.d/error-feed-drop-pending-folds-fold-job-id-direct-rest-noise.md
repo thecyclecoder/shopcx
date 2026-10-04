@@ -1,0 +1,1 @@
+- **Drop stale pending_folds.fold_job_id direct-REST noise from Supabase logs** · verified 2026-10-04 · → [[../libraries/control-tower]]
