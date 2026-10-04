@@ -5456,6 +5456,105 @@ export function isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAd
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column daily_amazon_order_snapshots.date does
+ * not exist` for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.daily_amazon_order_snapshots`. The table exists (see
+ * `supabase/migrations/20260422240000_amazon_integration.sql`) but has NEVER carried a
+ * `date` column — the per-day column is `snapshot_date` (the UNIQUE constraint is
+ * `(amazon_connection_id, snapshot_date, order_bucket)` and the index is
+ * `idx_amazon_snapshots_date ON daily_amazon_order_snapshots(workspace_id, snapshot_date DESC)`),
+ * and every ShopCX reader goes through SDKs / joined queries that select `snapshot_date`.
+ * The column-missing ERROR only reaches this feed when a foreign app / stale Supabase
+ * Studio session / deprecated integration queries
+ * `/rest/v1/daily_amazon_order_snapshots?select=...&date=eq.YYYY-MM-DD` — a natural
+ * mistake because many rollup tables use a plain `date` column but ours uses
+ * `snapshot_date` (same mis-pattern as the sibling `daily_meta_ad_spend.date` drop above).
+ * There is no lever from ShopCX to make that query resolve — renaming `snapshot_date` to
+ * `date` would break every real caller — paging Platform on it
+ * ([[../specs/error-feed-drop-daily-amazon-order-snapshots-date-adhoc-nois]]) is repair
+ * work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise` and
+ * `isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise` — same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` + SELECT-lookup shape
+ * covering BOTH bare and PostgREST CTE wrapper forms), aimed at the same table but a
+ * different mistaken column name.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column daily_amazon_order_snapshots.date does not exist` (or the
+ *      `public.` qualified variant, with any leading `ERROR: ` prefix Postgres includes
+ *      on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on
+ *      `public.daily_amazon_order_snapshots` — either (a) the bare
+ *      `select ... from public.daily_amazon_order_snapshots` shape, OR (b) the
+ *      PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."daily_amazon_order_snapshots" ... )`
+ *      CTE wrapper form with double-quoted identifiers. Both forms are the same
+ *      foreign-owned read.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have a `date` column) still pages — the pin is
+ *     `daily_amazon_order_snapshots.date` only,
+ *   - a column-missing error on `daily_amazon_order_snapshots` for a DIFFERENT column
+ *     (e.g. the real `snapshot_date` regression, or `order_bucket` / `order_count` /
+ *     `gross_revenue_cents` / `net_revenue_cents`) still pages — the pin covers `date`
+ *     only,
+ *   - a column-missing error on the sibling `daily_amazon_product_snapshots` table for
+ *     `date` is a DIFFERENT shape on a DIFFERENT table and stays paged — the `\b` anchor
+ *     on `daily_amazon_order_snapshots` prevents swallowing the sibling,
+ *   - a `daily_amazon_order_snapshots.date` error attached to a DIFFERENT statement
+ *     shape (INSERT / UPDATE / DELETE / DDL, or a JOIN whose first FROM is another table)
+ *     still pages — the pin is the SELECT-lookup shape, matching the ad hoc direct-REST
+ *     read we've observed; the CTE branch likewise requires the wrapped op to be a
+ *     SELECT (a PostgREST INSERT/UPDATE inside the same wrapper stays paged),
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `daily_amazon_order_snapshots` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `daily_amazon_order_snapshots.date` (with or without the `public.` qualifier).
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column daily_amazon_order_snapshots.date does not exist" ||
+    stripped === "column public.daily_amazon_order_snapshots.date does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name
+  // `daily_amazon_order_snapshots` (with or without the `public.` schema qualifier). A
+  // JOIN / UNION / non-SELECT stays captured — a caller that actually writes to
+  // daily_amazon_order_snapshots with a bogus `date` column is a code bug we DO want to
+  // page on, not the ad hoc direct-REST read this drop targets. The `\b` around the
+  // table name keeps the anchor from matching the sibling `daily_amazon_product_snapshots`.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?daily_amazon_order_snapshots\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."daily_amazon_order_snapshots" ... )` with double-quoted identifiers.
+  // Same foreign-owned read, different rendering — the plain SELECT regex above misses
+  // it because the statement starts with `with` and the FROM clause carries the quoted
+  // `"public"."daily_amazon_order_snapshots"` shape. Guarded so the CTE branch requires
+  // the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper —
+  // e.g. `WITH pgrst_source AS (INSERT INTO "public"."daily_amazon_order_snapshots"("date") ...)`
+  // — is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?daily_amazon_order_snapshots\b/.test(q);
+}
+
+/**
  * Expected-by-design noise — Postgres reporting `duplicate key value violates unique
  * constraint "dashboard_notifications_dedupe_key_open_uniq"` on an INSERT INTO
  * `public.dashboard_notifications`. That partial UNIQUE index (migration

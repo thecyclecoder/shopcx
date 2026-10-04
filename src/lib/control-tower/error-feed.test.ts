@@ -50,6 +50,7 @@ import {
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise,
+  isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
@@ -13773,6 +13774,300 @@ test("isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise r
     isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise(
       "",
       "select units from public.daily_amazon_order_snapshots",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/daily_amazon_order_snapshots?select=...&date=eq.YYYY-MM-DD` against our
+// `public.daily_amazon_order_snapshots` table. The table exists but by design carries
+// NO `date` column — the per-day column is `snapshot_date` (see
+// `supabase/migrations/20260422240000_amazon_integration.sql` — the UNIQUE constraint
+// is `(amazon_connection_id, snapshot_date, order_bucket)` and the index is
+// `idx_amazon_snapshots_date ON daily_amazon_order_snapshots(workspace_id, snapshot_date DESC)`).
+// Foreign-owned surface, no lever from us — drop AT CAPTURE only when BOTH the exact
+// column-missing message on `daily_amazon_order_snapshots.date` AND a SELECT-lookup
+// shape on `daily_amazon_order_snapshots` (bare OR PostgREST CTE wrapper) are present.
+// A column-missing on any other table, a different column on
+// `daily_amazon_order_snapshots` (including the real `snapshot_date`), the sibling
+// `daily_amazon_product_snapshots.date`, a JOIN whose first FROM is another table, or
+// a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise drops the ad hoc SELECT lookup on the exact daily_amazon_order_snapshots.date column-missing shape", () => {
+  // The captured production sample: unqualified and public.-qualified message variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.date does not exist",
+      "select snapshot_date, order_bucket, order_count from public.daily_amazon_order_snapshots where date = '2026-10-04'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column public.daily_amazon_order_snapshots.date does not exist",
+      "select snapshot_date, order_bucket, order_count from public.daily_amazon_order_snapshots where date = '2026-10-04'",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.date does not exist",
+      "select date from daily_amazon_order_snapshots limit 10",
+    ),
+    true,
+  );
+  // Trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.date does not exist",
+      "select order_count from public.daily_amazon_order_snapshots where workspace_id = 'x' order by date desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.date does not exist",
+      "SELECT DATE, ORDER_COUNT FROM PUBLIC.DAILY_AMAZON_ORDER_SNAPSHOTS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "ERROR: column daily_amazon_order_snapshots.date does not exist",
+      "select date from public.daily_amazon_order_snapshots",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "  column daily_amazon_order_snapshots.date does not exist  ",
+      "   select date from public.daily_amazon_order_snapshots   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"daily_amazon_order_snapshots\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape — the real production sample is this
+  // CTE-wrapped SELECT with double-quoted identifiers. The plain bare-SELECT regex
+  // misses this because the statement starts with `with` and the FROM clause carries
+  // the quoted `"public"."daily_amazon_order_snapshots"` shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.date does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."daily_amazon_order_snapshots"."date", "public"."daily_amazon_order_snapshots"."order_count" FROM "public"."daily_amazon_order_snapshots" WHERE "public"."daily_amazon_order_snapshots"."date" = $1 LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column public.daily_amazon_order_snapshots.date does not exist",
+      'WITH pgrst_source AS (SELECT "public"."daily_amazon_order_snapshots"."date" FROM "public"."daily_amazon_order_snapshots")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "ERROR: column daily_amazon_order_snapshots.date does not exist",
+      'WITH pgrst_source AS (SELECT "public"."daily_amazon_order_snapshots"."date" FROM "public"."daily_amazon_order_snapshots")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a date column still pages)", () => {
+  // If any other table had a real `date` column and regressed, we absolutely want to
+  // see it — the pin is `daily_amazon_order_snapshots.date` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column holidays.date does not exist",
+      "select date from public.holidays where country = 'US'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column calendar_days.date does not exist",
+      "select date from public.calendar_days where id = $1",
+    ),
+    false,
+  );
+  // Sibling `daily_amazon_product_snapshots` — a DIFFERENT table. A column-missing on
+  // the sibling is a DIFFERENT shape on a DIFFERENT table and stays paged rather than
+  // being swallowed by this classifier.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_product_snapshots.date does not exist",
+      "select date from public.daily_amazon_product_snapshots where workspace_id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise KEEPS a DIFFERENT column-missing on daily_amazon_order_snapshots (a real column rename still pages)", () => {
+  // Real `daily_amazon_order_snapshots` columns — if any of these regress we absolutely
+  // want the page. snapshot_date is the ACTUAL per-day column and a regression there is
+  // a genuine product bug.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.snapshot_date does not exist",
+      "select snapshot_date from public.daily_amazon_order_snapshots where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.order_count does not exist",
+      "select order_count from public.daily_amazon_order_snapshots where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.order_bucket does not exist",
+      "select order_bucket from public.daily_amazon_order_snapshots where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.gross_revenue_cents does not exist",
+      "select gross_revenue_cents from public.daily_amazon_order_snapshots where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.net_revenue_cents does not exist",
+      "select net_revenue_cents from public.daily_amazon_order_snapshots where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise KEEPS a JOIN across other tables (a real code shape joining the sibling table still pages)", () => {
+  // The regex is anchored on `from (public.)?daily_amazon_order_snapshots` as the
+  // first FROM target; a JOIN whose first FROM is a different table won't match —
+  // which is the outcome we want, because a caller that joins and asks for a real
+  // column shape is product code, not the ad hoc direct-REST read.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.date does not exist",
+      "select p.date, s.gross_revenue_cents from public.daily_amazon_product_snapshots p join public.daily_amazon_order_snapshots s on s.snapshot_date = p.snapshot_date",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing daily_amazon_order_snapshots.date still pages)", () => {
+  // INSERT / UPDATE / DELETE against the table referencing a bogus column is real
+  // code trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.date does not exist",
+      "insert into public.daily_amazon_order_snapshots (date, order_bucket) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.date does not exist",
+      "update public.daily_amazon_order_snapshots set date = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.date does not exist",
+      "delete from public.daily_amazon_order_snapshots where date is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.date does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."daily_amazon_order_snapshots"("date", "order_bucket") VALUES ($1, $2) RETURNING "public"."daily_amazon_order_snapshots"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.date does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."daily_amazon_order_snapshots" SET "date" = $1 WHERE "public"."daily_amazon_order_snapshots"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise KEEPS a PostgREST CTE wrapper on a DIFFERENT table (a real schema regression on daily_amazon_product_snapshots.date still pages)", () => {
+  // Same wrapper shape but the wrapped SELECT reads a different table — the pin is
+  // `daily_amazon_order_snapshots.date` only; a regression on the sibling is one we
+  // want to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_product_snapshots.date does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."daily_amazon_product_snapshots"."id", "public"."daily_amazon_product_snapshots"."date" FROM "public"."daily_amazon_product_snapshots" WHERE "public"."daily_amazon_product_snapshots"."workspace_id" = $1 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on daily_amazon_order_snapshots (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "database is shutting down",
+      "select id from public.daily_amazon_order_snapshots where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      'duplicate key value violates unique constraint "daily_amazon_order_snapshots_amazon_connection_id_snapshot_"',
+      "insert into public.daily_amazon_order_snapshots (amazon_connection_id, snapshot_date, order_bucket) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.daily_amazon_order_snapshots where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise returns false on empty / nullish inputs", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise("", ""),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "column daily_amazon_order_snapshots.date does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+      "",
+      "select date from public.daily_amazon_order_snapshots",
     ),
     false,
   );
