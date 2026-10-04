@@ -12,9 +12,14 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Drop foreign daily Amazon snapshot date lookups from Supabase logs** · verified 2026-10-04 · → [[../inngest/supabase-log-poll]]
+- **Drop stale daily Amazon product snapshot date lookups from the Supabase error feed** · verified 2026-10-04 · → [[../libraries/control-tower]]
+- **Fail the QB close Amazon sync when the shipped report parses empty unexpectedly** · verified 2026-10-04 · → [[../libraries/qb-close-sync-amazon-sales]]
 - **Fix date-grain output freshness false alarms** · verified 2026-10-03 · → [[../libraries/control-tower#parseOutputFreshnessValueMs]]
+- **Drop stale agent_jobs branch direct-REST log noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
 - **Drop stale agent_jobs branch_name direct-REST log noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
 - **Drop stale direct agent_jobs merge_sha lookup noise** · verified 2026-10-03 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise`)
+- **Drop stale agent_jobs.target direct-REST Supabase log noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
 - **Drop stale daily Amazon order units lookup noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
 - **Drop stale loop_alerts closed_at direct REST noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
 - **Drop stale loop_alerts error_signature direct-REST noise** · verified 2026-10-03 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise`)
