@@ -93,6 +93,7 @@ import {
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise,
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise,
   isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoise,
+  isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isExpectedBillingForecastsPendingUniqViolation,
 } from "@/lib/control-tower/error-feed";
@@ -1020,6 +1021,27 @@ const LOG_QUERIES: LogQuery[] = [
       // so the literal substring without parens must appear verbatim in-file):
       // isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoisemessage, query
       if (isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.pending_folds` naming a `fold_job_id` column that has NEVER
+      // lived on the table — the real fold-job reference column is `job_id` and every
+      // ShopCX reader goes through SDKs that select the real column. The column-missing
+      // ERROR only reaches this feed when a foreign app / stale SQL Editor session /
+      // deprecated integration queries
+      // `/rest/v1/pending_folds?select=fold_job_id,...`. There is no lever from ShopCX
+      // to make that query resolve — renaming the migrated `job_id` column would break
+      // every real reader, and paging Platform on it
+      // ([[../specs/error-feed-drop-pending-folds-fold-job-id-direct-rest-noise]],
+      // Control Tower signature `supabase-logs:31d4e6c26d956a75`) is repair work for a
+      // query we don't own. Narrowly gated to require BOTH the exact column-missing
+      // message AND a SELECT-on-pending_folds shape (bare OR PostgREST CTE wrapper) —
+      // a column-missing error on any other table, a different column on
+      // `pending_folds` (e.g. the real `job_id` column), or on `pending_folds` via a
+      // non-SELECT statement (real code-bug shape) still surfaces / pages on first
+      // sighting.
+      // Self-verify grep fingerprint (stored check pattern uses parens as ERE grouping,
+      // so the literal substring without parens must appear verbatim in-file):
+      // isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoisemessage, query
+      if (isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.products` naming one of three columns that have NEVER lived on
       // the products table — `ingredients`, `supplement_facts`, `benefits`. Product
