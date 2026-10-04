@@ -71,6 +71,7 @@ import {
   isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
@@ -759,6 +760,27 @@ const LOG_QUERIES: LogQuery[] = [
       // `specs`, a JOIN through `spec_phases`, or on `specs` via a non-SELECT
       // statement (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs` that types `problem` or `proposed_change` as scalar
+      // columns. The `specs` table exists but by design carries NO `problem` or
+      // `proposed_change` columns — that prose lives inline in each `spec_phases.body`
+      // row, and every ShopCX reader goes through the [[../libraries/specs-table]] SDK
+      // / `get_spec_with_phases` RPC. The column-missing ERROR only reaches this feed
+      // when a foreign app / stale SQL Editor session / deprecated integration queries
+      // `public.specs` with those phantom columns (observed both as a bare SELECT and
+      // as the PostgREST-wrapped `WITH pgrst_source AS ( SELECT ... FROM
+      // "public"."specs" ... )` CTE form). There is no lever from ShopCX to make that
+      // query resolve — adding fake `problem` / `proposed_change` columns would make
+      // the data model worse — paging Platform on it (Control Tower signature
+      // `supabase-logs:0e3379f172768a91`,
+      // [[../specs/error-feed-drop-specs-problem-proposed-change-adhoc-search-noise]])
+      // is repair work for a query we don't own. Narrowly gated to require BOTH the
+      // exact column-missing message for one of the two pinned columns AND a
+      // SELECT-on-specs shape (bare OR PostgREST CTE wrapper) — a column-missing error
+      // on any other table, a different column on `specs`, a JOIN through
+      // `spec_phases`, or on `specs` via a non-SELECT statement (real code-bug shape)
+      // still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.agent_jobs` that asks for BOTH `slug` and the real `spec_slug`
       // column. The `agent_jobs` table exists but has NEVER had a `slug` column — the
