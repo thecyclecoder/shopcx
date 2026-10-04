@@ -52,6 +52,7 @@ import {
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise,
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise,
   isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoise,
+  isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
@@ -14181,6 +14182,278 @@ test("isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoise 
     isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoise(
       "",
       "select date from public.daily_amazon_product_snapshots",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/pending_folds?select=fold_job_id,...` against our `public.pending_folds`
+// table. The table exists but its fold-job reference column is `job_id`, not
+// `fold_job_id` — every ShopCX reader selects the real column. Foreign-owned surface,
+// no lever from us — drop AT CAPTURE only when BOTH the exact column-missing message
+// on `pending_folds.fold_job_id` AND a SELECT-lookup shape on `pending_folds` (bare OR
+// PostgREST CTE wrapper) are present. A column-missing on any other table, a different
+// column on `pending_folds` (e.g. the real `job_id` column), a JOIN whose first FROM
+// is another table, or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise drops the ad hoc SELECT lookup on the exact pending_folds.fold_job_id column-missing shape", () => {
+  // The captured production sample: unqualified and public.-qualified message variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.fold_job_id does not exist",
+      "select fold_job_id, spec_slug, status from public.pending_folds where workspace_id = 'x'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column public.pending_folds.fold_job_id does not exist",
+      "select fold_job_id, spec_slug, status from public.pending_folds where workspace_id = 'x'",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.fold_job_id does not exist",
+      "select fold_job_id from pending_folds limit 10",
+    ),
+    true,
+  );
+  // Trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.fold_job_id does not exist",
+      "select fold_job_id, status from public.pending_folds where workspace_id = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.fold_job_id does not exist",
+      "SELECT FOLD_JOB_ID, STATUS FROM PUBLIC.PENDING_FOLDS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "ERROR: column pending_folds.fold_job_id does not exist",
+      "select fold_job_id from public.pending_folds",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "  column pending_folds.fold_job_id does not exist  ",
+      "   select fold_job_id from public.pending_folds   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"pending_folds\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape — the real production sample is this
+  // CTE-wrapped SELECT with double-quoted identifiers. The plain bare-SELECT regex
+  // misses this because the statement starts with `with` and the FROM clause carries
+  // the quoted `"public"."pending_folds"` shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.fold_job_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."pending_folds"."fold_job_id", "public"."pending_folds"."status" FROM "public"."pending_folds" WHERE "public"."pending_folds"."workspace_id" = $1 LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column public.pending_folds.fold_job_id does not exist",
+      'WITH pgrst_source AS (SELECT "public"."pending_folds"."fold_job_id" FROM "public"."pending_folds")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "ERROR: column pending_folds.fold_job_id does not exist",
+      'WITH pgrst_source AS (SELECT "public"."pending_folds"."fold_job_id" FROM "public"."pending_folds")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a fold_job_id column still pages)", () => {
+  // If any other table had a real `fold_job_id` column and regressed, we absolutely
+  // want to see it — the pin is `pending_folds.fold_job_id` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column fold_jobs.fold_job_id does not exist",
+      "select fold_job_id from public.fold_jobs where workspace_id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column agent_jobs.fold_job_id does not exist",
+      "select fold_job_id from public.agent_jobs where workspace_id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise KEEPS a DIFFERENT column-missing on pending_folds (a real column rename still pages)", () => {
+  // Real `pending_folds` columns — if any of these regress we absolutely want the
+  // page. In particular the real fold-job column is `job_id`; a regression on it
+  // (not `fold_job_id`) stays paged.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.job_id does not exist",
+      "select job_id from public.pending_folds where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.spec_slug does not exist",
+      "select spec_slug from public.pending_folds where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.status does not exist",
+      "select status from public.pending_folds where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.requested_by does not exist",
+      "select requested_by from public.pending_folds where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise KEEPS a JOIN across other tables (a real code shape joining pending_folds still pages)", () => {
+  // The regex is anchored on `from (public.)?pending_folds` as the first FROM target;
+  // a JOIN whose first FROM is a different table won't match — which is the outcome
+  // we want, because a caller that joins and asks for a real column shape is product
+  // code, not the ad hoc direct-REST read.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.fold_job_id does not exist",
+      "select j.id, p.fold_job_id from public.agent_jobs j join public.pending_folds p on p.job_id = j.id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing pending_folds.fold_job_id still pages)", () => {
+  // INSERT / UPDATE / DELETE against the table referencing a bogus column is real
+  // code trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.fold_job_id does not exist",
+      "insert into public.pending_folds (workspace_id, spec_slug, fold_job_id) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.fold_job_id does not exist",
+      "update public.pending_folds set fold_job_id = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.fold_job_id does not exist",
+      "delete from public.pending_folds where fold_job_id is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.fold_job_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."pending_folds"("workspace_id", "fold_job_id") VALUES ($1, $2) RETURNING "public"."pending_folds"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.fold_job_id does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."pending_folds" SET "fold_job_id" = $1 WHERE "public"."pending_folds"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise KEEPS a PostgREST CTE wrapper on a DIFFERENT table (a real schema regression on another table still pages)", () => {
+  // Same wrapper shape but the wrapped SELECT reads a different table — the pin is
+  // `pending_folds.fold_job_id` only; a regression on an adjacent table is one we
+  // want to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column agent_jobs.fold_job_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs"."id", "public"."agent_jobs"."fold_job_id" FROM "public"."agent_jobs" WHERE "public"."agent_jobs"."workspace_id" = $1 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on pending_folds (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "database is shutting down",
+      "select id from public.pending_folds where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      'duplicate key value violates unique constraint "pending_folds_workspace_id_spec_slug_key"',
+      "insert into public.pending_folds (workspace_id, spec_slug, status) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.pending_folds where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise returns false on empty / nullish inputs", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise("", ""),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "column pending_folds.fold_job_id does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
+      "",
+      "select fold_job_id from public.pending_folds",
     ),
     false,
   );
