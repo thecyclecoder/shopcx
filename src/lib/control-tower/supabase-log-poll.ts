@@ -79,6 +79,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsBranchNameDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsBranchDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
@@ -922,6 +923,28 @@ const LOG_QUERIES: LogQuery[] = [
       // (real code-bug shape) still surfaces / pages on first sighting.
       // Static-analysis fingerprint — `isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
       if (isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.agent_jobs.started_at` / `public.agent_jobs.completed_at`. The
+      // `agent_jobs` table exists but has NO `started_at` / `completed_at` columns —
+      // run timing lives on `agent_jobs.created_at` + `agent_jobs.updated_at`, NOT on
+      // dedicated CI-style run-timestamp columns. The column-missing ERROR only reaches
+      // this feed when a foreign app / stale SQL Editor session / deprecated
+      // integration reads the rows as if they were a GitHub-world build-run with
+      // start/complete timestamps paired with legacy `branch` / `merge_sha` columns.
+      // There is no lever from ShopCX to make that query resolve — paging Platform on
+      // it (Control Tower signature `supabase-logs:06728c8285287a40`,
+      // [[../specs/error-feed-drop-agent-jobs-run-timestamp-direct-rest-noise]]) is
+      // repair work for a query we don't own. Narrowly gated to require ALL FOUR of
+      // the exact column-missing message, a SELECT-on-agent_jobs shape (bare OR
+      // PostgREST CTE wrapper), a `kind` co-mention, AND a legacy sibling projection
+      // marker (`branch` or `merge_sha`) in the same query — a column-missing on any
+      // other table, a different column on `agent_jobs`, a JOIN through
+      // `approval_decisions` / `agent_job_costs` / `spec_phases`, a bare `select
+      // started_at from agent_jobs` without the legacy pairing, or on `agent_jobs`
+      // via a non-SELECT statement (real code-bug shape) still surfaces / pages on
+      // first sighting.
+      // Static-analysis fingerprint — `isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
+      if (isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.workspaces.slug`. The `workspaces` table exists but has NO
       // `slug` column — the workspace slug shape lives on `workspaces.help_slug` (the
