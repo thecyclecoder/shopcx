@@ -26,6 +26,8 @@ Wiring the analytics table into the close would have overstated Amazon burn and 
 |---|---|
 | `syncAmazonSalesForClose(admin, ws, start, end)` | request → poll → download → parse → upsert |
 | `parseShippedUnits(tsv)` | the parser, exported for testing — the shipped/pending split is the whole point |
+| `validateAmazonCloseReportHeaders(headers)` | reject a report with missing required headers (asin, sku, quantity, item-price, purchase-date, promotion-ids, order-status; product-name optional) before parsing |
+| `assertNonEmptyAmazonCloseReport(admin, workspaceId, start, end, parsedShippedRows)` | **guard:** fail loudly when a trailing window that previously contained shipped activity parses to zero rows — signals a stall instead of a silent no-op |
 
 Idempotent: upserts on `(workspace_id, asin, sale_date)`.
 
@@ -53,6 +55,7 @@ Caught by `sync-amazon-sales.test.ts` before this ever ran on real data.
 
 ## Gotchas
 
+- **Header validation + empty-report guard:** `validateAmazonCloseReportHeaders` refuses a report with missing required columns (asin, sku, quantity, item-price, purchase-date, promotion-ids, order-status; product-name is optional). A missing header silently shifts every column index left and reads garbage as a status. `assertNonEmptyAmazonCloseReport` runs AFTER all `amazon_connections` are merged and fails loudly when a trailing window with prior shipped activity parses to zero rows — the exact 2026-09-30 stall mode. A cold window (no prior rows) legitimately no-ops. The throw escalates to `sync-qb-close-sources`' per-sync catch, surfacing `amazon-sales` in the heartbeat's `detail` fan-out and flipping the beat to `ok: false` so Grace/Ada see an actionable signal.
 - SP-API report generation is **asynchronous**: request → poll → download, with a 3-minute ceiling. A `CANCELLED`/`FATAL` status throws rather than returning empty.
 - One ASIN can span several seller SKUs; rows merge per `(asin, sale_date)` and `seller_sku` keeps the first seen (descriptive only — never join on it).
 - Multiple `amazon_connections` per workspace are merged.
@@ -60,7 +63,7 @@ Caught by `sync-amazon-sales.test.ts` before this ever ran on real data.
 
 ## Tests
 
-`src/lib/qb-close/sync-amazon-sales.test.ts` — 6 cases. Run: `npx tsx --test src/lib/qb-close/sync-amazon-sales.test.ts`.
+`src/lib/qb-close/sync-amazon-sales.test.ts` — 12 cases covering parser rules (shipped vs pending/cancelled bucketing, promotion bucketing, edge cases), header validation, and the empty-report guard (no-op on merged rows, no-op on cold window, throw on empty-vs-existing, Supabase probe errors). Run: `npx tsx --test src/lib/qb-close/sync-amazon-sales.test.ts`.
 
 ## Related
 

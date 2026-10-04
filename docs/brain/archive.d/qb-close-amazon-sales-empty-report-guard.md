@@ -1,0 +1,1 @@
+- **Fail the QB close Amazon sync when the shipped report parses empty unexpectedly** · verified 2026-10-04 · → [[../libraries/qb-close-sync-amazon-sales]]
