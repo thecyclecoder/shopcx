@@ -44,6 +44,7 @@ import {
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
@@ -360,6 +361,24 @@ const LOG_QUERIES: LogQuery[] = [
       // via a non-SELECT statement (real code-bug shape), still surfaces / pages on
       // first sighting.
       if (isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... shopify_order_name ...
+      // from public.orders` lookup by an external tool / stale exploratory query — or
+      // the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )`
+      // CTE wrapper the same client emits over the REST endpoint. Our `orders` table
+      // has NO `shopify_order_name` column — customer-visible order names live in
+      // `orders.order_number`, while the `shopify_order_name` name belongs to the
+      // sibling `one_time_charges` table. No ShopCX code path issues a SELECT on
+      // `orders.shopify_order_name`, so the resulting column-missing ERROR is repair
+      // work for a query we don't own
+      // ([[../specs/error-feed-drop-orders-shopify-order-name-adhoc-lookup-noise]],
+      // Control Tower signature `supabase-logs:29330036d8d9e5fe`). Narrowly gated to
+      // require BOTH the exact column-missing message AND the SELECT-lookup shape — a
+      // column-missing error on any other column of `orders` (including the live
+      // `order_number`), or on `shopify_order_name` from any other table (including
+      // the real `one_time_charges.shopify_order_name`), or on `orders` via a
+      // non-SELECT statement (real code-bug shape), still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... paused_at ... from
       // public.subscriptions` lookup by an external tool / stale exploratory query — or
       // the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions"
