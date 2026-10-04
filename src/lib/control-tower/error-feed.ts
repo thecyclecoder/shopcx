@@ -5456,6 +5456,30 @@ export function isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAd
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column daily_amazon_order_snapshots.date does
+ * not exist` for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.daily_amazon_order_snapshots`. The table exists but has NEVER carried a
+ * `date` column — the per-day column is `snapshot_date`. Narrowly gated so only the
+ * exact column-missing message plus a SELECT lookup on this table is dropped at capture.
+ */
+export function isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column daily_amazon_order_snapshots.date does not exist" ||
+    stripped === "column public.daily_amazon_order_snapshots.date does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?daily_amazon_order_snapshots\b/.test(q)) return true;
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?daily_amazon_order_snapshots\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column daily_amazon_product_snapshots.date does
  * not exist` for an ad hoc / stale PostgREST direct-REST SELECT against
  * `public.daily_amazon_product_snapshots`. The table exists (see
