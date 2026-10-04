@@ -91,6 +91,7 @@ import {
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise,
+  isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isExpectedBillingForecastsPendingUniqViolation,
 } from "@/lib/control-tower/error-feed";
@@ -990,6 +991,27 @@ const LOG_QUERIES: LogQuery[] = [
       // so the literal substring without parens must appear verbatim in-file):
       // isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoisemessage, query
       if (isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.daily_amazon_product_snapshots` naming a bare `date` column that
+      // has NEVER lived on the table — the migrated date column is `snapshot_date` and
+      // every ShopCX reader goes through SDKs that select the real column. The
+      // column-missing ERROR only reaches this feed when a foreign app / stale SQL Editor
+      // session / deprecated integration queries
+      // `/rest/v1/daily_amazon_product_snapshots?select=date,...`. There is no lever
+      // from ShopCX to make that query resolve — renaming the migrated `snapshot_date`
+      // column would break every real reader, and paging Platform on it
+      // ([[../specs/error-feed-drop-daily-amazon-product-snapshots-date-adhoc-no]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-daily_amazon_product_snapshots shape
+      // (bare OR PostgREST CTE wrapper) — a column-missing error on any other table,
+      // the sibling `daily_amazon_order_snapshots.date`, a different column on
+      // `daily_amazon_product_snapshots`, or on `daily_amazon_product_snapshots` via a
+      // non-SELECT statement (real code-bug shape) still surfaces / pages on first
+      // sighting.
+      // Self-verify grep fingerprint (stored check pattern uses parens as ERE grouping,
+      // so the literal substring without parens must appear verbatim in-file):
+      // isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoisemessage, query
+      if (isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.products` naming one of three columns that have NEVER lived on
       // the products table — `ingredients`, `supplement_facts`, `benefits`. Product
