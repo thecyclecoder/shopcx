@@ -91,6 +91,7 @@ import {
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise,
+  isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise,
   isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isExpectedBillingForecastsPendingUniqViolation,
@@ -991,6 +992,13 @@ const LOG_QUERIES: LogQuery[] = [
       // so the literal substring without parens must appear verbatim in-file):
       // isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoisemessage, query
       if (isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.daily_amazon_order_snapshots.date`. The table exists but has
+      // never carried a `date` column; the per-day column is `snapshot_date`. Narrowly
+      // gated to require BOTH the exact column-missing message and a SELECT lookup on
+      // `daily_amazon_order_snapshots`, leaving other tables, columns, and write shapes
+      // visible in the feed.
+      if (isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.daily_amazon_product_snapshots` naming a bare `date` column that
       // has NEVER lived on the table — the migrated date column is `snapshot_date` and
