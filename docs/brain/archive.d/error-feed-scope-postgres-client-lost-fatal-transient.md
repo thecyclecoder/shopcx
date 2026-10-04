@@ -1,0 +1,1 @@
+- **Scope Postgres client-lost FATAL logs as transient** · verified 2026-10-04 · → [[lifecycles/control-tower]]
