@@ -55,6 +55,7 @@ import {
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise,
   isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoise,
   isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise,
+  isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
@@ -15446,6 +15447,286 @@ test("isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise returns fa
     isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
       "",
       "select fold_job_id from public.pending_folds",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise ──
+// Spec: error-feed-drop-loop-heartbeats-beat-at-direct-rest-noise.
+// Control Tower signature: supabase-logs:1b4a323180ec8365.
+// Drops the SELECT lookup shape for `loop_heartbeats.beat_at` or `loop_heartbeats.loop`
+// — legacy / off-schema column names that stale foreign direct-REST callers ask for.
+// The real columns are `loop_id` and `ran_at`; any other column, any non-SELECT
+// statement shape, any JOIN, any different table, any FATAL/PANIC/constraint failure
+// still pages.
+
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise drops the captured supabase-logs:1b4a323180ec8365 PostgREST CTE sample on loop_heartbeats.beat_at", () => {
+  // The production PostgREST CTE sample — a stale foreign direct-REST client asks for
+  // legacy `beat_at` / `loop` column names that the migrated heartbeat table never
+  // carried. PostgREST wraps the SELECT in `WITH pgrst_source AS ( ... )` with
+  // double-quoted identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.beat_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_heartbeats"."loop", "public"."loop_heartbeats"."beat_at" FROM "public"."loop_heartbeats" WHERE "public"."loop_heartbeats"."loop" = $1 ORDER BY "public"."loop_heartbeats"."beat_at" DESC LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column public.loop_heartbeats.beat_at does not exist",
+      'WITH pgrst_source AS (SELECT "public"."loop_heartbeats"."beat_at" FROM "public"."loop_heartbeats")',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "ERROR: column loop_heartbeats.beat_at does not exist",
+      'WITH pgrst_source AS (SELECT "public"."loop_heartbeats"."beat_at" FROM "public"."loop_heartbeats")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise ALSO drops the PostgREST CTE sample on loop_heartbeats.loop", () => {
+  // Same drop class covers the sibling `loop` legacy name — the real column is
+  // `loop_id`, so a direct-REST client that reads `select loop,beat_at,...` hits the
+  // column-missing error on `loop` first depending on the select-order rendering.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.loop does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_heartbeats"."loop", "public"."loop_heartbeats"."beat_at" FROM "public"."loop_heartbeats" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column public.loop_heartbeats.loop does not exist",
+      'WITH pgrst_source AS (SELECT "public"."loop_heartbeats"."loop" FROM "public"."loop_heartbeats")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise drops the bare SELECT lookup variant on either legacy column", () => {
+  // The non-PostgREST bare-SELECT shape — same ad hoc read without the CTE wrapper.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.beat_at does not exist",
+      "select loop, beat_at from public.loop_heartbeats where loop = 'triage-escalations-cron'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.loop does not exist",
+      "select loop, beat_at from public.loop_heartbeats",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.beat_at does not exist",
+      "select beat_at from loop_heartbeats limit 10",
+    ),
+    true,
+  );
+  // Case-insensitive on the query, with trailing WHERE / ORDER BY / LIMIT.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.beat_at does not exist",
+      "SELECT LOOP, BEAT_AT FROM PUBLIC.LOOP_HEARTBEATS ORDER BY BEAT_AT DESC LIMIT 50",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "  column loop_heartbeats.beat_at does not exist  ",
+      "   select beat_at from public.loop_heartbeats   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise KEEPS a non-SELECT statement shape on loop_heartbeats (a real code-bug writing beat_at / loop still pages)", () => {
+  // INSERT / UPDATE / DELETE against the table referencing a bogus legacy column is
+  // real code trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.beat_at does not exist",
+      "insert into public.loop_heartbeats (loop, beat_at, ok) values ($1, now(), true)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.loop does not exist",
+      "update public.loop_heartbeats set loop = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.beat_at does not exist",
+      "delete from public.loop_heartbeats where beat_at < now() - interval '30 days'",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.beat_at does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."loop_heartbeats"("loop", "beat_at") VALUES ($1, now()) RETURNING "public"."loop_heartbeats"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.loop does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."loop_heartbeats" SET "loop" = $1 WHERE "public"."loop_heartbeats"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise KEEPS a JOIN across other tables (a real code shape joining loop_heartbeats still pages)", () => {
+  // The regex is anchored on `from (public.)?loop_heartbeats` as the first FROM target;
+  // a JOIN whose first FROM is a different table won't match — which is the outcome
+  // we want, because a caller that joins is product code, not the ad hoc direct-REST
+  // read.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.beat_at does not exist",
+      "select a.id, h.beat_at from public.loop_alerts a join public.loop_heartbeats h on h.loop_id = a.loop_id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise KEEPS a DIFFERENT column-missing on loop_heartbeats (a real column rename regression still pages)", () => {
+  // Real `loop_heartbeats` columns — if any of these regress we absolutely want the
+  // page. In particular `loop_id` and `ran_at` are the real columns the drop targets'
+  // legacy names (`loop` / `beat_at`) stand in for; a regression on them stays paged.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.loop_id does not exist",
+      "select loop_id from public.loop_heartbeats where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.ran_at does not exist",
+      "select ran_at from public.loop_heartbeats where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.kind does not exist",
+      "select kind from public.loop_heartbeats where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.ok does not exist",
+      "select ok from public.loop_heartbeats where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.produced does not exist",
+      "select produced from public.loop_heartbeats where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise KEEPS a column-missing error on any OTHER table (a different table with a beat_at / loop column still pages)", () => {
+  // If any other table had a real `beat_at` or `loop` column and regressed, we
+  // absolutely want to see it — the pin is `loop_heartbeats.` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column cron_runs.beat_at does not exist",
+      "select beat_at from public.cron_runs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_alerts.loop does not exist",
+      "select loop from public.loop_alerts where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise KEEPS a PostgREST CTE wrapper on a DIFFERENT table (a real schema regression on another table still pages)", () => {
+  // Same wrapper shape but the wrapped SELECT reads a different table — the pin is
+  // `loop_heartbeats` only; a regression on an adjacent table is one we want to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_alerts.beat_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."id", "public"."loop_alerts"."beat_at" FROM "public"."loop_alerts" WHERE "public"."loop_alerts"."workspace_id" = $1 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on loop_heartbeats (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "database is shutting down",
+      "select id from public.loop_heartbeats where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      'duplicate key value violates unique constraint "loop_heartbeats_feed_minute_uidx"',
+      "insert into public.loop_heartbeats (loop_id, kind, ran_at) values ($1, $2, now())",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.loop_heartbeats where loop_id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise returns false on empty / nullish inputs", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise("", ""),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.beat_at does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "",
+      "select beat_at from public.loop_heartbeats",
     ),
     false,
   );
