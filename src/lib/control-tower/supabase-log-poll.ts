@@ -1151,23 +1151,25 @@ const LOG_QUERIES: LogQuery[] = [
       // isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoisemessage, query
       if (isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
-      // against `public.loop_heartbeats` naming legacy column names (`beat_at` or
-      // `loop`) that have NEVER lived on the table — the real per-run columns are
-      // `ran_at` and `loop_id`, and every ShopCX reader + writer (heartbeat SDK, the
-      // Control Tower monitor) uses the real column names. The column-missing ERROR
-      // only reaches this feed when a foreign app / stale SQL Editor session /
-      // deprecated integration queries
-      // `/rest/v1/loop_heartbeats?select=loop,beat_at,...`. There is no lever from
+      // against `public.loop_heartbeats` naming legacy column names (`beat_at`, `loop`,
+      // or `loop_key`) that have NEVER lived on the table — the real per-run columns
+      // are `ran_at` and `loop_id` (`loop_key` is a stale synonym for `loop_id`), and
+      // every ShopCX reader + writer (heartbeat SDK, the Control Tower monitor) uses
+      // the real column names. The column-missing ERROR only reaches this feed when a
+      // foreign app / stale SQL Editor session / deprecated integration queries
+      // `/rest/v1/loop_heartbeats?select=loop_key,beat_at,...`. There is no lever from
       // ShopCX to make that query resolve — renaming the migrated `loop_id` / `ran_at`
       // columns would break every real reader, and paging Platform on it
-      // ([[../specs/error-feed-drop-loop-heartbeats-beat-at-direct-rest-noise]], Control
-      // Tower signature `supabase-logs:1b4a323180ec8365`) is repair work for a query
-      // we don't own. Narrowly gated to require BOTH an exact column-missing message
-      // on `loop_heartbeats.beat_at` OR `loop_heartbeats.loop` AND a SELECT-on-
-      // loop_heartbeats shape (bare OR PostgREST CTE wrapper) — a column-missing error
-      // on any other table, a different column on `loop_heartbeats` (e.g. a real
-      // `loop_id` / `ran_at` regression), writes, joins, or FATAL/PANIC/constraint
-      // failures on `loop_heartbeats` still surface / page on first sighting.
+      // ([[../specs/error-feed-drop-loop-heartbeats-beat-at-direct-rest-noise]] +
+      // [[../specs/error-feed-drop-loop-heartbeats-loop-key-direct-rest-noise]], Control
+      // Tower signatures `supabase-logs:1b4a323180ec8365` + `supabase-logs:2dde5e6c56fb408c`)
+      // is repair work for a query we don't own. Narrowly gated to require BOTH an
+      // exact column-missing message on `loop_heartbeats.beat_at` OR `loop_heartbeats.loop`
+      // OR `loop_heartbeats.loop_key` AND a SELECT-on-loop_heartbeats shape (bare OR
+      // PostgREST CTE wrapper) — a column-missing error on any other table, a different
+      // column on `loop_heartbeats` (e.g. a real `loop_id` / `ran_at` regression),
+      // writes, joins, or FATAL/PANIC/constraint failures on `loop_heartbeats` still
+      // surface / page on first sighting.
       // Self-verify grep fingerprint (stored check pattern uses parens as ERE grouping,
       // so the literal substring without parens must appear verbatim in-file):
       // isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoisemessage, query

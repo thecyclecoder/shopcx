@@ -16157,13 +16157,14 @@ test("isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise returns fa
 });
 
 // ── isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise ──
-// Spec: error-feed-drop-loop-heartbeats-beat-at-direct-rest-noise.
-// Control Tower signature: supabase-logs:1b4a323180ec8365.
-// Drops the SELECT lookup shape for `loop_heartbeats.beat_at` or `loop_heartbeats.loop`
-// — legacy / off-schema column names that stale foreign direct-REST callers ask for.
-// The real columns are `loop_id` and `ran_at`; any other column, any non-SELECT
-// statement shape, any JOIN, any different table, any FATAL/PANIC/constraint failure
-// still pages.
+// Specs: error-feed-drop-loop-heartbeats-beat-at-direct-rest-noise,
+// error-feed-drop-loop-heartbeats-loop-key-direct-rest-noise.
+// Control Tower signatures: supabase-logs:1b4a323180ec8365, supabase-logs:2dde5e6c56fb408c.
+// Drops the SELECT lookup shape for `loop_heartbeats.beat_at`, `loop_heartbeats.loop`,
+// or `loop_heartbeats.loop_key` — legacy / off-schema column names that stale foreign
+// direct-REST callers ask for. The real columns are `loop_id` and `ran_at` (`loop_key`
+// is a stale synonym for `loop_id`); any other column, any non-SELECT statement shape,
+// any JOIN, any different table, any FATAL/PANIC/constraint failure still pages.
 
 test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise drops the captured supabase-logs:1b4a323180ec8365 PostgREST CTE sample on loop_heartbeats.beat_at", () => {
   // The production PostgREST CTE sample — a stale foreign direct-REST client asks for
@@ -16211,6 +16212,94 @@ test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise ALSO d
       'WITH pgrst_source AS (SELECT "public"."loop_heartbeats"."loop" FROM "public"."loop_heartbeats")',
     ),
     true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise ALSO drops the PostgREST CTE sample on loop_heartbeats.loop_key (supabase-logs:2dde5e6c56fb408c)", () => {
+  // The captured production CTE query shape — a stale foreign direct-REST client
+  // reads `select=loop_key,ran_at,...` against the heartbeat table. `loop_key` has
+  // never shipped as a column; the real identifier is `loop_id`. PostgREST wraps the
+  // SELECT in `WITH pgrst_source AS ( ... )` with double-quoted identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.loop_key does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_heartbeats"."loop_key", "public"."loop_heartbeats"."ran_at" FROM "public"."loop_heartbeats" WHERE "public"."loop_heartbeats"."loop_key" = $1 ORDER BY "public"."loop_heartbeats"."ran_at" DESC LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column public.loop_heartbeats.loop_key does not exist",
+      'WITH pgrst_source AS (SELECT "public"."loop_heartbeats"."loop_key" FROM "public"."loop_heartbeats")',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "ERROR: column loop_heartbeats.loop_key does not exist",
+      'WITH pgrst_source AS (SELECT "public"."loop_heartbeats"."loop_key" FROM "public"."loop_heartbeats")',
+    ),
+    true,
+  );
+  // Bare SELECT lookup variant — same ad hoc read without the PostgREST CTE wrapper.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.loop_key does not exist",
+      "select loop_key, ran_at from public.loop_heartbeats where loop_key = 'triage-escalations-cron'",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.loop_key does not exist",
+      "select loop_key from loop_heartbeats limit 10",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise KEEPS a non-SELECT statement shape on loop_heartbeats for loop_key (a real code-bug writing loop_key still pages)", () => {
+  // Negative non-SELECT cases on `loop_key` — INSERT / UPDATE / DELETE against the
+  // table referencing the stale `loop_key` column is real code trying to write the
+  // table, a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.loop_key does not exist",
+      "insert into public.loop_heartbeats (loop_key, ran_at, ok) values ($1, now(), true)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.loop_key does not exist",
+      "update public.loop_heartbeats set loop_key = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.loop_key does not exist",
+      "delete from public.loop_heartbeats where loop_key = $1",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE on loop_key stays
+  // paged too — that would be a real code-write bug on our side.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.loop_key does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."loop_heartbeats"("loop_key", "ran_at") VALUES ($1, now()) RETURNING "public"."loop_heartbeats"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.loop_key does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."loop_heartbeats" SET "loop_key" = $1 WHERE "public"."loop_heartbeats"."id" = $2 )',
+    ),
+    false,
   );
 });
 
