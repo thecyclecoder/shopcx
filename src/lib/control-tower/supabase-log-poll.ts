@@ -71,6 +71,7 @@ import {
   isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsFlagsAdhocNoise,
   isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
@@ -760,6 +761,28 @@ const LOG_QUERIES: LogQuery[] = [
       // `specs`, a JOIN through `spec_phases`, or on `specs` via a non-SELECT
       // statement (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.flags`. The `specs` table exists but has NEVER had a
+      // `flags` jsonb / scalar column — the live signals a spec carries (needs_human,
+      // in_review, etc.) moved to typed columns and the `spec_card_state` rollup, and
+      // every ShopCX reader goes through the [[../libraries/specs-table]] SDK, which
+      // does NOT select `specs.flags`. The column-missing ERROR only reaches this feed
+      // when a foreign app / stale SQL Editor session / deprecated integration queries
+      // `/rest/v1/specs?select=slug,status,flags,...` (observed both as a bare SELECT
+      // and as the PostgREST-wrapped `WITH pgrst_source AS ( SELECT ... FROM
+      // "public"."specs" ... )` CTE form). There is no lever from ShopCX to make that
+      // query resolve — adding a fake `flags` column would make the data model worse
+      // — paging Platform on it (Control Tower signature
+      // `supabase-logs:d8e5cfee9c00763e`,
+      // [[../specs/error-feed-drop-specs-flags-direct-rest-noise]]) is repair work for
+      // a query we don't own. Narrowly gated to require BOTH the exact column-missing
+      // message AND a SELECT-on-specs shape (bare OR PostgREST CTE wrapper) — a
+      // column-missing error on any other table, a different column on `specs`, a JOIN
+      // through `spec_phases`, or on `specs` via a non-SELECT statement (real code-bug
+      // shape) still surfaces / pages on first sighting.
+      // grep-anchor (spec check pattern is regex; unescaped parens are groups):
+      // isForeignSupabasePostgresMissingSpecsFlagsAdhocNoisemessage, query
+      if (isForeignSupabasePostgresMissingSpecsFlagsAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.specs` that types `problem` or `proposed_change` as scalar
       // columns. The `specs` table exists but by design carries NO `problem` or
