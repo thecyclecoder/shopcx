@@ -1,0 +1,1 @@
+- **Drop stale direct-REST specs.flags lookup noise from Supabase logs** · verified 2026-10-05 · → [[lifecycles/control-tower]]

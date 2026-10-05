@@ -1,0 +1,1 @@
+- **Drop stale public.specs intent column probes from Supabase logs** · verified 2026-10-05 · → [[lifecycles/control-tower]]
