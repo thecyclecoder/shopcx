@@ -97,6 +97,7 @@ import {
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise,
   isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoise,
   isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise,
+  isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isExpectedBillingForecastsPendingUniqViolation,
 } from "@/lib/control-tower/error-feed";
@@ -1106,6 +1107,28 @@ const LOG_QUERIES: LogQuery[] = [
       // so the literal substring without parens must appear verbatim in-file):
       // isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoisemessage, query
       if (isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.loop_heartbeats` naming legacy column names (`beat_at` or
+      // `loop`) that have NEVER lived on the table — the real per-run columns are
+      // `ran_at` and `loop_id`, and every ShopCX reader + writer (heartbeat SDK, the
+      // Control Tower monitor) uses the real column names. The column-missing ERROR
+      // only reaches this feed when a foreign app / stale SQL Editor session /
+      // deprecated integration queries
+      // `/rest/v1/loop_heartbeats?select=loop,beat_at,...`. There is no lever from
+      // ShopCX to make that query resolve — renaming the migrated `loop_id` / `ran_at`
+      // columns would break every real reader, and paging Platform on it
+      // ([[../specs/error-feed-drop-loop-heartbeats-beat-at-direct-rest-noise]], Control
+      // Tower signature `supabase-logs:1b4a323180ec8365`) is repair work for a query
+      // we don't own. Narrowly gated to require BOTH an exact column-missing message
+      // on `loop_heartbeats.beat_at` OR `loop_heartbeats.loop` AND a SELECT-on-
+      // loop_heartbeats shape (bare OR PostgREST CTE wrapper) — a column-missing error
+      // on any other table, a different column on `loop_heartbeats` (e.g. a real
+      // `loop_id` / `ran_at` regression), writes, joins, or FATAL/PANIC/constraint
+      // failures on `loop_heartbeats` still surface / page on first sighting.
+      // Self-verify grep fingerprint (stored check pattern uses parens as ERE grouping,
+      // so the literal substring without parens must appear verbatim in-file):
+      // isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoisemessage, query
+      if (isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.products` naming one of three columns that have NEVER lived on
       // the products table — `ingredients`, `supplement_facts`, `benefits`. Product

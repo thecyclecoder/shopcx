@@ -5954,6 +5954,106 @@ export function isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column loop_heartbeats.<beat_at|loop> does
+ * not exist` for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.loop_heartbeats`. The table exists (see
+ * `supabase/migrations/20260622120000_control_tower.sql`) but has NEVER carried either
+ * of these column names — the per-run columns are `ran_at` and `loop_id`, and every
+ * ShopCX reader goes through the heartbeat SDK / direct SELECTs that name the real
+ * columns (`src/lib/control-tower/heartbeat.ts` writes `loop_id` + `ran_at`;
+ * `src/lib/inngest/sms-callback-drain.ts` + the Control Tower monitor read them back
+ * the same way). The column-missing ERROR only reaches this feed when a foreign app /
+ * stale Supabase Studio session / deprecated integration queries
+ * `/rest/v1/loop_heartbeats?select=loop,beat_at,...` (a client assuming the heartbeat
+ * table carries legacy column names that never shipped). There is no lever from
+ * ShopCX to make that query resolve — renaming the real `loop_id` / `ran_at` columns
+ * would break every real reader + writer, and paging Platform on a one-off stale
+ * direct-REST query burns repair time without giving us a product lever to pull
+ * (Control Tower signature `supabase-logs:1b4a323180ec8365`,
+ * [[../specs/error-feed-drop-loop-heartbeats-beat-at-direct-rest-noise]]).
+ *
+ * Sibling of `isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise`
+ * and `isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise` — the
+ * same narrow-gating shape (exact `column <table>.<name> does not exist` for one of a
+ * fixed set of legacy column names + SELECT-lookup shape covering BOTH bare and
+ * PostgREST CTE wrapper forms), aimed at a different foreign caller on a different
+ * table.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for ONE of the two
+ *      legacy column names — trimmed equal to
+ *      `column loop_heartbeats.<beat_at|loop> does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.loop_heartbeats` —
+ *      either (a) the bare `select ... from public.loop_heartbeats` shape, OR (b) the
+ *      PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."loop_heartbeats" ... )`
+ *      CTE wrapper form with double-quoted identifiers. Both forms are the same
+ *      foreign-owned read.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on
+ *     a table that DOES have a `beat_at` or `loop` column) still pages — the pin is
+ *     `loop_heartbeats.` only,
+ *   - a column-missing error on `loop_heartbeats` for a DIFFERENT column (e.g. a real
+ *     column rename regression on `loop_id`, `ran_at`, `kind`, `ok`, `produced`,
+ *     `detail`, `duration_ms`) still pages — the pin covers `beat_at` / `loop` only,
+ *   - a `loop_heartbeats.beat_at` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, or a JOIN whose first FROM is another table)
+ *     still pages — the pin is the SELECT-lookup shape, matching the ad hoc
+ *     direct-REST read we've observed; the CTE branch likewise requires the wrapped
+ *     op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper stays
+ *     paged — that would be a real code-write bug on our side),
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing
+ *     on `loop_heartbeats` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `loop_heartbeats.beat_at` OR `loop_heartbeats.loop` (with or without the `public.`
+  // qualifier).
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column loop_heartbeats.beat_at does not exist" ||
+    stripped === "column public.loop_heartbeats.beat_at does not exist" ||
+    stripped === "column loop_heartbeats.loop does not exist" ||
+    stripped === "column public.loop_heartbeats.loop does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `loop_heartbeats`
+  // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to loop_heartbeats with a bogus `beat_at`
+  // or `loop` column is a code bug we DO want to page on, not the ad hoc direct-REST
+  // read this drop targets. The `\b` around the table name keeps the anchor from
+  // matching any sibling identifier.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?loop_heartbeats\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."loop_heartbeats" ... )` with double-quoted identifiers. Same
+  // foreign-owned read, different rendering — the plain SELECT regex above misses it
+  // because the statement starts with `with` and the FROM clause carries the quoted
+  // `"public"."loop_heartbeats"` shape. Guarded so the CTE branch requires the wrapped
+  // op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper — e.g.
+  // `WITH pgrst_source AS (INSERT INTO "public"."loop_heartbeats"("beat_at") ...)` —
+  // is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?loop_heartbeats\b/.test(q);
+}
+
+/**
  * Expected-by-design noise — Postgres reporting `duplicate key value violates unique
  * constraint "dashboard_notifications_dedupe_key_open_uniq"` on an INSERT INTO
  * `public.dashboard_notifications`. That partial UNIQUE index (migration
