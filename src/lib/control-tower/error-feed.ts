@@ -1149,20 +1149,23 @@ export function isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
 /**
  * Foreign-app noise — Postgres reporting a missing COLUMN on `public.loop_alerts` for an
  * ad hoc / stale direct-REST SELECT. The `loop_alerts` monitoring table has never owned
- * `closed_at` or `error_signature` — its lifecycle is tracked via `status` +
- * `resolved_at`, and the `error_signature` name is an `error_events` concept, not a
- * `loop_alerts` one (see the table definition in `supabase/migrations/` and the sibling
- * direct-REST column-missing drops in this file); grep confirms no ShopCX code path
- * reads either name on `loop_alerts`. The messages only reach Supabase's `postgres_logs`
- * feed when a foreign / stale PostgREST client (a stale Supabase Studio session, an
- * abandoned external integration, a bookmarked REST URL) queries
- * `/rest/v1/loop_alerts?select=...closed_at...` or `...error_signature...`. There is no
- * lever from ShopCX to make that query resolve — paging Platform on it
+ * `closed_at`, `error_signature`, or `loop_key` — its lifecycle is tracked via `status` +
+ * `resolved_at`, and the `error_signature` / `loop_key` names are concepts that live on
+ * sibling tables (`error_events` / `loop_heartbeats`), not `loop_alerts` (see the table
+ * definition in `supabase/migrations/` and the sibling direct-REST column-missing drops
+ * in this file); grep confirms no ShopCX code path reads any of those names on
+ * `loop_alerts`. The messages only reach Supabase's `postgres_logs` feed when a foreign /
+ * stale PostgREST client (a stale Supabase Studio session, an abandoned external
+ * integration, a bookmarked REST URL) queries
+ * `/rest/v1/loop_alerts?select=...closed_at...`, `...error_signature...`, or
+ * `...loop_key...`. There is no lever from ShopCX to make that query resolve — paging
+ * Platform on it
  * ([[../specs/error-feed-drop-loop-alerts-closed-at-direct-rest-noise]] /
- * [[../specs/error-feed-drop-loop-alerts-error-signature-direct-rest-noise]], Control
- * Tower signatures `supabase-logs:7dc04785e9561d24` (closed_at) and
- * `supabase-logs:2f7afeedcba03d28` (error_signature)) is repair work for a query no code
- * owns.
+ * [[../specs/error-feed-drop-loop-alerts-error-signature-direct-rest-noise]] /
+ * [[../specs/error-feed-drop-loop-alerts-loop-key-direct-rest-noise]], Control Tower
+ * signatures `supabase-logs:7dc04785e9561d24` (closed_at),
+ * `supabase-logs:2f7afeedcba03d28` (error_signature), and
+ * `supabase-logs:1676b561414d21b9` (loop_key)) is repair work for a query no code owns.
  *
  * Sibling of `isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise` /
  * `isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise` — same narrow-gating
@@ -1178,9 +1181,9 @@ export function isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
  *      columns on `loop_alerts` — trimmed equal to `column loop_alerts.<col> does not
  *      exist` (or the `public.` qualified variant, with any leading `ERROR: ` prefix
  *      Postgres includes on the logs surface stripped) for `<col>` in {`closed_at`,
- *      `error_signature`}. The qualified `<table>.<name>` form is the shape Postgres
- *      emits when PostgREST's CTE wrapper names the relation on the column reference,
- *      AND
+ *      `error_signature`, `loop_key`}. The qualified `<table>.<name>` form is the shape
+ *      Postgres emits when PostgREST's CTE wrapper names the relation on the column
+ *      reference, AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.loop_alerts` — either
  *      (a) the bare `select ... from (public.)?loop_alerts` shape, OR (b) the
  *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM "public"."loop_alerts"
@@ -1217,18 +1220,21 @@ export function isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
   const msg = (message ?? "").trim();
   if (!msg) return false;
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
-  // Pinned to the two columns observed as foreign direct-REST noise against
-  // `public.loop_alerts`: `closed_at` (`supabase-logs:7dc04785e9561d24`) and
-  // `error_signature` (`supabase-logs:2f7afeedcba03d28`). Both are columns the table has
-  // never owned — the lifecycle lives on `status` + `resolved_at`, and `error_signature`
-  // is an `error_events` concept. A different missing column on `loop_alerts` (e.g.
-  // `resolved_at`, `status`, `workspace_id`) is a real column rename / regression and is
-  // intentionally NOT in this set.
+  // Pinned to the three columns observed as foreign direct-REST noise against
+  // `public.loop_alerts`: `closed_at` (`supabase-logs:7dc04785e9561d24`),
+  // `error_signature` (`supabase-logs:2f7afeedcba03d28`), and `loop_key`
+  // (`supabase-logs:1676b561414d21b9`). All are columns the table has never owned — the
+  // lifecycle lives on `status` + `resolved_at`, `error_signature` is an `error_events`
+  // concept, and `loop_key` is a `loop_heartbeats` concept. A different missing column on
+  // `loop_alerts` (e.g. `resolved_at`, `status`, `workspace_id`) is a real column rename
+  // / regression and is intentionally NOT in this set.
   const messageMatches =
     stripped === "column loop_alerts.closed_at does not exist" ||
     stripped === "column public.loop_alerts.closed_at does not exist" ||
     stripped === "column loop_alerts.error_signature does not exist" ||
-    stripped === "column public.loop_alerts.error_signature does not exist";
+    stripped === "column public.loop_alerts.error_signature does not exist" ||
+    stripped === "column loop_alerts.loop_key does not exist" ||
+    stripped === "column public.loop_alerts.loop_key does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
