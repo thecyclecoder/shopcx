@@ -38,6 +38,7 @@ import {
   isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsIntentAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
@@ -6080,6 +6081,291 @@ test("isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise retur
   assert.equal(
     isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(
       "column specs.proposed_change does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingSpecsIntentAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads `public.specs` with a phantom
+// `intent` scalar column. The table exists but by design carries NO such column — that
+// prose lives in `specs.why` + `specs.what` on each row. Foreign-owned surface, no lever
+// from us — drop AT CAPTURE only when BOTH the exact column-missing message on
+// `specs.intent` AND a SELECT-lookup shape on `specs` (bare OR PostgREST CTE wrapper)
+// are present. A column-missing on any other table, a different column on `specs`, a
+// JOIN through `spec_phases`, or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingSpecsIntentAdhocNoise drops the ad hoc SELECT lookup on the exact specs.intent column-missing shape", () => {
+  // The captured production sample: unqualified and public.-qualified message shapes.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.intent does not exist",
+      "select slug, title, intent from public.specs where slug = 'x' limit 1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column public.specs.intent does not exist",
+      "select slug, title, intent from public.specs where slug = 'x' limit 1",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.intent does not exist",
+      "select intent from specs limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.intent does not exist",
+      "select slug, intent from public.specs where slug = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.intent does not exist",
+      "SELECT SLUG, INTENT FROM PUBLIC.SPECS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "ERROR: column specs.intent does not exist",
+      "select intent from public.specs",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "  column specs.intent does not exist  ",
+      "   select intent from public.specs   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsIntentAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"specs\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in
+  // the pgrst_source CTE with double-quoted `"public"."specs"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.intent does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."specs"."slug", "public"."specs"."intent" FROM "public"."specs" WHERE "public"."specs"."slug" = $1 LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column public.specs.intent does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."intent" FROM "public"."specs")',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "ERROR: column specs.intent does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."intent" FROM "public"."specs")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsIntentAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have an intent column still pages)", () => {
+  // If any other table ever carries a real `intent` column and regresses, we absolutely
+  // want to see it — the pin is `specs.intent` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column tickets.intent does not exist",
+      "select intent from public.tickets where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column ticket_analyses.intent does not exist",
+      "select intent from public.ticket_analyses where id = $1",
+    ),
+    false,
+  );
+  // Sibling `spec_phases` is a DIFFERENT table — the pin here is `specs` only, so this
+  // stays paged rather than silently swallowed by the specs classifier.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column spec_phases.intent does not exist",
+      "select intent from public.spec_phases where spec_id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsIntentAdhocNoise KEEPS a DIFFERENT column-missing on specs (a real column rename still pages)", () => {
+  // Real `specs` columns — if any of these regress we absolutely want the page.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.status does not exist",
+      "select status from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.slug does not exist",
+      "select slug from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.workspace_id does not exist",
+      "select workspace_id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.why does not exist",
+      "select why from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.what does not exist",
+      "select what from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsIntentAdhocNoise KEEPS a JOIN across other tables (a real code shape joining spec_phases still pages)", () => {
+  // The regex is anchored on `from (public.)?specs` as the first FROM target; a JOIN
+  // whose first FROM is `spec_phases` won't match — which is the outcome we want,
+  // because a caller that joins the two is product code, not the ad hoc direct-REST
+  // read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.intent does not exist",
+      "select p.body, s.intent from public.spec_phases p join public.specs s on s.id = p.spec_id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsIntentAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing specs.intent still pages)", () => {
+  // INSERT / UPDATE / DELETE against specs referencing a bogus column is real code
+  // trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.intent does not exist",
+      "insert into public.specs (slug, intent) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.intent does not exist",
+      "update public.specs set intent = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.intent does not exist",
+      "delete from public.specs where intent is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.intent does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."specs"("slug", "intent") VALUES ($1, $2) RETURNING "public"."specs"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.intent does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."specs" SET "intent" = $1 WHERE "public"."specs"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsIntentAdhocNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on specs (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "database is shutting down",
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      'duplicate key value violates unique constraint "specs_workspace_slug"',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "canceling statement due to statement timeout",
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      'permission denied for relation "public.specs"',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      'relation "public.specs" does not exist',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsIntentAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.intent does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
+      "column specs.intent does not exist",
       null,
     ),
     false,

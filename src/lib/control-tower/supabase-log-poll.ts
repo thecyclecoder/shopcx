@@ -72,6 +72,7 @@ import {
   isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsIntentAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
@@ -781,6 +782,25 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_phases`, or on `specs` via a non-SELECT statement (real code-bug shape)
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs` that asks for a phantom `intent` scalar column. The
+      // `specs` table exists but by design carries NO `intent` column — a spec's
+      // human-readable intent lives in `specs.why` + `specs.what`, and every ShopCX
+      // reader goes through the specs-table SDK / RPC. The column-missing ERROR only
+      // reaches this feed when a foreign app / stale SQL Editor session / deprecated
+      // integration reads `public.specs` with that phantom column (observed both as a
+      // bare SELECT and as the PostgREST-wrapped `WITH pgrst_source AS ( SELECT ...
+      // FROM "public"."specs" ... )` CTE form). There is no lever from ShopCX to make
+      // that query resolve — adding a fake `intent` column would make the PM data model
+      // worse — paging Platform on it (Control Tower signature
+      // `supabase-logs:dcafe116ebd473a2`,
+      // [[../specs/error-feed-drop-specs-intent-direct-rest-noise]]) is repair work
+      // for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-specs shape (bare OR PostgREST CTE
+      // wrapper) — a column-missing error on any other table, a different column on
+      // `specs`, a JOIN through `spec_phases`, or on `specs` via a non-SELECT statement
+      // (real code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.agent_jobs` that asks for BOTH `slug` and the real `spec_slug`
       // column. The `agent_jobs` table exists but has NEVER had a `slug` column — the
