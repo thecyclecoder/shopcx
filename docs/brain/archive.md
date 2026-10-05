@@ -12,8 +12,17 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Drop stale loop_heartbeats beat_at direct-REST noise** · verified 2026-10-05 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise`)
+- **Drop stale direct-REST specs.flags lookup noise from Supabase logs** · verified 2026-10-05 · → [[lifecycles/control-tower]]
+- **Drop stale public.specs intent column probes from Supabase logs** · verified 2026-10-05 · → [[lifecycles/control-tower]]
+- **Drop stale agent_jobs run timestamp direct-REST lookup noise** · verified 2026-10-04 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise`)
 - **Drop foreign daily Amazon snapshot date lookups from Supabase logs** · verified 2026-10-04 · → [[../inngest/supabase-log-poll]]
 - **Drop stale daily Amazon product snapshot date lookups from the Supabase error feed** · verified 2026-10-04 · → [[../libraries/control-tower]]
+- **Drop stale orders.shopify_order_name PostgREST lookup noise** · verified 2026-10-04 · → [[../libraries/control-tower]] § error-feed.ts classifier `isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise`; cross-link in [[../tables/orders]]
+- **Drop stale pending_folds.fold_job_id direct-REST noise from Supabase logs** · verified 2026-10-04 · → [[../libraries/control-tower]]
+- **Drop stale specs problem/proposed_change search noise** · verified 2026-10-04 · → [[../libraries/control-tower]]
+- **Drop stale specs verified_at direct-REST noise** · verified 2026-10-04 · → [[tables/specs]]
+- **Scope Postgres client-lost FATAL logs as transient** · verified 2026-10-04 · → [[lifecycles/control-tower]]
 - **Fail the QB close Amazon sync when the shipped report parses empty unexpectedly** · verified 2026-10-04 · → [[../libraries/qb-close-sync-amazon-sales]]
 - **Fix date-grain output freshness false alarms** · verified 2026-10-03 · → [[../libraries/control-tower#parseOutputFreshnessValueMs]]
 - **Drop stale agent_jobs branch direct-REST log noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
