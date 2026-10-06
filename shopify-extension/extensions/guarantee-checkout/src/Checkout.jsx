@@ -3,12 +3,16 @@ import { render } from "preact";
 import { useState, useEffect, useMemo } from "preact/hooks";
 
 /**
- * Checkout trust card — the block at the top of checkout.
+ * Checkout trust card — the block at the top of checkout, styled as the page's
+ * heading (Shopify's checkout has none of its own):
  *
+ *   You're almost there, Dylan
  *   [product]  ★★★★★ 4.7 · 11,882 reviews
- *   [ image ]  "I lost 40+ pounds and kept it off…" — Barbara H.
- *              ✓ 30-Day Money-Back Guarantee · Cancel anytime
+ *   [ image ]  "I lost 40+ pounds and kept it off…" Barbara H.
+ *   ✓ 30-Day Money-Back Guarantee · Cancel anytime
  *
+ * A tinted band, not a bordered box, so it reads as a header and not a form field;
+ * image and text sit side by side in a grid so it stays short on mobile.
  * It replaced a bare guarantee headline. On mobile the order summary (and the
  * reviews block inside it) is collapsed, so this card is the only social proof most
  * mobile shoppers see. It stays compact on purpose: everything above Shop Pay pushes
@@ -144,45 +148,51 @@ function TrustCard() {
 
   const quote = quotes.length ? quotes[tick % quotes.length] : null;
   const trust = [guarantee, trustLine].filter(Boolean).join(" · ");
+  // first name needs protected-customer-data access; a guest or an unapproved app
+  // gets undefined and the plain heading
+  const firstName = String(shopify.buyerIdentity?.customer?.value?.firstName || "").trim();
 
   if (!rating && !quote && !guarantee) return null;
 
   return (
-    <s-box border="base" borderRadius="base" padding="base">
-      <s-stack direction="inline" gap="base" alignItems="center">
-        {image ? (
-          <s-box inlineSize="64px">
-            <s-image src={image} alt="" aspectRatio="1" objectFit="cover" borderRadius="base" />
-          </s-box>
-        ) : null}
-        <s-stack gap="small-200">
-          {rating ? (
-            <s-text type="strong">
-              <s-text tone="warning">★★★★★</s-text> {Number(rating.display_rating).toFixed(1)} ·{" "}
-              {Number(rating.display_count).toLocaleString("en-US")} reviews
-            </s-text>
-          ) : null}
-          {quote ? (
-            <s-text>
-              “{quote.quote}”{" "}
-              <s-text color="subdued">
-                — {quote.name}
-                {quote.verified ? ", verified buyer" : ""}
-              </s-text>
-            </s-text>
-          ) : null}
-          {quote && WEIGHT.test(quote.quote) ? (
-            <s-text type="small" color="subdued">
-              Results vary.
-            </s-text>
-          ) : null}
-          {trust ? (
-            <s-stack direction="inline" gap="small-200" alignItems="center">
-              {guarantee ? <s-icon type="check-circle" size="small" /> : null}
-              <s-text type="small">{trust}</s-text>
+    <s-box background="subdued" borderRadius="large" padding="base">
+      <s-stack gap="base">
+        <s-heading>{firstName ? `You're almost there, ${firstName}` : "You're almost there"}</s-heading>
+        {rating || quote ? (
+          <s-grid gridTemplateColumns={image ? "72px 1fr" : "1fr"} gap="base" alignItems="center">
+            {image ? (
+              <s-image src={image} alt="" aspectRatio="1" objectFit="cover" borderRadius="base" />
+            ) : null}
+            <s-stack gap="small-300">
+              {rating ? (
+                <s-text type="strong">
+                  <s-text tone="warning">★★★★★</s-text> {Number(rating.display_rating).toFixed(1)} ·{" "}
+                  {Number(rating.display_count).toLocaleString("en-US")} reviews
+                </s-text>
+              ) : null}
+              {quote ? (
+                <s-text>
+                  <s-text type="emphasis">“{quote.quote}”</s-text>{" "}
+                  <s-text color="subdued">
+                    {quote.name}
+                    {quote.verified ? ", verified buyer" : ""}
+                  </s-text>
+                </s-text>
+              ) : null}
+              {quote && WEIGHT.test(quote.quote) ? (
+                <s-text type="small" color="subdued">
+                  Results vary.
+                </s-text>
+              ) : null}
             </s-stack>
-          ) : null}
-        </s-stack>
+          </s-grid>
+        ) : null}
+        {trust ? (
+          <s-stack direction="inline" gap="small-200" alignItems="center">
+            {guarantee ? <s-icon type="check-circle" size="small" tone="success" /> : null}
+            <s-text type="small">{trust}</s-text>
+          </s-stack>
+        ) : null}
       </s-stack>
     </s-box>
   );
