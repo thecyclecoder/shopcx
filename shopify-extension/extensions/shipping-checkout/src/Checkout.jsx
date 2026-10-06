@@ -26,11 +26,11 @@ import { render } from "preact";
  * a line saying why. Measured on delivered orders, 12 months to 2026-10-06
  * (order → delivered_at, calendar days):
  *
- *   region      n      median  p80    window shown
- *   mainland    29,781  7.0     9.2    today + 6..9  (default, settings)
- *   Puerto Rico 119     9.8     15.0   today + 10..15
- *   Hawaii      124     14.0    19.7   today + 14..20
- *   Alaska      94      15.6    25.3   today + 16..25
+ *   region      n       median  p80
+ *   mainland    29,781  7.0     9.2    → dated window, today + 6..9 (settings)
+ *   Puerto Rico 119     9.8     15.0   ┐
+ *   Hawaii      124     14.0    19.7   ├ → "2–3 weeks" (founder's call, 2026-10-06:
+ *   Alaska      94      15.6    25.3   ┘   a range, not dates, for these three)
  *
  * Those three ship almost entirely USPS Ground Advantage (directly or via OSM), so
  * only the USPS mark shows for them. The address comes from shopify.shippingAddress,
@@ -68,9 +68,9 @@ const arrival = (days) => {
  * province instead, so both are matched.
  */
 const REMOTE = {
-  AK: { name: "Alaska", min: 16, max: 25 },
-  HI: { name: "Hawaii", min: 14, max: 20 },
-  PR: { name: "Puerto Rico", min: 10, max: 15 },
+  AK: { name: "Alaska" },
+  HI: { name: "Hawaii" },
+  PR: { name: "Puerto Rico" },
 };
 
 const remoteRegion = (address) => {
@@ -89,8 +89,8 @@ function ShippingTrust() {
   const apiEndpoint = String(settings.api_endpoint || "https://shopcx.ai").replace(/\/$/, "");
   // undefined until an address is entered, or without protected-customer-data access
   const region = remoteRegion(shopify.shippingAddress?.value);
-  const minDays = region ? region.min : toDays(settings.arrival_min_days, 6);
-  const maxDays = region ? region.max : Math.max(minDays, toDays(settings.arrival_max_days, 9));
+  const minDays = toDays(settings.arrival_min_days, 6);
+  const maxDays = Math.max(minDays, toDays(settings.arrival_max_days, 9));
 
   return (
     <s-box background="subdued" borderRadius="large" padding="base">
@@ -98,7 +98,9 @@ function ShippingTrust() {
         <s-stack direction="inline" gap="small-200" alignItems="center">
           <s-icon type="truck" size="small" />
           <s-text type="strong">
-            Estimated arrival {fmt(arrival(minDays))} – {fmt(arrival(maxDays))}
+            {region
+              ? "Estimated arrival in 2–3 weeks"
+              : `Estimated arrival ${fmt(arrival(minDays))} – ${fmt(arrival(maxDays))}`}
           </s-text>
         </s-stack>
         <s-stack direction="inline" gap="small-200" alignItems="center">
