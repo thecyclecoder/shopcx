@@ -5,7 +5,7 @@ The three Shopify **checkout UI extensions** in `shopify-extension/extensions/` 
 | Extension | Handle | Shows | Calls |
 |---|---|---|---|
 | Money-Back Guarantee | `guarantee-checkout` | "30-Day Money-Back Guarantee" headline, only while the live `refunds` policy offers one | `GET /api/storefront/guarantee?shop=` |
-| Customer Reviews | `reviews-checkout` | One 5★ review per distinct product in the cart, weight-loss rail applied | `GET /api/storefront/{workspace}/product-reviews?shopify_product_id=&limit=6` |
+| Customer Reviews | `reviews-checkout` | Up to three short 5★ quotes across the cart (round-robin over products). A body ≤140 chars shows as written, a longer one shows its `summary` (Haiku one-liner); weight-loss rail applied to the shown line | `GET /api/storefront/{workspace}/product-reviews?shopify_product_id=&limit=12` (returns `summary` alongside `body`) |
 | Loyalty Rewards | `loyalty-checkout` | Points balance + redeem-a-tier → discount code applied to checkout | `GET /api/loyalty/balance`, `POST /api/loyalty/redeem` |
 
 ## Runtime: Preact + Polaris web components (API 2025-10+)
