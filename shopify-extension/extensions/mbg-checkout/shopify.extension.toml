@@ -1,6 +1,7 @@
 api_version = "2025-10"
 
 [[extensions]]
+uid = "0c7925f3-2855-fe47-e02b-df0b51a2eabc7076e73d"
 type = "ui_extension"
 name = "Money-Back Guarantee Terms"
 handle = "mbg-checkout"
@@ -25,4 +26,4 @@ description = "Base URL for the guarantee API (e.g. https://shopcx.ai)"
 key = "badge_url"
 type = "single_line_text_field"
 name = "Badge image URL"
-description = "Optional square badge shown beside the headline. Leave blank for the check icon."
+description = "Optional square badge beside the headline. Leave blank for the store's gold money-back seal."

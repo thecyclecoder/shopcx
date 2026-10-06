@@ -5,9 +5,11 @@ import { useState, useEffect } from "preact/hooks";
 /**
  * Money-Back Guarantee block with its terms one tap away:
  *
- *   [✓] 30-Day Money-Back Guarantee
- *       Not happy with your first order? Send it back within 30 days for a refund.
- *       See terms ›   → modal: the published Returns policy, section by section
+ *   [gold seal]  Love it, or your money back
+ *                Try your first order for 30 days. If it's not for you, send it
+ *                back for a refund.
+ *                How the 30-day guarantee works ›  → modal: the published Returns
+ *                                                    policy, section by section
  *
  * SOURCED, NOT WRITTEN. Whether it shows is decided by the live `refunds` policy
  * (same gate as the trust card's guarantee line); the modal's terms are the
@@ -17,7 +19,7 @@ import { useState, useEffect } from "preact/hooks";
  *
  * THE LINE IS DELIBERATELY NARROW. The policy covers the first order only and
  * deducts the return label, so the copy says "your first order" and "a refund",
- * never "risk-free" or "full refund".
+ * never "risk-free" or "full refund". The seal is the store's existing artwork.
  *
  * EVERYONE SEES IT, signed-in returning customers included (founder's call,
  * 2026-10-06). The copy's "your first order" and the terms modal carry the scope,
@@ -28,6 +30,10 @@ export default function extension() {
 }
 
 const MODAL_ID = "mbg-terms";
+
+// the store's own gold "100% Money Back Guarantee" seal (Shopify Files)
+const DEFAULT_SEAL =
+  "https://cdn.shopify.com/s/files/1/0634/9599/5565/files/money-back-guarantee.png?v=1725549424";
 
 /** consecutive list items → one <s-unordered-list> */
 function Blocks({ blocks }) {
@@ -84,21 +90,17 @@ function GuaranteeTerms() {
   const terms = Array.isArray(guarantee.terms) ? guarantee.terms : [];
 
   return (
-    <s-box border="base" borderRadius="large" padding="base">
-      <s-grid gridTemplateColumns="40px 1fr" columnGap="base" alignItems="center">
-        {badge ? (
-          <s-image src={badge} alt="" aspectRatio="1" />
-        ) : (
-          <s-icon type="check-circle" size="large" />
-        )}
-        <s-stack gap="small-300">
-          <s-text type="strong">{guarantee.title}</s-text>
-          <s-text type="small" color="subdued">
-            Not happy with your first order? Send it back within 30 days for a refund.
+    <s-box background="subdued" borderRadius="large" padding="base">
+      <s-grid gridTemplateColumns="72px 1fr" columnGap="base" alignItems="center">
+        <s-image src={badge || DEFAULT_SEAL} alt="100% money-back guarantee seal" aspectRatio="1" />
+        <s-stack gap="small-200">
+          <s-heading>Love it, or your money back</s-heading>
+          <s-text color="subdued">
+            Try your first order for 30 days. If it's not for you, send it back for a refund.
           </s-text>
           {terms.length ? (
             <s-link command="--show" commandFor={MODAL_ID}>
-              See terms
+              How the 30-day guarantee works
             </s-link>
           ) : null}
         </s-stack>
