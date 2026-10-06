@@ -1,0 +1,1 @@
+- **Drop stale subscriptions.paused_until direct-REST noise from Supabase logs** · verified 2026-10-06 · → [[../libraries/control-tower]]
