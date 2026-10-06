@@ -4,7 +4,7 @@
  * blocks retired in the Klaviyo sunset ([[../../../../../../docs/brain/integrations/klaviyo]]).
  *
  * `GET ?shopify_product_id=7465708093613&limit=12&offset=0`
- *   → { aggregate: { rating, count }, reviews: [...], has_more }
+ *   → { aggregate: { rating, count, display_count }, reviews: [...], has_more }
  *
  * **Keyed by Shopify product id, not handle.** Our `products.handle` and the
  * Shopify handle drift (ours says `amazing-coffee-pods`, Shopify's template is
@@ -63,7 +63,7 @@ export async function GET(
   const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10));
   const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get("limit") || "12", 10)));
 
-  const empty = { aggregate: { rating: null, count: 0 }, reviews: [], has_more: false };
+  const empty = { aggregate: { rating: null, count: 0, display_count: 0 }, reviews: [], has_more: false };
 
   if (!shopifyProductId && !handle) {
     return NextResponse.json({ error: "shopify_product_id or handle required" }, { status: 400, headers: CORS });
@@ -177,9 +177,16 @@ export async function GET(
     weighted += n * (i + 1);
   });
 
+  // `display_count` adds the off-platform bump (the Yotpo-era reviews whose rows
+  // are gone) to the COUNT only, never the rating — the same number the Shopify
+  // `reviews.rating_count` metafield and the in-house storefront show
+  // ([[../../../../../../docs/brain/libraries/shopify-review-metafields]] § The +10,000
+  // off-platform bump). `count` stays the true row count.
+  const bump = Math.max(0, Math.floor(Number(workspace.storefront_off_platform_review_count) || 0));
   const aggregate = {
     rating: rated ? Math.round((weighted / rated) * 100) / 100 : null,
     count: rated,
+    display_count: rated ? rated + bump : 0,
   };
 
   const returned = (reviews || []).map((r) => ({

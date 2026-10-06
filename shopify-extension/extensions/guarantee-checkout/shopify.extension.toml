@@ -3,16 +3,18 @@ api_version = "2025-10"
 [[extensions]]
 uid = "f43c3624-87cb-da0c-4e48-ccee2a59501af12c723a"
 type = "ui_extension"
-name = "Money-Back Guarantee"
+name = "Trust Card"
 handle = "guarantee-checkout"
 
 [[extensions.targeting]]
 module = "./src/Checkout.jsx"
 target = "purchase.checkout.block.render"
 
-# network_access only. This block reads one statement from our own API and writes
-# nothing — no api_access (it needs no Shopify data) and no block_progress (it must
-# never be able to stop a checkout).
+# network_access only. This block reads our own APIs (guarantee + product reviews)
+# and writes nothing — no api_access (cart lines come from the checkout API, not the
+# Storefront API) and no block_progress (it must never be able to stop a checkout).
+# The handle stays guarantee-checkout so the existing checkout-editor placement keeps
+# working.
 [extensions.capabilities]
 network_access = true
 
@@ -21,4 +23,16 @@ network_access = true
 key = "api_endpoint"
 type = "single_line_text_field"
 name = "API Endpoint"
-description = "Base URL for the guarantee API (e.g. https://shopcx.ai)"
+description = "Base URL for the ShopCX API (e.g. https://shopcx.ai)"
+
+[[settings.fields]]
+key = "workspace"
+type = "single_line_text_field"
+name = "Workspace slug"
+description = "Workspace slug used in the reviews path (e.g. superfoods)"
+
+[[settings.fields]]
+key = "trust_line"
+type = "single_line_text_field"
+name = "Extra trust line"
+description = "Shown next to the guarantee, e.g. Cancel anytime. Leave blank to hide."
