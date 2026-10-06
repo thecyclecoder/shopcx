@@ -87,6 +87,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
+  isForeignSupabasePostgresMissingProductVariantsShopifyProductIdAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingProductsPricingRuleIdLookupNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
@@ -1079,6 +1080,23 @@ const LOG_QUERIES: LogQuery[] = [
       // via a non-SELECT statement (real code-bug shape) still surfaces / pages on first
       // sighting.
       if (isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.product_variants.shopify_product_id`. The `product_variants`
+      // table exists but has NO `shopify_product_id` column — that id lives one level up
+      // on the `products` table (variants link to their parent product via the internal
+      // `product_id` UUID FK). The column-missing ERROR only reaches this feed when a
+      // foreign app / stale PostgREST session / deprecated integration queries
+      // `/rest/v1/product_variants?shopify_product_id=eq.<id>`. There is no lever from
+      // ShopCX to make that query resolve — paging Platform on it (Control Tower
+      // signature `supabase-logs:2f26be9322cf4038`,
+      // [[../specs/error-feed-drop-product-variants-shopify-product-id-direct-r]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-product_variants shape (bare OR PostgREST
+      // CTE wrapper) — a column-missing error on any other table, a different column on
+      // `product_variants` (including the real `price_cents`), or on `product_variants`
+      // via a non-SELECT statement (real code-bug shape) still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresMissingProductVariantsShopifyProductIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.meta_ad_accounts.name`. The `meta_ad_accounts` table exists but
       // has NO bare `name` column — the human-readable account label lives on
