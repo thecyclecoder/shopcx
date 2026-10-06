@@ -5,11 +5,16 @@ import { useState, useEffect } from "preact/hooks";
 /**
  * Money-Back Guarantee block with its terms one tap away:
  *
- *   [gold seal]  Love it, or your money back
- *                Try your first order for 30 days. If it's not for you, send it
- *                back for a refund.
- *                How the 30-day guarantee works ›  → modal: the published Returns
- *                                                    policy, section by section
+ *   Centered on a tinted card:
+ *                       [gold seal]
+ *               Love it, or your money back
+ *     Try your first order for 30 days. If it's not for you,
+ *               send it back for a refund.
+ *            How the 30-day guarantee works ›   → modal: the published Returns
+ *                                                 policy, section by section
+ *
+ * The tint is the checkout branding's `subdued` background; checkout extensions
+ * can't set an arbitrary colour, only transparent / base / subdued.
  *
  * SOURCED, NOT WRITTEN. Whether it shows is decided by the live `refunds` policy
  * (same gate as the trust card's guarantee line); the modal's terms are the
@@ -90,21 +95,21 @@ function GuaranteeTerms() {
   const terms = Array.isArray(guarantee.terms) ? guarantee.terms : [];
 
   return (
-    <s-box background="subdued" borderRadius="large" padding="base">
-      <s-grid gridTemplateColumns="72px 1fr" columnGap="base" alignItems="center">
-        <s-image src={badge || DEFAULT_SEAL} alt="100% money-back guarantee seal" aspectRatio="1" />
-        <s-stack gap="small-200">
-          <s-heading>Love it, or your money back</s-heading>
-          <s-text color="subdued">
-            Try your first order for 30 days. If it's not for you, send it back for a refund.
-          </s-text>
-          {terms.length ? (
-            <s-link command="--show" commandFor={MODAL_ID}>
-              How the 30-day guarantee works
-            </s-link>
-          ) : null}
-        </s-stack>
-      </s-grid>
+    <s-box background="subdued" borderRadius="large" padding="large-200">
+      <s-stack gap="small-200" alignItems="center">
+        <s-box inlineSize="88px">
+          <s-image src={badge || DEFAULT_SEAL} alt="100% money-back guarantee seal" aspectRatio="1" />
+        </s-box>
+        <s-heading>Love it, or your money back</s-heading>
+        <s-paragraph textAlign="center" color="subdued">
+          Try your first order for 30 days. If it's not for you, send it back for a refund.
+        </s-paragraph>
+        {terms.length ? (
+          <s-link command="--show" commandFor={MODAL_ID}>
+            How the 30-day guarantee works
+          </s-link>
+        ) : null}
+      </s-stack>
 
       {terms.length ? (
         <s-modal id={MODAL_ID} heading={guarantee.title} padding="base">
