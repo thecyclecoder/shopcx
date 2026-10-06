@@ -14,8 +14,10 @@ import { useState, useEffect, useMemo } from "preact/hooks";
  * numeric tail is what our endpoint keys on. One request per distinct product,
  * which is one or two in practice.
  *
- * SHORT AND SWEET: up to three 5-star quotes across the cart, round-robin over
- * products. A body of 140 characters or less shows as written; a longer one shows
+ * SHORT AND SWEET: up to twelve 5-star quotes across the cart, round-robin over
+ * products, shown three at a time with previous/next arrows (paging is local, no
+ * extra requests). One quote per reviewer, so a two-review customer is not shown
+ * twice. A body of 140 characters or less shows as written; a longer one shows
  * its `summary` (the Haiku one-liner, max 15 words) instead, so the sidebar stays
  * compact. A long review with no summary is skipped.
  *
@@ -43,8 +45,11 @@ export default function extension() {
 const WEIGHT =
   /\b(?:lost|losing|lose|down|shed|dropped|dropping|drop)\s+(?:about\s+|around\s+|over\s+|almost\s+|nearly\s+)?(?:\d+\+?|(?:ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|a hundred)(?:[\s-]\w+)?)\s*(?:lb|lbs|pound|pounds)\b/i;
 
-// Three short quotes across the whole cart, not one long body per product.
-const MAX_REVIEWS = 3;
+// Up to twelve short quotes across the whole cart, three on screen at a time.
+const MAX_REVIEWS = 12;
+const PAGE_SIZE = 3;
+// Fetch extra per product: 5-star, length and rail filters drop some.
+const FETCH_LIMIT = 24;
 // A body this short is already a quote; anything longer shows its summary.
 const SHORT_BODY = 140;
 
@@ -74,6 +79,7 @@ function CheckoutReviews() {
   }, [lines]);
 
   const [reviews, setReviews] = useState([]);
+  const [page, setPage] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -85,7 +91,7 @@ function CheckoutReviews() {
     Promise.all(
       productIds.map((id) =>
         fetch(
-          `${apiEndpoint}/api/storefront/${workspace}/product-reviews?shopify_product_id=${id}&limit=12`
+          `${apiEndpoint}/api/storefront/${workspace}/product-reviews?shopify_product_id=${id}&limit=${FETCH_LIMIT}`
         )
           .then((res) => (res.ok ? res.json() : null))
           .catch(() => null)
@@ -105,6 +111,7 @@ function CheckoutReviews() {
       // round-robin so a two-product cart shows both products before a third card
       const picked = [];
       const seen = new Set();
+      const reviewers = new Set();
       for (let i = 0; picked.length < MAX_REVIEWS; i++) {
         let added = false;
         for (const pool of pools) {
@@ -113,11 +120,15 @@ function CheckoutReviews() {
           added = true;
           if (seen.has(r.id)) continue; // pooled link groups can share a review
           seen.add(r.id);
+          const who = (r.reviewer_name || "").trim().toLowerCase();
+          if (who && reviewers.has(who)) continue;
+          if (who) reviewers.add(who);
           picked.push(r);
         }
         if (!added) break;
       }
       setReviews(picked);
+      setPage(0);
     });
 
     return () => {
@@ -127,13 +138,17 @@ function CheckoutReviews() {
 
   if (!reviews.length) return null;
 
-  const resultsVary = reviews.some((r) => WEIGHT.test(r.quote));
+  const pages = Math.ceil(reviews.length / PAGE_SIZE);
+  const current = Math.min(page, pages - 1);
+  const shown = reviews.slice(current * PAGE_SIZE, current * PAGE_SIZE + PAGE_SIZE);
+  // follows the quotes on screen, so it appears with any weight claim it qualifies
+  const resultsVary = shown.some((r) => WEIGHT.test(r.quote));
 
   return (
     <s-stack gap="base">
       <s-heading>What customers say</s-heading>
 
-      {reviews.map((r) => (
+      {shown.map((r) => (
         <s-box key={r.id} border="base" borderRadius="base" padding="base">
           <s-stack gap="small-200">
             <s-text tone="warning">
@@ -153,6 +168,30 @@ function CheckoutReviews() {
           </s-stack>
         </s-box>
       ))}
+
+      {pages > 1 ? (
+        <s-stack direction="inline" gap="small" alignItems="center" justifyContent="center">
+          <s-button
+            variant="secondary"
+            accessibilityLabel="Previous reviews"
+            disabled={current === 0}
+            onClick={() => setPage(current - 1)}
+          >
+            <s-icon type="chevron-left" />
+          </s-button>
+          <s-text type="small" color="subdued">
+            {current + 1} / {pages}
+          </s-text>
+          <s-button
+            variant="secondary"
+            accessibilityLabel="More reviews"
+            disabled={current === pages - 1}
+            onClick={() => setPage(current + 1)}
+          >
+            <s-icon type="chevron-right" />
+          </s-button>
+        </s-stack>
+      ) : null}
 
       {resultsVary ? (
         <s-text type="small" color="subdued">
