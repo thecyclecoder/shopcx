@@ -484,14 +484,22 @@ async function loadTriggerMessageForTicket(
   workspace_id: string,
   ticket_id: string,
 ): Promise<TriggerMessage | null> {
-  // The ticket_messages table does not carry workspace_id directly — the ticket does.
-  // Scope-safety here is already enforced by the caller's workspace check on the ticket
-  // row (reSessionSol's `getLiveDirection` + the Phase-2 gate's upstream load), so this
-  // helper trusts the ticket_id and reads messages by direction + author_type only.
+  // Cross-tenant guard — Phase 5 (security-review fix). `ticket_messages` has NO
+  // `workspace_id` column of its own (it hangs off the ticket), so a bare `.eq('ticket_id', …)`
+  // read would succeed for a ticket owned by ANY workspace — a foreign ticket_id could leak a
+  // message into the agent_jobs instructions this helper feeds. The caller's existing scope
+  // check (`getLiveDirection`) is a sibling, not an upstream guard: this helper runs BEFORE
+  // getLiveDirection in `reSessionSol`, so trusting it would be out-of-order.
+  //
+  // Fix: PostgREST inner-join on tickets with a workspace_id filter — the same pattern
+  // `src/lib/control-tower/monitor.ts:1488` already uses on this table. A ticket_id whose
+  // parent ticket row doesn't belong to `workspace_id` returns an empty set (not a privacy
+  // leak dressed up as a null). `maybeSingle()` keeps the two-row impossibility explicit.
   const { data, error } = await admin
     .from("ticket_messages")
-    .select("id, body, body_clean, created_at")
+    .select("id, body, body_clean, created_at, tickets!inner(id)")
     .eq("ticket_id", ticket_id)
+    .eq("tickets.workspace_id", workspace_id)
     .eq("direction", "inbound")
     .eq("author_type", "customer")
     .neq("visibility", "internal")
@@ -507,8 +515,6 @@ async function loadTriggerMessageForTicket(
   if (!row) return null;
   const text = (row.body_clean ?? row.body ?? "").toString();
   if (!text.trim()) return null;
-  // Reference the workspace param so lint / future scope-tightening cannot drop it.
-  void workspace_id;
   return { id: row.id, created_at: row.created_at, text };
 }
 
