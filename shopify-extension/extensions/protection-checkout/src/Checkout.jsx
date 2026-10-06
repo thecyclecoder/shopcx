@@ -147,23 +147,23 @@ function ShippingProtection() {
   };
 
   return (
-    <s-stack direction="inline" gap="small-200" alignItems="center">
+    // a grid, not an inline stack: an inline stack wraps the text under the
+    // checkbox and badge on a phone-width checkout
+    <s-grid gridTemplateColumns="auto 32px 1fr" columnGap="small-200" alignItems="center">
       <s-checkbox checked={checked} onChange={onChange} accessibilityLabel="Add Shipping Protection" />
-      <s-box inlineSize="32px">
-        <s-image src={String(settings.badge_url || DEFAULT_BADGE)} alt="" aspectRatio="1" />
-      </s-box>
+      <s-image src={String(settings.badge_url || DEFAULT_BADGE)} alt="" aspectRatio="1" />
       <s-stack gap="none">
-        <s-stack direction="inline" gap="small-200" alignItems="center">
-          <s-text type="strong">Shipping Protection</s-text>
+        <s-text>
+          <s-text type="strong">Shipping Protection</s-text>{" "}
           <s-text color="subdued">
             <s-text type="redundant">{ANCHOR}</s-text>
-          </s-text>
+          </s-text>{" "}
           <s-text type="strong">{PRICE}</s-text>
-        </s-stack>
+        </s-text>
         <s-text type="small" color="subdued">
           Protect yourself against damage or loss. 100% replacement guarantee.
         </s-text>
       </s-stack>
-    </s-stack>
+    </s-grid>
   );
 }
