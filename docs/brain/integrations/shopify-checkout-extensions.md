@@ -4,7 +4,7 @@ The three Shopify **checkout UI extensions** in `shopify-extension/extensions/` 
 
 | Extension | Handle | Shows | Calls |
 |---|---|---|---|
-| Trust Card (was Money-Back Guarantee) | `guarantee-checkout` | Compact card at the top of checkout: first cart line's product image, "★★★★★ 4.7 · 11,000+ reviews" for the cart's most-reviewed product (the Shopify page's numbers: `display_rating` / `display_count`, count rounded down to the thousand with "+"), a rotating short 5★ quote (weight rail + "Results vary."), and the guarantee headline (policy-gated) plus an optional `trust_line` setting. Each part fails closed. | `GET /api/storefront/guarantee?shop=` + `GET /api/storefront/{workspace}/product-reviews?shopify_product_id=&limit=24` |
+| Trust Card (was Money-Back Guarantee) | `guarantee-checkout` | Compact card at the top of checkout: first cart line's product image, "★★★★★ 4.7 · 11,882 reviews" for the cart's most-reviewed product (the Shopify page's numbers: `display_rating` / `display_count`, shown exact), a rotating short 5★ quote (weight rail + "Results vary."), and the guarantee headline (policy-gated) plus an optional `trust_line` setting. Each part fails closed. | `GET /api/storefront/guarantee?shop=` + `GET /api/storefront/{workspace}/product-reviews?shopify_product_id=&limit=24` |
 | Customer Reviews | `reviews-checkout` | Up to twelve short 5★ quotes across the cart (round-robin over products, one per reviewer), three on screen with prev/next arrows paged locally. A body ≤140 chars shows as written, a longer one shows its `summary` (Haiku one-liner); weight-loss rail applied to the shown line | `GET /api/storefront/{workspace}/product-reviews?shopify_product_id=&limit=24` (returns `summary` alongside `body`, and `aggregate.display_rating` / `display_count`) |
 | Loyalty Rewards | `loyalty-checkout` | Points balance + redeem-a-tier → discount code applied to checkout | `GET /api/loyalty/balance`, `POST /api/loyalty/redeem` |
 
@@ -32,7 +32,7 @@ Per-extension files: `package.json` (`@shopify/ui-extensions` 2025.10.x, `preact
 
 The product-reviews aggregate carries two scopes. `rating` / `count` are POOLED across the link group (Instant ↔ K-Cups), the true row numbers the review list pages through. `display_rating` / `display_count` are the **Shopify product page's** numbers: that product alone (plus its "(Free Gift)" fold, no link-group pooling), exactly what `buildReviewAggregates` publishes to the `reviews.rating` / `reviews.rating_count` metafields, with `workspaces.storefront_off_platform_review_count` (+10,000 for Superfoods, the Yotpo-era reviews whose rows are gone) added to the count server-side ([[../libraries/shopify-review-metafields]] § The +10,000 off-platform bump). The rating is never bumped. Never add a bump inside an extension; it double-counts.
 
-Amazing Coffee, 2026-10-06: pooled 3,003 / 4.76; page scope 1,882 / 4.74, so `display_count` 11,882. The trust card labels that "4.7 · 11,000+ reviews", rounded down to the thousand with a "+", matching the PDP's "4.7★ from 11,000+ reviews".
+Amazing Coffee, 2026-10-06: pooled 3,003 / 4.76; page scope 1,882 / 4.74, so `display_count` 11,882. The trust card shows "4.7 · 11,882 reviews", the exact count the PDP displays ("11,000+" appears only in the PDP's meta description, not on the page).
 
 ## Fail-closed design
 

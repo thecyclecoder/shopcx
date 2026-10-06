@@ -5,7 +5,7 @@ import { useState, useEffect, useMemo } from "preact/hooks";
 /**
  * Checkout trust card — the block at the top of checkout.
  *
- *   [product]  ★★★★★ 4.7 · 11,000+ reviews
+ *   [product]  ★★★★★ 4.7 · 11,882 reviews
  *   [ image ]  "I lost 40+ pounds and kept it off…" — Barbara H.
  *              ✓ 30-Day Money-Back Guarantee · Cancel anytime
  *
@@ -20,9 +20,9 @@ import { useState, useEffect, useMemo } from "preact/hooks";
  *   - IMAGE: the first cart line's product image. No setting to forget to update.
  *   - RATING + COUNT: the Shopify product page's numbers for the cart's
  *     most-reviewed product — `display_rating` / `display_count` from the
- *     product-reviews API (page scope, off-platform bump added server-side). The
- *     count is rounded down to the thousand with a "+" ("11,000+"), the same label
- *     the store's product pages use. Never add a bump here; that double-counts.
+ *     product-reviews API (page scope, off-platform bump added server-side). Shown
+ *     exact, as the product page shows it. Never add a bump here; that
+ *     double-counts.
  *   - QUOTE: short 5-star quotes (a body of 140 chars or less, else its Haiku
  *     summary), rotating every few seconds. WEIGHT-LOSS RAIL as in reviews-checkout:
  *     a quantified claim only from a VERIFIED buyer, and "Results vary." whenever
@@ -52,10 +52,6 @@ const quoteOf = (r) => {
 };
 
 const numericId = (gid) => String(gid || "").split("/").pop();
-
-/** "11,000+" — the store pages' label. Under 1,000 it is the exact number. */
-const countLabel = (n) =>
-  n >= 1000 ? `${(Math.floor(n / 1000) * 1000).toLocaleString("en-US")}+` : n.toLocaleString("en-US");
 
 function TrustCard() {
   const lines = shopify.lines.value;
@@ -163,7 +159,7 @@ function TrustCard() {
           {rating ? (
             <s-text type="strong">
               <s-text tone="warning">★★★★★</s-text> {Number(rating.display_rating).toFixed(1)} ·{" "}
-              {countLabel(Number(rating.display_count))} reviews
+              {Number(rating.display_count).toLocaleString("en-US")} reviews
             </s-text>
           ) : null}
           {quote ? (
