@@ -23,6 +23,7 @@
  * `portal-action-healer` cron, so behaviour is identical.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { errText } from "@/lib/error-text";
 // ⭐ Vendor writes go through the commerce SDK, never the Appstle wrapper directly. Calling the
 // vendor straight bypasses billing_source resolution, so a migrated subscription's change would
 // hit Appstle for a contract it no longer holds — failing there and returning BEFORE the local
@@ -722,9 +723,9 @@ async function payment_failed_update_blocked_is_recovered_or_internal(
   } catch (e) {
     // A read failure is NOT a dismiss — fall through to the journey launch (and from there to
     // the human escalation if the launch also fails). We never want a DB blip to force a
-    // silent close over a genuinely blocked state.
-    const detail = e instanceof Error ? e.message : String(e);
-    return { dismiss: false, reason: `recovered/internal probe threw (${detail}) — fall through` };
+    // silent close over a genuinely blocked state. Lossless renderer so a supabase-js
+    // PostgREST error object preserves its code/details/hint instead of `[object Object]`.
+    return { dismiss: false, reason: `recovered/internal probe threw (${errText(e)}) — fall through` };
   }
 }
 
@@ -784,8 +785,9 @@ async function launchAddPaymentMethodJourneyForTicket(
     }
     return { ok: false, reason: "launchJourneyForTicket returned false (non-deliverable channel or guarded skip)" };
   } catch (e) {
-    const detail = e instanceof Error ? e.message : String(e);
-    return { ok: false, reason: `launchJourneyForTicket threw: ${detail}` };
+    // Lossless renderer so a supabase-js PostgREST error object preserves its code/details
+    // /hint instead of `[object Object]` in the escalation note.
+    return { ok: false, reason: `launchJourneyForTicket threw: ${errText(e)}` };
   }
 }
 

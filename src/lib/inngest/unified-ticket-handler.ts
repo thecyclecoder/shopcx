@@ -19,6 +19,7 @@
 import { NonRetriableError } from "inngest";
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { OUTAGE_SPANNING_RETRIES, throwForAnthropicStatus, throwForAnthropicNetworkError, isRetryableAnthropicStatus } from "@/lib/anthropic-retry";
 import { recordClaudeFailure } from "@/lib/claude-health";
 import { assembleTicketContext } from "@/lib/ai-context";
@@ -2455,7 +2456,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           await sysNote(
             admin,
             tid,
-            `[System] date-change-ask gate: reSessionSol threw ${String(reErr)} — reply still held; next inbound turn will re-enter the gate.`,
+            `[System] date-change-ask gate: reSessionSol threw ${errText(reErr)} — reply still held; next inbound turn will re-enter the gate.`,
           );
         }
         return { held: true as const };
