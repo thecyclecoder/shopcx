@@ -3541,6 +3541,7 @@ async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
   /** per-attempt side effects (metering + session persist) — runs after EACH attempt, not just the last. */
   onRun?: (r: T, attempt: number) => Promise<void>;
 }): Promise<{ run: T; parsed: Record<string, unknown> | null; verdict: string; fallbackReason: string | null }> {
+  const { shouldDiscardStaleResumeVerdict } = await import("../src/lib/security-stale-resume");
   let last: T | null = null;
   let parsed: Record<string, unknown> | null = null;
   let verdict = "";
@@ -3554,6 +3555,18 @@ async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
     parsed = extractJson<Record<string, unknown>>(r.resultText);
     verdict = String(parsed?.status || "");
     if (parsed && verdict && opts.recognized.has(verdict)) {
+      // ⭐ Phase 5 of [[../.box/spec-inflection-resession-must-act-on-newest-ask.md]] — a repair-attempt
+      // `needs-human` that cites "no prior findings in this session context" is the resumed session
+      // telling us it has nothing to re-emit (its own first attempt left no findings in context). That
+      // isn't a human-needed verdict — it's a stale-resume failure. Discard it and fall through to the
+      // actionable fallbackReason ("no parseable verdict …") so the platform-director's
+      // reconcileNeedsAttention triage re-runs the review ONCE as a fresh session (which actually
+      // reviews the branch from scratch — the only recovery that works for this signature). See
+      // [[../src/lib/security-stale-resume]].
+      if (shouldDiscardStaleResumeVerdict({ useRepair, verdict, review: parsed.review, recognized: opts.recognized })) {
+        verdict = "";
+        continue;
+      }
       return { run: r, parsed, verdict, fallbackReason: null };
     }
     // unparseable / empty / unrecognized verdict → retry once more, then fail safe.
