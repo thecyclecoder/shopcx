@@ -1,0 +1,34 @@
+api_version = "2025-10"
+
+[[extensions]]
+type = "ui_extension"
+name = "Shipping Protection"
+handle = "protection-checkout"
+
+[[extensions.targeting]]
+module = "./src/Checkout.jsx"
+target = "purchase.checkout.block.render"
+
+# No capabilities: no fetch calls (the variant ids are settings with production
+# defaults; the badge is a plain image URL), and no block_progress — it must never stop a checkout.
+# Cart-line and attribute changes need no capability, only the checkout's own
+# instructions (shopify.instructions.lines / .attributes), which the block checks.
+
+[settings]
+[[settings.fields]]
+key = "one_time_variant_id"
+type = "single_line_text_field"
+name = "One-time variant ID"
+description = "Numeric Shopify variant id of the one-time Shipping Protection variant ($4.95)."
+
+[[settings.fields]]
+key = "subscription_variant_id"
+type = "single_line_text_field"
+name = "Subscription variant ID"
+description = "Numeric Shopify variant id of the subscription variant (priced so the selling plan's discount lands on $4.95)."
+
+[[settings.fields]]
+key = "badge_url"
+type = "single_line_text_field"
+name = "Badge image URL"
+description = "Optional. Defaults to the Shipping Protection product's shield image."
