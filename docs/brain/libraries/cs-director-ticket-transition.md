@@ -40,4 +40,4 @@ The per-verdict behavior:
 
 ## Related
 
-[[cs-director]] · [[cs-director-verdict-note]] · [[../tables/tickets]] · [[../inngest/cs-director-digest-composer]] · [[../tables/director_activity]]
+[[cs-director]] · [[cs-director-verdict-note]] · [[cs-director-close-gate]] · [[../tables/tickets]] · [[../inngest/cs-director-digest-composer]] · [[../tables/director_activity]]
