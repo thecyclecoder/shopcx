@@ -1,11 +1,12 @@
 # shopify-checkout-extensions
 
-The three Shopify **checkout UI extensions** in `shopify-extension/extensions/` — blocks that render inside Shopify's hosted checkout (not the theme). Each is a `purchase.checkout.block.render` target the merchant places in the checkout editor, and each reads from a ShopCX API route.
+The Shopify **checkout UI extensions** in `shopify-extension/extensions/` — blocks that render inside Shopify's hosted checkout (not the theme). Each is a `purchase.checkout.block.render` target the merchant places in the checkout editor, and each reads from a ShopCX API route.
 
 | Extension | Handle | Shows | Calls |
 |---|---|---|---|
 | Trust Card (was Money-Back Guarantee) | `guarantee-checkout` | The checkout's heading band (tinted, no border): "You're almost there[, {first name}]" (first name only when protected customer data allows, else omitted), then a side-by-side grid of the first cart line's product image and "★★★★★ 4.7 · 11,882 reviews" for the cart's most-reviewed product (the Shopify page's numbers: `display_rating` / `display_count`, shown exact), a rotating short 5★ quote (weight rail + "Results vary."), and the guarantee headline (policy-gated) plus an optional `trust_line` setting. Each part fails closed. | `GET /api/storefront/guarantee?shop=` + `GET /api/storefront/{workspace}/product-reviews?shopify_product_id=&limit=24` |
 | Customer Reviews | `reviews-checkout` | Up to twelve short 5★ quotes across the cart (round-robin over products, one per reviewer), three on screen with prev/next arrows paged locally. A body ≤140 chars shows as written, a longer one shows its `summary` (Haiku one-liner); weight-loss rail applied to the shown line | `GET /api/storefront/{workspace}/product-reviews?shopify_product_id=&limit=24` (returns `summary` alongside `body`, and `aggregate.display_rating` / `display_count`) |
+| Shipping Trust | `shipping-checkout` | Two quiet lines by the shipping options: "🚚 Estimated arrival Mon, Oct 12 – Thu, Oct 15" (today + `arrival_min_days`..`arrival_max_days`, defaults 6..9, a Sunday end moved to Monday) and USPS + DHL marks with "Tracked from our warehouse to your door". Every claim is measured; see § Shipping claims | Nothing (static). Logos load from `{api_endpoint}/checkout/usps.png` / `dhl.png` in the Next app's `public/` |
 | Loyalty Rewards | `loyalty-checkout` | Points balance + redeem-a-tier → discount code applied to checkout | `GET /api/loyalty/balance`, `POST /api/loyalty/redeem` |
 
 ## Runtime: Preact + Polaris web components (API 2025-10+)
@@ -35,6 +36,17 @@ The product-reviews aggregate carries two scopes. `rating` / `count` are POOLED 
 **Display rule (founder, 2026-10-06):** display surfaces (PDP, in-house storefront, checkout blocks) show the exact count, e.g. "11,882 reviews". Only marketing and ad copy rounds it ("11K+").
 
 Amazing Coffee, 2026-10-06: pooled 3,003 / 4.76; page scope 1,882 / 4.74, so `display_count` 11,882. The trust card shows "4.7 · 11,882 reviews", the exact count the PDP displays ("11,000+" appears only in the PDP's meta description, not on the page).
+
+## Shipping claims: measured, never marketing
+
+The Shipping Trust block makes three claims, each from `orders` (last 90 days to 2026-10-06, 5,938 orders). Re-measure before changing a default.
+
+- **Arrival window:** order → `delivered_at` was 6.5 days at the median, 8.4 at p80 and 10.6 at p95 (calendar days). The block shows a window, today + 6 to today + 9, worded as an *estimate*. A hard "arrives by" date at p80 would be missed for one order in five and turn into "where is my order" tickets.
+- **Carriers:** about 72% of fulfillments go out on OSM Priority Select or USPS Ground Advantage (USPS does final delivery), about 20% on DHL eCommerce Ground, and UPS is effectively 0. So the block shows USPS and DHL only. Never show a carrier we don't ship with.
+- **Tracked:** all 5,804 shipped orders in the window carry an `amplifier_tracking_number`.
+- **Ship speed** (order → `amplifier_shipped_at`: 37.5 h median, 61.5 h p80) is not shown as a claim; "ships in 24 hours" would be false.
+
+The logos are the Simple Icons (CC0) USPS and DHL marks in brand colour, rendered to PNG.
 
 ## Fail-closed design
 
