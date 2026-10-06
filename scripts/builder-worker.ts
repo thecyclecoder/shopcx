@@ -16704,22 +16704,14 @@ async function runCsDirectorCallJob(job: Job) {
       let executedActions: Array<{ type: string; executed_at: string }> = [];
       if (verdict.decision === "close_no_action") {
         try {
-          const { data: msgs } = await db
-            .from("ticket_messages")
-            .select("id, direction, author_type, visibility, body, body_clean, created_at")
-            .eq("ticket_id", ticketId)
-            .eq("direction", "inbound")
-            .eq("author_type", "customer")
-            .order("created_at", { ascending: true });
-          inboundMessages = ((msgs as typeof inboundMessages | null) ?? []).map((r) => ({
-            id: r.id,
-            direction: r.direction,
-            author_type: r.author_type,
-            visibility: r.visibility,
-            body: r.body,
-            body_clean: r.body_clean,
-            created_at: r.created_at,
-          }));
+          // Cross-tenant guard — scope the ticket_messages read via a tickets!inner workspace
+          // join. The sibling of the Phase 5 fix on `loadTriggerMessageForTicket`
+          // (src/lib/inflection-detector.ts:498-508): ticket_messages has no workspace_id
+          // column of its own, so a bare `.eq('ticket_id', …)` service-role read could leak
+          // messages from a foreign workspace into the close-no-action builder. See
+          // [[../src/lib/cs-director-close-gate]].
+          const { loadInboundMessagesForCloseGate } = await import("../src/lib/cs-director-close-gate");
+          inboundMessages = await loadInboundMessagesForCloseGate(db, job.workspace_id, ticketId);
         } catch (e) {
           console.warn(`${tag} inbound-messages read for close-no-action gate failed:`, e instanceof Error ? e.message : e);
         }
