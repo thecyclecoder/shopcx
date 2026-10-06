@@ -1,6 +1,7 @@
 import type { RouteHandler } from "@/lib/portal/types";
 import { jsonOk, jsonErr, findCustomer, checkPortalBan } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { uuidLineItemProductIds } from "@/lib/email-storefront";
 
 /**
  * Portal route: product resources for the customer (spec: blog-resources).
@@ -96,7 +97,8 @@ export const resources: RouteHandler = async ({ auth, route, url }) => {
     const { data: vrows } = await vq;
     for (const v of vrows || []) if (v.product_id) directProductIds.add(String(v.product_id));
   }
-  const productIds = [...directProductIds];
+  // Shopify-numeric line-item id would 22P02 the whole query — see uuidLineItemProductIds in email-storefront.ts
+  const productIds = uuidLineItemProductIds([...directProductIds]);
   if (productIds.length === 0) return jsonOk({ ok: true, route, mode: "owned", products: [] });
 
   // Posts linked to those products.

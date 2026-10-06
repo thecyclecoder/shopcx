@@ -1,0 +1,1 @@
+- **Drop foreign-app `subscriptions.paused_at` PostgREST lookup noise at capture** · verified 2026-10-01 · → [[../libraries/control-tower]]

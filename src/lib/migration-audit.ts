@@ -35,6 +35,12 @@ export interface RecordAuditInput {
    * escalated by the migration caller.
    */
   droppedLines?: Array<{ title: string; shopifyVariantId: string; sku: string | null; priceCents: number; quantity: number; paid: boolean }>;
+  /**
+   * Lines deliberately left off the migrated sub: an excluded product (MIGRATION_EXCLUDED_PRODUCT_IDS
+   * in migrate-to-internal — e.g. ACV Gummies, no stock) or an Appstle one-time promo line.
+   * Logged once into `notes`; no page.
+   */
+  excludedLines?: Array<{ title: string; productId: string; variantId: string; priceCents: number; quantity: number; reason: "excluded_product" | "one_time_promo" }>;
 }
 
 /** Create the pending audit row at migration time. Returns its id. */
@@ -49,10 +55,11 @@ export async function recordMigrationAudit(input: RecordAuditInput): Promise<str
     is_recovery: !!input.isRecovery,
     status: "pending",
   };
-  // Record any dropped-unmappable-items note (column defaults to [] when none).
-  if (input.droppedLines?.length) {
-    row.notes = [{ type: "dropped_unmappable_items", items: input.droppedLines }];
-  }
+  // Record dropped-unmappable / policy-excluded notes (column defaults to [] when none).
+  const notes: Array<Record<string, unknown>> = [];
+  if (input.droppedLines?.length) notes.push({ type: "dropped_unmappable_items", items: input.droppedLines });
+  if (input.excludedLines?.length) notes.push({ type: "excluded_product_items", items: input.excludedLines });
+  if (notes.length) row.notes = notes;
   const { data, error } = await admin
     .from("migration_audits")
     .insert(row)
@@ -284,9 +291,10 @@ async function autoHealMigration(
   // Cancel a lingering Appstle contract (double-bill risk).
   if ((failed("appstle_cancelled") || failed("no_double_bill")) && audit.appstle_contract_id) {
     try {
-      const { appstleSubscriptionAction } = await import("@/lib/appstle");
-      // Use the OLD appstle contract id directly (the sub row now holds internal-*).
-      const r = await appstleSubscriptionAction(audit.workspace_id as string, String(audit.appstle_contract_id), "cancel", "migrated to shopcx", "ShopCX auto-heal");
+      const { subscriptionCancelAtVendorForMigration } = await import("@/lib/commerce/subscription");
+      // Use the OLD appstle contract id directly (the sub row now holds internal-*). Vendor-only:
+      // a customer-style cancel would also write cancel-truth / end dunning by that old id.
+      const r = await subscriptionCancelAtVendorForMigration(audit.workspace_id as string, String(audit.appstle_contract_id), "appstle");
       if (r.success) changed = true;
     } catch (e) {
       console.error("[migration-audit] auto-heal cancel failed:", e instanceof Error ? e.message : e);

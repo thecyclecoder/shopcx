@@ -1,0 +1,1 @@
+- **Drop stale specs problem/proposed_change search noise** · verified 2026-10-04 · → [[../libraries/control-tower]]

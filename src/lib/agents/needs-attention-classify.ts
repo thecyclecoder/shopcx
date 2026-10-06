@@ -138,6 +138,17 @@ const TOOLING_FAILURE_PATTERNS: RegExp[] = [
   /did not emit a security envelope/i,
   /no security envelope on the fused spec-test result/i,
   /fused security envelope missing required check/i,
+  // error-feed-scope-postgres-client-lost-fatal-transient Fix 1 — the security-review preflight
+  // writes "Cannot run the required preflight: .claude/skills/security-review/SKILL.md is absent
+  // and no Supabase env/.env is available ..." when its box is missing the SKILL.md and no
+  // Supabase env is wired in to verify the spec row before opening the branch diff. That's an
+  // AGENT-ENVIRONMENT incompleteness (TOOLING_FAILURE → auto-spec-the-tooling-fix), NOT a
+  // missing-code-prerequisite the spec should build inline (REAL_BLOCKER). Without this pattern,
+  // the park's "needs-human" error matches /needs[- ]human/i in REAL_BLOCKER_PATTERNS first and
+  // spawns a bogus `*-fix-real_blocker` child on the origin, surfacing the `blocker:real_blocker`
+  // spec-test fail check that resumed us. Checking tooling BEFORE real_blocker in classifyByHeuristic
+  // routes it correctly (parked security-review job d3ef27e6 observed sample).
+  /cannot run the required preflight/i,
 ];
 
 const REAL_BLOCKER_PATTERNS: RegExp[] = [

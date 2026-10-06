@@ -18,8 +18,9 @@ Enforced by [scripts/_check-policies-sdk-compliance.ts](../../../scripts/_check-
 | `getPolicy(admin, workspaceId, slug)` | → `PolicyRow \| null`. Highest-version ACTIVE row for the slug, or `null`. Callers must NOT read `.customer_summary` and quote it as the rule — that's the published rendering, not the rule (the 2026-08-02 refuse-delivery incident). Use `internal_summary` + `rules` for enforcement decisions; use `getPolicyCustomerFacing` when rendering to a customer. |
 | `listActivePolicies(admin, workspaceId)` | → `PolicyRow[]`. Every ACTIVE, non-superseded row, ordered by slug. Full rows — prefer `getInternalRules` / `getAgentPolicyPackage` when you only need the internal projection. |
 | `getInternalRules(admin, workspaceId)` | → `InternalPolicyRule[]` (`{slug,name,internal_summary}`). The pre-Phase-2 agent-facing projection — INTERNAL half only, never `customer_summary`. Kept for the grader / daily-analysis-report; new agent-facing sites prefer `getAgentPolicyPackage` (which also carries the machine-readable `rules[]`). |
-| `getAgentPolicyPackage(admin, workspaceId)` | → `AgentPolicyPackageEntry[]` (`{slug,name,internal_summary,rules}`). **The shared agent policy package (Phase 2).** BOTH Sol (orchestrator) and June (director brief) read this — the two agents can never reason from divergent rules again. INTERNAL half only, never `customer_summary`. |
+| `getAgentPolicyPackage(admin, workspaceId)` | → `AgentPolicyPackageEntry[]` (`{slug,name,internal_summary,rules}`). **The shared agent policy package (Phase 2).** BOTH Sol (orchestrator) and June (director brief) read this — the two agents can never reason from divergent rules again. INTERNAL half only, never `customer_summary`. Runs `rules` through `normalizePolicyRuleFieldRefs` before returning so legacy `customer.loyalty_points` references (backed by `loyalty_members.points_balance`) never reach a downstream agent; see § Field normalization guard. |
 | `formatAgentPolicyPackage(entries)` | → `string`. Renders the package into the plain-text `POLICIES (canonical — these supersede any conflicting older rule below):` block Sol's `buildPoliciesSection` and June's `loadDirectorPolicyBrief` embed. Includes each policy's `internal_summary` + a `RULES:` sub-block bulleting each machine-readable assertion. Returns `""` on empty. |
+| `normalizePolicyRuleFieldRefs(rules)` | → `unknown[]`. Rewrite legacy field references inside policy rules' string properties — e.g., `customer.loyalty_points` → `loyalty.points_balance` (backed by `loyalty_members.points_balance`). Idempotent and embedded in `getAgentPolicyPackage` so a legacy reference in a live row can never reach a policy consumer expecting a supported field. See [[../tables/loyalty_members]] and § Field normalization guard. |
 | `updatePolicyText(admin, workspaceId, slug, patch)` | → `UpdatePolicyResult` (`{id, version, versionBumped}`). In-place update of the ACTIVE row. Bumps `version` iff `customer_summary` / `internal_summary` / `rules` actually changed; a name-only or `updated_by`-only patch does not bump. Throws when no active row matches (never a silent no-op). |
 | `getPolicyCustomerFacing(admin, workspaceId, slug)` | → `CustomerFacingPolicy \| null`. Storefront-shaped projection — `customer_summary` + display fields. Hides `internal_summary` + `rules` (those never belong on the customer page). |
 | `insertDraftPolicy(admin, {workspaceId, slug, name, customer_summary?, internal_summary?, rules?})` | → `{id}`. DRAFT row (`is_active=false`) — the entry point for the CS digest storyline flow (`addPolicyFromStoryline` in [[cs-director-digest-reply]]), which seeds a draft the founder edits into shape from Settings → Policies before activating. Never activates on insert. |
@@ -61,6 +62,20 @@ The check encodes forbidden paths as **assertions anchored to `rules[]` ids**, n
 - **Loud coverage.** The summary line names: assertion count, regression PASS/FAIL, live-scan mode, per-anchor `found` vs `MISSING (drift)`, plus a `NOT COVERED` line for what is out of scope by design (prose-only contradictions in an `internal_summary` paragraph). A check that quietly covers nothing is worse than no check — the check announces what it does and does not enforce.
 
 Adding a new contradiction class means adding a `FORBIDDEN_PATHS` entry with a clear `anchorRuleId` + the exact phrases to forbid; the coverage summary announces it on the next run.
+
+## Field normalization guard (Phase 5)
+
+Policy authors may reference non-existent customer columns in policy rules — e.g., `customer.loyalty_points` was coded into live rules even though loyalty balance lives on `loyalty_members.points_balance`, not `customers`. Agents and tools that naively read policy fields as customer columns can produce server-side 500s.
+
+`normalizePolicyRuleFieldRefs` (embedded in `getAgentPolicyPackage`) rewrites legacy field references on read:
+
+| Legacy field | Supported field | Backing table |
+|---|---|---|
+| `customer.loyalty_points` | `loyalty.points_balance` | `loyalty_members.points_balance` |
+
+The rewrite is **idempotent** — a rule already using the supported field is returned as-is. The mapping is stored in `LEGACY_POLICY_FIELD_REMAP` as a guard comment: adding a new unsupported `customer.*` field requires an entry here, visible to every reviewer.
+
+**Durability:** The SDK normalizes on read, so downstream agents see the supported field immediately. To repair live rows, the companion script [[../tables/policies]] § Ship-time backfill (`scripts/_backfill-policy-loyalty-points-field.ts`) anchored-replaces the legacy field in each workspace's active `refunds` policy, idempotent per workspace.
 
 ## Callers
 

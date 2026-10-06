@@ -1,0 +1,1 @@
+- **Drop foreign-app agent_jobs.result direct-REST column-missing noise** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)

@@ -15,7 +15,8 @@ import { inngest } from "./client";
 import { enforceSwitch } from "@/lib/control-tower/enforce-switch";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { reconcileShopcxDrift } from "@/lib/commerce/shopcx-drift-reconciler";
+import { reconcileShopcxDrift, findLateSubscriptions } from "@/lib/commerce/shopcx-drift-reconciler";
+import { enqueueRepairJob } from "@/lib/repair-agent";
 
 const FN_ID = "shopcx-drift-reconcile-cron";
 
@@ -66,18 +67,62 @@ export const shopcxDriftReconcileCron = inngest.createFunction(
       for (const e of report.errors) console.error(`[shopcx-drift] ${workspaceId}: ${e}`);
     }
 
+    // ⭐ The cadence check — what drift structurally cannot see.
+    const late = await step.run("find-late-subscriptions", async () => {
+      const all: { contractId: string; extraDays: number; inDunning: boolean; inherited: boolean }[] = [];
+      for (const workspaceId of workspaces) {
+        for (const l of await findLateSubscriptions(workspaceId)) {
+          all.push({ contractId: l.contractId, extraDays: l.extraDays, inDunning: l.inDunning, inherited: l.inheritedFromAppstle });
+        }
+      }
+      return all;
+    });
+    // A sub held by an OPEN dunning cycle is late on purpose, and one that arrived late was already
+    // behind when we got it. Only the remainder is something WE did — and only that should page
+    // anyone, or the alert becomes noise and stops being read.
+    const lateUnexplained = late.filter((l) => !l.inDunning && !l.inherited);
+
+    // ⭐ ESCALATE. Every defect in this subsystem through 2026-09-30 was found because a HUMAN
+    // asked "check on things" — the cron logged perfectly and nobody read the logs. A monitor that
+    // only writes to console is not a monitor. Anything non-zero now opens a repair job, deduped by
+    // signature so a persisting condition does not re-open one daily.
+    if (loud.length || lateUnexplained.length) {
+      await step.run("escalate", async () => {
+        const admin = createAdminClient();
+        const bits = [
+          loud.length ? `${loud.length} STRANDED (will never be charged again)` : "",
+          lateUnexplained.length ? `${lateUnexplained.length} late beyond their own cadence` : "",
+        ].filter(Boolean).join("; ");
+        await enqueueRepairJob(admin, {
+          source: "loop-alert",
+          // Stable signature = deduped while the condition persists, re-opens once cleared.
+          signature: `shopcx-subscription-health:${loud.length ? "stranded" : "late"}`,
+          title: `ShopCX subscriptions unhealthy — ${bits}`,
+        });
+        console.error(
+          `[shopcx-drift] ESCALATED — ${bits}\n  stranded: ${loud.slice(0, 20).join("\n  ")}\n  late: ${lateUnexplained.slice(0, 20).map((l) => `${l.contractId} +${l.extraDays}d`).join(", ")}`,
+        );
+      });
+    }
+
     if (loud.length) {
       console.error(
         `[shopcx-drift] ⚠️ ${loud.length} STRANDED subscription(s) — these will never be charged again:\n  ${loud.join("\n  ")}`,
       );
     }
-    console.log(`[shopcx-drift] checked=${checked} repaired=${repaired} drift=${JSON.stringify(drift)}`);
+    console.log(`[shopcx-drift] checked=${checked} repaired=${repaired} drift=${JSON.stringify(drift)} late=${lateUnexplained.length} (+${late.length - lateUnexplained.length} held by dunning)`);
 
     await step.run("beat", () =>
       emitCronHeartbeat(FN_ID, {
-        produced: { checked, repaired, stranded: drift.stranded ?? 0, date: drift.date ?? 0, status: drift.status ?? 0 },
+        produced: {
+          checked, repaired,
+          stranded: drift.stranded ?? 0, date: drift.date ?? 0, status: drift.status ?? 0,
+          late: lateUnexplained.length,
+          lateInDunning: late.filter((l) => l.inDunning).length,
+          lateInherited: late.filter((l) => l.inherited && !l.inDunning).length,
+        },
       }),
     );
-    return { checked, repaired, drift };
+    return { checked, repaired, drift, late: lateUnexplained.length };
   },
 );

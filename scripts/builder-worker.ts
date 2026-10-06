@@ -58,7 +58,9 @@ import { buildQcChildEnv } from "../src/lib/ads/creative-qc-sandbox";
 import { recoverSpecsForSession, type RecoveredSpec } from "./planner-transcript-recover";
 import { isStrandedFoldCandidate } from "./builder-worker.stranded-fold"; // fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 1 — pure decision predicate for sweepStrandedFolds
 import { shouldReAskForJsonEnvelope, storefrontOptimizerReAskPrompt } from "../src/lib/storefront-optimizer-reask"; // storefront-optimizer-re-asks-once-before-parking Phase 1 — pure decision helper for the one bounded re-ask before park
-import { applyRefreshOutcome, classifyAccountHealth, decideHeldAccountRecovery, decideSweepAction } from "./builder-worker.auth-refresh"; // a-test-that-no-runner-executes-is-not-a-test Phase 1 — pure decision predicates for sweepExpiredCredentials + attemptCredentialRefresh, extracted so scripts/builder-worker.auth-refresh.test.ts can pin the four cases the outage named. build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 — classifyAccountHealth is the shared account-health classifier the sweepUpcomingExpiries + brain runbook document as the SoT for the reason vocabulary. Re-authored Phase 1 — decideHeldAccountRecovery is the pure predicate the sweep consults for accounts ALREADY held, so a CEO re-auth returns them to rotation on the next sweep tick instead of waiting out the 25-hour weekly-cap window.
+import { applyRefreshOutcome, classifyAccountHealth, decideHeldAccountRecovery, decideSweepAction } from "./builder-worker.auth-refresh";
+import { parseOverflowDirs, parsePrimarySoftMax, pickTieredAccount } from "./builder-worker.account-tier"; // box-account-tiers — Max primaries carry the load, Pro accounts take overflow only.
+import { applyOauthTokenEnv, decideTokenHoldRelease, readOauthToken, tokenExpiryStatus, type OauthToken } from "./builder-worker.oauth-token"; // box-setup-token-auth — per-account one-year `claude setup-token` tokens replace the race-prone /login refresh tokens (anthropics/claude-code#48786); see docs/brain/recipes/build-box-setup.md § Long-lived setup-token auth. // a-test-that-no-runner-executes-is-not-a-test Phase 1 — pure decision predicates for sweepExpiredCredentials + attemptCredentialRefresh, extracted so scripts/builder-worker.auth-refresh.test.ts can pin the four cases the outage named. build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 — classifyAccountHealth is the shared account-health classifier the sweepUpcomingExpiries + brain runbook document as the SoT for the reason vocabulary. Re-authored Phase 1 — decideHeldAccountRecovery is the pure predicate the sweep consults for accounts ALREADY held, so a CEO re-auth returns them to rotation on the next sweep tick instead of waiting out the 25-hour weekly-cap window.
 // planner-authoring-survives-large-multi-spec-output Phase 2 — bounded per-result size for the
 // planner authoring turn: split the approved specs into small batches (K=2), one runClaude call
 // per batch, so no single result approaches the size at which the ingestion drop kicked in.
@@ -1205,6 +1207,10 @@ interface AccountState {
   authRefreshInFlight?: boolean;    // a `claude -p` refresh call is currently running for this account
   lastAuthRefreshAttemptAt?: number; // epoch-ms of the last refresh attempt — throttles re-attempts
   lastAuthRefreshFailed?: boolean;   // last completed refresh attempt did NOT renew expiresAt
+  // box-setup-token-auth — the mint time (token-file mtime) of the setup-token the account was on when
+  // an auth hold was placed. A hold on a token that itself 401'd is only released by a NEWER token file
+  // (decideTokenHoldRelease); null/undefined = the hold predates the token (a /login-era hold) → release.
+  tokenMintedAtWhenHeld?: number | null;
 }
 const accounts: AccountState[] = ACCOUNT_POOL.map((d) => ({ configDir: d, inFlight: 0, lastAssignedAt: 0, cappedUntil: 0, capEventLogged: false, holdReason: null }));
 const accountByDir = new Map(accounts.map((a) => [a.configDir, a]));
@@ -1312,6 +1318,7 @@ function accountsSnapshot(now: number) {
       // quota claim we cannot substantiate. Defaulting to 'usage_cap' is what sent the founder to
       // check usage twice on 2026-08-03 while two accounts had actually been dead for 49h/66h.
       hold_reason: a.cappedUntil > now ? (a.holdReason ?? null) : null,
+      tier: OVERFLOW_CONFIG_DIRS.has(a.configDir) ? "overflow" : "primary", // box-account-tiers
     })),
     healthy: healthyAccounts(now).length,
     total: accounts.length,
@@ -1380,6 +1387,11 @@ async function restoreAccountCapsOnBoot(): Promise<void> {
   }
 }
 
+// box-account-tiers (CEO 2026-10-02) — RR1/RR2 are Max (primary), RR3/RR4 are Pro (overflow only: they
+// get a NEW session only when every healthy primary already carries BOX_PRIMARY_ACCOUNT_SOFT_MAX sessions,
+// or is capped/held). Override with BOX_OVERFLOW_CONFIG_DIRS (comma list, or "none" for a flat pool).
+const OVERFLOW_CONFIG_DIRS = parseOverflowDirs(process.env.BOX_OVERFLOW_CONFIG_DIRS);
+const PRIMARY_ACCOUNT_SOFT_MAX = parsePrimarySoftMax(process.env.BOX_PRIMARY_ACCOUNT_SOFT_MAX);
 function healthyAccounts(now: number): AccountState[] {
   return accounts.filter((a) => a.cappedUntil <= now);
 }
@@ -1496,8 +1508,9 @@ function pickNewSessionAccount(now: number): AccountState | null {
   // Floor at 0: the reconcile can briefly leave a counter negative when both decrements of a just-ended
   // double-counted lane land after a heartbeat reconciled it to the ground truth — a negative must not make
   // an account look "emptiest". Self-heals on the next reconcile tick regardless.
-  healthy.sort((a, b) => Math.max(0, a.inFlight) - Math.max(0, b.inFlight) || a.lastAssignedAt - b.lastAssignedAt);
-  return healthy[0];
+  // box-account-tiers — least-loaded among Max primaries under their soft max, else Pro overflow, else
+  // stack on a primary (see scripts/builder-worker.account-tier.ts for the full rule + tests).
+  return pickTieredAccount(healthy, OVERFLOW_CONFIG_DIRS, PRIMARY_ACCOUNT_SOFT_MAX);
 }
 
 // The rollover entry-point for EVERY autonomous box runner (repair/regression/security/seed/improve/
@@ -1625,6 +1638,10 @@ function markAccountAuthExpired(dir: string, now: number, detail: string, explic
   const reason: AccountHoldReason =
     explicitReason ?? (a.lastAuthRefreshFailed ? "refresh_failed" : "auth_expired");
   a.holdReason = reason;
+  // box-setup-token-auth — on a token account the rejected credential IS the setup-token (it ranks above
+  // /login), so remember which token was rejected: only a newer token file releases this hold.
+  const heldToken = cachedOauthToken(dir, now);
+  a.tokenMintedAtWhenHeld = heldToken ? heldToken.mintedAt : null;
   if (!a.capEventLogged) {
     a.capEventLogged = true;
     const detailForEvent =
@@ -1643,7 +1660,11 @@ function markAccountAuthExpired(dir: string, now: number, detail: string, explic
     // sat unreported for three days on 2026-08-03). The `auth_expired` / `refresh_failed` paths
     // keep the historical card body — Phase 2 explicitly names the unrecoverable case as the one
     // that needs to escalate; the auto-recoverable cases don't warrant a founder page.
-    if (reason === "reauth_required") {
+    if (heldToken) {
+      // box-setup-token-auth — the account's setup-token was rejected (revoked, or past its year). The
+      // remedy is a fresh `claude setup-token`, not /login, so it gets the token card.
+      void emitCeoReauthCardBestEffort(dir, 0, now, { why: "rejected", expiresAt: tokenExpiryStatus(heldToken.mintedAt, now).expiresAt });
+    } else if (reason === "reauth_required") {
       // Read the credentials file's expiresAt so the card body can name how long the account
       // has been dead ("expired ~49h ago") — the exact signal the CEO would use to prioritize
       // the login. `readCredentialsFields` returns `{ expiresAt: 0 }` on any read error; the
@@ -1757,7 +1778,12 @@ async function emitCeoAuthExpiryAlertBestEffort(configDir: string, reason: Accou
 //   plus the expired-for duration so the CEO can see "this account went dead ~66h ago" at a glance.
 const REAUTH_REQUIRED_CARD_TYPE = "agent_approval_request";
 const REAUTH_REQUIRED_ESCALATION_KIND = "box_account_reauth_required";
-async function emitCeoReauthCardBestEffort(configDir: string, expiresAtMs: number, nowMs: number): Promise<void> {
+// box-setup-token-auth — `tokenCtx` switches the card to the setup-token remedy for an account that
+// runs on a `<configDir>/.oauth-token` token: "rejected" (the token 401'd), "expiring_soon" (inside the
+// 30-day warn window of its one-year life), "expired". Same type + dedupe key as the /login card, so the
+// existing dismiss-on-recovery path closes it.
+type TokenCardContext = { why: "rejected" | "expiring_soon" | "expired"; expiresAt: number };
+async function emitCeoReauthCardBestEffort(configDir: string, expiresAtMs: number, nowMs: number, tokenCtx?: TokenCardContext): Promise<void> {
   try {
     const workspaceId = await resolveOwnerWorkspaceId();
     if (!workspaceId) return;
@@ -1797,14 +1823,22 @@ async function emitCeoReauthCardBestEffort(configDir: string, expiresAtMs: numbe
 
     // The literal command chain the spec named — one command per line so the CEO can copy each
     // step in sequence (paste-safe: no shell metachars beyond the assignment).
-    const commandLines = [
-      "ssh root@claude-server",
-      "sudo -iu builder",
-      `CLAUDE_CONFIG_DIR=${homeRelDir} claude`,
-      "/login",
-    ];
-    const title = `Box pool account ${label} needs a human /login (expired ${expiredForLabel})`;
-    const body =
+    const commandLines = tokenCtx
+      ? [
+          "ssh root@claude-server",
+          "sudo -iu builder",
+          "cd ~/shopcx",
+          `CLAUDE_CONFIG_DIR=${homeRelDir} claude setup-token`,
+          `bash scripts/box-install-oauth-token.sh ${homeRelDir}`,
+        ]
+      : [
+          "ssh root@claude-server",
+          "sudo -iu builder",
+          `CLAUDE_CONFIG_DIR=${homeRelDir} claude`,
+          "/login",
+        ];
+    let title = `Box pool account ${label} needs a human /login (expired ${expiredForLabel})`;
+    let body =
       `The box pool account ${label} (${configDir}) has an expired OAuth access token AND NO ` +
       `refreshToken in \`.credentials.json\` — no wait or retry can renew it. Only an interactive ` +
       `\`/login\` restores this account.\n\n` +
@@ -1812,6 +1846,23 @@ async function emitCeoReauthCardBestEffort(configDir: string, expiresAtMs: numbe
       `To re-login:\n` +
       commandLines.map((l) => `  ${l}`).join("\n") +
       `\n\nThis account has been pulled from rotation. The pool is one account down until you re-login.`;
+    if (tokenCtx) {
+      const days = Math.round((tokenCtx.expiresAt - nowMs) / 86_400_000);
+      const situation =
+        tokenCtx.why === "rejected"
+          ? `rejected its long-lived setup-token (revoked, or past its one-year life — estimated expiry ${astTime(tokenCtx.expiresAt)}). It has been pulled from rotation; the pool is one account down until you mint a new token.`
+          : tokenCtx.why === "expired"
+            ? `is on a setup-token that is past its estimated one-year life (${astTime(tokenCtx.expiresAt)}). Expect it to start failing — mint a new token now.`
+            : `is on a setup-token that expires in ~${days} day(s) (estimated ${astTime(tokenCtx.expiresAt)}). Nothing is broken yet — renew it before then so the account never drops out.`;
+      title =
+        tokenCtx.why === "expiring_soon"
+          ? `Box pool account ${label}: setup-token expires in ~${days}d — renew it`
+          : `Box pool account ${label} needs a new setup-token`;
+      body =
+        `The box pool account ${label} (${configDir}) ${situation}\n\n` +
+        `To renew (approve in a browser signed in to THIS account's email, then paste the printed token when the script asks):\n` +
+        commandLines.map((l) => `  ${l}`).join("\n");
+    }
 
     const { error: notifErr } = await db.from("dashboard_notifications").insert({
       workspace_id: workspaceId,
@@ -1829,7 +1880,10 @@ async function emitCeoReauthCardBestEffort(configDir: string, expiresAtMs: numbe
         config_dir: configDir,
         config_dir_home_relative: homeRelDir,
         account_label: label,
-        hold_reason: "reauth_required",
+        hold_reason: tokenCtx ? (tokenCtx.why === "rejected" ? "auth_expired" : null) : "reauth_required",
+        auth_mode: tokenCtx ? "setup_token" : "login",
+        token_card_reason: tokenCtx?.why ?? null,
+        token_expires_at: tokenCtx ? new Date(tokenCtx.expiresAt).toISOString() : null,
         expired_at: expiresAtMs > 0 ? new Date(expiresAtMs).toISOString() : null,
         expired_for_ms: expiredForMs,
         login_command_chain: commandLines,
@@ -1902,6 +1956,17 @@ async function dismissCeoReauthCardBestEffort(configDir: string): Promise<void> 
 // could ever refresh them because nothing could ever run against them — 37 hours of downtime. See spec.
 const CRED_EXPIRY_CACHE_MS = 30_000; // 30s TTL — token expiry is a slow-moving fact
 const credentialsCache = new Map<string, { expiresAt: number; checkedAt: number }>();
+// box-setup-token-auth — per-account `claude setup-token` token (`<configDir>/.oauth-token`), cached on
+// the same 30s TTL so the spawn + sweep hot paths don't re-read the file on every call. Installing or
+// replacing a token takes effect within one TTL — no worker restart needed.
+const oauthTokenCache = new Map<string, { token: OauthToken | null; checkedAt: number }>();
+function cachedOauthToken(configDir: string, now: number = Date.now()): OauthToken | null {
+  const cached = oauthTokenCache.get(configDir);
+  if (cached && now - cached.checkedAt < CRED_EXPIRY_CACHE_MS) return cached.token;
+  const token = readOauthToken(configDir);
+  oauthTokenCache.set(configDir, { token, checkedAt: now });
+  return token;
+}
 // Read `$configDir/.credentials.json` and return the `claudeAiOauth.expiresAt` (ms) + whether a
 // refresh_token is present. Returns { expiresAt: 0, hasRefreshToken: false } on any error (missing file,
 // malformed JSON, missing field) so a malformed credential can NEVER cause a silent proactive eject — the
@@ -1965,6 +2030,8 @@ async function attemptCredentialRefresh(configDir: string): Promise<void> {
     // silently authing via the env-provided API key and NEVER touching the credentials file). The Max
     // pool is OAuth-only; the API key exists on some environments and would win otherwise.
     delete env.ANTHROPIC_API_KEY;
+    // Same reason for CLAUDE_CODE_OAUTH_TOKEN: this call exists to renew the /login credentials file.
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
     // Minimal prompt — the goal is CLI startup (which does the token refresh), not a real response.
     const result = await shAsync("claude", ["-p", "noop"], {
       env,
@@ -2015,6 +2082,24 @@ async function attemptCredentialRefresh(configDir: string): Promise<void> {
 // fires four refreshes in parallel and clears the pool.
 function sweepExpiredCredentials(now: number): void {
   for (const a of accounts) {
+    // box-setup-token-auth — an account with a setup-token never consults `.credentials.json`: the token
+    // ranks above /login, so the /login file's expiry is irrelevant (ejecting on it would pull a healthy
+    // account) and a refresh exercise would only re-enter the refresh-token race the token exists to
+    // avoid. The only decision is whether a token newly installed should release an auth hold.
+    const token = cachedOauthToken(a.configDir, now);
+    if (token) {
+      if (decideTokenHoldRelease({ holdReason: a.holdReason, cappedUntil: a.cappedUntil, now, token, tokenMintedAtWhenHeld: a.tokenMintedAtWhenHeld }) === "release") {
+        const priorHoldReason = a.holdReason;
+        a.cappedUntil = 0;
+        a.holdReason = null;
+        a.tokenMintedAtWhenHeld = null;
+        a.capEventLogged = false;
+        recordAccountEvent("recovered", a.configDir, `setup-token installed (minted ${astTime(token.mintedAt)}) — ${priorHoldReason ?? "auth"} hold cleared, back in rotation`);
+        console.warn(`[multi-account] ${a.configDir} ${priorHoldReason ?? "auth"} hold cleared — setup-token installed; back in rotation`);
+        void dismissCeoReauthCardBestEffort(a.configDir);
+      }
+      continue;
+    }
     const { expiresAt, hasRefreshToken } = (() => {
       const cached = credentialsCache.get(a.configDir);
       // Fresh cache hit — trust the cached expiresAt, re-read hasRefreshToken cheaply (small file, hot).
@@ -2134,10 +2219,30 @@ function sweepExpiredCredentials(now: number): void {
 const AUTH_EXPIRY_WARN_MS = 24 * 60 * 60 * 1000; // 24h — warn a full day before the wall
 const AUTH_EXPIRY_WARN_INTERVAL_MS = 15 * 60 * 1000; // 15 min — heartbeat runs every 5s; throttle
 let lastUpcomingExpirySweepAt = 0;
+// box-setup-token-auth — whether a token-renewal card may be open per account (unknown after a boot ⇒
+// dismiss once when the token reads fresh, so a renewal done across a restart still clears its card).
+const tokenRenewCardMaybeOpen = new Map<string, boolean>();
 function sweepUpcomingExpiries(now: number): void {
   if (now - lastUpcomingExpirySweepAt < AUTH_EXPIRY_WARN_INTERVAL_MS) return;
   lastUpcomingExpirySweepAt = now;
   for (const a of accounts) {
+    // box-setup-token-auth — token accounts: warn a month before the token's one-year life ends; once a
+    // renewed token is in place, close any open renewal card (once per boot + after each raise).
+    const token = readOauthToken(a.configDir);
+    if (token) {
+      const exp = tokenExpiryStatus(token.mintedAt, now);
+      if (exp.kind === "ok") {
+        if (tokenRenewCardMaybeOpen.get(a.configDir) !== false && !(a.cappedUntil > now)) {
+          tokenRenewCardMaybeOpen.set(a.configDir, false);
+          void dismissCeoReauthCardBestEffort(a.configDir);
+        }
+      } else {
+        console.warn(`[multi-account] ${a.configDir} setup-token ${exp.kind === "expired" ? "is past its estimated one-year life" : `expires in ~${(exp.msUntilExpiry / 86_400_000).toFixed(0)}d`} — renewal card raised`);
+        tokenRenewCardMaybeOpen.set(a.configDir, true);
+        void emitCeoReauthCardBestEffort(a.configDir, 0, now, { why: exp.kind, expiresAt: exp.expiresAt });
+      }
+      continue;
+    }
     // Ground-truth read of the credentials file — cache is fine for expiresAt (the sweep hot path
     // already re-uses it) but refreshToken must be read fresh so a CEO re-login is picked up on the
     // next warn tick, not the next expiry cycle.
@@ -3177,6 +3282,13 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   // object itself. Unset → the CLI's default (~/.claude = pool[0]) — back-compat for callers not yet
   // wired into the pool (box-multi-account-failover Phase 1).
   if (opts.configDir) env.CLAUDE_CONFIG_DIR = opts.configDir;
+  // box-setup-token-auth — hand the CLI this account's one-year setup-token when it has one (ranks above
+  // the /login credential, so the session never touches the race-prone rotating refresh token). Set AFTER
+  // the sandbox branch on purpose: `build` strips *_TOKEN via SECRET_RE and `qc` copies an allowlist, and
+  // the session needs its own account's auth either way (it could already read .credentials.json). Any
+  // inherited global CLAUDE_CODE_OAUTH_TOKEN is always dropped so accounts can never cross. Unset
+  // configDir ⇒ the CLI's default dir (~/.claude), so read that dir's token.
+  applyOauthTokenEnv(env, cachedOauthToken(opts.configDir ?? join(process.env.HOME || "/home/builder", ".claude")));
   const base = sessionId ? ["--resume", sessionId] : [];
   // stream-json (not json): every box session must emit output continuously so the hang detector can
   // tell "actively running" from "stuck", AND so the live TaskCreate/TaskUpdate events arrive while

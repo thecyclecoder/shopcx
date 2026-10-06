@@ -8,7 +8,7 @@ System-level reference covering everything an agent needs to navigate the codeba
 |---|---|---|
 | [tables/](tables/) | One page per `public.*` table — columns, FKs (both directions), common queries, gotchas | 304 |
 | [inngest/](inngest/) | One page per `src/lib/inngest/*.ts` — trigger event/cron, downstream events sent, tables read/written | 126 |
-| [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 24 |
+| [integrations/](integrations/) | One page per external API — auth model, credential location, key endpoints, rate limits, retry pattern, gotchas | 25 |
 | [libraries/](libraries/) | One page per `src/lib/*.ts` — exports + signatures + callers + gotchas | 611 |
 | [lifecycles/](lifecycles/) | Long-form narrative — end-to-end traces of key flows. Each wikilinks 5+ reference pages and ends with the src/lib files involved | 48 |
 | [journeys/](journeys/) | One page per `journey_definitions` row — trigger pattern, steps, outcomes, channel rules, files | 11 + README |
@@ -358,6 +358,7 @@ Every background job, webhook fan-out, and cron lives here. Each page lists trig
 External APIs we call. Each page documents auth model, credential location (env var or `workspaces.X_encrypted` column), key endpoints, rate limits + retry pattern, and known gotchas.
 
 - [[integrations/shopify]] — Admin GraphQL + REST + Bulk Operations + Storefront API + App Proxy + Multipass. Per-workspace OAuth.
+- [[integrations/shopify-checkout-extensions]] — Checkout UI extensions (guarantee, cart reviews, loyalty): Preact on API 2025-10, the null-origin CORS + public-route contract their backend routes must meet.
 - [[integrations/appstle]] — Subscription contracts. Per-workspace API key + shop domain.
 - [[integrations/klaviyo]] — Reviews + Placed Order events + engagement events + historical SMS campaigns. Per-workspace API key.
 - [[integrations/resend]] — Transactional email send + inbound parse. Per-workspace API key + webhook secret. Self-hosted open/click tracking.

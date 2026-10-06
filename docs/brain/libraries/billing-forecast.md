@@ -79,7 +79,19 @@ async function forecastItemsChanged(workspaceId: string, contractId: string, ite
 
 ## Gotchas
 
-_None documented._
+### Concurrent-webhook race on `createForecast` — caught at DB level
+
+`createForecast` intentionally handles concurrent inserts for the same `(workspace_id, shopify_contract_id)` pair via the `idx_billing_forecasts_pending` partial unique index on `(workspace_id, shopify_contract_id)` WHERE `status='pending'`.
+
+When two Appstle webhooks fire concurrently for the same subscription renewal:
+1. Both read `getPendingForecast` and see no pending row (no existing forecast).
+2. Both attempt to INSERT a new pending row.
+3. The first INSERT succeeds; the second hits a 23505 constraint violation on `idx_billing_forecasts_pending`.
+4. The app catches `error.code === '23505'` with message containing `idx_billing_forecasts_pending`, re-reads the winning row, and applies the same UPDATE branch (expected_date, expected_revenue_cents, expected_items, billing_interval, billing_interval_count, updated_at) to converge on one canonical pending row. Returns the winner's id.
+
+**Capture:** The 23505 is expected by design and dropped from error-feed logging via `isExpectedBillingForecastsPendingUniqViolation(message, query)` in [[control-tower]] — the Postgres error is flagged at the `postgres` LogQuery mapRow in `supabase-log-poll.ts` before signature generation, so healthy concurrent-webhook races do not page Platform.
+
+**Scope:** The filter is narrowly gated to INSERT-only (COPY replay, UPDATE ... ON CONFLICT hitting the same index still surface) and this constraint only (23505 on a different unique index still pages).
 
 ---
 

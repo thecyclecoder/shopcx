@@ -97,8 +97,8 @@ The single-customer event is intentionally **delayed ~1h** so the customer has t
 
 `demographics-snapshot-builder` writes one [[../tables/demographics_snapshots]] row per cohort:
 
-- **All-customers**: `product_id = NULL`. Distributions over the whole workspace's enriched customers.
-- **Per-product**: one row per active product. Customers are joined to products via `orders.line_items[].title` (text match — `line_items` JSONB has no product_id reference). The snapshot freezes the cohort's gender/age/income/urban/buyer_type distributions + `top_health_priorities` + a derived `suggested_target_customer` blurb.
+- **All-customers**: `product_id = NULL`. Distributions over the whole workspace's enriched customers. Upserted via `upsertWorkspaceDemographicsSnapshot()` ([[../inngest/customer-demographics]]), which matches the table's partial unique index on `(workspace_id) WHERE product_id IS NULL` by querying for an existing row and updating or inserting as needed.
+- **Per-product**: one row per active product. Customers are joined to products via `orders.line_items[].title` (text match — `line_items` JSONB has no product_id reference). Upserted with `onConflict: "workspace_id,product_id"` which matches the full composite unique constraint. The snapshot freezes the cohort's gender/age/income/urban/buyer_type distributions + `top_health_priorities` + a derived `suggested_target_customer` blurb.
 
 The dashboard reads snapshots, not the underlying `customer_demographics`. This is a deliberate cache — rebuilding distributions over 100K+ customers on every page load would be brutal. Snapshots rebuild after every batch enrichment so they trail by at most a night.
 

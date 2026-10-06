@@ -1,0 +1,1 @@
+- **Drop stale specs.fold_status PostgREST noise from Supabase logs** · verified 2026-10-03 · → [[../tables/specs]]

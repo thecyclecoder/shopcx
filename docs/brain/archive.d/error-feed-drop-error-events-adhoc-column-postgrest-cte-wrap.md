@@ -1,0 +1,1 @@
+- **Widen error_events ad-hoc column-missing capture-drop to include the PostgREST CTE wrapper shape** · verified 2026-09-27 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise`)

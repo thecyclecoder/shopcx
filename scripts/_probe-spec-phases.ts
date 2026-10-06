@@ -1,47 +1,40 @@
-async function main() {
-  const { createAdminClient } = await import("../src/lib/supabase/admin");
+import { loadEnv } from "./_bootstrap"; 
+loadEnv();
+import { createAdminClient } from "../src/lib/supabase/admin";
+
+(async () => {
   const admin = createAdminClient();
 
-  const specs = [
-    "fraud-nightly-scan-shopify-domain-column-fix",
-    "popup-offer-normalize-shopify-product-id"
-  ];
+  const { data } = await admin
+    .from("specs")
+    .select("id, slug, status")
+    .eq("slug", "a-green-loop-must-not-hide-a-stale-output-table")
+    .limit(1);
 
-  console.log("=== Phase Rollup Status ===\n");
-
-  for (const slug of specs) {
-    console.log(`\n${slug}:`);
-
-    // Get phases for this spec
-    const { data: phases } = await admin
-      .from("spec_phases")
-      .select("phase_title, status")
-      .eq("spec_slug", slug)
-      .order("phase_number", { ascending: true });
-
-    if (phases && phases.length > 0) {
-      phases.forEach(p => {
-        console.log(`  - ${p.phase_title}: ${p.status}`);
-      });
-
-      // Check if all shipped
-      const allShipped = phases.every(p => p.status === "shipped");
-      console.log(`  → Derived shipped state: ${allShipped ? "YES (all phases shipped)" : "NO"}`);
-    } else {
-      console.log(`  No phases found`);
-    }
-
-    // Check stored status in specs table
-    const { data: spec } = await admin
-      .from("specs")
-      .select("status")
-      .eq("slug", slug)
-      .single();
-
-    if (spec) {
-      console.log(`  → Stored specs.status: ${spec.status}`);
-    }
+  if (!data || data.length === 0) {
+    console.log("Spec not found");
+    process.exit(1);
   }
-}
 
-main();
+  const specId = data[0].id;
+  const specStatus = data[0].status;
+
+  console.log(`Spec: ${data[0].slug}`);
+  console.log(`Stored status: ${specStatus}`);
+
+  const { data: phases } = await admin
+    .from("spec_phases")
+    .select("phase_number, status")
+    .eq("spec_id", specId)
+    .order("phase_number");
+
+  console.log("\nPhases:");
+  phases?.forEach((p) => {
+    console.log(`  Phase ${p.phase_number}: ${p.status}`);
+  });
+
+  const allShipped = phases?.every((p) => p.status === "shipped");
+  console.log(`\nAll phases shipped: ${allShipped}`);
+  
+  process.exit(0);
+})().catch(e => { console.error("ERR", e.message); process.exit(1); });

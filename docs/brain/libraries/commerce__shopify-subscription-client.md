@@ -290,3 +290,90 @@ One mutation per renewal buys a permanently-correct schedule:
 Every one of these is **non-fatal**. The renewal worker bills by an explicit
 `billingCycleSelector` it resolves itself, so a failed pin is a display drift, never a missed or
 duplicated charge.
+
+
+## 🔴 NEVER pin a spent cycle — the rolling retime stranded 90 subs
+
+`shopifyRetimeContract` pinned whichever cycle the target date resolved to. After a successful
+charge that is the cycle that **just billed** — so the retime dragged a BILLED cycle forward onto the
+customer's next date. The renewal worker resolves by date and skips spent cycles, so the
+subscription became silently unbillable: row active, date correct-looking, never charged again.
+
+**Measured 2026-09-28: 90 of 209 migrated subs, every one stranded by our own retime.** Drift had
+read 0 three days earlier, because the strand only appears after the *next* charge.
+
+Fixed: the retime now steps past BILLED/skipped cycles to the first open one before pinning. The
+customer's date is unchanged; only which cycle carries it moves.
+
+### ⚠️ The damage is only half-repairable
+
+Probed directly while fixing it:
+
+- a spent cycle **can** be pinned back into its own window (accepted, no error);
+- but the FOLLOWING cycle then refuses `OUT_OF_BOUNDS` when pulled back to the customer's date.
+
+A stranded customer can be re-dated, but only **inside the open cycle's window**.
+
+⚠️ **`billingAttemptExpectedDate` is the cycle END, not "the date".** The first repair used it as the
+target and pushed all 88 customers to the far edge of their next cycle — mean **+40 days**, worst
+**+140 on a 28-day cadence**, five cycles skipped. A cycle can be pinned anywhere inside
+`[startAt, endAt]`, and the window START is usually exactly one cadence after the customer's last
+charge: their real date. `scripts/_repair-strand-dates.ts` targets
+`last charge + cadence`, clamped into the window — which **removed 3,436 days of delay across 88
+customers (mean 39d each)** and took the delayed count from 88 to 4.
+
+The 4 that remain sit at the earliest date their window allows, and their gaps are **not** from this
+bug — all four were already overdue on Appstle before migration (last charged 06-30 to 08-28 on
+28-day cadences).
+
+Revenue is delayed, never lost, and a re-dated customer only ever moves LATER — nobody is surprised
+by an early charge.
+
+That asymmetry is the reason the guard matters more than the repair: this is cheap to prevent and
+impossible to undo cleanly.
+
+
+## ⚠️ A sub can be in the RIGHT cycle and still be dated a month too late
+
+The strand check asks "is my date in a spent cycle?" and the drift check asks "does Shopify's date
+match mine?" **A subscription can pass both and still be wrong**: sitting in a correct, unbilled
+cycle but pinned to the far end of its window, a full extra cycle after the customer's last charge.
+
+Nothing flags it. The reconciler sees an unbilled cycle (not stranded) and a date that matches ours
+(no drift). It is visible *only* by comparing the date against the customer's own cadence —
+`last charge + one interval` — which is what `scripts/_delay-audit.ts` does.
+
+Found 2026-09-28 while verifying a claim that "only 4 customers are delayed". The real figure across
+183 active subs was **22**, of which 3 were this shape. `scripts/_pull-late-dates-earlier.ts` moved
+14 subs to the earliest date their window allows, recovering **379 days** and taking
+strand-attributable delay to **0**.
+
+The 15 that remain are all legitimate: 7 held by an open dunning cycle (which holds the date on
+purpose) and 8 that were already overdue on Appstle before migration.
+
+**The lesson for any future audit: a metric that reads "fine" is not the same as a customer being
+charged on the right day.** Both automated checks were green on subs that were a month late.
+
+
+## 🔴 Verify every pin — the edit that schedules a customer can strand them
+
+Pinning cycle N to date X makes X the **END BOUNDARY** of cycle N−1's window, and a date lookup
+resolves a boundary to the **earlier** cycle. If N−1 is BILLED, the edit meant to schedule the
+customer has just made them unbillable — and `subscriptionBillingCycleScheduleEdit` returns success.
+
+Measured 2026-09-30: a repair script pinned 14 subs to earlier dates and **re-stranded 3 of them**
+this way, one day after a different repair fixed 90. It trusted the mutation's own success; the
+earlier repair had verified and did not.
+
+`shopifySyncBillingSchedule` now re-reads after the first pin and fails loudly if the date resolves
+to a spent cycle. It lives in the SDK rather than in any one caller because **every** caller needs
+it — the renewal worker, the portal, and every repair script.
+
+**Never trust a schedule edit's own success.** Ask where the date actually lands.
+
+### Recovering a sub whose next live cycle is far away
+
+A stranded sub is not always fixable by walking the date forward: if the following cycle sits months
+out (one was at +104 days on a 56-day cadence), the walk never reaches it. Pin that cycle back
+instead — its window starts at the spent cycle's date, so `last charge + one cadence` is usually
+inside it and restores the customer's real rhythm.

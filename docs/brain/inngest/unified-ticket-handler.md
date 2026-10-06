@@ -113,6 +113,15 @@ Applying a playbook sets `active_playbook_id`, `playbook_step:0`, `status:closed
 **Silent-turn escape hatch** ([[../libraries/silent-turn-guard]]). After the exec-playbook-step + auto-advance block finishes, the handler calls `detectSilentTurn` on the tracked `responseSent` / `escalationRaised` / `cancelled` / `finalAction` / `finalError` signals. On `silent:true` (dead playbook resume with no reply, or a failed subscription/refund mutation whose error string wasn't translated to `action='escalate_api_failure'`), the handler runs the SAME `raiseHoldingMessageEscalation` closure the escalate_api_failure branch uses — the byte-identical `SILENT_TURN_HOLDING_MESSAGE`, ticket → open + escalated, Slack notify — so a customer is never left silent by construction. Return-value shape is `{ status: "playbook_silent_turn", reason }`. [[../specs/post-resolution-inbound-reroute-and-silent-turn-guard]] § Phase 2 (Melissa/eca3f43b measured 5 of 13 backstopped tickets ended silent).
 
 
+## Holding message escalation — Slack via dispatchSlackNotification
+
+When a ticket's playbook step fails with an escalation-class error (`action='escalate_api_failure'`) OR the silent-turn guard detects a dead playbook (no reply sent) OR the repeat-question loop guard trips, the handler calls `raiseHoldingMessageEscalation(ticket, reason)`. This closure:
+1. Loads the ticket's workspace, stamps `status='open'`, `escalated_to='system'`, and writes a system note.
+2. Sends `SILENT_TURN_HOLDING_MESSAGE` to the customer (a terse "we're looking into this" message).
+3. Routes a Slack notification through [[../libraries/slack-notify]] `dispatchSlackNotification(wsId, 'escalation', {...})` instead of the historical raw webhook. The notification is delivered per [[../tables/slack_notification_rules]] rows where `event_type='escalation'`; if no matching rule exists, the Slack ping is dropped (silent, expected). The closure wraps the dispatch in try/catch so a Slack outage never blocks the customer-facing message.
+
+The stale raw-webhook block that queried `workspaces.slack_webhook_url` (a non-existent column) was replaced with this rules-driven path; that eliminates the postgres ERROR that filled the error feed on every escalation.
+
 ## Downstream events sent
 
 _None._

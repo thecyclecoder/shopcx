@@ -85,6 +85,12 @@ Three durable rules (folded from [[../specs/sol-reviews-policies-and-never-bais-
 - **The seed (`scripts/seed-policies-v1.ts`) is NOT the live source of truth — live rows drift.** Policies are dashboard-editable and several have diverged from the seed (e.g. the refund Tier-2 threshold tightened 2026-06-05). Amend a live policy with a **targeted, idempotent apply-script** that fetches the row and does anchored replacements (the `scripts/update-exchanges-allergy-escalate.ts` / `fix-pause-policy-and-grader.ts` pattern) — never re-run the full seed, which would revert drift.
 - **Subscription pricing / 50%-MSRP floor:** the floor (a price the cleanup raised everyone to) is the rail [[../libraries/subscription-overcharge]] clamps the established baseline to — overcharge remediation never restores a customer below the floor, so detection never contradicts this policy.
 
+## Ship-time backfill: Loyalty points field normalization
+
+Policy authors sometimes reference non-existent customer columns (e.g., `customer.loyalty_points` was live in refund-policy rules even though loyalty balance is a loyalty-member concept on `loyalty_members.points_balance`). The SDK choicepoint `normalizePolicyRuleFieldRefs` (§ [[../libraries/policies]] § Field normalization guard) rewrites these on read so downstream agents see supported fields immediately.
+
+To durably repair live rows: `scripts/_backfill-policy-loyalty-points-field.ts` anchored-replaces `customer.loyalty_points` with `loyalty.points_balance` in each workspace's active `refunds` policy (the only live policy carrying the legacy field). Auto-ledgered by `detectAndEscalateShipTimeBackfills` per the ship-time backfill convention, and drained by the box on spec-fold completion. Idempotent per workspace — re-running a workspace that already uses the supported field exits clean without a version bump.
+
 ---
 
 [[../README]] · [[../libraries/ticket-directions]] · [[../libraries/sol-policy-bait-guard]] · [[../../CLAUDE]] · [[../../DATABASE]]

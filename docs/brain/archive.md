@@ -12,16 +12,113 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Drop stale loop_alerts loop_key direct REST noise** · verified 2026-10-05 · → [[../libraries/control-tower]]
+- **Drop stale loop_heartbeats beat_at direct-REST noise** · verified 2026-10-05 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise`)
+- **Drop stale loop_heartbeats loop_key direct-REST noise** · verified 2026-10-05 · → [[../libraries/control-tower]]
+- **Drop stale direct-REST specs.flags lookup noise from Supabase logs** · verified 2026-10-05 · → [[lifecycles/control-tower]]
+- **Drop stale public.specs intent column probes from Supabase logs** · verified 2026-10-05 · → [[lifecycles/control-tower]]
+- **Drop stale agent_jobs run timestamp direct-REST lookup noise** · verified 2026-10-04 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise`)
+- **Drop foreign daily Amazon snapshot date lookups from Supabase logs** · verified 2026-10-04 · → [[../inngest/supabase-log-poll]]
+- **Drop stale daily Amazon product snapshot date lookups from the Supabase error feed** · verified 2026-10-04 · → [[../libraries/control-tower]]
+- **Drop stale orders.shopify_order_name PostgREST lookup noise** · verified 2026-10-04 · → [[../libraries/control-tower]] § error-feed.ts classifier `isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise`; cross-link in [[../tables/orders]]
+- **Drop stale pending_folds.fold_job_id direct-REST noise from Supabase logs** · verified 2026-10-04 · → [[../libraries/control-tower]]
+- **Drop stale specs problem/proposed_change search noise** · verified 2026-10-04 · → [[../libraries/control-tower]]
+- **Drop stale specs verified_at direct-REST noise** · verified 2026-10-04 · → [[tables/specs]]
+- **Scope Postgres client-lost FATAL logs as transient** · verified 2026-10-04 · → [[lifecycles/control-tower]]
+- **Fail the QB close Amazon sync when the shipped report parses empty unexpectedly** · verified 2026-10-04 · → [[../libraries/qb-close-sync-amazon-sales]]
+- **Fix date-grain output freshness false alarms** · verified 2026-10-03 · → [[../libraries/control-tower#parseOutputFreshnessValueMs]]
+- **Drop stale agent_jobs branch direct-REST log noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
+- **Drop stale agent_jobs branch_name direct-REST log noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
+- **Drop stale direct agent_jobs merge_sha lookup noise** · verified 2026-10-03 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsMergeShaDirectRestLookupNoise`)
+- **Drop stale agent_jobs.target direct-REST Supabase log noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
+- **Drop stale daily Amazon order units lookup noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
+- **Drop stale loop_alerts closed_at direct REST noise** · verified 2026-10-03 · → [[../libraries/control-tower]]
+- **Drop stale loop_alerts error_signature direct-REST noise** · verified 2026-10-03 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise`)
+- **Drop stale specs.fold_status PostgREST noise from Supabase logs** · verified 2026-10-03 · → [[../tables/specs]]
+- **Drop stale specs.review_status direct-REST noise from Supabase logs** · verified 2026-10-03 · → [[lifecycles/control-tower]]
+- **Error-feed drop: agent_jobs.config_dir direct-REST lookup noise** · verified 2026-10-02 · → [[../libraries/control-tower]]
+- **Drop foreign-app jsonb LIKE on appstle_contract_snapshots.raw from the Supabase postgres error feed** · verified 2026-10-02 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise`)
+- **Drop foreign `orders.total_price` and `orders.subtotal_price` column-missing noise from the error feed** · verified 2026-10-02 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise`)
+- **Scope out foreign `product_variants.price` direct-REST noise at capture** · verified 2026-10-02 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise`)
+- **Portal removelineitem false-fails when Appstle remove propagates slower than 800ms verify window** · verified 2026-10-02 · → [[../libraries/subscription-items]]
+- **Fix _probe-spec-fold.ts: select specs.owner not specs.owner_function** · verified 2026-10-02 · → [[../libraries/builder-worker]]
+- **Widen sync-qb-close-sources output-freshness threshold to accommodate Amazon shipping-lag** · verified 2026-10-02 · → [[../libraries/control-tower]]
+- **Drop the foreign-app `agent_jobs.payload` direct-REST read noise from the Control Tower error feed** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise`)
+- **Drop foreign-app agent_jobs.result direct-REST column-missing noise** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
+- **Drop foreign PostgREST agent_jobs.title column-missing noise at capture** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
+- **Drop supabase-logs noise for Studio ad hoc appstle_api_calls lookup naming non-existent `method` / `status_code` columns** · verified 2026-10-01 · → [[inngest/supabase-log-poll]]
+- **Drop foreign-app PostgREST noise: `customer_events.metadata` ad hoc lookup** · verified 2026-10-01 · → [[../libraries/control-tower]]
+- **Drop foreign-app `customers.address` column-missing noise at capture** · verified 2026-10-01 · → [[../inngest/supabase-log-poll]]
+- **Drop `meta_ad_accounts.name` direct-REST column-missing noise at capture** · verified 2026-10-01 · → [[../lifecycles/control-tower]]
+- **Drop foreign-app Postgres noise: ad-hoc PostgREST select on orders.shipping_name** · verified 2026-10-01 · → [[../inngest/supabase-log-poll]]
+- **Drop foreign `orders.subtotal_cents` column-missing noise from the error feed** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise`)
+- **Scope capture — drop foreign PostgREST reads of products.pricing_rule_id from the Control Tower error feed** · verified 2026-10-01 · → [[inngest/supabase-log-poll]]
+- **Scope out foreign PostgREST noise: column spec_phases.phase_key does not exist** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
+- **Drop foreign-app noise — PostgREST direct-REST reads of a non-existent specs.phase column** · verified 2026-10-01 · → [[../libraries/control-tower]]
+- **Drop foreign-app `subscriptions.paused_at` PostgREST lookup noise at capture** · verified 2026-10-01 · → [[../libraries/control-tower]]
+- **A green loop must not hide a stale output table** · verified 2026-09-30 · → [[lifecycles/shoptics-migration]], [[libraries/control-tower]]
+- **Catch billing_forecasts pending unique-index race in createForecast** · verified 2026-09-30 · → [[../libraries/billing-forecast]]
+- **Drop stale qb_amazon_sales_snapshots.gross_revenue_cents direct-REST lookup noise** · verified 2026-09-30 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
+- **Classify foreign `daily_meta_ad_spend.date` PostgREST ad-hoc noise** · verified 2026-09-29 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise`)
+- **Drop foreign PostgREST noise for loyalty_members.lifetime_points** · verified 2026-09-29 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise`)
+- **Drop foreign-app noise: product_ingredients.sort_order direct-REST ad-hoc lookup** · verified 2026-09-29 · → [[../libraries/control-tower]]
+- **Drop foreign-app ticket_messages.role adhoc SELECT noise at capture** · verified 2026-09-29 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise]]
+- **Drop foreign PostgREST reads on tickets.assigned_agent from the Control Tower error feed** · verified 2026-09-29 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise]]
+- **Guard products.id .in() filters against Shopify-numeric line-item ids** · verified 2026-09-29 · → [[../libraries/email-storefront]]
+- **Add missing workspaces.playbook_compiler_support_min column** · verified 2026-09-28 · → [[../tables/workspaces]]
+- **Drop expected 23505 on dashboard_notifications_dedupe_key_open_uniq from supabase-logs capture** · verified 2026-09-28 · → [[lifecycles/control-tower]]
+- **Drop foreign 'column orders.source does not exist' ad-hoc lookup noise from the error feed** · verified 2026-09-28 · → [[../libraries/control-tower]] (error-feed.ts capture filters)
+- **Drop stale playbooks.title direct-REST lookup noise from Supabase logs** · verified 2026-09-28 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise`)
+- **Drop error-feed noise: foreign PostgREST reads on products.ingredients/supplement_facts/benefits** · verified 2026-09-28 · → [[../libraries/control-tower#error-feedts--the-error-feed]]
+- **Drop PostgREST CTE-wrapped variant of spec_phases workspace_id/spec_slug lookup noise** · verified 2026-09-28 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise]]
+- **Drop foreign PostgREST specs.current_phase column-missing noise** · verified 2026-09-28 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise]] (§ wired in [[../inngest/supabase-log-poll.md]])
+- **Drop foreign ticket_messages.sender_type PostgREST select noise from the supabase-logs feed** · verified 2026-09-28 · → [[../libraries/control-tower]]
+- **Fix ticket_messages inserts using invalid direction='internal'** · verified 2026-09-28 · → [[../tables/ticket_messages]]
+- **Fix fraud+returns routes selecting nonexistent orders.total_price_cents column** · verified 2026-09-28 · → [[../lifecycles/fraud-detection]], [[../lifecycles/return-pipeline]]
+- **Guard specs-table.getSpec against a non-UUID workspaceId so the slug-swap caller surfaces in the stack trace** · verified 2026-09-28 · → [[../libraries/specs-table]]
+- **specs-table listSpecs UUID-shape guard** · verified 2026-09-28 · → [[../libraries/specs-table]]
+- **Route holding-message escalations through dispatchSlackNotification** · verified 2026-09-28 · → [[../inngest/unified-ticket-handler]]
+- **Guard Amazon sync events before querying amazon_connections with malformed connection ids** · verified 2026-09-27 · → [[../inngest/amazon-sync]]
+- **Fix all-customers demographics snapshot upsert** · verified 2026-09-27 · → [[lifecycles/demographic-enrichment]]
+- **Drop stale agent_jobs.slug direct-REST lookup noise** · verified 2026-09-27 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
+- **Widen error_events ad-hoc column-missing capture-drop to include the PostgREST CTE wrapper shape** · verified 2026-09-27 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise`)
+- **Widen error_events column-missing capture-drop to PostgREST's WITH pgrst_source CTE shape** · verified 2026-09-27 · → [[../libraries/control-tower]]
+- **Drop stale spec_phases spec_slug PostgREST CTE noise** · verified 2026-09-27 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise]]
+- **Drop the ad hoc public.specs.body_md direct-REST lookup at capture** · verified 2026-09-27 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise`)
+- **Drop foreign-app `column workspaces.slug does not exist` PostgREST noise at capture** · verified 2026-09-27 · → [[../libraries/control-tower]] (`isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise`)
 - **Fix cancellation timeline worker reading a missing orders column** · verified 2026-09-26 · → [[../libraries/cs-director-cancellation-timeline]]
 - **Fix build-state probe to read the canonical spec review stamp** · verified 2026-09-26 · → [[tables/specs]]
 - **Suppress child cron freshness alerts during a Control Tower watchdog scheduler gap** · verified 2026-09-26 · → [[../libraries/control-tower]]
 - **Fix creative scout watcher to use real agent_jobs columns** · verified 2026-09-26 · → [[../libraries/agent-jobs#agent_job_columns--jobselect----typed-column-source-of-truth]]
+- **customer-timeline: read dunning_cycles.created_at (not the non-existent started_at)** · verified 2026-09-26 · → [[../libraries/customer-timeline]] + [[../tables/dunning_cycles]]
 - **Stop the director box snapshot from querying a missing agent_jobs.completed_at column** · verified 2026-09-26 · → [[../libraries/director-box-snapshot]]
+- **Stop director grading from selecting a nonexistent approval_decisions column** · verified 2026-09-26 · → [[../libraries/director-grader]]
+- **Stop paging stale agent_jobs approval-join column lookups** · verified 2026-09-26 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise`)
+- **Drop ad hoc approval-decision SQL syntax errors from Supabase log feed** · verified 2026-09-26 · → [[../libraries/control-tower]]
 - **Drop ad hoc control_tower_events lookup noise from Supabase DB logs** · verified 2026-09-26 · → [[lifecycles/control-tower]]
+- **Drop ad-hoc `error_events.first_seen` column-missing lookup noise from Supabase Postgres logs** · verified 2026-09-26 · → [[../libraries/control-tower#error-feed-capture-filters]]
+- **Drop foreign-app 'column error_events.metadata does not exist' ad-hoc SELECT noise from postgres_logs capture** · verified 2026-09-26 · → [[../libraries/control-tower]]
+- **Consolidate per-column error_events foreign-noise drops into one generic classifier** · verified 2026-09-26 · → [[lifecycles/control-tower]]
+- **Drop PostgREST error_events missing-column lookup noise** · verified 2026-09-26 · → [[libraries/control-tower]]
+- **Drop stale direct Supabase orders.name lookup noise** · verified 2026-09-26 · → [[lifecycles/control-tower]]
+- **Drop stale public.policies.kind direct-REST lookup noise from Supabase logs** · verified 2026-09-26 · → [[../libraries/control-tower]]
+- **Drop ad hoc smart_patterns content-column searches from Supabase log feed** · verified 2026-09-26 · → [[../libraries/control-tower]]
+- **Drop stale spec_phases idx lookup noise from Supabase log feed** · verified 2026-09-26 · → [[../libraries/control-tower]] `isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise`
+- **Drop stale spec_phases shipped_at direct-REST noise from the error feed** · verified 2026-09-26 · → [[../libraries/control-tower]]
+- **Drop ad hoc spec_phases workspace/slug lookup noise from Supabase logs** · verified 2026-09-26 · → [[../libraries/control-tower#error-feedts--the-error-feed-error-feed-monitoring-phase-1--2]]
+- **Drop stale spec status history created_at REST lookup noise** · verified 2026-09-26 · → [[../libraries/control-tower]]
+- **Drop stale specs archive timestamp direct-REST noise** · verified 2026-09-26 · → [[../libraries/control-tower]]
+- **Drop CTE-wrapped specs folded_at PostgREST lookup noise** · verified 2026-09-26 · → [[../libraries/control-tower]]
+- **Drop stale specs.is_active direct-REST noise from Supabase logs** · verified 2026-09-26 · → [[lifecycles/control-tower]]
 - **Drop Supabase array_agg aggregate introspection noise from the error feed** · verified 2026-09-26 · → [[../libraries/control-tower]]
+- **Drop foreign-app Supabase SQL Editor ad-hoc lookups on loop_alerts referencing non-existent columns** · verified 2026-09-26 · → [[../libraries/control-tower]]
+- **Drop Supabase postgres_logs `column reference "oid" is ambiguous` foreign-app noise at capture** · verified 2026-09-26 · → [[libraries/control-tower]]
+- **Stop paging on foreign specs.archived PostgREST probes** · verified 2026-09-26 · → [[../libraries/control-tower]]
+- **Fix sonnet-prompt auto-reviewer's stale policies column select** · verified 2026-09-26 · → [[../lifecycles/ai-learning]]
 - **Fix fraud nightly scan workspace lookup column** · verified 2026-09-26 · → [[../inngest/fraud-detection]]
 - **Fix the graduate-state probe's director_activity column names** · verified 2026-09-26 · → [[../tables/director_activity]]
 - **Bound main build status GitHub reads so the cron cannot wedge** · verified 2026-09-26 · → [[../libraries/control-tower#main-build-statusts--the-red-main-pipeline-alarm]]
+- **Normalize refund policy loyalty balance fields before they reach customer queries** · verified 2026-09-26 · → [[../libraries/policies]]
 - **Normalize Shopify product ids before computing popup offers** · verified 2026-09-26 · → [[../libraries/popup-decide]]
 - **ShopCX contract items join products for Shopify product id** · verified 2026-09-26 · → [[../libraries/commerce__shopcx-contract-ingest]], [[../libraries/commerce__shopcx-line-ops]], [[../lifecycles/shopcx-subscriptions]]
 - **Update stale spec phase probes to use position instead of phase** · verified 2026-09-26 · → [[../tables/spec_phases#columns]]
