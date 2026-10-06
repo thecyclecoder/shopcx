@@ -3082,6 +3082,118 @@ test("isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise ALSO dr
   );
 });
 
+test("isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise ALSO drops the `name` / `phase_order` sibling columns from the same foreign caller (Control Tower supabase-logs:0f78fbfd0bd78a01)", () => {
+  // Same foreign-owned read, two more off-schema columns — the live `spec_phases` shape
+  // uses `title` + `position`, so an ad hoc PostgREST SELECT asking for `name` or
+  // `phase_order` is the same class as the existing workspace_id/spec_slug drop and
+  // should be filtered at capture rather than opened as a Control Tower error.
+  //
+  // Plain SELECT shape — unqualified + public.-qualified for each of the two new columns.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.name does not exist",
+      "select id, name, status, phase_order from public.spec_phases where spec_slug = 'foo'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column public.spec_phases.name does not exist",
+      "select name from public.spec_phases limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.phase_order does not exist",
+      "select id, name, status, phase_order from public.spec_phases where spec_slug = 'foo'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column public.spec_phases.phase_order does not exist",
+      "select phase_order from public.spec_phases limit 10",
+    ),
+    true,
+  );
+  // ERROR: prefix on the message is stripped as usual.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "ERROR: column spec_phases.name does not exist",
+      "select name from public.spec_phases where id = 'x'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "ERROR:  column spec_phases.phase_order does not exist",
+      "select phase_order from public.spec_phases where id = 'x'",
+    ),
+    true,
+  );
+  // The exact `pgrst_source` CTE wire shape captured in the Control Tower signature —
+  // double-quoted identifiers, SELECTs id/name/status/phase_order, filters by spec_slug.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.name does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."spec_phases"."id", "public"."spec_phases"."name", "public"."spec_phases"."status", "public"."spec_phases"."phase_order" FROM "public"."spec_phases" WHERE "public"."spec_phases"."spec_slug" = $1 ORDER BY "public"."spec_phases"."phase_order" ASC LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column public.spec_phases.name does not exist",
+      'WITH pgrst_source AS (SELECT "public"."spec_phases"."name" FROM "public"."spec_phases")',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.phase_order does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."spec_phases"."id", "public"."spec_phases"."name", "public"."spec_phases"."status", "public"."spec_phases"."phase_order" FROM "public"."spec_phases" WHERE "public"."spec_phases"."spec_slug" = $1 ORDER BY "public"."spec_phases"."phase_order" ASC LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column public.spec_phases.phase_order does not exist",
+      'WITH pgrst_source AS (SELECT "public"."spec_phases"."phase_order" FROM "public"."spec_phases")',
+    ),
+    true,
+  );
+  // Negative — the shape guard is still load-bearing: a real code-write with the same
+  // bogus column (`name` / `phase_order`) must stay captured so a ShopCX bug still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.name does not exist",
+      "insert into public.spec_phases (name, status) values ('foo', 'planned')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.phase_order does not exist",
+      "update public.spec_phases set phase_order = 2 where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.name does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."spec_phases"("name") VALUES ($1) RETURNING "public"."spec_phases"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(
+      "column spec_phases.phase_order does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."spec_phases" SET "phase_order" = $1 WHERE "public"."spec_phases"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise KEEPS a column-missing error on any OTHER table (a table that DOES have workspace_id / spec_slug still pages)", () => {
   // `specs` itself has `workspace_id` — a real column-missing there is a schema regression.
   assert.equal(
