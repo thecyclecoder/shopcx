@@ -12,7 +12,7 @@
  * retry loop that never actually charged anything.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { resolveBillingSource } from "@/lib/internal-subscription";
+import { resolveBillingSource, resolveLiveContractId } from "@/lib/internal-subscription";
 import {
   subscriptionGetUpcomingOrders,
   subscriptionAttemptBilling,
@@ -75,6 +75,9 @@ export async function dunningChargeContract(
    */
   attemptOrdinal: number,
 ): Promise<DunningChargeResult> {
+  // Exhausted dunning cycles can still carry a sub's pre-migration id (only OPEN cycles are
+  // re-pointed) — resolve it to the live migrated row before routing and charging.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
   const engine = src as DunningChargeResult["engine"];
 
@@ -141,6 +144,7 @@ export async function dunningUnskip(
   contractId: string,
   appstleBillingAttemptId: string | null,
 ): Promise<void> {
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "shopcx") {
     const { shopifyUnskipBillingCycle } = await import("@/lib/commerce/shopify-subscription-client");

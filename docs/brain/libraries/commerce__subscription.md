@@ -144,6 +144,8 @@ Canonical subscription mutation surface for the Commerce SDK. Every subscription
 
 ## Pattern: Internal-vs-Appstle branching
 
+**Every dispatcher first calls `resolveLiveContractId`** ([[internal-subscription]]). An old (pre-migration) Appstle id from a cancel-journey snapshot, a cached portal, ticket history or an exhausted dunning cycle resolves to the live migrated row and its current id. Before this, it fell through to Appstle and acted on the dead contract.
+
 Every mutation checks `isInternalSubscription()` at the top:
 - **Internal path:** delegates to `internal*` handlers from [[internal-subscription]] (Braintree charge, internal state management).
 - **Appstle path:** delegates to `appstleX` wrappers from [[appstle]] (Appstle API + healOnTouch top-guard from [[appstle-pricing]]).

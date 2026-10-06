@@ -56,6 +56,7 @@ import type {
 import {
   isInternalSubscription,
   resolveBillingSource,
+  resolveLiveContractId,
   internalSubGetUpcomingOrders,
   internalSubSwitchPaymentMethod,
   internalSubAddFreeProduct,
@@ -454,6 +455,8 @@ export async function subscriptionAction(
   cancelReason?: string,
   cancelledBy?: string,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
     const r = await internalSubscriptionAction(workspaceId, contractId, action);
@@ -507,6 +510,8 @@ export async function subscriptionSkipNextOrder(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
     return internalSubSkipNextOrder(workspaceId, contractId);
@@ -526,6 +531,8 @@ export async function subscriptionSkipUpcomingOrder(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") return internalSkipUpcoming(workspaceId, contractId);
   if (src === "shopcx") return shopifySkipBillingCycle(workspaceId, contractId);
@@ -559,6 +566,8 @@ export async function subscriptionGetUpcomingOrders(
   orders?: { id: string; billingDate: string; status: string }[];
   error?: string;
 }> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const srcUpcoming = await resolveBillingSource(workspaceId, contractId);
   if (srcUpcoming === "internal") return internalSubGetUpcomingOrders(workspaceId, contractId);
   if (srcUpcoming === "shopcx") {
@@ -582,6 +591,8 @@ export async function subscriptionUpdateBillingInterval(
   interval: "DAY" | "WEEK" | "MONTH" | "YEAR",
   intervalCount: number,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
     return internalSubUpdateBillingInterval(workspaceId, contractId, interval, intervalCount);
@@ -595,6 +606,8 @@ export async function subscriptionUpdateNextBillingDate(
   contractId: string,
   nextBillingDate: string,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
     return internalSubUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
@@ -625,6 +638,8 @@ export async function subscriptionSwitchPaymentMethod(
   // token → customer_payment_methods.is_default flip). Delegate to preserve
   // that path exactly; the wrapper top-guards with healOnTouch on the
   // Appstle branch.
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const srcPm = await resolveBillingSource(workspaceId, contractId);
   if (srcPm === "internal") return internalSubSwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
   if (srcPm === "shopcx") return shopifySwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
@@ -653,6 +668,8 @@ export async function subscriptionSendPaymentUpdateEmail(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const srcEmail = await resolveBillingSource(workspaceId, contractId);
   if (srcEmail === "appstle") return appstleSendPaymentUpdateEmail(workspaceId, contractId);
 
@@ -951,6 +968,8 @@ export async function subscriptionAddFreeProduct(
   variantId: string,
   quantity: number = 1,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const srcGift = await resolveBillingSource(workspaceId, contractId);
   if (srcGift === "internal") return internalSubAddFreeProduct(workspaceId, contractId, variantId, quantity);
   if (srcGift === "shopcx") {
@@ -970,6 +989,8 @@ export async function subscriptionSwapProduct(
   oldVariantId: string,
   newVariantId: string,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const srcSwap = await resolveBillingSource(workspaceId, contractId);
   if (srcSwap === "internal") return internalSwapProduct(workspaceId, contractId, oldVariantId, newVariantId);
   if (srcSwap === "shopcx") {
@@ -1032,6 +1053,8 @@ export async function subscriptionOrderNow(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult & { summary?: string; internal?: boolean }> {
+  // An old (pre-migration) id resolves to the live migrated row before the lookup below.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions")
@@ -1041,6 +1064,8 @@ export async function subscriptionOrderNow(
     .maybeSingle();
   if (!sub) return { success: false, error: "subscription_not_found" };
 
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
 
   if (src === "internal" || src === "shopcx") {
