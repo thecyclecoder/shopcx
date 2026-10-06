@@ -4,7 +4,7 @@
  * blocks retired in the Klaviyo sunset ([[../../../../../../docs/brain/integrations/klaviyo]]).
  *
  * `GET ?shopify_product_id=7465708093613&limit=12&offset=0`
- *   → { aggregate: { rating, count }, reviews: [...], has_more }
+ *   → { aggregate: { rating, count, display_rating, display_count }, reviews: [...], has_more }
  *
  * **Keyed by Shopify product id, not handle.** Our `products.handle` and the
  * Shopify handle drift (ours says `amazing-coffee-pods`, Shopify's template is
@@ -63,7 +63,11 @@ export async function GET(
   const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0", 10));
   const limit = Math.min(50, Math.max(1, parseInt(url.searchParams.get("limit") || "12", 10)));
 
-  const empty = { aggregate: { rating: null, count: 0 }, reviews: [], has_more: false };
+  const empty = {
+    aggregate: { rating: null, count: 0, display_rating: null, display_count: 0 },
+    reviews: [],
+    has_more: false,
+  };
 
   if (!shopifyProductId && !handle) {
     return NextResponse.json({ error: "shopify_product_id or handle required" }, { status: 400, headers: CORS });
@@ -135,14 +139,28 @@ export async function GET(
   // NO body filter here: a rating-only review still counts toward "4.8 from
   // 3,158 reviews". Requiring text would cut Superfood Tabs by ~300 and
   // contradict the `reviews.rating_count` metafield the product cards read.
-  const starCount = (star: number) =>
+  const starCount = (star: number, filter = matchFilter) =>
     admin
       .from("product_reviews")
       .select("id", { count: "exact", head: true })
       .eq("workspace_id", workspace.id)
-      .or(matchFilter)
+      .or(filter)
       .in("status", SHOWN_STATUSES)
       .eq("rating", star);
+
+  // The SHOPIFY-PAGE scope: this product alone (plus its "(Free Gift)" fold),
+  // without the Instant ↔ K-Cups pooling — exactly what `buildReviewAggregates`
+  // publishes to the `reviews.rating` / `reviews.rating_count` metafields the
+  // live PDP header reads. Surfaces that sit next to the Shopify store (the
+  // checkout trust card) show this so they never contradict the product page.
+  const pageClauses: string[] = [];
+  if (product?.id) pageClauses.push(`product_id.eq.${product.id}`);
+  if (shopifyProductId) {
+    pageClauses.push(`shopify_product_id.in.(${shopifyIdsFoldingInto(shopifyProductId).join(",")})`);
+  }
+  const pageFilter = pageClauses.join(",");
+  // Only a link-grouped product has a different page scope; skip the extra counts otherwise.
+  const pooled = productIds.length > 1 && pageClauses.length > 0;
 
   // Listable = has a body. Pagination must count these, not the aggregate —
   // otherwise `has_more` stays true forever against rating-only rows the list
@@ -155,31 +173,43 @@ export async function GET(
     .in("status", SHOWN_STATUSES)
     .not("body", "is", null);
 
-  const [{ data: reviews }, { count: listable }, ...starResults] = await Promise.all([
+  const [{ data: reviews }, { count: listable }, ...counts] = await Promise.all([
     base()
       .order("featured", { ascending: false })
       .order("rating", { ascending: false })
       .order("created_at", { ascending: false })
       .range(offset, offset + limit - 1),
     listableCount,
-    starCount(1),
-    starCount(2),
-    starCount(3),
-    starCount(4),
-    starCount(5),
+    ...[1, 2, 3, 4, 5].map((star) => starCount(star)),
+    ...(pooled ? [1, 2, 3, 4, 5].map((star) => starCount(star, pageFilter)) : []),
   ]);
 
-  let rated = 0;
-  let weighted = 0;
-  starResults.forEach((res, i) => {
-    const n = res.count || 0;
-    rated += n;
-    weighted += n * (i + 1);
-  });
+  const tally = (results: { count: number | null }[]) => {
+    let n = 0;
+    let weighted = 0;
+    results.forEach((res, i) => {
+      const c = res.count || 0;
+      n += c;
+      weighted += c * (i + 1);
+    });
+    return { n, rating: n ? Math.round((weighted / n) * 100) / 100 : null };
+  };
+  const pool = tally(counts.slice(0, 5));
+  const page = pooled ? tally(counts.slice(5, 10)) : pool;
+  const rated = pool.n;
 
+  // `display_rating` / `display_count` are the Shopify product page's numbers:
+  // the page scope above, plus the off-platform bump (the Yotpo-era reviews whose
+  // rows are gone) on the COUNT only, never the rating — the same values the
+  // `reviews.rating` / `reviews.rating_count` metafields carry
+  // ([[../../../../../../docs/brain/libraries/shopify-review-metafields]] § The +10,000
+  // off-platform bump). `rating` / `count` stay the true pooled numbers.
+  const bump = Math.max(0, Math.floor(Number(workspace.storefront_off_platform_review_count) || 0));
   const aggregate = {
-    rating: rated ? Math.round((weighted / rated) * 100) / 100 : null,
+    rating: pool.rating,
     count: rated,
+    display_rating: page.rating,
+    display_count: page.n ? page.n + bump : 0,
   };
 
   const returned = (reviews || []).map((r) => ({
