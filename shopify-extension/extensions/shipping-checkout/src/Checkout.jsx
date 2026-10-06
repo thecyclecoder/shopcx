@@ -30,9 +30,13 @@ export default function extension() {
 
 const DAY = 864e5;
 
+// An unset setting arrives as null or "", and Number(null) / Number("") is 0,
+// which collapsed the window to "today – today". Only a real positive integer
+// overrides the measured default.
 const toDays = (v, fallback) => {
+  if (v === null || v === undefined || String(v).trim() === "") return fallback;
   const n = Number(v);
-  return Number.isFinite(n) && n >= 0 ? Math.round(n) : fallback;
+  return Number.isFinite(n) && n >= 1 ? Math.round(n) : fallback;
 };
 
 /** today + days, a Sunday nudged to Monday (no Sunday delivery promise) */

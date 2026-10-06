@@ -42,6 +42,7 @@ Amazing Coffee, 2026-10-06: pooled 3,003 / 4.76; page scope 1,882 / 4.74, so `di
 The Shipping Trust block makes three claims, each from `orders` (last 90 days to 2026-10-06, 5,938 orders). Re-measure before changing a default.
 
 - **Arrival window:** order → `delivered_at` was 6.5 days at the median, 8.4 at p80 and 10.6 at p95 (calendar days). The block shows a window, today + 6 to today + 9, worded as an *estimate*. A hard "arrives by" date at p80 would be missed for one order in five and turn into "where is my order" tickets.
+- **Unset settings fall back, never to 0.** A checkout-editor setting nobody filled arrives as `null` or `""`, and `Number(null)` is `0`, which shipped as "Estimated arrival Tue, Oct 6 – Tue, Oct 6" (today–today) in shopcx-122. `toDays` treats null/blank/<1 as unset and uses the measured default. Any numeric setting in a checkout block needs the same guard.
 - **Carriers:** about 72% of fulfillments go out on OSM Priority Select or USPS Ground Advantage (USPS does final delivery), about 20% on DHL eCommerce Ground, and UPS is effectively 0. So the block shows USPS and DHL only. Never show a carrier we don't ship with.
 - **Tracked:** all 5,804 shipped orders in the window carry an `amplifier_tracking_number`.
 - **Ship speed** (order → `amplifier_shipped_at`: 37.5 h median, 61.5 h p80) is not shown as a claim; "ships in 24 hours" would be false.
