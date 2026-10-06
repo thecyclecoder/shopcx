@@ -1,0 +1,1 @@
+- **Scope the CS Director close-no-action ticket_messages read by workspace** · verified 2026-10-06 · → [[libraries/cs-director-close-gate]], [[specs/inflection-resession-must-act-on-newest-ask]]
