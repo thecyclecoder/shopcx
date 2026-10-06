@@ -1,0 +1,1 @@
+- **Generalize ad hoc customer_events missing-column drop from metadata-specific to column-agnostic** · verified 2026-10-06 · → [[../libraries/control-tower]]
