@@ -1,0 +1,1 @@
+- **Drop quoted PostgREST error_events missing-column lookup noise** · verified 2026-10-06 · → [[lifecycles/error-feed]]
