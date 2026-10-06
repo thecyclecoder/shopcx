@@ -135,3 +135,7 @@ const { data } = await admin.from("subscriptions")
 ---
 
 [[../README]] · [[../../CLAUDE]] · [[../../DATABASE]]
+
+## Trigger: customer subscription_status
+
+`subscriptions_sync_customer_subscription_status` (AFTER INSERT/DELETE/UPDATE OF `status`, `customer_id`, `billing_source`, `is_internal`) recomputes [[customers]]`.subscription_status` for the affected customer(s) when they have at least one internal sub. See [[customers]] § `subscription_status`.
