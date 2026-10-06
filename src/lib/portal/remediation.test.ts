@@ -67,6 +67,43 @@ test("a genuinely unrecognized error still → human", () => {
   assert.equal(r.disposition, "human");
 });
 
+// ── Phase 4 of inflection-resession-must-act-on-newest-ask ───────────────────
+// payment_failed_update_blocked is the stale triage note the dc31bf31 ticket
+// stacked on top of a recovered dunning cycle. The pure classifier now returns
+// the `journey_add_payment_method` disposition for this error class; the DB-aware
+// remediatePortalTicket consumer then suppresses (internal / recovered) or routes
+// to the add-payment-method journey.
+
+test("Phase 4: payment_failed_update_blocked → journey_add_payment_method (never bare 'human')", () => {
+  const r = classifyPortalFailure(ctx("payment_failed_update_blocked"));
+  assert.equal(
+    r.disposition,
+    "journey_add_payment_method",
+    "payment_failed_update_blocked must get the explicit branch, not fall through to 'human'",
+  );
+  assert.match(r.reason, /payment_failed_update_blocked/);
+});
+
+test("Phase 4: payment_failed_update_blocked substring in a larger error still → journey_add_payment_method", () => {
+  // The portal/route.ts folds detail text into `error`, so the classifier matches
+  // on an .includes() rather than an exact-equal. A detailed string must still
+  // land on the branch, not fall through.
+  const r = classifyPortalFailure(
+    ctx("payment_failed_update_blocked — gateway still rejects the vaulted card"),
+  );
+  assert.equal(r.disposition, "journey_add_payment_method");
+});
+
+test("Phase 4: a close-but-not-matching error does NOT trigger the journey branch", () => {
+  // Make sure the branch doesn't greedily match unrelated 'payment_failed' strings.
+  const r = classifyPortalFailure(ctx("payment_failed_other_class"));
+  assert.equal(
+    r.disposition,
+    "human",
+    "unrelated payment_failed_* errors still fall through to the human branch",
+  );
+});
+
 // ── Remove-payment-method guard codes (portal-remove-card-guard-rejections-are-
 // validation-not-human-escalations spec) ──
 //

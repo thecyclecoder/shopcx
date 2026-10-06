@@ -61,6 +61,7 @@ import { errText } from "@/lib/error-text";
 import type { ActionContext, ActionParams, SonnetDecision } from "@/lib/action-executor";
 import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
 import type { CxOrderRemedyState, CxOrderRemedyStateRef } from "@/lib/cx-agent-sdk";
+import { detectDateChangeAsk } from "@/lib/date-change-ask";
 import { MONEY_ACTION_TYPES, isNonOrderScopedLoyaltyAction, isNonRefundReplacementAction } from "@/lib/june-remedy-approval";
 import { recordDirectorActivity, type DirectorActivityInput } from "@/lib/director-activity";
 import { getAgentPolicyPackage, formatAgentPolicyPackage } from "@/lib/policies";
@@ -263,6 +264,141 @@ export interface RemedyExecutionPlan {
    */
   actionParams: Record<string, unknown>;
   customerMessage: string | null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3 of [[../../docs/brain/specs/inflection-resession-must-act-on-newest-ask.md]] —
+// findUnsatisfiedCustomerRequests. The dc31bf31 scar's SECOND failure mode: the customer
+// repeated his ask on 08-08 ("Still do not Knw date?????"), June (session 4543b96b) chose
+// `close_no_action`, calling his last message a positive thank-you. He then paused 30 days in
+// the portal on 08-27, auto-resumed 09-26, and renewed 10-02 — a $237.16 refund + cancelled
+// subscriber that `close_no_action` should never have been allowed to produce.
+//
+// This pure helper lists the customer's explicit requests made AFTER the last successful
+// action executed on the ticket. The transition builder consumes it to refuse a
+// `close_no_action` while any inbound ask is unsatisfied (and the runner posts the internal
+// note + re-sessions Sol per the spec).
+//
+// Pure (no DB, no clock) so unit tests can drive it with fixture messages and the pure
+// transition can call it from any lane.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The subset of a `ticket_messages` row the predicate needs. */
+export interface UnsatisfiedRequestMessage {
+  id: string;
+  direction: string; // 'inbound' | 'outbound'
+  author_type: string; // 'customer' | 'agent' | 'ai' | 'system'
+  visibility?: string | null; // 'external' | 'internal'
+  body?: string | null;
+  body_clean?: string | null;
+  created_at: string; // ISO
+}
+
+/** A SUCCESSFUL action's descriptor — only `type` + `executed_at` are consulted. */
+export interface UnsatisfiedRequestExecutedAction {
+  type: string;
+  executed_at: string; // ISO
+}
+
+/** One request the predicate flags as unsatisfied. */
+export interface UnsatisfiedCustomerRequest {
+  message_id: string;
+  message_created_at: string;
+  excerpt: string;
+  kind: "date_change" | "refund" | "cancel" | "change" | "move" | "skip";
+  cue: string;
+}
+
+const SIMPLE_REQUEST_CUES: Array<{ kind: UnsatisfiedCustomerRequest["kind"]; cue: string; re: RegExp }> = [
+  { kind: "refund", cue: "refund", re: /\brefund(?:s|ed|ing)?\b/i },
+  { kind: "cancel", cue: "cancel", re: /\bcancel(?:s|ed|led|ling|lation)?\b/i },
+  { kind: "change", cue: "change", re: /\b(?:change|modify|update|edit)\b/i },
+  { kind: "move", cue: "move", re: /\bmove(?:s|d|ing)?\b/i },
+  { kind: "skip", cue: "skip", re: /\b(?:skip|push|delay|postpone|hold\s+off)\b/i },
+];
+
+function excerpt(text: string, cap = 160): string {
+  const t = text.trim();
+  if (t.length <= cap) return t;
+  return t.slice(0, cap - 1).trim() + "…";
+}
+
+/**
+ * Phase 3 of [[../../docs/brain/specs/inflection-resession-must-act-on-newest-ask.md]].
+ * Lists explicit customer requests (date-change asks + simple refund/cancel/change/move/skip
+ * cues) made AFTER the last successful action's `executed_at`. Pure — no DB, no clock.
+ *
+ * `messages` is the ordered or unordered set of `ticket_messages` rows for the ticket; the
+ * helper filters to `direction='inbound'` + `author_type='customer'` + `visibility!='internal'`
+ * internally, so a caller can safely pass the full conversation.
+ *
+ * `executedActions` is the set of actions whose terminal status was `verified`/`ok` on the
+ * ticket. The caller filters out failed actions BEFORE passing them in — a failed cancel is
+ * NOT a satisfaction. The predicate takes the MAX `executed_at` as the floor.
+ *
+ * Returns an empty array when every inbound ask has been satisfied (or there was never an
+ * explicit ask). Returns one entry per unsatisfied inbound message (not per cue — multiple
+ * cues on the same message collapse to a single entry, preferring `date_change` which is the
+ * dc31bf31-specific signal) so the caller's note can name the open request without flooding.
+ */
+export function findUnsatisfiedCustomerRequests(
+  messages: UnsatisfiedRequestMessage[] | null | undefined,
+  executedActions: UnsatisfiedRequestExecutedAction[] | null | undefined,
+): UnsatisfiedCustomerRequest[] {
+  const inbound = (messages ?? []).filter(
+    (m) =>
+      m.direction === "inbound" &&
+      m.author_type === "customer" &&
+      (m.visibility ?? "external") !== "internal",
+  );
+  if (inbound.length === 0) return [];
+
+  // Latest successful-action timestamp — the "floor" above which an ask is unsatisfied.
+  // The empty-actions case uses the epoch so EVERY inbound ask counts (no action has
+  // satisfied anything yet).
+  let floor = 0;
+  for (const a of executedActions ?? []) {
+    const t = Date.parse(a.executed_at);
+    if (Number.isFinite(t) && t > floor) floor = t;
+  }
+
+  const out: UnsatisfiedCustomerRequest[] = [];
+
+  for (const m of inbound) {
+    const ts = Date.parse(m.created_at);
+    if (!Number.isFinite(ts) || ts <= floor) continue;
+    const text = (m.body_clean ?? m.body ?? "").toString();
+    if (!text.trim()) continue;
+
+    // 1) Date-change ask wins when it fires — the dc31bf31-specific signal.
+    const dateAsk = detectDateChangeAsk(text);
+    if (dateAsk.isAsk) {
+      out.push({
+        message_id: m.id,
+        message_created_at: m.created_at,
+        excerpt: excerpt(text),
+        kind: "date_change",
+        cue: "date_change_ask",
+      });
+      continue;
+    }
+
+    // 2) Fall through to the simple cue table (refund / cancel / change / move / skip).
+    for (const c of SIMPLE_REQUEST_CUES) {
+      if (c.re.test(text)) {
+        out.push({
+          message_id: m.id,
+          message_created_at: m.created_at,
+          excerpt: excerpt(text),
+          kind: c.kind,
+          cue: c.cue,
+        });
+        break;
+      }
+    }
+  }
+
+  return out;
 }
 
 /**

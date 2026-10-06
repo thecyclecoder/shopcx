@@ -230,6 +230,27 @@ When the job's `reason` is `portal_error` (Phase 1 of [[../../docs/brain/specs/p
 
 Silence is a real signal — one-off portal errors should NOT get spec noise. When in doubt about "structural vs. one-off", err on the side of OMITTING; the human can still commission a spec from the Roadmap.
 
+## Address the customer's NEWEST ask — never the tone label alone
+
+Phase 1 of [[../../../docs/brain/specs/inflection-resession-must-act-on-newest-ask.md]] pins the invariant: a re-session is a BOUNCE, not a reset. When the inflection detector flags frustration/drift and re-runs you, your prompt now carries a **NEWEST CUSTOMER ASK** block with the exact triggering `ticket_messages` row (prefers `body_clean`). You MUST address THAT message — the inflection `kind` is tone context, not a license to re-answer an older question. Ticket dc31bf31 is the scar: a 14:14 "Can we move order to Oct 30th as I ordered enough Aug n Sept???????" fired the frustration path with `cues=['repeated_punct']`, Sol re-answered the Sep 2 ship date, and the customer was billed four weeks early ($237.16 refund + cancelled subscriber).
+
+Every Direction MUST carry a top-level `newest_customer_ask` field:
+
+```json
+"newest_customer_ask": {
+  "quoted": "<verbatim quote of the newest inbound customer message (prefer body_clean) — the message that triggered this session, re-session or first-touch>",
+  "resolution": "<ONE sentence stating how THIS turn resolves it — the action enqueued (change_next_date / refund / pause / cancel / …), the clarifying question asked, or why no action is possible>"
+}
+```
+
+**Rules the writer enforces (adjust before you commit the Direction, not after):**
+
+- `quoted` must be the newest inbound customer message, verbatim. If your prompt carries a NEWEST CUSTOMER ASK block, quote THAT text. If there is no such block (fresh first-touch with no inflection), quote the newest inbound `ticket_messages` row from the brief.
+- `resolution` must name the concrete turn outcome. If the ask is a date change / refund / cancel / specific account request, you ENQUEUED the action and your `first_reply` reflects what landed (see [Executing changes](#executing-changes--enqueue--poll--adapt)) OR your `context_summary` + `resolution` explicitly state why no action is possible (policy out-of-scope, missing info, needs-info clarifying question). "Repeated identical question — restated the same answer" is NOT a valid resolution for a re-session; a re-session that re-answers the OLDER question is the exact dc31bf31 miss.
+- `resolution` is a plain-language sentence; it is NOT a `chosen_path` enum. "Enqueued change_next_date to Oct 30; reply confirms the move" and "Asked which specific flavour the customer wants swapped — a `needs_info` turn" are both valid shapes.
+
+The field is REQUIRED on every Direction — first-touch and re-session alike. A missing / empty / dishonest `newest_customer_ask` is a bug in your reasoning, not a formatting choice.
+
 ## Output protocol — ONE JSON object as your final message
 
 ```json
@@ -240,7 +261,11 @@ Silence is a real signal — one-off portal errors should NOT get spec noise. Wh
     "context_summary": "<short prose summary of the merged customer + subscription + order context you read>",
     "chosen_path": "playbook" | "journey" | "workflow" | "stateless" | "needs_info",
     "plan": { ... path-specific shape (see above); may also carry `launch_journey_slug` for a standalone-journey launch (e.g. move → `"shipping-address"`) ... },
-    "guardrails": { ... bounded proxies (see above) ... }
+    "guardrails": { ... bounded proxies (see above) ... },
+    "newest_customer_ask": {
+      "quoted": "<verbatim newest inbound customer message>",
+      "resolution": "<one sentence stating how THIS turn resolves it>"
+    }
   },
   "first_reply": "<plain-text customer-facing reply, mirror the customer's language, no markdown, no 'Sol' signature — the personality layer adds Suzie/Julie>",
   "proposed_spec": {

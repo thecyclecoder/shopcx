@@ -35,6 +35,23 @@
  * See docs/brain/libraries/cs-director.md loop-closure contract + Phase 2 verification bullet.
  */
 
+import {
+  findUnsatisfiedCustomerRequests,
+  type UnsatisfiedCustomerRequest,
+  type UnsatisfiedRequestMessage,
+  type UnsatisfiedRequestExecutedAction,
+} from "@/lib/cs-director";
+
+// Phase 3 of inflection-resession-must-act-on-newest-ask — re-export the pure predicate so a
+// test or caller that reaches for the gate from this file (the close-transition builder) can
+// import it from here, and the spec's grep check pins the token in BOTH files.
+export {
+  findUnsatisfiedCustomerRequests,
+  type UnsatisfiedCustomerRequest,
+  type UnsatisfiedRequestMessage,
+  type UnsatisfiedRequestExecutedAction,
+};
+
 export type CsDirectorDecision =
   | "approve_remedy"
   | "author_spec"
@@ -69,6 +86,19 @@ export type CsDirectorTransitionActionKey =
    * ticket unescalated — 19h invisible to the founder on a $1,628-LTV customer.
    */
   | "keep_escalated_founder_ruling_pending"
+  /**
+   * Phase 3 of [[../../docs/brain/specs/inflection-resession-must-act-on-newest-ask.md]] —
+   * downgrade applied to a `close_no_action` verdict when `findUnsatisfiedCustomerRequests`
+   * returns at least one open ask (date-change / refund / cancel / change / move / skip)
+   * posted AFTER the last successful executed action. The transition DOES NOT CLOSE and
+   * leaves the ticket in its pre-patch state (no de-escalate, no clear). The runner picks up
+   * this key and (a) posts an internal note naming the open request + its excerpt, and (b)
+   * re-sessions Sol so a fresh Direction can address the ask instead of silently closing it.
+   * Ground-truth case: ticket dc31bf31 (Aug 2026) — June closed-no-action over "Still do not
+   * Knw date?????", reading an older thank-you as the last word; the real request was an
+   * unresolved date change and the customer was billed four weeks early (SHOPCX481, $237.16).
+   */
+  | "needs_sol_resession_unsatisfied_ask"
   | "noop";
 
 /**
@@ -139,6 +169,15 @@ export interface CsDirectorTransitionInput {
    * (the runner treats a read error as `priorEscalation: null` for exactly this reason).
    */
   priorEscalation?: { escalated_to: string | null; escalation_reason: string | null } | null;
+  /**
+   * Phase 3 of [[../../docs/brain/specs/inflection-resession-must-act-on-newest-ask.md]] —
+   * inbound ticket_messages + successful executed actions threaded in by the runner so the
+   * pure builder can call `findUnsatisfiedCustomerRequests` and refuse to CLOSE while any
+   * explicit customer ask is unsatisfied. Both OPTIONAL — a caller that cannot read them
+   * (test fixture, legacy call site) still gets today's close_no_action behavior.
+   */
+  inboundMessages?: UnsatisfiedRequestMessage[] | null;
+  executedActions?: UnsatisfiedRequestExecutedAction[] | null;
   /** ISO timestamp used for `updated_at` / `closed_at` / `resolved_at` — passed in so tests are deterministic. */
   now: string;
 }
@@ -146,6 +185,12 @@ export interface CsDirectorTransitionInput {
 export interface CsDirectorTicketTransition {
   patch: Record<string, unknown>;
   action_key: CsDirectorTransitionActionKey;
+  /**
+   * Phase 3 of inflection-resession-must-act-on-newest-ask — populated ONLY when
+   * `action_key === 'needs_sol_resession_unsatisfied_ask'`. The runner reads the list to post
+   * an internal note naming each open ask and to decide the re-session reason.
+   */
+  unsatisfiedRequests?: UnsatisfiedCustomerRequest[];
 }
 
 /**
@@ -274,7 +319,33 @@ function needsAttentionEscalationReason(reason: string | undefined): string {
  * overwrite a ticket that has moved on. Never throws; unknown decisions become a `noop` patch so
  * the runner treats them as a safety fall-through rather than corrupting the row.
  */
+/**
+ * Phase 3 of [[../../docs/brain/specs/inflection-resession-must-act-on-newest-ask.md]] — the
+ * close-no-action gate. Returns an empty array when the predicate is satisfied OR the caller
+ * didn't thread the data (back-compat; same shipped behavior as pre-Phase-3).
+ */
+function closeNoActionBlockedBy(input: CsDirectorTransitionInput): UnsatisfiedCustomerRequest[] {
+  if (input.decision !== "close_no_action") return [];
+  if (!input.inboundMessages) return [];
+  return findUnsatisfiedCustomerRequests(input.inboundMessages, input.executedActions ?? []);
+}
+
 export function decideCsDirectorTicketTransition(input: CsDirectorTransitionInput): CsDirectorTicketTransition {
+  // Phase 3 of inflection-resession-must-act-on-newest-ask — a close_no_action verdict is
+  // DOWNGRADED when the customer's post-last-action messages contain an unsatisfied request.
+  // The downgrade fires BEFORE the founder-ruling-pending check so a ticket that was never
+  // escalated still gets caught (dc31bf31 was never in `escalate_founder` lane).
+  const unsatisfied = closeNoActionBlockedBy(input);
+  if (unsatisfied.length > 0) {
+    return {
+      action_key: "needs_sol_resession_unsatisfied_ask",
+      // No-op patch: leave status / escalated_* / assigned_to as the pre-session state so the
+      // ticket stays visible wherever it already was. updated_at is still bumped so the row
+      // reflects the session touch.
+      patch: { updated_at: input.now },
+      unsatisfiedRequests: unsatisfied,
+    };
+  }
   const raw = decideRawTransition(input);
   // Phase 1 of a-cs-director-verdict-cannot-clear-an-unruled-founder-escalation — the founder-
   // escalation-is-sticky invariant: while `escalation_reason` still carries the

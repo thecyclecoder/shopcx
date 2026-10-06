@@ -19,6 +19,7 @@
 import { NonRetriableError } from "inngest";
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { OUTAGE_SPANNING_RETRIES, throwForAnthropicStatus, throwForAnthropicNetworkError, isRetryableAnthropicStatus } from "@/lib/anthropic-retry";
 import { recordClaudeFailure } from "@/lib/claude-health";
 import { assembleTicketContext } from "@/lib/ai-context";
@@ -2408,6 +2409,61 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         await sysNote(admin, tid, `[System] ${pick.model === "haiku" ? "Haiku" : "Sonnet"}: ${decision.action_type} — ${decision.reasoning}`);
         return decision;
       });
+
+      // ── Phase 2 of inflection-resession-must-act-on-newest-ask — date-change-ask gate ──
+      // Before the orchestrator decision ships, check that it actually addresses a detected
+      // date-change ask. The dc31bf31 scar: a 14:14 "Can we move order to Oct 30th as I
+      // ordered enough Aug n Sept???????" fired the frustration path; Sol re-answered the
+      // Sep 2 ship-date question and no move happened → customer billed four weeks early
+      // ($237.16 refund + cancelled subscriber). Phase 1 made the triggering message visible
+      // to Sol; this Phase closes the loop by refusing to ship a status-only reply when
+      // the orchestrator decision would otherwise skip the ask entirely.
+      //
+      // Guards: pure detector (no DB / no clock), fires only on BOTH a change-verb AND a date
+      // or order-subject anchor; a clarifying-question Direction (needs_clarification=true or
+      // a non-empty clarification_question) counts as "addresses the ask" because it defers
+      // to the customer rather than silently restating an older answer.
+      const dateChangeGateOutcome = await step.run("date-change-ask-gate", async () => {
+        if (await newerActivity(admin, tid, t0)) return { held: false as const };
+        const { detectDateChangeAsk, decisionAddressesDateChange } = await import(
+          "@/lib/date-change-ask"
+        );
+        const ask = detectDateChangeAsk(msg);
+        if (!ask.isAsk) return { held: false as const };
+        if (decisionAddressesDateChange(sonnetDecision)) return { held: false as const };
+
+        // Draft would ship a reply that ignores the ask — hold it and re-session Sol.
+        await sysNote(
+          admin,
+          tid,
+          `[System] date-change-ask gate: holding reply — newest ask asks to move/skip/pause the next order${
+            ask.requestedDate ? ` (requested=${ask.requestedDate})` : " (date ambiguous — needs clarify)"
+          } but the orchestrator decision carries no change_next_date / skip_next_order / pause action and is not a clarifying question. Re-sessioning Sol with reason='unaddressed_date_ask'.`,
+        );
+        try {
+          const { reSessionSol } = await import("@/lib/inflection-detector");
+          await reSessionSol(admin, tid, {
+            workspace_id: wsId,
+            channel: st.ch,
+            kind: "drift",
+            evidence: {
+              stage: 1,
+              reason: "unaddressed_date_ask",
+              cues: ["date_change_ask_gate"],
+            },
+          });
+        } catch (reErr) {
+          await sysNote(
+            admin,
+            tid,
+            `[System] date-change-ask gate: reSessionSol threw ${errText(reErr)} — reply still held; next inbound turn will re-enter the gate.`,
+          );
+        }
+        return { held: true as const };
+      });
+      if (dateChangeGateOutcome.held) {
+        return { status: "date_change_ask_held" };
+      }
 
       // Actions execute immediately — message delay handled by sendWithDelay (pending_send_at)
       await step.run("sonnet-execute", async () => {
