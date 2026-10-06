@@ -6,8 +6,10 @@ import { useEffect, useRef } from "preact/hooks";
  * Shipping Protection toggle — one checkbox, ON by default, placed under the
  * shipping address:
  *
- *   [✓] Shipping Protection  ~~$9.95~~ $4.95
- *       Protect yourself against damage or loss. 100% replacement guarantee.
+ *   [✓] [shield] Shipping Protection  ~~$9.95~~ $4.95
+ *                Protect yourself against damage or loss. 100% replacement guarantee.
+ *
+ * The shield is the product's own image (Shopify CDN), overridable by setting.
  *
  * The $9.95 is a visual anchor drawn here only; nothing in Shopify carries a
  * compare-at price. What the shopper is charged is the variant's own price.
@@ -23,7 +25,8 @@ import { useEffect, useRef } from "preact/hooks";
  *     and renews with it. Otherwise it is the one-time variant. A cart that gains or
  *     loses its subscription swaps the version.
  *   - Both versions bill $4.95: the one-time variant is $4.95, the subscription
- *     variant is $6.60 and the Appstle plan takes 25% off it.
+ *     variant is $6.60 and the Appstle plan takes 25% off it. (Product option
+ *     "Type": Subscription 45036181651629, One-time 67144482881709.)
  *   - Nothing but protection in the cart → no protection.
  *   - ON BY DEFAULT, auto-added on first render when missing. Unchecking writes the
  *     checkout attribute `_shipping_protection=declined`, so the opt-out survives
@@ -48,8 +51,11 @@ const PROTECTION_PRODUCTS = new Set([
   "gid://shopify/Product/7634377900205", // ShopWill, retired
 ]);
 
-const DEFAULT_ONE_TIME = "";
+const DEFAULT_ONE_TIME = "67144482881709";
 const DEFAULT_SUBSCRIPTION = "45036181651629";
+
+const DEFAULT_BADGE =
+  "https://cdn.shopify.com/s/files/1/0634/9599/5565/files/1757690544395.png?v=1760632984&width=96";
 
 const variantGid = (v, fallback) => {
   const id = String(v || fallback || "").trim().split("/").pop();
@@ -141,8 +147,11 @@ function ShippingProtection() {
   };
 
   return (
-    <s-stack direction="inline" gap="small-200" alignItems="start">
+    <s-stack direction="inline" gap="small-200" alignItems="center">
       <s-checkbox checked={checked} onChange={onChange} accessibilityLabel="Add Shipping Protection" />
+      <s-box inlineSize="32px">
+        <s-image src={String(settings.badge_url || DEFAULT_BADGE)} alt="" aspectRatio="1" />
+      </s-box>
       <s-stack gap="none">
         <s-stack direction="inline" gap="small-200" alignItems="center">
           <s-text type="strong">Shipping Protection</s-text>

@@ -9,8 +9,8 @@ handle = "protection-checkout"
 module = "./src/Checkout.jsx"
 target = "purchase.checkout.block.render"
 
-# No capabilities: no network calls (the variant ids are settings with
-# production defaults), and no block_progress — it must never stop a checkout.
+# No capabilities: no fetch calls (the variant ids are settings with production
+# defaults; the badge is a plain image URL), and no block_progress — it must never stop a checkout.
 # Cart-line and attribute changes need no capability, only the checkout's own
 # instructions (shopify.instructions.lines / .attributes), which the block checks.
 
@@ -26,3 +26,9 @@ key = "subscription_variant_id"
 type = "single_line_text_field"
 name = "Subscription variant ID"
 description = "Numeric Shopify variant id of the subscription variant (priced so the selling plan's discount lands on $4.95)."
+
+[[settings.fields]]
+key = "badge_url"
+type = "single_line_text_field"
+name = "Badge image URL"
+description = "Optional. Defaults to the Shipping Protection product's shield image."
