@@ -1,13 +1,6 @@
-import {
-  reactExtension,
-  useCartLines,
-  useSettings,
-  BlockStack,
-  InlineLayout,
-  Text,
-  View,
-} from "@shopify/ui-extensions-react/checkout";
-import { useState, useEffect, useMemo } from "react";
+import "@shopify/ui-extensions/preact";
+import { render } from "preact";
+import { useState, useEffect, useMemo } from "preact/hooks";
 
 /**
  * Customer reviews for WHAT IS ACTUALLY IN THE CART.
@@ -17,7 +10,7 @@ import { useState, useEffect, useMemo } from "react";
  * table the PDP, the cart drawer and the AI agent read, so there is one corpus and
  * no second copy pasted into someone else's dashboard to go stale.
  *
- * useCartLines() gives each line's merchandise.product.id as a Shopify GID; the
+ * shopify.lines gives each line's merchandise.product.id as a Shopify GID; the
  * numeric tail is what our endpoint keys on. One request per distinct product,
  * which is one or two in practice.
  *
@@ -32,8 +25,14 @@ import { useState, useEffect, useMemo } from "react";
  * reserves space for social proof that may never come and shifts the page when it
  * does not. If the fetch fails the block is silently absent, which is the correct
  * failure for decoration sitting next to a payment button.
+ *
+ * API 2025-10+: Preact + Polaris web components, state from the `shopify` global.
+ * Reading `shopify.lines.value` during render subscribes this component to cart
+ * changes (via @preact/signals, which the ui-extensions preact entry wires up).
  */
-export default reactExtension("purchase.checkout.block.render", () => <CheckoutReviews />);
+export default function extension() {
+  render(<CheckoutReviews />, document.body);
+}
 
 const WEIGHT =
   /\b(?:lost|losing|lose|down|shed)\s+(?:about\s+|around\s+|over\s+|almost\s+|nearly\s+)?\d+\s*(?:lb|lbs|pound|pounds)\b/i;
@@ -41,8 +40,8 @@ const WEIGHT =
 const numericId = (gid) => String(gid || "").split("/").pop();
 
 function CheckoutReviews() {
-  const lines = useCartLines();
-  const settings = useSettings();
+  const lines = shopify.lines.value;
+  const settings = shopify.settings.value;
   const apiEndpoint = settings.api_endpoint || "https://shopcx.ai";
   const workspace = settings.workspace || "superfoods";
 
@@ -99,37 +98,35 @@ function CheckoutReviews() {
   const resultsVary = reviews.some((r) => WEIGHT.test(r.body || ""));
 
   return (
-    <BlockStack spacing="base">
-      <Text size="medium" emphasis="bold">
-        What customers say
-      </Text>
+    <s-stack gap="base">
+      <s-heading>What customers say</s-heading>
 
       {reviews.map((r) => (
-        <View key={r.id} border="base" cornerRadius="base" padding="base">
-          <BlockStack spacing="extraTight">
-            <Text size="small" appearance="warning">
+        <s-box key={r.id} border="base" borderRadius="base" padding="base">
+          <s-stack gap="small-200">
+            <s-text tone="warning">
               {"★".repeat(Math.max(0, Math.min(5, r.rating || 0)))}
-            </Text>
-            <Text size="small">{r.body}</Text>
-            <InlineLayout columns={["fill", "auto"]} spacing="tight">
-              <Text size="extraSmall" appearance="subdued">
+            </s-text>
+            <s-paragraph>{r.body}</s-paragraph>
+            <s-stack direction="inline" gap="small" justifyContent="space-between">
+              <s-text type="small" color="subdued">
                 {r.reviewer_name}
-              </Text>
+              </s-text>
               {r.verified ? (
-                <Text size="extraSmall" appearance="subdued">
+                <s-text type="small" color="subdued">
                   Verified buyer
-                </Text>
+                </s-text>
               ) : null}
-            </InlineLayout>
-          </BlockStack>
-        </View>
+            </s-stack>
+          </s-stack>
+        </s-box>
       ))}
 
       {resultsVary ? (
-        <Text size="extraSmall" appearance="subdued">
+        <s-text type="small" color="subdued">
           Results vary.
-        </Text>
+        </s-text>
       ) : null}
-    </BlockStack>
+    </s-stack>
   );
 }

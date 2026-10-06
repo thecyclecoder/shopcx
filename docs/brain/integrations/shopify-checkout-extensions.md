@@ -1,0 +1,43 @@
+# shopify-checkout-extensions
+
+The three Shopify **checkout UI extensions** in `shopify-extension/extensions/` — blocks that render inside Shopify's hosted checkout (not the theme). Each is a `purchase.checkout.block.render` target the merchant places in the checkout editor, and each reads from a ShopCX API route.
+
+| Extension | Handle | Shows | Calls |
+|---|---|---|---|
+| Money-Back Guarantee | `guarantee-checkout` | "30-Day Money-Back Guarantee" headline, only while the live `refunds` policy offers one | `GET /api/storefront/guarantee?shop=` |
+| Customer Reviews | `reviews-checkout` | One 5★ review per distinct product in the cart, weight-loss rail applied | `GET /api/storefront/{workspace}/product-reviews?shopify_product_id=&limit=6` |
+| Loyalty Rewards | `loyalty-checkout` | Points balance + redeem-a-tier → discount code applied to checkout | `GET /api/loyalty/balance`, `POST /api/loyalty/redeem` |
+
+## Runtime: Preact + Polaris web components (API 2025-10+)
+
+All three target `api_version = "2025-10"`. From 2025-10 Shopify checkout extensions are **Preact + Polaris web components** (`<s-stack>`, `<s-text>`, `<s-box>` …) with checkout state on the `shopify` global (`shopify.settings.value`, `shopify.shop`, `shopify.lines.value`, `shopify.buyerIdentity.customer.value`, `shopify.applyDiscountCodeChange`). Entry shape:
+
+```jsx
+import "@shopify/ui-extensions/preact";
+import { render } from "preact";
+export default function extension() { render(<Block />, document.body); }
+```
+
+**`@shopify/ui-extensions-react` has no 2025.10 release** (last is 2025.7.x). The guarantee and reviews blocks originally shipped (#3015, #3016) as React on 2025-10, which could not install or render — the guarantee block sat on the checkout page showing nothing while its API returned `enabled: true`. Ported 2026-10-06.
+
+Per-extension files: `package.json` (`@shopify/ui-extensions` 2025.10.x, `preact`, `@preact/signals`), `tsconfig.json` (jsxImportSource preact, `checkJs`), `shopify.d.ts` (types the `shopify` global for the target). Typecheck one with `cd shopify-extension/extensions/<handle> && npx -p typescript@5 tsc --noEmit -p tsconfig.json` — it validates `s-*` props and icon names (e.g. `shield-check` is not in the checkout icon set; the guarantee uses `check-circle`). The root `tsconfig.json` excludes `shopify-extension/`.
+
+## Backend contract
+
+- Every route a checkout extension calls must send `Access-Control-Allow-Origin: *` — extensions run in a Web Worker with a **null origin**, so an allowlist can't match.
+- It must also be public in `src/lib/supabase/middleware.ts` `PUBLIC_ROUTES`, or anonymous checkout requests get redirected to `/login`.
+- `/api/storefront/*` satisfies both. **`/api/loyalty/*` satisfies neither**, so the loyalty block cannot load its balance in checkout yet. Making it public is not enough on its own: `POST /api/loyalty/redeem` trusts the `workspace_id` + `shopify_customer_id` in the body, so opening it would let anyone spend a customer's points. It needs Shopify session-token verification (`shopify.sessionToken.get()` on the client, verified server-side) before it is exposed.
+
+## Fail-closed design
+
+Guarantee and reviews render **nothing** until data arrives and nothing on any error — no skeleton, no hardcoded fallback. A guarantee is a legal promise sourced from [[../tables/policies]] via `getPolicyCustomerFacing`; reviews come from `product_reviews`, the same corpus as the PDP. Neither declares `block_progress`, so neither can stop a checkout.
+
+## Deploy
+
+`cd shopify-extension && npm install && npx shopify app deploy`. Network access for checkout extensions must also be approved for the app in the Partner Dashboard, or `fetch` is blocked at runtime. `api_endpoint` (and `workspace` for reviews) are merchant settings in the checkout editor; both default to production values.
+
+## Related
+
+- [[shopify]] — Admin API, app config (`shopify-extension/shopify.app.toml`)
+- [[../tables/policies]] — source of the guarantee
+- [[../lifecycles/customer-portal]] — the other extension in this app (theme app extension)

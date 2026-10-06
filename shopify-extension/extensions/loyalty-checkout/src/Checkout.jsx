@@ -1,28 +1,23 @@
-import {
-  reactExtension,
-  useCustomer,
-  useApplyDiscountCodeChange,
-  useShop,
-  useSettings,
-  BlockStack,
-  InlineStack,
-  Text,
-  Button,
-  Banner,
-  Divider,
-  SkeletonText,
-} from "@shopify/ui-extensions-react/checkout";
-import { useState, useEffect } from "react";
+import "@shopify/ui-extensions/preact";
+import { render } from "preact";
+import { useState, useEffect } from "preact/hooks";
 
-export default reactExtension("purchase.checkout.block.render", () => (
-  <LoyaltyRewards />
-));
+/**
+ * Loyalty points + redeem-to-discount block for checkout.
+ *
+ * API 2025-10+: Preact + Polaris web components, state from the `shopify` global.
+ * The customer comes from shopify.buyerIdentity (needs protected customer data
+ * access), and a redeemed code is applied with shopify.applyDiscountCodeChange.
+ */
+export default function extension() {
+  render(<LoyaltyRewards />, document.body);
+}
 
 function LoyaltyRewards() {
-  const customer = useCustomer();
-  const applyDiscountCode = useApplyDiscountCodeChange();
-  const shop = useShop();
-  const settings = useSettings();
+  const customer = shopify.buyerIdentity?.customer?.value;
+  const applyDiscountCode = (change) => shopify.applyDiscountCodeChange(change);
+  const shop = shopify.shop;
+  const settings = shopify.settings.value;
 
   const [loading, setLoading] = useState(true);
   const [balance, setBalance] = useState(null);
@@ -124,12 +119,7 @@ function LoyaltyRewards() {
 
   // Don't render if no customer, loading, or no balance
   if (loading) {
-    return (
-      <BlockStack spacing="tight">
-        <SkeletonText inlineSize="large" />
-        <SkeletonText inlineSize="small" />
-      </BlockStack>
-    );
+    return <s-skeleton-paragraph />;
   }
 
   if (!customer?.id || balance === null || balance <= 0) {
@@ -137,71 +127,60 @@ function LoyaltyRewards() {
   }
 
   return (
-    <BlockStack spacing="base">
-      <Text size="medium" emphasis="bold">
-        Loyalty Rewards
-      </Text>
+    <s-stack gap="base">
+      <s-heading>Loyalty Rewards</s-heading>
 
-      <InlineStack spacing="tight" blockAlignment="center">
-        <Text size="base">
-          You have <Text emphasis="bold">{balance.toLocaleString()}</Text> reward points
-        </Text>
-        {dollarValue > 0 && (
-          <Text size="base" appearance="subdued">
-            (worth ${dollarValue})
-          </Text>
-        )}
-      </InlineStack>
+      <s-stack direction="inline" gap="small" alignItems="center">
+        <s-text>
+          You have <s-text type="strong">{balance.toLocaleString()}</s-text> reward points
+        </s-text>
+        {dollarValue > 0 && <s-text color="subdued">(worth ${dollarValue})</s-text>}
+      </s-stack>
 
       {result && (
-        <Banner status="success">
-          Applied {result.code} — ${result.value} off!
-        </Banner>
+        <s-banner tone="success">
+          Applied {result.code}: ${result.value} off!
+        </s-banner>
       )}
 
-      {error && (
-        <Banner status="critical">
-          {error}
-        </Banner>
-      )}
+      {error && <s-banner tone="critical">{error}</s-banner>}
 
       {!result && (
         <>
-          <Divider />
-          <BlockStack spacing="tight">
+          <s-divider />
+          <s-stack gap="small">
             {tiers.map((tier) => (
-              <InlineStack
+              <s-stack
                 key={tier.tier_index}
-                spacing="base"
-                blockAlignment="center"
-                inlineAlignment="spaceBetween"
+                direction="inline"
+                gap="base"
+                alignItems="center"
+                justifyContent="space-between"
               >
-                <BlockStack spacing="none">
-                  <Text size="base" emphasis={tier.affordable ? "bold" : undefined}>
-                    {tier.label}
-                  </Text>
-                  <Text size="small" appearance="subdued">
+                <s-stack gap="none">
+                  <s-text type={tier.affordable ? "strong" : undefined}>{tier.label}</s-text>
+                  <s-text type="small" color="subdued">
                     {tier.points_cost.toLocaleString()} points
-                  </Text>
-                </BlockStack>
+                  </s-text>
+                </s-stack>
                 {tier.affordable ? (
-                  <Button
-                    kind="secondary"
+                  <s-button
+                    variant="secondary"
                     loading={redeeming}
-                    onPress={() => handleRedeem(tier)}
+                    onClick={() => handleRedeem(tier)}
                   >
                     Redeem
-                  </Button>
+                  </s-button>
                 ) : (
-                  <Text size="small" appearance="subdued">
+                  <s-text type="small" color="subdued">
                     Need {tier.points_needed.toLocaleString()} more
-                  </Text>
+                  </s-text>
                 )}
-              </InlineStack>
+              </s-stack>
             ))}
-          </BlockStack>
+          </s-stack>
         </>
       )}
-    </BlockStack>
+    </s-stack>
   );
 }
