@@ -34,6 +34,34 @@ stubbed for now — the renewal scheduler lands in a future commit.
 async function isInternalSubscription(workspaceId: string, contractId: string) : Promise<boolean>
 ```
 
+### Old (pre-migration) contract ids — `resolveLiveContractId` / `pickContractRefRow`
+
+A migration renames `shopify_contract_id` (Appstle numeric → `internal-…`), but the old id lives on in places we don't control:
+- cancel-journey snapshots sent before the migration;
+- cached portal bundles;
+- ticket history the agent reads;
+- exhausted dunning cycles (only OPEN cycles are re-pointed).
+
+Looked up by `shopify_contract_id` alone, an old id matched nothing, and every engine router's "not found ⇒ Appstle" default sent the action to the cancelled Appstle contract. A cancel then "succeeded" there while Braintree kept billing, and a resume could try to reactivate the Appstle contract.
+
+The fix is one shared lookup, `findSubByContractRef`. It matches a contract id on its current `shopify_contract_id` OR `migrated_from_contract_id`; the raw `.or()` filter is gated to safe characters, the same gate as portal `resolveSub`. Precedence lives in the pure, tested `pickContractRefRow`:
+- **A row holding the id as its current contract wins**, except a dead shell (cancelled, not internal) when a migrated row also claims the id.
+- **Among migrated rows:** internal first, then live, then newest.
+- **A row mid-migration** (pre-marked, so both columns hold the id) counts as current.
+
+Who uses it:
+- `isInternalSubscription`, `resolveBillingSource` and `loadInternalSub` all read through it, so routing follows the migrated row's engine.
+- `resolveLiveContractId(workspaceId, contractId)` (exported) returns the live row's contract id, or the input when nothing claims it. It is called first by:
+  - every engine dispatcher in [[commerce__subscription]], including `subscriptionOrderNow`;
+  - [[dunning-charge]] `dunningChargeContract` and `dunningUnskip`;
+  - the four internal writers that address rows by contract id: `internalSubUpdateShippingAddress`, `internalSubGetUpcomingOrders`, `internalSubSwitchPaymentMethod`, `internalSubAddFreeProduct`.
+
+  Routing alone isn't enough: an old id passed through would match zero rows on an `.eq("shopify_contract_id", …)` write and report success while changing nothing.
+
+**Resume restores a next date.** `internalSubscriptionAction("resume")` on a sub with `next_billing_date = null` (every cancel nulls it) sets it to tomorrow, the same default the portal's reactivate uses. Without this, a resumed cancelled sub (agent resume, dunning new-card recovery reaching a migrated sub through its old id) went active but was never selected by the renewal cron, so nobody billed it.
+
+Tests: `test:internal-subscription-contract-ref`.
+
 ### `resolveVariant` — function
 
 ```ts

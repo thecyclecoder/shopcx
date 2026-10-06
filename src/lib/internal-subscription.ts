@@ -38,16 +38,95 @@ interface SubRow {
   customer_id: string | null;
 }
 
+/** Only these characters can appear in a real contract id; gates the raw `.or()` filter below
+ *  against PostgREST filter injection (same gate as portal `resolveSub`). */
+const SAFE_CONTRACT_ID = /^[A-Za-z0-9_-]+$/;
+
+type ContractRefRow = Record<string, unknown> & {
+  id: string;
+  shopify_contract_id: string | null;
+  migrated_from_contract_id: string | null;
+  is_internal: boolean | null;
+  status: string | null;
+  created_at: string | null;
+};
+
+/**
+ * Find the subscription a contract id REFERS TO — its current `shopify_contract_id`, OR the
+ * contract it was migrated FROM (`migrated_from_contract_id`).
+ *
+ * ⭐ Why: a migration renames `shopify_contract_id` (Appstle numeric → `internal-…`), but the old
+ * id lives on in places we don't control — cancel-journey snapshots sent before the migration,
+ * cached portal bundles, ticket history the agent reads, exhausted dunning cycles. Looked up by
+ * `shopify_contract_id` alone it matched nothing, and every engine router's "not found ⇒ Appstle"
+ * default sent the action to the cancelled Appstle contract: a cancel "succeeded" there while
+ * Braintree kept billing, and a resume could try to reactivate the Appstle contract.
+ *
+ * Precedence: a row holding the id as its CURRENT contract wins, except a dead shell (cancelled,
+ * not internal) when a migrated row also claims the id — the shell is a stale vendor-webhook
+ * artefact, the migrated row is the subscription. Among migrated rows: internal first, then
+ * live, then newest. A row mid-migration (pre-marked: both columns equal the id) is CURRENT.
+ */
+async function findSubByContractRef(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  contractId: string,
+  cols: string,
+): Promise<{ row: ContractRefRow | null; error: string | null }> {
+  const select = `${cols}, id, shopify_contract_id, migrated_from_contract_id, is_internal, status, created_at`;
+  if (!SAFE_CONTRACT_ID.test(contractId)) {
+    const { data, error } = await admin
+      .from("subscriptions").select(select)
+      .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
+    return { row: (data as unknown as ContractRefRow | null) ?? null, error: error?.message ?? null };
+  }
+  const { data, error } = await admin
+    .from("subscriptions").select(select)
+    .eq("workspace_id", workspaceId)
+    .or(`shopify_contract_id.eq.${contractId},migrated_from_contract_id.eq.${contractId}`)
+    .limit(10);
+  if (error) return { row: null, error: error.message };
+  return { row: pickContractRefRow((data ?? []) as unknown as ContractRefRow[], contractId), error: null };
+}
+
+/** Pure precedence rule for `findSubByContractRef` (exported for tests). */
+export function pickContractRefRow<T extends Pick<ContractRefRow, "shopify_contract_id" | "migrated_from_contract_id" | "is_internal" | "status" | "created_at">>(
+  rows: readonly T[],
+  contractId: string,
+): T | null {
+  const current = rows.find((r) => r.shopify_contract_id === contractId) ?? null;
+  const migrated = rows
+    .filter((r) => r.shopify_contract_id !== contractId && r.migrated_from_contract_id === contractId)
+    .sort((a, b) =>
+      Number(!!b.is_internal) - Number(!!a.is_internal) ||
+      Number(b.status !== "cancelled") - Number(a.status !== "cancelled") ||
+      String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")),
+    )[0] ?? null;
+  if (current && migrated && current.status === "cancelled" && !current.is_internal) return migrated;
+  return current ?? migrated;
+}
+
+/**
+ * The LIVE contract id for a reference that may be a pre-migration id. Returns the input
+ * unchanged when no row claims it. Engine dispatchers call this first so every downstream
+ * read and write addresses the subscription by the id it actually carries — an old id passed
+ * through would match zero rows on an `.eq("shopify_contract_id", …)` write and report success.
+ */
+export async function resolveLiveContractId(workspaceId: string, contractId: string): Promise<string> {
+  if (!contractId) return contractId;
+  const { row, error } = await findSubByContractRef(createAdminClient(), workspaceId, contractId, "id");
+  if (error) throw new Error(`resolveLiveContractId(${contractId}) failed: ${error}`);
+  return row?.shopify_contract_id || contractId;
+}
+
 async function loadInternalSub(workspaceId: string, contractId: string): Promise<SubRow | null> {
   const admin = createAdminClient();
-  const { data } = await admin
-    .from("subscriptions")
-    .select(
-      "id, status, next_billing_date, billing_interval, billing_interval_count, items, applied_discounts, customer_id, is_internal",
-    )
-    .eq("workspace_id", workspaceId)
-    .eq("shopify_contract_id", contractId)
-    .maybeSingle();
+  const { row: data } = await findSubByContractRef(
+    admin,
+    workspaceId,
+    contractId,
+    "next_billing_date, billing_interval, billing_interval_count, items, applied_discounts, customer_id",
+  );
   if (!data) return null;
   if (!data.is_internal) return null;
   // is_internal is in the select but we don't carry it on SubRow
@@ -70,14 +149,9 @@ async function loadInternalSub(workspaceId: string, contractId: string): Promise
  * Appstle path is the safe default.
  */
 export async function isInternalSubscription(workspaceId: string, contractId: string): Promise<boolean> {
-  const admin = createAdminClient();
-  const { data } = await admin
-    .from("subscriptions")
-    .select("is_internal")
-    .eq("workspace_id", workspaceId)
-    .eq("shopify_contract_id", contractId)
-    .maybeSingle();
-  return !!data?.is_internal;
+  // Old (pre-migration) ids resolve to the migrated row — see findSubByContractRef.
+  const { row } = await findSubByContractRef(createAdminClient(), workspaceId, contractId, "id");
+  return !!row?.is_internal;
 }
 
 // Bump the customer's overall subscription_status to reflect the
@@ -119,6 +193,13 @@ export async function internalSubscriptionAction(
   // portal detail, and agent context panel from surfacing a stale date.
   const patch: Record<string, unknown> = { status: statusMap[action], updated_at: new Date().toISOString() };
   if (action === "cancel") patch.next_billing_date = null;
+  // A resumed sub must have a next charge date, or the renewal cron (which selects on
+  // next_billing_date) never bills it: active, and billed by nobody. A cancel nulls the date, so
+  // resuming a cancelled sub (agent resume, dunning new-card recovery) restores one — tomorrow,
+  // the same default the portal's reactivate uses. A sub that still has a date keeps it.
+  if (action === "resume" && !sub.next_billing_date) {
+    patch.next_billing_date = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  }
 
   // A pause or cancel ENDS dunning — same rule as the Appstle path. Internal subs reach
   // here directly (appstleSubscriptionAction delegates before its own hook runs), so the
@@ -928,6 +1009,8 @@ export async function internalSubUpdateShippingAddress(
   contractId: string,
   address: ShippingAddressInput,
 ): Promise<ActionResult> {
+  // Address the row by the id it carries now — an old pre-migration id would match nothing.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const admin = createAdminClient();
   const { error } = await admin
     .from("subscriptions")
@@ -1021,17 +1104,13 @@ export async function resolveBillingSource(
   workspaceId: string,
   contractId: string,
 ): Promise<BillingSource> {
-  const admin = createAdminClient();
-  const { data, error } = await admin
-    .from("subscriptions")
-    .select("is_internal, billing_source")
-    .eq("workspace_id", workspaceId)
-    .eq("shopify_contract_id", contractId)
-    .maybeSingle();
+  // Old (pre-migration) ids resolve to the migrated row's engine — never the "not found ⇒
+  // Appstle" default, which sent a migrated customer's cancel to their dead Appstle contract.
+  const { row: data, error } = await findSubByContractRef(createAdminClient(), workspaceId, contractId, "billing_source");
   if (error) {
     // Never guess an engine on a read failure — routing a write to the wrong vendor is worse than
     // failing the call, and 'appstle' is the historical default that would silently be chosen.
-    throw new Error(`resolveBillingSource(${contractId}) failed: ${error.message}`);
+    throw new Error(`resolveBillingSource(${contractId}) failed: ${error}`);
   }
   const row = data as { is_internal: boolean | null; billing_source: string | null } | null;
   if (!row) return "appstle";
@@ -1057,6 +1136,8 @@ export async function internalSubGetUpcomingOrders(
   workspaceId: string,
   contractId: string,
 ): Promise<{ success: boolean; orders?: { id: string; billingDate: string; status: string }[]; error?: string }> {
+  // Address the row by the id it carries now — an old pre-migration id would match nothing.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions")
@@ -1081,6 +1162,8 @@ export async function internalSubSwitchPaymentMethod(
   contractId: string,
   paymentMethodId: string,
 ): Promise<{ success: boolean; error?: string }> {
+  // Address the row by the id it carries now — an old pre-migration id would match nothing.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions")
@@ -1113,6 +1196,8 @@ export async function internalSubAddFreeProduct(
   variantId: string,
   quantity: number = 1,
 ): Promise<{ success: boolean; error?: string }> {
+  // Address the row by the id it carries now — an old pre-migration id would match nothing.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const r = await internalSubAddItem(workspaceId, contractId, variantId, quantity);
   if (!r.success) return r;
   const admin = createAdminClient();
