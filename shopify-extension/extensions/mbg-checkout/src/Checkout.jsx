@@ -19,10 +19,9 @@ import { useState, useEffect } from "preact/hooks";
  * deducts the return label, so the copy says "your first order" and "a refund",
  * never "risk-free" or "full refund".
  *
- * RETURNING CUSTOMERS DON'T SEE IT. A signed-in buyer with a past order isn't
- * covered, so promising them a guarantee would be false. `buyerIdentity.customer`
- * needs protected-customer-data access; without it (or for guests) it is
- * undefined and the block shows.
+ * EVERYONE SEES IT, signed-in returning customers included (founder's call,
+ * 2026-10-06). The copy's "your first order" and the terms modal carry the scope,
+ * so the block doesn't need to hide itself.
  */
 export default function extension() {
   render(<GuaranteeTerms />, document.body);
@@ -62,7 +61,6 @@ function GuaranteeTerms() {
   const apiEndpoint = String(settings.api_endpoint || "https://shopcx.ai").replace(/\/$/, "");
   const badge = String(settings.badge_url || "").trim();
   const shop = shopify.shop.myshopifyDomain;
-  const customer = shopify.buyerIdentity?.customer?.value;
 
   const [guarantee, setGuarantee] = useState(null);
 
@@ -82,7 +80,6 @@ function GuaranteeTerms() {
   }, [apiEndpoint, shop]);
 
   if (!guarantee) return null;
-  if (customer && Number(customer.ordersCount) > 0) return null;
 
   const terms = Array.isArray(guarantee.terms) ? guarantee.terms : [];
 
