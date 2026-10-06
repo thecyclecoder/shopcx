@@ -39,7 +39,29 @@ const REPLACE_VARIANTS_ROUTES = new Set(["replacevariants", "replace_variants"])
 const MAX_HEAL_ATTEMPTS = 3;
 const HEAL_NOTE_PREFIX = "[Auto-heal attempt";
 
-export type Disposition = "retry" | "dismiss" | "human";
+export type Disposition =
+  | "retry"
+  | "dismiss"
+  | "human"
+  /**
+   * Phase 4 of [[../../../docs/brain/specs/inflection-resession-must-act-on-newest-ask.md]] —
+   * route the customer to the `add-payment-method` journey instead of marking "needs a
+   * human" when the portal surfaces a `payment_failed_update_blocked` error. The pure
+   * classifier returns this disposition; the DB-aware caller (`remediatePortalTicket`)
+   * then (a) auto-dismisses when the subscription is internal OR its newest `dunning_cycles`
+   * row has `status='recovered'` (no triage note — the stale blocked-state has recovered),
+   * or (b) launches the add-payment-method journey, falling back to escalation if the launch
+   * cannot resolve the journey_definitions row.
+   */
+  | "journey_add_payment_method";
+
+/**
+ * Phase 4 of [[../../../docs/brain/specs/inflection-resession-must-act-on-newest-ask.md]] —
+ * the error code the dunning helper raises on a payment-method update attempt that is still
+ * blocked by the carrier / tokenization fail. Export so the branch below AND
+ * `remediatePortalTicket` (DB-aware suppression branch) read the same literal.
+ */
+export const PAYMENT_FAILED_UPDATE_BLOCKED_ERROR = "payment_failed_update_blocked";
 
 export interface FailureContext {
   route: string;
@@ -218,6 +240,25 @@ export function classifyPortalFailure(
     return {
       disposition: "retry",
       reason: "Transient error (Appstle operation lock / gateway). Safe to re-run the action.",
+    };
+  }
+
+  // ── Phase 4 of inflection-resession-must-act-on-newest-ask ──
+  // `payment_failed_update_blocked` fires on an internal/dunning path that TRIED to update
+  // the vaulted card but the live gateway said no. The pre-Phase-4 fallback classified this
+  // as `human` and emitted `[Triage] Unrecognized portal error`, which stacked on dc31bf31
+  // AFTER the dunning cycle had already recovered — the note framed the turn as blocked
+  // when the real state was healthy, pulling Sol back toward "needs a human" and away from
+  // the actual date-change ask ([[./handlers/change-date]] already exempts internal subs
+  // from this error class). The pure classifier marks the branch; `remediatePortalTicket`
+  // runs the DB-aware suppression (internal sub / latest dunning_cycles.status='recovered'
+  // → dismiss without a triage note) and otherwise routes to the add-payment-method
+  // journey instead of escalating.
+  if (e.includes(PAYMENT_FAILED_UPDATE_BLOCKED_ERROR)) {
+    return {
+      disposition: "journey_add_payment_method",
+      reason:
+        "payment_failed_update_blocked — the live gateway still rejects the vaulted card. Internal sub / recovered dunning → auto-dismiss; otherwise launch the add-payment-method journey (never 'needs a human' silently).",
     };
   }
 
@@ -627,6 +668,127 @@ async function escalate(admin: SupabaseClient, ticket: TicketRow, reason: string
     .eq("id", ticket.id);
 }
 
+/**
+ * Phase 4 of [[../../../docs/brain/specs/inflection-resession-must-act-on-newest-ask.md]] —
+ * DB-aware suppression predicate for `payment_failed_update_blocked`. Returns `dismiss:true`
+ * when the referenced subscription is internal (`subscriptions.is_internal=true` — the same
+ * exemption [[./handlers/change-date]] already applies for this error class) OR the
+ * subscription's newest `dunning_cycles` row has `status='recovered'`. Pure DB reads scoped
+ * to the ticket's `workspace_id` — a scope mismatch returns `dismiss:false` so the caller
+ * routes to the add-payment-method journey (or escalates), never silently crosses workspaces.
+ *
+ * The contract_id comes from the portal error's `request_payload.contractId` the handler
+ * always carries; a missing contract_id (shouldn't happen, defensive) returns `dismiss:false`
+ * so the caller falls through to the journey launch.
+ */
+async function payment_failed_update_blocked_is_recovered_or_internal(
+  admin: SupabaseClient,
+  workspaceId: string,
+  ctx: FailureContext,
+): Promise<{ dismiss: boolean; reason: string }> {
+  const contractId = (ctx.payload?.contractId as string | undefined)?.toString();
+  if (!contractId) {
+    return { dismiss: false, reason: "no contractId on the failure payload — cannot verify recovered/internal" };
+  }
+  try {
+    const { data: sub } = await admin
+      .from("subscriptions")
+      .select("id, is_internal")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .maybeSingle();
+    if (sub?.is_internal === true) {
+      return {
+        dismiss: true,
+        reason: `subscription is internal (change-date already exempts this error class for internal subs — contract=${contractId})`,
+      };
+    }
+    // Latest dunning_cycles row for this contract (newest first).
+    const { data: cycles } = await admin
+      .from("dunning_cycles")
+      .select("status, updated_at")
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", contractId)
+      .order("updated_at", { ascending: false })
+      .limit(1);
+    const newest = ((cycles as Array<{ status: string | null }> | null) ?? [])[0];
+    if (newest?.status === "recovered") {
+      return {
+        dismiss: true,
+        reason: `newest dunning_cycles.status='recovered' for contract=${contractId} (payment already recovered — the triage note would be stale)`,
+      };
+    }
+    return { dismiss: false, reason: "neither internal nor recovered — fall through to journey launch" };
+  } catch (e) {
+    // A read failure is NOT a dismiss — fall through to the journey launch (and from there to
+    // the human escalation if the launch also fails). We never want a DB blip to force a
+    // silent close over a genuinely blocked state.
+    const detail = e instanceof Error ? e.message : String(e);
+    return { dismiss: false, reason: `recovered/internal probe threw (${detail}) — fall through` };
+  }
+}
+
+/**
+ * Phase 4 of inflection-resession-must-act-on-newest-ask — resolve the active
+ * `add-payment-method` journey_definitions row for this workspace + launch it for the
+ * customer via [[../journey-delivery]] `launchJourneyForTicket`. Returns ok+detail on a
+ * successful delivery; the caller then auto-dismisses the ticket. A missing journey row /
+ * missing customer_id / `launchJourneyForTicket` returning false → ok:false with a reason
+ * naming the failure class so the caller's escalation sysNote distinguishes the attempt
+ * from a bare "unrecognized error".
+ */
+async function launchAddPaymentMethodJourneyForTicket(
+  admin: SupabaseClient,
+  ticket: TicketRow,
+): Promise<{ ok: boolean; detail?: string; reason?: string }> {
+  if (!ticket.customer_id) {
+    return { ok: false, reason: "ticket has no customer_id — journey cannot deliver" };
+  }
+  // Resolve the active add-payment-method journey for this workspace. The journey slug is
+  // the same one Phase 3 of checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol
+  // pins; here we read it from the DB rather than hard-coding the row id so a workspace that
+  // renamed the row's internal id still finds it by slug.
+  const { data: journeyRow } = await admin
+    .from("journey_definitions")
+    .select("id, name, trigger_intent")
+    .eq("workspace_id", ticket.workspace_id)
+    .eq("slug", "add-payment-method")
+    .eq("is_active", true)
+    .maybeSingle();
+  const journey = journeyRow as { id: string; name: string; trigger_intent: string } | null;
+  if (!journey) {
+    return { ok: false, reason: "no active add-payment-method journey in journey_definitions" };
+  }
+  const { data: tick } = await admin
+    .from("tickets")
+    .select("channel")
+    .eq("id", ticket.id)
+    .maybeSingle();
+  const channel = (tick?.channel as string | undefined) ?? "email";
+  try {
+    const { launchJourneyForTicket } = await import("@/lib/journey-delivery");
+    const delivered = await launchJourneyForTicket({
+      workspaceId: ticket.workspace_id,
+      ticketId: ticket.id,
+      customerId: ticket.customer_id,
+      journeyId: journey.id,
+      journeyName: journey.name,
+      triggerIntent: journey.trigger_intent,
+      channel,
+      leadIn:
+        "Your card update didn't go through — let me get you to the secure update flow so we can get this sorted. Tap below to add a new payment method.",
+      ctaText: "Add Payment Method",
+    });
+    if (delivered) {
+      return { ok: true, detail: `delivered journey '${journey.name}' on channel '${channel}'` };
+    }
+    return { ok: false, reason: "launchJourneyForTicket returned false (non-deliverable channel or guarded skip)" };
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    return { ok: false, reason: `launchJourneyForTicket threw: ${detail}` };
+  }
+}
+
 export type RemediationOutcome =
   | { action: "healed"; detail: string }
   | { action: "dismissed"; reason: string }
@@ -710,6 +872,52 @@ export async function remediatePortalTicket(
     return { action: "escalated", reason: "escalate to June" };
   }
 
+  // ── Phase 4 of inflection-resession-must-act-on-newest-ask ──
+  // `payment_failed_update_blocked` branch: suppress the stale triage note when the
+  // subscription is internal OR its newest dunning_cycles row has status='recovered'
+  // (the payment already recovered — [[./handlers/change-date]] already exempts internal
+  // subs from this error class). Otherwise launch the add-payment-method journey; on a
+  // launch failure (no active journey_definitions row, missing customer_id, delivery
+  // threw), fall back to the human escalate so the ticket is never silently dropped.
+  if (disposition === "journey_add_payment_method") {
+    const dismissed = await payment_failed_update_blocked_is_recovered_or_internal(
+      admin,
+      ticket.workspace_id,
+      ctx,
+    );
+    if (dismissed.dismiss) {
+      await sysNote(
+        admin,
+        ticket.id,
+        `[Auto-resolve] payment_failed_update_blocked — ${dismissed.reason}. Closing without a triage note (no 'needs a human').`,
+      );
+      await addTag(admin, ticket, "auto-dismissed");
+      await closeTicket(admin, ticket.id);
+      return { action: "dismissed", reason: dismissed.reason };
+    }
+    const launched = await launchAddPaymentMethodJourneyForTicket(admin, ticket);
+    if (launched.ok) {
+      await sysNote(
+        admin,
+        ticket.id,
+        `[Auto-resolve] payment_failed_update_blocked — launched the add-payment-method journey for the customer (${launched.detail}). Closing instead of marking 'needs a human'.`,
+      );
+      await addTag(admin, ticket, "auto-dismissed");
+      await closeTicket(admin, ticket.id);
+      return { action: "dismissed", reason: "launched add-payment-method journey" };
+    }
+    // Launch failed — surface the WHY and fall back to escalate so the ticket is never
+    // silently dropped. The sysNote names the attempt so the audit trail distinguishes a
+    // genuine human-needs from the pre-Phase-4 blanket "unrecognized" classification.
+    await sysNote(
+      admin,
+      ticket.id,
+      `[Triage] payment_failed_update_blocked — could not launch the add-payment-method journey (${launched.reason}). Escalating to June.`,
+    );
+    await escalate(admin, ticket, reason);
+    return { action: "escalated", reason: "payment_failed_update_blocked journey-launch failed" };
+  }
+
   // ── retry ──
   // Before re-applying a date change, make sure the customer hasn't already
   // resolved it themselves (re-did the date, or grabbed an order via "Order
@@ -777,7 +985,11 @@ export async function remediatePortalTicket(
     await closeTicket(admin, ticket.id);
     return { action: "dismissed", reason: recheck.reason };
   }
-  if (recheck.disposition === "human") {
+  if (recheck.disposition === "human" || recheck.disposition === "journey_add_payment_method") {
+    // Phase 4 safety-net: a retry that newly SURFACES payment_failed_update_blocked
+    // escalates rather than loop back into the journey launch here (we are already
+    // mid-heal). The pure classifier's primary journey branch above handles the
+    // first-time case; this branch catches the rare "retry revealed it" path.
     const reason = "Retry surfaced a non-transient error — needs a human.";
     await sysNote(admin, ticket.id, `[Triage] ${reason}\nError: ${heal.error}`);
     await escalate(admin, ticket, reason);
