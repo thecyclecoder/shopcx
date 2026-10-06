@@ -8,6 +8,7 @@ The Shopify **checkout UI extensions** in `shopify-extension/extensions/` — bl
 | Customer Reviews | `reviews-checkout` | Up to twelve short 5★ quotes across the cart (round-robin over products, one per reviewer), three on screen with prev/next arrows paged locally. A body ≤140 chars shows as written, a longer one shows its `summary` (Haiku one-liner); weight-loss rail applied to the shown line | `GET /api/storefront/{workspace}/product-reviews?shopify_product_id=&limit=24` (returns `summary` alongside `body`, and `aggregate.display_rating` / `display_count`) |
 | Shipping Trust | `shipping-checkout` | Two quiet lines by the shipping options: "🚚 Estimated arrival Mon, Oct 12 – Thu, Oct 15" (today + `arrival_min_days`..`arrival_max_days`, defaults 6..9, a Sunday end moved to Monday) and USPS + DHL marks with "Tracked from our warehouse to your door". Every claim is measured; see § Shipping claims | Nothing (static). Logos load from `{api_endpoint}/checkout/usps.png` / `dhl.png` in the Next app's `public/` |
 | Shipping Protection | `protection-checkout` | One checkbox + shield badge, ON by default, merchant-placed under the shipping address: "Shipping Protection ~~$9.95~~ $4.95 · Protect yourself against damage or loss. 100% replacement guarantee." Keeps exactly one protection line in the cart, subscription-aware; see § Shipping Protection toggle | Nothing (static). Writes cart lines via `applyCartLinesChange` and the `_shipping_protection` checkout attribute |
+| Money-Back Guarantee Terms | `mbg-checkout` | Standalone guarantee block: check icon (or `badge_url`), "30-Day Money-Back Guarantee", "Not happy with your first order? Send it back within 30 days for a refund.", and a "See terms" link opening an `s-modal` with the published Returns policy section by section. Hidden for a signed-in buyer with a past order (`buyerIdentity.customer.ordersCount > 0`) | `GET /api/storefront/guarantee?shop=` (`terms`) |
 | Loyalty Rewards | `loyalty-checkout` | Points balance + redeem-a-tier → discount code applied to checkout | `GET /api/loyalty/balance`, `POST /api/loyalty/redeem` |
 
 ## Shipping Protection toggle
@@ -20,6 +21,12 @@ The Shopify **checkout UI extensions** in `shopify-extension/extensions/` — bl
 - **Product setup (2026-10-06):** option `Type` on the live product: `Subscription` variant `45036181651629` at $6.60, `One-time` variant `67144482881709` at $4.95, both SKU `insure01`, inventory untracked. Re-pricing either one changes what the shopper pays; keep Subscription × 0.75 = One-time.
 - **Variant ids are block settings** (`one_time_variant_id`, `subscription_variant_id`, numeric) with those production defaults in the code; `badge_url` overrides the shield image (default: the product's own image on the Shopify CDN). If the variant for the current cart type is missing, the block renders nothing.
 - If the checkout can't add/remove lines or write attributes (`shopify.instructions`), it renders nothing and changes nothing.
+
+## Guarantee terms modal
+
+`mbg-checkout` shows only while the live `refunds` policy offers a money-back guarantee (the same gate as the trust card's line). Its modal content is the published **`returns`** policy (`getPolicyCustomerFacing(..., "returns").customer_summary`), which the guarantee route turns into plain-text `terms: [{ heading, blocks: [{ type: "paragraph" | "item", text }] }]`: `## ` opens a section, `- ` lines are list items, the `# ` title is dropped, and `**bold**` / `[label](href)` keep only their words. The policy's own words, never paraphrased, so editing the policy updates checkout with no deploy. No returns policy → no "See terms" link; the headline still shows.
+
+The block's one sentence is narrow on purpose: the guarantee covers the **first order only** and the **return label cost is deducted**, so the copy says "your first order" and "a refund", never "risk-free" or "full refund". A signed-in buyer with a past order isn't covered, so the block hides for them (needs protected-customer-data access; guests always see it).
 
 ## Runtime: Preact + Polaris web components (API 2025-10+)
 
