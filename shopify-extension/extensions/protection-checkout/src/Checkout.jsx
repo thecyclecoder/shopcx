@@ -147,8 +147,10 @@ function ShippingProtection() {
   };
 
   return (
-    // a grid, not an inline stack: an inline stack wraps the text under the
-    // checkbox and badge on a phone-width checkout
+    // a card, so it reads as one unit under the address instead of floating alone;
+    // inside, a grid, not an inline stack: an inline stack wraps the text under
+    // the checkbox and badge on a phone-width checkout
+    <s-box border="base" borderRadius="large" padding="base">
     <s-grid gridTemplateColumns="auto 32px 1fr" columnGap="small-200" alignItems="center">
       <s-checkbox checked={checked} onChange={onChange} accessibilityLabel="Add Shipping Protection" />
       <s-image src={String(settings.badge_url || DEFAULT_BADGE)} alt="" aspectRatio="1" />
@@ -165,5 +167,6 @@ function ShippingProtection() {
         </s-text>
       </s-stack>
     </s-grid>
+    </s-box>
   );
 }
