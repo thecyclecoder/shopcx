@@ -164,6 +164,15 @@ Per-table `reloptions` are tightened on `public.customers` — the cluster defau
 
 - `email_marketing_status` / `sms_marketing_status`: `"subscribed"`, `"unsubscribed"`, `"not_subscribed"`, or `null`. Lowercase.
 - `subscription_status`: `"active"`, `"cancelled"`, `"never"`, `"paused"`. `"never"` = a lead (no orders yet).
+- **`subscription_status` is DB-derived for customers on internal billing** (migration `20270106120000_customer_subscription_status_from_internal_subs.sql`). Shopify's `productSubscriberStatus` only knows Appstle and ShopCX contracts. Once a customer's contracts are cancelled for the internal migration, Shopify reports them as never-subscribed, and the Shopify customer webhook and sync (`shopify-webhooks.ts`, `shopify-sync.ts`) overwrote our value on every customer update. Measured 2026-10-06: of 153 customers with an active internal sub, only 46 read `active`, and 55 of the 60 wrong rows sampled were last written by that webhook.
+
+  The fix is three DB pieces plus a one-time recompute:
+  - **`derive_customer_subscription_status(customer_id)`** returns `active` > `paused` > `cancelled` from [[subscriptions]], but only for a customer with at least one internal sub. Otherwise it returns NULL ("no opinion"), and Shopify's value stands.
+  - **A BEFORE INSERT/UPDATE OF `subscription_status` trigger on `customers`** makes the derived value win over whatever any writer supplies.
+  - **An AFTER trigger on `subscriptions`** recomputes for the affected customer(s) when `status`, `customer_id`, `billing_source` or `is_internal` changes, including both the old and new customer on a reassignment.
+  - **The one-time recompute** corrected 120 customers (100 never→active).
+
+  Scope is deliberately internal-only. Deriving for every customer would have reclassified about 1,260 Appstle-only customers in marketing segments (mostly never→cancelled). Customers come under the rule automatically as they migrate.
 - Customers can be linked. To get a customer's full history, expand to linked group first (see `customer_links`).
 - A lead IS a customer (no orders, `subscription_status='never'`). No parallel `leads` table.
 - **`default_address` is the canonical current address for order destinations.** All order-creating actions ([[../libraries/customer-shipping-address]]) resolve the shipment address to this field first — it is the source-of-truth when a customer updates their address on file via `update_shipping_address`. Subscription `shipping_address` is a fallback for customers who have a subscription but never updated their account address; cited orders are the last resort. This priority prevents stale-order snapshots from silently shipping to the wrong address (ticket 49ddd6c4).
