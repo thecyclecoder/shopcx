@@ -12,7 +12,9 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Drop stale loop_alerts loop_key direct REST noise** · verified 2026-10-05 · → [[../libraries/control-tower]]
 - **Drop stale loop_heartbeats beat_at direct-REST noise** · verified 2026-10-05 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise`)
+- **Drop stale loop_heartbeats loop_key direct-REST noise** · verified 2026-10-05 · → [[../libraries/control-tower]]
 - **Drop stale direct-REST specs.flags lookup noise from Supabase logs** · verified 2026-10-05 · → [[lifecycles/control-tower]]
 - **Drop stale public.specs intent column probes from Supabase logs** · verified 2026-10-05 · → [[lifecycles/control-tower]]
 - **Drop stale agent_jobs run timestamp direct-REST lookup noise** · verified 2026-10-04 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise`)
