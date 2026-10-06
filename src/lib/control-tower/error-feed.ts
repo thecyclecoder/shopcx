@@ -2223,13 +2223,14 @@ export function isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise
  *      trimmed equal to `column error_events.<name> does not exist` (or the `public.`
  *      qualified variant), with any leading `ERROR: ` prefix Postgres includes on the logs
  *      surface stripped, AND `<name>` a plain unquoted identifier (a-z / 0-9 / _), AND
- *   2. the `parsed.query` attribute is a SELECT-lookup on `public.error_events` — either
- *      (a) the bare `select ... from public.error_events` shape, OR (b) the PostgREST-
- *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."error_events" ... )`
- *      CTE wrapper form with double-quoted identifiers (matching the sibling widening in
- *      `isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise` /
- *      `isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise`, Control Tower
- *      signature `supabase-logs:41dd87c2e483a884`).
+ *   2. the `parsed.query` attribute is a read-only lookup shape against `error_events` — a
+ *      bare `select ... from public.error_events`, OR the equivalent quoted-identifier form
+ *      PostgREST emits for direct REST reads (`from "public"."error_events"`), OR a CTE
+ *      wrapping that read that resolves to an outer SELECT (`with pgrst_source as (select …
+ *      from "public"."error_events") select …`). Non-SELECT writes and modifying CTEs whose
+ *      outer statement is INSERT/UPDATE/DELETE stay captured — the pin is the read shape (Control Tower
+ *      signature `supabase-logs:41dd87c2e483a884`; the CTE form matches the sibling widening in
+ *      `isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise`).
  *
  * Narrowly gated so:
  *   - a column-missing error for `<column>` on ANY OTHER table (a real code bug on another
@@ -2268,16 +2269,57 @@ export function isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
   }
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
-  // SELECT-lookup on error_events — either the bare `select ... from public.error_events`
-  // shape OR PostgREST's `WITH pgrst_source AS ( SELECT ... FROM "public"."error_events"
-  // ... )` CTE wrapper (double-quoted identifiers). Same foreign-owned read, different
-  // rendering. Guarded so the CTE branch requires the wrapped op to be a SELECT — a
-  // PostgREST INSERT/UPDATE inside the same wrapper is a real code-write and stays
-  // captured/paged. A JOIN across error_events + another table still surfaces (the
-  // bare-SELECT regex requires the FROM clause to name error_events with no join partner
-  // interposed; the CTE regex likewise anchors on the wrapper's FROM clause).
+  // SELECT-lookup on error_events — the bare `select ... from public.error_events` shape,
+  // PostgREST's `WITH pgrst_source AS ( SELECT ... FROM "public"."error_events" ... )` CTE
+  // wrapper, or any other quoted PostgREST read whose outer statement is a SELECT. A PostgREST
+  // INSERT/UPDATE/DELETE (or a modifying CTE) is a real code-write and stays captured/paged.
   if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q)) return true;
-  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?error_events\b/.test(q);
+  if (/^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?error_events\b/.test(q)) return true;
+  // Delegated to a named helper so the grep-verifiable quoted-lookup branch stays auditable.
+  return isQuotedPostgrestErrorEventsLookup(q);
+}
+
+/**
+ * The quoted PostgREST direct-REST read branch of the `error_events` missing-column drop —
+ * paired with the plain-unquoted branch in
+ * `isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise`. Split into its own predicate
+ * so the quoted PostgREST shape is a named, grep-able unit (Verification bullet: `The
+ * classifier contains a quoted PostgREST error_events lookup branch.`) and so its shape
+ * assumptions can evolve without touching the message-side match.
+ *
+ * PostgREST emits its generated SQL with every identifier double-quoted (`from
+ * "public"."error_events"`) and typically wraps the read in a `with pgrst_source as (…)
+ * select …` CTE that lets it project columns / apply Content-Range in one statement. Both
+ * shapes are the same ad hoc read-lookup class as the plain unquoted read — the caller is
+ * external and we hold no lever on the query — so we normalize the query by stripping SQL
+ * double-quotes before the outer-shape checks.
+ *
+ * `true` ONLY when BOTH markers are present, against the quote-stripped lowercased query:
+ *   1. read-only outer shape — either a bare `select …`, or `with … ) select …` (the last
+ *      CTE's closing paren followed by the outer SELECT keyword — a modifying CTE whose
+ *      outer statement is INSERT/UPDATE/DELETE is missing that `) select` transition and
+ *      stays captured, keeping real write-path code bugs visible), AND
+ *   2. a `from (public.)?error_events` clause somewhere — either at the outer level (plain
+ *      SELECT) or inside the CTE body (PostgREST's `select … from "public"."error_events"`
+ *      inside `with pgrst_source as (…)`).
+ *
+ * Accepts an already-lowercased-and-trimmed query for reuse from the classifier's normalized
+ * `q`; the caller has done the null/empty guard, so this predicate assumes a nonempty input.
+ */
+function isQuotedPostgrestErrorEventsLookup(lowerQuery: string): boolean {
+  // Strip SQL double-quotes so `from "public"."error_events"` and the CTE-wrapped variant
+  // both compare against the same shape family as the plain-unquoted branch. Postgres's
+  // error message text stays unquoted (`column error_events.<name> does not exist`), so no
+  // symmetric strip is needed on the message side.
+  const qNormalized = lowerQuery.replace(/"/g, "");
+  const isPlainSelect = /^select\b/.test(qNormalized);
+  // The CTE body itself must be a SELECT too: PostgREST wraps writes the same way
+  // (`with pgrst_source as (delete from "public"."error_events" … returning …) select …`), and
+  // a write is a real code path that must keep paging.
+  const isCteWrappingSelect =
+    /^with\s+[a-z_][a-z0-9_]*\s+as\s*\(\s*select\b/.test(qNormalized) && /\)\s*select\b/.test(qNormalized);
+  if (!isPlainSelect && !isCteWrappingSelect) return false;
+  return /\bfrom\s+(?:public\.)?error_events\b/.test(qNormalized);
 }
 
 /**

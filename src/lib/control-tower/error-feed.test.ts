@@ -2472,6 +2472,55 @@ test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise returns false 
   );
 });
 
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise drops the quoted PostgREST direct-REST shape (Supabase-logs 3c4fe003f1a71cdf)", () => {
+  // The sampled `occurrences` PostgREST query: identifiers double-quoted, all-lowercase in
+  // the log after Supabase's normalization. This is the shape that was still paging Platform
+  // when the plain unquoted regex missed it.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.occurrences does not exist",
+      'select "occurrences" from "public"."error_events"',
+    ),
+    true,
+  );
+  // With a hand-typed uppercase SELECT (Supabase lowercases the log line, but a caller
+  // pasting SQL into a REST client would still normalize the same way in-code).
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.occurrences does not exist",
+      'SELECT "occurrences" FROM "public"."error_events"',
+    ),
+    true,
+  );
+  // Quoted table without the `public.` schema qualifier — PostgREST emits both depending on
+  // the caller's search_path / API version.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.occurrences does not exist",
+      'select "occurrences" from "error_events"',
+    ),
+    true,
+  );
+  // PostgREST's `with pgrst_source as (…) select …` CTE wrapping — the standard shape it
+  // emits for `GET /rest/v1/error_events?select=<col>` when the column projection is pushed
+  // into the CTE. The failing column reference is inside the CTE body.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.occurrences does not exist",
+      'with pgrst_source as (select "public"."error_events"."occurrences" from "public"."error_events") select "occurrences" from "pgrst_source"',
+    ),
+    true,
+  );
+  // Same CTE shape with a trailing WHERE / LIMIT / ORDER BY inside the CTE body.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column public.error_events.occurrences does not exist",
+      'with pgrst_source as (select "occurrences" from "public"."error_events" where "first_seen_at" > now() - interval \'1 hour\' order by "first_seen_at" desc limit 100) select * from "pgrst_source"',
+    ),
+    true,
+  );
+});
+
 test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise drops the PostgREST direct-REST CTE-wrapped SELECT shape", () => {
   // Verbatim payload observed on Control Tower signature `supabase-logs:41dd87c2e483a884`
   // (5 sightings 2026-09-26 → 2026-09-27) — PostgREST wraps the direct-REST row read in
@@ -2503,6 +2552,26 @@ test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise drops the Post
       'WITH pgrst_source AS ( SELECT "metadata" FROM "error_events" WHERE id = $1 )',
     ),
     true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise KEEPS a modifying CTE whose outer statement is a write (a real code-bug still pages)", () => {
+  // WITH … DELETE / INSERT / UPDATE on error_events is a modifying-CTE write — a code path
+  // actually mutating error_events with a bogus column is a bug we WANT to see; the drop is
+  // scoped to read-only outer statements (bare SELECT or WITH … ) SELECT).
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      'with recent as (select id from public.error_events where first_seen_at > now() - interval \'1 hour\') delete from public.error_events where metadata is null',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      'with new_events as (values (1, $1), (2, $2)) insert into public.error_events (id, metadata) select * from new_events',
+    ),
+    false,
   );
 });
 
@@ -16520,6 +16589,25 @@ test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise return
     isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
       "",
       "select beat_at from public.loop_heartbeats",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise KEEPS a PostgREST write CTE even when its outer statement is a SELECT", () => {
+  // PostgREST renders writes as `with pgrst_source as (<write> returning …) select … from pgrst_source`;
+  // the outer SELECT must not make a real DELETE/UPDATE on error_events look like an ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.metadata does not exist",
+      'with pgrst_source as (delete from "public"."error_events" where "metadata" is null returning *) select count(*) from "pgrst_source"',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
+      "column error_events.first_seen does not exist",
+      'with pgrst_source as (update "public"."error_events" set "first_seen" = $1 from "public"."error_events" e2 returning *) select * from "pgrst_source"',
     ),
     false,
   );
