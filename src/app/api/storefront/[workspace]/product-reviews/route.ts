@@ -189,6 +189,9 @@ export async function GET(
     title: r.title,
     // `summary` is the Haiku-shortened line; the widget wants the real words.
     body: r.body || r.summary,
+    // The short line on its own, for surfaces that need a compact quote (the
+    // checkout reviews block shows three of these instead of one long body).
+    summary: r.summary,
     created_at: r.created_at,
     featured: r.featured,
     // Exposed so callers can hold weight-loss claims to the corpus's own evidence
