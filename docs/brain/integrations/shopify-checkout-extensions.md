@@ -32,6 +32,8 @@ Per-extension files: `package.json` (`@shopify/ui-extensions` 2025.10.x, `preact
 
 The product-reviews aggregate carries two scopes. `rating` / `count` are POOLED across the link group (Instant ↔ K-Cups), the true row numbers the review list pages through. `display_rating` / `display_count` are the **Shopify product page's** numbers: that product alone (plus its "(Free Gift)" fold, no link-group pooling), exactly what `buildReviewAggregates` publishes to the `reviews.rating` / `reviews.rating_count` metafields, with `workspaces.storefront_off_platform_review_count` (+10,000 for Superfoods, the Yotpo-era reviews whose rows are gone) added to the count server-side ([[../libraries/shopify-review-metafields]] § The +10,000 off-platform bump). The rating is never bumped. Never add a bump inside an extension; it double-counts.
 
+**Display rule (founder, 2026-10-06):** display surfaces (PDP, in-house storefront, checkout blocks) show the exact count, e.g. "11,882 reviews". Only marketing and ad copy rounds it ("11K+").
+
 Amazing Coffee, 2026-10-06: pooled 3,003 / 4.76; page scope 1,882 / 4.74, so `display_count` 11,882. The trust card shows "4.7 · 11,882 reviews", the exact count the PDP displays ("11,000+" appears only in the PDP's meta description, not on the page).
 
 ## Fail-closed design
