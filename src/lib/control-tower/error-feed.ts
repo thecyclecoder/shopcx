@@ -2124,28 +2124,34 @@ export function isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise(
 }
 
 /**
- * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
- * `customer_events.metadata`. `customer_events` DOES exist as a product table (see
- * `supabase/migrations/20260325000001_customer_events.sql`), but it has never carried a
- * `metadata` column — its jsonb payload column is `properties`. The message appears on
- * Supabase's `postgres_logs` feed only when an external / manual tool, a stale integration,
- * or a Supabase SQL Editor session does a raw
- * `select ... metadata ... from public.customer_events` lookup (or the PostgREST-generated
- * CTE wrapper form the same client emits). There is no lever from ShopCX to make that
- * query resolve — paging Platform on it
- * ([[../specs/error-feed-drop-customer-events-metadata-direct-rest-lookup-]], Control
- * Tower signature `supabase-logs:bf8e316735341025`) is repair work for a query we don't
- * own.
+ * Foreign-app noise — Postgres reporting a missing column on `customer_events` for an ad hoc
+ * SELECT lookup. `customer_events` DOES exist as a product table (see
+ * `supabase/migrations/20260325000001_customer_events.sql`); its jsonb payload column is
+ * `properties`, and every other column our own code path / migration / view / function /
+ * trigger touches is stable and known. A raw `select ... <column> ... from
+ * public.customer_events` naming a column we don't own only comes from an external / manual
+ * tool, a stale integration, or a Supabase SQL Editor session (or the PostgREST-generated
+ * CTE wrapper form the same client emits). There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it is repair work for a query we don't own.
  *
- * Sibling of `isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise` — same narrow-
- * gating shape, different table pin. Both are the capture-time drop class the twelve other
- * `isForeignSupabasePostgresMissing*` siblings in [[./supabase-log-poll]] implement.
+ * Generalized across the column name — supersedes the earlier per-column
+ * `isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise` drop (originally pinned
+ * to `metadata`; now subsumed) because every observed instance of this signature has been
+ * the same ad hoc external-tool read hitting a different column name (`metadata`,
+ * `contract_id`, Control Tower signature `supabase-logs:ff46bdb1cc519cb9`), and per-column
+ * classifiers proliferate one-per-column with no upside — the SELECT-lookup shape is what
+ * identifies the ad hoc caller, not the specific column.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise` — same column-
+ * agnostic, SELECT-shape-pinned structure, different table pin. Both are the capture-time
+ * drop class the other `isForeignSupabasePostgresMissing*` siblings in
+ * [[./supabase-log-poll]] implement.
  *
  * `true` ONLY when BOTH markers are present:
- *   1. the message is Postgres's canonical column-missing shape for THIS name — trimmed
- *      equal to `column customer_events.metadata does not exist` (with or without the
- *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the logs
- *      surface), AND
+ *   1. the message is Postgres's canonical column-missing shape scoped to `customer_events`
+ *      — trimmed equal to `column customer_events.<name> does not exist` (or the `public.`
+ *      qualified variant), with any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface stripped, AND `<name>` a plain unquoted identifier (a-z / 0-9 / _), AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.customer_events` — either
  *      (a) the bare `select ... from public.customer_events` shape, OR (b) the PostgREST-
  *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."customer_events" ... )`
@@ -2154,23 +2160,22 @@ export function isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise(
  *      `isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise`).
  *
  * Narrowly gated so:
- *   - a column-missing error for ANY OTHER column on `customer_events` (a real product-
- *     schema regression on `properties`, `event_type`, `source`, `summary`, `created_at`)
- *     still pages,
- *   - a column-missing error for `metadata` on ANY OTHER table (handled by its own sibling
- *     — e.g. `error_events.metadata` by
- *     `isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise`) still pages,
- *   - a `customer_events.metadata` error attached to a DIFFERENT statement shape (INSERT /
+ *   - a column-missing error for `<column>` on ANY OTHER table (a real code bug on another
+ *     table that DOES have such a column) still pages — the pin is `customer_events.` only,
+ *   - a `customer_events.<column>` error attached to a DIFFERENT statement shape (INSERT /
  *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
- *     SELECT-lookup shape only, matching the ad hoc read we've observed,
- *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *     SELECT-lookup shape only, matching the ad hoc read we've observed. A caller that
+ *     actually writes to customer_events with the named field is a code bug we DO want to
+ *     page on, not the ad hoc read this drop targets,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing is
+ *     untouched (different message).
  *
  * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
  * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
  * so returning null here fully suppresses the row (no error_event, no loop_alert, no
  * signature). Not a `transient` flag: this is a capture-time drop.
  */
-export function isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise(
+export function isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise(
   message: string | null | undefined,
   query: string | null | undefined,
 ): boolean {
@@ -2178,19 +2183,22 @@ export function isForeignSupabasePostgresMissingCustomerEventsMetadataAdhocNoise
   if (!msg) return false;
   // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
   // surface sometimes carries it, sometimes doesn't. The column-missing message itself
-  // has a stable shape: `column <name> does not exist`.
+  // has a stable shape: `column <table>.<name> does not exist` — pinned here to
+  // `customer_events` (with or without the `public.` qualifier) and any unquoted identifier
+  // column name.
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
-  const messageMatches =
-    stripped === "column customer_events.metadata does not exist" ||
-    stripped === "column public.customer_events.metadata does not exist";
-  if (!messageMatches) return false;
+  if (
+    !/^column (?:public\.)?customer_events\.[a-z_][a-z0-9_]* does not exist$/.test(stripped)
+  ) {
+    return false;
+  }
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
   // Either (a) a bare `select ... from public.customer_events` lookup — any trailing
   // WHERE / LIMIT / ORDER BY is fine — OR (b) the PostgREST-generated CTE wrapper
   // `WITH pgrst_source AS ( SELECT ... FROM "public"."customer_events" ... )` form the
   // same external callers emit. A JOIN / UNION / non-SELECT stays captured — a caller
-  // that actually writes to customer_events with a `metadata` field is a code bug we DO
+  // that actually writes to customer_events with the named field is a code bug we DO
   // want to page on, not the ad hoc read this drop targets.
   const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?customer_events\b/.test(q);
   const pgrstCte =
