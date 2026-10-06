@@ -1,0 +1,1 @@
+- **Drop foreign ticket_messages.sender_type PostgREST select noise from the supabase-logs feed** · verified 2026-09-28 · → [[../libraries/control-tower]]

@@ -1,0 +1,1 @@
+- **Drop foreign-app `customers.address` column-missing noise at capture** · verified 2026-10-01 · → [[../inngest/supabase-log-poll]]

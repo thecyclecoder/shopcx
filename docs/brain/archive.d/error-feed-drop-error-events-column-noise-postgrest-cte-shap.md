@@ -1,0 +1,1 @@
+- **Widen error_events column-missing capture-drop to PostgREST's WITH pgrst_source CTE shape** · verified 2026-09-27 · → [[../libraries/control-tower]]

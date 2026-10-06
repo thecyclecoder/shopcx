@@ -1,0 +1,1 @@
+- **Drop foreign `orders.subtotal_cents` column-missing noise from the error feed** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise`)

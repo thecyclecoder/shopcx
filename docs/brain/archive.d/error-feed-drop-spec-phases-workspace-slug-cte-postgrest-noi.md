@@ -1,0 +1,1 @@
+- **Drop PostgREST CTE-wrapped variant of spec_phases workspace_id/spec_slug lookup noise** · verified 2026-09-28 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise]]

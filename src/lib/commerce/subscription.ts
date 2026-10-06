@@ -96,6 +96,7 @@ import {
   appstleUnskipOrder,
   appstleGetUpcomingOrders,
   appstleOrderNowByContract,
+  appstleCancelContractVendorOnly,
 } from "@/lib/appstle";
 import {
   subAddItem,
@@ -478,6 +479,28 @@ export async function subscriptionAction(
   return appstleSubscriptionAction(workspaceId, contractId, action, cancelReason, cancelledBy);
 }
 
+/**
+ * Cancel the OLD engine's contract during an engine migration — at the VENDOR ONLY.
+ *
+ * ⚠️ Not `subscriptionAction(..., "cancel")`. That is a customer cancel: it also writes
+ * cancel-truth onto our row (status='cancelled', `cancelled_at`, next date nulled), ends open
+ * dunning, and recomputes `customers.subscription_status`. During a migration the subscription
+ * is NOT ending, it is changing engines, and the row is flipped in place right after. The flip
+ * restored `status` but never cleared `cancelled_at`, so every live migrated sub carried a
+ * phantom cancellation date (33 of them, each stamped seconds before its own flip).
+ *
+ * The engine is passed explicitly: the caller already knows it, and after the flip the old
+ * contract id no longer resolves to a row.
+ */
+export async function subscriptionCancelAtVendorForMigration(
+  workspaceId: string,
+  contractId: string,
+  engine: "appstle" | "shopcx",
+): Promise<OpResult> {
+  if (engine === "shopcx") return shopifySubscriptionAction(workspaceId, contractId, "cancel");
+  return appstleCancelContractVendorOnly(workspaceId, contractId);
+}
+
 // ── Schedule ────────────────────────────────────────────────────────
 
 export async function subscriptionSkipNextOrder(
@@ -664,7 +687,7 @@ export async function subscriptionRemoveItem(
   workspaceId: string,
   contractId: string,
   variantOrLine: string | { variantId?: string; lineGid?: string },
-): Promise<OpResult & { alreadyAbsent?: boolean }> {
+): Promise<OpResult & { alreadyAbsent?: boolean; pending?: boolean }> {
   return subRemoveItem(workspaceId, contractId, variantOrLine);
 }
 
@@ -1022,6 +1045,22 @@ export async function subscriptionOrderNow(
 
   if (src === "internal" || src === "shopcx") {
     if (sub.status !== "active") return { success: false, error: `not_active (${sub.status})` };
+    // ⭐ Repeat-press guard, shared with the portal: refuse when a charge for this sub is in
+    // flight or an order for it landed inside the window. This is the chokepoint for the
+    // dashboard bill-now route AND every agent action (bill_now / order_now /
+    // change_next_date's ship-today path), none of which had any recent-charge check — an
+    // agent picking up "I just ordered but didn't get an email" could otherwise charge again.
+    const { guardRecentOrderNow, ORDER_IN_PROGRESS } = await import("@/lib/portal/order-now-guard");
+    const recent = await guardRecentOrderNow(admin, {
+      subscription_id: sub.id as string,
+      workspace_id: workspaceId,
+    });
+    if (recent.action === "block") {
+      return {
+        success: false,
+        error: `${ORDER_IN_PROGRESS}: an order for this subscription was already placed in the last 15 minutes, so it was not charged again`,
+      };
+    }
     const { inngest } = await import("@/lib/inngest/client");
     if (src === "shopcx") {
       const { RENEWAL_ATTEMPT_EVENT } = await import("@/lib/inngest/shopify-subscription-renewals");

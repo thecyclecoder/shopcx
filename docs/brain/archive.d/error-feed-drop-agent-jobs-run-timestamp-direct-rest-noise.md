@@ -1,0 +1,1 @@
+- **Drop stale agent_jobs run timestamp direct-REST lookup noise** · verified 2026-10-04 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise`)

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { bucketOrder } from "@/lib/order-bucketing";
+import { uuidLineItemProductIds } from "@/lib/email-storefront";
 
 export async function GET(
   request: Request,
@@ -382,7 +383,8 @@ async function buildStorefrontSubLtv(
       if (!latestSnapshot || r.snapshot_date > latestSnapshot) latestSnapshot = r.snapshot_date;
     }
 
-    const productIds = [...latestByProduct.keys()];
+    // Shopify-numeric line-item id would 22P02 the whole query — see uuidLineItemProductIds in email-storefront.ts
+    const productIds = uuidLineItemProductIds([...latestByProduct.keys()]);
     const { data: productRows } = productIds.length
       ? await admin.from("products").select("id, title").in("id", productIds)
       : { data: [] as { id: string; title: string }[] };

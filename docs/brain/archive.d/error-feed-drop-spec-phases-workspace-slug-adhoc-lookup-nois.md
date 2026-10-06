@@ -1,0 +1,1 @@
+- **Drop ad hoc spec_phases workspace/slug lookup noise from Supabase logs** · verified 2026-09-26 · → [[../libraries/control-tower#error-feedts--the-error-feed-error-feed-monitoring-phase-1--2]]

@@ -96,4 +96,4 @@ The live theme (`theme-superfoodscompany.com/master`, role MAIN) is managed thro
 
 ## Related
 
-[[../tables/customers]] · [[../tables/orders]] · [[../tables/products]] · [[../tables/product_variants]] · [[../tables/subscriptions]] · [[../tables/customer_payment_methods]] · [[../tables/store_credit_log]] · [[../tables/import_jobs]] · [[../tables/posts]] · [[../lifecycles/blog-resources]] · [[../libraries/shopify-theme]] · [[../recipes/edit-shopify-theme]] · [[../inngest/sync-shopify]] · [[../inngest/today-sync]] · [[../inngest/sync-inventory]]
+[[../tables/customers]] · [[../tables/orders]] · [[../tables/products]] · [[../tables/product_variants]] · [[../tables/subscriptions]] · [[../tables/customer_payment_methods]] · [[../tables/store_credit_log]] · [[../tables/import_jobs]] · [[../tables/posts]] · [[../lifecycles/blog-resources]] · [[../libraries/shopify-theme]] · [[../recipes/edit-shopify-theme]] · [[../inngest/sync-shopify]] · [[../inngest/today-sync]] · [[../inngest/sync-inventory]] · [[shopify-checkout-extensions]]

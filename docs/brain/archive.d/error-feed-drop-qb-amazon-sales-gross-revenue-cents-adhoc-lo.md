@@ -1,0 +1,1 @@
+- **Drop stale qb_amazon_sales_snapshots.gross_revenue_cents direct-REST lookup noise** · verified 2026-09-30 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)

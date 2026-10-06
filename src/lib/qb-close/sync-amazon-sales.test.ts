@@ -11,7 +11,12 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseShippedUnits } from "./sync-amazon-sales";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  assertNonEmptyAmazonCloseReport,
+  parseShippedUnits,
+  validateAmazonCloseReportHeaders,
+} from "./sync-amazon-sales";
 
 const HEADERS = ["amazon-order-id", "purchase-date", "order-status", "sku", "asin", "product-name", "quantity", "item-price", "promotion-ids"];
 const row = (o: Partial<Record<string, string>>) =>
@@ -84,4 +89,72 @@ test("skips zero-quantity, blank-asin and blank-date rows without throwing", () 
 test("an empty or header-only report yields nothing rather than throwing", () => {
   assert.equal(parseShippedUnits("").byKey.size, 0);
   assert.equal(parseShippedUnits(HEADERS.join("\t")).byKey.size, 0);
+});
+
+test("validateAmazonCloseReportHeaders throws clearly when a required header is missing", () => {
+  const missing = HEADERS.filter((h) => h !== "order-status");
+  assert.throws(() => validateAmazonCloseReportHeaders(missing), /order-status/);
+  // Independent of the exported helper: the parser must refuse a malformed TSV so a column
+  // shift cannot write garbage into qb_amazon_sales_snapshots.
+  const malformed = [missing.join("\t"), missing.map((h) => (h === "quantity" ? "2" : "x")).join("\t")].join("\n");
+  assert.throws(() => parseShippedUnits(malformed), /order-status/);
+});
+
+test("validateAmazonCloseReportHeaders accepts a valid header set (product-name optional)", () => {
+  // product-name is written when present but is not required — older marketplace exports omit it.
+  const withoutProductName = HEADERS.filter((h) => h !== "product-name");
+  assert.doesNotThrow(() => validateAmazonCloseReportHeaders(withoutProductName));
+  assert.doesNotThrow(() => validateAmazonCloseReportHeaders(HEADERS));
+});
+
+/**
+ * The thinnest possible SupabaseClient stub — only the chain `assertNonEmptyAmazonCloseReport`
+ * walks. Returning the fed rows on the terminal `.limit(1)` is enough to exercise the two
+ * branches that matter (prior data vs cold start).
+ */
+function fakeAdminWith(rows: Array<{ id: string }>): SupabaseClient {
+  const resolver = Promise.resolve({ data: rows, error: null });
+  const builder: Record<string, unknown> = {
+    from: () => builder,
+    select: () => builder,
+    eq: () => builder,
+    gte: () => builder,
+    lte: () => builder,
+    limit: () => resolver,
+  };
+  return builder as unknown as SupabaseClient;
+}
+
+test("assertNonEmptyAmazonCloseReport is a no-op when the merged parse has rows", async () => {
+  // Non-zero parse → should NOT touch the DB; a stub that would reject on query proves it.
+  const neverQuery = { from: () => { throw new Error("should not query when parse is non-empty"); } } as unknown as SupabaseClient;
+  await assertNonEmptyAmazonCloseReport(neverQuery, "ws-1", "2026-09-01", "2026-10-04", 5);
+});
+
+test("assertNonEmptyAmazonCloseReport is a no-op on a cold window (no prior data)", async () => {
+  // A brand-new workspace or first-ever sync against this window is legitimately empty.
+  const admin = fakeAdminWith([]);
+  await assertNonEmptyAmazonCloseReport(admin, "ws-1", "2026-09-01", "2026-10-04", 0);
+});
+
+test("assertNonEmptyAmazonCloseReport throws when parsed is empty but prior rows exist in window", async () => {
+  const admin = fakeAdminWith([{ id: "snapshot-1" }]);
+  await assert.rejects(
+    () => assertNonEmptyAmazonCloseReport(admin, "ws-1", "2026-09-01", "2026-10-04", 0),
+    /parsed 0 shipped rows.*existing/i,
+  );
+});
+
+test("assertNonEmptyAmazonCloseReport surfaces a Supabase probe error rather than silently passing", async () => {
+  const probeError: SupabaseClient = (() => {
+    const resolver = Promise.resolve({ data: null, error: { message: "boom" } });
+    const builder: Record<string, unknown> = {
+      from: () => builder, select: () => builder, eq: () => builder, gte: () => builder, lte: () => builder, limit: () => resolver,
+    };
+    return builder as unknown as SupabaseClient;
+  })();
+  await assert.rejects(
+    () => assertNonEmptyAmazonCloseReport(probeError, "ws-1", "2026-09-01", "2026-10-04", 0),
+    /probe failed.*boom/i,
+  );
 });

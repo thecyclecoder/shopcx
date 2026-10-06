@@ -23,7 +23,7 @@ import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAppstleConfig } from "@/lib/subscription-items";
 import { isEnginePromotion, type BillingSource } from "@/lib/internal-subscription";
-import { subscriptionAction } from "@/lib/commerce/subscription";
+import { subscriptionCancelAtVendorForMigration } from "@/lib/commerce/subscription";
 import { inferAppstleLineBase, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
 import { OPEN_DUNNING_STATUSES, updateDunningCycle } from "@/lib/dunning";
 
@@ -93,6 +93,50 @@ async function repointOpenDunningCyclesForMigration(
 }
 
 /**
+ * Cancel the OLD engine's contract for a migration — vendor-only, never a customer-style cancel.
+ *
+ * Two hazards this closes:
+ *  1. A customer-style cancel (`subscriptionAction`) writes cancel-truth onto OUR row
+ *     (status='cancelled' + `cancelled_at`) and ends dunning. The flip restored `status` but never
+ *     `cancelled_at`, so every live migrated sub carried a phantom cancellation date.
+ *  2. The Appstle cancel fires a `subscription.cancelled` webhook. Its migrated-contract guard
+ *     keys on `migrated_from_contract_id`, which used to be written only by the flip, AFTER the
+ *     cancel. A webhook processed in that gap was not recognised: it either wrote cancelled onto
+ *     the row (the flip then restored status) or, landing after the rename, INSERTed a dead shell.
+ *     So for an Appstle contract we stamp `migrated_from_contract_id` BEFORE cancelling, and put
+ *     the previous value back if the cancel fails, so a genuine later cancel is never ignored.
+ *     ShopCX contracts are skipped: their row may already carry its origin Appstle id there, and
+ *     the cancel's Shopify webhook goes through ShopCX ingest, not this guard.
+ */
+export async function cancelOldEngineForMigration(
+  admin: Admin,
+  args: { workspaceId: string; subId: string; contractId: string; engine: "appstle" | "shopcx"; priorMigratedFrom: string | null },
+  /** Injectable for tests; production always uses the SDK's vendor-only cancel. */
+  cancelAtVendor: typeof subscriptionCancelAtVendorForMigration = subscriptionCancelAtVendorForMigration,
+): Promise<{ success: boolean; error?: string }> {
+  const premark = args.engine === "appstle" && args.priorMigratedFrom !== args.contractId;
+  if (premark) {
+    const { error } = await admin
+      .from("subscriptions")
+      .update({ migrated_from_contract_id: args.contractId })
+      .eq("id", args.subId)
+      .eq("workspace_id", args.workspaceId)
+      .eq("shopify_contract_id", args.contractId);
+    if (error) return { success: false, error: `pre-cancel mark failed: ${error.message}` };
+  }
+  const r = await cancelAtVendor(args.workspaceId, args.contractId, args.engine);
+  if (!r.success && premark) {
+    await admin
+      .from("subscriptions")
+      .update({ migrated_from_contract_id: args.priorMigratedFrom })
+      .eq("id", args.subId)
+      .eq("workspace_id", args.workspaceId)
+      .eq("shopify_contract_id", args.contractId);
+  }
+  return r;
+}
+
+/**
  * Appstle bills shipping protection as a regular **line item** titled "Shipping
  * Protection". Internally it is NOT a catalog item — it's a flag on the sub
  * (`shipping_protection_added` + `shipping_protection_amount_cents`) and the
@@ -119,6 +163,74 @@ export interface DroppedLine {
   priceCents: number;
   quantity: number;
   paid: boolean;
+}
+
+/**
+ * Products a migration must NOT carry onto internal rails, by internal product UUID. A line
+ * resolving to one of these is EXCLUDED from items[] (recorded as an audit note, no ops page —
+ * it is policy, not a mapping failure), and a sub whose ONLY product lines are excluded is NOT
+ * migrated at all (left on its old engine, untouched).
+ *
+ * Apple Cider Vinegar Gummies — out of stock with no restock planned (CEO 2026-10-01). Left in,
+ * the internal engine bills it at catalog price every cycle for a product we can't ship (sub
+ * 25afd98d was charged $27.57 for it on its first internal renewal, SHOPCX426, 2026-09-22).
+ */
+export const MIGRATION_EXCLUDED_PRODUCT_IDS: ReadonlySet<string> = new Set([
+  "ad466a2f-061e-4692-a3d3-f672797fcecf", // Apple Cider Vinegar Gummies
+]);
+
+/**
+ * A live line deliberately left off the migrated sub: an excluded product
+ * (MIGRATION_EXCLUDED_PRODUCT_IDS) or an Appstle one-time promo (see `appstlePromoFlags`).
+ * `productId` / `variantId` are "" when the line was excluded before catalog resolution.
+ */
+export interface ExcludedLine {
+  title: string;
+  productId: string;
+  variantId: string;
+  priceCents: number;
+  quantity: number;
+  reason: "excluded_product" | "one_time_promo";
+}
+
+/**
+ * Appstle marks promo lines with line custom attributes:
+ *   `_appstle-free-product: true`     — the line is a free gift ($0)
+ *   `_appstle-one-time-product: true` — it ships ONCE, with the next order, then drops off
+ * Appstle honours both. The internal engine knows neither: an unflagged line is priced off
+ * the catalog every cycle. So a one-time promo must never be carried over (it already
+ * shipped, or was meant to ship once), and a recurring free line must land as `is_gift`
+ * (priced $0, excluded from quantity breaks). Ground truth: all 88 flagged lines across 2,480
+ * stored contract snapshots carry BOTH flags (the $0 ACV Gummies bonus); migrated without
+ * this, sub 25afd98d paid $27.57 for one on its first internal renewal.
+ */
+export function appstlePromoFlags(l: Record<string, unknown>): { freeProduct: boolean; oneTime: boolean } {
+  const attrs = Array.isArray(l.customAttributes) ? (l.customAttributes as Array<{ key?: unknown; value?: unknown }>) : [];
+  const on = (key: string) => attrs.some((a) => a?.key === key && String(a?.value).toLowerCase() === "true");
+  return { freeProduct: on("_appstle-free-product"), oneTime: on("_appstle-one-time-product") };
+}
+
+/** Drop excluded-product items from an already-internal items[] (the cancelled local-row path). */
+function withoutExcludedItems(items: Array<Record<string, unknown>>): {
+  items: Array<Record<string, unknown>>;
+  excludedLines: ExcludedLine[];
+} {
+  const kept: Array<Record<string, unknown>> = [];
+  const excludedLines: ExcludedLine[] = [];
+  for (const i of items) {
+    const productId = String(i.product_id || "");
+    if (MIGRATION_EXCLUDED_PRODUCT_IDS.has(productId)) {
+      excludedLines.push({
+        title: String(i.title || ""),
+        productId,
+        variantId: String(i.variant_id || ""),
+        priceCents: Number(i.price_cents || 0),
+        quantity: Number(i.quantity || 1),
+        reason: "excluded_product",
+      });
+    } else kept.push(i);
+  }
+  return { items: kept, excludedLines };
 }
 
 export interface MigrateResult {
@@ -237,9 +349,10 @@ async function appstleLinesToInternalItems(
   admin: Admin,
   workspaceId: string,
   lines: Array<Record<string, unknown>>,
-): Promise<{ items: Array<Record<string, unknown>>; shippingProtectionCents: number; droppedLines: DroppedLine[] }> {
+): Promise<{ items: Array<Record<string, unknown>>; shippingProtectionCents: number; droppedLines: DroppedLine[]; excludedLines: ExcludedLine[] }> {
   const items: Array<Record<string, unknown>> = [];
   const droppedLines: DroppedLine[] = [];
+  const excludedLines: ExcludedLine[] = [];
   let shippingProtectionCents = 0;
   for (const l of lines) {
     const quantity = (l.quantity as number) || 1;
@@ -260,6 +373,22 @@ async function appstleLinesToInternalItems(
     const shopifyVid = String((l.variantId as string) || "").split("/").pop() || "";
     if (!shopifyVid) continue;
     const lineSku = String((l.sku as string) || "").trim();
+
+    // Appstle one-time promo → never carried over (it ships once on Appstle's side, then
+    // drops off; internally it would recur at catalog price). Checked before catalog
+    // resolution so an unmappable one-time promo is excluded quietly, not paged as a paid drop.
+    const promo = appstlePromoFlags(l);
+    if (promo.oneTime) {
+      excludedLines.push({
+        title: title || variantTitle || shopifyVid,
+        productId: "",
+        variantId: "",
+        priceCents: currentPriceCents,
+        quantity,
+        reason: "one_time_promo",
+      });
+      continue;
+    }
 
     // Resolve the internal variant by shopify_variant_id first, then by sku
     // (workspace-scoped) — a migrated line can carry a Shopify id we never synced
@@ -298,6 +427,34 @@ async function appstleLinesToInternalItems(
       continue;
     }
 
+    // Policy exclusion (e.g. ACV Gummies — no stock): keep it off the migrated sub.
+    if (MIGRATION_EXCLUDED_PRODUCT_IDS.has(String(v.product_id))) {
+      excludedLines.push({
+        title: title || (v.title as string) || "",
+        productId: String(v.product_id),
+        variantId: String(v.id),
+        priceCents: currentPriceCents,
+        quantity,
+        reason: "excluded_product",
+      });
+      continue;
+    }
+
+    // Recurring free gift (free, NOT one-time) → ships $0 every cycle as an `is_gift` item.
+    // No price inference: the engine prices gifts at $0 and leaves them out of qty breaks.
+    if (promo.freeProduct) {
+      items.push({
+        variant_id: v.id,
+        product_id: v.product_id,
+        title: title || undefined,
+        variant_title: variantTitle || (v.title as string) || undefined,
+        sku: (v.sku as string) || undefined,
+        quantity,
+        is_gift: true,
+      });
+      continue;
+    }
+
     // SMART PRICING (heal-by-migration): use the shared inference on the line we
     // already fetched. Reads pricingPolicy.basePrice directly when present
     // (isolates the true base from stacked discounts; distinguishes standard from
@@ -329,7 +486,7 @@ async function appstleLinesToInternalItems(
     }
     items.push(item);
   }
-  return { items, shippingProtectionCents, droppedLines };
+  return { items, shippingProtectionCents, droppedLines, excludedLines };
 }
 
 /**
@@ -393,7 +550,7 @@ export async function migrateContractToInternalComp(
   // Find the sub by its Appstle/Shopify contract id within the workspace.
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, status, is_internal, comp, customer_id, items, billing_interval, billing_interval_count, next_billing_date, billing_source")
+    .select("id, shopify_contract_id, status, is_internal, comp, customer_id, items, billing_interval, billing_interval_count, next_billing_date, billing_source, migrated_from_contract_id")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", contractId)
     .maybeSingle();
@@ -423,10 +580,14 @@ export async function migrateContractToInternalComp(
         ).json();
     // See the sweep path: an Appstle 400 returns a PARSEABLE problem+json body whose `status` is
     // 400, so "not CANCELLED" is not usability. Require the shape of a real contract.
+    // A contract WE already cancelled for this migration (pre-marked, then the flip failed) reads
+    // CANCELLED but is still the source of truth — resume from it instead of stranding the sub.
+    const cancelledForMigration =
+      compEngine === "appstle" && live?.status === "CANCELLED" && sub.migrated_from_contract_id === contractId;
     const liveUsable =
       !!live &&
       !live.errorKey &&
-      live.status !== "CANCELLED" &&
+      (live.status !== "CANCELLED" || cancelledForMigration) &&
       !!live.billingPolicy &&
       Array.isArray(live.lines?.nodes);
 
@@ -437,20 +598,29 @@ export async function migrateContractToInternalComp(
     if (liveUsable) {
       // Comp subs ship free (base $0), so a protection charge never applies — we
       // take only the converted product items and drop any protection line.
-      ({ items } = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []));
+      let excludedLines: ExcludedLine[];
+      ({ items, excludedLines } = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []));
+      // Only excluded products (e.g. ACV Gummies alone) → don't migrate; checked BEFORE the cancel.
+      if (!items.length && excludedLines.length) return { ok: false, error: "only_excluded_products (not migrated)" };
       interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || "week").toLowerCase();
       intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
       nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();
 
       // Cancel Appstle FIRST so a later flip failure stops the sub rather than
       // letting Appstle keep billing it.
-      if (!isCancelled) {
-        const cancelR = await subscriptionAction(workspaceId, contractId, "cancel", "migrated to shopcx (comp)", "ShopCX comp migration");
+      if (!isCancelled && !cancelledForMigration) {
+        const cancelR = await cancelOldEngineForMigration(admin, {
+          workspaceId, subId: String(sub.id), contractId,
+          engine: compEngine === "shopcx" ? "shopcx" : "appstle",
+          priorMigratedFrom: (sub.migrated_from_contract_id as string | null) ?? null,
+        });
         if (!cancelR.success) return { ok: false, error: `Appstle cancel failed: ${cancelR.error}` };
       }
     } else {
       if (!isCancelled) return { ok: false, error: "appstle_unavailable (active/paused sub left alone — re-runnable)" };
-      items = (sub.items as Array<Record<string, unknown>>) || [];
+      const local = withoutExcludedItems((sub.items as Array<Record<string, unknown>>) || []);
+      if (!local.items.length && local.excludedLines.length) return { ok: false, error: "only_excluded_products (not migrated)" };
+      items = local.items;
       interval = String(sub.billing_interval || "week").toLowerCase();
       intervalCount = Number(sub.billing_interval_count || 1);
       nextBillingDate = (sub.next_billing_date as string) || new Date().toISOString();
@@ -481,6 +651,9 @@ export async function migrateContractToInternalComp(
         comp: true,
         comp_note: opts.compNote ?? null,
         status: sub.status,
+        // A live sub must not carry a cancellation date (a racing Appstle cancel webhook, or the
+        // old customer-style cancel, could have stamped one). A cancelled sub keeps its own.
+        ...(isCancelled ? {} : { cancelled_at: null }),
         items: compItems,
         next_billing_date: nextBillingDate,
         billing_interval: interval,
@@ -541,7 +714,7 @@ export async function migrateCustomerAppstleSubsToInternal(
   // Each has its own source of truth below; they must never share one.
   const { data: subs } = await admin
     .from("subscriptions")
-    .select("id, shopify_contract_id, status, is_internal, items, billing_interval, billing_interval_count, next_billing_date, billing_source")
+    .select("id, shopify_contract_id, status, is_internal, items, billing_interval, billing_interval_count, next_billing_date, billing_source, migrated_from_contract_id")
     .eq("workspace_id", workspaceId)
     .in("customer_id", groupIds)
     .in("billing_source", ["appstle", "shopcx"]);
@@ -593,10 +766,15 @@ export async function migrateCustomerAppstleSubsToInternal(
       // "CANCELLED". The old check passed it, and the code below then cancelled the live contract
       // and flipped the row to internal with ZERO items, weekly, billing immediately. Require the
       // shape of a real contract instead: a billing policy AND a lines array.
+      // A contract WE already cancelled for this migration (pre-marked, then the flip failed)
+      // reads CANCELLED but is still the source of truth — resume from it. Without this a re-run
+      // skips it as unavailable and the sub is billed by nobody.
+      const cancelledForMigration =
+        engine === "appstle" && live?.status === "CANCELLED" && sub.migrated_from_contract_id === contractId;
       const liveUsable =
         !!live &&
         !live.errorKey &&
-        live.status !== "CANCELLED" &&
+        (live.status !== "CANCELLED" || cancelledForMigration) &&
         !!live.billingPolicy &&
         Array.isArray(live.lines?.nodes);
 
@@ -610,22 +788,31 @@ export async function migrateCustomerAppstleSubsToInternal(
       // Lines the migration couldn't map to an internal variant → dropped, noted on
       // the audit (and a paid drop pages a human). Empty unless something unmappable.
       let droppedLines: DroppedLine[] = [];
+      // Lines deliberately left off (MIGRATION_EXCLUDED_PRODUCT_IDS) → audit note, no page.
+      let excludedLines: ExcludedLine[] = [];
       if (liveUsable) {
         // Translate Appstle lines → internal catalog UUID references (no baked
         // price; grandfathered lines get a price_override_cents). A "Shipping
         // Protection" line is pulled out into the flag below, not items[].
-        ({ items, shippingProtectionCents, droppedLines } = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []));
+        ({ items, shippingProtectionCents, droppedLines, excludedLines } = await appstleLinesToInternalItems(admin, workspaceId, (live.lines?.nodes as Array<Record<string, unknown>>) || []));
+        // The sub's only products are excluded (e.g. ACV Gummies alone) → don't migrate it.
+        // Checked BEFORE the cancel so the old engine is left exactly as it was.
+        if (!items.length && excludedLines.length) { result.skipped.push({ contractId, reason: "only_excluded_products" }); continue; }
         interval = String((live.billingPolicy as Record<string, unknown> | undefined)?.interval || "week").toLowerCase();
         intervalCount = Number((live.billingPolicy as Record<string, unknown> | undefined)?.intervalCount || 1);
         nextBillingDate = (live.nextBillingDate as string) || new Date().toISOString();
 
-        // Cancel the OLD engine FIRST (safe failure mode: a later flip failure stops the sub
-        // rather than letting both systems bill it). `subscriptionAction` dispatches, so this
-        // cancels the Appstle contract or the Shopify one depending on who holds it — and it
-        // still reads the PRE-flip billing_source here, which is what makes that correct.
-        // Already-cancelled subs have nothing to cancel.
-        if (!isCancelled) {
-          const cancelR = await subscriptionAction(workspaceId, contractId, "cancel", "migrated to shopcx", "ShopCX migration");
+        // Cancel the OLD engine FIRST, so both systems can never bill at once. Vendor-only (see
+        // cancelOldEngineForMigration): our row is left untouched, and if the flip below then
+        // fails, a re-run resumes from the pre-marked, cancelled Appstle contract
+        // (`cancelledForMigration`) instead of stranding the sub. Already-cancelled subs have
+        // nothing to cancel.
+        if (!isCancelled && !cancelledForMigration) {
+          const cancelR = await cancelOldEngineForMigration(admin, {
+            workspaceId, subId: String(sub.id), contractId,
+            engine: engine === "shopcx" ? "shopcx" : "appstle",
+            priorMigratedFrom: (sub.migrated_from_contract_id as string | null) ?? null,
+          });
           if (!cancelR.success) { result.failed.push({ contractId, error: `Appstle cancel failed: ${cancelR.error}` }); continue; }
         }
       } else {
@@ -633,7 +820,10 @@ export async function migrateCustomerAppstleSubsToInternal(
         // bill) — migrate them onto internal rails using the local row. An
         // active/paused sub we can't read is left alone (re-runnable).
         if (!isCancelled) { result.skipped.push({ contractId, reason: `${engine}_unavailable` }); continue; }
-        items = (sub.items as Array<Record<string, unknown>>) || [];
+        const local = withoutExcludedItems((sub.items as Array<Record<string, unknown>>) || []);
+        if (!local.items.length && local.excludedLines.length) { result.skipped.push({ contractId, reason: "only_excluded_products" }); continue; }
+        items = local.items;
+        excludedLines = local.excludedLines;
         interval = String(sub.billing_interval || "week").toLowerCase();
         intervalCount = Number(sub.billing_interval_count || 1);
         nextBillingDate = (sub.next_billing_date as string) || new Date().toISOString();
@@ -656,6 +846,9 @@ export async function migrateCustomerAppstleSubsToInternal(
         // sub left reading 'appstle' after moving to Braintree is a row whose engine is a lie.
         billing_source: "internal",
           status: sub.status,
+          // A live sub must not carry a cancellation date (a racing Appstle cancel webhook, or the
+          // old customer-style cancel, could have stamped one). A cancelled sub keeps its own.
+          ...(isCancelled ? {} : { cancelled_at: null }),
           customer_id: billableCustomerId,
           // Pin the default card so the renewal charges it explicitly (the
           // default-card fallback stays the safety net for any unpinned sub).
@@ -714,7 +907,10 @@ export async function migrateCustomerAppstleSubsToInternal(
           if (isShippingProtectionLine(l)) return s;
           const amt = Math.round(parseFloat(String((l.currentPrice as Record<string, unknown> | undefined)?.amount ?? "0")) * 100);
           return s + amt * Number(l.quantity || 1);
-        }, 0);
+        }, 0)
+          // Excluded lines are not on the migrated sub, so they are not in the engine's subtotal
+          // either — take them out of the baseline or `pricing_preserved` false-fails.
+          - (liveUsable ? excludedLines.reduce((s, x) => s + x.priceCents * x.quantity, 0) : 0);
         const { recordMigrationAudit, verifyMigration } = await import("@/lib/migration-audit");
         const auditId = await recordMigrationAudit({
           workspaceId,
@@ -724,6 +920,7 @@ export async function migrateCustomerAppstleSubsToInternal(
           preMigrationChargeCents: preCharge,
           isRecovery: !!opts.isRecovery,
           droppedLines,
+          excludedLines,
         });
         if (auditId) await verifyMigration(auditId);
       } catch (e) {
