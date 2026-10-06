@@ -451,6 +451,74 @@ export interface ReSessionResult {
 }
 
 /**
+ * Phase 1 of [[../specs/inflection-resession-must-act-on-newest-ask]] — the triggering
+ * message the re-session carries into the Sol prompt. Shape mirrors what Sol needs to
+ * quote verbatim: the message `id`, the `created_at` so the prompt can tell Sol which
+ * turn she must address, and `text` preferring `body_clean` (the normalized form the
+ * detector itself read; the raw `body` is a fallback for the pre-body_clean legacy rows).
+ *
+ * The field is persisted on `agent_jobs.instructions` by `reSessionSol` and the worker
+ * (`runTicketHandleJob` in `scripts/builder-worker.ts`) injects it into the prompt so
+ * Sol's Direction can never again treat the inflection `kind` as the whole signal — the
+ * dc31bf31 scar (frustration label, no words, Sol re-answered the old question).
+ */
+export interface TriggerMessage {
+  id: string;
+  created_at: string;
+  text: string;
+}
+
+/**
+ * Loads the newest inbound customer `ticket_messages` row for this ticket. Prefers
+ * `body_clean` (same text the detector read), falls back to `body` for legacy rows
+ * written before the `body_clean` normalizer landed. Returns `null` when the ticket
+ * has no inbound customer messages yet (a race against the first inbound landing, or
+ * a ticket that only ever carried outbound/internal rows) — reSessionSol tolerates
+ * the null and simply omits the field.
+ *
+ * The row filter deliberately excludes `visibility='internal'` so an agent-note or
+ * triage stamp doesn't masquerade as the customer's newest ask.
+ */
+async function loadTriggerMessageForTicket(
+  admin: SupabaseClient,
+  workspace_id: string,
+  ticket_id: string,
+): Promise<TriggerMessage | null> {
+  // Cross-tenant guard — Phase 5 (security-review fix). `ticket_messages` has NO
+  // `workspace_id` column of its own (it hangs off the ticket), so a bare `.eq('ticket_id', …)`
+  // read would succeed for a ticket owned by ANY workspace — a foreign ticket_id could leak a
+  // message into the agent_jobs instructions this helper feeds. The caller's existing scope
+  // check (`getLiveDirection`) is a sibling, not an upstream guard: this helper runs BEFORE
+  // getLiveDirection in `reSessionSol`, so trusting it would be out-of-order.
+  //
+  // Fix: PostgREST inner-join on tickets with a workspace_id filter — the same pattern
+  // `src/lib/control-tower/monitor.ts:1488` already uses on this table. A ticket_id whose
+  // parent ticket row doesn't belong to `workspace_id` returns an empty set (not a privacy
+  // leak dressed up as a null). `maybeSingle()` keeps the two-row impossibility explicit.
+  const { data, error } = await admin
+    .from("ticket_messages")
+    .select("id, body, body_clean, created_at, tickets!inner(id)")
+    .eq("ticket_id", ticket_id)
+    .eq("tickets.workspace_id", workspace_id)
+    .eq("direction", "inbound")
+    .eq("author_type", "customer")
+    .neq("visibility", "internal")
+    .order("created_at", { ascending: false })
+    .limit(1);
+  if (error) return null;
+  const row = ((data as Array<{
+    id: string;
+    body: string | null;
+    body_clean: string | null;
+    created_at: string;
+  }> | null) ?? [])[0];
+  if (!row) return null;
+  const text = (row.body_clean ?? row.body ?? "").toString();
+  if (!text.trim()) return null;
+  return { id: row.id, created_at: row.created_at, text };
+}
+
+/**
  * Race guard for the `reSessionSol` no-live-Direction fallback: returns `true` iff an
  * `agent_jobs` row already exists for this ticket's `ticket-handle-<first8>` slug in a
  * non-terminal state. Sourced from the canonical `ACTIVE_STATUSES` set exported by
@@ -492,6 +560,14 @@ export async function reSessionSol(
     turn_index?: number;
   },
 ): Promise<ReSessionResult> {
+  // Phase 1 of [[../specs/inflection-resession-must-act-on-newest-ask]] — snapshot the
+  // triggering message (newest inbound customer `ticket_messages` row) BEFORE any mutation
+  // so both the no-live-Direction fallback enqueue and the normal below-cap enqueue carry
+  // the same `trigger_message` payload. runTicketHandleJob reads it to tell Sol which
+  // message her Direction must address. A null (very early race / legacy row) is tolerated —
+  // the field is simply omitted and the worker falls back to the brief's conversation block.
+  const triggerMessage = await loadTriggerMessageForTicket(admin, input.workspace_id, ticket_id);
+
   // (1) Load the live Direction (workspace-scoped) BEFORE any mutation so the cap-check can
   // read `resession_count` off the row. When no live row exists (already superseded / never
   // authored) the router bails cleanly — same behavior as the pre-Phase-2 supersede-null
@@ -538,6 +614,9 @@ export async function reSessionSol(
           kind: input.kind,
           evidence: input.evidence,
           superseded_direction_id: null,
+          // Phase 1 of inflection-resession-must-act-on-newest-ask — Sol must address the
+          // customer's newest ask, not just the inflection tone label.
+          trigger_message: triggerMessage,
         }),
       })
       .select("id")
@@ -691,6 +770,9 @@ export async function reSessionSol(
         kind: input.kind,
         evidence: input.evidence,
         superseded_direction_id: superseded.id,
+        // Phase 1 of inflection-resession-must-act-on-newest-ask — Sol must address the
+        // customer's newest ask, not just the inflection tone label.
+        trigger_message: triggerMessage,
       }),
     })
     .select("id")

@@ -151,7 +151,19 @@ Four mutations, gated on a cap check (Phase 2 of [[../specs/sol-runaway-re-sessi
    - Return `cap_hit:true` (else branches all set `cap_hit:false`). `sol_max_resessions IS NULL` = uncapped — the cap branch NEVER fires regardless of `resession_count`.
 3. **Increment `resession_count`** on the live Direction via [[./ticket-directions]] `incrementResessionCount` — compare-and-set on `(id, workspace_id, superseded_at IS NULL)` + `.select('id')` so a racing supersede returns `null` and the router bails without double-counting.
 4. **Supersede the live Direction** via [[./ticket-directions]] `superseDirection` (workspace-scoped compare-and-set on `superseded_at IS NULL`). If a racing caller stamped it first, `superseDirection` returns `null` — the router bails without enqueueing so we don't fan out a redundant `ticket-handle` session. The DB-level partial UNIQUE `(ticket_id) WHERE superseded_at IS NULL` on [[../tables/ticket_directions]] is a second belt guaranteeing exactly one live row per ticket at any moment.
-5. **Enqueue a new box session.** One `agent_jobs` row `kind='ticket-handle'`, `spec_slug='ticket-handle-<first 8 of ticket_id>'` (mirrors first-touch for worker routing uniformity), `status='queued'`, `instructions = JSON.stringify({ticket_id, workspace_id, turn_index, reason:'inflection', kind, evidence, superseded_direction_id})`. `runTicketHandleJob` reads `reason='inflection'` to know it's a bounce (vs `'first_touch'`) and links the new Direction back to `superseded_direction_id` in the ledger.
+5. **Enqueue a new box session.** One `agent_jobs` row `kind='ticket-handle'`, `spec_slug='ticket-handle-<first 8 of ticket_id>'` (mirrors first-touch for worker routing uniformity), `status='queued'`, `instructions = JSON.stringify({ticket_id, workspace_id, turn_index, reason:'inflection', kind, evidence, superseded_direction_id, trigger_message})`. `runTicketHandleJob` reads `reason='inflection'` to know it's a bounce (vs `'first_touch'`) and links the new Direction back to `superseded_direction_id` in the ledger.
+
+### `trigger_message` on the re-session instructions — Phase 1 of [[../specs/inflection-resession-must-act-on-newest-ask]]
+
+Both `reSessionSol` agent_jobs inserts (the no-live-Direction fallback and the normal below-cap enqueue) carry a `trigger_message` field on the instructions JSON:
+
+```ts
+trigger_message: { id: string; created_at: string; text: string } | null
+```
+
+Sourced from the newest inbound customer `ticket_messages` row — the message the detector itself classified — via the private `loadTriggerMessageForTicket` helper. `text` prefers `body_clean` and falls back to `body` for legacy pre-normalizer rows; the query filters `direction='inbound'` + `author_type='customer'` + `visibility != 'internal'` so an agent-note or triage stamp cannot masquerade as the customer's newest ask. A ticket with no inbound customer rows yet (very early race) returns `null`; the field is still persisted so the worker can tell "snapshot ran but found nothing" from "field never shipped".
+
+`runTicketHandleJob` (`scripts/builder-worker.ts`) reads `trigger_message` and injects a NEWEST CUSTOMER ASK block into the Sol prompt stating: _"Your Direction MUST address THIS message. The inflection kind is CONTEXT ONLY — it does not replace the customer's words."_ The ticket-handle skill then requires a top-level `newest_customer_ask: { quoted, resolution }` on every Direction so the bounce can never again degenerate into re-answering an older question. Ground truth: ticket dc31bf31 (14:14 ask to move an order to Oct 30 fired the frustration path with `cues=['repeated_punct']`, Sol re-answered the Sep 2 ship date, customer was billed four weeks early → $237.16 refund + cancelled subscriber).
 
 ### The router NEVER sends a customer-facing message
 

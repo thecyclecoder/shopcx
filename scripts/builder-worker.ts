@@ -3541,6 +3541,7 @@ async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
   /** per-attempt side effects (metering + session persist) — runs after EACH attempt, not just the last. */
   onRun?: (r: T, attempt: number) => Promise<void>;
 }): Promise<{ run: T; parsed: Record<string, unknown> | null; verdict: string; fallbackReason: string | null }> {
+  const { shouldDiscardStaleResumeVerdict } = await import("../src/lib/security-stale-resume");
   let last: T | null = null;
   let parsed: Record<string, unknown> | null = null;
   let verdict = "";
@@ -3554,6 +3555,18 @@ async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
     parsed = extractJson<Record<string, unknown>>(r.resultText);
     verdict = String(parsed?.status || "");
     if (parsed && verdict && opts.recognized.has(verdict)) {
+      // ⭐ Phase 5 of [[../.box/spec-inflection-resession-must-act-on-newest-ask.md]] — a repair-attempt
+      // `needs-human` that cites "no prior findings in this session context" is the resumed session
+      // telling us it has nothing to re-emit (its own first attempt left no findings in context). That
+      // isn't a human-needed verdict — it's a stale-resume failure. Discard it and fall through to the
+      // actionable fallbackReason ("no parseable verdict …") so the platform-director's
+      // reconcileNeedsAttention triage re-runs the review ONCE as a fresh session (which actually
+      // reviews the branch from scratch — the only recovery that works for this signature). See
+      // [[../src/lib/security-stale-resume]].
+      if (shouldDiscardStaleResumeVerdict({ useRepair, verdict, review: parsed.review, recognized: opts.recognized })) {
+        verdict = "";
+        continue;
+      }
       return { run: r, parsed, verdict, fallbackReason: null };
     }
     // unparseable / empty / unrecognized verdict → retry once more, then fail safe.
@@ -12808,7 +12821,17 @@ async function stampAgentSessionNote(ticketId: string, body: string): Promise<vo
 async function runTicketHandleJob(job: Job) {
   const tag = `[handle:${job.id.slice(0, 8)}]`;
   const sessShort = job.id.slice(0, 8);
-  let params: { ticket_id?: string; workspace_id?: string; turn_index?: number; reason?: string } = {};
+  let params: {
+    ticket_id?: string;
+    workspace_id?: string;
+    turn_index?: number;
+    reason?: string;
+    // Phase 1 of inflection-resession-must-act-on-newest-ask — reSessionSol snapshots the
+    // newest inbound customer `ticket_messages` row and threads it here so Sol's prompt can
+    // tell her WHICH message her Direction must address (the inflection `kind` is tone
+    // context only; it does not replace the customer's words).
+    trigger_message?: { id?: string; created_at?: string; text?: string } | null;
+  } = {};
   try {
     params = job.instructions ? JSON.parse(job.instructions) : {};
   } catch {
@@ -12830,12 +12853,30 @@ async function runTicketHandleJob(job: Job) {
 
   try {
     const brief = await loadTicketHandleBrief(ticketId);
+    // Phase 1 of inflection-resession-must-act-on-newest-ask — when the ticket-handle job is
+    // a bounce (`reason='inflection'`), reSessionSol snapshotted the customer's newest inbound
+    // message and threaded it here. Surface it to Sol as a non-negotiable framing line so she
+    // cannot read the inflection `kind` ('frustration'/'drift') as a license to re-answer an
+    // older question — the dc31bf31 scar (Sol re-answered the Sep 2 ship date while the
+    // customer's actual 14:14 ask to move to Oct 30 went unaddressed, costing a $237.16 refund
+    // and a cancelled subscriber).
+    const triggerMessageLines: string[] = [];
+    const trig = params.trigger_message;
+    if (trig && typeof trig === "object" && typeof trig.text === "string" && trig.text.trim().length > 0) {
+      triggerMessageLines.push(
+        `NEWEST CUSTOMER ASK (the message that triggered this re-session — ${trig.created_at ?? "(no timestamp)"}):`,
+        `  "${trig.text.trim()}"`,
+        `Your Direction MUST address THIS message. The inflection kind (${params.reason === "inflection" ? "frustration/drift tone label" : "tone context"}) is CONTEXT ONLY — it does not replace the customer's words. If the ask is a date change / refund / cancel / specific account request, your Direction's actions must reflect it (or your \`context_summary\` must explicitly state why no action is possible); never read the tone label as license to re-answer an older question. Your Direction's \`newest_customer_ask\` field MUST quote this message verbatim and state how this turn resolves it.`,
+        ``,
+      );
+    }
     const prompt = [
       `Use the ticket-handle skill (cwd is the repo root). You are Sol, June's Ticket Handler agent, running the FIRST-TOUCH box session on Max.`,
       ``,
       `TICKET id ${ticketId} · workspace ${workspaceId} — full context loaded for you:`,
       brief,
       ``,
+      ...triggerMessageLines,
       `For deterministic READ-ONLY CX data (customer + merged identity, subscriptions w/ realized pricing + discounts, orders w/ per-unit computed, active products, active policies) — CALL THE SDK, NEVER improvise SQL:`,
       `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
       `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
@@ -16645,6 +16686,66 @@ async function runCsDirectorCallJob(job: Job) {
       } catch (e) {
         console.warn(`${tag} pre-patch ticket read failed:`, e instanceof Error ? e.message : e);
       }
+      // Phase 3 of inflection-resession-must-act-on-newest-ask — pre-close read of inbound
+      // ticket_messages + successful executed actions so the pure builder can refuse a
+      // close_no_action when any customer ask is still unsatisfied. Scoped reads only (same
+      // workspace_id as the ticket); a read failure leaves the lists empty, which maps to
+      // today's close_no_action behavior exactly (fail-safe fallthrough — a DB blip must
+      // never force-close over an unresolved customer ask).
+      let inboundMessages: Array<{
+        id: string;
+        direction: string;
+        author_type: string;
+        visibility: string | null;
+        body: string | null;
+        body_clean: string | null;
+        created_at: string;
+      }> = [];
+      let executedActions: Array<{ type: string; executed_at: string }> = [];
+      if (verdict.decision === "close_no_action") {
+        try {
+          const { data: msgs } = await db
+            .from("ticket_messages")
+            .select("id, direction, author_type, visibility, body, body_clean, created_at")
+            .eq("ticket_id", ticketId)
+            .eq("direction", "inbound")
+            .eq("author_type", "customer")
+            .order("created_at", { ascending: true });
+          inboundMessages = ((msgs as typeof inboundMessages | null) ?? []).map((r) => ({
+            id: r.id,
+            direction: r.direction,
+            author_type: r.author_type,
+            visibility: r.visibility,
+            body: r.body,
+            body_clean: r.body_clean,
+            created_at: r.created_at,
+          }));
+        } catch (e) {
+          console.warn(`${tag} inbound-messages read for close-no-action gate failed:`, e instanceof Error ? e.message : e);
+        }
+        try {
+          const { data: outcomes } = await db
+            .from("ticket_required_outcomes")
+            .select("action_type, status, verified_at, updated_at")
+            .eq("workspace_id", job.workspace_id)
+            .eq("ticket_id", ticketId)
+            .eq("status", "verified");
+          executedActions = ((outcomes as Array<{
+            action_type: string | null;
+            status: string | null;
+            verified_at: string | null;
+            updated_at: string | null;
+          }> | null) ?? [])
+            .filter((r) => typeof r.action_type === "string")
+            .map((r) => ({
+              type: r.action_type as string,
+              executed_at: (r.verified_at ?? r.updated_at ?? "") as string,
+            }))
+            .filter((r) => r.executed_at.length > 0);
+        } catch (e) {
+          console.warn(`${tag} executed-actions read for close-no-action gate failed:`, e instanceof Error ? e.message : e);
+        }
+      }
       const transition = decideCsDirectorTicketTransition({
         decision: verdict.decision,
         reasoning: verdict.reasoning,
@@ -16664,6 +16765,9 @@ async function runCsDirectorCallJob(job: Job) {
         // still pending (ticket c969f235). `null` when the read failed → no downgrade, so a DB
         // error CANNOT strand a ticket escalated forever.
         priorEscalation,
+        // Phase 3 of inflection-resession-must-act-on-newest-ask — close_no_action downgrade.
+        inboundMessages: verdict.decision === "close_no_action" ? inboundMessages : null,
+        executedActions: verdict.decision === "close_no_action" ? executedActions : null,
         ceoUserId,
         now: new Date().toISOString(),
       });
@@ -16728,6 +16832,57 @@ async function runCsDirectorCallJob(job: Job) {
               if (noteErr) console.warn(`${tag} founder-ruling-pending sysNote insert failed: ${noteErr.message}`);
             } catch (e) {
               console.warn(`${tag} founder-ruling-pending sysNote write threw:`, e instanceof Error ? e.message : e);
+            }
+          }
+          // Phase 3 of inflection-resession-must-act-on-newest-ask — the downgrade's side
+          // effect: name the open request(s) on the thread AND re-session Sol so a fresh
+          // Direction can address the ask instead of silently closing it. Mirrors the pattern
+          // the founder-ruling-pending branch uses: the pure transition decides; the runner
+          // emits the human-visible note + the mutation.
+          if (transition.action_key === "needs_sol_resession_unsatisfied_ask") {
+            const asks = transition.unsatisfiedRequests ?? [];
+            try {
+              const summary = asks
+                .map((a) => `${a.kind} ("${a.excerpt}" at ${a.message_created_at})`)
+                .join("; ");
+              const noteBody = `[System] CS Director verdict 'close_no_action' DOWNGRADED by the unsatisfied-request guard — ${asks.length} open customer ask(s) made after the last successful action: ${summary || "(no excerpt)"}. Ticket stays OPEN; re-sessioning Sol so a fresh Direction addresses the newest ask.`;
+              const { error: noteErr } = await db.from("ticket_messages").insert({
+                ticket_id: ticketId,
+                direction: "outbound",
+                visibility: "internal",
+                author_type: "system",
+                body: noteBody.slice(0, 2000),
+              });
+              if (noteErr) console.warn(`${tag} unsatisfied-ask sysNote insert failed: ${noteErr.message}`);
+            } catch (e) {
+              console.warn(`${tag} unsatisfied-ask sysNote write threw:`, e instanceof Error ? e.message : e);
+            }
+            try {
+              const { reSessionSol } = await import("../src/lib/inflection-detector");
+              // Resolve the channel for the sol_max_resessions lookup. A missing config falls
+              // back to 'email' (the dominant channel + the default `ai_channel_config` row), so
+              // a ticket whose channel can't be read still re-sessions correctly.
+              let channel = "email";
+              try {
+                const { data: ch } = await db
+                  .from("tickets")
+                  .select("channel")
+                  .eq("id", ticketId)
+                  .maybeSingle();
+                if (ch?.channel) channel = String(ch.channel);
+              } catch { /* fall through to 'email' */ }
+              await reSessionSol(db, ticketId, {
+                workspace_id: job.workspace_id,
+                channel,
+                kind: "drift",
+                evidence: {
+                  stage: 1,
+                  reason: "unsatisfied_customer_request_blocking_close",
+                  cues: asks.map((a) => `${a.kind}:${a.cue}`),
+                },
+              });
+            } catch (e) {
+              console.warn(`${tag} unsatisfied-ask reSessionSol threw:`, e instanceof Error ? e.message : e);
             }
           }
         }

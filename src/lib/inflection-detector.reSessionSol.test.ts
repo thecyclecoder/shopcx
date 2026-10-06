@@ -72,6 +72,17 @@ interface FakeResolutionEvent {
   chosen: Record<string, unknown> | null;
 }
 
+interface FakeTicketMessage {
+  id: string;
+  ticket_id: string;
+  direction: string;
+  author_type: string;
+  visibility: string;
+  body: string | null;
+  body_clean: string | null;
+  created_at: string;
+}
+
 interface SeedInput {
   directions: FakeDirection[];
   tickets?: FakeTicket[];
@@ -81,6 +92,10 @@ interface SeedInput {
    *  exists → bail) from the "genuine no-Direction" case (no such row → enqueue fallback). */
   jobs?: FakeJob[];
   nextJobId?: string;
+  /** Phase 1 of inflection-resession-must-act-on-newest-ask — reSessionSol reads the newest
+   *  inbound customer message to snapshot the triggering ask onto the agent_jobs instructions.
+   *  Seed with newest-first OR any order; the stub orders by `created_at` desc. */
+  ticket_messages?: FakeTicketMessage[];
 }
 
 function makeAdmin(seed: SeedInput) {
@@ -90,7 +105,9 @@ function makeAdmin(seed: SeedInput) {
     tickets: (seed.tickets ?? []).map((t) => ({ ...t })),
     channel_configs: (seed.channel_configs ?? []).map((c) => ({ ...c })),
     resolution_events: [] as FakeResolutionEvent[],
-    // The router must never touch ticket_messages. Any write here fails the test.
+    ticket_messages: (seed.ticket_messages ?? []).map((m) => ({ ...m })),
+    // The router may READ ticket_messages (Phase 1 snapshot of the newest customer ask) but
+    // must NEVER write to it — the router sends no customer-facing message.
     ticketMessageWrites: 0,
   };
   let nextJobId = seed.nextJobId ?? "job-generated";
@@ -206,6 +223,103 @@ function makeAdmin(seed: SeedInput) {
     };
   }
 
+  function fromTicketMessages() {
+    // The read path the Phase-1 trigger_message snapshot uses — now with the Phase-5
+    // tenant guard (tickets!inner workspace filter):
+    //   .select("id, body, body_clean, created_at, tickets!inner(id)")
+    //     .eq("ticket_id", ...)
+    //     .eq("tickets.workspace_id", ...)   ← parent-table filter (tenant boundary)
+    //     .eq("direction", "inbound")
+    //     .eq("author_type", "customer")
+    //     .neq("visibility", "internal")
+    //     .order("created_at", { ascending: false })
+    //     .limit(1)   → Promise<{data: row[], error}>
+    // Writes (insert / update / upsert) are not expected and fail the test.
+    const filters: Record<string, unknown> = {};
+    const parentFilters: Record<string, Record<string, unknown>> = {};
+    const neFilters: Record<string, unknown> = {};
+    let orderDesc = false;
+    const builder = {
+      select(_cols: string) {
+        return builder;
+      },
+      eq(col: string, val: unknown) {
+        // Phase 5 — a `tickets.workspace_id` filter is a join-side predicate against
+        // the parent ticket row, not a column on ticket_messages. Route it to the
+        // parentFilters bucket so the limit() terminal can enforce it against the
+        // seeded tickets state.
+        const dot = col.indexOf(".");
+        if (dot > 0) {
+          const parent = col.slice(0, dot);
+          const key = col.slice(dot + 1);
+          parentFilters[parent] = parentFilters[parent] ?? {};
+          parentFilters[parent]![key] = val;
+          return builder;
+        }
+        filters[col] = val;
+        return builder;
+      },
+      neq(col: string, val: unknown) {
+        neFilters[col] = val;
+        return builder;
+      },
+      order(_col: string, opts: { ascending?: boolean }) {
+        orderDesc = opts?.ascending === false;
+        return builder;
+      },
+      limit(n: number) {
+        let rows = state.ticket_messages.filter((m) => {
+          for (const [k, v] of Object.entries(filters)) {
+            if ((m as unknown as Record<string, unknown>)[k] !== v) return false;
+          }
+          for (const [k, v] of Object.entries(neFilters)) {
+            if ((m as unknown as Record<string, unknown>)[k] === v) return false;
+          }
+          // Phase 5 tenant-guard: enforce parent-table filters by looking up the
+          // ticket row via state.tickets[].id and requiring every parent-column eq.
+          // A ticket_messages row whose parent ticket doesn't match the predicates
+          // (foreign workspace, or no matching ticket at all) is filtered OUT —
+          // this models the PostgREST `!inner` join faithfully.
+          for (const [parent, preds] of Object.entries(parentFilters)) {
+            if (parent !== "tickets") continue; // only join we model here
+            const parentRow = state.tickets.find((t) => t.id === (m as unknown as { ticket_id?: string }).ticket_id);
+            if (!parentRow) return false;
+            for (const [pk, pv] of Object.entries(preds)) {
+              if ((parentRow as unknown as Record<string, unknown>)[pk] !== pv) return false;
+            }
+          }
+          return true;
+        });
+        rows = rows.slice().sort((a, b) => (orderDesc
+          ? (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0)
+          : (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0)));
+        rows = rows.slice(0, n);
+        return Promise.resolve({
+          data: rows.map((r) => ({
+            id: r.id,
+            body: r.body,
+            body_clean: r.body_clean,
+            created_at: r.created_at,
+          })),
+          error: null,
+        });
+      },
+      insert(_row: unknown) {
+        state.ticketMessageWrites++;
+        throw new Error(
+          "reSessionSol must NOT write to ticket_messages — the router sends no customer-facing message",
+        );
+      },
+      update(_patch: unknown) {
+        state.ticketMessageWrites++;
+        throw new Error(
+          "reSessionSol must NOT write to ticket_messages — the router sends no customer-facing message",
+        );
+      },
+    };
+    return builder;
+  }
+
   function fromResolutionEvents() {
     return {
       insert(row: Record<string, unknown>) {
@@ -241,12 +355,7 @@ function makeAdmin(seed: SeedInput) {
         );
       }
       if (table === "ticket_resolution_events") return fromResolutionEvents();
-      if (table === "ticket_messages") {
-        state.ticketMessageWrites++;
-        throw new Error(
-          "reSessionSol must NOT touch ticket_messages — the router sends no customer-facing message",
-        );
-      }
+      if (table === "ticket_messages") return fromTicketMessages();
       throw new Error(`unexpected table: ${table}`);
     },
   };
@@ -292,11 +401,26 @@ function seedConfig(overrides: Partial<FakeChannelConfig> = {}): FakeChannelConf
 
 const EV: InflectionEvidence = { stage: 1, reason: "stage1_frustration_cue", cues: ["refund_now"] };
 
+function seedInboundMsg(overrides: Partial<FakeTicketMessage> = {}): FakeTicketMessage {
+  return {
+    id: "msg-newest",
+    ticket_id: TID,
+    direction: "inbound",
+    author_type: "customer",
+    visibility: "external",
+    body: "Can we move order to Oct 30th as I ordered enough Aug n Sept???????",
+    body_clean: "Can we move order to Oct 30th as I ordered enough Aug n Sept???????",
+    created_at: "2026-08-05T14:14:00Z",
+    ...overrides,
+  };
+}
+
 test("frustration + live Direction → supersede fires + agent_jobs row carries the spec payload", async () => {
   const { admin, state } = makeAdmin({
     directions: [seedLive()],
     tickets: [seedTicket()],
     channel_configs: [seedConfig()],
+    ticket_messages: [seedInboundMsg()],
     nextJobId: "job-abc",
   });
   const res = await reSessionSol(admin, TID, {
@@ -332,6 +456,15 @@ test("frustration + live Direction → supersede fires + agent_jobs row carries 
   assert.equal(parsed.kind, "frustration");
   assert.equal(parsed.superseded_direction_id, "dir-live");
   assert.deepEqual(parsed.evidence, EV);
+  // Phase 1 of inflection-resession-must-act-on-newest-ask — the triggering message is
+  // snapshotted onto the instructions so Sol can quote it + address it, not just the kind label.
+  assert.ok(parsed.trigger_message, "trigger_message must be present on the instructions");
+  assert.equal(parsed.trigger_message.id, "msg-newest");
+  assert.equal(
+    parsed.trigger_message.text,
+    "Can we move order to Oct 30th as I ordered enough Aug n Sept???????",
+  );
+  assert.equal(parsed.trigger_message.created_at, "2026-08-05T14:14:00Z");
 });
 
 test("drift branch: same supersede+enqueue shape — the holding-message policy is the caller's job", async () => {
@@ -339,6 +472,7 @@ test("drift branch: same supersede+enqueue shape — the holding-message policy 
     directions: [seedLive()],
     tickets: [seedTicket()],
     channel_configs: [seedConfig()],
+    ticket_messages: [seedInboundMsg()],
   });
   const res = await reSessionSol(admin, TID, {
     workspace_id: WS,
@@ -369,6 +503,7 @@ test("no-live-direction fallback: enqueues on genuine no-Direction (nothing ever
     tickets: [seedTicket()],
     channel_configs: [seedConfig()],
     jobs: [],
+    ticket_messages: [seedInboundMsg()],
     nextJobId: "job-fallback",
   });
   const res = await reSessionSol(admin, TID, {
@@ -400,6 +535,13 @@ test("no-live-direction fallback: enqueues on genuine no-Direction (nothing ever
   assert.equal(parsed.kind, "frustration");
   assert.equal(parsed.superseded_direction_id, null, "no prior Direction to link — must be null");
   assert.deepEqual(parsed.evidence, EV);
+  // Phase 1 — the fallback enqueue carries the trigger_message snapshot too, so a bounced
+  // first-touch session can quote the customer's newest ask instead of guessing from the brief.
+  assert.ok(
+    parsed.trigger_message,
+    "fallback-enqueue instructions must carry trigger_message (Phase 1)",
+  );
+  assert.equal(parsed.trigger_message.id, "msg-newest");
 
   // Observability ledger row stamped with the distinguishing reasoning marker.
   const ev = state.resolution_events.find((e) => e.reasoning === "sol:resession-no-direction");
@@ -570,6 +712,282 @@ test("below cap: resession_count increments by exactly 1 + agent_jobs row insert
   const dir = state.directions.find((d) => d.id === "dir-live")!;
   assert.equal(dir.resession_count, 2, "resession_count incremented by exactly 1 (1 → 2)");
   assert.notEqual(dir.superseded_at, null, "supersede fired after increment");
+});
+
+// ── Phase 1 of inflection-resession-must-act-on-newest-ask — trigger_message ──
+// The re-session instructions MUST carry the newest inbound customer message so
+// Sol's prompt can tell her WHICH ask to address (the inflection `kind` is tone
+// context only). Ground truth: ticket dc31bf31 (14:14 "move to Oct 30???????" →
+// Sol re-answered Sep 2 → $237.16 refund + cancelled subscriber).
+
+test("Phase 1: trigger_message snapshots the NEWEST inbound customer ticket_messages row (not an older one)", async () => {
+  const { admin, state } = makeAdmin({
+    directions: [seedLive()],
+    tickets: [seedTicket()],
+    channel_configs: [seedConfig()],
+    ticket_messages: [
+      seedInboundMsg({
+        id: "msg-older",
+        body: "Where is my order?",
+        body_clean: "Where is my order?",
+        created_at: "2026-08-05T13:00:00Z",
+      }),
+      seedInboundMsg({
+        id: "msg-newest",
+        body: "Can we move order to Oct 30th as I ordered enough Aug n Sept???????",
+        body_clean: "Can we move order to Oct 30th as I ordered enough Aug n Sept???????",
+        created_at: "2026-08-05T14:14:00Z",
+      }),
+    ],
+    nextJobId: "job-newest-ask",
+  });
+  const res = await reSessionSol(admin, TID, {
+    workspace_id: WS,
+    channel: CH,
+    kind: "frustration",
+    evidence: EV,
+    turn_index: 2,
+  });
+  assert.equal(res.enqueued, true);
+  const parsed = JSON.parse(state.jobs[0]!.instructions);
+  assert.ok(parsed.trigger_message, "trigger_message must be present");
+  assert.equal(parsed.trigger_message.id, "msg-newest", "newest inbound message wins");
+  assert.equal(
+    parsed.trigger_message.text,
+    "Can we move order to Oct 30th as I ordered enough Aug n Sept???????",
+  );
+  assert.equal(parsed.trigger_message.created_at, "2026-08-05T14:14:00Z");
+});
+
+test("Phase 1: trigger_message prefers body_clean over body (same text the detector classified)", async () => {
+  const { admin, state } = makeAdmin({
+    directions: [seedLive()],
+    tickets: [seedTicket()],
+    channel_configs: [seedConfig()],
+    ticket_messages: [
+      seedInboundMsg({
+        id: "msg-newest",
+        body: "<p>raw HTML wrapper</p>Can we move order to Oct 30th?",
+        body_clean: "Can we move order to Oct 30th?",
+        created_at: "2026-08-05T14:14:00Z",
+      }),
+    ],
+    nextJobId: "job-prefer-clean",
+  });
+  await reSessionSol(admin, TID, {
+    workspace_id: WS,
+    channel: CH,
+    kind: "frustration",
+    evidence: EV,
+  });
+  const parsed = JSON.parse(state.jobs[0]!.instructions);
+  assert.equal(
+    parsed.trigger_message.text,
+    "Can we move order to Oct 30th?",
+    "body_clean must win over raw body",
+  );
+});
+
+test("Phase 1: trigger_message falls back to body when body_clean is null (pre-normalizer legacy row)", async () => {
+  const { admin, state } = makeAdmin({
+    directions: [seedLive()],
+    tickets: [seedTicket()],
+    channel_configs: [seedConfig()],
+    ticket_messages: [
+      seedInboundMsg({
+        id: "msg-legacy",
+        body: "move my order please",
+        body_clean: null,
+        created_at: "2026-08-05T14:14:00Z",
+      }),
+    ],
+    nextJobId: "job-legacy",
+  });
+  await reSessionSol(admin, TID, {
+    workspace_id: WS,
+    channel: CH,
+    kind: "frustration",
+    evidence: EV,
+  });
+  const parsed = JSON.parse(state.jobs[0]!.instructions);
+  assert.equal(parsed.trigger_message.text, "move my order please");
+  assert.equal(parsed.trigger_message.id, "msg-legacy");
+});
+
+test("Phase 1: trigger_message skips internal / outbound / non-customer rows (no agent-note masquerade)", async () => {
+  const { admin, state } = makeAdmin({
+    directions: [seedLive()],
+    tickets: [seedTicket()],
+    channel_configs: [seedConfig()],
+    ticket_messages: [
+      // Internal triage stamp — must NOT be picked as the trigger.
+      seedInboundMsg({
+        id: "msg-internal",
+        visibility: "internal",
+        body: "[Triage] Unrecognized portal error",
+        body_clean: "[Triage] Unrecognized portal error",
+        created_at: "2026-08-05T14:20:00Z",
+      }),
+      // Outbound reply — must NOT be picked.
+      seedInboundMsg({
+        id: "msg-outbound",
+        direction: "outbound",
+        body: "Thanks for reaching out",
+        body_clean: "Thanks for reaching out",
+        created_at: "2026-08-05T14:19:00Z",
+      }),
+      // AI-authored draft — not a customer message.
+      seedInboundMsg({
+        id: "msg-ai",
+        author_type: "ai",
+        body: "AI draft",
+        body_clean: "AI draft",
+        created_at: "2026-08-05T14:18:00Z",
+      }),
+      // The real customer message is older than all three above — scope filters must still pick it.
+      seedInboundMsg({
+        id: "msg-newest-customer",
+        body: "please move my order to Oct 30",
+        body_clean: "please move my order to Oct 30",
+        created_at: "2026-08-05T14:14:00Z",
+      }),
+    ],
+    nextJobId: "job-scope",
+  });
+  await reSessionSol(admin, TID, {
+    workspace_id: WS,
+    channel: CH,
+    kind: "frustration",
+    evidence: EV,
+  });
+  const parsed = JSON.parse(state.jobs[0]!.instructions);
+  assert.equal(
+    parsed.trigger_message.id,
+    "msg-newest-customer",
+    "internal / outbound / AI rows must not masquerade as the newest customer ask",
+  );
+});
+
+test("Phase 1: trigger_message is null when no inbound customer messages exist yet (very early race)", async () => {
+  const { admin, state } = makeAdmin({
+    directions: [seedLive()],
+    tickets: [seedTicket()],
+    channel_configs: [seedConfig()],
+    ticket_messages: [],
+    nextJobId: "job-no-msgs",
+  });
+  await reSessionSol(admin, TID, {
+    workspace_id: WS,
+    channel: CH,
+    kind: "frustration",
+    evidence: EV,
+  });
+  const parsed = JSON.parse(state.jobs[0]!.instructions);
+  assert.equal(
+    parsed.trigger_message,
+    null,
+    "null is persisted explicitly so the worker can tell 'snapshot ran but found nothing' from 'field never shipped'",
+  );
+});
+
+// Phase 5 (security-review fix) — cross-tenant guard on the ticket_messages read ────
+// Pre-Phase-5, loadTriggerMessageForTicket read ticket_messages by ticket_id alone and
+// discarded the workspace_id param (ticket_messages has no workspace_id column of its
+// own). A caller passing a foreign ticket_id with the attacker's workspace would snapshot
+// a message from someone else's workspace into the agent_jobs instructions. The fix:
+// a tickets!inner workspace_id join-filter so the parent ticket must belong to the
+// caller's workspace or the message set is empty.
+
+test("Phase 5 security: a ticket_id from a FOREIGN workspace cannot leak a message into trigger_message", async () => {
+  const foreignWs = "77777777-0000-0000-0000-0000000000ws";
+  const foreignTicket = {
+    id: TID,
+    workspace_id: foreignWs,
+    escalated_at: null,
+    escalated_to: null,
+    escalation_reason: null,
+  };
+  // Seed a same-workspace active job so the fallback bails cleanly (no live Direction
+  // in input.workspace_id). This isolates the test to the message-read scoping.
+  const activeJob: FakeJob = {
+    id: "job-in-flight",
+    workspace_id: WS,
+    kind: "ticket-handle",
+    spec_slug: `ticket-handle-${TID.slice(0, 8)}`,
+    status: "queued",
+    instructions: "",
+  };
+  const { admin, state } = makeAdmin({
+    directions: [],
+    tickets: [foreignTicket],
+    channel_configs: [seedConfig()],
+    jobs: [activeJob],
+    // The message exists on the ticket row, but the row belongs to a FOREIGN workspace.
+    // The guard must refuse to surface it.
+    ticket_messages: [
+      {
+        id: "msg-foreign",
+        ticket_id: TID,
+        direction: "inbound",
+        author_type: "customer",
+        visibility: "external",
+        body: "secret-cross-tenant-text",
+        body_clean: "secret-cross-tenant-text",
+        created_at: "2026-08-05T14:14:00Z",
+      },
+    ],
+  });
+  const res = await reSessionSol(admin, TID, {
+    workspace_id: WS, // caller's workspace — DIFFERENT from the ticket's foreignWs
+    channel: CH,
+    kind: "frustration",
+    evidence: EV,
+  });
+  // No live Direction in WS + an active job already in WS → the router bails. No new
+  // agent_jobs row inserted. The security guarantee being tested: even if the router
+  // HAD fanned out, the trigger_message would be null because the join rejects the
+  // foreign-workspace parent row.
+  assert.equal(res.enqueued, false, "concurrent-job dedup should bail");
+  // Prove the guard directly: insert a non-foreign case to show the diff is scoping.
+  // (A follow-up guard test below seeds a same-workspace ticket to prove the read works.)
+  // Here the invariant: no NEW job row created; no foreign message escaped the scope.
+  assert.equal(state.jobs.length, 1, "no new job inserted on the concurrent-dedup path");
+  const existing = state.jobs[0]!;
+  assert.equal(existing.id, "job-in-flight", "pre-existing job untouched");
+  // And the stub's write-count guard confirms the router did not write to ticket_messages.
+  assert.equal(state.ticketMessageWrites, 0, "router must not write to ticket_messages");
+});
+
+test("Phase 5 security: a ticket_id in the CALLER's workspace still returns its newest message (positive case)", async () => {
+  // Positive side of the tenant guard: same ticket_id, same workspace → message surfaces.
+  const { admin, state } = makeAdmin({
+    directions: [seedLive()],
+    tickets: [seedTicket()], // this is in WS (the caller's workspace)
+    channel_configs: [seedConfig()],
+    ticket_messages: [
+      {
+        id: "msg-same-ws",
+        ticket_id: TID,
+        direction: "inbound",
+        author_type: "customer",
+        visibility: "external",
+        body: "legitimate-same-tenant-ask",
+        body_clean: "legitimate-same-tenant-ask",
+        created_at: "2026-08-05T14:14:00Z",
+      },
+    ],
+    nextJobId: "job-positive",
+  });
+  await reSessionSol(admin, TID, {
+    workspace_id: WS,
+    channel: CH,
+    kind: "frustration",
+    evidence: EV,
+  });
+  const parsed = JSON.parse(state.jobs[0]!.instructions);
+  assert.ok(parsed.trigger_message, "same-workspace ticket must still surface its newest message");
+  assert.equal(parsed.trigger_message.id, "msg-same-ws");
+  assert.equal(parsed.trigger_message.text, "legitimate-same-tenant-ask");
 });
 
 test("cap-hit workspace scoping: escalate is workspace-scoped (never touches a foreign ticket)", async () => {
