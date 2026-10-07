@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: SELECT workspaces.updated_at ad-hoc lookup** · verified 2026-10-07 · → [[../inngest/supabase-log-poll]]
