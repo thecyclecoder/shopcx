@@ -624,6 +624,41 @@ export async function getLiveDirection(
 export const loadLiveDirection = getLiveDirection;
 
 /**
+ * Phase 3 of [[../specs/every-inbound-handled-within-30-min]] — session-written direction
+ * recovery.
+ *
+ * Three Sol sessions on 2026-10-07 ran to completion with `terminal_reason=completed` AND
+ * posted the "Direction written" session note, but the worker's `No recognizable verdict`
+ * branch (scripts/builder-worker.ts) failed them anyway because the FINAL output JSON
+ * didn't carry a `direction` key — so the writes Sol had already made to
+ * `ticket_directions` were thrown away and the ticket stranded.
+ *
+ * This helper lets the worker, before failing, check whether Sol wrote a Direction row
+ * DURING the session. If a non-superseded row's `authored_at` is at or after the session
+ * start, the completed Direction exists on-disk and the worker continues the normal
+ * completed path with it instead of discarding ~$0.90 of work.
+ *
+ * Pure read; no side-effects. Returns `null` when nothing qualifies.
+ */
+export async function findDirectionWrittenDuringSession(
+  admin: Admin,
+  ticketId: string,
+  sessionStartedAt: string,
+): Promise<TicketDirection | null> {
+  const { data, error } = await admin
+    .from("ticket_directions")
+    .select(COLS)
+    .eq("ticket_id", ticketId)
+    .is("superseded_at", null)
+    .gte("authored_at", sessionStartedAt)
+    .order("authored_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as TicketDirection | null) ?? null;
+}
+
+/**
  * message_sent → close. Phase 1 of
  * [[../specs/sol-closes-ticket-on-resolving-reply-so-cora-grades-it]].
  *

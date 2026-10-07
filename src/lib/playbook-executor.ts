@@ -68,6 +68,52 @@ async function resolveOrderShippingAddress(admin: Admin, orderId: string): Promi
   return null;
 }
 
+/**
+ * Render a subscription's items with FLAVOR names (variant_title) attached, deduping the
+ * shared product name. Phase 5 of every-inbound-handled-within-30-min: ticket cc3d6b9b
+ * shipped a reply saying "Superfood Tabs and Superfood Tabs" because the renderer only
+ * read `title` and dropped the per-line `variant_title`. This helper reads both so two
+ * flavors of the same product render as "Superfood Tabs in Peach Mango and Mixed Berry",
+ * and two different products render as "Superfood Tabs in Peach Mango and Energy Mix in
+ * Berry" — flavor names present, product name deduped when every line shares it.
+ *
+ * Shape handled: `items` is a `Shopify-ish` JSON array stored on `subscriptions.items`
+ * — each entry carries at least `title` (product title) and optionally `variant_title`
+ * (the flavor / size). Pure — no DB.
+ */
+export function renderSubItemsWithVariants(items: unknown): string {
+  if (!Array.isArray(items) || items.length === 0) return "your products";
+  const rows = items
+    .map((raw) => {
+      const it = (raw ?? {}) as { title?: unknown; variant_title?: unknown };
+      const title = (it.title ?? "").toString().trim();
+      const variant = (it.variant_title ?? "").toString().trim();
+      return { title: title || "item", variant: variant && variant.toLowerCase() !== "default title" ? variant : "" };
+    })
+    .filter((r) => r.title);
+  if (!rows.length) return "your products";
+
+  // When every line shares the same product title and each carries a distinct variant,
+  // collapse to "<Product> in <variantA> and <variantB>" (joining with commas + "and" for
+  // three or more). Otherwise render each line as "<Product> in <variant>" (or bare
+  // "<Product>") and join the list.
+  const sharedTitle = rows.every((r) => r.title === rows[0]!.title) ? rows[0]!.title : null;
+  const allHaveVariants = rows.every((r) => r.variant.length > 0);
+  if (sharedTitle && allHaveVariants && rows.length > 1) {
+    const flavors = rows.map((r) => r.variant);
+    return `${sharedTitle} in ${joinWithAnd(flavors)}`;
+  }
+  const parts = rows.map((r) => (r.variant ? `${r.title} in ${r.variant}` : r.title));
+  return joinWithAnd(parts);
+}
+
+function joinWithAnd(parts: string[]): string {
+  if (parts.length === 0) return "";
+  if (parts.length === 1) return parts[0]!;
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
+  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
+}
+
 /** Translate raw billing intervals to customer-friendly labels */
 function translateIntervals(text: string): string {
   return text
@@ -2183,15 +2229,22 @@ async function handleApplyPolicy(
     }
   }
 
-  // Subscription created
+  // Subscription created.
+  //
+  // Phase 5 of every-inbound-handled-within-30-min: the item list must name the FLAVOR
+  // (variant_title), not just the product title, and dedupe the product name so two
+  // flavors of the same product render as "Superfood Tabs in Peach Mango and Mixed Berry"
+  // instead of "Superfood Tabs and Superfood Tabs". The subscription-created note is
+  // written as short plain sentences — no run-on date ledger (refund.md § Communication
+  // rules).
   if (subCreated) {
-    const items = sub ? (sub.items as { title?: string }[] || []).map(i => i.title || "item").join(" and ") : "your products";
-    // If interval was changed after the order, we note the original interval in the subscription description
-    // Use the current interval as the description (it's what the customer has now)
-    const intervalDesc = originalInterval || "a recurring schedule";
+    const items = sub ? renderSubItemsWithVariants(sub.items as unknown) : "your products";
     timelineEvents.push({
       date: new Date(subCreated),
-      label: `You checked out on our website and selected the subscribe and save option. That created your first order and set up a recurring subscription for ${items}. You can always cancel a subscription anytime, but if you cancel after an order is made, it will stop future orders but can't stop an order that's already processed.`,
+      label:
+        `You started a subscription for ${items}. ` +
+        `A subscription can be cancelled anytime, which stops future orders but cannot ` +
+        `stop an order that has already processed.`,
     });
   }
 
@@ -3412,6 +3465,98 @@ export async function assertPlaybookStepConfidence(
  * this is functionally "seed the initial context object". Legacy signal-matched calls omit the
  * argument and get the pre-Phase-2 behavior (empty `{}`) unchanged.
  */
+/**
+ * Deterministic intent → playbook router. Phase 2 of
+ * [[../../docs/brain/specs/every-inbound-handled-within-30-min]].
+ *
+ * Ground truth: ticket 09f7257a (Angelica Devine, 2026-10-07). Her message matched the
+ * Refund playbook's `trigger_intents` (`unwanted_charge`, `charged_without_permission`,
+ * `refund_request`) exactly, but Sol and the orchestrator both routed to a bare cancel
+ * journey and called it out-of-policy themselves — skipping the Refund playbook's tier
+ * ladder (OOP tiers 1 → 2 → 3). This router closes that gap: when the classified intent
+ * is in an active playbook's `trigger_intents` AND no playbook is active on the ticket,
+ * start the playbook deterministically instead of leaving the choice to Sol/Sonnet.
+ *
+ * Idempotent + racey-write-safe: a re-call on an already-active playbook is a no-op (the
+ * `active_playbook_id IS NULL` guard inside `startPlaybook`'s compare-and-set `.update`
+ * narrows the write), so a second-sweep call never resets `playbook_step` on a ticket
+ * mid-flow.
+ *
+ * Returns `{ routed: true, playbook_id, playbook_name }` when a playbook was started,
+ * `{ routed: false, reason }` otherwise. The caller (unified-ticket-handler) decides
+ * whether to short-circuit the Sonnet orchestrator on `routed:true`.
+ */
+export async function routeIntentToPlaybook(
+  admin: Admin,
+  workspaceId: string,
+  ticketId: string,
+  intent: string,
+): Promise<
+  | { routed: true; playbook_id: string; playbook_name: string }
+  | { routed: false; reason: "no_intent" | "ticket_has_active_playbook" | "no_match" | "ticket_missing" }
+> {
+  const normIntent = (intent ?? "").toString().trim().toLowerCase();
+  if (!normIntent) return { routed: false, reason: "no_intent" };
+
+  // Guard-first: a ticket already carrying a playbook is NOT re-routed. The guarded
+  // `startPlaybook` below also enforces this at the write, but a cheap read-time check
+  // avoids the playbooks lookup entirely on the common continuation path.
+  const { data: ticket } = await admin
+    .from("tickets")
+    .select("active_playbook_id")
+    .eq("id", ticketId)
+    .single();
+  if (!ticket) return { routed: false, reason: "ticket_missing" };
+  if (ticket.active_playbook_id) return { routed: false, reason: "ticket_has_active_playbook" };
+
+  const { data: playbooks } = await admin
+    .from("playbooks")
+    .select("id, name, slug, trigger_intents")
+    .eq("workspace_id", workspaceId)
+    .eq("is_active", true)
+    .order("priority", { ascending: false });
+
+  // Match semantics: substring-either-way on normalized intents (same shape as
+  // `matchPlaybook`), skipping session-chosen-only playbooks (assisted-purchase lane).
+  const { isSessionChosenOnlyPlaybook } = await import("@/lib/assisted-purchase-direction");
+  for (const pb of playbooks || []) {
+    if (isSessionChosenOnlyPlaybook(pb.slug as string | null)) continue;
+    const triggers = ((pb.trigger_intents as string[] | null) ?? []).map((t) =>
+      (t ?? "").toString().trim().toLowerCase(),
+    );
+    const hit = triggers.some(
+      (t) => t.length > 0 && (normIntent === t || normIntent.includes(t) || t.includes(normIntent)),
+    );
+    if (!hit) continue;
+
+    // Compare-and-set start: `startPlaybook`'s `.update` already filters by `id`, but we
+    // re-assert `active_playbook_id IS NULL` here so a race with another writer doesn't
+    // clobber `playbook_step` on an in-flight run. The second-write path is safe (same
+    // playbook_id) but `playbook_step` would reset to 0 which is semantically wrong.
+    const { data: raced } = await admin
+      .from("tickets")
+      .select("active_playbook_id")
+      .eq("id", ticketId)
+      .single();
+    if (raced?.active_playbook_id) {
+      return { routed: false, reason: "ticket_has_active_playbook" };
+    }
+    await startPlaybook(admin, ticketId, pb.id as string);
+    // Execute step 0 so the playbook's first reply ships THIS turn (matching the shape
+    // handlePlaybook in action-executor.ts uses when it dispatches a new playbook).
+    try {
+      await executePlaybookStep(workspaceId, ticketId, "", null);
+    } catch {
+      // Step-level failure is contained — the ticket is now on the playbook and the next
+      // inbound turn will re-enter executePlaybookStep normally. We do not unwind the
+      // startPlaybook write because the ticket is already on the playbook's ladder.
+    }
+    return { routed: true, playbook_id: pb.id as string, playbook_name: pb.name as string };
+  }
+
+  return { routed: false, reason: "no_match" };
+}
+
 export async function startPlaybook(
   admin: Admin, ticketId: string, playbookId: string,
   opts?: { seed_context?: Record<string, unknown> },

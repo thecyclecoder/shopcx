@@ -2362,6 +2362,41 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       const { pickOrchestratorModel } = await import("@/lib/model-picker");
       const { applyNoProgressCircuit } = await import("@/lib/no-progress-guard");
 
+      // ── Phase 2 of every-inbound-handled-within-30-min: deterministic intent→playbook router.
+      // Before paying for Sonnet, check whether the classified intent is in an active playbook's
+      // trigger_intents AND the ticket has no active playbook. If yes, start the playbook — the
+      // Refund playbook's tier ladder owns refund-intent messages, not a bare cancel journey
+      // chosen by Sonnet (ticket 09f7257a was the ground truth: `unwanted_charge` + `refund_request`
+      // matched Refund exactly, yet Sonnet ran a cancel journey).
+      const playbookRouted = await step.run("intent-playbook-route", async () => {
+        if (await newerActivity(admin, tid, t0)) return { routed: false as const };
+        try {
+          // Cheap Haiku-only intent classification over the newest message — matches the shape
+          // the old pipeline used, kept local so we don't move the orchestrator onto this cost.
+          const ctx = await assembleTicketContext(wsId, tid);
+          const custCtx = ctx.systemPrompt.split("CUSTOMER CONTEXT:")[1]?.split("CHANNEL")[0]?.trim() || "";
+          const hist = ctx.conversationHistory.map((m) => `${m.role}: ${m.content}`).join("\n");
+          const hNames = await handlerNames(admin, wsId, st.hasCust, st.ch);
+          const intent = await classifyIntent(msg, custCtx, hist, hNames);
+          const { routeIntentToPlaybook } = await import("@/lib/playbook-executor");
+          const r = await routeIntentToPlaybook(admin, wsId, tid, intent.intent);
+          if (r.routed) {
+            await sysNote(
+              admin,
+              tid,
+              `[System] Intent→playbook router: classified intent="${intent.intent}" matched Refund-tier playbook "${r.playbook_name}" (${r.playbook_id.slice(0, 8)}). Starting playbook deterministically — the Refund playbook's tier ladder owns refund-intent messages (not a bare cancel journey).`,
+            );
+            return { routed: true as const };
+          }
+          return { routed: false as const };
+        } catch {
+          return { routed: false as const };
+        }
+      });
+      if (playbookRouted.routed) {
+        return { status: "intent_playbook_routed" };
+      }
+
       // ── No-progress circuit (Phase 3 of ticket-merge-summary-and-context-cap) ──
       // Before paying for another Sonnet/Opus turn, check whether the
       // ticket is stuck in a loop: M consecutive inbound customer
@@ -2425,10 +2460,15 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       // to the customer rather than silently restating an older answer.
       const dateChangeGateOutcome = await step.run("date-change-ask-gate", async () => {
         if (await newerActivity(admin, tid, t0)) return { held: false as const };
-        const { detectDateChangeAsk, decisionAddressesDateChange } = await import(
+        const { detectDateChangeAsk, decisionAddressesDateChange, stripQuotedAndForwarded } = await import(
           "@/lib/date-change-ask"
         );
-        const ask = detectDateChangeAsk(msg);
+        // Phase 4 of every-inbound-handled-within-30-min: strip quoted-reply + forwarded-
+        // email blocks before the detector reads the body. Ticket 09f7257a's forwarded
+        // order-confirmation email false-positived here because its "Skip delivery · Pause"
+        // links + date headers tripped BOTH a change-verb and an order-subject anchor.
+        const askBody = stripQuotedAndForwarded(msg);
+        const ask = detectDateChangeAsk(askBody);
         if (!ask.isAsk) return { held: false as const };
         if (decisionAddressesDateChange(sonnetDecision)) return { held: false as const };
 
@@ -2456,8 +2496,38 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           await sysNote(
             admin,
             tid,
-            `[System] date-change-ask gate: reSessionSol threw ${errText(reErr)} — reply still held; next inbound turn will re-enter the gate.`,
+            `[System] date-change-ask gate: reSessionSol threw ${errText(reErr)} — reply still held; routing to June (cs-director-call) so the ticket never strands.`,
           );
+          // Phase 4 of every-inbound-handled-within-30-min: when the re-session fails, the
+          // held reply must not sit — enqueue a cs-director-call so June picks it up
+          // instead of waiting for the 30-min watchdog. Idempotent: a prior inflight
+          // cs-director-call on this ticket collapses this insert.
+          try {
+            const { data: inflight } = await admin
+              .from("agent_jobs")
+              .select("id")
+              .eq("workspace_id", wsId)
+              .eq("kind", "cs-director-call")
+              .eq("spec_slug", tid)
+              .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input"])
+              .limit(1);
+            if (!inflight || !inflight.length) {
+              await admin.from("agent_jobs").insert({
+                workspace_id: wsId,
+                spec_slug: tid,
+                kind: "cs-director-call",
+                status: "queued",
+                instructions: JSON.stringify({
+                  ticket_id: tid,
+                  source: "date-change-ask-gate-resession-failed",
+                  reason: errText(reErr),
+                }),
+                created_by: null,
+              });
+            }
+          } catch {
+            // best-effort — the 30-min watchdog will catch this on its next tick anyway.
+          }
         }
         return { held: true as const };
       });
