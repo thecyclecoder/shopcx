@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST workspace_members.customer_id / .external_customer_id column-missing noise** · verified 2026-10-07 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise`)
