@@ -38,7 +38,7 @@ Each sync runs in its own `step.run` and its failure is collected rather than th
 
 ## Gotchas
 
-- **Amazon sales is a separate SP-API report pull** ([[../libraries/qb-close-sync-amazon-sales]]) — shipped-only, because `daily_amazon_product_snapshots` counts Pending too (July: 803 ordered vs 597 shipped). It is the slowest step: report generation is asynchronous with a 3-minute ceiling.
+- **Amazon sales is a separate SP-API report pull** ([[../libraries/qb-close-sync-amazon-sales]]) — shipped-only, because `daily_amazon_product_snapshots` counts Pending too (July: 803 ordered vs 597 shipped). It is the slowest step: report generation is asynchronous with a 3-minute ceiling, and the 35-day window is pulled as two ≤30-day reports (SP-API caps a report at 30 days — a longer window silently returns no orders).
 - **Processors are synced for the PRIOR month too.** Transactions keep settling for days after the sale, so last month's figures move well into the first week of the next. Shoptics' equivalent snapshot froze at 07-31 08:01 UTC and understated July Braintree gross by ~$618 — a month-to-date capture is not a final figure.
 - `shopify_payments` currently 403s (ShopCX's token lacks `read_shopify_payments_payouts`). By design that leaves the existing row untouched rather than zeroing it, so the failure is loud but harmless.
 - The event form accepts `{start, end}` to re-sync an arbitrary window (a cron firing carries neither).

@@ -178,6 +178,40 @@ export async function assertNonEmptyAmazonCloseReport(
   );
 }
 
+/**
+ * SP-API refuses an orders report spanning more than 30 days. It does NOT error: the request
+ * succeeds and the downloaded document is a single line, "Date range exceeded. Report can be
+ * requested only upto 30 days". The close's 35-day trailing window hit exactly that on every
+ * cron run, so this sync never wrote a row (every qb_amazon_sales_snapshots row through
+ * 2026-09-30 was a Shoptics backfill copy).
+ */
+export const AMAZON_REPORT_MAX_DAYS = 30;
+
+/**
+ * Split an inclusive [start, end] YYYY-MM-DD window into consecutive, non-overlapping chunks of
+ * at most `maxDays` calendar days each. Non-overlap matters: chunk results are summed per
+ * (asin, sale_date), so a shared day would be double-counted.
+ */
+export function splitReportWindow(
+  start: string,
+  end: string,
+  maxDays = AMAZON_REPORT_MAX_DAYS,
+): { start: string; end: string }[] {
+  const day = (s: string) => new Date(`${s}T00:00:00Z`);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  const last = day(end);
+  const chunks: { start: string; end: string }[] = [];
+  for (let cur = day(start); cur <= last; ) {
+    const chunkEnd = new Date(cur);
+    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + maxDays - 1);
+    const e = chunkEnd < last ? chunkEnd : last;
+    chunks.push({ start: fmt(cur), end: fmt(e) });
+    cur = new Date(e);
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return chunks;
+}
+
 /** Wait for a requested report to finish. SP-API report generation is asynchronous. */
 async function waitForReport(
   connectionId: string,
@@ -209,17 +243,23 @@ export async function syncAmazonSalesForClose(
   const merged = new Map<string, Agg>();
   let excluded = 0;
   for (const c of conns) {
-    const reportId = await requestReport(c.id, c.marketplace_id, `${start}T00:00:00Z`, `${end}T23:59:59Z`);
-    const tsv = await waitForReport(c.id, c.marketplace_id, reportId);
-    const parsed = parseShippedUnits(tsv);
-    excluded += parsed.excluded;
-    for (const [k, v] of parsed.byKey) {
-      const cur = merged.get(k);
-      if (!cur) { merged.set(k, v); continue; }
-      cur.units += v.units; cur.revenue += v.revenue;
-      cur.recurringUnits += v.recurringUnits; cur.recurringRevenue += v.recurringRevenue;
-      cur.snsUnits += v.snsUnits; cur.snsRevenue += v.snsRevenue;
-      cur.oneTimeUnits += v.oneTimeUnits; cur.oneTimeRevenue += v.oneTimeRevenue;
+    // Chunks never overlap, so summing per (asin, sale_date) across them cannot double-count.
+    for (const w of splitReportWindow(start, end)) {
+      const reportId = await requestReport(c.id, c.marketplace_id, `${w.start}T00:00:00Z`, `${w.end}T23:59:59Z`);
+      const tsv = await waitForReport(c.id, c.marketplace_id, reportId);
+      if (/^Date range exceeded/i.test(tsv.trim())) {
+        throw new Error(`Amazon rejected report window ${w.start}..${w.end}: ${tsv.trim().slice(0, 120)}`);
+      }
+      const parsed = parseShippedUnits(tsv);
+      excluded += parsed.excluded;
+      for (const [k, v] of parsed.byKey) {
+        const cur = merged.get(k);
+        if (!cur) { merged.set(k, v); continue; }
+        cur.units += v.units; cur.revenue += v.revenue;
+        cur.recurringUnits += v.recurringUnits; cur.recurringRevenue += v.recurringRevenue;
+        cur.snsUnits += v.snsUnits; cur.snsRevenue += v.snsRevenue;
+        cur.oneTimeUnits += v.oneTimeUnits; cur.oneTimeRevenue += v.oneTimeRevenue;
+      }
     }
   }
 

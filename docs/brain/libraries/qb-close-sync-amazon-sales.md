@@ -24,7 +24,8 @@ Wiring the analytics table into the close would have overstated Amazon burn and 
 
 | Export | Purpose |
 |---|---|
-| `syncAmazonSalesForClose(admin, ws, start, end)` | request → poll → download → parse → upsert |
+| `syncAmazonSalesForClose(admin, ws, start, end)` | per ≤30-day chunk: request → poll → download → parse; then merge → upsert |
+| `splitReportWindow(start, end, maxDays=30)` / `AMAZON_REPORT_MAX_DAYS` | split an inclusive window into contiguous, non-overlapping ≤30-day chunks (SP-API's report cap) |
 | `parseShippedUnits(tsv)` | the parser, exported for testing — the shipped/pending split is the whole point |
 | `validateAmazonCloseReportHeaders(headers)` | reject a report with missing required headers (asin, sku, quantity, item-price, purchase-date, promotion-ids, order-status; product-name optional) before parsing |
 | `assertNonEmptyAmazonCloseReport(admin, workspaceId, start, end, parsedShippedRows)` | **guard:** fail loudly when a trailing window that previously contained shipped activity parses to zero rows — signals a stall instead of a silent no-op |
@@ -53,6 +54,12 @@ Caught by `sync-amazon-sales.test.ts` before this ever ran on real data.
 
 `FBA Subscribe & Save Discount` → `recurring` · `Subscribe and Save Promotion V2` → `sns_checkout` · else `one_time`. Amazon writes **`&`** in report data while docs show "and", so both spellings are matched — miss that and subscription revenue silently lands in `one_time`. Buckets sum to `units_shipped` by construction.
 
+## ⭐ SP-API caps an orders report at 30 days — and doesn't error
+
+Request a longer window and the report still comes back `DONE`, but the document is one line: `Date range exceeded. Report can be requested only upto 30 days`. The cron's 35-day lookback ([[../inngest/sync-qb-close-sources]]) hit this on **every run since the sync shipped** — it never wrote a single row. Every `qb_amazon_sales_snapshots` row through 2026-09-30 was a Shoptics copy from `scripts/_backfill-qb-close-sources.ts` (09-30's copy was taken mid-day: 2 units vs a real 18). Found on the September 2026 pre-close check: 577 shipped in the table vs 656 real.
+
+`splitReportWindow(start, end)` now cuts the window into contiguous, **non-overlapping** chunks of ≤ `AMAZON_REPORT_MAX_DAYS` (30) — non-overlap matters because chunk results are summed per `(asin, sale_date)`. A response matching `Date range exceeded` throws with the window named, so a future limit change fails loudly instead of parsing as "no orders".
+
 ## Gotchas
 
 - **Header validation + empty-report guard:** `validateAmazonCloseReportHeaders` refuses a report with missing required columns (asin, sku, quantity, item-price, purchase-date, promotion-ids, order-status; product-name is optional). A missing header silently shifts every column index left and reads garbage as a status. `assertNonEmptyAmazonCloseReport` runs AFTER all `amazon_connections` are merged and fails loudly when a trailing window with prior shipped activity parses to zero rows — the exact 2026-09-30 stall mode. A cold window (no prior rows) legitimately no-ops. The throw escalates to `sync-qb-close-sources`' per-sync catch, surfacing `amazon-sales` in the heartbeat's `detail` fan-out and flipping the beat to `ok: false` so Grace/Ada see an actionable signal.
@@ -63,7 +70,7 @@ Caught by `sync-amazon-sales.test.ts` before this ever ran on real data.
 
 ## Tests
 
-`src/lib/qb-close/sync-amazon-sales.test.ts` — 12 cases covering parser rules (shipped vs pending/cancelled bucketing, promotion bucketing, edge cases), header validation, and the empty-report guard (no-op on merged rows, no-op on cold window, throw on empty-vs-existing, Supabase probe errors). Run: `npx tsx --test src/lib/qb-close/sync-amazon-sales.test.ts`.
+`src/lib/qb-close/sync-amazon-sales.test.ts` — 15 cases covering parser rules (shipped vs pending/cancelled bucketing, promotion bucketing, edge cases), header validation, the 30-day window splitter, and the empty-report guard (no-op on merged rows, no-op on cold window, throw on empty-vs-existing, Supabase probe errors). Run: `npx tsx --test src/lib/qb-close/sync-amazon-sales.test.ts`.
 
 ## Related
 
