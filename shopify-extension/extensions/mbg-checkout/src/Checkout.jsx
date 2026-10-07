@@ -84,25 +84,28 @@ function GuaranteeTerms() {
   const terms = Array.isArray(guarantee.terms) ? guarantee.terms : [];
 
   return (
-    <s-box border="base" borderRadius="large" padding="base">
-      <s-grid gridTemplateColumns="40px 1fr" columnGap="base" alignItems="center">
+    // Centered, type-led card on a tinted band: no seal by default (founder found
+    // seals dated, 2026-10-07). The badge_url setting adds an image on top if set.
+    <s-box background="subdued" borderRadius="large" padding="large-100">
+      <s-stack gap="small-200" alignItems="center">
         {badge ? (
-          <s-image src={badge} alt="" aspectRatio="1" />
-        ) : (
-          <s-icon type="check-circle" size="large" />
-        )}
-        <s-stack gap="small-300">
-          <s-text type="strong">{guarantee.title}</s-text>
-          <s-text type="small" color="subdued">
-            Not happy with your first order? Send it back within 30 days for a refund.
-          </s-text>
-          {terms.length ? (
-            <s-link command="--show" commandFor={MODAL_ID}>
-              See terms
-            </s-link>
-          ) : null}
-        </s-stack>
-      </s-grid>
+          <s-box inlineSize="72px">
+            <s-image src={badge} alt={guarantee.title} aspectRatio="1" />
+          </s-box>
+        ) : null}
+        <s-text type="small" color="subdued">
+          30-DAY MONEY-BACK GUARANTEE
+        </s-text>
+        <s-heading>Try it for 30 days</s-heading>
+        <s-paragraph textAlign="center" color="subdued">
+          Love it, or send back your first order within 30 days for a refund.
+        </s-paragraph>
+        {terms.length ? (
+          <s-link command="--show" commandFor={MODAL_ID}>
+            See guarantee terms
+          </s-link>
+        ) : null}
+      </s-stack>
 
       {terms.length ? (
         <s-modal id={MODAL_ID} heading={guarantee.title} padding="base">
