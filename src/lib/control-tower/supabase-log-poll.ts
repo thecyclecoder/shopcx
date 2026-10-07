@@ -90,6 +90,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
+  isForeignSupabasePostgresMissingWorkspacesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsShopifyProductIdAdhocNoise,
   isForeignSupabasePostgresMissingCrisisCustomerActionsColumnDirectRestNoise,
@@ -1150,6 +1151,27 @@ const LOG_QUERIES: LogQuery[] = [
       // `workspaces`, or on `workspaces` via a non-SELECT statement (real code-bug
       // shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.workspaces.updated_at`. The `workspaces` table has NEVER
+      // carried an `updated_at` column — no ShopCX code path (src/, scripts/,
+      // shopify-extension/, docs/brain/) issues a SELECT on `workspaces.updated_at`.
+      // The column-missing ERROR only reaches this feed when an external PostgREST
+      // caller (Supabase Studio's Table Editor / API Docs, a foreign SQL client, a
+      // stale exploratory query, a third-party integration) emits
+      // `select ... updated_at ... from public.workspaces` — or the
+      // `WITH pgrst_source AS ( SELECT ... FROM "public"."workspaces" ... )` CTE
+      // wrapper the same client emits over the REST endpoint. There is no lever from
+      // ShopCX to make that query resolve — paging Platform on it (Control Tower
+      // signature `supabase-logs:d9958c473b0f14f4`,
+      // [[../specs/error-feed-drop-workspaces-updated-at-column-adhoc-noise]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-workspaces shape (bare OR PostgREST CTE
+      // wrapper) — a column-missing error on any other column of `workspaces` (a real
+      // product-schema regression on a live column), on `updated_at` from any other
+      // table (a real code bug on another table that has such a column), or on
+      // `workspaces` via a non-SELECT statement (real code-bug shape) still surfaces /
+      // pages on first sighting.
+      if (isForeignSupabasePostgresMissingWorkspacesUpdatedAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.product_variants.price`. The `product_variants` table exists but
       // has NO bare `price` column — pricing lives on `product_variants.price_cents`
