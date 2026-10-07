@@ -626,16 +626,19 @@ export async function reSessionSol(
     // Best-effort observability ledger — mirrors the cap-hit branch's diagnostic stamp so a
     // failed ledger write cannot wedge the enqueue that keeps the customer promise.
     try {
-      await admin.from("ticket_resolution_events").insert({
-        workspace_id: input.workspace_id,
-        ticket_id,
-        turn_index: input.turn_index ?? null,
-        reasoning: "sol:resession-no-direction",
-        chosen: {
-          kind: input.kind,
-          fallback: "first_touch_no_live_direction",
-        } as Record<string, unknown>,
-      });
+      // ledger-skip-missing-turn-index: ticket_resolution_events.turn_index is NOT NULL per supabase/migrations/20260917120004_ticket_resolution_events.sql, so a stamp with no known turn is skipped rather than attempted-and-rejected.
+      if (typeof input.turn_index === "number") {
+        await admin.from("ticket_resolution_events").insert({
+          workspace_id: input.workspace_id,
+          ticket_id,
+          turn_index: input.turn_index,
+          reasoning: "sol:resession-no-direction",
+          chosen: {
+            kind: input.kind,
+            fallback: "first_touch_no_live_direction",
+          } as Record<string, unknown>,
+        });
+      }
     } catch {
       // Ledger is diagnostic — do not block the fallback enqueue.
     }
@@ -687,19 +690,22 @@ export async function reSessionSol(
 
     // Ledger stamp — best-effort like the inflection-event insert in `applyInflectionGate`
     // (a diagnostic write that must not wedge the escalate). turn_index is threaded from the
-    // caller (nullable — the ledger tolerates NULL turn_index for out-of-band stamps).
+    // caller.
     try {
-      await admin.from("ticket_resolution_events").insert({
-        workspace_id: input.workspace_id,
-        ticket_id,
-        turn_index: input.turn_index ?? null,
-        reasoning: "sol:cap-hit",
-        chosen: {
-          resession_count: live.resession_count,
-          sol_max_resessions: solMaxResessions,
-          kind: input.kind,
-        } as Record<string, unknown>,
-      });
+      // ledger-skip-missing-turn-index: ticket_resolution_events.turn_index is NOT NULL per supabase/migrations/20260917120004_ticket_resolution_events.sql, so a stamp with no known turn is skipped rather than attempted-and-rejected.
+      if (typeof input.turn_index === "number") {
+        await admin.from("ticket_resolution_events").insert({
+          workspace_id: input.workspace_id,
+          ticket_id,
+          turn_index: input.turn_index,
+          reasoning: "sol:cap-hit",
+          chosen: {
+            resession_count: live.resession_count,
+            sol_max_resessions: solMaxResessions,
+            kind: input.kind,
+          } as Record<string, unknown>,
+        });
+      }
     } catch {
       // Ledger is diagnostic — do not block the cap-hit escalate.
     }
