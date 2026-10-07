@@ -102,6 +102,7 @@ import {
   isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoise,
   isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise,
   isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise,
+  isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isExpectedBillingForecastsPendingUniqViolation,
 } from "@/lib/control-tower/error-feed";
@@ -1210,6 +1211,24 @@ const LOG_QUERIES: LogQuery[] = [
       // so the literal substring without parens must appear verbatim in-file):
       // isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoisemessage, query
       if (isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.workspace_members` naming `customer_id` / `external_customer_id`
+      // — columns the table has NEVER carried (membership is a workspace↔user link, not
+      // a customer link; the full repo + git history has zero references to
+      // `external_customer_id`). The column-missing ERROR only reaches this feed when a
+      // foreign app / stale Supabase Studio session / deprecated integration queries
+      // `/rest/v1/workspace_members?select=customer_id,external_customer_id,...` as if
+      // the row carried a customer FK. There is no lever from ShopCX to make that query
+      // resolve — adding either column to `workspace_members` would be a schema lie, and
+      // paging Platform on it (Control Tower signature `supabase-logs:a19c9bdd091bdaa8`,
+      // [[../specs/error-feed-drop-workspace-members-customer-id-direct-rest-no]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message (on one of the two off-schema columns) AND a
+      // SELECT-on-workspace_members shape (bare OR PostgREST CTE wrapper) — a
+      // column-missing error on any other table, a different column on
+      // `workspace_members`, or on `workspace_members` via a non-SELECT statement (real
+      // code-write bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.products` naming one of three columns that have NEVER lived on
       // the products table — `ingredients`, `supplement_facts`, `benefits`. Product
