@@ -21,7 +21,7 @@
  * See docs/brain/tables/agent_model_tiers.md and docs/brain/libraries/agent-model-tiers.md.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
-import { MODELS, type ModelTier } from "@/lib/ai-models";
+import { BOX_MODELS, type ModelTier } from "@/lib/ai-models";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -43,7 +43,7 @@ export function isModelTier(v: unknown): v is ModelTier {
 }
 
 /**
- * Resolve a job kind's pinned model id for the box. Returns a src/lib/ai-models MODELS id (e.g. the
+ * Resolve a job kind's pinned model id for the box. Returns a src/lib/ai-models BOX_MODELS id (e.g. the
  * opus id) when a tier is set for `(workspaceId, kind)`, else NULL — null means "pass no --model flag"
  * so the box stays on the Max default (no regression for any unset kind).
  *
@@ -63,7 +63,7 @@ export async function modelForKind(
     .maybeSingle();
   if (error || !data) return null;
   const tier = (data as { model_tier: string | null }).model_tier;
-  return isModelTier(tier) ? MODELS[tier] : null;
+  return isModelTier(tier) ? BOX_MODELS[tier] : null;
 }
 
 /** The full registry for a workspace (the Agents-hub / profile read), newest-updated first. */
