@@ -54,6 +54,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsBranchDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
@@ -10519,6 +10520,181 @@ test("isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise
   assert.equal(
     isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise(
       "column agent_jobs.started_at does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/agent_jobs?select=...terminal_reason,log_tail...` against our
+// `public.agent_jobs` table. The table exists but has NEVER had a `terminal_reason`
+// column — the string only appears parsed out of `log_tail` JSON via regex.
+// Foreign-owned surface, no lever from us — drop AT CAPTURE only when ALL THREE of the
+// exact column-missing message on `agent_jobs.terminal_reason`, a SELECT-lookup shape
+// on `agent_jobs` (bare OR PostgREST CTE wrapper), AND a `log_tail` mention in the
+// same query are present. A column-missing on any other table, a different column on
+// `agent_jobs`, a JOIN through `approval_decisions`, a bare
+// `select terminal_reason from agent_jobs` without `log_tail`, or a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise drops the ad hoc SELECT lookup on the exact agent_jobs.terminal_reason column-missing shape", () => {
+  // The captured production sample: unqualified and public.-qualified variants, the
+  // caller always asks for BOTH terminal_reason and the real log_tail column.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column agent_jobs.terminal_reason does not exist",
+      "select id, kind, terminal_reason, log_tail from public.agent_jobs where id like 'x%' and kind = 'build-spec' order by created_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column public.agent_jobs.terminal_reason does not exist",
+      "select id, kind, terminal_reason, log_tail from public.agent_jobs where id like 'x%' and kind = 'build-spec' order by created_at desc limit 100",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column agent_jobs.terminal_reason does not exist",
+      "select terminal_reason, log_tail from agent_jobs limit 10",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column agent_jobs.terminal_reason does not exist",
+      "SELECT TERMINAL_REASON, LOG_TAIL FROM PUBLIC.AGENT_JOBS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "ERROR: column agent_jobs.terminal_reason does not exist",
+      "select terminal_reason, log_tail from public.agent_jobs",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"agent_jobs\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."agent_jobs"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column agent_jobs.terminal_reason does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs"."id", "public"."agent_jobs"."terminal_reason", "public"."agent_jobs"."log_tail" FROM "public"."agent_jobs" WHERE "public"."agent_jobs"."kind" = $1 ORDER BY "public"."agent_jobs"."created_at" DESC LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column public.agent_jobs.terminal_reason does not exist",
+      'WITH pgrst_source AS (SELECT "public"."agent_jobs"."terminal_reason", "public"."agent_jobs"."log_tail" FROM "public"."agent_jobs")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise KEEPS a DIFFERENT column-missing on agent_jobs (a real column rename still pages)", () => {
+  // Real agent_jobs columns — if any of these regress we absolutely want the page.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column agent_jobs.foo does not exist",
+      "select foo, log_tail from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column agent_jobs.status does not exist",
+      "select status, log_tail from public.agent_jobs",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise KEEPS a column-missing error on any OTHER table (the pin is agent_jobs only)", () => {
+  // `specs.terminal_reason` is a different-table miss — a hypothetical regression on
+  // another table that owns the column stays paged.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column specs.terminal_reason does not exist",
+      "select terminal_reason, log_tail from public.specs where workspace_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise KEEPS a bare SELECT without the log_tail co-mention (hypothetical real code after a schema regression still pages)", () => {
+  // The drop is scoped to the confused-column pairing (`terminal_reason` + `log_tail`);
+  // a bare read that only asks for `terminal_reason` could hypothetically be real
+  // product code after a schema regression, so it stays paged.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column agent_jobs.terminal_reason does not exist",
+      "select terminal_reason from public.agent_jobs where workspace_id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column agent_jobs.terminal_reason does not exist",
+      "select id, terminal_reason from agent_jobs limit 10",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing agent_jobs.terminal_reason still pages)", () => {
+  // INSERT / UPDATE / DELETE against agent_jobs referencing a bogus column is real
+  // code trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column agent_jobs.terminal_reason does not exist",
+      "insert into public.agent_jobs (terminal_reason, log_tail) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column agent_jobs.terminal_reason does not exist",
+      "update public.agent_jobs set terminal_reason = $1 where log_tail is not null",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column agent_jobs.terminal_reason does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(
+      "column agent_jobs.terminal_reason does not exist",
       null,
     ),
     false,

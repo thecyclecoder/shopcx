@@ -89,6 +89,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsBranchDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsShopifyProductIdAdhocNoise,
@@ -1135,6 +1136,22 @@ const LOG_QUERIES: LogQuery[] = [
       // first sighting.
       // Static-analysis fingerprint — `isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
       if (isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.agent_jobs` that asks for a bogus `terminal_reason` column paired
+      // with the real `log_tail`. The `agent_jobs` table has NEVER carried a
+      // `terminal_reason` column — the string only appears parsed out of `log_tail` JSON
+      // via regex. There is no lever from ShopCX to make that query resolve — paging
+      // Platform on it (Control Tower signature `supabase-logs:6b1f34626d45cfd8`,
+      // [[../specs/error-feed-drop-agent-jobs-terminal-reason-direct-rest-looku]]) is
+      // repair work for a query we don't own. Narrowly gated to require ALL THREE of
+      // the exact column-missing message, a SELECT-on-agent_jobs shape (bare OR
+      // PostgREST CTE wrapper), AND a `log_tail` co-mention in the same query — a
+      // column-missing on any other table, a different column on `agent_jobs`, a bare
+      // `select terminal_reason from agent_jobs` without `log_tail`, a JOIN through
+      // `approval_decisions`, or on `agent_jobs` via a non-SELECT statement (real
+      // code-bug shape) still surfaces / pages on first sighting.
+      // Static-analysis fingerprint — `isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
+      if (isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.workspaces.slug`. The `workspaces` table exists but has NO
       // `slug` column — the workspace slug shape lives on `workspaces.help_slug` (the
