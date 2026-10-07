@@ -45,6 +45,7 @@ import {
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
@@ -386,6 +387,26 @@ const LOG_QUERIES: LogQuery[] = [
       // non-SELECT statement (real code-bug shape), still surfaces / pages on first
       // sighting.
       if (isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... easypost_tracker_id
+      // ... from public.orders` lookup (or its `easypost_tracking_code` / `easypost_carrier`
+      // twins) by an external tool / stale exploratory query — or the PostgREST
+      // `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE wrapper the
+      // same client emits over the REST endpoint. Our `orders` table has NO EasyPost
+      // tracker-id / tracking-code / carrier top-level columns — EasyPost tracker state
+      // lives on the sibling `shipments` / `fulfillments` tables (the EasyPost tracker-id
+      // itself lives on `shipments.easypost_tracker_id`, not on `orders`). No ShopCX code
+      // path issues a SELECT on `orders.easypost_tracker_id` /
+      // `orders.easypost_tracking_code` / `orders.easypost_carrier`, so the resulting
+      // column-missing ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-orders-easypost-tracker-adhoc-lookup-noise]], Control
+      // Tower signature `supabase-logs:80528fce22470ee0`). Narrowly gated to require BOTH
+      // the exact column-missing message AND the SELECT-lookup shape — a column-missing
+      // error on any other column of `orders` (including the live `order_number` /
+      // `total_cents`), or on `easypost_tracker_id` / `easypost_tracking_code` /
+      // `easypost_carrier` from any other table (including the real
+      // `shipments.easypost_tracker_id`), or on `orders` via a non-SELECT statement
+      // (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... paused_at ... from
       // public.subscriptions` lookup by an external tool / stale exploratory query — or
       // the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions"
