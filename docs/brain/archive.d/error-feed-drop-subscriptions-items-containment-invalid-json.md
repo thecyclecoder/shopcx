@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: subscriptions.items @> ad-hoc invalid-JSON lookup** · verified 2026-10-07 · → [[../libraries/control-tower]]
