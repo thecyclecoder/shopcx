@@ -1,0 +1,1 @@
+- **Every inbound customer message is handled within 30 minutes** · verified 2026-10-07 · → [[../inngest/ticket-response-sla-watchdog]]

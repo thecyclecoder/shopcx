@@ -44,6 +44,16 @@ Stamps the ticket onto a playbook: `active_playbook_id = playbookId`, `playbook_
 
 `seed_context` merges shallow-into an empty fresh context (a starting playbook has no prior context), so callers can pass whatever the target playbook's step 0 reads (e.g. `refund` reads `order_id`; `assisted-purchase-classic` reads `subscription_id`). Non-object values are ignored (guarded to `{}`).
 
+### `routeIntentToPlaybook` — function
+
+```ts
+async function routeIntentToPlaybook(
+  admin: Admin, workspaceId: string, ticketId: string, intent: string,
+): Promise<{ routed: boolean; playbook_id?: string; playbook_name?: string }>
+```
+
+Phase 2 of [[../specs/every-inbound-handled-within-30-min]]. Checks if the classified inbound intent matches any active playbook's `trigger_intents` list; if so and no playbook is currently active on the ticket, the function calls `startPlaybook` deterministically and returns `{ routed: true, playbook_id, playbook_name }`. Otherwise returns `{ routed: false }`. This closes the gap where refund-intent messages (e.g., "refund_request", "unwanted_charge", "charged_without_permission") were being routed to a bare cancel journey instead of the Refund playbook's tier ladder. Ground truth: ticket 09f7257a (Angelica Devine, 2026-10-07) — her message matched the Refund playbook's trigger intents exactly, yet Sol and Sonnet both routed to a cancel journey and called it out-of-policy, skipping the playbook's tier exceptions. The deterministic intent router is called from `unified-ticket-handler` before Sol/Sonnet dispatch and moves intent→playbook routing from a heuristic decision to an authoritative trigger-match.
+
 ### `PlaybookExecResult` — interface
 
 ### `extractAssistedPurchaseIntentFromDecision` — function
@@ -134,6 +144,10 @@ Pure decision function for the `pause_subscription` step in the Refund playbook.
 - **Sol's playbook short-circuit is an earlier entry point** ([[../specs/sol-cheap-execution-over-ticket-direction]] § Phase 4). When a follow-up turn arrives on a ticket whose live [[../tables/ticket_directions]] row is `chosen_path='playbook'` AND [[../tables/tickets]].`active_playbook_id` is still set, [[../inngest/unified-ticket-handler]]'s Step 3.98 calls `executePlaybookStep` DIRECTLY and skips the Sonnet orchestrator — a zero-cost turn. Stamps a [[../tables/ticket_resolution_events]] row with `reasoning='sol:playbook-shortcircuit'` (same stage → send → CAS-shipped_at pattern as `sendFirstTouchAck`) so cost analytics can count zero-cost turns without a heuristic classifier. When `chosen_path='playbook'` but `active_playbook_id` is null (playbook completed or its exception retries exhausted), the short-circuit falls through to the standard Sonnet Step 4 path so the ticket keeps making progress. One effector (`executePlaybookStep`), two entry paths (Sonnet-orchestrated `handlePlaybook`, and this direct short-circuit).
 
 - **Every `aiGenerate` userPrompt must include `Customer data:\n${dataCtx}`.** `basePrompt` instructs the model to "refer to orders by date and amount" — so if a call omits `dataCtx`, the model has no date/amount and emits unrendered placeholders (`your order from [date] for $[amount]`) that reach the customer (there is NO substitution step). _Bug (fixed 2026-06-14):_ the `handleOfferException` stand-firm branch was the only call missing `dataCtx`; Opus on the hardship path printed `[date]`/`[amount]` to a customer (graded 4/10 via the broken-action hard cap). Fixes: stand-firm now passes `dataCtx`; `basePrompt` bans placeholder tokens; and `aiGenerate` has a backstop that regenerates (then strips) any `[...]`/`{{...}}` placeholder before it can leave. When adding a new `aiGenerate` call, pass `dataCtx`.
+
+## Related
+
+[[../specs/every-inbound-handled-within-30-min]] (Phase 2: `routeIntentToPlaybook`) · [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] · [[../specs/sol-cheap-execution-over-ticket-direction]] · [[../inngest/unified-ticket-handler]]
 
 ---
 
