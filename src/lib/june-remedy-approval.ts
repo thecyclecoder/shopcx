@@ -1219,10 +1219,22 @@ export async function executeApprovedJuneRemedies(admin: Admin): Promise<{ execu
     }
     try {
       if (row.status === "denied") {
+        // Phase 3 of cx-agents-read-engine-price-not-override-base: scope the deny note to the
+        // SPECIFIC parked remedy that was declined. The old blanket wording ("Founder DECLINED
+        // the refund/credit") read as a ticket-wide refund ban: June later cited one stale
+        // withdrawn remedy as "the founder declined any refund on this ticket" on 668bc5c8.
+        const remedy = (ti.remedy as Record<string, unknown> | null) ?? {};
+        const rawSummary =
+          typeof remedy.summary === "string"
+            ? remedy.summary.trim()
+            : typeof ti.remedy_summary === "string"
+              ? (ti.remedy_summary as string).trim()
+              : "";
+        const summaryClause = rawSummary ? rawSummary.slice(0, 240) : "the specific action in the parked card";
         await postInternalNote(
           admin,
           ticketId,
-          `[cs-director] Founder DECLINED the refund/credit. No money moved. Ticket left escalated for a human to decide next steps.`,
+          `[cs-director] Founder declined this parked remedy (${summaryClause}). No money moved. This is not a ruling on other remedies for this ticket.`,
         );
         denied++;
         await stampExecuted(admin, row.id, ti, "denied");

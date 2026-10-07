@@ -133,6 +133,18 @@ classified by `isRaiseAttempt` (`src/lib/subscription-overcharge.ts:503`) must s
 rather than execute — lowering toward a demonstrated rate is in-leash; anything that would raise
 a customer's price is not, and no amount of agent reasoning may cross that line.
 
+**⭐ Never change a subscription price without quoting `renewal_subtotal_cents`.** On an INTERNAL
+sub, the renewal engine (`resolveSubscriptionPricing`) is the authority for what the next charge
+will be — NOT `price_override_cents` (that's the PRE-DISCOUNT base; the quantity break and S&S
+apply ON TOP). Before you propose any price change, read `getCxSubscriptions` and SEE the
+engine's view: each item carries `realized_cents` (what the engine will charge per unit) and the
+subscription carries `renewal_subtotal_cents` (Σ realized × qty — what the next shipment will
+charge). The `update_line_item_price` handler now REFUSES on an internal sub unless the action's
+payload names `expected_current_realized_cents` and that figure matches the engine (±1¢). Ticket
+01f6a2e6 → 668bc5c8 (Sanja Rojas) is the ground-truth case: Sonnet, June ×2, and Sol each wrote a
+wrong base in a row — all because the SDK had labeled the pre-discount base as realized. Quote
+the engine's realized price in your reasoning AND in the action payload, every time.
+
 ```json
 "remedy": {
   "action_type": "restore_grandfathered_price",

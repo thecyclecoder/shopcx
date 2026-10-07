@@ -570,7 +570,7 @@ export async function deriveRestoreBase(
     if (absChange < 100 || absChange < previousRealizedPerUnitCents * 0.02) {
       return {
         ok: false,
-        error: `Refusing immaterial price change on contract ${contractId} variant ${variantId}: change $${(absChange / 100).toFixed(2)} on a $${(previousRealizedPerUnitCents / 100).toFixed(2)} baseline is below the $1 AND 2% materiality floor (catalog rounding drift shouldn't trigger a correction).`,
+        error: `Refusing immaterial price change on contract ${contractId} variant ${variantId}: change $${(absChange / 100).toFixed(2)} on a $${(previousRealizedPerUnitCents / 100).toFixed(2)}/unit engine realized price is below the $1 AND 2% materiality floor (catalog rounding drift shouldn't trigger a correction).`,
         refuseReason: "immaterial",
         agentBaseCents,
         previousRealizedPerUnitCents,

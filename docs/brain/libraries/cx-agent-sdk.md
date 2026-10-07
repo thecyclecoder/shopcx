@@ -33,9 +33,12 @@ Recent orders across the linked-identity group: **the last 180 days, but ALWAYS 
 getCxSubscriptions(admin, workspaceId, customerId) → Promise<CxSubscription[]>
 ```
 All subscriptions across the linked-identity group. Each subscription includes:
-- `status`, `billing_interval`, `billing_interval_count`, `next_billing_date`
-- `items` with `price_cents` (Shopify contracts) + `price_override_cents` (internal contracts) + `realized_cents` (whichever is set)
+- `status`, `billing_interval`, `billing_interval_count`, `next_billing_date`, `billing_source` (`internal` | `appstle` | `shopcx` | `null`)
+- `items` with `price_cents`, `price_override_cents`, and — most importantly — `realized_cents`, the price the renewal engine will ACTUALLY charge per unit (internal subs: from [[pricing]] `resolveSubscriptionPricing`, so a 12%-break × 25%-S&S $79.95 line reports $52.77; external subs: the baked `price_cents`). Internal subs also expose per-line `base_cents` / `break_pct` / `sns_pct` / `is_grandfathered` so agents can SEE the decomposition.
+- `renewal_subtotal_cents` — Σ `realized_cents × quantity` over product lines, the discountable subtotal the renewal will charge. `null` on external engines.
 - `applied_discounts` — coupons/applied discounts (same JSONB structure internal + Shopify contracts both persist)
+
+Agents must cite `renewal_subtotal_cents` and the per-unit `realized_cents` BEFORE proposing a price change. `price_override_cents` is the PRE-DISCOUNT grandfathered base; it is NEVER the realized per-unit price (ticket 01f6a2e6 → 668bc5c8: Sonnet, June × 2, and Sol each 'fixed' a correct $158.31/shipment sub down to $118.71 because the SDK had labeled the override base as realized).
 
 ```typescript
 getCxProducts(admin, workspaceId) → Promise<CxProduct[]>
@@ -188,9 +191,18 @@ interface CxSubscriptionItem {
   variant_id: string | null;
   variant_title: string | null;
   quantity: number;
+  // Configured line price (Shopify contracts, and baked grandfathered unit on some internal subs).
   price_cents: number | null;
+  // PRE-DISCOUNT grandfathered base — NOT the realized price. The engine applies break + S&S on top.
   price_override_cents: number | null;
-  realized_cents: number;  // price_cents ?? price_override_cents ?? 0
+  // The per-unit price the renewal engine will ACTUALLY charge. Internal subs: from
+  // resolveSubscriptionPricing. External engines: the baked price_cents.
+  realized_cents: number;
+  // Decomposition on INTERNAL subs (null on external):
+  base_cents: number | null;
+  break_pct: number | null;
+  sns_pct: number | null;
+  is_grandfathered: boolean | null;
 }
 
 interface CxSubscriptionDiscount {
@@ -210,8 +222,11 @@ interface CxSubscription {
   billing_interval_count: number | null;
   next_billing_date: string | null;
   created_at: string;
+  billing_source: "internal" | "appstle" | "shopcx" | null;
   items: CxSubscriptionItem[];
   applied_discounts: CxSubscriptionDiscount[];
+  // Σ realized_cents × qty on product lines. null on external engines.
+  renewal_subtotal_cents: number | null;
 }
 
 interface CxProduct {
@@ -287,7 +302,7 @@ interface CxActionableOutcomes {
 
 **Per-unit pricing** — `getCxOrders` computes `per_unit_cents = lineTotal ÷ qty`, matching the surface `computeChargedLineTotals` in the deployed orchestrator. Agents see the ACTUAL charged per-unit, not the pre-discount Shopify unit price.
 
-**Subscription pricing** — `getCxSubscriptions` exposes both `price_cents` (Shopify contracts) and `price_override_cents` (internal contracts), with `realized_cents` resolving to whichever is set. Agents can cite the real configured price.
+**Subscription pricing** — `getCxSubscriptions` reports the price the renewal engine will ACTUALLY charge. For an internal sub (`billing_source='internal'` / `is_internal=true`) it calls [[pricing]] `resolveSubscriptionPricing` and sets each item's `realized_cents` to the engine's `unit_cents` (post break + S&S + any active renewal offer), plus per-line decomposition (`base_cents` / `break_pct` / `sns_pct` / `is_grandfathered`) and a sub-level `renewal_subtotal_cents`. For an external engine (Appstle / Shopify) the baked `price_cents` is authoritative and the decomposition fields are null — the vendor owns the composition. `price_override_cents` is the PRE-DISCOUNT grandfathered base; it is NEVER the realized price. Pinned by `src/lib/cx-agent-sdk.subscriptions-engine-price.test.ts` (the Cocoa 12% × 25% example: $79.95 override × 3 → $52.77/bag, $158.31/shipment). Derived-from tickets 01f6a2e6 → 668bc5c8 (Sanja Rojas): three agents in a row re-priced a correct sub down to $118.71 because the SDK had labeled the pre-discount base as realized.
 
 **Product catalog** — `getCxProducts` reads only `status='active'` rows so agents cite current flavors/variants.
 

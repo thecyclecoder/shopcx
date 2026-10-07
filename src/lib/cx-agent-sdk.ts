@@ -34,6 +34,7 @@ import { linkGroupIds } from "@/lib/customer-links";
 import { getAmplifierOnHandBySku } from "@/lib/inventory/read";
 import { suggestEmailCorrection } from "@/lib/email-typo";
 import { getOrderRefundLedger, type OrderRefundLedger } from "@/lib/refund-ledger";
+import { resolveSubscriptionPricing } from "@/lib/pricing";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -85,12 +86,28 @@ export interface CxSubscriptionItem {
   variant_id: string | null;
   variant_title: string | null;
   quantity: number;
-  /** Configured line price (Shopify contracts). */
+  /** Configured line price (Shopify contracts, and the baked grandfathered unit lock on some
+   *  internal contracts). */
   price_cents: number | null;
-  /** Configured line override (internal contracts store realized price here). */
+  /** PRE-DISCOUNT grandfathered base. The renewal engine applies the quantity break + S&S on
+   *  top — this is NOT the realized per-unit price. See `realized_cents` for what will actually
+   *  be charged. */
   price_override_cents: number | null;
-  /** The realized cents per unit — price_cents ?? price_override_cents ?? 0. */
+  /** The per-unit price the renewal engine will ACTUALLY charge. For an internal sub this
+   *  comes from `resolveSubscriptionPricing` (so a 12%-break × 25%-S&S Cocoa line on a $79.95
+   *  base reports $52.77, not $79.95). For an Appstle / Shopify contract the engine is external
+   *  — `price_cents` is the authoritative baked unit, so we report that (falling back to
+   *  `price_override_cents` only for pre-migration safety). */
   realized_cents: number;
+  /** Pre-discount strike base (per unit). Internal subs — the override or catalog MSRP the
+   *  engine priced off. External engines — null (we don't own the decomposition). */
+  base_cents: number | null;
+  /** Quantity-break % applied by the engine on this line (0 when none). Internal subs only. */
+  break_pct: number | null;
+  /** Subscribe & Save % applied by the engine on this line (0 when none). Internal subs only. */
+  sns_pct: number | null;
+  /** True when the realized price came from a grandfathered override / baked-unit lock. */
+  is_grandfathered: boolean | null;
 }
 
 export interface CxSubscriptionDiscount {
@@ -110,8 +127,16 @@ export interface CxSubscription {
   billing_interval_count: number | null;
   next_billing_date: string | null;
   created_at: string;
+  /** Which engine bills this sub — `internal` means ShopCX's `resolveSubscriptionPricing` is
+   *  the authority for next-renewal pricing; `appstle` / `shopcx` mean the external contract
+   *  carries baked unit prices. Agents never change a price without matching this engine. */
+  billing_source: "internal" | "appstle" | "shopcx" | null;
   items: CxSubscriptionItem[];
   applied_discounts: CxSubscriptionDiscount[];
+  /** Σ `realized_cents × quantity` over product lines — what the renewal engine will charge for
+   *  the discountable product subtotal of this subscription. NULL for an external engine
+   *  (Appstle / Shopify own the composition). Agents MUST cite this before changing a price. */
+  renewal_subtotal_cents: number | null;
 }
 
 export interface CxProductVariant {
@@ -752,6 +777,20 @@ export async function getCxOrders(
  * price_override_cents), applied_discounts (the JSONB coupons block internal
  * subs + Shopify contracts both persist here), and status. Fan-out across the
  * linked-account group.
+ *
+ * For INTERNAL subs (`billing_source = 'internal'` or `is_internal = true`) the
+ * item's `realized_cents` is the price the renewal engine will actually charge —
+ * computed via `resolveSubscriptionPricing` (quantity break × S&S × any active
+ * persist-to-renewal offer). We also surface `base_cents` / `break_pct` /
+ * `sns_pct` / `is_grandfathered` per line and `renewal_subtotal_cents` on the
+ * subscription, so agents start with the renewal shape and never confuse the
+ * pre-discount base with the realized price (ticket 01f6a2e6 → 668bc5c8: a
+ * $79.95 Cocoa base on a 3-bag sub was mislabeled as $79.95/bag realized when
+ * the engine actually charges $52.77/bag — $158.31/shipment).
+ *
+ * For external engines (Appstle / Shopify) we DON'T own the decomposition, so
+ * `realized_cents` reports the baked `price_cents` and the decomposition fields
+ * stay null — those contracts have their price managed by the vendor.
  */
 export async function getCxSubscriptions(
   admin: Admin,
@@ -762,13 +801,14 @@ export async function getCxSubscriptions(
   const { data: subs } = await admin
     .from("subscriptions")
     .select(
-      "id, customer_id, shopify_contract_id, status, items, applied_discounts, billing_interval, billing_interval_count, next_billing_date, created_at",
+      "id, customer_id, shopify_contract_id, status, items, applied_discounts, billing_interval, billing_interval_count, next_billing_date, created_at, is_internal, billing_source, delivery_price_cents, pricing_offer_id",
     )
     .eq("workspace_id", workspaceId)
     .in("customer_id", linked)
     .order("created_at", { ascending: false });
   if (!subs?.length) return [];
-  return subs.map((s) => {
+  const results: CxSubscription[] = [];
+  for (const s of subs) {
     const rawItems = (s.items as Array<{
       title?: string;
       variant_id?: string | null;
@@ -776,20 +816,11 @@ export async function getCxSubscriptions(
       quantity?: number;
       price_cents?: number | null;
       price_override_cents?: number | null;
+      product_id?: string | null;
+      sku?: string | null;
+      line_id?: string | null;
+      is_gift?: boolean;
     }> | null) ?? [];
-    const items: CxSubscriptionItem[] = rawItems.map((i) => {
-      const price = (i.price_cents as number | null) ?? null;
-      const override = (i.price_override_cents as number | null) ?? null;
-      return {
-        title: i.title ?? "",
-        variant_id: (i.variant_id as string | null) ?? null,
-        variant_title: (i.variant_title as string | null) ?? null,
-        quantity: (i.quantity as number | undefined) ?? 1,
-        price_cents: price,
-        price_override_cents: override,
-        realized_cents: price ?? override ?? 0,
-      };
-    });
     const rawDiscounts = (s.applied_discounts as Array<{
       id?: string | null;
       title?: string | null;
@@ -804,7 +835,71 @@ export async function getCxSubscriptions(
       value: (d.value as number | null) ?? null,
       value_type: (d.valueType as string | null) ?? null,
     }));
-    return {
+    const rawBillingSource = (s.billing_source as string | null) ?? null;
+    const billing_source: CxSubscription["billing_source"] =
+      rawBillingSource === "internal" || rawBillingSource === "appstle" || rawBillingSource === "shopcx"
+        ? rawBillingSource
+        : null;
+    const isInternal = billing_source === "internal" || !!s.is_internal;
+
+    let items: CxSubscriptionItem[];
+    let renewal_subtotal_cents: number | null;
+
+    if (isInternal) {
+      // Internal engine owns the renewal composition — ask it what will actually be charged.
+      const priced = await resolveSubscriptionPricing(workspaceId, {
+        items: rawItems,
+        delivery_price_cents: (s.delivery_price_cents as number | null) ?? null,
+        pricing_offer_id: (s.pricing_offer_id as string | null) ?? null,
+      });
+      items = rawItems.map((i, idx) => {
+        const bakedPrice = (i.price_cents as number | null) ?? null;
+        const overrideBase = (i.price_override_cents as number | null) ?? null;
+        const line = priced.lines[idx];
+        // Internal engine is authoritative on realized — always prefer engine's unit_cents.
+        // The fallback only fires if the engine returned no line for this row (shouldn't
+        // happen) and never resolves to the override BASE as realized.
+        const engineRealized = line ? line.unit_cents : bakedPrice ?? 0;
+        return {
+          title: i.title ?? "",
+          variant_id: (i.variant_id as string | null) ?? null,
+          variant_title: (i.variant_title as string | null) ?? null,
+          quantity: (i.quantity as number | undefined) ?? 1,
+          price_cents: bakedPrice,
+          price_override_cents: overrideBase,
+          realized_cents: engineRealized,
+          base_cents: line ? line.base_cents : null,
+          break_pct: line ? line.break_pct : null,
+          sns_pct: line ? line.sns_pct : null,
+          is_grandfathered: line ? line.is_grandfathered : null,
+        };
+      });
+      renewal_subtotal_cents = priced.product_subtotal_cents;
+    } else {
+      items = rawItems.map((i) => {
+        const bakedPrice = (i.price_cents as number | null) ?? null;
+        const overrideBase = (i.price_override_cents as number | null) ?? null;
+        // External engine (Appstle / Shopify) bakes the realized unit in `price_cents`.
+        // `price_override_cents` is pre-migration safety only — never a realized value.
+        const externalRealized = bakedPrice ?? overrideBase ?? 0;
+        return {
+          title: i.title ?? "",
+          variant_id: (i.variant_id as string | null) ?? null,
+          variant_title: (i.variant_title as string | null) ?? null,
+          quantity: (i.quantity as number | undefined) ?? 1,
+          price_cents: bakedPrice,
+          price_override_cents: overrideBase,
+          realized_cents: externalRealized,
+          base_cents: null,
+          break_pct: null,
+          sns_pct: null,
+          is_grandfathered: null,
+        };
+      });
+      renewal_subtotal_cents = null;
+    }
+
+    results.push({
       id: s.id as string,
       customer_id: s.customer_id as string,
       shopify_contract_id: (s.shopify_contract_id as string | null) ?? null,
@@ -813,10 +908,13 @@ export async function getCxSubscriptions(
       billing_interval_count: (s.billing_interval_count as number | null) ?? null,
       next_billing_date: (s.next_billing_date as string | null) ?? null,
       created_at: s.created_at as string,
+      billing_source,
       items,
       applied_discounts,
-    };
-  });
+      renewal_subtotal_cents,
+    });
+  }
+  return results;
 }
 
 /**
@@ -1132,15 +1230,33 @@ export function formatCxSubscriptions(subs: CxSubscription[]): string {
       .map((i) => {
         const variant = i.variant_title ? ` (${i.variant_title})` : "";
         const src = i.price_cents != null ? "price" : i.price_override_cents != null ? "override" : "?";
-        return `${i.title}${variant} x${i.quantity} @ ${DOLLARS(i.realized_cents)} [${src}]`;
+        const decomp =
+          s.billing_source === "internal" && i.base_cents != null
+            ? ` (base ${DOLLARS(i.base_cents)} − ${i.break_pct ?? 0}% break − ${i.sns_pct ?? 0}% S&S)`
+            : "";
+        return `${i.title}${variant} x${i.quantity} @ ${DOLLARS(i.realized_cents)}/unit${decomp} [${src}]`;
       })
       .join(", ");
     const discounts = s.applied_discounts.length
       ? ` · discounts: ${s.applied_discounts.map((d) => `${d.title ?? d.id ?? "?"}${d.value != null ? ` (${d.value_type ?? "?"} ${d.value})` : ""}`).join(", ")}`
       : "";
     const cadence = `every ${s.billing_interval_count ?? 1} ${s.billing_interval ?? "month"}`;
+    const engine =
+      s.billing_source === "internal"
+        ? "internal"
+        : s.billing_source === "shopcx"
+          ? "shopcx"
+          : s.billing_source === "appstle"
+            ? "appstle"
+            : s.shopify_contract_id
+              ? "external"
+              : "internal";
+    const renewal =
+      s.renewal_subtotal_cents != null
+        ? ` · renewal subtotal: ${DOLLARS(s.renewal_subtotal_cents)}`
+        : "";
     lines.push(
-      `  - ${s.id} [${s.status}] contract: ${s.shopify_contract_id ?? "(internal)"} · ${cadence} · next: ${s.next_billing_date ?? "?"} · ${items}${discounts}`,
+      `  - ${s.id} [${s.status}] engine: ${engine} · contract: ${s.shopify_contract_id ?? "(internal)"} · ${cadence} · next: ${s.next_billing_date ?? "?"}${renewal} · ${items}${discounts}`,
     );
   }
   return lines.join("\n");
