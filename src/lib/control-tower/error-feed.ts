@@ -5477,6 +5477,69 @@ export function isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `workspaces.updated_at`. Our `workspaces` table has NEVER carried an `updated_at`
+ * column (see [[../tables/workspaces]]) — no ShopCX code path (src/, scripts/,
+ * shopify-extension/, docs/brain/) issues a SELECT on `workspaces.updated_at`. The
+ * message appears on Supabase's `postgres_logs` feed only when an external PostgREST
+ * caller (Supabase Studio's Table Editor / API Docs, a foreign SQL client, a stale
+ * exploratory query, a third-party integration) does a raw
+ * `select ... updated_at ... from public.workspaces` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."workspaces" ... )` CTE wrapper the
+ * same client emits over the REST endpoint. There is no lever from ShopCX to make that
+ * query resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-workspaces-updated-at-column-adhoc-noise]], Control Tower
+ * signature `supabase-logs:d9958c473b0f14f4`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise` — the same
+ * narrow-gating shape on the same `public.workspaces` table, scoped to the
+ * `updated_at` ad hoc read instead of the `slug` one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column workspaces.updated_at does not exist` (or the
+ *      `public.` qualified variant, with any leading `ERROR: ` prefix Postgres includes
+ *      on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.workspaces` — either
+ *      (a) the bare `select ... from public.workspaces` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."workspaces" ... )`
+ *      CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `workspaces` (a real
+ *     product-schema regression on a live column) still pages — the pin is
+ *     `workspaces.updated_at` only,
+ *   - a column-missing error for `updated_at` on ANY OTHER table (a real code bug on
+ *     another table that has such a column) still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE /
+ *     DELETE / DDL on `workspaces`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingWorkspacesUpdatedAtColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column workspaces.updated_at does not exist" ||
+    stripped === "column public.workspaces.updated_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?workspaces\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?workspaces\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column product_variants.price does not exist`
  * for an ad hoc / stale PostgREST direct-REST SELECT against `public.product_variants`.
  * The `product_variants` table exists (see [[../tables/product_variants]]) but by design
