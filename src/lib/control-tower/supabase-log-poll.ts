@@ -60,6 +60,7 @@ import {
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
+  isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
@@ -608,6 +609,25 @@ const LOG_QUERIES: LogQuery[] = [
       // grep-anchor (spec check pattern is regex; unescaped parens are groups):
       // isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoisemessage, query
       if (isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a PostgREST direct-REST read against
+      // `/rest/v1/subscriptions?items=cs.<value>` where an external client passed a
+      // non-JSON value to the `items=cs.<value>` containment filter, producing
+      // Postgres `invalid input syntax for type json` under the PostgREST
+      // `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions" ... WHERE ...
+      // "items" @> ... )` CTE wrapper. ShopCX code never issues this query — our only
+      // JSONB @>-on-items path is the `public.list_subscriptions` RPC, which types the
+      // input as text[] and builds the JSONB server-side. There is no lever from
+      // ShopCX to make that query resolve — paging Platform on it (Control Tower
+      // signature `supabase-logs:dbe2c7bfb3216740`,
+      // [[../specs/error-feed-drop-subscriptions-items-containment-invalid-json]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the
+      // exact invalid-JSON message AND the PostgREST SELECT-CTE wrapper on
+      // `public.subscriptions` carrying both `"items"` and the `@>` containment
+      // token — a different operator on items (?, ?|, ->, ->>, =, text LIKE), the
+      // same operator against a different column on `subscriptions`, a bad-JSON
+      // error on any other table, or a non-SELECT PostgREST wrapper (INSERT /
+      // UPDATE) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / hand-typed SQL Editor lookup
       // against `public.approval_decisions` that references the non-existent
       // `agent_jobs.branch_name` column and dangles at the end, which Postgres reports as

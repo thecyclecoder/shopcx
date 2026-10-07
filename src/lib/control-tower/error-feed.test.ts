@@ -28,6 +28,7 @@ import {
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
+  isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
@@ -18217,6 +18218,242 @@ test("isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise drops the Pos
     isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
       "column subscriptions.paused_until does not exist",
       'WITH pgrst_source AS ( UPDATE "public"."subscriptions" SET "paused_until" = $1 WHERE "id" = $2 RETURNING * )',
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client calls
+// `/rest/v1/subscriptions?items=cs.<value>` with a non-JSON value, which Postgres reports
+// as `invalid input syntax for type json` under the PostgREST
+// `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions" ... WHERE ... "items" @> ... )`
+// CTE wrapper. ShopCX code never issues a direct `items @>` containment filter — the only
+// JSONB @>-on-items path is the `public.list_subscriptions` RPC. Foreign-owned surface, no
+// lever from us — drop AT CAPTURE only when BOTH the exact invalid-JSON message AND the
+// PostgREST SELECT-CTE wrapper carrying both `"items"` and `@>` are present. A different
+// column, a different JSONB operator, a non-SELECT wrapper, or any other table still pages.
+
+test("isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise drops the exact captured items @> invalid-JSON shape", () => {
+  // The captured PostgREST direct-REST shape from Control Tower signature
+  // supabase-logs:dbe2c7bfb3216740 — a `items=cs.<value>` containment filter whose
+  // value failed JSON parse.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions".* FROM "public"."subscriptions" WHERE "public"."subscriptions"."items" @> \'["x"]\' LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "ERROR: invalid input syntax for type json",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions".* FROM "public"."subscriptions" WHERE "public"."subscriptions"."items" @> \'["x"]\' )',
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "  invalid input syntax for type json  ",
+      '   WITH pgrst_source AS ( SELECT "public"."subscriptions".* FROM "public"."subscriptions" WHERE "public"."subscriptions"."items" @> \'[]\' )   ',
+    ),
+    true,
+  );
+  // Case-insensitive on the query — PostgREST sometimes echoes uppercase keywords.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH PGRST_SOURCE AS ( SELECT "public"."subscriptions".* FROM "public"."subscriptions" WHERE "public"."subscriptions"."items" @> $1 )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise KEEPS the same invalid-JSON message against any OTHER wrapped FROM relation (a real code bug on another table still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH pgrst_source AS ( SELECT "public"."orders".* FROM "public"."orders" WHERE "public"."orders"."items" @> \'["x"]\' )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH pgrst_source AS ( SELECT "public"."carts".* FROM "public"."carts" WHERE "public"."carts"."items" @> \'[]\' )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise KEEPS the same invalid-JSON message against public.subscriptions with no items / no @> pair (a different column or operator still pages)", () => {
+  // Same table, different column — a real JSON parse bug on a different jsonb column.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions".* FROM "public"."subscriptions" WHERE "public"."subscriptions"."metadata" @> \'["x"]\' )',
+    ),
+    false,
+  );
+  // Same table, items column, but a DIFFERENT JSONB operator (`?` key-exists, not @>).
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions".* FROM "public"."subscriptions" WHERE "public"."subscriptions"."items" ? \'sku\' )',
+    ),
+    false,
+  );
+  // Same table, items column, but the `?|` any-key operator.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions".* FROM "public"."subscriptions" WHERE "public"."subscriptions"."items" ?| array[\'a\',\'b\'] )',
+    ),
+    false,
+  );
+  // Same table, items column, but the `->` / `->>` JSON path extract.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."items" -> 0 FROM "public"."subscriptions" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."items" ->> 0 FROM "public"."subscriptions" )',
+    ),
+    false,
+  );
+  // Same table, items column, but a plain `=` / `LIKE` on a text-ish compare.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions".* FROM "public"."subscriptions" WHERE "public"."subscriptions"."items" = $1 )',
+    ),
+    false,
+  );
+  // Any plain SELECT on subscriptions without items/@>.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."id" FROM "public"."subscriptions" WHERE "public"."subscriptions"."status" = $1 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise KEEPS a non-SELECT PostgREST wrapper on subscriptions (a real code-bug INSERT / UPDATE on items still pages)", () => {
+  // INSERT / UPDATE / DELETE wrapped in a PostgREST pgrst_source CTE on subscriptions
+  // referencing items @> is real code attempting to write — a bug we DO want to see.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH pgrst_source AS ( INSERT INTO "public"."subscriptions" ("items") VALUES ($1) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH pgrst_source AS ( UPDATE "public"."subscriptions" SET "items" = $1 WHERE "public"."subscriptions"."items" @> \'[]\' RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      'WITH pgrst_source AS ( DELETE FROM "public"."subscriptions" WHERE "public"."subscriptions"."items" @> \'[]\' RETURNING * )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise KEEPS a different Postgres ERROR class (FATAL / PANIC / constraint / permission / relation-missing on subscriptions still pages)", () => {
+  const q =
+    'WITH pgrst_source AS ( SELECT "public"."subscriptions".* FROM "public"."subscriptions" WHERE "public"."subscriptions"."items" @> \'[]\' )';
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "database is shutting down",
+      q,
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      'duplicate key value violates unique constraint "subscriptions_pkey"',
+      q,
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "canceling statement due to statement timeout",
+      q,
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      'permission denied for relation "public.subscriptions"',
+      q,
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      'relation "public.subscriptions" does not exist',
+      q,
+    ),
+    false,
+  );
+  // A near-miss message that mentions json but isn't the canonical shape.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type jsonb",
+      q,
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "invalid input syntax for type json",
+      null,
+    ),
+    false,
+  );
+  // Empty message — the shape alone isn't enough.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+      "",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions".* FROM "public"."subscriptions" WHERE "public"."subscriptions"."items" @> \'[]\' )',
     ),
     false,
   );
