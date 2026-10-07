@@ -63,6 +63,7 @@ import {
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
@@ -11555,6 +11556,280 @@ test("isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise returns f
   assert.equal(
     isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise(
       "column orders.shopify_order_name does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/orders?select=...easypost_tracker_id...` against our `public.orders` table.
+// The table exists but has NO `easypost_tracker_id` / `easypost_tracking_code` /
+// `easypost_carrier` columns — EasyPost tracker state lives on the sibling `shipments`
+// / `fulfillments` tables (and the real EasyPost tracker-id lives on
+// `shipments.easypost_tracker_id`, not on `orders`). Foreign-owned surface, no lever
+// from us — drop AT CAPTURE only when BOTH the exact column-missing message on one of
+// the three `orders` columns AND a SELECT-lookup shape on `orders` (bare OR PostgREST
+// CTE wrapper) are present. A column-missing on a live `orders` column, on
+// `easypost_tracker_id` / `easypost_tracking_code` / `easypost_carrier` from any other
+// table (including the real `shipments.easypost_tracker_id`), or via a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise drops the captured supabase-logs:80528fce22470ee0 message+query pair (ad hoc SELECT on orders.easypost_tracker_id)", () => {
+  // Unqualified and public.-qualified message variants over the bare-SELECT shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_tracker_id does not exist",
+      "select id, easypost_tracker_id from public.orders",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column public.orders.easypost_tracker_id does not exist",
+      "select easypost_tracker_id from public.orders",
+    ),
+    true,
+  );
+  // The `easypost_tracking_code` twin.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_tracking_code does not exist",
+      "select id, easypost_tracking_code from public.orders",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column public.orders.easypost_tracking_code does not exist",
+      "select easypost_tracking_code from public.orders",
+    ),
+    true,
+  );
+  // The `easypost_carrier` twin.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_carrier does not exist",
+      "select id, easypost_carrier from public.orders",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column public.orders.easypost_carrier does not exist",
+      "select easypost_carrier from public.orders",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_tracker_id does not exist",
+      "select easypost_tracker_id from orders limit 10",
+    ),
+    true,
+  );
+  // Trailing WHERE / ORDER BY / LIMIT still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_tracker_id does not exist",
+      "select id, easypost_tracker_id from public.orders where workspace_id = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_tracker_id does not exist",
+      "SELECT ID, EASYPOST_TRACKER_ID FROM PUBLIC.ORDERS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "ERROR: column orders.easypost_tracker_id does not exist",
+      "select easypost_tracker_id from public.orders",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "  column orders.easypost_tracker_id does not exist  ",
+      "   select easypost_tracker_id from public.orders   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"orders\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."orders"` identifiers — for each of
+  // the three pinned columns.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_tracker_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."orders"."id", "public"."orders"."easypost_tracker_id" FROM "public"."orders" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column public.orders.easypost_tracking_code does not exist",
+      'WITH pgrst_source AS (SELECT "public"."orders"."easypost_tracking_code" FROM "public"."orders")',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_carrier does not exist",
+      'WITH pgrst_source AS (SELECT "public"."orders"."easypost_carrier" FROM "public"."orders")',
+    ),
+    true,
+  );
+  // ERROR: prefix stripped as usual.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "ERROR: column orders.easypost_tracker_id does not exist",
+      'WITH pgrst_source AS (SELECT "public"."orders"."easypost_tracker_id" FROM "public"."orders")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise KEEPS a column-missing on a DIFFERENT column of orders (a real product-schema regression on another orders column still pages)", () => {
+  // If any other `orders` column regressed we absolutely want the page — the pin is
+  // the three EasyPost columns only.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.order_number does not exist",
+      "select order_number from public.orders",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column public.orders.total_cents does not exist",
+      "select total_cents from public.orders",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise KEEPS an easypost_tracker_id miss on a DIFFERENT table (the real shipments.easypost_tracker_id regression still pages)", () => {
+  // The live `shipments.easypost_tracker_id` column: if IT regresses we WANT the page —
+  // the pin is `orders` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column shipments.easypost_tracker_id does not exist",
+      "select easypost_tracker_id from public.shipments",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column public.shipments.easypost_tracker_id does not exist",
+      "select easypost_tracker_id from public.shipments",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column fulfillments.easypost_tracking_code does not exist",
+      "select easypost_tracking_code from public.fulfillments",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise KEEPS a non-SELECT statement shape on orders (an INSERT/UPDATE/DELETE with the same message is a real code-bug and still pages)", () => {
+  // INSERT / UPDATE / DELETE against orders referencing a bogus `easypost_tracker_id`
+  // column is real code trying to write the table — a bug we WANT to see, not the ad
+  // hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_tracker_id does not exist",
+      "insert into public.orders (id, workspace_id, easypost_tracker_id) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_tracker_id does not exist",
+      "update public.orders set easypost_tracker_id = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_tracker_id does not exist",
+      "delete from public.orders where easypost_tracker_id is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_tracker_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."orders"("workspace_id", "easypost_tracker_id") VALUES ($1, $2) RETURNING "public"."orders"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_tracker_id does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."orders" SET "easypost_tracker_id" = $1 WHERE "public"."orders"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise KEEPS a FATAL / PANIC / constraint-violation (different message shape — a real DB problem still pages)", () => {
+  // FATAL / PANIC / unique-violation / foreign-key-violation on orders are real DB
+  // problems — pin is the exact column-missing message only.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "FATAL: database is shutting down",
+      "select easypost_tracker_id from public.orders",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      'duplicate key value violates unique constraint "orders_pkey"',
+      "select easypost_tracker_id from public.orders",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_tracker_id does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
+      "column orders.easypost_tracker_id does not exist",
       null,
     ),
     false,
