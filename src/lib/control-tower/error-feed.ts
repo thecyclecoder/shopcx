@@ -2830,6 +2830,81 @@ export function isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `invalid input syntax for type json` for a PostgREST
+ * direct-REST read against `/rest/v1/subscriptions?items=cs.<value>` where the external
+ * client passed a non-JSON value to the `items=cs.<value>` containment filter. The
+ * `subscriptions` table has an `items` JSONB column, but no ShopCX code path issues
+ * a direct-REST `items=cs.<value>` containment filter — our only JSONB @>-on-items path
+ * is the `public.list_subscriptions` RPC, which types the input as `text[]` and builds
+ * the JSONB server-side. The error only reaches Supabase's `postgres_logs` feed when
+ * an external PostgREST client (Supabase Studio, a stale integration, a hand-typed
+ * URL) passes a malformed JSON value to an `items=cs.<value>` filter against
+ * `/rest/v1/subscriptions`, which PostgREST translates to the `WITH pgrst_source AS
+ * ( SELECT ... FROM "public"."subscriptions" ... WHERE ... "items" @> ... )` CTE
+ * wrapper form. There is no lever from ShopCX to make that query resolve — paging
+ * Platform on it (Control Tower signature `supabase-logs:dbe2c7bfb3216740`,
+ * [[../specs/error-feed-drop-subscriptions-items-containment-invalid-json]]) is repair
+ * work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise` and
+ * `isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise` — same
+ * narrow-gating shape on the same table, scoped to the invalid-JSON-containment
+ * variant instead of a column-missing error.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical shape for a bad JSON cast — trimmed equal
+ *      to `invalid input syntax for type json` (with any leading `ERROR: ` prefix
+ *      Postgres includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is PostgREST's `WITH pgrst_source AS
+ *      ( SELECT ... FROM "public"."subscriptions" ... )` CTE wrapper that references
+ *      the double-quoted `"items"` identifier together with the `@>` containment
+ *      token.
+ *
+ * Narrowly gated so:
+ *   - a bad-JSON error on any OTHER table / any OTHER column (a real product-code
+ *     JSON parse bug) still pages,
+ *   - the same message against `subscriptions` without the `items`+`@>` pair (a
+ *     different column, a different JSONB operator like `?` / `?|` / `->` / `->>`,
+ *     or a plain `=` / `LIKE`) still pages — the pin is the items-containment
+ *     variant only,
+ *   - a non-SELECT PostgREST wrapper on `subscriptions` (INSERT / UPDATE) still
+ *     pages — the pin is the SELECT shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The invalid-JSON message itself
+  // has a stable shape: `invalid input syntax for type json`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped !== "invalid input syntax for type json") return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // PostgREST direct-REST wraps every read as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."subscriptions" ... )` (double-quoted identifiers). A non-SELECT wrapped
+  // op (INSERT / UPDATE / DELETE / DDL on `subscriptions`) stays captured — a real
+  // code bug writing an items @> filter is a bug we DO want to page on, not the ad
+  // hoc direct-REST read this drop targets.
+  if (!/^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."subscriptions"/.test(q)) return false;
+  // Both the double-quoted `"items"` identifier AND the `@>` containment token must
+  // appear — a different operator on items (?, ?|, ->, ->>, =, text LIKE) or the
+  // same operator against a different column on subscriptions stays captured.
+  if (!q.includes('"items"')) return false;
+  if (!q.includes("@>")) return false;
+  return true;
+}
+
+/**
  * Foreign-app noise - Postgres reporting `syntax error at end of input` for a stale /
  * hand-typed ad hoc approval-decisions lookup that references the non-existent
  * `agent_jobs.branch_name` column. `approval_decisions` and `agent_jobs` are real
