@@ -74,6 +74,7 @@ import {
   isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecsFlagsAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsOwnerFunctionAdhocNoise,
   isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise,
   isForeignSupabasePostgresMissingSpecsIntentAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
@@ -827,6 +828,24 @@ const LOG_QUERIES: LogQuery[] = [
       // grep-anchor (spec check pattern is regex; unescaped parens are groups):
       // isForeignSupabasePostgresMissingSpecsFlagsAdhocNoisemessage, query
       if (isForeignSupabasePostgresMissingSpecsFlagsAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs` that types a phantom `owner_function` scalar column. The
+      // `specs` table exists but has NEVER had an `owner_function` column — the real
+      // owning function slug lives on `specs.owner text`, and every ShopCX reader goes
+      // through the [[../libraries/specs-table]] SDK, which does NOT select
+      // `specs.owner_function`. The column-missing ERROR only reaches this feed when a
+      // foreign app / stale SQL Editor session / deprecated integration queries
+      // `public.specs` with that phantom column (observed both as a bare SELECT and as
+      // the PostgREST-wrapped `WITH pgrst_source AS ( SELECT ... FROM "public"."specs"
+      // ... )` CTE form). There is no lever from ShopCX to make that query resolve —
+      // adding a fake `owner_function` column would duplicate the existing `owner`
+      // column and make the PM data model worse — paging Platform on it is repair work
+      // for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-specs shape (bare OR PostgREST CTE
+      // wrapper) — a column-missing error on any other table, a different column on
+      // `specs`, a JOIN through `spec_phases`, or on `specs` via a non-SELECT statement
+      // (real code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsOwnerFunctionAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.specs` that types `problem` or `proposed_change` as scalar
       // columns. The `specs` table exists but by design carries NO `problem` or
