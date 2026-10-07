@@ -59,6 +59,7 @@ import {
   isForeignSupabasePostgresMissingDailyAmazonProductSnapshotsDateAdhocNoise,
   isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise,
   isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise,
+  isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
@@ -16748,6 +16749,284 @@ test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise return
     isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
       "",
       "select beat_at from public.loop_heartbeats",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise ──
+// Spec: error-feed-drop-workspace-members-customer-id-direct-rest-no.
+// Control Tower signature: supabase-logs:a19c9bdd091bdaa8.
+// Drops the SELECT lookup shape for `workspace_members.customer_id` or
+// `workspace_members.external_customer_id` — columns the membership table has NEVER
+// carried (members link workspace↔user, not workspace↔customer). Any other column, any
+// non-SELECT statement shape, any JOIN, any different table, any FATAL/PANIC/
+// constraint failure still pages.
+
+test("isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise drops the captured supabase-logs:a19c9bdd091bdaa8 PostgREST CTE sample on workspace_members.customer_id", () => {
+  // The production PostgREST CTE sample — a stale foreign direct-REST client asks for
+  // `customer_id` as if the membership row carried a customer FK. PostgREST wraps the
+  // SELECT in `WITH pgrst_source AS ( ... )` with double-quoted identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.customer_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."workspace_members"."workspace_id", "public"."workspace_members"."user_id" FROM "public"."workspace_members" WHERE "public"."workspace_members"."customer_id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column public.workspace_members.customer_id does not exist",
+      'WITH pgrst_source AS (SELECT "public"."workspace_members"."customer_id" FROM "public"."workspace_members")',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "ERROR: column workspace_members.customer_id does not exist",
+      'WITH pgrst_source AS (SELECT "public"."workspace_members"."customer_id" FROM "public"."workspace_members")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise ALSO drops the external_customer_id sibling miss", () => {
+  // The sibling off-schema column name — same drop class, same foreign caller shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.external_customer_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."workspace_members"."external_customer_id" FROM "public"."workspace_members" WHERE "public"."workspace_members"."external_customer_id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column public.workspace_members.external_customer_id does not exist",
+      'WITH pgrst_source AS (SELECT "public"."workspace_members"."external_customer_id" FROM "public"."workspace_members")',
+    ),
+    true,
+  );
+  // Bare SELECT lookup variant — same ad hoc read without the PostgREST CTE wrapper.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.external_customer_id does not exist",
+      "select external_customer_id from public.workspace_members where external_customer_id = 'cx_123'",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise drops the bare SELECT lookup variant", () => {
+  // The non-PostgREST bare-SELECT shape — same ad hoc read without the CTE wrapper.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.customer_id does not exist",
+      "select customer_id, user_id from public.workspace_members where customer_id = 'cx_123'",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.customer_id does not exist",
+      "select customer_id from workspace_members limit 10",
+    ),
+    true,
+  );
+  // Case-insensitive on the query, with trailing WHERE / ORDER BY / LIMIT.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.customer_id does not exist",
+      "SELECT CUSTOMER_ID, USER_ID FROM PUBLIC.WORKSPACE_MEMBERS ORDER BY CUSTOMER_ID DESC LIMIT 50",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "  column workspace_members.customer_id does not exist  ",
+      "   select customer_id from public.workspace_members   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise KEEPS a non-SELECT statement shape (a real code-bug writing customer_id still pages)", () => {
+  // INSERT / UPDATE / DELETE against the table referencing a bogus column is real code
+  // trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.customer_id does not exist",
+      "insert into public.workspace_members (workspace_id, user_id, customer_id) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.customer_id does not exist",
+      "update public.workspace_members set customer_id = $1 where workspace_id = $2 and user_id = $3",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.external_customer_id does not exist",
+      "delete from public.workspace_members where external_customer_id = $1",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.customer_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."workspace_members"("workspace_id", "user_id", "customer_id") VALUES ($1, $2, $3) RETURNING "public"."workspace_members"."workspace_id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.external_customer_id does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."workspace_members" SET "external_customer_id" = $1 WHERE "public"."workspace_members"."user_id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise KEEPS a column-missing on a DIFFERENT workspace_members column (a real column rename regression still pages)", () => {
+  // Real `workspace_members` columns — if any of these regress we absolutely want the
+  // page. The pin is `customer_id` / `external_customer_id` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.workspace_id does not exist",
+      "select workspace_id from public.workspace_members where user_id = 'u1'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.user_id does not exist",
+      "select user_id from public.workspace_members where workspace_id = 'w1'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.role does not exist",
+      "select role from public.workspace_members where user_id = 'u1'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.display_name does not exist",
+      "select display_name from public.workspace_members where user_id = 'u1'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise KEEPS a column-missing error on any OTHER table (a different table with a customer_id column still pages)", () => {
+  // Many ShopCX tables genuinely carry a `customer_id` FK (tickets, subscriptions,
+  // orders, customer_events). If any of them regress we absolutely want to see it — the
+  // pin is `workspace_members.` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column tickets.customer_id does not exist",
+      "select customer_id from public.tickets where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column subscriptions.customer_id does not exist",
+      "select customer_id from public.subscriptions where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column customers.external_customer_id does not exist",
+      "select external_customer_id from public.customers where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise KEEPS a JOIN whose first FROM is another table (a real code shape joining workspace_members still pages)", () => {
+  // The regex is anchored on `from (public.)?workspace_members` as the first FROM
+  // target; a JOIN whose first FROM is a different table won't match — which is the
+  // outcome we want, because a caller that joins is product code, not the ad hoc
+  // direct-REST read.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.customer_id does not exist",
+      "select w.id, m.customer_id from public.workspaces w join public.workspace_members m on m.workspace_id = w.id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise KEEPS a PostgREST CTE wrapper on a DIFFERENT table (a real schema regression on another table still pages)", () => {
+  // Same wrapper shape but the wrapped SELECT reads a different table — the pin is
+  // `workspace_members` only; a regression on an adjacent table is one we want to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column tickets.customer_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."tickets"."id", "public"."tickets"."customer_id" FROM "public"."tickets" WHERE "public"."tickets"."workspace_id" = $1 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on workspace_members (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "database is shutting down",
+      "select workspace_id from public.workspace_members where user_id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      'duplicate key value violates unique constraint "workspace_members_pkey"',
+      "insert into public.workspace_members (workspace_id, user_id) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "canceling statement due to statement timeout",
+      "select workspace_id from public.workspace_members where user_id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise returns false on empty / nullish inputs", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise("", ""),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "column workspace_members.customer_id does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+      "",
+      "select customer_id from public.workspace_members",
     ),
     false,
   );
