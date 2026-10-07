@@ -178,6 +178,22 @@ bash scripts/box-install-oauth-token.sh ~/.claude-personal  # paste it (hidden);
 
 Repeat with `~/.claude` (RR1), `~/.claude-personal` (RR2), `~/.claude-third` (RR3), `~/.claude-fourth` (RR4). The script refuses to save a token that fails its verification run. Verify billing once after switching: claude.ai/settings/usage moves, the API console stays flat.
 
+## Blank final results + reading a session transcript (box-blank-session-result, 2026-10-07)
+
+**Symptom.** From 2026-10-03 about half of Sol's `ticket-handle` sessions (and most `cs-director-call` / `agent-grade` runs) ended `subtype:"success"` with `"result":""` — the last turn emitted ~2 tokens — so the lane found no JSON and failed the job ("Sol first-touch returned no completed direction JSON"). It began the day after the pool moved to setup-token auth; the CLI also self-updates, so the cause is not yet pinned.
+
+**Recovery (in `runBoxSession`, so every lane gets it).** `scripts/builder-worker.session-result.ts` (tests: `npm run test:box-session-result`): (1) use the `result` text when non-blank; (2) else the session's last non-blank assistant text block (the answer the agent already wrote); (3) else resume the SAME session once (same account + cwd, Claude only, ≤5 min) with `BLANK_RESULT_NUDGE_PROMPT` asking it to restate its final output. An `is_error` result is never swapped (the wall/auth classifiers read it).
+
+**Diagnosis data.** The heartbeat's `accounts.session_results` carries since-boot counters of successful sessions split by auth mode (`setup_token` / `login`) and by kind × answer source (`result` / `assistant_fallback` / `blank`), plus nudge outcomes; `accounts.cli_version` is the box's `claude --version` (re-read hourly). If blanks cluster on `setup_token`, the token is implicated; if they track a `cli_version` change, the CLI is.
+
+**Reading a transcript.** Transcripts live at `<config dir>/projects/<cwd-slug>/<session-id>.jsonl` under whichever account ran the session. The session id is `agent_jobs.claude_session_id` (or `"session_id"` in the job's `log_tail`). On the box:
+
+```bash
+ssh root@claude-server
+sudo -iu builder
+bash ~/shopcx/scripts/box-show-session.sh <session-id> 60   # finds it across all four config dirs, prints the last 60 events
+```
+
 ## Second runtime: Codex on a ChatGPT plan (box-codex-runner)
 
 The box runs a **second agent runtime** — OpenAI's `codex exec` on a **ChatGPT-plan device-code login** (NOT an API key — same "session billing, no per-token `$`" shape as `claude -p` on Max). A whitelist of job kinds runs on **Codex primary**; **Claude is the fallback** when Codex is capped or errors (reusing the existing account-failover machinery). This **offloads Max** — directly relieving the usage wall — while keeping customer-facing voice + the core build/plan on Claude.

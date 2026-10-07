@@ -59,6 +59,7 @@ import { recoverSpecsForSession, type RecoveredSpec } from "./planner-transcript
 import { isStrandedFoldCandidate } from "./builder-worker.stranded-fold"; // fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 1 — pure decision predicate for sweepStrandedFolds
 import { shouldReAskForJsonEnvelope, storefrontOptimizerReAskPrompt } from "../src/lib/storefront-optimizer-reask"; // storefront-optimizer-re-asks-once-before-parking Phase 1 — pure decision helper for the one bounded re-ask before park
 import { applyRefreshOutcome, classifyAccountHealth, decideHeldAccountRecovery, decideSweepAction } from "./builder-worker.auth-refresh";
+import { BLANK_RESULT_NUDGE_PROMPT, chooseFinalText, parseSessionStream } from "./builder-worker.session-result"; // box-blank-session-result — recover a blank final `result` (2026-10-03 regression).
 import { parseOverflowDirs, parsePrimarySoftMax, pickTieredAccount } from "./builder-worker.account-tier"; // box-account-tiers — Max primaries carry the load, Pro accounts take overflow only.
 import { applyOauthTokenEnv, decideTokenHoldRelease, readOauthToken, tokenExpiryStatus, type OauthToken } from "./builder-worker.oauth-token"; // box-setup-token-auth — per-account one-year `claude setup-token` tokens replace the race-prone /login refresh tokens (anthropics/claude-code#48786); see docs/brain/recipes/build-box-setup.md § Long-lived setup-token auth. // a-test-that-no-runner-executes-is-not-a-test Phase 1 — pure decision predicates for sweepExpiredCredentials + attemptCredentialRefresh, extracted so scripts/builder-worker.auth-refresh.test.ts can pin the four cases the outage named. build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 — classifyAccountHealth is the shared account-health classifier the sweepUpcomingExpiries + brain runbook document as the SoT for the reason vocabulary. Re-authored Phase 1 — decideHeldAccountRecovery is the pure predicate the sweep consults for accounts ALREADY held, so a CEO re-auth returns them to rotation on the next sweep tick instead of waiting out the 25-hour weekly-cap window.
 // planner-authoring-survives-large-multi-spec-output Phase 2 — bounded per-result size for the
@@ -1296,6 +1297,38 @@ function noteAccountRecoveries(now: number) {
   }
 }
 
+// ── box-blank-session-result diagnostics (2026-10-07) ──────────────────────────────────────────────
+// From 2026-10-03 many box sessions finished OK but with a BLANK final result. It began the day after
+// the pool moved to `claude setup-token` auth, and the CLI on the box self-updates, so either could be the
+// cause. These since-boot counters (on the heartbeat as `accounts.session_results`) split every
+// successful session by auth mode and by how its answer was obtained, plus the box's CLI version, so
+// the cause shows up in data instead of needing a manual A/B on the box.
+type FinalSourceKey = "result" | "assistant_fallback" | "blank";
+const emptyBucket = (): Record<FinalSourceKey, number> => ({ result: 0, assistant_fallback: 0, blank: 0 });
+const sessionResultStats = {
+  since: new Date().toISOString(),
+  by_auth: { setup_token: emptyBucket(), login: emptyBucket() } as Record<"setup_token" | "login", Record<FinalSourceKey, number>>,
+  by_kind: {} as Record<string, Record<FinalSourceKey, number>>,
+  nudges: { recovered: 0, failed: 0 },
+};
+function noteSessionResult(kind: string, auth: "setup_token" | "login", source: FinalSourceKey): void {
+  sessionResultStats.by_auth[auth][source]++;
+  (sessionResultStats.by_kind[kind] ??= emptyBucket())[source]++;
+}
+function noteBlankNudgeOutcome(kind: string, recovered: boolean): void {
+  sessionResultStats.nudges[recovered ? "recovered" : "failed"]++;
+  if (!recovered) console.warn(`[runBoxSession:${kind}] blank-result resume nudge did not recover an answer`);
+}
+let _claudeCliVersion: string | null | undefined;
+function claudeCliVersion(): string | null {
+  if (_claudeCliVersion !== undefined) return _claudeCliVersion;
+  const r = sh("claude", ["--version"], { timeout: 15_000 });
+  _claudeCliVersion = r.code === 0 ? r.out.trim().split("\n")[0].slice(0, 80) || null : null;
+  return _claudeCliVersion;
+}
+// Re-read the CLI version at most hourly — the CLI self-updates under a long-running worker.
+setInterval(() => { _claudeCliVersion = undefined; }, 60 * 60 * 1000).unref?.();
+
 // The per-account snapshot the worker writes onto its heartbeat (box-multi-account-failover Phase 2). Carries
 // per-account in-flight load + capped state, the healthy count, the all-capped flag, and the recent event
 // ring — everything the box-health view + Control Tower box tile need to show how each Max account is burning.
@@ -1325,6 +1358,9 @@ function accountsSnapshot(now: number) {
     all_capped: allAccountsCapped(now),
     soonest_reset: allAccountsCapped(now) ? new Date(soonestReset(now)).toISOString() : null,
     events: accountEvents.slice().reverse(), // newest first
+    // box-blank-session-result — since-boot blank-result counters by auth mode + kind, and the CLI version.
+    cli_version: claudeCliVersion(),
+    session_results: sessionResultStats,
     // The second runtime (box-codex-runner): the box view renders this as a Codex runner card alongside the
     // Max accounts. null when Codex is disabled (kill-switch) so a Codex-less box shows only the Max pool.
     codex: CODEX_ENABLED
@@ -3137,6 +3173,9 @@ interface RunBoxSessionOpts {
   // Extra env vars merged into the spawned env (after the sandbox branch). The godmode
   // lane uses this to pass GOD_MODE_SESSION_ID down to the PreToolUse hook.
   extraEnv?: Record<string, string>;
+  // box-blank-session-result — internal: this call IS the one-shot "restate your final output" resume
+  // nudge for a session whose result came back blank. Never set by callers.
+  blankResultNudge?: boolean;
 }
 
 interface RunResult {
@@ -3220,7 +3259,7 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   // box-codex-runner: a Codex-primary kind runs on `codex exec` FIRST; on a Codex cap/error/throw we fall
   // THROUGH to the Claude path below — on the healthy account the failover wrapper already picked. All
   // Codex-routed kinds are single-shot, so nulling the session for the Claude fallback is a safe no-op.
-  if (runtimeForKind(opts.kind, Date.now()) === "codex") {
+  if (!opts.blankResultNudge && runtimeForKind(opts.kind, Date.now()) === "codex") {
     const cx = await runCodexSession(prompt, sessionId, cwd, opts).catch((e) => {
       console.error(`[runtime] codex ${opts.kind} threw — Claude fallback:`, e);
       return null;
@@ -3373,28 +3412,27 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
     await new Promise((res) => setTimeout(res, BOX_AUTH_RETRY_BACKOFF_MS));
   }
   if (writer) await writer.flush();
-  let session = sessionId;
-  let resultText = "";
   let isError = r.code !== 0;
   // stream-json output is newline-delimited JSON events; the final {type:"result"} carries the
-  // result text + session_id + is_error. Parse line-by-line; the last result event wins.
-  let parsedResult = false;
+  // result text + session_id + is_error. The last result event wins (parseSessionStream).
+  // box-blank-session-result: when that result text is BLANK on a successful run (the 2026-10-03
+  // regression — ~half of Sol's ticket-handle sessions), fall back to the agent's last non-blank
+  // assistant message, and failing that, resume the same session once asking it to restate its answer.
+  const parsed = parseSessionStream(r.out || "", sessionId);
+  let session = parsed.session;
+  let resultText = "";
+  const parsedResult = parsed.resultText !== null;
   let usage: RunUsage = null;
   let model: string | null = null;
-  for (const line of (r.out || "").split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let obj: { type?: string; session_id?: string; result?: unknown; is_error?: boolean };
-    try { obj = JSON.parse(trimmed); } catch { continue; }
-    if (typeof obj.session_id === "string") session = obj.session_id;
-    if (obj.type === "result") {
-      resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-      isError = isError || obj.is_error === true;
-      parsedResult = true;
-      // fleet-cost-metering Phase 1: the result event carries the run's token usage.
-      const ex = extractClaudeUsage(obj as Record<string, unknown>);
-      if (ex.usage) { usage = ex.usage; model = ex.model; }
-    }
+  let finalSource: "result" | "assistant_fallback" | "blank" = "result";
+  if (parsedResult) {
+    const chosen = chooseFinalText(parsed);
+    resultText = chosen.text;
+    finalSource = chosen.source;
+    isError = isError || parsed.resultIsError;
+    // fleet-cost-metering Phase 1: the result event carries the run's token usage.
+    const ex = extractClaudeUsage(parsed.resultEvent as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
   }
   if (!parsedResult) {
     // No result event — killed mid-run (hang/cap) or non-stream output. Surface raw + treat as error.
@@ -3408,6 +3446,18 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   } else if (r.killed === "hardcap") {
     isError = true;
     resultText = `[${kind} killed: exceeded the ${Math.round(opts.timeout / 60000)} min hard cap]\n` + resultText;
+  }
+  if (parsedResult && !isError && !opts.blankResultNudge) {
+    noteSessionResult(kind, env.CLAUDE_CODE_OAUTH_TOKEN ? "setup_token" : "login", finalSource);
+  }
+  if (finalSource === "assistant_fallback" && !isError) {
+    console.warn(`[runBoxSession:${kind}] blank final result — recovered the answer from the last assistant message (session ${session ?? "?"})`);
+  } else if (finalSource === "blank" && !isError && session && !opts.blankResultNudge) {
+    console.warn(`[runBoxSession:${kind}] blank final result and no assistant text — resuming session ${session} once to restate it`);
+    const nudged = await runBoxSession(BLANK_RESULT_NUDGE_PROMPT, session, cwd, { ...opts, blankResultNudge: true, timeout: Math.min(opts.timeout, 5 * 60 * 1000) });
+    noteBlankNudgeOutcome(kind, !nudged.isError && !!nudged.resultText.trim());
+    // Keep the first run's usage when the nudge reports none, so metering never drops the main run.
+    return { ...nudged, usage: nudged.usage ?? usage, model: nudged.model ?? model, raw: `${(r.out || "") + (r.err || "")}\n${nudged.raw}` };
   }
   return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
