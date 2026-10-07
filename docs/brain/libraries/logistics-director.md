@@ -42,6 +42,11 @@ component (no server imports, no side effects).
    `director_function='logistics'` + `action_kind='storefront_availability_toggled'` (shape #1) or the crisis cohort action kind (shape #2);
    out-of-leash escalations write an `approval_decisions` row instead (CEO decided, director didn't).
 
+## Portal-only suppression (`setPortalVariantSuppression`)
+`src/lib/logistics/storefront-availability.ts` also exports `setPortalVariantSuppression(workspaceId, shopifyVariantId, suppressed, reason)`, the **portal half only** of the availability lever. It adds or removes a Shopify variant id in `workspaces.portal_config.suppressed_variant_ids` (read by [[portal__mutation-guard|mutation-guard]] `getSuppressedVariantIds`: bootstrap hides the variant from the add/swap catalog, and `replace-variants` rejects a crafted request). It **never touches the Shopify theme**. Use it when a variant must leave the portal but the storefront is off-limits. It is idempotent (no write or audit row when already in the target state); a real change writes one `director_activity` row (`director_function='logistics'`, `action_kind='portal_variant_suppression_toggled'`). Existing subscription lines on a suppressed variant are unaffected.
+
+First use (2026-10-07, founder-directed): ACV Gummies (Apple) were discontinued, so variant ids `45693375676589` (current) and `42618781302957` (legacy, still on old Appstle lines) were suppressed. The gummy line was removed from all 106 mixed subscriptions and the 2 gummies-only subscriptions were cancelled.
+
 ## North star
 The executor surface is a **legible bounded capability** — Marco can decide within the two
 crisis-cohort categories, everything else escalates to the CEO ([[../operational-rules]] §
