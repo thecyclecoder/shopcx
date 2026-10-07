@@ -74,6 +74,7 @@ import {
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
   isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise,
+  isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
@@ -13321,6 +13322,223 @@ test("isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise r
     isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(
       "column qb_amazon_sales_snapshots.gross_revenue_cents does not exist",
       "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client / hand-typed URL reads
+// `/rest/v1/qb_amazon_sales_snapshots?select=sku,...` against our
+// `public.qb_amazon_sales_snapshots` table. The table exists (qb-close Amazon
+// sales-receipt / COGS source, migration 20261213120001_qb_close_source_tables.sql) but
+// by design carries NO `sku` column — the real merchant-SKU column is `seller_sku`
+// (plus `asin` for the Amazon identifier), and every ShopCX caller
+// (`src/lib/qb-close/sync-amazon-sales.ts`, `src/lib/qb-close/month-end.ts`) selects on
+// `seller_sku` / `asin`. Foreign-owned surface, no lever from us — drop AT CAPTURE only
+// when BOTH the exact column-missing message on `qb_amazon_sales_snapshots.sku` AND a
+// SELECT-lookup shape on `qb_amazon_sales_snapshots` (bare OR PostgREST CTE wrapper)
+// are present. A column-missing on any other table, a different column on
+// `qb_amazon_sales_snapshots` (including the real `seller_sku` / `asin` columns), a
+// non-SELECT statement, or a JOIN still pages.
+
+test("isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise drops the exact failing sample (positive drop — bare SELECT shape with the exact message)", () => {
+  // The captured production sample: a bare SELECT-lookup on the table for the missing
+  // column, in both unqualified and public.-qualified message variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column qb_amazon_sales_snapshots.sku does not exist",
+      "select sku, units, updated_at from public.qb_amazon_sales_snapshots where workspace_id = $1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column public.qb_amazon_sales_snapshots.sku does not exist",
+      "select sku from public.qb_amazon_sales_snapshots",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column qb_amazon_sales_snapshots.sku does not exist",
+      "select sku from qb_amazon_sales_snapshots limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "ERROR: column qb_amazon_sales_snapshots.sku does not exist",
+      "select sku from public.qb_amazon_sales_snapshots",
+    ),
+    true,
+  );
+  // Case-insensitive on the query; trailing WHERE / ORDER BY / LIMIT stays the ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column qb_amazon_sales_snapshots.sku does not exist",
+      "SELECT SKU, UNITS FROM PUBLIC.QB_AMAZON_SALES_SNAPSHOTS ORDER BY UPDATED_AT DESC LIMIT 50",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "  column qb_amazon_sales_snapshots.sku does not exist  ",
+      "   select sku from public.qb_amazon_sales_snapshots   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"qb_amazon_sales_snapshots\" ...)` CTE wrapper form (positive drop — CTE wrapper shape)", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."qb_amazon_sales_snapshots"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column qb_amazon_sales_snapshots.sku does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."qb_amazon_sales_snapshots"."sku", "public"."qb_amazon_sales_snapshots"."units", "public"."qb_amazon_sales_snapshots"."updated_at" FROM "public"."qb_amazon_sales_snapshots" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column public.qb_amazon_sales_snapshots.sku does not exist",
+      'WITH pgrst_source AS (SELECT "public"."qb_amazon_sales_snapshots"."sku" FROM "public"."qb_amazon_sales_snapshots")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "ERROR: column qb_amazon_sales_snapshots.sku does not exist",
+      'WITH pgrst_source AS (SELECT "public"."qb_amazon_sales_snapshots"."sku" FROM "public"."qb_amazon_sales_snapshots")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise KEEPS a column-missing on `qb_amazon_sales_snapshots.seller_sku` / `asin` / `revenue` (the REAL columns — a rename regression still pages)", () => {
+  // `seller_sku` IS the real merchant-SKU column, `asin` IS the Amazon identifier,
+  // `revenue` IS the real per-ASIN/per-day money column. If any regressed we absolutely
+  // want the page. The pin is `sku` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column qb_amazon_sales_snapshots.seller_sku does not exist",
+      "select seller_sku, revenue from public.qb_amazon_sales_snapshots",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column qb_amazon_sales_snapshots.asin does not exist",
+      "select asin from public.qb_amazon_sales_snapshots",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column public.qb_amazon_sales_snapshots.revenue does not exist",
+      "select revenue from public.qb_amazon_sales_snapshots",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise KEEPS a column-missing on a DIFFERENT table (`products.sku` — pin is qb_amazon_sales_snapshots only)", () => {
+  // A column-missing error for any OTHER table's `sku` column still pages — the pin is
+  // `qb_amazon_sales_snapshots.` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column products.sku does not exist",
+      "select id, sku from public.products",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column product_variants.sku does not exist",
+      "select sku from public.product_variants",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise KEEPS a non-SELECT statement shape on qb_amazon_sales_snapshots (an INSERT / UPDATE / DELETE with the same message is a real code-bug and still pages)", () => {
+  // An INSERT/UPDATE/DELETE against qb_amazon_sales_snapshots referencing a bogus `sku`
+  // column is real code trying to write the table — a bug we WANT to see, not the ad
+  // hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column qb_amazon_sales_snapshots.sku does not exist",
+      "insert into public.qb_amazon_sales_snapshots (workspace_id, asin, sale_date, sku) values ($1, $2, $3, $4)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column qb_amazon_sales_snapshots.sku does not exist",
+      "update public.qb_amazon_sales_snapshots set sku = $1 where workspace_id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column qb_amazon_sales_snapshots.sku does not exist",
+      "delete from public.qb_amazon_sales_snapshots where sku = $1",
+    ),
+    false,
+  );
+  // The PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column qb_amazon_sales_snapshots.sku does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."qb_amazon_sales_snapshots"("workspace_id", "asin", "sku") VALUES ($1, $2, $3) RETURNING "public"."qb_amazon_sales_snapshots"."id" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise KEEPS the same message on a JOIN with another table (a real code path joining qb_amazon_sales_snapshots still pages)", () => {
+  // The pin is the bare SELECT-lookup on qb_amazon_sales_snapshots or its PostgREST CTE
+  // wrapper — a JOIN across other tables is a real code path we own and want to see.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column qb_amazon_sales_snapshots.sku does not exist",
+      "select s.sku, p.title from public.qb_amazon_sales_snapshots s join public.products p on p.id = s.product_id where s.workspace_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column qb_amazon_sales_snapshots.sku does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(
+      "column qb_amazon_sales_snapshots.sku does not exist",
+      null,
     ),
     false,
   );

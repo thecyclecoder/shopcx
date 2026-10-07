@@ -98,6 +98,7 @@ import {
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
   isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise,
+  isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
@@ -1424,6 +1425,27 @@ const LOG_QUERIES: LogQuery[] = [
       // regression), or on `qb_amazon_sales_snapshots` via a non-SELECT statement (real
       // code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.qb_amazon_sales_snapshots.sku`. The `qb_amazon_sales_snapshots`
+      // table exists (qb-close Amazon sales-receipt / COGS source, migration
+      // 20261213120001_qb_close_source_tables.sql) but by design carries NO `sku`
+      // column — the real merchant-SKU column is `seller_sku` (plus `asin` for the
+      // Amazon identifier), see [[../tables/qb_amazon_sales_snapshots]] and every
+      // ShopCX caller under `src/lib/qb-close/sync-amazon-sales.ts` +
+      // `src/lib/qb-close/month-end.ts`. The column-missing ERROR only reaches this
+      // feed when a foreign app / stale PostgREST client / deprecated integration /
+      // hand-typed URL queries `/rest/v1/qb_amazon_sales_snapshots?select=sku,...` —
+      // a natural mistake because the bare `sku` naming is far more common across
+      // commerce schemas than our `seller_sku`. There is no lever from ShopCX to make
+      // that query resolve — paging Platform on it
+      // ([[../specs/error-feed-drop-qb-amazon-sales-sku-adhoc-noise]]) is repair work
+      // for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-qb_amazon_sales_snapshots shape (bare
+      // OR PostgREST CTE wrapper) — a column-missing error on any other table, a
+      // different column on `qb_amazon_sales_snapshots` (e.g. `seller_sku` / `asin` /
+      // `revenue` regression), or on `qb_amazon_sales_snapshots` via a non-SELECT
+      // statement (real code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.loyalty_members.lifetime_points`. The `loyalty_members` table
       // exists but has NO `lifetime_points` column — the live running-total column is
