@@ -16718,20 +16718,20 @@ async function runCsDirectorCallJob(job: Job) {
         try {
           const { data: outcomes } = await db
             .from("ticket_required_outcomes")
-            .select("action_type, status, verified_at, updated_at")
+            .select("kind, status, verified_at, authored_at")
             .eq("workspace_id", job.workspace_id)
             .eq("ticket_id", ticketId)
             .eq("status", "verified");
           executedActions = ((outcomes as Array<{
-            action_type: string | null;
+            kind: string | null;
             status: string | null;
             verified_at: string | null;
-            updated_at: string | null;
+            authored_at: string | null;
           }> | null) ?? [])
-            .filter((r) => typeof r.action_type === "string")
+            .filter((r) => typeof r.kind === "string")
             .map((r) => ({
-              type: r.action_type as string,
-              executed_at: (r.verified_at ?? r.updated_at ?? "") as string,
+              type: r.kind as string,
+              executed_at: (r.verified_at ?? r.authored_at ?? "") as string,
             }))
             .filter((r) => r.executed_at.length > 0);
         } catch (e) {
