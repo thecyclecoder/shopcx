@@ -30,6 +30,10 @@ Both test cases mirror the Phase 5 pattern from `inflection-detector.reSessionSo
 
 Both tests run under `npx tsx --test src/lib/cs-director-close-gate.test.ts` and exercise the fixture harness (no network, pure logic).
 
+## Pre-read details — the executed-actions list
+
+The close-no-action gate in `decideCsDirectorTicketTransition` (scripts/builder-worker.ts near line 16720) loads the list of executed outcomes from the ticket's `ticket_required_outcomes` rows. The SELECT reads: `kind`, `status`, `verified_at`, `authored_at` — these MUST match the [[../tables/ticket_required_outcomes]] column names exactly. A prior mismatch (column names `action_type` + `updated_at`) caused the pre-read to fail silently, returning an empty list and defeating the Phase-3 gate that checks for unsatisfied customer asks before closing. The correct column names are now enforced in both the SELECT literal and the surrounding TypeScript type + filter + map.
+
 ## Related
 
-[[./cs-director]] · [[./inflection-detector]] · [[./cs-director-ticket-transition]] · [[../tables/ticket_messages]] · [[../specs/inflection-resession-must-act-on-newest-ask]] · [[../specs/inflection-resession-cs-director-ticket-messages-workspace-s]]
+[[./cs-director]] · [[./inflection-detector]] · [[./cs-director-ticket-transition]] · [[../tables/ticket_messages]] · [[../tables/ticket_required_outcomes]] · [[../specs/inflection-resession-must-act-on-newest-ask]] · [[../specs/inflection-resession-cs-director-ticket-messages-workspace-s]]

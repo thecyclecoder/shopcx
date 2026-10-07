@@ -165,6 +165,10 @@ Sourced from the newest inbound customer `ticket_messages` row — the message t
 
 `runTicketHandleJob` (`scripts/builder-worker.ts`) reads `trigger_message` and injects a NEWEST CUSTOMER ASK block into the Sol prompt stating: _"Your Direction MUST address THIS message. The inflection kind is CONTEXT ONLY — it does not replace the customer's words."_ The ticket-handle skill then requires a top-level `newest_customer_ask: { quoted, resolution }` on every Direction so the bounce can never again degenerate into re-answering an older question. Ground truth: ticket dc31bf31 (14:14 ask to move an order to Oct 30 fired the frustration path with `cues=['repeated_punct']`, Sol re-answered the Sep 2 ship date, customer was billed four weeks early → $237.16 refund + cancelled subscriber).
 
+## Ledger stamp guards on turn_index
+
+The two best-effort `ticket_resolution_events` ledger stamps in `reSessionSol` — the no-live-Direction fallback (around line 629) and the re-session cap-hit branch (around line 692) — guard on `typeof input.turn_index === 'number'` before the insert. The [[../tables/ticket_resolution_events]] column `turn_index` has a NOT NULL constraint (DDL: supabase/migrations/20260917120004_ticket_resolution_events.sql). When the caller omits turn_index (undefined), the ledger stamp is skipped rather than attempted and rejected by Postgres. This prevents the recurring null-constraint violation (Postgres error 23502) on this table and keeps the best-effort stamping truly best-effort.
+
 ### The router NEVER sends a customer-facing message
 
 Per spec: the corrected reply is the new box session's job — writing it from the router would put two messages on the ledger for one inflection turn, breaking the "one Direction per intent" invariant [[../specs/sol-cheap-execution-over-ticket-direction]] relies on. The optional holding-message send lives at the Phase-2 gate call site (see below), NOT here.

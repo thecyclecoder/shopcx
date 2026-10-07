@@ -1,0 +1,1 @@
+- **Stop inserting ticket_resolution_events ledger rows with a null turn_index** · verified 2026-10-07 · → [[../lifecycles/ticket-lifecycle]]
