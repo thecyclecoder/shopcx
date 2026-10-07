@@ -178,9 +178,13 @@ bash scripts/box-install-oauth-token.sh ~/.claude-personal  # paste it (hidden);
 
 Repeat with `~/.claude` (RR1), `~/.claude-personal` (RR2), `~/.claude-third` (RR3), `~/.claude-fourth` (RR4). The script refuses to save a token that fails its verification run. Verify billing once after switching: claude.ai/settings/usage moves, the API console stays flat.
 
+**⚠️ The token changes the CLI's default model — pin it.** Under `/login` the unpinned default was Opus 4.8; under the setup-token it fell to **Sonnet 4.6** (2026-10-02 → 10-07, unnoticed), which ended ~half of `ticket-handle` sessions without their final JSON. Every account's `<configDir>/settings.json` therefore carries `"model": "claude-opus-4-8"` (set 2026-10-07; backups at `settings.json.bak-20261007`). A new account / re-provisioned config dir must get the same line. Kinds pinned in [[../tables/agent_model_tiers]] still override it via `--model` ([[../libraries/agent-model-tiers]]). Check the live model from any transcript's `message.model`.
+
 ## Blank final results + reading a session transcript (box-blank-session-result, 2026-10-07)
 
 **Symptom.** From 2026-10-03 about half of Sol's `ticket-handle` sessions (and most `cs-director-call` / `agent-grade` runs) ended `subtype:"success"` with `"result":""` — the last turn emitted ~2 tokens — so the lane found no JSON and failed the job ("Sol first-touch returned no completed direction JSON"). It began the day after the pool moved to setup-token auth; the CLI also self-updates, so the cause is not yet pinned.
+
+**Root cause (found 2026-10-07): the model, not the auth.** The setup-token switch silently moved unpinned sessions from Opus 4.8 to Sonnet 4.6 (see the ⚠️ note above). Sonnet writes the JSON beside a `TaskUpdate` call, then ends on an empty or prose turn; Opus didn't. Fixed by pinning the model, so the recovery below is now a safety net.
 
 **Recovery (in `runBoxSession`, so every lane gets it).** `scripts/builder-worker.session-result.ts` (tests: `npm run test:box-session-result`): (1) use the `result` text when non-blank; (2) else the session's last non-blank assistant text block (the answer the agent already wrote); (3) else resume the SAME session once (same account + cwd, Claude only, ≤5 min) with `BLANK_RESULT_NUDGE_PROMPT` asking it to restate its final output. An `is_error` result is never swapped (the wall/auth classifiers read it).
 
