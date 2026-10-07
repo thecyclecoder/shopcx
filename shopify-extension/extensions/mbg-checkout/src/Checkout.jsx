@@ -5,9 +5,16 @@ import { useState, useEffect } from "preact/hooks";
 /**
  * Money-Back Guarantee block with its terms one tap away:
  *
- *   [✓] 30-Day Money-Back Guarantee
- *       Not happy with your first order? Send it back within 30 days for a refund.
- *       See terms ›   → modal: the published Returns policy, section by section
+ *   Centered on a tinted card:
+ *                       [gold seal]
+ *               Love it, or your money back
+ *     Try your first order for 30 days. If it's not for you,
+ *               send it back for a refund.
+ *            How the 30-day guarantee works ›   → modal: the published Returns
+ *                                                 policy, section by section
+ *
+ * The tint is the checkout branding's `subdued` background; checkout extensions
+ * can't set an arbitrary colour, only transparent / base / subdued.
  *
  * SOURCED, NOT WRITTEN. Whether it shows is decided by the live `refunds` policy
  * (same gate as the trust card's guarantee line); the modal's terms are the
@@ -17,7 +24,7 @@ import { useState, useEffect } from "preact/hooks";
  *
  * THE LINE IS DELIBERATELY NARROW. The policy covers the first order only and
  * deducts the return label, so the copy says "your first order" and "a refund",
- * never "risk-free" or "full refund".
+ * never "risk-free" or "full refund". The seal is the store's existing artwork.
  *
  * EVERYONE SEES IT, signed-in returning customers included (founder's call,
  * 2026-10-06). The copy's "your first order" and the terms modal carry the scope,
@@ -28,6 +35,10 @@ export default function extension() {
 }
 
 const MODAL_ID = "mbg-terms";
+
+// the store's own gold "100% Money Back Guarantee" seal (Shopify Files)
+const DEFAULT_SEAL =
+  "https://cdn.shopify.com/s/files/1/0634/9599/5565/files/money-back-guarantee.png?v=1725549424";
 
 /** consecutive list items → one <s-unordered-list> */
 function Blocks({ blocks }) {
@@ -84,25 +95,18 @@ function GuaranteeTerms() {
   const terms = Array.isArray(guarantee.terms) ? guarantee.terms : [];
 
   return (
-    // Centered, type-led card on a tinted band: no seal by default (founder found
-    // seals dated, 2026-10-07). The badge_url setting adds an image on top if set.
-    <s-box background="subdued" borderRadius="large" padding="large-100">
+    <s-box background="subdued" borderRadius="large" padding="large-200">
       <s-stack gap="small-200" alignItems="center">
-        {badge ? (
-          <s-box inlineSize="72px">
-            <s-image src={badge} alt={guarantee.title} aspectRatio="1" />
-          </s-box>
-        ) : null}
-        <s-text type="small" color="subdued">
-          30-DAY MONEY-BACK GUARANTEE
-        </s-text>
-        <s-heading>Try it for 30 days</s-heading>
+        <s-box inlineSize="120px">
+          <s-image src={badge || DEFAULT_SEAL} alt="100% money-back guarantee seal" aspectRatio="1" />
+        </s-box>
+        <s-heading>Love it, or your money back</s-heading>
         <s-paragraph textAlign="center" color="subdued">
-          Love it, or send back your first order within 30 days for a refund.
+          Try your first order for 30 days. If it's not for you, send it back for a refund.
         </s-paragraph>
         {terms.length ? (
           <s-link command="--show" commandFor={MODAL_ID}>
-            See guarantee terms
+            How the 30-day guarantee works
           </s-link>
         ) : null}
       </s-stack>
