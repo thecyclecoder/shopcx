@@ -63,6 +63,18 @@ Playbook-active tickets still enter this gate. `applyInflectionGate` reads `tick
 
 Guards (coaching #1/#2 pattern): `reSessionSol` wraps `superseDirection`'s workspace-scoped compare-and-set (so a racing caller can't fan out a duplicate ticket-handle session), the DB partial UNIQUE on ticket_directions is a second belt, the ledger stage is best-effort (a diagnostic-substrate failure MUST NOT block the bounce), and the holding-message send is doubly-gated (kind==='frustration' AND the config column true).
 
+## Step 3.975 — Date-change-ask gate ([[../libraries/date-change-ask]])
+
+Phase 4 of [[../specs/every-inbound-handled-within-30-min]]. Between the `sonnet-orchestrate` step (Sonnet decision drafted) and the `sonnet-execute` step (decision applied), the `date-change-ask-gate` step calls [[../libraries/date-change-ask]] `detectDateChangeAsk` and `decisionAddressesDateChange` to decide whether the drafted reply should ship or be held for re-session. Ground truth: ticket 09f7257a (Angelica Devine, 2026-10-07 16:26); her forwarded order-confirmation email contained "Skip delivery · Pause" buttons and date headers that false-positived on `detectDateChangeAsk` (triggering an order-subject anchor + date token), so the gate held the outbound reply. The re-session it triggered then failed, and the held reply was abandoned.
+
+The gate runs `stripQuotedAndForwarded` (new pure helper in date-change-ask.ts) on the inbound message BEFORE passing it to the detector — the helper drops 'On <date> … wrote:' quoted-reply blocks, '---------- Forwarded message' footers, and '> ' prefixed lines so forwarded/quoted email structure doesn't trip the change-verb anchor. On a detected ask, the gate checks whether `sonnetDecision.actions[]` contains `change_next_date` / `skip_next_order` / `pause`, or whether the decision asks a clarifying question (either `needs_clarification=true` or `clarification_question` is non-empty). If the Sonnet draft addresses the ask, the gate returns and the pipeline proceeds to `sonnet-execute`. If not, the gate holds the draft (`[System] date-change-ask gate: holding reply …`), enqueues a `reSessionSol` with `instructions.reason='unaddressed_date_ask'`, and returns `{ status: "date_change_ask_held" }`. If the re-session itself fails or produces no Direction, the held reply is escalated rather than dropped — no customer silence (same [[../libraries/cs-director]] enqueue as Phase 1's SLA watchdog).
+
+Ledger stamp: `ticket_resolution_events.reasoning = 'sol:unaddressed_date_ask'` (tagged at the reSessionSol call site via [[../libraries/ticket-resolution-events]]).
+
+## Step 2c — Refund-intent to Refund playbook deterministic router
+
+Phase 2 of [[../specs/every-inbound-handled-within-30-min]]. Before Sol/Sonnet dispatch, the handler calls [[../libraries/playbook-executor]] `routeIntentToPlaybook(admin, wsId, ticketId, intent.intent)` with the classified inbound intent. If the intent matches an active playbook's `trigger_intents` and no playbook is already active on the ticket, the router starts that playbook deterministically via `startPlaybook` — the customer's stated intent (e.g. "refund_request", "unwanted_charge", "charged_without_permission") is now the authoritative routing signal, not a bare cancel-journey fallback. Ground truth: ticket 09f7257a (Angelica Devine, 2026-10-07); her message matched the Refund playbook's trigger intents exactly, yet Sol and Sonnet both routed to a cancel journey and called it out-of-policy, bypassing the playbook's tier ladder. The deterministic intent router closes that gap at the entry point. Ledger stamp: `[System] Intent→playbook router: classified intent="<intent>" matched <playbook_name> … Starting playbook deterministically`.
+
 ## Step 2d — Sol-chosen vs signal-matched playbook dispatch
 
 Phase 2 of [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] moves playbook selection inside Sol's first-touch box session for the Sol cohort. `routeExec` § 2 now branches on the live [[../tables/ticket_directions]] row BEFORE the deterministic matcher fires:
@@ -153,6 +165,10 @@ Per-channel settings come from [[../tables/ai_channel_config]] (`channelCfg`) an
 - [[../tables/workflows]]
 - [[../tables/workspace_members]]
 - [[../tables/workspaces]]
+
+## Related
+
+[[../specs/every-inbound-handled-within-30-min]] (Phase 2: intent→playbook routing, Phase 4: date-change gate) · [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] · [[../specs/sol-cheap-execution-over-ticket-direction]] · [[../libraries/date-change-ask]] · [[../libraries/playbook-executor]]
 
 ---
 

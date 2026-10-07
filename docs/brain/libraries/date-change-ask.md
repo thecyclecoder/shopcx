@@ -89,6 +89,7 @@ Plus the negative anchors ("move my address", "pause my music") and `decisionAdd
 ## Related
 
 - [[../specs/inflection-resession-must-act-on-newest-ask]] — the parent spec. Phase 1 wires the triggering message onto the re-session instructions; this file is Phase 2.
+- [[../specs/every-inbound-handled-within-30-min]] — Phase 4 (the date-change gate with `stripQuotedAndForwarded`). This module's quote/forward stripper closes the ground-truth incident ticket 09f7257a where a forwarded order-confirmation email's "Skip · Pause" buttons false-positived on `detectDateChangeAsk`.
 - [[./inflection-detector]] — the per-turn inflection gate the detector pairs with; its Phase-2 ledger prefix (`sol:inflection-*`) is distinct from this gate's `sol:unaddressed_date_ask`.
 - [[./cs-director]] — Phase 3's `findUnsatisfiedCustomerRequests` reuses `detectDateChangeAsk` on inbound messages newer than the last executed action, so June can't close-no-action over an unanswered date-change ask.
 - [[../inngest/unified-ticket-handler]] — the send-path gate's call site, between `sonnet-orchestrate` and `sonnet-execute`.
