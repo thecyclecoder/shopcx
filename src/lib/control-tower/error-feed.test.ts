@@ -40,6 +40,7 @@ import {
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecsFlagsAdhocNoise,
   isForeignSupabasePostgresMissingSpecsOwnerFunctionAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsTargetAdhocNoise,
   isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise,
   isForeignSupabasePostgresMissingSpecsIntentAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
@@ -6734,6 +6735,182 @@ test("isForeignSupabasePostgresMissingSpecsOwnerFunctionAdhocNoise returns false
     isForeignSupabasePostgresMissingSpecsOwnerFunctionAdhocNoise(
       "column specs.owner_function does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingSpecsTargetAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads `public.specs` with a phantom
+// `target` scalar column. The table exists but has NEVER had a `target` column — a
+// spec's parent (owning function mandate or goal milestone) is encoded on
+// `specs.parent_kind` + `specs.parent_slug`, and the first-party SDK does NOT select
+// `specs.target`. Foreign-owned surface, no lever from us — drop AT CAPTURE only when
+// BOTH the exact column-missing message on `specs.target` AND a SELECT-lookup shape on
+// `specs` (bare OR PostgREST CTE wrapper) are present. A column-missing on any other
+// table, a different column on `specs`, a JOIN through `spec_phases`, or a non-SELECT
+// statement still pages. Mirrors the OwnerFunction sibling block above.
+
+test("isForeignSupabasePostgresMissingSpecsTargetAdhocNoise drops the ad hoc SELECT lookup on the exact specs.target column-missing shape", () => {
+  // The captured production sample: unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column specs.target does not exist",
+      "select slug, status, target from public.specs where slug = 'x' limit 1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column public.specs.target does not exist",
+      "select slug, status, target from public.specs where slug = 'x' limit 1",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column specs.target does not exist",
+      "select target from specs limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column specs.target does not exist",
+      "select slug, target from public.specs where slug = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column specs.target does not exist",
+      "SELECT SLUG, TARGET FROM PUBLIC.SPECS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "ERROR: column specs.target does not exist",
+      "select target from public.specs",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "  column specs.target does not exist  ",
+      "   select target from public.specs   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsTargetAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"specs\" ...)` CTE wrapper form", () => {
+  // The exact PostgREST direct-REST wire shape behind Control Tower signature
+  // `supabase-logs:1244667ec7881f07`: the foreign-owned lookup wrapped in the
+  // `pgrst_source` CTE with double-quoted `"public"."specs"` identifiers. The plain
+  // bare-SELECT regex misses this because the statement starts with `with` and the
+  // FROM clause carries the quoted schema.table shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column specs.target does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."specs"."slug", "public"."specs"."target" FROM "public"."specs" WHERE "public"."specs"."slug" = $1 LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column public.specs.target does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."target" FROM "public"."specs")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "ERROR: column specs.target does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."target" FROM "public"."specs")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsTargetAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a target column still pages)", () => {
+  // If any other table had a real `target` column and regressed, we absolutely want to
+  // see it — the pin is `specs.target` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column agent_jobs.target does not exist",
+      "select target from public.agent_jobs where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column goal_milestones.target does not exist",
+      "select target from public.goal_milestones where id = 'x'",
+    ),
+    false,
+  );
+  // Sibling `spec_phases.target` (also non-existent) is a DIFFERENT foreign-caller
+  // shape on a DIFFERENT table — the pin here is `specs` only, so this stays paged
+  // rather than silently swallowed by the specs classifier.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column spec_phases.target does not exist",
+      "select target from public.spec_phases where spec_id = 'x'",
+    ),
+    false,
+  );
+  // PostgREST CTE wrapper on a different table — same wrapper shape, different FROM.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column agent_jobs.target does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs"."id", "public"."agent_jobs"."target" FROM "public"."agent_jobs" WHERE "public"."agent_jobs"."workspace_id" = $1 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsTargetAdhocNoise KEEPS a DIFFERENT column-missing on specs (a real column rename still pages)", () => {
+  // Real `specs` columns — if any of these regress we absolutely want the page.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column specs.owner does not exist",
+      "select owner from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column specs.status does not exist",
+      "select status from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column specs.slug does not exist",
+      "select slug from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column specs.parent_kind does not exist",
+      "select parent_kind from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsTargetAdhocNoise(
+      "column specs.parent_slug does not exist",
+      "select parent_slug from public.specs where id = 'x'",
     ),
     false,
   );
