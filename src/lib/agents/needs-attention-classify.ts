@@ -149,6 +149,21 @@ const TOOLING_FAILURE_PATTERNS: RegExp[] = [
   // spec-test fail check that resumed us. Checking tooling BEFORE real_blocker in classifyByHeuristic
   // routes it correctly (parked security-review job d3ef27e6 observed sample).
   /cannot run the required preflight/i,
+  // error-feed-drop-workspaces-updated-at-column-adhoc-noise Fix 1 — the security-review's
+  // repair-attempt verdict can land as a stock `needs-human` whose review text says
+  // "No prior review context available in this session — the previous security-review turn
+  // was not captured; a human should re-trigger /security-review to get a fresh scan."
+  // That is the SAME stale-resume failure mode [[../security-stale-resume.ts]] describes
+  // (the resumed session has nothing to re-emit — attempt 1 produced no real review), reskinned
+  // with new phrasing the existing STALE_RESUME_SIGNATURES don't recognize. It is a
+  // TOOLING_FAILURE (the review agent produced no real verdict), NOT a real_blocker (the
+  // on-branch diff has no missing prerequisite). Without this pattern, the park's `needs-human`
+  // error matches /needs[- ]human/i in REAL_BLOCKER_PATTERNS first and spawns a bogus
+  // `*-fix-real_blocker` child on the origin, surfacing the `blocker:real_blocker` spec-test
+  // fail check that resumed us (parked security-review job 15ebb395 observed sample). Checking
+  // tooling BEFORE real_blocker in classifyByHeuristic routes it correctly.
+  /no prior review context/i,
+  /security-review turn was not captured/i,
 ];
 
 const REAL_BLOCKER_PATTERNS: RegExp[] = [
