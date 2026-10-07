@@ -1,0 +1,1 @@
+- **Drop foreign-PostgREST `column specs.target does not exist` noise at the capture boundary** · verified 2026-10-07 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingSpecsTargetAdhocNoise`; cross-link in [[../tables/specs]])
