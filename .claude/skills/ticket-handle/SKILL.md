@@ -196,6 +196,18 @@ If NO playbook clearly matches the ask, choose `chosen_path='stateless'` (or `'n
 
 Same principle as [Policy review](#policy-review-is-mandatory-phase-1-of-sol-reviews-policies): the presence of a bounded proxy — a real playbook slug — is what authorizes the `playbook` path. Absence means take a different path, never fake the authorization. When in doubt about which playbook fits, grep `docs/brain/playbooks/README.md` for the active slug list, or use `get_playbook` when it's live. If the shape isn't in that list, the honest answer is `stateless`.
 
+## Never change a subscription price without quoting `renewal_subtotal_cents`
+
+On an INTERNAL sub, `resolveSubscriptionPricing` is the authority for what the renewal will actually
+charge — NOT `price_override_cents` (that is the PRE-DISCOUNT base; the quantity break and S&S
+apply ON TOP). `getCxSubscriptions` now reports the engine's view: each item carries
+`realized_cents` and the subscription carries `renewal_subtotal_cents`. Before you enqueue any
+`update_line_item_price` or author a `restore_grandfathered_price` remedy, cite both values and name
+the engine's price in `expected_current_realized_cents` on the action payload — the handler refuses
+on an internal sub when the quoted figure drifts >1¢ from the engine. Ground-truth case: ticket
+01f6a2e6 → 668bc5c8 (Sanja Rojas), where three agents in a row "fixed" a correct $158.31/shipment
+sub down to $118.71 because the SDK had labeled the override base as realized.
+
 ## `guardrails` — bounded proxies, hit-a-rail escalates
 
 Sol picks `guardrails` — the constraints downstream cheap-execution MUST respect. They are bounded proxies (per CLAUDE.md § North star): a rail-hit = escalate, not execute. Example shapes (illustrative; add only the rails that apply):

@@ -78,6 +78,13 @@ export interface ActionParams {
   shopify_order_id?: string;
   amount_cents?: number;
   base_price_cents?: number;
+  /** update_line_item_price on an INTERNAL sub — the agent's assertion of the current
+   *  per-unit price the renewal engine is charging. The handler recomputes the engine's
+   *  realized price via resolveSubscriptionPricing and REFUSES if the two disagree by more
+   *  than 1¢. Prevents an agent that mis-read `price_override_cents` (the pre-discount base)
+   *  as the realized price from "fixing" a correct sub (ticket 01f6a2e6 → 668bc5c8).
+   *  Required for internal subs; ignored on external engines. */
+  expected_current_realized_cents?: number;
   crisis_action_id?: string;
   order_number?: string;
   free_label?: boolean;
@@ -2433,6 +2440,75 @@ export const directActionHandlers: Record<
     // ShopCX → a draft base-price pin with the discounts recomputed in the same commit.
     const { resolveBillingSource } = await import("@/lib/internal-subscription");
     const priceEngine = await resolveBillingSource(ctx.workspaceId, p.contract_id);
+
+    // ⭐ Phase 2 of cx-agents-read-engine-price-not-override-base:
+    // On an INTERNAL sub, require the agent to QUOTE the engine's current realized per-unit
+    // price before we accept a change. We recompute via resolveSubscriptionPricing and refuse
+    // on a mismatch > 1¢ — so an agent that mis-read `price_override_cents` (the pre-discount
+    // base) as the realized price cannot "fix" a correct sub. Only an agent that has read
+    // getCxSubscriptions post-Phase-1 (which reports `realized_cents` and `renewal_subtotal_cents`
+    // from the engine) can satisfy this gate. Ticket 01f6a2e6 → 668bc5c8 (Sanja Rojas): Sonnet,
+    // June ×2, Sol each wrote a wrong base in sequence; this gate stops that class entirely.
+    if (priceEngine === "internal" && subRow?.id) {
+      const assertedCents = p.expected_current_realized_cents;
+      if (assertedCents == null || !Number.isFinite(assertedCents)) {
+        return {
+          success: false,
+          error:
+            `Refusing update_line_item_price on internal contract ${p.contract_id}: payload is missing ` +
+            `expected_current_realized_cents. On an internal sub you MUST first read getCxSubscriptions ` +
+            `(items[].realized_cents / sub.renewal_subtotal_cents) and quote the engine's current realized ` +
+            `price in this field — otherwise a wrong pre-discount base can silently reach the engine.`,
+        };
+      }
+      // Determine the engine's current realized unit for the target variant. Prefer the agent's
+      // explicit variant_id; fall back to the sole non-shipping-protection line (matches the
+      // handler's own single-line inference below).
+      let assertVariantId = p.variant_id ? String(p.variant_id) : "";
+      if (!assertVariantId) {
+        const subItems = Array.isArray(subRow.items)
+          ? (subRow.items as Array<{ variant_id?: unknown; title?: unknown }>)
+          : [];
+        const real = subItems.filter(
+          (i) => !String(i.title ?? "").toLowerCase().includes("shipping protection"),
+        );
+        if (real.length === 1 && real[0]?.variant_id) assertVariantId = String(real[0].variant_id);
+      }
+      if (assertVariantId) {
+        const { resolveSubscriptionPricing } = await import("@/lib/pricing");
+        const priced = await resolveSubscriptionPricing(ctx.workspaceId, {
+          items: Array.isArray(subRow.items)
+            ? (subRow.items as Array<Record<string, unknown>>)
+            : [],
+          delivery_price_cents: (subRow.delivery_price_cents as number | null) ?? null,
+          pricing_offer_id: (subRow.pricing_offer_id as string | null) ?? null,
+        });
+        const engineLine = priced.lines.find(
+          (l) => String(l.variant_id) === String(assertVariantId),
+        );
+        const engineRealized = engineLine?.unit_cents;
+        if (engineRealized == null) {
+          return {
+            success: false,
+            error:
+              `Refusing update_line_item_price on internal contract ${p.contract_id}: cannot locate ` +
+              `variant ${assertVariantId} on the sub — re-read getCxSubscriptions and name a current line.`,
+          };
+        }
+        if (Math.abs(engineRealized - assertedCents) > 1) {
+          return {
+            success: false,
+            error:
+              `Refusing update_line_item_price on internal contract ${p.contract_id} variant ${assertVariantId}: ` +
+              `you believe the engine's current realized per-unit is $${(assertedCents / 100).toFixed(2)}, ` +
+              `but resolveSubscriptionPricing says $${(engineRealized / 100).toFixed(2)} — ` +
+              `re-read getCxSubscriptions (items[].realized_cents + sub.renewal_subtotal_cents) and try again. ` +
+              `price_override_cents is the PRE-DISCOUNT base, not realized.`,
+          };
+        }
+      }
+    }
+
     if (priceEngine !== "appstle") {
       // Prefer the agent-supplied variant_id, but fall back to the sole real (non
       // shipping-protection) line on the sub — a sub with one item has an unambiguous restore
@@ -2473,9 +2549,20 @@ export const directActionHandlers: Record<
       }
       const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, variantId, derived.base);
       if (r.success) await logPriceCorrection(variantId, derived);
-      return r.success
-        ? { ...r, summary: `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${variantId} (${priceEngine})${derived.note}` }
-        : r;
+      if (!r.success) return r;
+      // Phase 2 of cx-agents-read-engine-price-not-override-base: name the engine's
+      // realized price in the handler summary (not the raw base), so a reviewer can
+      // see what the renewal will actually charge before/after.
+      const prevRealized = derived.previousRealizedPerUnitCents;
+      const nextRealized = derived.projectedRealizedPerUnitCents;
+      const prevRealizedStr = prevRealized != null ? `$${(prevRealized / 100).toFixed(2)}` : "?";
+      const nextRealizedStr = nextRealized != null ? `$${(nextRealized / 100).toFixed(2)}` : "?";
+      return {
+        ...r,
+        summary:
+          `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${variantId} (${priceEngine}): ` +
+          `realized ${prevRealizedStr} → ${nextRealizedStr} per unit${derived.note}`,
+      };
     }
 
     // Build candidate variants in priority order:
