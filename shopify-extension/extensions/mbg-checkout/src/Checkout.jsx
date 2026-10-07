@@ -84,13 +84,18 @@ function GuaranteeTerms() {
   const terms = Array.isArray(guarantee.terms) ? guarantee.terms : [];
 
   return (
-    // Centered seal card on a tinted band. The seal is our own image
-    // (public/checkout/guarantee-seal.png); the badge_url setting overrides it.
+    // Centered, type-led card on a tinted band: no seal by default (founder found
+    // seals dated, 2026-10-07). The badge_url setting adds an image on top if set.
     <s-box background="subdued" borderRadius="large" padding="large-100">
       <s-stack gap="small-200" alignItems="center">
-        <s-box inlineSize="96px">
-          <s-image src={badge || `${apiEndpoint}/checkout/guarantee-seal.png`} alt={guarantee.title} aspectRatio="1" />
-        </s-box>
+        {badge ? (
+          <s-box inlineSize="72px">
+            <s-image src={badge} alt={guarantee.title} aspectRatio="1" />
+          </s-box>
+        ) : null}
+        <s-text type="small" color="subdued">
+          30-DAY MONEY-BACK GUARANTEE
+        </s-text>
         <s-heading>Try it for 30 days</s-heading>
         <s-paragraph textAlign="center" color="subdued">
           Love it, or send back your first order within 30 days for a refund.
