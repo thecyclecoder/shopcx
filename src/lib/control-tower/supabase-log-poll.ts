@@ -1438,7 +1438,7 @@ const LOG_QUERIES: LogQuery[] = [
       // a natural mistake because the bare `sku` naming is far more common across
       // commerce schemas than our `seller_sku`. There is no lever from ShopCX to make
       // that query resolve — paging Platform on it
-      // ([[../specs/error-feed-drop-qb-amazon-sales-sku-adhoc-noise]]) is repair work
+      // ([[../archive.d/error-feed-drop-qb-amazon-sales-sku-adhoc-noise]]) is repair work
       // for a query we don't own. Narrowly gated to require BOTH the exact
       // column-missing message AND a SELECT-on-qb_amazon_sales_snapshots shape (bare
       // OR PostgREST CTE wrapper) — a column-missing error on any other table, a
