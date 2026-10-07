@@ -13,8 +13,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
+  AMAZON_REPORT_MAX_DAYS,
   assertNonEmptyAmazonCloseReport,
   parseShippedUnits,
+  splitReportWindow,
   validateAmazonCloseReportHeaders,
 } from "./sync-amazon-sales";
 
@@ -157,4 +159,33 @@ test("assertNonEmptyAmazonCloseReport surfaces a Supabase probe error rather tha
     () => assertNonEmptyAmazonCloseReport(probeError, "ws-1", "2026-09-01", "2026-10-04", 0),
     /probe failed.*boom/i,
   );
+});
+
+// SP-API returns "Date range exceeded. Report can be requested only upto 30 days" for longer
+// windows, and the close's 35-day lookback hit it on every cron run.
+test("splitReportWindow keeps a <=30-day window as one chunk", () => {
+  assert.deepEqual(splitReportWindow("2026-09-01", "2026-09-30"), [{ start: "2026-09-01", end: "2026-09-30" }]);
+  assert.deepEqual(splitReportWindow("2026-09-05", "2026-09-05"), [{ start: "2026-09-05", end: "2026-09-05" }]);
+});
+
+test("splitReportWindow splits the 35-day close lookback into contiguous, non-overlapping chunks", () => {
+  const chunks = splitReportWindow("2026-09-02", "2026-10-07");
+  assert.deepEqual(chunks, [
+    { start: "2026-09-02", end: "2026-10-01" },
+    { start: "2026-10-02", end: "2026-10-07" },
+  ]);
+  const days = (c: { start: string; end: string }) =>
+    (Date.parse(`${c.end}T00:00:00Z`) - Date.parse(`${c.start}T00:00:00Z`)) / 86_400_000 + 1;
+  for (const c of chunks) assert.ok(days(c) <= AMAZON_REPORT_MAX_DAYS);
+});
+
+test("splitReportWindow handles multi-chunk windows across month and year ends", () => {
+  const chunks = splitReportWindow("2026-11-20", "2027-02-10");
+  for (let i = 1; i < chunks.length; i++) {
+    const next = new Date(`${chunks[i - 1].end}T00:00:00Z`);
+    next.setUTCDate(next.getUTCDate() + 1);
+    assert.equal(chunks[i].start, next.toISOString().slice(0, 10));
+  }
+  assert.equal(chunks[0].start, "2026-11-20");
+  assert.equal(chunks.at(-1)!.end, "2027-02-10");
 });
