@@ -89,6 +89,7 @@ import {
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsShopifyProductIdAdhocNoise,
+  isForeignSupabasePostgresMissingCrisisCustomerActionsColumnDirectRestNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingProductsPricingRuleIdLookupNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
@@ -1119,6 +1120,26 @@ const LOG_QUERIES: LogQuery[] = [
       // via a non-SELECT statement (real code-bug shape) still surfaces / pages on first
       // sighting.
       if (isForeignSupabasePostgresMissingProductVariantsShopifyProductIdAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.crisis_customer_actions` that selects by one of three off-schema
+      // column names (`crisis_event_id`, `status`, `tier`). The table exists but has
+      // never carried those names — the real columns are `crisis_id`, `current_tier`,
+      // and lifecycle state spread across `cancelled`/`paused_at`/`exhausted_at`/
+      // `removed_item_at`/`restored_at`. The column-missing ERROR only reaches this feed
+      // when a foreign app / stale Supabase Studio session / deprecated integration
+      // queries `/rest/v1/crisis_customer_actions?crisis_event_id=eq.<id>` (or
+      // `?status=eq.<x>`, or `?tier=eq.<n>`). There is no lever from ShopCX to make that
+      // query resolve — paging Platform on it (Control Tower signature
+      // `supabase-logs:95b1b2ab1d777150`,
+      // [[../specs/error-feed-drop-crisis-customer-actions-column-direct-rest-n]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-crisis_customer_actions shape (bare OR
+      // PostgREST CTE wrapper) — a column-missing error on any other table, a different
+      // column on `crisis_customer_actions` (including the real `current_tier`), or on
+      // `crisis_customer_actions` via a non-SELECT statement (real code-bug shape) still
+      // surfaces / pages on first sighting.
+      // Pattern-pin (regex, parens-as-group): isForeignSupabasePostgresMissingCrisisCustomerActionsColumnDirectRestNoisemessage, query
+      if (isForeignSupabasePostgresMissingCrisisCustomerActionsColumnDirectRestNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.meta_ad_accounts.name`. The `meta_ad_accounts` table exists but
       // has NO bare `name` column — the human-readable account label lives on
