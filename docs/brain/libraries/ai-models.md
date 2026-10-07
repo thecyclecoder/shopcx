@@ -43,6 +43,10 @@ const MODELS
 
 ### `ModelTier` — type
 
+### `BOX_MODELS` — const
+
+`Record<ModelTier, string>` — the model id per tier for **box** `claude -p` sessions (Max/Pro subscription, $0/token). [[agent-model-tiers]] `modelForKind` resolves through this, never `MODELS`. It spreads `MODELS` and overrides `opus` to `claude-opus-4-8`, so the box can track the newest subscription model without moving the ~25 API-billed `OPUS_MODEL` callers on Vercel (different price + behavior surface).
+
 ## Callers
 
 - `src/app/api/tickets/[id]/analysis/override/route.ts`

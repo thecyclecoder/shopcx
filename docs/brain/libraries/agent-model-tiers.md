@@ -25,8 +25,9 @@ Every box `claude -p` agent inherited the one Max-plan default model (no `--mode
 
 ## Gotchas
 
-- **`modelForKind` returns a model *id*, not a tier.** It maps the stored tier through [[ai-models]] `MODELS`, so a deprecated model id changes in ONE place.
+- **`modelForKind` returns a model *id*, not a tier.** It maps the stored tier through [[ai-models]] `BOX_MODELS` (not `MODELS` — box opus is `claude-opus-4-8`, ahead of the API-side `OPUS_MODEL`), so a deprecated model id changes in ONE place.
 - **Never mutate a tier outside `applyModelTierChange`** — it keeps the provenance stamps + `updated_at` consistent and is the governed chokepoint.
+- **"Unset ⇒ Max default" is NOT a stable model.** The default is whatever the CLI picks for the auth in use. Under `/login` it was Opus 4.8; after the 2026-10-02 setup-token switch ([[../recipes/build-box-setup]] § Long-lived setup-token auth) it silently fell to **Sonnet 4.6**, and ~half of `ticket-handle` sessions then ended without their final JSON (Sonnet writes the answer beside a `TaskUpdate` call, then ends on an empty or prose turn). Fix (2026-10-07): `ticket-handle` pinned `opus` (provenance `platform`/`ceo`) + every account's `settings.json` carries `"model": "claude-opus-4-8"` so unpinned kinds get Opus too. Pin any quality-critical kind explicitly rather than trusting the default.
 - The resolver swallows read errors to null **on purpose** — a registry outage must degrade to the Max default, never block a job.
 
 ## Related
