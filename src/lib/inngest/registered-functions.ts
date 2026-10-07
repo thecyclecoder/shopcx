@@ -99,6 +99,7 @@ import { returnsReconcileSweep } from "@/lib/inngest/returns-reconcile-sweep";
 import { deliveryNightlyAudit } from "@/lib/inngest/delivery-audit";
 import { deliverPendingSends } from "@/lib/inngest/deliver-pending-send";
 import { unansweredInboundBackstopCron } from "@/lib/inngest/unanswered-inbound-backstop-cron";
+import { ticketResponseSlaWatchdog } from "@/lib/inngest/ticket-response-sla-watchdog";
 import { crisisDailyCampaign, crisisAdvanceTier } from "@/lib/inngest/crisis-campaign";
 import { syncInventory } from "@/lib/inngest/sync-inventory";
 import {
@@ -294,6 +295,7 @@ export const registeredInngestFunctions = [
   deliveryNightlyAudit,
   deliverPendingSends,
   unansweredInboundBackstopCron,
+  ticketResponseSlaWatchdog,
   crisisDailyCampaign,
   crisisAdvanceTier,
   syncInventory,

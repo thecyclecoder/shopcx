@@ -126,6 +126,58 @@ function parseIso(y: string, m: string, d: string): string | null {
 }
 
 /**
+ * Pure helper: strip quoted-reply blocks and forwarded-email blocks from an inbound
+ * message so [[detectDateChangeAsk]] sees ONLY the newest customer-authored text.
+ *
+ * Phase 4 of [[../../docs/brain/specs/every-inbound-handled-within-30-min]]. Ground truth:
+ * ticket 09f7257a (Angelica Devine, 2026-10-07). Her reply to the ticket included her
+ * forwarded Shopify order-confirmation email ("Skip this delivery · Pause subscription" +
+ * date headers). The date-change gate ran `detectDateChangeAsk` on the raw body and the
+ * Shopify boilerplate false-positived — a reply the customer did NOT ask to be moved was
+ * held. Running the detector on `stripQuotedAndForwarded(body_clean)` drops those blocks
+ * so the gate reads only her new paragraph.
+ *
+ * Three strip rules, in order (each applied to the full remaining text; order matters —
+ * forwarded blocks often live inside a `On <date> ... wrote:` wrapper):
+ *   1. `---------- Forwarded message ----------` (or Gmail `-----Original Message-----`,
+ *      Outlook `From: ... Sent: ...`) and EVERYTHING after it — forwarded email body.
+ *   2. `On <date> ... wrote:` (Gmail / Apple Mail / most clients) and EVERYTHING after it
+ *      — the quoted-reply chain.
+ *   3. Lines beginning with `> ` or `>` — the inline-quote convention Markdown + many
+ *      clients emit.
+ *
+ * Pure (no DB, no clock) so the gate can call it synchronously. Returns the trimmed
+ * remaining text; returns `""` when the entire message was quoted/forwarded content.
+ */
+export function stripQuotedAndForwarded(text: string): string {
+  const raw = (text ?? "").toString();
+  if (!raw) return "";
+
+  // 1. Forwarded-message / original-message blocks. Match the dash-separated headers Gmail
+  //    + Outlook emit — case-insensitive, allow surrounding whitespace, cut everything from
+  //    the header onward. Outlook also emits a plain `From: <addr>\nSent: <date>\n` block —
+  //    match that as a fallback (anchored on two consecutive headers so it never catches a
+  //    casual `From: alice`).
+  let cut = raw.replace(/\n?-{2,}\s*Forwarded message[\s\S]*$/i, "");
+  cut = cut.replace(/\n?-{2,}\s*Original Message[\s\S]*$/i, "");
+  cut = cut.replace(/\n?Begin forwarded message:[\s\S]*$/i, "");
+  cut = cut.replace(/\nFrom:\s[^\n]+\nSent:\s[\s\S]*$/i, "");
+
+  // 2. `On <date> ... wrote:` block. The pattern is loose — any `On ` line that ends in
+  //    `wrote:` (the Gmail / Apple Mail convention). Lines are often wrapped so we match
+  //    across newlines up to the `wrote:` anchor, then cut everything after it.
+  cut = cut.replace(/\n?On\s[\s\S]+?wrote:[\s\S]*$/i, "");
+
+  // 3. Inline quote lines starting with `>` — drop each line entirely (don't try to merge).
+  cut = cut
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*>+/.test(line))
+    .join("\n");
+
+  return cut.trim();
+}
+
+/**
  * Pure date-ask detector. See the file-top docstring for semantics.
  */
 export function detectDateChangeAsk(text: string): DateChangeAsk {

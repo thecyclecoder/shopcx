@@ -12899,6 +12899,11 @@ async function runTicketHandleJob(job: Job) {
   // Session-start stamp — fires before the (expensive, timeout-prone) box session so even a hang / crash
   // / timeout leaves a "Sol is reviewing this" trace on the ticket. The failure branches below then add
   // the terminal note; a session that vanishes mid-run leaves only this start note, which is the signal.
+  // Phase 3 of every-inbound-handled-within-30-min: capture the session-start timestamp so the
+  // "no recognizable verdict" branch can recover a Direction Sol wrote mid-session (ticket 09f7257a
+  // scar — Sol's completed-direction write landed on-disk but the final output JSON didn't carry
+  // the `direction` key, so the worker threw $0.90 of work away and the customer stranded).
+  const sessionStartedAt = new Date().toISOString();
   await stampAgentSessionNote(ticketId, `Sol is reviewing this ticket in session ${sessShort}.`);
 
   try {
@@ -13763,11 +13768,69 @@ async function runTicketHandleJob(job: Job) {
 
     // No recognizable verdict. If the agent actually produced output (prose, not a hard run error),
     // it over-ran the single-turn envelope — surface a failure without a park so a human can look.
+    //
+    // Phase 3 of every-inbound-handled-within-30-min: before failing, check whether Sol WROTE a
+    // Direction row during this session (via `findDirectionWrittenDuringSession` → the
+    // ticket_directions table). Three sessions on 2026-10-07 ran to terminal_reason=completed and
+    // the "Direction written" session_note, but the FINAL JSON didn't carry a `direction` key, so
+    // this branch threw ~$0.90 of real work away. Recover the row if it exists; otherwise fail AND
+    // enqueue a cs-director-call so the ticket never ends unowned.
     if (!isError) {
-      await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} failed: returned no completed direction (session over-ran without a verdict).`);
+      try {
+        const { findDirectionWrittenDuringSession } = await import("../src/lib/ticket-directions");
+        const recovered = await findDirectionWrittenDuringSession(db, ticketId, sessionStartedAt);
+        if (recovered) {
+          await stampAgentSessionNote(
+            ticketId,
+            `Sol's session ${sessShort} recovered: FINAL JSON missing \`direction\` key, but a live Direction (${String(recovered.id).slice(0, 8)}, chosen_path=${recovered.chosen_path}) was written mid-session — accepting it instead of discarding the work.`,
+          );
+          await update(job.id, {
+            status: "completed",
+            session_note: `recovered_direction:${String(recovered.id).slice(0, 8)} chosen_path=${recovered.chosen_path}`,
+            log_tail: raw.slice(-2000),
+          });
+          return;
+        }
+      } catch (recErr) {
+        console.warn(`${tag} direction recovery probe threw: ${errText(recErr)}`);
+      }
+
+      // Nothing usable on-disk. Fail the job AND route to June so the ticket never sits.
+      await stampAgentSessionNote(
+        ticketId,
+        `Sol's session ${sessShort} failed: returned no completed direction (session over-ran without a verdict) — routing to June (cs-director-call) so the ticket never strands.`,
+      );
+      try {
+        const { data: inflight } = await db
+          .from("agent_jobs")
+          .select("id")
+          .eq("workspace_id", workspaceId)
+          .eq("kind", "cs-director-call")
+          .eq("spec_slug", ticketId)
+          .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input"])
+          .limit(1);
+        if (!inflight || !inflight.length) {
+          await db.from("agent_jobs").insert({
+            workspace_id: workspaceId,
+            spec_slug: ticketId,
+            kind: "cs-director-call",
+            status: "queued",
+            instructions: JSON.stringify({
+              ticket_id: ticketId,
+              source: "runTicketHandleJob:no-recognizable-verdict",
+              parked_from: { kind: "ticket-handle", job_id: job.id },
+            }),
+            created_by: null,
+          });
+        }
+      } catch (eqErr) {
+        console.warn(`${tag} cs-director-call enqueue failed on no-verdict path: ${errText(eqErr)}`);
+      }
       await update(job.id, {
         status: "failed",
         error: "Sol first-touch returned no completed direction JSON",
+        // Phase 3 of every-inbound-handled-within-30-min: carry the final 2KB of raw output on
+        // the failure note so diagnosis doesn't need a separate archaeological dig.
         log_tail: raw.slice(-2000),
       });
       return;

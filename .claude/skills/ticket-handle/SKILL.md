@@ -153,6 +153,18 @@ An acknowledgment that pairs the truth with the save path passes ("That order al
 
 **3) Acknowledge the already-shipped order honestly.** You may say "that specific shipment already left and can't be redirected" — the customer deserves the truth. But that acknowledgment must be part of a save path, never the whole reply. Pair it with the address update / replacement / self-service cancel handoff.
 
+### Refund / unauthorized-charge / "didn't sign up" → the Refund playbook, never a bare cancel journey
+
+Phase 2 of [[../../../docs/brain/specs/every-inbound-handled-within-30-min.md]]. A refund-intent message — "I want a refund", "I didn't sign up for this", "unauthorized charge", "cancel and refund me", "I didn't knowingly subscribe" — belongs to the **Refund playbook**, NEVER a bare `cancel-subscription` journey called out-of-policy. The Refund playbook's trigger_intents (`unwanted_charge`, `charged_without_permission`, `refund_request`) OWN this class of ticket; its tiered ladder (OOP tiers 1 → 2 → 3) is what makes refund decisions survive policy review.
+
+**The 09f7257a scar (2026-10-07, Angelica Devine):** she wrote "cancellation… I did not sign up for a subscription… full refund". Sol and the orchestrator both routed to a bare cancel journey and called it out-of-policy themselves — the Refund playbook was skipped entirely, the customer waited two hours, and the founder had to start the playbook manually.
+
+**The rule for your Direction:**
+
+- `chosen_path: "playbook"` with `plan.playbook_slug: "refund"` — never `chosen_path: "journey"` with `plan.journey_slug: "cancel-subscription"` for a refund-intent message. The deterministic `routeIntentToPlaybook` router in `unified-ticket-handler.ts` ALREADY starts the Refund playbook before Sonnet runs when the classified intent matches — but your Direction must agree with that routing, not fight it.
+- Seed `plan.playbook_seed_context` with the order_id (the renewal she wants refunded) and the subscription_id. The Refund playbook's step 0 reads these to render the policy explanation with the real dates + flavor names (Phase 5 of this spec); seeding them avoids a wasted step asking "which order?".
+- Only when the customer EXPLICITLY asks to cancel INSTEAD of a refund (or in addition — "cancel but no refund needed") does the Cancel journey apply. "Cancel and refund me" is NOT a cancel ask — it is a refund ask that happens to use the word "cancel". When in doubt, start Refund.
+
 ### Checkout-stuck → the assisted-purchase Direction blueprint
 
 Phase 3 of [[../../../docs/brain/specs/checkout-stuck-defaults-to-assisted-purchase-concierge-sonnet-and-sol.md]]. When the inbound message is CHECKOUT-STUCK — the customer can't check out / the OTP or verification code isn't arriving / they're stuck at the payment or authentication screen / they're asking "how do I finish my order" (per [[../../../docs/brain/libraries/checkout-stuck-intent.md]] `classifyCheckoutStuck`) — you author the **assisted-purchase Direction** and CONCIERGE the sale. The founder directive (2026-07-10): any checkout issue defaults, as fast as possible, to us placing the order for the customer via our Braintree minisite — never a stateless "try another card / try PayPal / try Shop Pay" dead-end.

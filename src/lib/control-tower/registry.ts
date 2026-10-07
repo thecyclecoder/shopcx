@@ -1049,6 +1049,23 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
     expectedCadence: "every 5 min (*/5 * * * *)",
     livenessWindowMs: 20 * MIN,
   },
+  // every-inbound-handled-within-30-min spec, Phase 1 — the 30-minute response SLA guarantee.
+  // Every 5 min finds open tickets whose newest inbound customer message has sat past
+  // TICKET_RESPONSE_SLA_MS (30 min) with no outbound external reply, no reply queued, and no
+  // live claim, and enqueues ONE cs-director-call for June. Owner cs — June rules before the
+  // founder is paged (the spec forbids escalating directly to the founder). 5-min cadence sits
+  // at the MONITOR_TICK_FLOOR; livenessWindowMs=20min satisfies cadenceMs * 1.2.
+  // registeredAt graces the first-tick window (newcron-grace).
+  {
+    id: "ticket-response-sla-watchdog",
+    kind: "cron",
+    owner: "cs",
+    label: "Ticket 30-min response SLA watchdog",
+    description: "Every 5 min: finds open tickets whose newest inbound customer message has waited past the 30-min response SLA with no reply + no live claim and enqueues one cs-director-call for June (never the founder). The catch-net for a failed Sol/Sonnet turn — complements the unanswered-inbound-backstop which only catches the lost-ingest class.",
+    expectedCadence: "every 5 min (*/5 * * * *)",
+    livenessWindowMs: 20 * MIN,
+    registeredAt: "2026-10-07T00:00:00Z",
+  },
   { id: "chargeback-evidence-reminder", kind: "cron", owner: "retention", label: "Chargeback evidence reminder", description: "Reminds about chargebacks with evidence due.", expectedCadence: "daily (0 9 * * *)", livenessWindowMs: 30 * HOUR },
   { id: "creative-scout-weekly-cron", kind: "cron", owner: "growth", label: "Creative scout", description: "Weekly PER-PRODUCT competitor-ad discovery — pulls each product's deliberately-chosen competitors' running ads from AdLibrary, tagged product_id/competitor_id. Rhea's core research loop (replaced the retired workspace-wide creative-finder-daily-cron 2026-07-12).", expectedCadence: "weekly (0 9 * * 1)", livenessWindowMs: 10 * 24 * HOUR, personaKind: "research" },
   {
