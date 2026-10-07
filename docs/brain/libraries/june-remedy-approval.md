@@ -16,7 +16,7 @@ North star ([[../operational-rules]] § supervisable autonomy): June optimizes a
 4. Dylan taps **Approve / Deny / Ask** in Eve's cockpit (the same god-mode surface as any decision card).
 5. **`executeApprovedJuneRemedies`** — the box-worker ~60s god-mode sweep — picks up the decided card:
    - **Approve →** execute the parked remedy through the production executor (`executeSonnetDecision`, execute-then-message invariant), deliver the customer reply **in the channel persona (never "June")** via `deliverTicketMessage`, then close + de-escalate.
-   - **Deny →** post an internal note ("Founder DECLINED… no money moved"), leave the ticket escalated for a human.
+   - **Deny →** post a SCOPED internal note naming the specific remedy that was declined — "[cs-director] Founder declined this parked remedy (`<remedy.summary>`). No money moved. This is not a ruling on other remedies for this ticket." — and leave the ticket escalated for a human. The scoping is deliberate (Phase 3 of [[../specs/cx-agents-read-engine-price-not-override-base]], ticket 668bc5c8): the earlier blanket "Founder DECLINED the refund/credit" wording caused June to later cite one stale withdrawn remedy as "the founder declined any refund on this ticket" and misroute an unrelated remedy on the same ticket. The note falls back to a safe generic label when a `summary` isn't on the card. Test: `src/lib/june-remedy-approval.denyNote.test.ts`.
    - Idempotent via an `executed_at` stamp inside the card's `tool_input` — **no schema change on [[../tables/god_mode_approvals]]**.
 
 ## Exports
