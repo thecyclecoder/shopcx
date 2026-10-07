@@ -6490,6 +6490,106 @@ export function isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNo
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column workspace_members.customer_id does not
+ * exist` (or the sibling `external_customer_id` miss) for an ad hoc / stale PostgREST
+ * direct-REST SELECT against `public.workspace_members`. The table exists (per
+ * `supabase/migrations/20250305120000_workspace_members.sql`) but has NEVER carried a
+ * `customer_id` OR `external_customer_id` column — `workspace_members` joins
+ * `workspace_id` ↔ `user_id` (an auth-user link, not a customer link), and the full
+ * repo + git history has zero references to `external_customer_id`. The column-missing
+ * ERROR only reaches this feed when a foreign app / stale Supabase Studio session /
+ * deprecated integration queries
+ * `/rest/v1/workspace_members?select=customer_id,external_customer_id,...` as if the
+ * membership row carried a customer FK. There is no lever from ShopCX to make that
+ * query resolve — adding a `customer_id` to `workspace_members` would be a schema lie
+ * (members are users, not customers), and paging Platform on a one-off stale
+ * direct-REST query burns repair time without giving us a product lever to pull
+ * (Control Tower signature `supabase-logs:a19c9bdd091bdaa8`,
+ * [[../specs/error-feed-drop-workspace-members-customer-id-direct-rest-no]]).
+ *
+ * Sibling of `isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise`
+ * and `isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise` — the same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` for one of a fixed
+ * set of legacy column names + SELECT-lookup shape covering BOTH bare and PostgREST
+ * CTE wrapper forms), aimed at a different foreign caller on a different table.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for ONE of the two
+ *      off-schema column names — trimmed equal to
+ *      `column workspace_members.<customer_id|external_customer_id> does not exist`
+ *      (or the `public.` qualified variant, with any leading `ERROR: ` prefix Postgres
+ *      includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.workspace_members` —
+ *      either (a) the bare `select ... from public.workspace_members` shape, OR (b)
+ *      the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."workspace_members" ... )`
+ *      CTE wrapper form with double-quoted identifiers. Both forms are the same
+ *      foreign-owned read.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on
+ *     a table that DOES have a `customer_id` or `external_customer_id` column) still
+ *     pages — the pin is `workspace_members.` only,
+ *   - a column-missing error on `workspace_members` for a DIFFERENT column (a real
+ *     column rename regression on `workspace_id` / `user_id` / `role`) still pages —
+ *     the pin covers `customer_id` / `external_customer_id` only,
+ *   - a `workspace_members.customer_id` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, or a JOIN whose first FROM is another table)
+ *     still pages — the pin is the SELECT-lookup shape, matching the ad hoc
+ *     direct-REST read we've observed; the CTE branch likewise requires the wrapped
+ *     op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper stays
+ *     paged — that would be a real code-write bug on our side),
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing
+ *     on `workspace_members` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `workspace_members.customer_id` OR `workspace_members.external_customer_id` (with
+  // or without the `public.` qualifier). Both are off-schema column names the table
+  // has never shipped — `workspace_members` links a workspace to a user, not a
+  // customer.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column workspace_members.customer_id does not exist" ||
+    stripped === "column public.workspace_members.customer_id does not exist" ||
+    stripped === "column workspace_members.external_customer_id does not exist" ||
+    stripped === "column public.workspace_members.external_customer_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name
+  // `workspace_members` (with or without the `public.` schema qualifier). A JOIN /
+  // UNION / non-SELECT stays captured — a caller that actually writes to
+  // workspace_members with a bogus `customer_id` column is a code bug we DO want to
+  // page on, not the ad hoc direct-REST read this drop targets. The `\b` around the
+  // table name keeps the anchor from matching any sibling identifier.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?workspace_members\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."workspace_members" ... )` with double-quoted identifiers. Same
+  // foreign-owned read, different rendering — the plain SELECT regex above misses it
+  // because the statement starts with `with` and the FROM clause carries the quoted
+  // `"public"."workspace_members"` shape. Guarded so the CTE branch requires the
+  // wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper —
+  // e.g. `WITH pgrst_source AS (INSERT INTO "public"."workspace_members"("customer_id") ...)`
+  // — is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?workspace_members\b/.test(q);
+}
+
+/**
  * Expected-by-design noise — Postgres reporting `duplicate key value violates unique
  * constraint "dashboard_notifications_dedupe_key_open_uniq"` on an INSERT INTO
  * `public.dashboard_notifications`. That partial UNIQUE index (migration
