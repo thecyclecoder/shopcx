@@ -183,6 +183,7 @@
     "test:box-auth-refresh": "tsx --test scripts/builder-worker.auth-refresh.test.ts",
     "test:box-oauth-token": "tsx --test scripts/builder-worker.oauth-token.test.ts",
     "test:box-account-tier": "tsx --test scripts/builder-worker.account-tier.test.ts",
+    "test:box-session-result": "tsx --test scripts/builder-worker.session-result.test.ts",
     "test:box-director-grade-approval-select": "tsx --test scripts/builder-worker.director-grade-approval-select.test.ts",
     "test:appstle-discount-code-only": "tsx --test src/lib/appstle-discount.code-only.test.ts",
     "test:appstle-discount-rollback": "tsx --test src/lib/appstle-discount.rollback.test.ts",
