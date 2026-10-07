@@ -1,0 +1,1 @@
+- **Drop foreign PostgREST `specs.owner_function does not exist` noise at capture** · verified 2026-10-07 · → [[../libraries/control-tower]]
