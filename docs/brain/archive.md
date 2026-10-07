@@ -12,6 +12,20 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **CS Director close-no-action gate: fix ticket_required_outcomes column names (kind, authored_at)** · verified 2026-10-07 · → [[../lifecycles/ticket-lifecycle]]
+- **Drop foreign direct-REST noise: crisis_customer_actions missing-column reads** · verified 2026-10-07 · → [[../libraries/control-tower]], [[../inngest/supabase-log-poll]]
+- **Scope foreign direct-REST `orders.easypost_tracker_id` lookup noise out of the error feed** · verified 2026-10-07 · → [[../libraries/control-tower]]
+- **Drop foreign PostgREST `specs.owner_function does not exist` noise at capture** · verified 2026-10-07 · → [[../libraries/control-tower]]
+- **Drop foreign-PostgREST `column specs.target does not exist` noise at the capture boundary** · verified 2026-10-07 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingSpecsTargetAdhocNoise`; cross-link in [[../tables/specs]])
+- **Drop foreign direct-REST workspace_members.customer_id / .external_customer_id column-missing noise** · verified 2026-10-07 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise`)
+- **Stop inserting ticket_resolution_events ledger rows with a null turn_index** · verified 2026-10-07 · → [[../lifecycles/ticket-lifecycle]]
+- **Drop stale `spec_phases.name` / `spec_phases.phase_order` PostgREST foreign-app noise at capture** · verified 2026-10-06 · → [[../libraries/control-tower]]
+- **Generalize ad hoc customer_events missing-column drop from metadata-specific to column-agnostic** · verified 2026-10-06 · → [[../libraries/control-tower]]
+- **Drop foreign PostgREST read of product_variants.shopify_product_id as capture-time noise** · verified 2026-10-06 · → [[../inngest/supabase-log-poll]]
+- **Drop quoted PostgREST error_events missing-column lookup noise** · verified 2026-10-06 · → [[lifecycles/error-feed]]
+- **Drop stale subscriptions.paused_until direct-REST noise from Supabase logs** · verified 2026-10-06 · → [[../libraries/control-tower]]
+- **Scope the CS Director close-no-action ticket_messages read by workspace** · verified 2026-10-06 · → [[libraries/cs-director-close-gate]], [[specs/inflection-resession-must-act-on-newest-ask]]
+- **Inflection re-sessions must act on the customer's newest ask** · verified 2026-10-06 · → [[../lifecycles/ticket-lifecycle]]
 - **Drop stale loop_alerts loop_key direct REST noise** · verified 2026-10-05 · → [[../libraries/control-tower]]
 - **Drop stale loop_heartbeats beat_at direct-REST noise** · verified 2026-10-05 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise`)
 - **Drop stale loop_heartbeats loop_key direct-REST noise** · verified 2026-10-05 · → [[../libraries/control-tower]]
