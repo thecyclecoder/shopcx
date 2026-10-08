@@ -247,6 +247,22 @@ export interface CreateOrderInput {
   tags?: string | null;
   source_name?: string | null;
   note?: string;
+  /**
+   * Explicit opt-in for the `vendor:'internal'` branch, which inserts a BARE
+   * mirror `orders` row — it takes NO payment and sends NOTHING to the
+   * warehouse. That is correct only for a bookkeeping mirror of money +
+   * fulfilment that happen elsewhere (an import of an already-paid upstream
+   * order, a replacement whose fulfilment is handled by the replacement engine).
+   *
+   * Without this flag `createOrder({vendor:'internal'})` is refused — a
+   * customer-facing caller that wants to actually bill + ship a one-time order
+   * must use [[one-time-charge]] `chargeOneTimeOrder`, not a silent unpaid,
+   * unshipped mirror. Phase 2 of assisted-one-time-orders-charge-and-ship: the
+   * assisted-purchase concierge path hit exactly this trap (ticket `ca008421`),
+   * so the dangerous branch is now opt-in and nothing customer-facing can reach
+   * it by accident.
+   */
+  mirror_only?: boolean;
 }
 
 export interface CreateOrderResult {
@@ -326,8 +342,9 @@ export async function createOrder(
   workspaceId: string,
   input: CreateOrderInput,
 ): Promise<CreateOrderResult> {
-  const admin = createAdminClient();
-
+  // Admin client is created lazily, AFTER the vendor guards below — the
+  // internal mirror_only refusal is a pure input check that must not depend on
+  // (or be gated behind) Supabase env being present.
   if (input.vendor === "shopify") {
     const { createShopifyOrder } = await import("@/lib/shopify-draft-orders");
     let shopifyResult: { shopifyOrderId: string; orderName: string };
@@ -343,6 +360,7 @@ export async function createOrder(
       shopify_order_id: shopifyResult.shopifyOrderId,
       order_number: shopifyResult.orderName,
     });
+    const admin = createAdminClient();
     const { data, error } = await admin.from("orders").insert(row).select("id").single();
     if (error) return { success: false, error: error.message };
     return {
@@ -354,7 +372,20 @@ export async function createOrder(
   }
 
   if (input.vendor === "internal") {
+    // The internal branch writes a bare mirror row — no Braintree sale, no
+    // Amplifier push. That silently produces an order that LOOKS real but was
+    // never paid or shipped, so it must be an explicit opt-in: a genuine
+    // bookkeeping mirror passes `mirror_only:true`; anything that needs to
+    // actually bill + ship uses chargeOneTimeOrder instead. Phase 2 of
+    // assisted-one-time-orders-charge-and-ship.
+    if (!input.mirror_only) {
+      return {
+        success: false,
+        error: "createOrder(internal) requires mirror_only:true — use chargeOneTimeOrder to bill + ship",
+      };
+    }
     const row = buildCreateOrderRow(workspaceId, input);
+    const admin = createAdminClient();
     const { data, error } = await admin.from("orders").insert(row).select("id").single();
     if (error) return { success: false, error: error.message };
     return {

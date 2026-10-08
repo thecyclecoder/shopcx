@@ -20,6 +20,7 @@ import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 import { LOYALTY_REMEDY_MAX_CENTS } from "@/lib/loyalty";
 import { attemptAllergenHold, isAllergyEscalation } from "@/lib/order-holds";
 import { linkGroupIds } from "@/lib/customer-links";
+import type { OneTimeChargeInput, OneTimeChargeResult } from "@/lib/one-time-charge";
 
 // ── Types ──
 
@@ -271,6 +272,12 @@ export interface ActionResult {
   carrier?: string;
   refundAmountCents?: number;
   couponCode?: string;
+  // Set by create_order (internal billing) so the assisted-purchase
+  // confirmation can quote the REAL order number and charged total rather
+  // than a generic "it's placed". See chargeOneTimeOrder + the concierge
+  // confirmation in interpretAssistedCreateResult.
+  order_number?: string;
+  amount_cents?: number;
   // Set by refund handlers when a refund is already in flight on the order
   // (a pending gateway refund, e.g. PayPal settling over a few business
   // days). success stays false — no new money moved — but this is a benign
@@ -1326,6 +1333,137 @@ async function deferCreateToAssistedPurchase(
   };
 }
 
+/** Signature of {@link chargeOneTimeOrder} — injectable so the idempotency +
+ *  amplifier-routing logic below is unit-testable without the real money path. */
+type ChargeOneTimeOrderFn = (input: OneTimeChargeInput) => Promise<OneTimeChargeResult>;
+
+/**
+ * The double-charge guard's key for an assisted one-time order.
+ *
+ * Stable over (ticketId, sorted line items) so a retried or re-sessioned ticket
+ * turn derives the IDENTICAL key — `chargeOneTimeOrder` stamps it into
+ * `transactions.metadata.request_key`, and `executeInternalOneTimeCreate` reads
+ * it back BEFORE a second sale. Pure + exported so the exact key semantics are
+ * pinned in a test (`action-executor.create-order-charges.test.ts`) rather than
+ * reconstructed inline, where a drift in ordering/format would silently defeat
+ * the guard and let a double-charge through. Phase 1 of
+ * assisted-one-time-orders-charge-and-ship.
+ */
+export function assistedOrderRequestKey(
+  ticketId: string,
+  lineItems: NonNullable<ActionParams["line_items"]>,
+): string {
+  const itemKey = lineItems
+    .map((li) => `${li.variant_id}:${li.quantity}:${li.unit_cents}`)
+    .sort()
+    .join("|");
+  return `shopcx-concierge:${ticketId}:${itemKey}`;
+}
+
+/**
+ * create_order on internal billing — charge the vaulted card + ship, idempotently.
+ *
+ * Phase 1 of assisted-one-time-orders-charge-and-ship. The old path handed
+ * vendor:'internal' to commerce/order.createOrder, whose internal branch only
+ * writes a bare mirror row — no Braintree sale, no Amplifier push — so the
+ * customer was told "it's placed" while nothing was paid or shipped. This routes
+ * the order through chargeOneTimeOrder (the primitive that bills the vaulted
+ * card, commits Avalara tax, inserts the order, pushes to Amplifier, and refunds
+ * on a post-charge insert failure) and returns the REAL order number + charged
+ * total for the confirmation.
+ *
+ * Idempotency: a retried or re-sessioned ticket turn must never double-charge.
+ * The request key is stable over (ticket, sorted items); chargeOneTimeOrder
+ * stamps it into `transactions.metadata.request_key`, so a prior charge for the
+ * same intent is discoverable here BEFORE a second sale. The lookup is scoped to
+ * this workspace + customer and treats both a succeeded AND an in-flight
+ * `pending` row as blocking — fail-closed, a customer re-told "try again" beats
+ * a second live charge.
+ *
+ * `charge` is injected only in tests; production always uses the dynamically
+ * imported {@link chargeOneTimeOrder} (kept dynamic so action-executor's import
+ * graph doesn't eagerly pull in Braintree / Amplifier / Avalara).
+ */
+export async function executeInternalOneTimeCreate(
+  ctx: ActionContext,
+  lineItems: NonNullable<ActionParams["line_items"]>,
+  paymentMethodId: string,
+  shippingAddress: Record<string, unknown> | null,
+  charge?: ChargeOneTimeOrderFn,
+): Promise<ActionResult> {
+  const requestKey = assistedOrderRequestKey(ctx.ticketId, lineItems);
+
+  const { data: priorRows } = await ctx.admin
+    .from("transactions")
+    .select("id, status, amount_cents, metadata")
+    .eq("workspace_id", ctx.workspaceId)
+    .eq("customer_id", ctx.customerId)
+    .eq("metadata->>request_key", requestKey)
+    .in("status", ["pending", "succeeded"]);
+  const prior = (priorRows || [])[0] as
+    | { status?: string; amount_cents?: number; metadata?: { order_number?: string } }
+    | undefined;
+  if (prior) {
+    // Already charged (or mid-charge) for this exact intent — return the
+    // existing order as an idempotent success rather than billing again.
+    const priorOrderNumber = prior.metadata?.order_number;
+    return {
+      success: true,
+      summary: priorOrderNumber
+        ? `Order ${priorOrderNumber} was already charged for this request — not charging again.`
+        : "A charge for this request is already in progress — not charging again.",
+      ...(priorOrderNumber ? { order_number: priorOrderNumber } : {}),
+      ...(typeof prior.amount_cents === "number" ? { amount_cents: prior.amount_cents } : {}),
+    };
+  }
+
+  const chargeFn = charge ?? (await import("@/lib/one-time-charge")).chargeOneTimeOrder;
+  const result = await chargeFn({
+    workspaceId: ctx.workspaceId,
+    customerId: ctx.customerId,
+    items: lineItems.map((li) => ({
+      variant_id: li.variant_id,
+      quantity: li.quantity,
+      unit_price_cents: li.unit_cents,
+    })),
+    paymentMethodId,
+    shippingAddress,
+    sourceName: "shopcx-concierge",
+    reason: `assisted one-time order (ticket ${ctx.ticketId})`,
+    requestKey,
+  });
+
+  if (!result.success) {
+    return {
+      success: false,
+      error: result.error,
+      summary: `Create order failed: ${result.error ?? "unknown error"}${result.details ? ` (${result.details})` : ""}`,
+    };
+  }
+  // Charge succeeded. If the warehouse push failed the customer paid but nothing
+  // ships — do NOT report a clean success. Surface amplifier_error and escalate
+  // to the CS routine (June) so a human finishes fulfilment.
+  if (result.amplifier_error) {
+    await escalateTicket(
+      ctx,
+      `one-time charge succeeded (order ${result.order_number}, $${((result.amount_cents ?? 0) / 100).toFixed(2)}) but Amplifier push failed: ${result.amplifier_error} — needs manual fulfilment`,
+    );
+    return {
+      success: false,
+      error: `amplifier_error: ${result.amplifier_error}`,
+      summary: `Charged order ${result.order_number} but the warehouse push failed — routed to the team to finish.`,
+      order_number: result.order_number,
+      amount_cents: result.amount_cents,
+    };
+  }
+  return {
+    success: true,
+    summary: `Charged and placed order ${result.order_number} for $${((result.amount_cents ?? 0) / 100).toFixed(2)}.`,
+    order_number: result.order_number,
+    amount_cents: result.amount_cents,
+  };
+}
+
 /**
  * Validate + normalize the optional `resolution_type` field on a `create_return`
  * ActionParams payload. The value that comes out is what the handler passes to
@@ -1496,7 +1634,6 @@ export const directActionHandlers: Record<
     // no shape mismatch can smuggle the create past the guard.
     const pm = await resolveVaultedPm(ctx.admin, ctx.workspaceId, ctx.customerId);
     if (!pm) return deferCreateToAssistedPurchase(ctx, "create_order");
-    const { createOrder } = await import("@/lib/commerce/order");
     if (!p.vendor) return { success: false, error: "create_order missing vendor" };
     if (!p.line_items?.length) return { success: false, error: "create_order missing line_items" };
     if (p.vendor !== "shopify" && p.vendor !== "internal") {
@@ -1534,6 +1671,16 @@ export const directActionHandlers: Record<
     if (!shippingAddress && p.address) {
       shippingAddress = p.address as unknown as Record<string, unknown>;
     }
+
+    // ── internal billing: charge the vaulted card + ship, idempotently. ──
+    // Routed through chargeOneTimeOrder instead of the bare mirror-row insert.
+    // See executeInternalOneTimeCreate for the full rationale + idempotency.
+    if (p.vendor === "internal") {
+      return executeInternalOneTimeCreate(ctx, p.line_items, pm.id, shippingAddress);
+    }
+
+    // ── shopify: a real Shopify order via the commerce dispatcher. ──
+    const { createOrder } = await import("@/lib/commerce/order");
     const r = await createOrder(ctx.workspaceId, {
       vendor: p.vendor,
       customer_id: ctx.customerId,
