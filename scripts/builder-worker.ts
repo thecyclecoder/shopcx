@@ -15748,6 +15748,15 @@ interface CsDirectorCallInstructions {
   // prompt as a fresh-eyes SECOND opinion (not the primary triage), and records the resulting
   // triage_runs row with `verdict='second_opinion'`.
   second_opinion_of?: string;
+  // june-remedy-shape-and-honest-apply-status Phase 3 — set by `needs-attention-route-cs-owner`
+  // when this call is the ONE re-dispatch of a prior approve_remedy whose APPLY was refused (e.g. a
+  // flat remedy shape the guard rejected). Carries the guard's rejection reason so June re-emits the
+  // remedy in a runnable shape instead of repeating the refused one. Its presence also marks the job
+  // as a retry (the router will NOT re-dispatch a second time — one retry, then the SLA watchdog).
+  prior_apply_failure_reason?: string;
+  // Marks this cs-director-call as the remedy-apply retry so a SECOND apply failure falls through to
+  // the 30-min SLA watchdog rather than looping (idempotent per original failure).
+  remedy_apply_retry?: boolean;
 }
 
 // Kept in sync with src/lib/cs-director.ts `CsDirectorDecision`. `close_no_action` +
@@ -16355,12 +16364,16 @@ async function loadCsDirectorCallBrief(
   return parts.join("\n");
 }
 
-function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): string {
+function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false, priorApplyFailureReason: string | null = null): string {
   const roleLine = secondOpinion
     ? `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. This is an ON-DEMAND SECOND OPINION on a prior June review of this ticket (june-review-replaces-solver-skeptic-quorum-triage Phase 2) — a supervisor asked for fresh eyes because the first verdict was borderline. Read the FIRST JUNE REVIEW section in the brief FIRST, then independently re-investigate the ticket READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict) that AGREES with the first review OR REFUTES it with concrete new evidence. Do NOT rubber-stamp — if you can find a genuine reason to differ, differ; the whole point of this seat is a second opinion, not a co-sign. The WORKER (deterministic Node) records your verdict to director_activity + triage_runs (verdict='second_opinion') and materializes it via applyBoxCsDirectorCall (src/lib/cs-director.ts) — approve_remedy fires via executeSonnetDecision then delivers via deliverTicketMessage (execute-then-message); author_spec writes through the specs SDK; escalate_founder returns linkage-back for the runner-minted CEO card. You NEVER mutate anything from here.`
     : `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. You are the PRIMARY escalation triage: every routine-owned escalated ticket routes to your review (june-review-replaces-solver-skeptic-quorum-triage Phase 1). You investigate READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict). The WORKER (deterministic Node) records the verdict to director_activity + triage_runs and materializes it via applyBoxCsDirectorCall (src/lib/cs-director.ts) — approve_remedy fires via executeSonnetDecision then delivers via deliverTicketMessage (execute-then-message); author_spec writes through the specs SDK; escalate_founder returns linkage-back for the runner-minted CEO card. You NEVER mutate anything from here.`;
+  const retryLine = priorApplyFailureReason
+    ? `⚠️ RE-DISPATCH AFTER A FAILED APPLY (june-remedy-shape-and-honest-apply-status Phase 3): your PRIOR approve_remedy on this ticket was approved but the executor REFUSED the apply — rejection reason: "${priorApplyFailureReason}". This is your ONE retry. Re-emit the remedy in a RUNNABLE shape — put the action params INSIDE \`payload\` (\`{"action_type":"partial_refund","payload":{"amount_cents":4320,"order_number":"SC136413"}}\`), not at the top level, and the customer message under \`customer_message\`. If you cannot produce a runnable remedy, escalate_founder instead of repeating the refused shape.`
+    : null;
   return [
     roleLine,
+    ...(retryLine ? [``, retryLine] : []),
     ``,
     `HOW YOU DECIDE (three verdicts, see docs/brain/libraries/cs-director.md § How it decides):`,
     `  • 'approve_remedy'   — the right customer-facing fix is clear + IN LEASH (no refund past the CS ceiling, no destructive/irreversible action). Return a RemedyPlan the Phase-2 executor fires through executeSonnetDecision + then delivers via deliverTicketMessage (execute-then-message rule).`,
@@ -16418,7 +16431,7 @@ async function runCsDirectorCallJob(job: Job) {
 
   try {
     const brief = await loadCsDirectorCallBrief(job.workspace_id, ticketId, triageRunId, secondOpinionOfRunId);
-    const prompt = csDirectorCallPrompt(brief, !!secondOpinionOfRunId);
+    const prompt = csDirectorCallPrompt(brief, !!secondOpinionOfRunId, inst.prior_apply_failure_reason ?? null);
     const { session, resultText, isError, raw, usage, model, configDir: csDir } = await runBoxLane(
       (cfg, sid) => runCsDirectorCallClaude(prompt, sid, REPO_DIR, cfg, job.id),
     );
@@ -16766,6 +16779,14 @@ async function runCsDirectorCallJob(job: Job) {
         applyResult.ok === true &&
         applyResult.needs_attention !== true &&
         applyResult.awaiting_founder_approval !== true;
+      // june-remedy-shape-and-honest-apply-status Phase 2 — a FAILED approve_remedy apply (not ok /
+      // parked needs_attention, and NOT a legitimate founder-approval hold) must never close OR
+      // de-escalate the ticket. The transition gates on this so Susan Knudson's de-escalate-with-no-
+      // owner outcome (ticket 2acc8634) cannot recur; Phase 3 re-owns the needs_attention job.
+      const approveRemedyApplyFailed =
+        verdict.decision === "approve_remedy" &&
+        applyResult.awaiting_founder_approval !== true &&
+        (applyResult.ok === false || applyResult.needs_attention === true);
       // Phase 2 of a-cs-director-verdict-cannot-clear-an-unruled-founder-escalation — read the
       // ticket's PRE-patch state BEFORE `decideCsDirectorTicketTransition` runs so the pure
       // builder can see whether an earlier `escalate_founder` verdict already stamped the
@@ -16856,6 +16877,7 @@ async function runCsDirectorCallJob(job: Job) {
         reasoning: verdict.reasoning,
         remedy: verdict.remedy ?? null,
         remedyResolved,
+        approveRemedyApplyFailed,
         // Phase 2 of cs-director-spec-claim-must-match-the-actual-write — gate the author_spec
         // close on a CONFIRMED write. A failed write returns `keep_escalated_needs_attention` so
         // the ticket stays open + escalated + escalation_reason stamped with the failure reason,
@@ -17227,13 +17249,18 @@ async function runCsDirectorCallJob(job: Job) {
     // June-session completion note — the session-boundary marker (complements her detailed per-verdict
     // note above). Names the decision + the ticket outcome (approve_remedy/author_spec close +
     // de-escalate; escalate_founder stays escalated, now founder-owned + routed to Eve's SMS).
-    const outcomeLabel = applyResult?.awaiting_founder_approval
-      ? "remedy parked for founder approval (via Eve's SMS) — stays escalated"
-      : verdict.decision === "escalate_founder"
-        ? "escalated to the founder (CEO inbox + Eve) for a ruling"
-        : verdict.decision === "author_spec"
-          ? "closed + de-escalated (structural fix authored to the Roadmap)"
-          : "handled — closed + de-escalated";
+    // june-remedy-shape-and-honest-apply-status Phase 2 — the outcome label is derived from the REAL
+    // applyResult (a failed/needs_attention apply reads 'apply FAILED (<reason>) — ticket NOT
+    // handled'), never the decision alone. Extracted as the pure, unit-tested `csDirectorOutcomeLabel`
+    // so the branch order (founder-hold → failed → decision-based) cannot drift from the transition.
+    const { csDirectorOutcomeLabel } = await import("../src/lib/cs-director");
+    const outcomeLabel = csDirectorOutcomeLabel({
+      decision: verdict.decision,
+      ok: applyResult.ok,
+      needs_attention: applyResult.needs_attention,
+      awaiting_founder_approval: applyResult.awaiting_founder_approval,
+      reason: applyResult.reason ?? applyResult.error ?? null,
+    });
     await stampAgentSessionNote(ticketId, `June's session ${sessShort} is complete — decision: ${verdict.decision}; ticket ${outcomeLabel}.`);
 
     if (isError) {
@@ -17253,8 +17280,16 @@ async function runCsDirectorCallJob(job: Job) {
     // director_activity write above; parking `needs_attention` is what the derived-from ticket
     // 115350d5 required so the escalation reaches an operator instead of dead-ending in the log.
     if (applyResult.needs_attention) {
+      // june-remedy-shape-and-honest-apply-status Phase 3 — a failed approve_remedy apply gets an
+      // EXPLICIT needs_attention_class ('cs_remedy_apply_failed') so it routes back to a fresh
+      // cs-director-call (one retry, carrying the guard's rejection reason) via
+      // needs-attention-route-cs-owner instead of sitting as class='unknown' that no surface owns
+      // (Susan Knudson, ticket 2acc8634). Non-approve_remedy failures pass `undefined` so the
+      // auto-classifier in `update` still stamps their class.
+      const remedyApplyFailed = verdict.decision === "approve_remedy";
       await update(job.id, {
         status: "needs_attention",
+        needs_attention_class: remedyApplyFailed ? "cs_remedy_apply_failed" : undefined,
         error: applyResult.error ?? `cs-director-call ${verdict.decision} action failed — human review needed`,
         log_tail: summary.slice(-2000),
       });

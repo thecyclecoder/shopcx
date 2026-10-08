@@ -142,6 +142,17 @@ export interface CsDirectorTransitionInput {
    */
   remedyResolved?: boolean;
   /**
+   * Phase 2 of [[../../docs/brain/specs/june-remedy-shape-and-honest-apply-status.md]] — true when
+   * the Phase-2 mutator FAILED to apply an `approve_remedy` (not ok / parked `needs_attention`) and
+   * it was NOT merely parked for founder approval. The honest-apply invariant: a failed remedy apply
+   * must NEVER close OR de-escalate the ticket — the customer wasn't actually helped. On 2026-10-07
+   * (ticket 2acc8634) June's $43.20 refund was refused by the safety guard, yet the ticket was
+   * de-escalated with no owner and Susan Knudson waited 6.5h. When true, `approve_remedy` returns
+   * `keep_escalated_needs_attention` so the failure is re-owned, never silently dropped. Absent/false
+   * → today's resolved/de-escalate behavior (back-compat; the runner threads it explicitly).
+   */
+  approveRemedyApplyFailed?: boolean;
+  /**
    * Phase 2 of cs-director-spec-claim-must-match-the-actual-write — the outcome of the
    * `handleAuthorSpec` executor call. Only meaningful for `decision='author_spec'`:
    *  - `specWritten: true`   → close + de-escalate (the write actually landed; nothing more to do).
@@ -314,6 +325,18 @@ function needsAttentionEscalationReason(reason: string | undefined): string {
 }
 
 /**
+ * Phase 2 of june-remedy-shape-and-honest-apply-status — the escalation_reason a FAILED
+ * `approve_remedy` apply stamps on the ticket. Names the guard's rejection reason (e.g.
+ * `missing_order_reference …`) so a CS agent scanning the queue sees WHY the remedy didn't fire
+ * instead of a phantom-resolved ticket. Caps at 400 chars for the free-text column.
+ */
+function remedyApplyFailedEscalationReason(reason: string | undefined): string {
+  const cleaned = (reason ?? "").trim();
+  const token = cleaned.length > 0 ? cleaned : "unknown_reason";
+  return `approve_remedy apply FAILED (${token}) — remedy not executed; ticket needs human review`.slice(0, 400);
+}
+
+/**
  * Decide the per-verdict patch to apply to the ticket. The runner then executes it as a compare-
  * and-set (`.eq("id", ticketId).eq("workspace_id", …).select("id")`) so an async race can't
  * overwrite a ticket that has moved on. Never throws; unknown decisions become a `noop` patch so
@@ -418,7 +441,20 @@ function decideRawTransition(input: CsDirectorTransitionInput): CsDirectorTicket
     // does not linger open (which would let the CS auto-router feed the loop Phase 1 caps).
     case "message_only":
       return { action_key: "close_and_deescalate", patch: closeAndDeescalatePatch(input.now) };
-    case "approve_remedy":
+    case "approve_remedy": {
+      // Honest-apply invariant (june-remedy-shape-and-honest-apply-status Phase 2): a FAILED apply
+      // must NEVER close OR de-escalate — the customer wasn't actually helped. This gate runs FIRST
+      // so even a remedy that carried `close_ticket:true` cannot auto-close on a refused apply
+      // (Susan Knudson, ticket 2acc8634: the $43.20 refund was refused but the ticket de-escalated
+      // with no owner). Keep escalated + needs_attention so Phase 3 re-owns it.
+      if (input.approveRemedyApplyFailed === true) {
+        const patch: Record<string, unknown> = {
+          escalation_reason: remedyApplyFailedEscalationReason(input.reasoning),
+          updated_at: input.now,
+        };
+        if (input.ceoUserId) patch.escalated_to = input.ceoUserId;
+        return { action_key: "keep_escalated_needs_attention", patch };
+      }
       // Close when the remedy explicitly signals no reply is pending OR the
       // mutator actually resolved it (fired the actions + delivered the reply).
       // The remedy IS the final CS resolution — a return pipeline / customer
@@ -429,6 +465,7 @@ function decideRawTransition(input: CsDirectorTransitionInput): CsDirectorTicket
         return { action_key: "close_and_deescalate", patch: closeAndDeescalatePatch(input.now) };
       }
       return { action_key: "deescalate_only", patch: deescalateOnlyPatch(input.now) };
+    }
     case "escalate_founder": {
       const patch: Record<string, unknown> = {
         escalation_reason: ceoOwnedEscalationReason(input.reasoning),

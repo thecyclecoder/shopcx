@@ -28,6 +28,8 @@ import {
   CS_FUNCTION,
   CS_ROUTED_MARKER,
   CS_DIRECTOR_LOOP_GUARD_MAX,
+  CS_REMEDY_APPLY_FAILED_CLASS,
+  isRemedyApplyRetry,
   type ParkedRowLike,
 } from "./needs-attention-route-cs-owner";
 
@@ -93,6 +95,47 @@ test("decideCsOwnerRoute: parked cs-director-call must NOT route to another cs-d
   );
   assert.equal(d.ticket_id, null);
   assert.match(d.reason, /self.?rout/i, "the decision reason must name the self-routing exclusion");
+});
+
+// ── june-remedy-shape-and-honest-apply-status Phase 3 — the cs_remedy_apply_failed carve-out ──
+// A cs-director-call parked with class 'cs_remedy_apply_failed' is the ONE exception to the
+// self-route exclusion above: June's CALL was sound (approve_remedy) but the executor REFUSED the
+// apply (a flat/un-runnable shape). It must re-dispatch ONE cs-director-call carrying the rejection
+// reason — but only once (the retry marker stops a second re-dispatch; the SLA watchdog owns it).
+
+test("decideCsOwnerRoute: cs-director-call parked with class cs_remedy_apply_failed (first time) → route_to='cs' for ONE retry", () => {
+  const d = decideCsOwnerRoute(
+    parked({
+      kind: "cs-director-call",
+      spec_slug: TICKET_ID,
+      needs_attention_class: CS_REMEDY_APPLY_FAILED_CLASS,
+      instructions: JSON.stringify({ ticket_id: TICKET_ID }),
+      error: "missing_order_reference … names no shopify_order_id / order_number / order_id",
+    }),
+  );
+  assert.equal(d.route_to, "cs", "a refused approve_remedy apply must re-dispatch June once with the reason");
+  assert.equal(d.ticket_id, TICKET_ID);
+  assert.equal(d.reason, "cs_remedy_apply_failed_retry");
+});
+
+test("decideCsOwnerRoute: cs_remedy_apply_failed whose instructions already carry remedy_apply_retry → route_to=null (one retry only; SLA watchdog owns it)", () => {
+  const d = decideCsOwnerRoute(
+    parked({
+      kind: "cs-director-call",
+      spec_slug: TICKET_ID,
+      needs_attention_class: CS_REMEDY_APPLY_FAILED_CLASS,
+      instructions: JSON.stringify({ ticket_id: TICKET_ID, remedy_apply_retry: true }),
+    }),
+  );
+  assert.equal(d.route_to, null, "a second apply failure must NOT loop — it falls to the 30-min SLA watchdog");
+  assert.equal(d.reason, "cs_remedy_apply_failed_retry_exhausted");
+});
+
+test("isRemedyApplyRetry: true only when instructions.remedy_apply_retry === true", () => {
+  assert.equal(isRemedyApplyRetry(parked({ instructions: JSON.stringify({ remedy_apply_retry: true }) })), true);
+  assert.equal(isRemedyApplyRetry(parked({ instructions: JSON.stringify({ ticket_id: TICKET_ID }) })), false);
+  assert.equal(isRemedyApplyRetry(parked({ instructions: null })), false);
+  assert.equal(isRemedyApplyRetry(parked({ instructions: "not-json" })), false);
 });
 
 test("decideCsOwnerRoute: parked ticket-handle STILL routes to cs-director-call (narrow change; only self-routing is removed)", () => {
@@ -339,6 +382,32 @@ test("applyCsOwnerRoute: enqueues cs-director-call + CS-attributed director_acti
   assert.equal(upd.where_status, "needs_attention", "compare-and-set MUST re-assert needs_attention (Learning #9)");
   assert.equal((upd.patch as { status: string }).status, "completed");
   assert.equal((upd.patch as { needs_attention_class: string }).needs_attention_class, CS_ROUTED_MARKER);
+});
+
+test("applyCsOwnerRoute: cs_remedy_apply_failed retry enqueues a cs-director-call carrying remedy_apply_retry + the rejection reason", async () => {
+  const { admin, state } = makeAdmin({
+    agent_jobs: [
+      { id: PARKED_ID, workspace_id: WS, kind: "cs-director-call", spec_slug: TICKET_ID, status: "needs_attention" },
+    ],
+  });
+  const row = parked({
+    kind: "cs-director-call",
+    spec_slug: TICKET_ID,
+    needs_attention_class: CS_REMEDY_APPLY_FAILED_CLASS,
+    instructions: JSON.stringify({ ticket_id: TICKET_ID }),
+    error: "missing_order_reference … names no shopify_order_id / order_number / order_id",
+  });
+  const res = await applyCsOwnerRoute(admin, row, decideCsOwnerRoute(row));
+  assert.equal(res.routed, true);
+  assert.equal(res.reason, "enqueued_cs_director_call");
+  assert.equal(state.inserted_cs_calls.length, 1);
+  const cs = state.inserted_cs_calls[0] as { instructions: string };
+  const inst = JSON.parse(cs.instructions) as { ticket_id: string; remedy_apply_retry?: boolean; prior_apply_failure_reason?: string };
+  assert.equal(inst.ticket_id, TICKET_ID);
+  assert.equal(inst.remedy_apply_retry, true, "the retry job must be marked so a SECOND failure doesn't loop");
+  assert.match(String(inst.prior_apply_failure_reason), /missing_order_reference/, "the guard's rejection reason must ride along so June re-emits a runnable shape");
+  // parked row flipped terminal with the routed marker
+  assert.equal((state.updates[0].patch as { needs_attention_class: string }).needs_attention_class, CS_ROUTED_MARKER);
 });
 
 test("applyCsOwnerRoute: inflight cs-director-call on the ticket → already_inflight (no second enqueue)", async () => {
