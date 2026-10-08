@@ -119,6 +119,31 @@ export async function resolveLiveContractId(workspaceId: string, contractId: str
   return row?.shopify_contract_id || contractId;
 }
 
+/**
+ * Stamp `cancelled_at = now` on a subscription that just went cancelled — but only when it has
+ * no stamp yet, so a re-cancel never rewrites the original date. Cancel-truth's other half
+ * (status + next_billing_date = null) is written by the caller.
+ *
+ * ⭐ The internal cancel writers (internalSubscriptionAction, internal dunning exhaustion, the
+ * cancel-journey fallback) set status + nulled the date but never stamped `cancelled_at`, unlike
+ * the Appstle / ShopCX paths: 353 internal cancelled subs carried no cancellation date
+ * (measured 2026-10-08), so anything reading it — the CS director's cancellation timeline, the
+ * portal's live-row ordering — missed them.
+ */
+export async function stampCancelledAtIfUnset(
+  admin: ReturnType<typeof createAdminClient>,
+  subscriptionId: string,
+  nowIso: string = new Date().toISOString(),
+): Promise<void> {
+  const { error } = await admin
+    .from("subscriptions")
+    .update({ cancelled_at: nowIso })
+    .eq("id", subscriptionId)
+    .eq("status", "cancelled")
+    .is("cancelled_at", null);
+  if (error) console.error(`[internal-subscription] stamp cancelled_at failed for ${subscriptionId}:`, error.message);
+}
+
 async function loadInternalSub(workspaceId: string, contractId: string): Promise<SubRow | null> {
   const admin = createAdminClient();
   const { row: data } = await findSubByContractRef(
@@ -212,6 +237,7 @@ export async function internalSubscriptionAction(
     .from("subscriptions")
     .update(patch)
     .eq("id", sub.id);
+  if (action === "cancel") await stampCancelledAtIfUnset(admin, sub.id);
   if (sub.customer_id) await syncCustomerSubscriptionStatus(sub.customer_id);
   return { success: true };
 }
