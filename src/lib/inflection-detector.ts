@@ -201,7 +201,12 @@ function stage1Classify(input: DetectInflectionInput): Stage1Result {
   // A CHECKOUT-STUCK message flags Sol back in even mid-playbook — a customer stuck at the
   // Shopify checkout while the current playbook is still driving (or a Direction that never
   // covered the payment lane, per Latrina's aa0b6697 case) needs a fresh assisted-purchase
-  // Direction. We map it to `kind: 'drift'` (rather than a new kind) so the existing
+  // Direction. This ALSO covers the payment-journey-stage objections (ticket cd385c7f):
+  // a customer mid add-payment-method journey who objects to the link ("I don't trust this
+  // to add payment" / "is this safe") or asks for an alternative rail ("do you have PayPal?")
+  // now matches `classifyCheckoutStuck` and re-sessions Sol to ANSWER in-lane (the same
+  // secure link accepts PayPal Vault — [[assisted-purchase-direction]] concierge replies)
+  // instead of falling out of the lane onto the no-progress circuit → escalation. We map it to `kind: 'drift'` (rather than a new kind) so the existing
   // `reSessionSol` router fires unchanged: supersede the live Direction + enqueue a new
   // ticket-handle box session for Sol. The verdict lands via detectInflection → applyInflectionGate
   // → reSessionSol just like the multi-signal drift path, and the ledger row stamps
