@@ -12,12 +12,23 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Scope out ad-hoc error_events free-text search noise (unqualified column "label"/"message")** · verified 2026-10-08 · → [[../lifecycles/control-tower]]
+- **Drop foreign error_events jsonb-sample ILIKE search noise at capture** · verified 2026-10-08 · → [[../libraries/control-tower]]
+- **Add fingerprint to the loop_alerts direct-REST missing-column noise filter** · verified 2026-10-08 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise`)
+- **Scope out loop_alerts.message foreign direct-REST column noise in the Control Tower feed** · verified 2026-10-08 · → [[../libraries/control-tower]]
+- **Drop foreign PostgREST `column journey_sessions.expires_at does not exist` noise at capture** · verified 2026-10-08 · → [[../libraries/control-tower]] (`isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise`)
 - **CS Director close-no-action gate: fix ticket_required_outcomes column names (kind, authored_at)** · verified 2026-10-07 · → [[../lifecycles/ticket-lifecycle]]
+- **CX agents must read the engine's realized price, not the override base** · verified 2026-10-07 · → [[../libraries/cx-agent-sdk]], [[../libraries/action-executor]], [[../libraries/june-remedy-approval]]
+- **Drop stale agent_jobs.terminal_reason direct-REST lookup noise** · verified 2026-10-07 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)
 - **Drop foreign direct-REST noise: crisis_customer_actions missing-column reads** · verified 2026-10-07 · → [[../libraries/control-tower]], [[../inngest/supabase-log-poll]]
 - **Scope foreign direct-REST `orders.easypost_tracker_id` lookup noise out of the error feed** · verified 2026-10-07 · → [[../libraries/control-tower]]
+- **Drop stale qb_amazon_sales_snapshots.sku direct-REST lookup noise** · verified 2026-10-07 · → [[libraries/control-tower]]
 - **Drop foreign PostgREST `specs.owner_function does not exist` noise at capture** · verified 2026-10-07 · → [[../libraries/control-tower]]
 - **Drop foreign-PostgREST `column specs.target does not exist` noise at the capture boundary** · verified 2026-10-07 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingSpecsTargetAdhocNoise`; cross-link in [[../tables/specs]])
+- **Drop foreign-app noise: subscriptions.items @> ad-hoc invalid-JSON lookup** · verified 2026-10-07 · → [[../libraries/control-tower]]
 - **Drop foreign direct-REST workspace_members.customer_id / .external_customer_id column-missing noise** · verified 2026-10-07 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise`)
+- **Drop foreign-app noise: SELECT workspaces.updated_at ad-hoc lookup** · verified 2026-10-07 · → [[../inngest/supabase-log-poll]]
+- **Every inbound customer message is handled within 30 minutes** · verified 2026-10-07 · → [[../inngest/ticket-response-sla-watchdog]]
 - **Stop inserting ticket_resolution_events ledger rows with a null turn_index** · verified 2026-10-07 · → [[../lifecycles/ticket-lifecycle]]
 - **Drop stale `spec_phases.name` / `spec_phases.phase_order` PostgREST foreign-app noise at capture** · verified 2026-10-06 · → [[../libraries/control-tower]]
 - **Generalize ad hoc customer_events missing-column drop from metadata-specific to column-agnostic** · verified 2026-10-06 · → [[../libraries/control-tower]]
