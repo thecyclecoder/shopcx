@@ -159,6 +159,15 @@ Return a `remedy` object shaped as a **RemedyPlan** — the Phase-2 executor wil
 `executeSonnetDecision` (the same real executor prod uses; see the `run-orchestrator-action` skill
 for the pattern). Two shapes are accepted (both normalize to an ordered actions batch):
 
+> **PAYLOAD SHAPE RULE — put action params INSIDE `payload`, the customer message under `customer_message`.**
+> Every action's params (`amount_cents`, `order_number`, `shopify_order_id`, `contract_id`, `date`, …)
+> go inside that step's `payload` object; the reply the customer reads goes in the top-level
+> `customer_message` (NOT `response_message` and NOT inside `payload`). A FLAT remedy — params at the
+> top level with no `payload` wrapper — is normalized defensively, but authoring the wrapper is the
+> contract. Use the EXACT key each handler reads (e.g. `change_next_date` reads `date`, NOT
+> `next_billing_date`). On 2026-10-07 a $43.20 refund was authored flat with the message under
+> `response_message`; the apply was refused and the customer waited 6.5h (ticket 2acc8634).
+
 **Preferred — MULTI-ACTION `actions[]` (a real fix often needs several).** A real fix is often a
 combination — e.g. `partial_refund` + `change_next_date` + `redeem_points_as_refund`, or
 `create_replacement_order` + `apply_coupon`. Author the FULL FIX as an ordered `actions[]` so the
@@ -178,7 +187,7 @@ makes the customer whole in one verdict; author more only when the fix genuinely
 "remedy": {
   "actions": [
     { "action_type": "partial_refund",            "payload": { "amount_cents": 3000, "order_number": "SC131156" } },
-    { "action_type": "change_next_date",          "payload": { "next_billing_date": "2026-10-06", "contract_id": "..." } },
+    { "action_type": "change_next_date",          "payload": { "date": "2026-10-06", "contract_id": "..." } },
     { "action_type": "redeem_points_as_refund",   "payload": { "amount_cents": 500 } }
   ],
   "summary": "one sentence — what you're doing across the batch + why the customer needs it",
@@ -194,7 +203,7 @@ one action, either shape works — the top-level `{action_type, payload}` is bac
 "remedy": {
   "action_type": "change_next_date",
   "summary":     "restore requested next-billing date",
-  "payload":     { "next_billing_date": "2026-10-06", "contract_id": "..." },
+  "payload":     { "date": "2026-10-06", "contract_id": "..." },
   "customer_message": "…",
   "confidence": 0.0
 }

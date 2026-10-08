@@ -33,6 +33,12 @@ For a **`ticket-handle`** or **`ticket-analyze`** park it's not: `ownerFunctionF
 
 `decideCsOwnerRoute` calls `wouldSelfRoute(row.kind)` and returns `{route_to: null, reason: 'self_routing_excluded'}` when the parked row's `kind === CS_DIRECTOR_CALL_KIND` (`'cs-director-call'`). A parked `cs-director-call` is the CS Director's OWN box session — routing it to another `cs-director-call` is self-routing (routing a thing to itself). The signal a parked director call carries is "June ran and could not finish" — that is exactly the signal Phase 1's loop-guard and the CEO fail-safe were built to handle. Narrow: other CS-owned kinds (`ticket-handle`, `ticket-analyze`) still route to the CS Director exactly as before. The parked `cs-director-call` falls through to the generic needs-attention sweep.
 
+## `cs_remedy_apply_failed` carve-out — [[../specs/june-remedy-shape-and-honest-apply-status]] Phase 3
+
+The one exception to the self-routing exclusion above. When the runner's `runCsDirectorCallJob` fails to APPLY an `approve_remedy` verdict (the verdict was sound, but the executor refused the apply — e.g. a flat remedy shape the guard rejected), it stamps the parked `cs-director-call` with `needs_attention_class = CS_REMEDY_APPLY_FAILED_CLASS` (`'cs_remedy_apply_failed'`). `decideCsOwnerRoute` checks this class BEFORE `wouldSelfRoute` and returns `{route_to:'cs', reason:'cs_remedy_apply_failed_retry'}` — because here the signal is "June's CALL was fine, the SHAPE was wrong", not "June ran and couldn't finish". `applyCsOwnerRoute` then enqueues ONE fresh `cs-director-call` whose `instructions` carry `remedy_apply_retry: true` + `prior_apply_failure_reason` (the guard's rejection reason, which the runner surfaces at the top of June's prompt so she re-emits a runnable remedy).
+
+**One retry only.** `isRemedyApplyRetry(row)` reads `instructions.remedy_apply_retry`; a retry that ALSO fails returns `{route_to:null, reason:'cs_remedy_apply_failed_retry_exhausted'}` and falls through to the generic backstop + the 30-minute SLA watchdog (`every-inbound-handled-within-30-min`), never a loop. Ground truth: ticket 2acc8634 (Susan Knudson, 2026-10-07) — the apply was refused, the job sat as `needs_attention_class='unknown'` (no surface routed it), and Susan waited 6.5h.
+
 ## Verdict shape
 
 | result reason                    | when                                                                                 |
