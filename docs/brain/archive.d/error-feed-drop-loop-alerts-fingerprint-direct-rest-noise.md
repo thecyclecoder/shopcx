@@ -1,0 +1,1 @@
+- **Add fingerprint to the loop_alerts direct-REST missing-column noise filter** · verified 2026-10-08 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise`)
