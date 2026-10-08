@@ -1,0 +1,19 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "t:name"
+handle = "quantity-break-discount"
+type = "function"
+description = "t:description"
+
+  # Product discount only. One automatic discount per tier ("Buy 2 Discount",
+  # "Buy 3 Discount"), each with its own $app:function-configuration metafield;
+  # see docs/brain/integrations/shopify-checkout-extensions.md.
+  [[extensions.targeting]]
+  target = "cart.lines.discounts.generate.run"
+  input_query = "src/cart_lines_discounts_generate_run.graphql"
+  export = "cart-lines-discounts-generate-run"
+
+  [extensions.build]
+  command = ""
+  path = "dist/function.wasm"
