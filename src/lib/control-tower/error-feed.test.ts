@@ -91,6 +91,7 @@ import {
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
+  isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
@@ -1458,6 +1459,110 @@ test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS the 
       "column public.loop_heartbeats.loop_key does not exist",
       'WITH pgrst_source AS ( SELECT "public"."loop_heartbeats"."loop_key" FROM "public"."loop_heartbeats" )',
     ),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise ──
+// A foreign / stale direct-REST client listed `worker_heartbeats?select=...&order=created_at`
+// against a column the singleton liveness table has never owned (it uses `updated_at` /
+// `started_at` / `last_poll_at`); Control Tower signature `supabase-logs:850d40ea218591b8`.
+// Drop AT CAPTURE only when BOTH the exact `column worker_heartbeats.created_at does not
+// exist` message AND the SELECT-lookup shape on `worker_heartbeats` (bare or PostgREST CTE
+// wrapper) are present. A real `created_at`-missing on another table, a `worker_heartbeats`
+// column rename, a non-SELECT write, or a FATAL/PANIC/constraint violation still pages.
+
+test("isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise drops the PostgREST CTE wrapper + bare SELECT listing the non-existent created_at column", () => {
+  // The captured incident shape: a stale direct-REST client lists worker_heartbeats ordered
+  // by created_at, PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."worker_heartbeats" ... )` CTE, and Postgres rejects with the column-missing.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise(
+      "column worker_heartbeats.created_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."worker_heartbeats"."id", "public"."worker_heartbeats"."created_at" FROM "public"."worker_heartbeats" ORDER BY "public"."worker_heartbeats"."created_at" DESC LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise(
+      "column public.worker_heartbeats.created_at does not exist",
+      'with pgrst_source as ( select "public"."worker_heartbeats"."created_at" from "public"."worker_heartbeats" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise(
+      "ERROR: column worker_heartbeats.created_at does not exist",
+      'WITH pgrst_source AS ( SELECT "created_at" FROM "public"."worker_heartbeats" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper), qualified and unqualified FROM, drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise(
+      "column worker_heartbeats.created_at does not exist",
+      "select id, created_at from public.worker_heartbeats order by created_at desc limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise(
+      "column worker_heartbeats.created_at does not exist",
+      "select * from worker_heartbeats where created_at is not null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise KEEPS real errors (other table, other column, non-SELECT, FATAL)", () => {
+  // Same created_at-missing message on a DIFFERENT relation is a real product-schema
+  // regression and still pages — the pin names worker_heartbeats only.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise(
+      "column tickets.created_at does not exist",
+      "select id, created_at from public.tickets order by created_at desc",
+    ),
+    false,
+  );
+  // A DIFFERENT column on worker_heartbeats (a real column rename that broke a live query)
+  // still pages — the pin is created_at only.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise(
+      "column worker_heartbeats.updated_at does not exist",
+      "select id, updated_at from public.worker_heartbeats",
+    ),
+    false,
+  );
+  // A non-SELECT shape (PostgREST CTE write / bare write) is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise(
+      "column worker_heartbeats.created_at does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."worker_heartbeats"("id","created_at") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise(
+      "column worker_heartbeats.created_at does not exist",
+      'update public.worker_heartbeats set created_at = now() where id = $1',
+    ),
+    false,
+  );
+  // A FATAL / constraint-class error on the same shape is untouched (different message).
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select id, created_at from public.worker_heartbeats",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise("", "select * from worker_heartbeats"), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise("column worker_heartbeats.created_at does not exist", ""),
     false,
   );
 });

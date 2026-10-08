@@ -37,6 +37,7 @@ import {
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
+  isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
@@ -289,6 +290,17 @@ const LOG_QUERIES: LogQuery[] = [
       // a `loop_alerts` column rename, a non-SELECT write, or a FATAL/PANIC/constraint
       // violation still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign / stale direct-REST client listed
+      // `worker_heartbeats` ordered by a non-existent `created_at` column (the singleton
+      // liveness table uses `updated_at` / `started_at` / `last_poll_at`, never `created_at`).
+      // The resulting undefined_column ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-worker-heartbeats-created-at-direct-rest-noise]], Control
+      // Tower signature `supabase-logs:850d40ea218591b8`). Narrowly gated to require BOTH the
+      // exact `column worker_heartbeats.created_at does not exist` message AND the SELECT-
+      // lookup shape on `worker_heartbeats` (bare or PostgREST CTE wrapper) — a real
+      // `created_at`-missing on another table, a `worker_heartbeats` column rename, a
+      // non-SELECT write, or a FATAL/PANIC/constraint violation still surfaces / pages.
+      if (isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an operator typo — a manual SQL client did a
       // `select ... from error_events` naming the wrong column (`first_seen` instead of
       // our real `first_seen_at`). The resulting undefined_column ERROR is repair work
