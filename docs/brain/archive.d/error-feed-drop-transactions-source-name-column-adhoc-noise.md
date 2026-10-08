@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: ad hoc SELECT of non-existent transactions.source_name column** · verified 2026-10-08 · → [[../inngest/supabase-log-poll]]

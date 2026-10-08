@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: ad hoc PostgREST SELECT of non-existent ticket_analyses.intents column** · verified 2026-10-08 · → [[../inngest/supabase-log-poll]]
