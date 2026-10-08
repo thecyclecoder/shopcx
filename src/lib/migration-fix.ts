@@ -372,3 +372,48 @@ export async function applyMigrationFix(
 
   return { ok: false, detail: `unknown fix_kind: ${(action as { fix_kind?: string }).fix_kind}` };
 }
+
+// ── Code-gap fix spec (Phase 2 escalation) ───────────────────────────────────────────────────
+/** A permanent-fix spec the migration-fix box agent proposes for a recurring code/data gap. */
+export interface MigrationGapSpec { slug: string; title: string; intent: string; problem: string; target?: string }
+
+/**
+ * The markdown the worker hands to `markNewSpecInReview` → `authorSpecRowStructured` for a
+ * code-gap fix spec. PURE (exported for tests).
+ *
+ * ⭐ The parent MUST be a resolvable function mandate. The old template wrote it as free text —
+ * `**Parent:** Retention mandate "Subscription continuity & billing integrity"` — which the
+ * authoring chokepoint (`assertValidParent`, author-spec.ts) rejects: "Parent is not a resolvable
+ * mandate or milestone (it reads as free text)". So EVERY gap spec this agent ever tried to file
+ * bounced. Ground truth: 2026-09-20, sub 25afd98d — the agent correctly diagnosed that Appstle
+ * free/one-time promo lines were being migrated as paid lines, and the fix spec never landed; the
+ * class was found again by hand two weeks later. Canonical form (same as platform-owned specs):
+ * `[[../functions/{fn}]] — "{Mandate heading}" mandate: {short reason}.`
+ */
+export function migrationGapSpecMarkdown(spec: MigrationGapSpec, auditId: string, subId: string): string {
+  return [
+    `# ${spec.title}`,
+    ``,
+    `**Owner:** [[../functions/retention]]`,
+    `**Parent:** [[../functions/retention]] — "Subscription continuity & billing integrity" mandate: a recurring Appstle→internal migration failure class (from failed migration \`${auditId}\`).`,
+    `**Why:** ${spec.intent.trim()}`,
+    `**What:** Migrations that hit this gap pass verifyMigration on their own, with no hand fix, and the failure class stops recurring.`,
+    `**Derived-from-migration:** \`${auditId}\``,
+    ``,
+    spec.intent.trim(),
+    ``,
+    `## Problem (from failed migration \`${auditId}\`, sub \`${subId}\`)`,
+    spec.problem.trim(),
+    spec.target ? `\n**Likely target:** \`${spec.target}\`` : ``,
+    ``,
+    `## Phases`,
+    `- **P1 — close the gap** — scope from the problem above; land the code/data fix + its brain page; gate on \`npx tsc --noEmit\`.`,
+    ``,
+    `## Verification`,
+    `- Re-run \`verifyMigration\` on a migration that hit this gap → expect it to auto-heal/pass without a hand fix, and confirm the class of failure no longer recurs.`,
+    ``,
+    `> Authored by the box migration-fix routine from failed migration \`${auditId}\`. Commission the build from the Roadmap board (owner = retention).`,
+    ``,
+  ].join("\n");
+}
+
