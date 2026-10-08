@@ -2951,6 +2951,52 @@ export function isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocN
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column subscription_cycle_charges.created_at does
+ * not exist` for an ad hoc SELECT lookup / PostgREST direct-REST call against
+ * `public.subscription_cycle_charges`. The `subscription_cycle_charges` ledger exists as a
+ * first-class product table, but it has no `created_at` column — its timestamps are
+ * `claimed_at` / `resolved_at`, and no ShopCX code path orders this table by `created_at`.
+ * The error only reaches Supabase's `postgres_logs` feed when an external / stale PostgREST
+ * client (a foreign app assuming a generic `.created_at` column, a stale SQL Editor session,
+ * a deprecated integration) issues a `select=...created_at...` against
+ * `/rest/v1/subscription_cycle_charges`. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:dc5495e4064edd50`) is repair work for a query we do not own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise` — the
+ * same narrow-gating shape (exact `column <table>.<name> does not exist` + bare
+ * SELECT-on-table shape), aimed at a different foreign caller.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column subscription_cycle_charges.created_at does not exist` (or
+ *      the `public.` qualified variant, with any leading `ERROR: ` prefix stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.subscription_cycle_charges`
+ *      lookup shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so a column-missing error for ANY OTHER table, a DIFFERENT column on
+ * `subscription_cycle_charges`, or a non-SELECT statement against the table still pages.
+ * Empty / nullish message OR query returns `false` — we need both markers. Consumed by the
+ * `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]]: returning null drops the row
+ * (no error_event, no loop_alert, no signature). A capture-time drop, not a transient flag.
+ */
+export function isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column subscription_cycle_charges.created_at does not exist" ||
+    stripped === "column public.subscription_cycle_charges.created_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?subscription_cycle_charges\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column subscriptions.paused_until does not exist`
  * for an ad hoc SELECT lookup / PostgREST direct-REST call against
  * `public.subscriptions.paused_until`. The `subscriptions` table exists as a first-class

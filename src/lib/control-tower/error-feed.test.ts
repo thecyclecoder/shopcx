@@ -27,6 +27,7 @@ import {
   isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
@@ -4140,6 +4141,155 @@ test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise retur
   assert.equal(
     isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
       "column spec_status_history.created_at does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/subscription_cycle_charges?select=...created_at...` against our
+// `public.subscription_cycle_charges` ledger. The table exists but has no `created_at`
+// column — its timestamps are `claimed_at` / `resolved_at`. Foreign-owned surface, no
+// lever from us (Control Tower signature `supabase-logs:dc5495e4064edd50`) — drop AT
+// CAPTURE only when BOTH the exact column-missing message on
+// `subscription_cycle_charges.created_at` AND the bare SELECT-lookup shape on
+// `subscription_cycle_charges` are present. A column-missing on any other table, a
+// different column on `subscription_cycle_charges`, or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise drops the ad hoc SELECT lookup on the exact subscription_cycle_charges.created_at column-missing shape", () => {
+  // The real captured sample — unqualified and public.-qualified message variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
+      "select id, created_at from public.subscription_cycle_charges order by created_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column public.subscription_cycle_charges.created_at does not exist",
+      "select id, created_at from public.subscription_cycle_charges order by created_at desc limit 100",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
+      "select created_at from subscription_cycle_charges limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
+      "select cycle_key, created_at from public.subscription_cycle_charges where status = 'failed' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
+      "SELECT ID, CREATED_AT FROM PUBLIC.SUBSCRIPTION_CYCLE_CHARGES",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "ERROR: column subscription_cycle_charges.created_at does not exist",
+      "select created_at from public.subscription_cycle_charges",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise KEEPS a column-missing error on any OTHER table (a different table's created_at still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column orders.created_at does not exist",
+      "select created_at from public.orders where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column spec_status_history.created_at does not exist",
+      "select created_at from public.spec_status_history limit 10",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise KEEPS a DIFFERENT column-missing on subscription_cycle_charges (a real column regression still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.claimed_at does not exist",
+      "select claimed_at from public.subscription_cycle_charges where cycle_key = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.cycle_key does not exist",
+      "select cycle_key from public.subscription_cycle_charges where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing subscription_cycle_charges.created_at still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
+      "insert into public.subscription_cycle_charges (created_at) values (now())",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
+      "update public.subscription_cycle_charges set created_at = now() where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
+      "delete from public.subscription_cycle_charges where created_at < now()",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise("", ""),
+    false,
+  );
+  // Exact message but empty / null query — cannot confirm the shape, stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
       null,
     ),
     false,

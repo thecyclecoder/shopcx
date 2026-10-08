@@ -62,6 +62,7 @@ import {
   isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
@@ -634,6 +635,15 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_status_history`, or on it via a non-SELECT statement (real code-bug shape)
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.subscription_cycle_charges.created_at`. The ledger exists but has no
+      // `created_at` column (timestamps are `claimed_at` / `resolved_at`, and no ShopCX code
+      // path orders it by `created_at`) — the column-missing ERROR only reaches this feed
+      // when a foreign app / stale PostgREST client reads `created_at` off the table. There
+      // is no lever from ShopCX to resolve it — paging Platform (Control Tower signature
+      // `supabase-logs:dc5495e4064edd50`) is repair work for a query we don't own. Narrowly
+      // gated: a different table, a different column, or a non-SELECT statement still pages.
+      if (isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.subscriptions.paused_until`. The `subscriptions` table exists but
       // has no `paused_until` column — the canonical pause timestamp is `pause_resume_at`
