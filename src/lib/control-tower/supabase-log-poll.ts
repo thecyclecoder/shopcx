@@ -82,6 +82,7 @@ import {
   isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise,
   isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecsFlagsAdhocNoise,
   isForeignSupabasePostgresMissingSpecsOwnerFunctionAdhocNoise,
@@ -920,6 +921,26 @@ const LOG_QUERIES: LogQuery[] = [
       // through `spec_phases`, or on `specs` via a non-SELECT statement (real code-bug
       // shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.merged_at`. The `specs` table exists but has NEVER had a
+      // `merged_at` column — merge provenance lives on `specs.merged_pr` +
+      // `specs.last_merge_sha` (and the per-phase `spec_phases.build_sha`), and every
+      // ShopCX reader goes through the [[../libraries/specs-table]] SDK/RPC, which does
+      // NOT select `specs.merged_at`. The column-missing ERROR only reaches this feed
+      // when a foreign app / stale SQL Editor session / deprecated integration queries
+      // `/rest/v1/specs?select=slug,status,merged_at,...` (observed both as a bare SELECT
+      // and as the PostgREST-wrapped `WITH pgrst_source AS ( SELECT ... FROM
+      // "public"."specs" ... )` CTE form). There is no lever from ShopCX to make that
+      // query resolve — adding a fake `merged_at` column would make the data model worse
+      // — paging Platform on it (Control Tower signature
+      // `supabase-logs:a093e7c15c154c25`,
+      // [[../specs/error-feed-drop-specs-merged-at-direct-rest-noise]]) is repair work
+      // for a query we don't own. Narrowly gated to require BOTH the exact column-missing
+      // message AND a SELECT-on-specs shape (bare OR PostgREST CTE wrapper) — a
+      // column-missing error on any other table, a different column on `specs`, a JOIN
+      // through `spec_phases`, or on `specs` via a non-SELECT statement (real code-bug
+      // shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.specs.review_status`. The `specs` table exists but has NEVER
       // had a `review_status` column — review state lives in the Vale / Ada review

@@ -41,6 +41,7 @@ import {
   isForeignSupabasePostgresPoliciesKindLookupNoise,
   isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecsFlagsAdhocNoise,
   isForeignSupabasePostgresMissingSpecsOwnerFunctionAdhocNoise,
@@ -17898,6 +17899,251 @@ test("isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise KEEP
     isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise(
       "column ticket_analyses.intents does not exist",
       "update public.ticket_analyses set intents = '{}' where id = '00000000-0000-0000-0000-000000000000'",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/specs?select=slug,status,merged_at,...` against our `public.specs` table.
+// The table exists but carries no `merged_at` column — merge provenance lives on
+// `specs.merged_pr` + `specs.last_merge_sha` per [[../tables/specs]]. Foreign-owned
+// surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `specs.merged_at` AND a SELECT-lookup shape on `specs` (bare OR PostgREST
+// CTE wrapper) are present. A column-missing on any other table, a different column on
+// `specs`, a JOIN through `spec_phases`, or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise drops the ad hoc SELECT lookup on the exact specs.merged_at column-missing shape", () => {
+  // The captured production sample: unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.merged_at does not exist",
+      "select slug, status, merged_at from public.specs where slug = 'x'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column public.specs.merged_at does not exist",
+      "select slug, status, merged_at from public.specs where slug = 'x'",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.merged_at does not exist",
+      "select merged_at from specs limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.merged_at does not exist",
+      "select slug, merged_at from public.specs where slug = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.merged_at does not exist",
+      "SELECT ID, MERGED_AT FROM PUBLIC.SPECS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "ERROR: column specs.merged_at does not exist",
+      "select merged_at from public.specs",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "  column specs.merged_at does not exist  ",
+      "   select merged_at from public.specs   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"specs\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape captured for signature
+  // `supabase-logs:a093e7c15c154c25`: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."specs"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.merged_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."specs"."id", "public"."specs"."merged_at" FROM "public"."specs" WHERE "public"."specs"."slug" = $1 LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column public.specs.merged_at does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."merged_at" FROM "public"."specs")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "ERROR: column specs.merged_at does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."merged_at" FROM "public"."specs")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a merged_at column still pages)", () => {
+  // If any other table had a real `merged_at` column and regressed, we absolutely want
+  // to see it — the pin is `specs.merged_at` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column pull_requests.merged_at does not exist",
+      "select merged_at from public.pull_requests where id = 'x'",
+    ),
+    false,
+  );
+  // Sibling `spec_phases.merged_at` is a DIFFERENT foreign-caller shape on a DIFFERENT
+  // table — the pin here is `specs` only, so this stays paged.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column spec_phases.merged_at does not exist",
+      "select merged_at from public.spec_phases where spec_id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise KEEPS a DIFFERENT column-missing on specs (a real column rename still pages)", () => {
+  // Real `specs` columns — if any of these regress we absolutely want the page.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.status does not exist",
+      "select status from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.slug does not exist",
+      "select slug from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise KEEPS a JOIN across other tables (a real code shape joining spec_phases still pages)", () => {
+  // The regex is anchored on `from (public.)?specs` as the first FROM target; a JOIN
+  // whose first FROM is `spec_phases` won't match — product code, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.merged_at does not exist",
+      "select p.body, s.merged_at from public.spec_phases p join public.specs s on s.id = p.spec_id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing specs.merged_at still pages)", () => {
+  // INSERT / UPDATE / DELETE against specs referencing a bogus column is real code
+  // trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.merged_at does not exist",
+      "insert into public.specs (slug, merged_at) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.merged_at does not exist",
+      "update public.specs set merged_at = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.merged_at does not exist",
+      "delete from public.specs where merged_at is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.merged_at does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."specs"("slug", "merged_at") VALUES ($1, $2) RETURNING "public"."specs"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.merged_at does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."specs" SET "merged_at" = $1 WHERE "public"."specs"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise KEEPS a PostgREST CTE wrapper on a DIFFERENT table (a real schema regression on pull_requests.merged_at still pages)", () => {
+  // Same wrapper shape but the wrapped SELECT reads a different table — the pin is
+  // `specs.merged_at` only; any other table's merged_at is a genuine regression.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column pull_requests.merged_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."pull_requests"."id", "public"."pull_requests"."merged_at" FROM "public"."pull_requests" WHERE "public"."pull_requests"."workspace_id" = $1 )',
+    ),
+    false,
+  );
+  // Sibling table `spec_phases` — the anchor `\bspecs\b` won't match `spec_phases`.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column spec_phases.merged_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."spec_phases"."id", "public"."spec_phases"."merged_at" FROM "public"."spec_phases" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise KEEPS a FATAL / PANIC / constraint / other Postgres ERROR on specs (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "database is shutting down",
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      'duplicate key value violates unique constraint "specs_workspace_slug"',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise returns false on empty / nullish inputs", () => {
+  assert.equal(isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(null, null), false);
+  assert.equal(isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(undefined, undefined), false);
+  assert.equal(isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise("", ""), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "column specs.merged_at does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
+      "",
+      "select merged_at from public.specs",
     ),
     false,
   );
