@@ -5825,8 +5825,8 @@ export function isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupN
  * shape covering BOTH bare and PostgREST CTE wrapper forms + co-mention of the real
  * `kind` column the caller paired with the bogus one), on the same table, aimed at the
  * run-timestamp pair of confused columns. In addition to `kind`, this classifier
- * REQUIRES the query to also mention a legacy obsolete projection sibling (`branch` or
- * `merge_sha`) — the stable fingerprint of this specific foreign CI-run-provenance
+ * REQUIRES the query to also mention a legacy obsolete projection sibling (`branch`,
+ * `merge_sha`, or `account_id`) — the stable fingerprint of this specific foreign CI-run-provenance
  * confusion — so a hypothetical SELECT asking for `started_at` + `kind` alone (no
  * legacy sibling) still pages, matching the spec's "legacy projection markers"
  * requirement.
@@ -5844,8 +5844,8 @@ export function isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupN
  *   3. the query ALSO mentions `kind` — the real column the caller included alongside
  *      the bogus run-timestamp field, AND
  *   4. the query ALSO mentions one of the legacy obsolete sibling projections
- *      (`branch` or `merge_sha`) — the stable fingerprint of the specific foreign
- *      CI-run-provenance read.
+ *      (`branch`, `merge_sha`, or `account_id`) — the stable fingerprint of the
+ *      specific foreign CI-run-provenance read.
  *
  * Narrowly gated so:
  *   - a column-missing error for ANY OTHER table (a real product-schema regression on
@@ -5866,9 +5866,9 @@ export function isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupN
  *     NOT also mention `kind` stays paged — the drop is scoped to the confused-column
  *     pairing only,
  *   - a `agent_jobs.started_at` / `agent_jobs.completed_at` error on a SELECT that
- *     mentions `kind` but NOT one of the legacy sibling projections (`branch` or
- *     `merge_sha`) stays paged — the drop is scoped to the specific legacy-projection
- *     fingerprint,
+ *     mentions `kind` but NOT one of the legacy sibling projections (`branch`,
+ *     `merge_sha`, or `account_id`) stays paged — the drop is scoped to the specific
+ *     legacy-projection fingerprint,
  *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
  *     `agent_jobs` is untouched (different message),
  *   - empty / nullish message OR query returns `false` — we need both markers.
@@ -5894,7 +5894,7 @@ export function isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestL
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
   if (!/\bkind\b/.test(q)) return false;
-  if (!/\b(?:branch|merge_sha)\b/.test(q)) return false;
+  if (!/\b(?:branch|merge_sha|account_id)\b/.test(q)) return false;
   if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?agent_jobs\b/.test(q)) return true;
   return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?agent_jobs\b/.test(q);
 }
