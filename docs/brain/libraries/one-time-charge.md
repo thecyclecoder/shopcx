@@ -29,8 +29,30 @@ chargeOneTimeOrder({
   shippingCents?,                       // default 0
   sourceName?,                          // default "one-time-charge"
   reason?,
+  requestKey?,                          // idempotency key → transactions.metadata.request_key
 }): Promise<OneTimeChargeResult>
 ```
+
+`requestKey` is stamped into `transactions.metadata.request_key`. This primitive
+only RECORDS the key — the pre-charge check is the caller's job (a caller that
+can be retried or re-sessioned reads `transactions` for a prior row with the same
+key before calling). See the assisted-concierge caller below.
+
+## Callers
+
+- **[[action-executor]] `create_order` (vendor `'internal'`)** →
+  `executeInternalOneTimeCreate`. The assisted-purchase concierge path. It
+  derives a stable `requestKey` from `ticketId` + the sorted line items, refuses
+  a second charge when a `pending`/`succeeded` transaction already carries that
+  key (idempotent on a re-sessioned ticket turn), passes `sourceName:
+  'shopcx-concierge'` and the per-line `unit_price_cents` from the server-resolved
+  price, and threads the real `order_number` + `amount_cents` back into the
+  customer confirmation ([[playbook-executor]] `interpretAssistedCreateResult`).
+  An `amplifier_error` after a successful charge is NOT reported as success — the
+  ticket is escalated to the CS routine (June) for manual fulfilment. Spec:
+  assisted-one-time-orders-charge-and-ship Phase 1.
+- **Manual CS scripts** — ad-hoc one-off charges (e.g. Jay M Brown's SHOPCX511,
+  ticket `ca008421`).
 
 ## Order of operations
 
