@@ -71,6 +71,7 @@ import {
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
+  isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
@@ -12670,6 +12671,103 @@ test("isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise KEEPS a c
     isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
       "column customers.address does not exist",
       "update public.customers set address = $1 where id = $2",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/journey_sessions?select=...expires_at...` (or a Supabase Studio browse)
+// against our `public.journey_sessions` table. The table exists but has NO `expires_at`
+// column — the live expiry column is `token_expires_at`. Foreign-owned surface, no
+// lever from us — drop AT CAPTURE only when BOTH the exact column-missing message on
+// `journey_sessions.expires_at` AND a SELECT-lookup shape on `journey_sessions` (bare OR
+// PostgREST CTE wrapper) are present. A column-missing on a live `journey_sessions`
+// column (`token_expires_at`), on `expires_at` from any other table, or via a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise drops the captured supabase-logs:cce14c08f17e48b3 message+query pair (PostgREST CTE SELECT on journey_sessions.expires_at)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `journey_sessions.expires_at` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise(
+      "column journey_sessions.expires_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."journey_sessions"."id", "public"."journey_sessions"."expires_at" FROM "public"."journey_sessions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise(
+      "column public.journey_sessions.expires_at does not exist",
+      'WITH pgrst_source AS (SELECT "public"."journey_sessions"."expires_at" FROM "public"."journey_sessions")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise(
+      "column journey_sessions.expires_at does not exist",
+      "select id, expires_at from public.journey_sessions",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise(
+      "column journey_sessions.expires_at does not exist",
+      "select expires_at from journey_sessions limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise(
+      "ERROR: column journey_sessions.expires_at does not exist",
+      'WITH pgrst_source AS (SELECT "public"."journey_sessions"."expires_at" FROM "public"."journey_sessions")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise(
+      "column journey_sessions.expires_at does not exist",
+      "SELECT ID, EXPIRES_AT FROM PUBLIC.JOURNEY_SESSIONS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise KEEPS a column-missing on a live journey_sessions column (token_expires_at — a real schema regression still pages)", () => {
+  // `token_expires_at` IS the live expiry column on `journey_sessions`. If it ever
+  // regresses we WANT the page — the pin is `journey_sessions.expires_at` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise(
+      "column journey_sessions.token_expires_at does not exist",
+      "select token_expires_at from public.journey_sessions",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise(
+      "column public.journey_sessions.token_expires_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."journey_sessions"."token_expires_at" FROM "public"."journey_sessions" )',
+    ),
+    false,
+  );
+  // A column-missing on `expires_at` from a DIFFERENT table must still page — the pin is
+  // `journey_sessions.expires_at` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise(
+      "column sessions.expires_at does not exist",
+      "select expires_at from public.sessions",
+    ),
+    false,
+  );
+  // A non-SELECT statement against `journey_sessions` (real code-bug shape) must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise(
+      "column journey_sessions.expires_at does not exist",
+      "update public.journey_sessions set expires_at = $1 where id = $2",
     ),
     false,
   );
