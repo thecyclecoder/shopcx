@@ -53,6 +53,7 @@ import {
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
+  isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
@@ -524,6 +525,20 @@ const LOG_QUERIES: LogQuery[] = [
       // another table (workspace_members / tickets), or via a non-SELECT statement (real
       // code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... intents ... from
+      // public.ticket_analyses` lookup by an external tool / stale integration. The
+      // `ticket_analyses` table exists but no ShopCX code path / migration / view /
+      // function / trigger references an `intents` column — our table carries `issues`,
+      // not `intents`, and every read goes through the ticket-analyses SDK — so the
+      // column-missing ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-ticket-analyses-intents-adhoc-lookup-noise]], Control
+      // Tower signature `supabase-logs:7f83f37774a85b5b`). Same narrow-gating shape as the
+      // `ticket_messages.role` sibling: BOTH the exact column-missing message AND the
+      // SELECT-lookup shape (bare or PostgREST-CTE) — a column-missing error on a live
+      // `ticket_analyses` column (issues / score), on `intents` for another table, or via
+      // a non-SELECT statement (real code-bug shape) still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... metadata ... from
       // public.error_events` lookup by an external tool / stale exploratory query. The
       // `error_events` table exists but no ShopCX code path / migration / view / function
