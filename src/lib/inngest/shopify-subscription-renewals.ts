@@ -33,8 +33,7 @@ import {
 } from "@/lib/subscription-cycle-charge-claim";
 import {
   getSubscriptionContract,
-  getUpcomingBillingCycles,
-  getBillingCycleForDate,
+  resolveChargeableCycle,
   shopifyAttemptBilling,
   awaitBillingAttempt,
   shopifySyncBillingSchedule,
@@ -219,8 +218,13 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
       return { status: "skipped", reason: "stale_next_billing_date" };
     }
 
-    // 2. Ask SHOPIFY what is actually due. Our date only chose the candidate.
-    const plan = await step.run("resolve-due-cycle", async () => {
+    // 2. Resolve the cycle to bill AT CHARGE TIME — the first non-skipped UNBILLED cycle by index,
+    //    NOT the cycle that contains our date. Our DB row only PLANS the date; Shopify's billing
+    //    calendar is resolved here, when we charge. A date that lands inside an already-BILLED cycle
+    //    used to strand the sub forever (we skipped on BILLED and nothing ever advanced it); by
+    //    index, the first unbilled cycle is always billable. `scheduledFor` stays the un-clamped
+    //    `next_billing_date` — the only valid anchor for advancing the customer's anniversary.
+    const plan = await step.run("resolve-chargeable-cycle", async () => {
       const contract = await getSubscriptionContract(workspace_id, sub.shopify_contract_id);
       if (!contract.success || !contract.contract) {
         return { ok: false as const, reason: contract.error ?? "contract_unreadable" };
@@ -229,50 +233,17 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
         return { ok: false as const, reason: `contract_${contract.contract.status.toLowerCase()}` };
       }
 
-      // ⭐ Target the cycle CONTAINING our billing date — do NOT hunt for a past-due cycle.
-      // Shopify anchors the cycle calendar to the contract's createdAt, not to the nextBillingDate
-      // we set, so a MIGRATED contract is born up to a full interval out of step (observed on
-      // 35945087149: our date 2026-10-15 vs Shopify's first cycle 2026-11-05). Past-due hunting
-      // finds nothing there and the customer is silently never charged.
       const due = sub.next_billing_date;
       if (!due) return { ok: false as const, reason: "no_next_billing_date" };
 
-      // ⚠️ Shopify rejects a selector date BEFORE the contract's createdAt with
-      // "Billing cycle start date out of range" — and a migrated contract is created TODAY while
-      // the customer may already be overdue, so this is the normal case for anyone due on or
-      // before migration day (63 such subs live right now), not an edge case. Left unhandled they
-      // resolve to nothing and are silently never charged.
-      // Clamping to just inside the contract's first cycle is correct: that cycle covers the
-      // charge we owe, and the customer is due now.
-      const created = contract.contract.createdAt ? new Date(contract.contract.createdAt).getTime() : 0;
-      const selectorDate =
-        created && new Date(due).getTime() < created
-          ? new Date(created + 1000).toISOString()
-          : due;
-
-      const cyc = await getBillingCycleForDate(workspace_id, sub.shopify_contract_id, selectorDate);
-      if (!cyc.success || !cyc.cycle) return { ok: false as const, reason: cyc.error ?? "cycle_unresolvable" };
-      // BILLED is Shopify's own idempotency signal — this cycle already charged, whoever did it.
-      if (cyc.cycle.status === "BILLED") return { ok: false as const, reason: "cycle_already_billed" };
-      if (cyc.cycle.skipped) return { ok: false as const, reason: "cycle_skipped" };
-      // ⚠️ TWO DATES, and conflating them drifts the customer's anniversary.
-      //
-      //   selectorDate — clamped forward so Shopify will accept the cycle selector. Correct for
-      //                  CHOOSING which cycle to bill, and meaningless outside that.
-      //   scheduledFor — the date the customer was actually DUE. The only valid anchor for the
-      //                  next billing date.
-      //
-      // Reusing the clamp as the advance anchor shifts the schedule by however overdue the sub
-      // was. Measured on 2026-09-16: cohort sub 36018618541 was due 09-12 on a 2-month cadence
-      // and advanced to 11-15 instead of 11-12 — because its due date preceded the contract's
-      // createdAt, which is the NORMAL case for a migrated sub that was already overdue on
-      // migration day. A sub three weeks overdue would lose three weeks of anniversary, every
-      // time, compounding on each renewal.
+      const resolved = await resolveChargeableCycle(workspace_id, sub.shopify_contract_id, new Date());
+      if (!resolved.success || resolved.index == null || !resolved.originTime) {
+        return { ok: false as const, reason: resolved.error ?? "cycle_unresolvable" };
+      }
       return {
         ok: true as const,
-        cycleIndex: cyc.cycle.index,
-        expectedDate: cyc.cycle.endAt,
-        dueDate: selectorDate,
+        cycleIndex: resolved.index,
+        originTime: resolved.originTime,
         scheduledFor: due,
       };
     });
@@ -309,9 +280,10 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
         workspace_id,
         sub.shopify_contract_id,
         `${sub.shopify_contract_id}:${cycleKey}`,
-        // Address by DATE, matching how the cycle was resolved — index is stable today but the
-        // date is what our schedule actually means.
-        { billingCycleSelector: { date: plan.dueDate } },
+        // Address by INDEX — the first unbilled cycle `resolveChargeableCycle` found — with an
+        // `originTime` guaranteed to sit inside that cycle (Shopify rejects a future-cycle attempt
+        // whose origin time is outside the selected cycle).
+        { billingCycleSelector: { index: plan.cycleIndex }, originTime: plan.originTime },
       );
       if (!started.success || !started.attemptId) {
         // ⚠️ `gql` funnels transport faults (HTTP 5xx, DNS, non-JSON) into the same {success:false}
