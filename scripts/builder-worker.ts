@@ -86,7 +86,7 @@ import { runBoxTurnWithFreshFallback, pickNextSession, isMissingSessionError } f
 // vocabulary the migration-fix lane branches on. Sourced from src/lib/migration-fix.ts so a `code_gap`
 // (or any future) verdict is a RECOGNIZED terminal outcome carried forward with its diagnosis, not a
 // silent fallthrough into the "ended without propose/human_needed" park that discarded the finding.
-import { RECOGNIZED_MIGRATION_FIX_VERDICTS, isRecognisedMigrationFixVerdict } from "../src/lib/migration-fix";
+import { RECOGNIZED_MIGRATION_FIX_VERDICTS, isRecognisedMigrationFixVerdict, migrationGapSpecMarkdown, type MigrationGapSpec } from "../src/lib/migration-fix";
 import type { CopyAuthorSessionDispatcher } from "../src/lib/ads/creative-agent"; // type-only — the impl is dynamic-imported; this pins the resume-aware dispatcher signature at compile time
 import type { CopyQcSessionDispatcher } from "../src/lib/ads/creative-qa"; // type-only — max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 1 dispatcher signature; the impl is dynamic-imported like the author/qa dispatchers
 
@@ -14950,30 +14950,9 @@ function normalizeMigrationFixActions(raw: unknown, jobId: string): PendingActio
 // Roadmap board to commission a build. The migration itself still fails-closed to a human with the
 // diagnosis (the spec fixes the CLASS, not this one sub's renewal). Idempotent: a STABLE gap-class slug
 // means recurring failures converge on one spec instead of spawning a duplicate per sub.
-interface GapSpec { slug: string; title: string; intent: string; problem: string; target?: string }
-
-function migrationGapSpecMarkdown(spec: GapSpec, auditId: string, subId: string): string {
-  return [
-    `# ${spec.title}`,
-    ``,
-    `**Owner:** [[../functions/retention]] · **Parent:** Retention mandate "Subscription continuity & billing integrity" · **Derived-from-migration:** \`${auditId}\``,
-    ``,
-    spec.intent.trim(),
-    ``,
-    `## Problem (from failed migration \`${auditId}\`, sub \`${subId}\`)`,
-    spec.problem.trim(),
-    spec.target ? `\n**Likely target:** \`${spec.target}\`` : ``,
-    ``,
-    `## Phases`,
-    `- **P1 — close the gap** — scope from the problem above; land the code/data fix + its brain page; gate on \`npx tsc --noEmit\`.`,
-    ``,
-    `## Verification`,
-    `- Re-run \`verifyMigration\` on a migration that hit this gap → expect it to auto-heal/pass without a hand fix, and confirm the class of failure no longer recurs.`,
-    ``,
-    `> Authored by the box migration-fix routine from failed migration \`${auditId}\`. Commission the build from the Roadmap board (owner = retention).`,
-    ``,
-  ].join("\n");
-}
+// The template (and the GapSpec shape) live in src/lib/migration-fix.ts so the authoring gates can be
+// unit-tested against it — see migrationGapSpecMarkdown there.
+type GapSpec = MigrationGapSpec;
 
 // Commit the gap-fix spec to main. Idempotent: if a spec with this (stable, gap-class) slug already
 // exists, leave it for the in-flight fix rather than clobbering. Returns a one-line result for log_tail.
