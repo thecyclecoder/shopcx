@@ -37,6 +37,10 @@ const CANCEL_ROUTES = new Set(["cancel", "canceljourney", "cancelJourney", "canc
 // lowercases the incoming ?route= before storing it, so ctx.route arrives as
 // "replacevariants" or "replace_variants" — see [[../../app/api/portal/route.ts]].
 const REPLACE_VARIANTS_ROUTES = new Set(["replacevariants", "replace_variants"]);
+// Route slugs for the immediate-renewal ("Order now") handler. route.ts lowercases the
+// incoming ?route= before storing it in the ticket subject + portal.error event, so it
+// arrives as "ordernow" or "order_now" — see [[../../app/api/portal/route.ts]].
+const ORDER_NOW_ROUTES = new Set(["ordernow", "order_now"]);
 const MAX_HEAL_ATTEMPTS = 3;
 const HEAL_NOTE_PREFIX = "[Auto-heal attempt";
 
@@ -69,6 +73,79 @@ export interface FailureContext {
   error: string;
   status: number | null;
   payload: Record<string, unknown>;
+  /**
+   * Phase 1 of [[../../../docs/brain/specs/sol-checks-billability-and-delivery-before-answering-order-now-failures.md]].
+   * Present ONLY for the `ordernow` / `order_now` route — the extra ground truth Sol needs
+   * before she answers an Order Now failure, so she stops GUESSING the shipping state and the
+   * subscription's health. On 2026-10-08 Sol told Ashley Denson her delivered order was "on its
+   * way" and her stranded sub "will keep coming automatically", then closed the ticket — she
+   * pressed Order Now again. These facts let her state the truth instead.
+   */
+  orderNow?: OrderNowFailureContext;
+}
+
+/**
+ * Delivery state of the subscription's most recent order + whether its next renewal would
+ * actually charge. Sol may claim "on its way" only when `last_order` says so, and promise a
+ * future renewal only when `subscription.billable` is true.
+ */
+export interface OrderNowFailureContext {
+  subscription: {
+    id: string;
+    status: string | null;
+    next_billing_date: string | null;
+    /** True iff the next renewal would CHARGE (not skip / not stranded). See `computeOrderNowBillability`. */
+    nextDateBillable: boolean;
+    /** Human-readable reason behind `nextDateBillable` — rendered to Sol so she can explain it honestly. */
+    nextDateBillableReason: string;
+  } | null;
+  /** Delivery truth of the subscription's most recent order — Sol may say "on its way" only when this supports it. */
+  lastOrderDelivery: {
+    order_number: string | null;
+    created_at: string;
+    /** Carrier/EasyPost delivery state (e.g. `delivered`, `in_transit`, `out_for_delivery`) — may be null. */
+    delivery_status: string | null;
+    /** Timestamp the parcel was delivered, when known. A non-null value means it is NOT in transit. */
+    delivered_at: string | null;
+    fulfillment_status: string | null;
+  } | null;
+}
+
+/** Shape of the `subscriptions` fields `computeOrderNowBillability` reasons over. */
+export interface OrderNowBillabilityInput {
+  status: string | null;
+  next_billing_date: string | null;
+  cancelled_at?: string | null;
+  last_payment_status?: string | null;
+}
+
+/**
+ * Pure predicate: would this subscription's NEXT renewal actually charge, or would it
+ * skip / never fire? "Billable" means a renewal landing on `next_billing_date` would place
+ * an order. A stranded sub (no date, cancelled, or in dunning) would NOT — and Sol must never
+ * tell the customer their coffee "will keep coming automatically" when it won't.
+ *
+ * Row-derived and deterministic so it can be unit-pinned (`remediation.test.ts`). It does not
+ * call Shopify — a date that Shopify later flags unbillable is Phase 2's concern (the refused
+ * retime no longer leaves a date behind); here we catch the stranded-sub shapes the row reveals.
+ */
+export function computeOrderNowBillability(
+  sub: OrderNowBillabilityInput,
+): { billable: boolean; reason: string } {
+  const status = (sub.status || "").toLowerCase();
+  if (status === "cancelled" || sub.cancelled_at) {
+    return { billable: false, reason: "subscription is cancelled — no renewal will ever charge" };
+  }
+  if (status !== "active") {
+    return { billable: false, reason: `subscription status is '${sub.status ?? "unknown"}', not active — renewal will not charge` };
+  }
+  if (!sub.next_billing_date) {
+    return { billable: false, reason: "no next_billing_date — the subscription is stranded and will never renew on its own" };
+  }
+  if ((sub.last_payment_status || "").toLowerCase() === "failed") {
+    return { billable: false, reason: "last payment failed — the sub is in dunning and the next renewal will skip until the card is fixed" };
+  }
+  return { billable: true, reason: "active with a future next_billing_date and no failed payment — the next renewal will charge" };
 }
 
 export interface TicketRow {
@@ -118,7 +195,7 @@ export async function getFailureContext(
       rows.find((e) => (e.properties?.route as string) === route) || rows[0];
     if (match) {
       const p = match.properties || {};
-      return {
+      const ctx: FailureContext = {
         route: (p.route as string) || route,
         // Include `detail` — handlers carry their friendly text there, not in
         // `message`. Folding it in lets the text-matching dismiss branches fire.
@@ -126,6 +203,7 @@ export async function getFailureContext(
         status: typeof p.status === "number" ? (p.status as number) : null,
         payload: (p.request_payload as Record<string, unknown>) || {},
       };
+      return enrichOrderNowContext(admin, ticket, ctx);
     }
   }
   // Fallback: parse the creation note.
@@ -142,7 +220,106 @@ export async function getFailureContext(
   const error = (body.match(/Error:\s*(.+)/)?.[1] || "").trim();
   let payload: Record<string, unknown> = {};
   try { payload = JSON.parse(body.match(/Details:\s*(\{[\s\S]*\})/)?.[1] || "{}"); } catch { /* ignore */ }
-  return { route, error, status: null, payload };
+  return enrichOrderNowContext(admin, ticket, { route, error, status: null, payload });
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SAFE_CONTRACT_ID = /^[A-Za-z0-9_-]+$/;
+
+interface OrderNowSubRow {
+  id: string;
+  status: string | null;
+  next_billing_date: string | null;
+  cancelled_at: string | null;
+  last_payment_status: string | null;
+}
+
+/**
+ * For an `ordernow` / `order_now` failure, attach the delivery state of the subscription's
+ * most recent order + whether the sub's next renewal is actually billable. No-op (returns the
+ * ctx unchanged) for every other route, or when the subscription can't be resolved — the base
+ * triage/escalate behaviour is unaffected.
+ *
+ * Phase 1 of [[../../../docs/brain/specs/sol-checks-billability-and-delivery-before-answering-order-now-failures.md]].
+ */
+export async function enrichOrderNowContext(
+  admin: SupabaseClient,
+  ticket: TicketRow,
+  ctx: FailureContext,
+): Promise<FailureContext> {
+  if (!ORDER_NOW_ROUTES.has((ctx.route || "").toLowerCase())) return ctx;
+
+  // The Order Now payload is keyed by the Shopify contract id the customer pressed.
+  const rawContractId = ctx.payload?.contractId ?? ctx.payload?.contract_id;
+  const contractId = typeof rawContractId === "string" ? rawContractId.trim() : "";
+
+  // Resolve the subscription. Prefer the exact contract-id match (current OR migrated-from, so a
+  // migrated numeric id lands on the live internal row, not the cancelled Appstle shell); fall
+  // back to the ticket customer's newest non-cancelled sub when no usable contract id is present.
+  let sub: OrderNowSubRow | null = null;
+
+  const subCols = "id, status, next_billing_date, cancelled_at, last_payment_status";
+  if (contractId && !UUID_RE.test(contractId) && SAFE_CONTRACT_ID.test(contractId)) {
+    const { data } = await admin
+      .from("subscriptions")
+      .select(subCols)
+      .eq("workspace_id", ticket.workspace_id)
+      .or(`shopify_contract_id.eq.${contractId},migrated_from_contract_id.eq.${contractId}`)
+      // A live row must beat a dead shell (see resolveSub): nulls-first on cancelled_at.
+      .order("cancelled_at", { ascending: true, nullsFirst: true })
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    sub = (data as OrderNowSubRow | null) || null;
+  }
+  if (!sub && ticket.customer_id) {
+    const { data } = await admin
+      .from("subscriptions")
+      .select(subCols)
+      .eq("workspace_id", ticket.workspace_id)
+      .eq("customer_id", ticket.customer_id)
+      .order("cancelled_at", { ascending: true, nullsFirst: true })
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    sub = (data as OrderNowSubRow | null) || null;
+  }
+  if (!sub) return ctx;
+
+  const { billable, reason } = computeOrderNowBillability(sub);
+
+  // Most recent order on this subscription — its delivery truth. Sol may only say "on its way"
+  // when delivery_status / delivered_at support it.
+  const { data: order } = await admin
+    .from("orders")
+    .select("order_number, created_at, delivery_status, delivered_at, fulfillment_status")
+    .eq("workspace_id", ticket.workspace_id)
+    .eq("subscription_id", sub.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return {
+    ...ctx,
+    orderNow: {
+      subscription: {
+        id: sub.id,
+        status: sub.status,
+        next_billing_date: sub.next_billing_date,
+        nextDateBillable: billable,
+        nextDateBillableReason: reason,
+      },
+      lastOrderDelivery: order
+        ? {
+            order_number: (order.order_number as string | null) ?? null,
+            created_at: order.created_at as string,
+            delivery_status: (order.delivery_status as string | null) ?? null,
+            delivered_at: (order.delivered_at as string | null) ?? null,
+            fulfillment_status: (order.fulfillment_status as string | null) ?? null,
+          }
+        : null,
+    },
+  };
 }
 
 /**

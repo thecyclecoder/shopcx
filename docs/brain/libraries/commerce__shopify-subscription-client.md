@@ -284,6 +284,8 @@ with `getBillingCycleForDate`, then sync from that index. It is what a "change m
 a pause/resume, or a skip should call — **not** `shopifySetNextBillingDate` alone, which leaves the
 Shopify-visible schedule saying something different from what we will actually charge.
 
+**⚠️ A refused retime leaves NOTHING behind (Phase 2 of [[../specs/sol-checks-billability-and-delivery-before-answering-order-now-failures]]).** The order inside `shopifyRetimeContract` is now: (1) `shopifySyncBillingSchedule` re-anchors the calendar — its own `success:false` (first pin back-resolves to a spent cycle) short-circuits the retime; (2) `getBillingCycleForDate` VERIFIES the target lands in an unbilled cycle **before** `shopifySetNextBillingDate` is called; (3) only on a confirmed-billable landing is the display `nextBillingDate` written. A stranded landing returns `{ success: false, stranded: true }` and writes neither Shopify's `nextBillingDate` nor our mirror row (the caller — [[commerce__subscription]] `subscriptionUpdateNextBillingDate` + [[action-executor]] `change_next_date` — gates its row write on `success`). Previously the verify ran AFTER the set and returned `success:true, stranded:true`, so a refused retime still left the new date on the contract — the 2026-10-08 Ashley Denson incident, where an Oct-11 retime Shopify flagged unbillable stayed put and hid the stuck state from Sol. The two direct renewal/auto-resume callers already branch on `.stranded` before `.success`, so the `success:false` is compatible.
+
 ### Why the 12-month horizon does not need solving with a cadence change
 
 The obvious permanent fix is to convert `WEEK`/4 → `MONTH`/1 and `WEEK`/8 → `MONTH`/2, which makes

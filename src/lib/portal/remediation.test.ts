@@ -14,7 +14,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { classifyPortalFailure, frequencySelfResolved, healPortalAction, swapSelfResolved, type FailureContext, type TicketRow } from "./remediation";
+import { classifyPortalFailure, computeOrderNowBillability, enrichOrderNowContext, frequencySelfResolved, healPortalAction, swapSelfResolved, type FailureContext, type TicketRow } from "./remediation";
 
 const ctx = (error: string, extra: Partial<FailureContext> = {}): FailureContext => ({
   route: "removeLineItem",
@@ -502,4 +502,117 @@ test("swapSelfResolved — missing contractId → not resolved (bail cleanly)", 
   const admin = stubDb({ customer_events: [], subscriptions: [] });
   const r = await swapSelfResolved(admin, "ws_1", { ...SWAP_CTX_MAP, payload: {} }, SWAP_TICKET);
   assert.equal(r.resolved, false);
+});
+
+// ── Order Now failure context (Phase 1 — sol-checks-billability-and-delivery-before-answering-order-now-failures) ──
+//
+// Ground truth: ticket for Ashley Denson (2026-10-08). Sol answered an `ordernow`
+// `already_billed` failure by claiming a DELIVERED order was "on its way" and that a
+// STRANDED sub "will keep coming automatically". getFailureContext now attaches an
+// `orderNow` block carrying the real delivery state + billability so Sol can't guess.
+
+test("computeOrderNowBillability — active sub with a future date → billable", () => {
+  const r = computeOrderNowBillability({ status: "active", next_billing_date: "2026-11-01T00:00:00Z", cancelled_at: null, last_payment_status: "succeeded" });
+  assert.equal(r.billable, true);
+});
+
+test("computeOrderNowBillability — cancelled sub → NOT billable (never renews)", () => {
+  const r = computeOrderNowBillability({ status: "cancelled", next_billing_date: null, cancelled_at: "2026-10-01T00:00:00Z" });
+  assert.equal(r.billable, false);
+  assert.match(r.reason, /cancelled/);
+});
+
+test("computeOrderNowBillability — active but no next_billing_date → NOT billable (stranded)", () => {
+  const r = computeOrderNowBillability({ status: "active", next_billing_date: null });
+  assert.equal(r.billable, false);
+  assert.match(r.reason, /stranded|never renew/);
+});
+
+test("computeOrderNowBillability — failed last payment → NOT billable (in dunning, skips)", () => {
+  const r = computeOrderNowBillability({ status: "active", next_billing_date: "2026-11-01T00:00:00Z", last_payment_status: "failed" });
+  assert.equal(r.billable, false);
+  assert.match(r.reason, /dunning|failed/);
+});
+
+// Minimal chainable stub supporting the enrich query shape (eq/or/order/limit/maybeSingle).
+class ONQuery {
+  private filters: Array<[string, unknown]> = [];
+  private orContract: string | null = null;
+  constructor(private rows: Row[]) {}
+  select() { return this; }
+  eq(col: string, val: unknown) { this.filters.push([col, val]); return this; }
+  or(expr: string) { this.orContract = (expr.match(/\.eq\.([^,]+)/)?.[1]) ?? null; return this; }
+  order() { return this; }
+  limit() { return this; }
+  private matched(): Row[] {
+    return this.rows.filter((r) =>
+      this.filters.every(([c, v]) => r[c] === v) &&
+      (this.orContract == null || r.shopify_contract_id === this.orContract || r.migrated_from_contract_id === this.orContract));
+  }
+  maybeSingle() { return Promise.resolve({ data: this.matched()[0] ?? null, error: null }); }
+}
+function onDb(tables: Record<string, Row[]>): SupabaseClient {
+  return { from: (t: string) => new ONQuery(tables[t] || []) } as unknown as SupabaseClient;
+}
+
+const ON_TICKET: TicketRow = {
+  id: "t_on",
+  workspace_id: "ws_1",
+  customer_id: "c_1",
+  subject: "Portal action needs help: ordernow",
+  created_at: "2026-10-08T12:00:00Z",
+  assigned_to: null,
+  escalated_to: null,
+  escalated_at: null,
+  tags: ["portal-action-failed"],
+};
+const ON_CTX = (payload: Row = { contractId: "55501" }, route = "ordernow"): FailureContext => ({
+  route,
+  error: "already_billed — This order has already been placed.",
+  status: 409,
+  payload,
+});
+
+test("enrichOrderNowContext — exposes billability AND last-order delivery for ordernow", async () => {
+  const admin = onDb({
+    subscriptions: [{ id: "s_1", workspace_id: "ws_1", shopify_contract_id: "55501", customer_id: "c_1", status: "active", next_billing_date: "2026-11-05T00:00:00Z", cancelled_at: null, last_payment_status: "succeeded" }],
+    orders: [{ workspace_id: "ws_1", subscription_id: "s_1", order_number: "SC139301", created_at: "2026-10-01T00:00:00Z", delivery_status: "delivered", delivered_at: "2026-10-02T00:00:00Z", fulfillment_status: "fulfilled" }],
+  });
+  const out = await enrichOrderNowContext(admin, ON_TICKET, ON_CTX());
+  assert.ok(out.orderNow, "orderNow block attached");
+  // Billability exposed.
+  assert.equal(out.orderNow!.subscription!.nextDateBillable, true);
+  assert.equal(out.orderNow!.subscription!.next_billing_date, "2026-11-05T00:00:00Z");
+  // Last-order delivery exposed — delivered, NOT in transit.
+  assert.equal(out.orderNow!.lastOrderDelivery!.delivery_status, "delivered");
+  assert.equal(out.orderNow!.lastOrderDelivery!.delivered_at, "2026-10-02T00:00:00Z");
+  assert.equal(out.orderNow!.lastOrderDelivery!.order_number, "SC139301");
+});
+
+test("enrichOrderNowContext — the Ashley shape: delivered order + stranded sub reads NOT billable", async () => {
+  const admin = onDb({
+    // Stranded: active flag but no next date → never renews.
+    subscriptions: [{ id: "s_2", workspace_id: "ws_1", shopify_contract_id: "55501", customer_id: "c_1", status: "active", next_billing_date: null, cancelled_at: null, last_payment_status: "succeeded" }],
+    orders: [{ workspace_id: "ws_1", subscription_id: "s_2", order_number: "SC139301", created_at: "2026-10-01T00:00:00Z", delivery_status: "delivered", delivered_at: "2026-10-02T00:00:00Z", fulfillment_status: "fulfilled" }],
+  });
+  const out = await enrichOrderNowContext(admin, ON_TICKET, ON_CTX());
+  assert.equal(out.orderNow!.subscription!.nextDateBillable, false);
+  assert.equal(out.orderNow!.lastOrderDelivery!.delivered_at, "2026-10-02T00:00:00Z");
+});
+
+test("enrichOrderNowContext — non-ordernow route is left untouched (no orderNow block)", async () => {
+  const admin = onDb({ subscriptions: [], orders: [] });
+  const out = await enrichOrderNowContext(admin, ON_TICKET, ON_CTX({ contractId: "55501" }, "changedate"));
+  assert.equal(out.orderNow, undefined);
+});
+
+test("enrichOrderNowContext — falls back to the ticket customer's sub when no contract id", async () => {
+  const admin = onDb({
+    subscriptions: [{ id: "s_3", workspace_id: "ws_1", customer_id: "c_1", status: "active", next_billing_date: "2026-12-01T00:00:00Z", cancelled_at: null, last_payment_status: "succeeded" }],
+    orders: [],
+  });
+  const out = await enrichOrderNowContext(admin, ON_TICKET, ON_CTX({}));
+  assert.ok(out.orderNow);
+  assert.equal(out.orderNow!.subscription!.id, "s_3");
+  assert.equal(out.orderNow!.lastOrderDelivery, null);
 });
