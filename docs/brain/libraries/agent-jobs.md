@@ -61,6 +61,10 @@ Sibling of `enqueueSpecTestIfDue` for the **PRE-MERGE** lane. When a `claude/*` 
 
 **Owner-forced re-run ([[../specs/premerge-spectest-rerun-and-visibility]] Phase 3 — `opts.force`).** An owner-initiated re-run from the /dashboard/developer/spec-tests **Pre-merge** surface passes `{ force: true }` and skips the terminal-verdict block (case **(b)**) entirely — a stuck `approved`/`needs_human`/`issues` verdict on a fixed branch can be kicked from the dashboard without waiting for a `build`/`pr-resolve` row to age out the verdict, and without waiting for the standing-pass backstop. The in-flight block (case **(a)**) still applies — an open spec-test job on the same `(workspace, slug, branch)` still refuses stacking. `force` is set ONLY by the API path `POST /api/roadmap/spec-test` with `{ slug, branch }`, which also fresh-captures the branch's Vercel preview via [[preview-capture]] `capturePreviewUrlForJob` right before the enqueue — so the forced re-test always hits the branch's CURRENT HEAD, never a stale `preview_url`.
 
+### `isFoldBlockingLiveJob` — function *(2026-10-08)*
+
+`isFoldBlockingLiveJob(row: { status, pending_actions? }) → boolean` decides whether an active build or spec-test row holds a fold. A `needs_approval` card is not live work when its only pending actions are `broken_check` escalations. `getLiveJobForSlug` and the auto-fold gate ([[spec-test-runs]]) both use it.
+
 ### `maybeEnqueuePreMergeSpecTestOnAccumulation` — function  *(spec-goal-branch-pm-flow M3)*
 
 ```ts

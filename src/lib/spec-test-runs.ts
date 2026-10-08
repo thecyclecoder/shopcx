@@ -11,7 +11,7 @@
 import { createHash } from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getRoadmap, listArchivedSlugs } from "@/lib/brain-roadmap";
-import { ACTIVE_STATUSES } from "@/lib/agent-jobs";
+import { ACTIVE_STATUSES, isFoldBlockingLiveJob } from "@/lib/agent-jobs";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
 import { AUTO_FOLD_GATE_LOOP_ID } from "@/lib/control-tower/registry";
 import { getSecurityStateBySlug } from "@/lib/security-agent";
@@ -836,7 +836,7 @@ async function evaluateAutoFoldGate(workspaceId: string): Promise<AutoFoldGateEv
     // verify guard (getLiveJobForSlug) so the gate and the owner's click can never disagree.
     admin
       .from("agent_jobs")
-      .select("spec_slug")
+      .select("spec_slug, status, pending_actions")
       .eq("workspace_id", workspaceId)
       .in("kind", ["build", "spec-test"])
       .in("status", ACTIVE_STATUSES),
@@ -847,7 +847,11 @@ async function evaluateAutoFoldGate(workspaceId: string): Promise<AutoFoldGateEv
     getSecurityStateBySlug(admin, workspaceId),
   ]);
   const archivedSet = new Set(archived);
-  const liveSlugs = new Set(((liveRows.data ?? []) as { spec_slug: string }[]).map((r) => r.spec_slug));
+  const liveSlugs = new Set(
+    ((liveRows.data ?? []) as { spec_slug: string; status: string; pending_actions: unknown }[])
+      .filter(isFoldBlockingLiveJob)
+      .map((r) => r.spec_slug),
+  );
   // Rail 3 cache: goalSlug → stored status. Every member spec of the same goal resolves to the same
   // status, so this collapses N spec lookups → 1 goal lookup per goal in the batch. Populated lazily
   // as we resolve.

@@ -236,9 +236,21 @@ export async function getLiveJobForSlug(workspaceId: string, slug: string, admin
     .in("kind", ["build", "spec-test"])
     .in("status", ACTIVE_STATUSES)
     .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  return (data as AgentJob | null) ?? null;
+    .limit(10);
+  return ((data ?? []) as AgentJob[]).find(isFoldBlockingLiveJob) ?? null;
+}
+
+/**
+ * Whether an active build/spec-test row should hold a fold. A `needs_approval` card whose only pending
+ * actions are `broken_check` escalations is not live work: it asks a human to repair a check the
+ * accumulation gate couldn't evaluate, and nothing is running. Counting it as live parked
+ * a-braintree-side-refund-must-reach-our-books, fully shipped in PR 2864, unfoldable for 14 days
+ * (2026-09-24 → 10-08). Unevaluable checks are advisory, so they never hold a shipped spec.
+ */
+export function isFoldBlockingLiveJob(row: { status: string; pending_actions?: unknown }): boolean {
+  if (row.status !== "needs_approval") return true;
+  const actions = Array.isArray(row.pending_actions) ? (row.pending_actions as Array<{ type?: string }>) : [];
+  return !(actions.length > 0 && actions.every((a) => a?.type === "broken_check"));
 }
 
 /**

@@ -8,7 +8,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fixPhaseChangedSinceLatestRun } from "./agent-jobs";
+import { fixPhaseChangedSinceLatestRun, isFoldBlockingLiveJob } from "./agent-jobs";
 
 const RUN = "2026-10-08T16:00:00Z";
 const phase = (kind: string, status: string, updated_at: string) => ({ kind, status, updated_at });
@@ -36,4 +36,19 @@ test("shipped or rejected fix phases never force", () => {
 
 test("unparseable run timestamp → no force", () => {
   assert.equal(fixPhaseChangedSinceLatestRun([phase("fix", "planned", "2026-10-08T17:00:00Z")], "garbage"), false);
+});
+
+// isFoldBlockingLiveJob — a broken-check card is advisory and never holds a shipped spec's fold.
+
+test("a running build holds the fold", () => {
+  assert.equal(isFoldBlockingLiveJob({ status: "building" }), true);
+});
+
+test("a needs_approval card carrying only broken_check escalations does not hold the fold", () => {
+  assert.equal(isFoldBlockingLiveJob({ status: "needs_approval", pending_actions: [{ type: "broken_check" }] }), false);
+});
+
+test("a needs_approval card with a real gated action still holds the fold", () => {
+  assert.equal(isFoldBlockingLiveJob({ status: "needs_approval", pending_actions: [{ type: "broken_check" }, { type: "apply_migration" }] }), true);
+  assert.equal(isFoldBlockingLiveJob({ status: "needs_approval", pending_actions: [] }), true);
 });
