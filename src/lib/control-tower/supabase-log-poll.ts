@@ -48,6 +48,7 @@ import {
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
+  isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
@@ -448,6 +449,18 @@ const LOG_QUERIES: LogQuery[] = [
       // `customers` via a non-SELECT statement (real code-bug shape), still surfaces
       // / pages on first sighting.
       if (isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... expires_at ... from
+      // public.journey_sessions` lookup by an external tool (Supabase Studio table editor,
+      // foreign SQL client, third-party integration) or the PostgREST CTE wrapper the same
+      // client emits. Our `journey_sessions` table has no `expires_at` column (the live
+      // expiry column is `token_expires_at`) — no ShopCX code path names it, so the
+      // resulting column-missing ERROR is foreign noise (Control Tower signature
+      // `supabase-logs:cce14c08f17e48b3`). Narrowly gated to require BOTH the exact
+      // column-missing message AND the SELECT-lookup shape — a column-missing error on any
+      // live `journey_sessions` column (including `token_expires_at`), on `expires_at` from
+      // any other table, or on `journey_sessions` via a non-SELECT statement (real code-bug
+      // shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... sender_type ... from
       // public.ticket_messages` lookup by an external tool (Supabase Studio table editor,
       // foreign SQL client, third-party integration) or the PostgREST CTE wrapper the
