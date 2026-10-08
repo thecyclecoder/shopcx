@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: subscription_cycle_charges.created_at direct-REST lookups** · verified 2026-10-08 · → [[../lifecycles/control-tower]]
