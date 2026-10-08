@@ -1,0 +1,1 @@
+- **Drop the foreign direct-REST uuid ~~ unknown LIKE-on-subscriptions.id probe from the Supabase log feed** · verified 2026-10-08 · → [[../libraries/control-tower]]

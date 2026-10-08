@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST tickets.playbook_id missing-column noise at capture** · verified 2026-10-08 · → [[../libraries/control-tower]]
