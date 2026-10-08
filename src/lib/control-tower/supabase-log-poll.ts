@@ -54,6 +54,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
   isForeignSupabasePostgresOrdersNameLookupNoise,
@@ -526,6 +527,16 @@ const LOG_QUERIES: LogQuery[] = [
       // missing error on any OTHER table, or on `error_events` via a non-SELECT statement
       // (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the ad hoc free-text search over `error_events`
+      // (`select * from error_events where coalesce(label,'')||coalesce(message,'') ilike
+      // '%…%'`) a foreign SQL editor / stale tool emits with made-up `label`/`message`
+      // columns ([[../specs/error-feed-drop-error-events-coalesce-label-message-adhoc-se]],
+      // Control Tower signature `supabase-logs:0e3379f172768a91`). The UNQUALIFIED
+      // `column "label"/"message" does not exist` message never matched the sibling drop's
+      // relation-qualified shape, so it kept paging Platform. Narrowly gated to the exact
+      // unqualified column-missing message AND the bare-SELECT coalesce-search shape — a
+      // relation-qualified column bug, a different table, or a non-SELECT write still pages.
+      if (isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(message, query)) return null;
       // Drop foreign-app noise at capture: Postgres reporting the built-in aggregate
       // `array_agg` classification when a catalog/introspection query resolves it as a
       // regular function ([[../specs/error-feed-drop-supabase-array-agg-aggregate-introspection-n]],

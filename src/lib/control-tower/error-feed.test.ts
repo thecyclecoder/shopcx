@@ -91,6 +91,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
@@ -2675,6 +2676,110 @@ test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise KEEPS a JOIN a
       "column error_events.metadata does not exist",
       'WITH pgrst_source AS ( SELECT "public"."error_events"."metadata" FROM "public"."orders" JOIN "public"."error_events" ON "public"."error_events"."order_id" = "public"."orders"."id" )',
     ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise ──
+// The ad hoc free-text search over `error_events` a foreign SQL editor / stale tool emits:
+// `select * from error_events where coalesce(label,'')||coalesce(message,'') ilike '%…%'`.
+// `label` / `message` are made-up columns no ShopCX code owns, so Postgres reports the
+// UNQUALIFIED `column "label"/"message" does not exist` shape — which the relation-qualified
+// sibling drop never matched. Drop AT CAPTURE only when BOTH the exact unqualified column-
+// missing message AND the bare-SELECT coalesce-search shape are present; a relation-qualified
+// bug, a different table, or a non-SELECT write still pages (Control Tower signature
+// `supabase-logs:0e3379f172768a91`).
+
+test("isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise drops the ad hoc coalesce free-text search", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(
+      'column "label" does not exist',
+      "select * from error_events where coalesce(label,'')||coalesce(message,'') ilike '%foo%'",
+    ),
+    true,
+  );
+  // The `message`-column variant is the same signature.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(
+      'column "message" does not exist',
+      "select * from error_events where coalesce(label,'')||coalesce(message,'') ilike '%bar%'",
+    ),
+    true,
+  );
+  // The `public.`-qualified FROM and Postgres's `ERROR: ` prefix are both tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(
+      'ERROR: column "label" does not exist',
+      "select * from public.error_events where coalesce(label,'') ilike '%x%'",
+    ),
+    true,
+  );
+  // Uppercase hand-typed query still drops (lowercased before the marker check).
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(
+      'column "label" does not exist',
+      "SELECT * FROM error_events WHERE COALESCE(label,'')||COALESCE(message,'') ILIKE '%y%'",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise KEEPS a relation-qualified column-missing message (real bug still pages)", () => {
+  // The relation-qualified shape is the sibling drop's domain, not this one.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(
+      "column error_events.label does not exist",
+      "select * from error_events where coalesce(label,'')||coalesce(message,'') ilike '%foo%'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise KEEPS a different table / a non-coalesce SELECT / a non-SELECT write", () => {
+  // Different table — the FROM pin is error_events only.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(
+      'column "label" does not exist',
+      "select * from tickets where coalesce(label,'')||coalesce(message,'') ilike '%foo%'",
+    ),
+    false,
+  );
+  // A SELECT on error_events WITHOUT the coalesce-search marker is not this signature.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(
+      'column "label" does not exist',
+      "select label from error_events where id = 1",
+    ),
+    false,
+  );
+  // A non-SELECT write to the guessed column is a real code bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(
+      'column "label" does not exist',
+      "update error_events set coalesce(label,'') = 'x'",
+    ),
+    false,
+  );
+  // A different column name (not label/message) is not this signature.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(
+      'column "foo" does not exist',
+      "select * from error_events where coalesce(label,'')||coalesce(message,'') ilike '%foo%'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise returns false on empty / nullish input", () => {
+  assert.equal(isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(null, null), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise("", ""), false);
+  // Message matches but query is empty — both markers are required.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise('column "label" does not exist', ""),
     false,
   );
 });
