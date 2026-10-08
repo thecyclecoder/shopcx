@@ -1,0 +1,1 @@
+- **Scope out foreign dashboard_notifications.dismissed_at direct-REST column-missing noise from the Supabase logs feed** · verified 2026-10-08 · → [[../libraries/control-tower]]
