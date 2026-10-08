@@ -27,6 +27,7 @@ import {
   isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
@@ -4246,6 +4247,160 @@ test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise retur
   assert.equal(
     isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
       "column spec_status_history.created_at does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise ──
+// Same foreign caller family as the created_at sibling, but for the `from_status` column.
+// Postgres reports the FIRST unresolved column, so when the ad hoc read is evaluated
+// `from_status` first the created_at pin never fires — this dedicated pin closes that gap.
+// The `spec_status_history` table has no `from_status` column (its status fields are
+// `old_status` / `new_status`). Drop AT CAPTURE only when BOTH the exact column-missing
+// message on `spec_status_history.from_status` AND the bare SELECT-lookup shape on
+// `spec_status_history` are present. Any other column / table / non-SELECT still pages.
+
+test("isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise drops the ad hoc SELECT lookup on the exact spec_status_history.from_status column-missing shape", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column spec_status_history.from_status does not exist",
+      "select id, from_status from public.spec_status_history order by at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column public.spec_status_history.from_status does not exist",
+      "select id, from_status from public.spec_status_history order by at desc limit 100",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column spec_status_history.from_status does not exist",
+      "select from_status from spec_status_history limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column spec_status_history.from_status does not exist",
+      "select spec_slug, from_status from public.spec_status_history where field = 'status' order by at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column spec_status_history.from_status does not exist",
+      "SELECT ID, FROM_STATUS FROM PUBLIC.SPEC_STATUS_HISTORY",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "ERROR: column spec_status_history.from_status does not exist",
+      "select from_status from public.spec_status_history",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "  column spec_status_history.from_status does not exist  ",
+      "   select from_status from public.spec_status_history   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise KEEPS a column-missing error on any OTHER table (different table still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column orders.from_status does not exist",
+      "select from_status from public.orders where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column tickets.from_status does not exist",
+      "select from_status from public.tickets where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise KEEPS a DIFFERENT column-missing on spec_status_history (the real old_status / new_status renamed still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column spec_status_history.old_status does not exist",
+      "select old_status from public.spec_status_history where spec_slug = 'x'",
+    ),
+    false,
+  );
+  // The created_at sibling's column must NOT be swallowed by the from_status pin.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column spec_status_history.created_at does not exist",
+      "select created_at from public.spec_status_history where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing spec_status_history.from_status still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column spec_status_history.from_status does not exist",
+      "insert into public.spec_status_history (id, from_status) values ($1, 'planned')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column spec_status_history.from_status does not exist",
+      "update public.spec_status_history set from_status = 'planned' where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column spec_status_history.from_status does not exist",
+      "delete from public.spec_status_history where from_status is null",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise("", ""),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column spec_status_history.from_status does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+      "column spec_status_history.from_status does not exist",
       null,
     ),
     false,
