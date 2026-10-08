@@ -62,6 +62,7 @@ import {
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
   isForeignSupabasePostgresOrdersNameLookupNoise,
   isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise,
+  isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise,
@@ -636,6 +637,19 @@ const LOG_QUERIES: LogQuery[] = [
       // non-SELECT statement (real code-bug shape) still surfaces / pages on first
       // sighting.
       if (isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.order_refunds.customer_id`. The `order_refunds` table exists but
+      // has no `customer_id` column — every ShopCX refund lookup joins through
+      // `order_id` / `workspace_id`. The column-missing ERROR only reaches this feed when a
+      // foreign app / stale SQL Editor session queries
+      // `/rest/v1/order_refunds?select=...customer_id...`. There is no lever from ShopCX to
+      // make that query resolve — paging Platform on it (Control Tower signature
+      // `supabase-logs:d919f14fa13296c8`) is repair work for a query we don't own. Narrowly
+      // gated to require BOTH the exact column-missing message AND the bare-SELECT /
+      // PostgREST-CTE shape on order_refunds — a column-missing error on any other table, a
+      // different column on `order_refunds`, or on it via a non-SELECT statement (real
+      // code-bug / schema-regression shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.smart_patterns.content`. The `smart_patterns` table exists but
       // has no `content` column (grep confirms no ShopCX caller queries `.content`; its

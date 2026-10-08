@@ -3003,6 +3003,52 @@ export function isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoi
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column order_refunds.customer_id does not exist`
+ * for an ad hoc SELECT lookup / PostgREST direct-REST call against
+ * `public.order_refunds.customer_id`. The `order_refunds` table exists as a product table
+ * (per-refund rows — see [[../tables/order_refunds]]), but it has no `customer_id` column:
+ * every ShopCX refund lookup joins through `order_id` / `workspace_id`, never a direct
+ * `customer_id` on the refund row. Grep confirms no ShopCX caller queries
+ * `order_refunds.customer_id`; the error only reaches Supabase's `postgres_logs` feed when
+ * an external / stale PostgREST client (a foreign app assuming a generic `.customer_id`
+ * column, a stale SQL Editor query, a deprecated integration) issues a `select=... customer_id ...`
+ * against `/rest/v1/order_refunds`. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it (Control Tower signature `supabase-logs:d919f14fa13296c8`)
+ * is repair work for a query we do not own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise` — the
+ * same narrow-gating shape (exact `column <table>.<name> does not exist` + bare
+ * SELECT-on-table / PostgREST-CTE shape), aimed at a different foreign caller. A JOIN /
+ * UNION / non-SELECT (INSERT/UPDATE) against order_refunds, a different column, or a
+ * different table all stay captured/paged — a real schema regression on order_refunds
+ * still surfaces.
+ */
+export function isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column order_refunds.customer_id does not exist" ||
+    stripped === "column public.order_refunds.customer_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — any trailing WHERE/LIMIT/ORDER BY is fine, but the
+  // statement MUST start with `select` and its FROM clause MUST name `order_refunds` (with
+  // or without the `public.` qualifier). A non-SELECT (INSERT/UPDATE) is a real code-write
+  // we DO want to page on.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?order_refunds\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."order_refunds" ... )` with double-quoted identifiers. Same foreign-owned
+  // read, different rendering; the CTE branch requires the wrapped op to be a SELECT so a
+  // PostgREST INSERT/UPDATE inside the wrapper stays captured/paged.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?order_refunds\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column smart_patterns.content does not exist`
  * for an ad hoc SELECT lookup / PostgREST direct-REST call against
  * `public.smart_patterns.content`. The `smart_patterns` table exists as a product table
