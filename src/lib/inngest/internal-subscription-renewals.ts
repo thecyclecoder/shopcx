@@ -19,7 +19,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat, emitRenewalOutcomeHeartbeat, aggregateRenewalOutcomes } from "@/lib/control-tower/heartbeat";
-import { getBraintreeGateway } from "@/lib/integrations/braintree";
+import { getBraintreeGateway, findChargedSaleByOrderId } from "@/lib/integrations/braintree";
 import { createAmplifierOrder, stampAmplifierImportFailure } from "@/lib/integrations/amplifier";
 import { generateOrderNumber } from "@/lib/order-number";
 import {
@@ -442,7 +442,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     concurrency: [{ limit: 10 }],
     triggers: [{ event: "internal-subscription/renewal-attempt" }],
   },
-  async ({ event, step }) => {
+  async ({ event, step, attempt }) => {
     const { subscription_id, workspace_id, expected_next_billing_date } = event.data as {
       subscription_id: string;
       workspace_id: string;
@@ -1331,11 +1331,31 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
 
     // ── 4. Charge ───────────────────────────────────────────────
     const charge = await step.run("braintree-sale", async () => {
+      // ⭐ Idempotent charge. The sale carries the reserved order number as its Braintree
+      // `orderId` (memoized by reserve-order-number, so identical across retries). If Braintree
+      // approved the sale but the result was lost before Inngest recorded this step — a deploy
+      // reaping the function mid-step, a timeout — the retry re-ran a fresh sale and charged the
+      // customer twice. On any retry we first look the order up and reuse a sale that already
+      // charged. A failed lookup throws (the step retries), never falls through to a blind sale.
+      if (attempt > 0) {
+        const prior = await findChargedSaleByOrderId(workspace_id, orderNumber);
+        if (prior) {
+          console.warn(`[renewal] retry found existing sale ${prior.id} (${prior.status}) for ${orderNumber} — not charging again`);
+          return {
+            success: true,
+            message: `reused existing sale ${prior.id} (retry)`,
+            transactionId: prior.id,
+            processorResponseCode: null,
+            processorResponseText: null,
+          };
+        }
+      }
       const gateway = await getBraintreeGateway(workspace_id);
       const result = await gateway.transaction.sale({
         amount: (totalCents / 100).toFixed(2),
         paymentMethodToken: ctx.pm.braintree_payment_method_token,
         customerId: ctx.pm.braintree_customer_id,
+        orderId: orderNumber,
         options: { submitForSettlement: true },
       });
       return {
