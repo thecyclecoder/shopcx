@@ -6,6 +6,11 @@ query CartInput {
       giftTag: attribute(key: "_free_gift") {
         value
       }
+      sellingPlanAllocation {
+        sellingPlan {
+          id
+        }
+      }
       merchandise {
         __typename
         ... on ProductVariant {
