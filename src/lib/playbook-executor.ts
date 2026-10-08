@@ -1854,6 +1854,11 @@ export interface AssistedCreateHandlerResult {
   success: boolean;
   summary?: string | null;
   error?: string | null;
+  // create_order on internal billing returns the REAL order number and charged
+  // total (chargeOneTimeOrder) so the confirmation quotes them instead of a
+  // generic "it's placed". Phase 1 of assisted-one-time-orders-charge-and-ship.
+  order_number?: string | null;
+  amount_cents?: number | null;
 }
 
 export interface AssistedCreateInterpretation {
@@ -1871,15 +1876,33 @@ export function interpretAssistedCreateResult(input: {
 }): AssistedCreateInterpretation {
   const { actionType, result } = input;
   if (result.success) {
+    // For create_order, quote the REAL order number and charged total when the
+    // handler returned them (chargeOneTimeOrder) — the customer was actually
+    // billed, so the confirmation should name the order and amount, not a
+    // generic "it's placed". Falls back to the generic line if either is absent.
+    let response: string;
+    if (actionType === "create_order") {
+      const num = result.order_number ?? null;
+      const amt = typeof result.amount_cents === "number" ? result.amount_cents : null;
+      if (num && amt !== null) {
+        response = `Your order ${num} is placed and on its way. You were charged $${(amt / 100).toFixed(2)}. You'll get a confirmation shortly.`;
+      } else if (num) {
+        response = `Your order ${num} is placed and on its way. You'll get a confirmation shortly.`;
+      } else {
+        response = "Your order is placed and on its way. You'll get a confirmation shortly.";
+      }
+    } else {
+      response = "Your subscription is set up. You'll get a confirmation shortly.";
+    }
     return {
       action: "complete",
-      response:
-        actionType === "create_order"
-          ? "Your order is placed and on its way. You'll get a confirmation shortly."
-          : "Your subscription is set up. You'll get a confirmation shortly.",
+      response,
       context: {
         assisted_purchase_completed: true,
         assisted_purchase_result_summary: result.summary ?? null,
+        assisted_purchase_order_number: result.order_number ?? null,
+        assisted_purchase_amount_cents:
+          typeof result.amount_cents === "number" ? result.amount_cents : null,
       },
       systemNote: `[Playbook] ${actionType} — dispatched via directActionHandlers. ${result.summary || ""}`.trim(),
       // Post-completion truthful confirmation — surface the executed action
@@ -2018,6 +2041,8 @@ async function handleAssistedCreate(
       success: !!result.success,
       summary: result.summary ?? null,
       error: result.error ?? null,
+      order_number: result.order_number ?? null,
+      amount_cents: typeof result.amount_cents === "number" ? result.amount_cents : null,
     },
     personaName: pers?.name ?? null,
   });

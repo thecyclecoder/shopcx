@@ -97,6 +97,15 @@ export interface OneTimeChargeInput {
   sourceName?: string;
   /** Free-text note stored on the transaction for the audit trail. */
   reason?: string;
+  /**
+   * Idempotency key stamped into `transactions.metadata.request_key`. A caller
+   * that can be retried or re-sessioned (the assisted-purchase concierge path,
+   * where a ticket turn may re-run) passes a stable key derived from its own
+   * inputs so a prior charge for the same intent is discoverable BEFORE a second
+   * sale. This primitive only records the key; the caller owns the pre-charge
+   * check (see `create_order` in [[action-executor]]).
+   */
+  requestKey?: string | null;
 }
 
 export interface OneTimeChargeResult {
@@ -336,6 +345,7 @@ export async function chargeOneTimeOrder(
         order_number: orderNumber,
         reason: input.reason ?? null,
         kind: "one_time_charge",
+        request_key: input.requestKey ?? null,
       },
     })
     .select("id")
