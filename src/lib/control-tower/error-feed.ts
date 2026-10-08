@@ -6867,6 +6867,96 @@ export function isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocN
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column tickets.playbook_id does not exist`
+ * for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.tickets.playbook_id`. The `tickets` table exists but by design carries NO
+ * `playbook_id` column — the actual column is `active_playbook_id`, and every ShopCX
+ * reader / writer selects / filters on that. The column-missing ERROR only reaches this
+ * feed when a foreign app / stale SQL Editor session / deprecated integration queries
+ * `/rest/v1/tickets?select=...&playbook_id=eq.<id>` (or the equivalent SELECT-lookup
+ * shape) — a natural mistake because a caller abbreviates `active_playbook_id` to the
+ * bare `playbook_id`. There is no lever from ShopCX to make that query resolve — paging
+ * Platform on it (Control Tower signature `supabase-logs:236d271e4b6aaf4e`) is repair
+ * work for a query we don't own.
+ *
+ * Twin of `isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise` — the
+ * same narrow-gating shape (exact `column <table>.<name> does not exist` + SELECT-lookup
+ * shape covering BOTH bare and PostgREST CTE wrapper forms), aimed at the same `tickets`
+ * table but a different foreign-abbreviated column.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column tickets.playbook_id does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.tickets` —
+ *      either (a) the bare `select ... from public.tickets` shape (with no JOIN — a
+ *      JOIN across other tables is a real code path we own), OR (b) the
+ *      PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."tickets" ... )` CTE wrapper
+ *      form with double-quoted identifiers. Both forms are the same foreign-owned read.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table still pages — the pin is `tickets.`
+ *     only,
+ *   - a column-missing error on `tickets` for a DIFFERENT column (e.g. the real
+ *     `active_playbook_id` column being renamed away, `status`, `workspace_id`) still
+ *     pages — the pin covers `playbook_id` only,
+ *   - a `tickets.playbook_id` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, JOIN across other tables) still pages — the pin is the
+ *     SELECT-lookup shape, matching the ad hoc direct-REST read we've observed; the CTE
+ *     branch likewise requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE
+ *     inside the same wrapper stays paged),
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `tickets` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `tickets.playbook_id` (with or without the `public.` qualifier).
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column tickets.playbook_id does not exist" ||
+    stripped === "column public.tickets.playbook_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select`, its FROM clause MUST name `tickets` (with or
+  // without the `public.` schema qualifier), AND the statement MUST NOT carry a `join`
+  // clause. A JOIN across other tables is a real code path we own (not the ad hoc
+  // direct-REST read this drop targets); a caller that actually writes to tickets with
+  // a bogus `playbook_id` column is a code bug we DO want to page on.
+  if (
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?tickets\b/.test(q) &&
+    !/\bjoin\b/.test(q)
+  ) {
+    return true;
+  }
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."tickets" ... )` with double-quoted identifiers. Same foreign-owned
+  // read, different rendering — the plain SELECT regex above misses it because the
+  // statement starts with `with` and the FROM clause carries the quoted
+  // `"public"."tickets"` shape. Guarded so the CTE branch requires the wrapped op to be
+  // a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper —
+  // e.g. `WITH pgrst_source AS (INSERT INTO "public"."tickets"("playbook_id") ...)`
+  // — is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?tickets\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column meta_ad_accounts.name does not exist` for
  * an ad hoc / stale PostgREST direct-REST SELECT against `public.meta_ad_accounts`. The
  * `meta_ad_accounts` table exists (see

@@ -107,6 +107,7 @@ import {
   isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
+  isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise,
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise,
@@ -1581,6 +1582,12 @@ const LOG_QUERIES: LogQuery[] = [
       // `tickets` via a non-SELECT statement (real code-bug shape) still surfaces /
       // pages on first sighting.
       if (isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(message, query)) return null;
+      // Same foreign direct-REST shape, different abbreviated column: a stale/foreign
+      // client reading `tickets.playbook_id` (the real column is `active_playbook_id`).
+      // Narrowly gated to the exact column-missing message AND a SELECT-on-tickets shape
+      // (bare OR PostgREST CTE wrapper) — a different column, a non-SELECT, or a JOIN
+      // path still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(message, query)) return null;
       // Drop expected-by-design noise at capture: Postgres reporting the 23505
       // unique-violation raised by our own `dashboard_notifications_dedupe_key_open_uniq`
       // partial index on an INSERT INTO `public.dashboard_notifications`. That index

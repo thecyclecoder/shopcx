@@ -80,6 +80,7 @@ import {
   isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
+  isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isExpectedBillingForecastsPendingUniqViolation,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
@@ -14588,6 +14589,183 @@ test("isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise retur
   assert.equal(
     isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
       "column tickets.assigned_agent does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/tickets?select=...&playbook_id=eq.<id>` against our `public.tickets` table.
+// The table exists but by design carries NO `playbook_id` column — the real column is
+// `active_playbook_id`. Foreign-owned surface, no lever from us — drop AT CAPTURE only
+// when BOTH the exact column-missing message on `tickets.playbook_id` AND a SELECT-lookup
+// shape on `tickets` (bare OR PostgREST CTE wrapper) are present. A column-missing on any
+// other table, a different column on `tickets` (including the real `active_playbook_id`),
+// a non-SELECT statement, or a JOIN still pages.
+
+test("isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise drops the captured message+query pair (positive drop — bare SELECT shape with the exact message)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column tickets.playbook_id does not exist",
+      "select id, playbook_id from public.tickets where workspace_id = $1 and playbook_id = $2",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column public.tickets.playbook_id does not exist",
+      "select playbook_id from public.tickets",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column tickets.playbook_id does not exist",
+      "select playbook_id from tickets limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "ERROR: column tickets.playbook_id does not exist",
+      "select playbook_id from public.tickets",
+    ),
+    true,
+  );
+  // Case-insensitive on the query; trailing WHERE / ORDER BY / LIMIT stays the ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column tickets.playbook_id does not exist",
+      "SELECT ID, PLAYBOOK_ID FROM PUBLIC.TICKETS ORDER BY CREATED_AT DESC LIMIT 50",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "  column tickets.playbook_id does not exist  ",
+      "   select playbook_id from public.tickets   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"tickets\" ...)` CTE wrapper form (positive drop — CTE wrapper shape)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column tickets.playbook_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."tickets"."id", "public"."tickets"."playbook_id" FROM "public"."tickets" ORDER BY "public"."tickets"."created_at" DESC )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column public.tickets.playbook_id does not exist",
+      'WITH pgrst_source AS (SELECT "public"."tickets"."playbook_id" FROM "public"."tickets")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise KEEPS a column-missing on `tickets.active_playbook_id` (the REAL column — a rename regression still pages)", () => {
+  // `tickets.active_playbook_id` IS the real column. If it regressed we want the page.
+  // The pin is the abbreviated `playbook_id` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column tickets.active_playbook_id does not exist",
+      "select active_playbook_id from public.tickets order by created_at desc",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column public.tickets.active_playbook_id does not exist",
+      "select active_playbook_id from public.tickets",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise KEEPS a column-missing on a DIFFERENT table (`playbooks.playbook_id` — pin is tickets only)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column playbooks.playbook_id does not exist",
+      "select id, playbook_id from public.playbooks",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise KEEPS a non-SELECT statement shape on tickets (INSERT / UPDATE / DELETE is a real code-bug and still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column tickets.playbook_id does not exist",
+      "insert into public.tickets (workspace_id, playbook_id) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column tickets.playbook_id does not exist",
+      "update public.tickets set playbook_id = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column tickets.playbook_id does not exist",
+      "delete from public.tickets where playbook_id = $1",
+    ),
+    false,
+  );
+  // The PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column tickets.playbook_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."tickets"("workspace_id", "playbook_id") VALUES ($1, $2) RETURNING "public"."tickets"."id" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise KEEPS the same message on a JOIN with another table (a real code path joining tickets still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column tickets.playbook_id does not exist",
+      "select t.id, t.playbook_id, w.slug from public.tickets t join public.workspaces w on w.id = t.workspace_id where w.slug = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column tickets.playbook_id does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(
+      "column tickets.playbook_id does not exist",
       null,
     ),
     false,
