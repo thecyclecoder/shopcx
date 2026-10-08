@@ -82,6 +82,12 @@ export interface ParkedRowLike {
   instructions: string | null;
   error: string | null;
   log_tail: string | null;
+  /**
+   * The park disposition the runner stamped (june-remedy-shape-and-honest-apply-status Phase 3 —
+   * `cs_remedy_apply_failed` is the one this router carves out). Optional so existing callers /
+   * test fixtures that don't set it behave exactly as before.
+   */
+  needs_attention_class?: string | null;
 }
 
 /** Decision returned by [[decideCsOwnerRoute]] — pure verdict, no side effects. */
@@ -105,6 +111,33 @@ export interface CsOwnerRouteDecision {
 export const CS_DIRECTOR_CALL_KIND = "cs-director-call" as const;
 
 /**
+ * june-remedy-shape-and-honest-apply-status Phase 3 — the `needs_attention_class` the runner stamps
+ * on a `cs-director-call` whose approve_remedy verdict was sound but whose APPLY the executor
+ * refused (e.g. a flat remedy shape the guard rejected, ticket 2acc8634). Unlike a generic parked
+ * cs-director-call (June ran and could not finish → self-route-excluded), this class means June's
+ * CALL was fine and the SHAPE was wrong, so the correct response is ONE re-dispatch carrying the
+ * rejection reason so June re-emits a runnable remedy. A second failure (the retry carries the
+ * `remedy_apply_retry` instructions marker) falls through to the 30-min SLA watchdog, not a loop.
+ */
+export const CS_REMEDY_APPLY_FAILED_CLASS = "cs_remedy_apply_failed" as const;
+
+/**
+ * True when a parked `cs_remedy_apply_failed` row is ITSELF the one-retry re-dispatch (its
+ * `instructions` carry `remedy_apply_retry:true`). The router uses this to STOP after exactly one
+ * retry — a second apply failure falls through to the generic backstop + 30-min SLA watchdog
+ * instead of looping June forever on a shape she can't fix. Pure (no DB access).
+ */
+export function isRemedyApplyRetry(row: ParkedRowLike): boolean {
+  if (!row.instructions) return false;
+  try {
+    const parsed = JSON.parse(row.instructions) as { remedy_apply_retry?: unknown };
+    return parsed.remedy_apply_retry === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Pure predicate — decides whether this parked row is a CS-owned park that must route to the
  * CS Director. Extracts `ticket_id` from `instructions` (the JSON payload the enqueue path
  * writes, per unified-ticket-handler `sol-first-touch-enqueue`) and falls back to the
@@ -123,6 +156,23 @@ export function decideCsOwnerRoute(row: ParkedRowLike): CsOwnerRouteDecision {
   const owner = resolveNodeOwner(row.kind);
   if (owner !== CS_FUNCTION) {
     return { route_to: null, ticket_id: null, reason: `not_cs_owned (kind=${row.kind}, owner=${owner ?? "null"})` };
+  }
+  // june-remedy-shape-and-honest-apply-status Phase 3 — a `cs_remedy_apply_failed` park is the ONE
+  // carve-out to the self-route exclusion below. June's CALL was sound (approve_remedy); only the
+  // APPLY was refused (a flat/un-runnable shape). Re-dispatch ONE fresh cs-director-call carrying the
+  // rejection reason so she re-emits a runnable remedy. Guard against looping: a retry that ALSO
+  // fails carries the `remedy_apply_retry` marker → fall through to the generic backstop + 30-min SLA
+  // watchdog (one retry, not forever). This check runs BEFORE `wouldSelfRoute` because the parked
+  // row's kind IS cs-director-call.
+  if (row.needs_attention_class === CS_REMEDY_APPLY_FAILED_CLASS) {
+    if (isRemedyApplyRetry(row)) {
+      return { route_to: null, ticket_id: null, reason: "cs_remedy_apply_failed_retry_exhausted" };
+    }
+    const ticketId = extractTicketIdFromRow(row);
+    if (!ticketId) {
+      return { route_to: null, ticket_id: null, reason: "cs_remedy_apply_failed_no_ticket_id" };
+    }
+    return { route_to: CS_FUNCTION, ticket_id: ticketId, reason: "cs_remedy_apply_failed_retry" };
   }
   // Phase 2 exclusion: a parked cs-director-call is the CS Director's OWN box session — routing it
   // to ANOTHER cs-director-call is self-routing (routing a thing to itself). The signal a parked
@@ -367,6 +417,20 @@ export async function applyCsOwnerRoute(
     reason: (row.error ?? "").slice(0, 300) || null,
     log_tail: (row.log_tail ?? "").slice(-400) || null,
   };
+  // june-remedy-shape-and-honest-apply-status Phase 3 — when this route is the one-retry re-dispatch
+  // of a refused approve_remedy apply, mark the new job `remedy_apply_retry:true` (so a SECOND
+  // failure is NOT re-dispatched — one retry, then the SLA watchdog) and carry the guard's rejection
+  // reason so June's prompt tells her exactly why the prior shape was refused.
+  const isRemedyApplyFailedRetry = decision.reason === "cs_remedy_apply_failed_retry";
+  const instructionsPayload: Record<string, unknown> = {
+    ticket_id: ticketId,
+    parked_from: parkedFrom,
+    second_opinion_of: null,
+  };
+  if (isRemedyApplyFailedRetry) {
+    instructionsPayload.remedy_apply_retry = true;
+    instructionsPayload.prior_apply_failure_reason = (row.error ?? "").slice(0, 500) || "unknown_reason";
+  }
   const { data: inserted, error: iErr } = await admin
     .from("agent_jobs")
     .insert({
@@ -374,7 +438,7 @@ export async function applyCsOwnerRoute(
       spec_slug: ticketId,
       kind: "cs-director-call",
       status: "queued",
-      instructions: JSON.stringify({ ticket_id: ticketId, parked_from: parkedFrom, second_opinion_of: null }),
+      instructions: JSON.stringify(instructionsPayload),
       created_by: null,
     })
     .select("id")
