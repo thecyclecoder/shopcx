@@ -981,6 +981,65 @@ test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS a Po
   );
 });
 
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise drops the PostgREST CTE wrapper lookup projecting the non-existent message column", () => {
+  // The captured incident shape (Control Tower `supabase-logs:7be91db5b111b4fd`): a stale
+  // Supabase Studio / direct-REST client reads `loop_alerts?select=...message...` (or
+  // `?message=ilike.*`), PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."loop_alerts" ... )` CTE, and Postgres rejects with
+  // `column loop_alerts.message does not exist` — `message` is not a `loop_alerts` column.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.message does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."id", "public"."loop_alerts"."message" FROM "public"."loop_alerts" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column public.loop_alerts.message does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."message" FROM "public"."loop_alerts" LIMIT 1 )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.message does not exist",
+      "select id, message from loop_alerts where message ilike '%x%' limit 10",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS a PostgREST CTE INSERT/UPDATE on loop_alerts naming message (a real code-bug write still pages)", () => {
+  // A PostgREST write wrapped in the same `WITH pgrst_source AS (...)` envelope is a real
+  // code-bug shape (someone trying to write a bogus `message` column), not the ad hoc read
+  // this drop targets — the CTE branch requires the wrapped op to be a SELECT.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.message does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."loop_alerts"("id","message") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.message does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."loop_alerts" SET "message" = $1 WHERE "id" = $2 RETURNING * )',
+    ),
+    false,
+  );
+  // A bare INSERT naming `message` is likewise a real code write, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.message does not exist",
+      "insert into public.loop_alerts (message) values ($1)",
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS the closed_at column-missing message on a DIFFERENT relation (a real product-schema regression still pages)", () => {
   // A real column-missing on another table that DOES carry a `closed_at` column
   // (e.g. `tickets.closed_at`) is a genuine regression we want to see — the pin names
