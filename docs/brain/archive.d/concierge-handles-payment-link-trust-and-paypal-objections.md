@@ -1,0 +1,1 @@
+- **Checkout-stuck concierge must answer in-journey payment-link trust + alt-rail (PayPal) objections, not escalate** · verified 2026-10-08 · → [[recipes/checkout-stuck-concierge-flow]]
