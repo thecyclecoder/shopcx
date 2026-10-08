@@ -2470,6 +2470,69 @@ function isQuotedPostgrestErrorEventsLookup(lowerQuery: string): boolean {
 }
 
 /**
+ * Foreign-app noise — Postgres reporting an UNQUALIFIED missing-column error (`column
+ * "label" does not exist` / `column "message" does not exist`) for an ad hoc free-text
+ * search over `error_events`: the exploratory
+ * `select * from error_events where coalesce(label,'')||coalesce(message,'') ilike '%…%'`
+ * shape a foreign SQL editor / stale tool emits when someone searches our error feed with
+ * made-up column names. `error_events` DOES exist, but no ShopCX code owns `label` or
+ * `message` columns on it — this is an external reader guessing at column names, not a
+ * ShopCX bug. There is no lever from ShopCX to make that query resolve, so paging Platform
+ * on it (Control Tower signature `supabase-logs:0e3379f172768a91`) is repair work for a
+ * query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise` — same table pin
+ * and capture-time-drop class, but a DIFFERENT message shape: that sibling matches the
+ * RELATION-QUALIFIED `column error_events.<name> does not exist` form; this one matches the
+ * UNQUALIFIED `column "<name>" does not exist` form Postgres emits when the search names a
+ * column with no table alias. The two message shapes don't overlap, so the sibling never
+ * matched this signature — it kept leaking into the feed and paging Platform.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message (with any leading Postgres `ERROR: ` prefix stripped) is EXACTLY the
+ *      unqualified missing-column shape for one of the two guessed columns —
+ *      `column "label" does not exist` or `column "message" does not exist`. A relation-
+ *      qualified message (`column error_events.label …`), a different column, a FATAL /
+ *      PANIC, or any other Postgres error falls through and still pages, AND
+ *   2. the lowercased query is a bare `select … from (public.)?error_events` AND contains
+ *      the free-text-search marker `coalesce(label` or `coalesce(message`. A non-SELECT
+ *      write, a different table, or a SELECT without the coalesce-search marker stays
+ *      captured — the pin is this exact ad hoc read shape.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. This signature is the UNQUALIFIED
+  // missing-column shape (`column "<name>" does not exist`, no table alias) for the two
+  // columns the foreign free-text search guesses at.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (
+    stripped !== 'column "label" does not exist' &&
+    stripped !== 'column "message" does not exist'
+  ) {
+    return false;
+  }
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT lookup on error_events — a non-SELECT write / DDL / modifying CTE is a real
+  // code path and stays captured/paged.
+  if (!/^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q)) return false;
+  // AND the free-text-search marker — `coalesce(label,'')||coalesce(message,'') ilike …`.
+  // A plain `select … from error_events` without this marker is NOT this signature and
+  // keeps paging.
+  return q.includes("coalesce(label") || q.includes("coalesce(message");
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column reference "oid" is ambiguous` on a
  * catalog-introspection query that joins two `pg_catalog` tables (each carrying its own
  * `oid` column) without qualifying the `oid` reference. None of our own SQL emits this
