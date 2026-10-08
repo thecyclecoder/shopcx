@@ -613,14 +613,19 @@ export async function subscriptionUpdateNextBillingDate(
     return internalSubUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
   }
   if (src === "shopcx") {
-    // ⭐ RETIME, not just set. `shopifySetNextBillingDate` moves only the display field; the cycle
-    // calendar underneath stays where it was, and the renewal worker picks the cycle BY DATE and
-    // skips one already BILLED. A new date landing in a spent cycle strands the subscription
-    // silently. `shopifyRetimeContract` re-anchors the calendar and verifies the date is billable.
+    // ⭐ Our DB row PLANS the date; Shopify's billing calendar is resolved only AT CHARGE TIME
+    // (see `resolveChargeableCycle`). So a timing change only needs to move Shopify's DISPLAY
+    // nextBillingDate — a date that lands in an already-BILLED cycle is NO LONGER a reason to
+    // refuse. The renewal worker and Order Now bill the first UNBILLED cycle by index regardless of
+    // what calendar cycle our date falls in, so a "stranded" display is cosmetic drift (the daily
+    // reconciler catches it), never a missed renewal. We therefore never refuse a ShopCX retime.
     const { shopifyRetimeContract } = await import("@/lib/commerce/shopify-subscription-client");
     const r = await shopifyRetimeContract(workspaceId, contractId, nextBillingDate);
     if (r.stranded) {
-      return { success: false, error: "date_not_billable — it lands in a cycle already charged" };
+      console.warn(
+        `[subscriptionUpdateNextBillingDate] ${contractId}: display date ${nextBillingDate} lands in a spent cycle — cosmetic drift only; the charge resolves the first unbilled cycle at charge time`,
+      );
+      return { success: true };
     }
     return r;
   }

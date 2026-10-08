@@ -509,6 +509,14 @@ export async function shopifyAttemptBilling(
      * renewal worker knows which cycle it is firing.
      */
     billingCycleSelector?: { index: number } | { date: string };
+    /**
+     * ⭐ The time the attempt is considered to be made. Shopify validates it against the SELECTED
+     * cycle — a future-cycle attempt with no (or a now-valued) origin time is rejected with
+     * "Origin time needs to be within the selected billing cycle". `resolveChargeableCycle` computes
+     * a value that always lands inside the cycle it picked, so renewals and Order Now can bill a
+     * future unbilled cycle. Omitting it keeps Shopify's default (the attempt time = now).
+     */
+    originTime?: string;
   } = {},
 ): Promise<BillingAttemptResult> {
   const env = await gql<{ subscriptionBillingAttemptCreate: { subscriptionBillingAttempt?: { id: string; ready: boolean }; userErrors: { message: string }[] } }>(
@@ -522,6 +530,7 @@ export async function shopifyAttemptBilling(
         idempotencyKey,
         ...(opts.inventoryPolicy ? { inventoryPolicy: opts.inventoryPolicy } : {}),
         ...(opts.billingCycleSelector ? { billingCycleSelector: opts.billingCycleSelector } : {}),
+        ...(opts.originTime ? { originTime: opts.originTime } : {}),
       },
     },
   );
@@ -877,15 +886,15 @@ export async function getUpcomingBillingCycles(
   workspaceId: string,
   contractId: string,
   opts: { startDate?: string; endDate?: string; first?: number } = {},
-): Promise<{ success: boolean; error?: string; cycles?: { index: number; expectedDate: string; skipped: boolean; status: string }[] }> {
+): Promise<{ success: boolean; error?: string; cycles?: { index: number; expectedDate: string; startAt: string; endAt: string; skipped: boolean; status: string }[] }> {
   const start = opts.startDate ?? new Date().toISOString();
   const end = opts.endDate ?? new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
-  const env = await gql<{ subscriptionBillingCycles?: { edges: { node: { cycleIndex: number; billingAttemptExpectedDate: string; skipped: boolean; status: string } }[] } }>(
+  const env = await gql<{ subscriptionBillingCycles?: { edges: { node: { cycleIndex: number; billingAttemptExpectedDate: string; cycleStartAt: string; cycleEndAt: string; skipped: boolean; status: string } }[] } }>(
     workspaceId,
     `query($id:ID!,$s:DateTime!,$e:DateTime!,$n:Int!){
        subscriptionBillingCycles(contractId:$id, first:$n,
          billingCyclesDateRangeSelector:{ startDate:$s, endDate:$e }){
-         edges { node { cycleIndex billingAttemptExpectedDate skipped status } } } }`,
+         edges { node { cycleIndex billingAttemptExpectedDate cycleStartAt cycleEndAt skipped status } } } }`,
     { id: contractGid(contractId), s: start, e: end, n: opts.first ?? 10 },
   );
   if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
@@ -894,10 +903,51 @@ export async function getUpcomingBillingCycles(
     cycles: (env.data?.subscriptionBillingCycles?.edges ?? []).map((e) => ({
       index: e.node.cycleIndex,
       expectedDate: e.node.billingAttemptExpectedDate,
+      // ⭐ The cycle WINDOW (start/end), not just its expected charge date — `resolveChargeableCycle`
+      // needs it to compute an `originTime` that lands inside the cycle Shopify is being asked to bill.
+      startAt: e.node.cycleStartAt,
+      endAt: e.node.cycleEndAt,
       skipped: e.node.skipped,
       status: e.node.status,
     })),
   };
+}
+
+/**
+ * ⭐ Charge-time cycle resolution. Returns the FIRST non-skipped UNBILLED cycle by index, plus an
+ * `originTime` guaranteed to fall inside that cycle's window.
+ *
+ * This is the charge-time replacement for `getBillingCycleForDate(next_billing_date)`. Our DB row
+ * PLANS the date; Shopify's billing calendar is resolved only HERE, when we actually charge. The
+ * date we set never has to agree with Shopify's cycle boundaries — a date landing inside an
+ * already-BILLED cycle used to strand the sub forever (the renewal cron skipped on BILLED and
+ * Order Now refused with "already placed"). By index, the first unbilled cycle is always billable.
+ *
+ * Shopify rejects a billing attempt whose origin time is outside the selected cycle
+ * ("Origin time needs to be within the selected billing cycle"). So:
+ *   - `now` inside the chosen cycle's window → use `now` (the normal case, charging the open cycle);
+ *   - otherwise (a FUTURE cycle whose window has not opened yet) → the cycle's `startAt + 1s`.
+ */
+export async function resolveChargeableCycle(
+  workspaceId: string,
+  contractId: string,
+  now: Date | string = new Date(),
+): Promise<{ success: boolean; error?: string; index?: number; originTime?: string }> {
+  const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
+  const cycles = await getUpcomingBillingCycles(workspaceId, contractId, { first: 25 });
+  if (!cycles.success) return { success: false, error: cycles.error ?? "could not read billing cycles" };
+  const chargeable = (cycles.cycles ?? [])
+    .filter((c) => c.status === "UNBILLED" && !c.skipped)
+    .sort((a, b) => a.index - b.index)[0];
+  if (!chargeable) return { success: false, error: "no unbilled chargeable cycle" };
+  const startMs = chargeable.startAt ? new Date(chargeable.startAt).getTime() : NaN;
+  const endMs = chargeable.endAt ? new Date(chargeable.endAt).getTime() : NaN;
+  const inside =
+    Number.isFinite(startMs) && Number.isFinite(endMs) && nowMs >= startMs && nowMs < endMs;
+  const originTime = inside
+    ? new Date(nowMs).toISOString()
+    : new Date((Number.isFinite(startMs) ? startMs : nowMs) + 1000).toISOString();
+  return { success: true, index: chargeable.index, originTime };
 }
 
 
