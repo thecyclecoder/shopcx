@@ -181,3 +181,36 @@ test("the other MULTIPLE_REMEDY_PATTERNS (multi-order shapes) never qualify for 
   assert.equal(res.ok, false);
   if (res.ok === false) assert.equal(res.kind, "multiple_remedies_offered");
 });
+
+// ── exception_teaser (ticket ccb423fe, Angelica Devine, 2026-10-08) ──────────────────────────
+// Phase 2 of docs/brain/specs/playbooks-survive-merge-guard-teasers-watchdog-catches-stalls.md.
+// Sol's context_summary declared the renewal return categorically denied (out-of-policy), yet her
+// stand-firm reply ENDED by pre-announcing the very return she'd denied: "…reply here to confirm
+// and I'll walk you through the return from there." The old PROMISE_PATTERNS had no teaser shape,
+// so the send was not blocked. The exception_teaser patterns catch it; replacing the teaser with
+// an allowed close (offer to cancel future renewals) ships fine.
+
+const ANGELICA_DIRECTION_CONTEXT =
+  "Customer wants to return a subscription renewal. Renewals are categorically denied under the returns policy — out-of-policy. chosen_path=playbook, refund_tier_ceiling=store_credit_return.";
+
+test("ccb423fe regression: Angelica's 13:11 reply teasing the return on a stand-firm turn is BLOCKED", () => {
+  const res = assessSolReplyBaitRisk({
+    contextSummary: ANGELICA_DIRECTION_CONTEXT,
+    firstReply:
+      "I completely understand wanting to send this back. Our subscription renewals aren't eligible for a standard return, so I can't promise a refund here. Since you'd like to send this order back, reply here to confirm and I'll walk you through the return from there.",
+  });
+  assert.equal(res.ok, false, "a return/exception teaser on an out-of-policy turn must be blocked");
+  if (res.ok === false) {
+    assert.equal(res.kind, "out_of_policy_promise");
+    assert.match(res.matched_phrase, /walk you through the return|reply here to confirm/i);
+  }
+});
+
+test("ccb423fe counterfactual: the SAME reply closing with an allowed cancel-future-renewals offer PASSES", () => {
+  const res = assessSolReplyBaitRisk({
+    contextSummary: ANGELICA_DIRECTION_CONTEXT,
+    firstReply:
+      "I completely understand wanting to send this back. Our subscription renewals aren't eligible for a standard return, so I can't promise a refund here. What I can do is pause, skip, or cancel your future renewals from your account so this doesn't happen again — just let me know.",
+  });
+  assert.equal(res.ok, true, "an allowed cancel-future-renewals close must still ship");
+});

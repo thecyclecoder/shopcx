@@ -360,7 +360,8 @@
     "test:engine-ranking": "tsx --test src/lib/engine-ranking.test.ts",
     "test:shopcx-normalize": "tsx --test src/lib/commerce/shopcx-normalize.test.ts",
     "test:shopcx-renewal-anchor": "tsx --test src/lib/inngest/shopcx-renewal-anchor.test.ts",
-    "test:shopcx-anchors": "tsx --test src/lib/commerce/anchors.test.ts"
+    "test:shopcx-anchors": "tsx --test src/lib/commerce/anchors.test.ts",
+    "test:first-touch": "tsx --test src/lib/first-touch.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.165",

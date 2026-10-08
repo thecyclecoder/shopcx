@@ -138,6 +138,38 @@ const PROMISE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
       /\b(?:let|allow) me (?:to )?(?:issue|process|initiate|set up|start|generate|arrange) (?:a|the|your)? ?(?:refund|return|prepaid label|store credit|exchange|replacement)/i,
     label: "let-me promised remedy",
   },
+  // ⭐ EXCEPTION TEASERS (ticket ccb423fe, Angelica Devine, 2026-10-08). Phase 2 of
+  // docs/brain/specs/playbooks-survive-merge-guard-teasers-watchdog-catches-stalls.md. The
+  // patterns above all catch a CONCRETE remedy commitment. The ccb423fe failure used a softer
+  // shape: Sol held firm ("categorically denied" in her context_summary) yet closed with
+  // "Since you'd like to send this order back, reply here to confirm and I'll walk you through
+  // the return from there." — a reply that PRE-ANNOUNCES the very return she just denied, baiting
+  // the customer into a dead-end. docs/brain/playbooks/refund.md § Communication rules already
+  // forbids teasing an exception during a stand-firm turn; these patterns make the guard enforce
+  // it. They only block in the out-of-policy branch below (and the unverified branch), so an
+  // in-policy "walk you through the return" still ships. ALLOWED closes — offering to cancel or
+  // pause future renewals, a plain sign-off — match none of these.
+  {
+    pattern: /\bwalk (?:you )?through (?:the |your )?return\b/i,
+    label: "exception_teaser",
+  },
+  {
+    pattern: /\breply\b[^.!?]{0,40}?\bto confirm\b[^.!?]{0,80}?\breturn\b/i,
+    label: "exception_teaser",
+  },
+  {
+    pattern:
+      /\bI['’]?(?:ll|\s?will|\s?d like to|\s?can)\s+send\s+(?:you\s+)?(?:a\s+|the\s+)?(?:return\s+|prepaid\s+)?label\b/i,
+    label: "exception_teaser",
+  },
+  {
+    pattern: /\blet me see what I can do\b/i,
+    label: "exception_teaser",
+  },
+  {
+    pattern: /\bI['’]?d like to make this right\b/i,
+    label: "exception_teaser",
+  },
 ];
 
 /**
