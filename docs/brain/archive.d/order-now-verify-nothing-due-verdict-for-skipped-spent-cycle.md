@@ -1,0 +1,1 @@
+- **Order-now verify needs a 'nothing_due' verdict so a skipped spent-cycle renewal isn't reported as pending or as an order placed** · verified 2026-10-08 · → [[../libraries/order-now-verify]]
