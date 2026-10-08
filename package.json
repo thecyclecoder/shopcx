@@ -356,6 +356,7 @@
     "test:one-time-charge": "tsx --test src/lib/one-time-charge.test.ts",
     "test:analyzer-evidence-gate": "tsx --test src/lib/ticket-analyzer.evidence-gate.test.ts",
     "test:dunning-rollforward": "tsx --test src/lib/dunning.rollforward.test.ts",
+    "test:next-date-after-charge": "tsx --test src/lib/dunning.next-date-after-charge.test.ts",
     "check:vendor-dispatch-in-sdk": "tsx scripts/_check-vendor-dispatch-in-sdk.ts",
     "test:shopcx-discount-shape": "tsx --test src/lib/commerce/shopcx-discount-shape.test.ts",
     "test:shopify-one-time-charge": "tsx --test src/lib/commerce/shopify-one-time-charge.test.ts",

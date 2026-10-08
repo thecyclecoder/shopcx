@@ -34,6 +34,7 @@ Design + migration plan: [[../lifecycles/shopcx-subscriptions]]. Dunning interac
 | `getSubscriptionContract(ws, contractId)` | — | read |
 | `getUpcomingBillingCycles(ws, contractId, opts?)` | `appstleGetUpcomingOrders` | read |
 | `getBillingCycleForDate(ws, contractId, date)` | — | read |
+| `resolveChargeableCycle(ws, contractId, now?)` | — | read |
 | `shopifySyncBillingSchedule(ws, contractId, {firstDate, startIndex?, cycles?})` | — | pin |
 | `shopifyRetimeContract(ws, contractId, nextDate)` | `appstleUpdateNextBillingDate` (done right) | pin |
 | `anchorsForDate(date, interval)` | — | helper |
@@ -146,6 +147,22 @@ commits, a charge landing in the window bills the new quantity at the old tier.
 - **Omitting `billingCycleSelector` on a charge bills Shopify's CURRENT calendar cycle**, not the
   renewal we decided to fire. On the live contract that cycle was already `BILLED`. Pass a
   selector once the worker knows which cycle it is charging.
+- **⭐ Charge-time cycle resolution — `resolveChargeableCycle(ws, contractId, now?)`.** The charge-time
+  replacement for `getBillingCycleForDate(next_billing_date)`. Our DB row PLANS the date; Shopify's
+  billing calendar is resolved only here, when we actually charge. It reads `getUpcomingBillingCycles`
+  and returns the **first non-skipped `UNBILLED` cycle by index** plus an `originTime` guaranteed to
+  fall inside that cycle's window (`now` when `now` is inside the window, otherwise the cycle's
+  `startAt + 1s`). This is why **a `BILLED` date-cycle is no longer a reason to skip or refuse**: by
+  index the first unbilled cycle is always billable, so a date landing inside a spent cycle can no
+  longer strand the sub. Double-charge protection moves entirely to our claim ledger
+  ([[subscription-cycle-charge-claim]] / `guardRecentOrderNow`), not Shopify's calendar. Callers:
+  [[../inngest/shopify-subscription-renewals]] (`resolve-chargeable-cycle` step) and
+  `portal/handlers/order-now.ts` (the ShopCX branch).
+- **`originTime` on `shopifyAttemptBilling`.** Shopify validates the attempt's origin time against the
+  SELECTED cycle and rejects a future-cycle attempt with *"Origin time needs to be within the selected
+  billing cycle"*. `shopifyAttemptBilling` now accepts `opts.originTime`, which `resolveChargeableCycle`
+  computes to always land inside the cycle it picked — this is what lets a renewal or Order Now bill a
+  FUTURE unbilled cycle by index. Omitting it keeps Shopify's default (origin time = now).
 - **The billing/delivery policies are WHOLE-OBJECT replacements.** Sending only
   `{interval, intervalCount}` wipes `anchors` / `minCycles` / `maxCycles`, silently moving every
   future charge date on an anchored contract. `shopifyUpdateBillingInterval` read-modify-writes.

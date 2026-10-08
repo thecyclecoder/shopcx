@@ -96,23 +96,27 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
     if (recentGuard.action === "block") {
       return jsonErr({ error: recentGuard.reason, message: recentGuard.message }, 409);
     }
-    const { shopifyAttemptBilling, awaitBillingAttempt } = await import("@/lib/commerce/shopify-subscription-client");
+    const { shopifyAttemptBilling, awaitBillingAttempt, resolveChargeableCycle } = await import("@/lib/commerce/shopify-subscription-client");
     const { cycleKeyFromNextBillingDate } = await import("@/lib/subscription-cycle-charge-claim");
     const due = (resolved as { next_billing_date?: string | null }).next_billing_date ?? null;
     const cycleKey = cycleKeyFromNextBillingDate(due);
     // ⚠️ NOT the renewal worker's key. Reusing it makes Shopify REPLAY that cycle's cached
     // attempt: if the cron already succeeded the customer is told a new order was placed when none
     // was, and if it declined they can never self-serve after fixing their card — the stale
-    // decline replays forever. A distinct key means this is a real, fresh attempt; the BILLED
-    // pre-check below is what stops a genuine double charge.
-    const cycleCheck = await (await import("@/lib/commerce/shopify-subscription-client"))
-      .getBillingCycleForDate(auth.workspaceId, String(contractId), due ?? new Date().toISOString());
-    if (cycleCheck.success && cycleCheck.cycle?.status === "BILLED") {
-      return jsonErr({ error: "already_billed", message: "This order has already been placed." }, 409);
+    // decline replays forever. A distinct key means this is a real, fresh attempt; `guardRecentOrderNow`
+    // above (our claim ledger) is what stops a genuine double charge, not Shopify's calendar.
+    //
+    // ⭐ Resolve the cycle AT CHARGE TIME — the first non-skipped UNBILLED cycle by index. A BILLED
+    // cycle is no longer a reason to refuse: our date only plans when, Shopify's calendar is resolved
+    // here. Billing by index with an in-window originTime lets an Order Now charge a future unbilled
+    // cycle instead of refusing with "already placed" when the date sits in a spent cycle.
+    const cycle = await resolveChargeableCycle(auth.workspaceId, String(contractId), new Date());
+    if (!cycle.success || cycle.index == null || !cycle.originTime) {
+      return jsonErr({ error: "no_chargeable_cycle", message: cycle.error ?? "No upcoming cycle to bill." }, 409);
     }
     const started = await shopifyAttemptBilling(
       auth.workspaceId, String(contractId), `${contractId}:${cycleKey}:portal`,
-      due ? { billingCycleSelector: { date: due } } : {},
+      { billingCycleSelector: { index: cycle.index }, originTime: cycle.originTime },
     );
     if (!started.success || !started.attemptId) {
       return jsonErr({ error: "billing_failed", message: started.error ?? "Could not start billing." }, 502);
@@ -130,17 +134,18 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
     // its own, so the sub silently stops earning and the skip is indistinguishable from a healthy
     // "nothing due" beat.
     {
-      // ⭐ Advance by the customer's OWN cadence, not to Shopify's next cycle END. Its calendar is
-      // anchored to the contract's createdAt, so the next cycle's end can be most of an extra
-      // interval away — one whole interval of revenue deferred per charge.
-      //
-      // Anchored to `due` (the date they were scheduled for) rather than to now, so an early
-      // "order now" does not permanently pull the customer's whole schedule forward.
-      const { rollForwardToFutureBillingDate } = await import("@/lib/dunning");
+      // ⭐ Advance by the customer's OWN cadence, at least one cadence from `max(due, now)`. An
+      // EARLY press (due still in the future) must ALWAYS move the date by one cadence — the old
+      // `rollForwardToFutureBillingDate(due)` was a no-op there, so the date never moved, the next
+      // nightly run re-resolved the same cycle, and the sub was stranded on one date (ground truth
+      // 2026-10-08, Ashley Denson). A late press rolls forward past now. `nextDateAfterCharge`
+      // encodes both.
+      const { nextDateAfterCharge } = await import("@/lib/dunning");
       const admin = createAdminClient();
       const r = resolved as { billing_interval?: string | null; billing_interval_count?: number | null };
-      const advanceTo = rollForwardToFutureBillingDate(
+      const advanceTo = nextDateAfterCharge(
         new Date(due ?? new Date().toISOString()),
+        new Date(),
         r.billing_interval ?? "month",
         r.billing_interval_count ?? 1,
       );

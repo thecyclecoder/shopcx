@@ -53,10 +53,19 @@ test("the loss compounds across renewals", () => {
   assert.ok(lostDays >= 9, `expected the drift to accumulate, got ${lostDays} days`);
 });
 
-test("the worker anchors on scheduledFor, not the clamped dueDate", () => {
+test("the worker anchors on scheduledFor, not on the charge-time cycle", () => {
   assert.match(SRC, /const anchor = new Date\(plan\.scheduledFor\)/);
   assert.match(SRC, /scheduledFor: due,/);
-  // The clamp must still exist — it is what makes the cycle selector valid at all.
-  assert.match(SRC, /const selectorDate =/);
   assert.doesNotMatch(SRC, /const anchor = new Date\(plan\.dueDate\)/);
+});
+
+// ⭐ Charge-time cycle resolution (Phase 1). The cycle to bill is resolved at charge time by
+// INDEX via `resolveChargeableCycle` — not from `next_billing_date`. The old date-selector clamp
+// (`selectorDate`) and the `cycle_already_billed` skip are gone: a date landing in a spent cycle
+// no longer strands the sub, because the first UNBILLED cycle is always billable by index.
+test("the worker resolves the cycle at charge time, never by date", () => {
+  assert.match(SRC, /resolveChargeableCycle\(/);
+  assert.match(SRC, /billingCycleSelector: \{ index: plan\.cycleIndex \}, originTime: plan\.originTime/);
+  assert.doesNotMatch(SRC, /const selectorDate =/);
+  assert.doesNotMatch(SRC, /cycle_already_billed/);
 });

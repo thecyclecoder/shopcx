@@ -494,6 +494,32 @@ resolves the cycle by date and skips spent ones. Measured on the 2026-09-16 coho
 subs that had just charged were already dead, one by eight minutes. `shopifyRetimeContract` verifies
 after writing and returns `stranded` rather than succeeding quietly.
 
+### ⭐ Charge-time cycle resolution — 2026-10-08 (Phase 1)
+
+The stranding above is designed OUT at charge time. ShopCX-billed subs no longer resolve the cycle
+*from* `next_billing_date`; our DB row only PLANS the date, and Shopify's billing calendar is
+resolved only when we actually charge. Ground truth 2026-10-08, Ashley Denson (sub `9d657599`,
+contract `36109058221`): an early Order Now never advanced her date, a frequency change re-shaped
+Shopify's cycle #1 to end 11-01, and every date we could give her before Nov 1 was unbillable.
+
+- **`resolveChargeableCycle(ws, contractId, now)`** ([[../libraries/commerce__shopify-subscription-client]])
+  returns the **first non-skipped `UNBILLED` cycle by index** plus an `originTime` inside that cycle
+  (`now` if inside its window, else the cycle `startAt + 1s`). `shopifyAttemptBilling` now accepts
+  `originTime` so it can bill a FUTURE cycle (Shopify otherwise rejects it with *"Origin time needs
+  to be within the selected billing cycle"*).
+- **The renewal worker** (`resolve-chargeable-cycle` step) and the **Order Now ShopCX branch** bill
+  `{ index }` from the resolver. A `BILLED` date-cycle is **no longer a reason to skip or refuse** —
+  the `cycle_already_billed` skip and the Order Now `already_billed` pre-check are gone.
+- **Idempotency stays on our side:** `claimCycleCharge` keyed on our dispatched date, plus
+  `guardRecentOrderNow`. Shopify's own `idempotencyKey` is the second guard, never the calendar.
+- **An early Order Now always advances the date by one cadence.** `nextDateAfterCharge(due, now,
+  interval, count)` (in [[../libraries/dunning]]) advances by at least one cadence from
+  `max(due, now)` — the old `rollForwardToFutureBillingDate(due)` was a no-op when `due` was still in
+  the future, which is exactly what froze Ashley on one date.
+
+(Phase 2 — portal timing changes writing only our row + Shopify's display date, and retiring the
+`stranded` reconciler kind — is tracked separately.)
+
 ## ⭐ First real renewals — 2026-09-19
 
 19 migrated subs came due in one cron tick. **17 charged clean ($1,811.38), 3 declined, 0 double
