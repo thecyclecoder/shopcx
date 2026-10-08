@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: ad hoc direct-REST SELECT of non-existent order_refunds.customer_id column** · verified 2026-10-08 · → [[../inngest/supabase-log-poll]]
