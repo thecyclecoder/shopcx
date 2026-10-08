@@ -1,0 +1,1 @@
+- **Running playbooks survive auto-merge, hold-firm replies can't tease returns, and the watchdog catches stalled playbooks** · verified 2026-10-08 · → [[../inngest/unified-ticket-handler]] [[../libraries/sol-policy-bait-guard]] [[../inngest/ticket-response-sla-watchdog]] [[../lifecycles/ticket-lifecycle]]
