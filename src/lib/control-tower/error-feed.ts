@@ -3020,6 +3020,52 @@ export function isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocN
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column spec_status_history.from_status does not
+ * exist` for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.spec_status_history`. Same foreign caller family as the `created_at` sibling: the
+ * `spec_status_history` audit table exists but has no `from_status` column — its status
+ * fields are `old_status` / `new_status`, and no ShopCX code path reads a `from_status`
+ * column off this table. Postgres reports the FIRST unresolved column in a failing query, so
+ * when the same ad hoc client's `select=...from_status...` read is evaluated `from_status`
+ * first, the `created_at` pin never sees it — this dedicated `from_status` pin closes that
+ * gap without widening the drop beyond this one foreign query. There is no lever from ShopCX
+ * to make that query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:c15125967eea3929`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise` — the
+ * same narrow-gating shape (exact `column <table>.<name> does not exist` + bare
+ * SELECT-on-table shape), aimed at the same foreign caller's `from_status` column.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column spec_status_history.from_status does not exist` (or the
+ *      `public.` qualified variant, with any leading `ERROR: ` prefix stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.spec_status_history`
+ *      lookup shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so a column-missing error for ANY OTHER table, a DIFFERENT column on
+ * `spec_status_history`, or a non-SELECT statement against the table still pages. Empty /
+ * nullish message OR query returns `false` — we need both markers. Consumed by the
+ * `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]]: returning null drops the row
+ * (no error_event, no loop_alert, no signature).
+ */
+export function isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column spec_status_history.from_status does not exist" ||
+    stripped === "column public.spec_status_history.from_status does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?spec_status_history\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column subscription_cycle_charges.created_at does
  * not exist` for an ad hoc SELECT lookup / PostgREST direct-REST call against
  * `public.subscription_cycle_charges`. The `subscription_cycle_charges` ledger exists as a
