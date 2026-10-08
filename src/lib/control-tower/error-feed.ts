@@ -1678,6 +1678,69 @@ export function isForeignSupabasePostgresMissingOrdersSourceColumnNoise(
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `transactions.source_name`. Our `transactions` table does NOT carry a `source_name`
+ * column — `source_name` lives on `public.orders` (the Shopify order-source label), never
+ * on `transactions`, and no in-tree reader (src/, scripts/, shopify-extension/,
+ * supabase/migrations/, docs/brain/) issues a SELECT that names
+ * `transactions.source_name`. The message appears on Supabase's `postgres_logs` feed only
+ * when an external / manual tool (Supabase Studio's Table Editor / API Docs, a foreign
+ * SQL client, a stale exploratory query) does a raw
+ * `select ... source_name ... from public.transactions` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."transactions" ... )` CTE wrapper the
+ * same client emits over the REST endpoint. There is no lever from ShopCX to make that
+ * query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:536f2f8f383676b7`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingOrdersSourceColumnNoise` — same narrow-
+ * gating shape, scoped to the orders-only `source_name` column being looked up off the
+ * wrong (`transactions`) table instead of the `source` / `subtotal_cents` cases on
+ * `orders` itself.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column transactions.source_name does not exist` (with or without
+ *      the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on
+ *      the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.transactions` — either
+ *      (a) the bare `select ... from public.transactions` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."transactions" ... )`
+ *      CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `transactions` (a real product-schema
+ *     regression on a live transactions column) still pages,
+ *   - a column-missing error for `source_name` on ANY OTHER table — including the real
+ *     `orders.source_name` column if it ever regresses — still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL on `transactions`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column transactions.source_name does not exist" ||
+    stripped === "column public.transactions.source_name does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?transactions\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?transactions\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `orders.subtotal_cents`. Our `orders` table does NOT carry a top-level `subtotal_cents`
  * column — the pre-tax/pre-shipping line-total breakdown lives nested inside the
  * `orders.payment_details` JSONB (every in-tree reader does

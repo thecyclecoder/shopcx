@@ -68,6 +68,7 @@ import {
   isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise,
   isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
@@ -12464,6 +12465,213 @@ test("isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise return
   assert.equal(
     isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise(
       "column orders.subtotal_cents does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/transactions?select=...source_name...` against our `public.transactions`
+// table. The table exists but has NO `source_name` column — `source_name` lives on
+// `public.orders` (the Shopify order-source label), never on `transactions`, and no
+// in-tree reader selects it off `transactions`. Foreign-owned surface, no lever from us —
+// drop AT CAPTURE only when BOTH the exact column-missing message on
+// `transactions.source_name` AND a SELECT-lookup shape on `transactions` (bare OR
+// PostgREST CTE wrapper) are present. A column-missing on any other table (including the
+// real `orders.source_name`), a different column on `transactions`, or a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise drops the captured supabase-logs:536f2f8f383676b7 message+query pair (ad hoc SELECT on transactions.source_name)", () => {
+  // Unqualified and public.-qualified message variants over the bare-SELECT shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column transactions.source_name does not exist",
+      "select id, source_name from public.transactions",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column public.transactions.source_name does not exist",
+      "select source_name from public.transactions",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column transactions.source_name does not exist",
+      "select source_name from transactions limit 10",
+    ),
+    true,
+  );
+  // Trailing WHERE / ORDER BY / LIMIT still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column transactions.source_name does not exist",
+      "select id, source_name from public.transactions where workspace_id = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column transactions.source_name does not exist",
+      "SELECT ID, SOURCE_NAME FROM PUBLIC.TRANSACTIONS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "ERROR: column transactions.source_name does not exist",
+      "select source_name from public.transactions",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "  column transactions.source_name does not exist  ",
+      "   select source_name from public.transactions   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"transactions\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."transactions"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column transactions.source_name does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."transactions"."id", "public"."transactions"."source_name" FROM "public"."transactions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column public.transactions.source_name does not exist",
+      'WITH pgrst_source AS (SELECT "public"."transactions"."source_name" FROM "public"."transactions")',
+    ),
+    true,
+  );
+  // ERROR: prefix stripped as usual.
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "ERROR: column transactions.source_name does not exist",
+      'WITH pgrst_source AS (SELECT "public"."transactions"."source_name" FROM "public"."transactions")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise KEEPS a column-missing on a DIFFERENT column of transactions (a real product-schema regression on another transactions column still pages)", () => {
+  // If any other `transactions` column regressed we absolutely want the page — the pin is
+  // `transactions.source_name` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column transactions.amount_cents does not exist",
+      "select amount_cents from public.transactions",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column public.transactions.status does not exist",
+      "select status from public.transactions",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise KEEPS a source_name miss on a DIFFERENT table (the real orders.source_name column — a regression on the actual column still pages)", () => {
+  // `orders.source_name` IS the real column on a different table. If that ever regresses
+  // we WANT the page — the pin is `transactions.source_name` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column orders.source_name does not exist",
+      "select source_name from public.orders",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column public.orders.source_name does not exist",
+      "select source_name from public.orders",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise KEEPS a non-SELECT statement shape on transactions (an INSERT/UPDATE/DELETE with the same message is a real code-bug and still pages)", () => {
+  // INSERT / UPDATE / DELETE against transactions referencing a bogus `source_name` column
+  // is real code trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column transactions.source_name does not exist",
+      "insert into public.transactions (id, workspace_id, source_name) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column transactions.source_name does not exist",
+      "update public.transactions set source_name = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column transactions.source_name does not exist",
+      "delete from public.transactions where source_name is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column transactions.source_name does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."transactions"("workspace_id", "source_name") VALUES ($1, $2) RETURNING "public"."transactions"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column transactions.source_name does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."transactions" SET "source_name" = $1 WHERE "public"."transactions"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column transactions.source_name does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(
+      "column transactions.source_name does not exist",
       null,
     ),
     false,
