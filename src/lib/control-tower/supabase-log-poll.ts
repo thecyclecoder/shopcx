@@ -40,6 +40,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
+  isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
@@ -318,6 +319,21 @@ const LOG_QUERIES: LogQuery[] = [
       // operator mismatch on this table, or a non-SELECT statement on this table (real
       // code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a Supabase Studio Table Editor quick-filter (or an
+      // external PostgREST probe) typed as a case-insensitive free-text search over the jsonb
+      // `sample` column on `public.error_events` emits `WHERE "sample" ILIKE $1`, which
+      // Postgres rejects with `operator does not exist: jsonb ~~* unknown` — there is no
+      // `jsonb ~~* text` (ILIKE) operator pairing. No ShopCX code path text-matches the jsonb
+      // `sample` payload (every in-tree reader filters structurally by `signature` /
+      // `workspace_id` / timestamps), so the resulting ERROR is repair work for a query no
+      // code owns ([[../specs/error-feed-drop-error-events-sample-jsonb-ilike-adhoc-noise]],
+      // Control Tower signature `supabase-logs:51710834d2a73960`). Narrowly gated to require
+      // BOTH the exact `operator does not exist: jsonb ~~* unknown` message AND the
+      // SELECT-shape on `error_events` naming `sample ilike` (bare or PostgREST CTE wrapper) —
+      // a jsonb-ILIKE error on any OTHER table, a DIFFERENT operator mismatch on this table,
+      // or a non-SELECT statement on this table (real code-bug shape) still surfaces / pages
+      // on first sighting.
+      if (isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... source ... from
       // public.orders` lookup by an external tool / stale exploratory query. Our `orders`
       // table exposes `source_name`, not `source` — no ShopCX code path issues a SELECT on
