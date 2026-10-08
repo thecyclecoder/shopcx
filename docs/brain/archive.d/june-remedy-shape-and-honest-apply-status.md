@@ -1,0 +1,1 @@
+- **June's approved remedies execute, or fail loudly and get re-owned** · verified 2026-10-08 · → [[../libraries/cs-director]]
