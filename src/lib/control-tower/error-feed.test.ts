@@ -91,6 +91,7 @@ import {
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
+  isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
@@ -891,6 +892,91 @@ test("isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise returns false 
 // `loop_alerts` (bare or PostgREST CTE wrapper) are present. A real column-missing on
 // `tickets.closed_at`, a `loop_alerts` column rename (e.g. `resolved_at`), a non-SELECT
 // write, or a FATAL/PANIC/constraint violation still surfaces / pages.
+
+// ── isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise ──
+// A stale external/REST client reads `dashboard_notifications?select=...dismissed_at...`
+// against a column the table never owned (Control Tower signature
+// `supabase-logs:a6332efa5c7a5ea8`). Drop AT CAPTURE only when BOTH the exact
+// `column dashboard_notifications.dismissed_at does not exist` message AND the
+// SELECT-lookup shape (bare or PostgREST CTE wrapper) are present. A different missing
+// column on the table, a non-SELECT write, or the same message via another statement
+// still pages.
+
+test("isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise drops the exact message for both SELECT shapes", () => {
+  // Bare SELECT-lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(
+      "column dashboard_notifications.dismissed_at does not exist",
+      "select id, dismissed_at from public.dashboard_notifications where dismissed_at is null",
+    ),
+    true,
+  );
+  // Unqualified-FROM variant.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(
+      "column dashboard_notifications.dismissed_at does not exist",
+      "select dismissed_at from dashboard_notifications order by dismissed_at desc limit 10",
+    ),
+    true,
+  );
+  // PostgREST CTE wrapper shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(
+      "column dashboard_notifications.dismissed_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."dashboard_notifications"."id", "public"."dashboard_notifications"."dismissed_at" FROM "public"."dashboard_notifications" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // `public.`-qualified message + `ERROR: ` prefix are both normalized before the check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(
+      "ERROR: column public.dashboard_notifications.dismissed_at does not exist",
+      'WITH pgrst_source AS ( SELECT "dismissed_at" FROM "public"."dashboard_notifications" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise KEEPS a different column, a non-SELECT statement, and empty markers", () => {
+  // A DIFFERENT missing column on the same table is a real regression and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(
+      "column dashboard_notifications.dismissed does not exist",
+      "select dismissed from public.dashboard_notifications where dismissed is null",
+    ),
+    false,
+  );
+  // The exact message via a non-SELECT statement (INSERT/UPDATE write) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(
+      "column dashboard_notifications.dismissed_at does not exist",
+      "insert into public.dashboard_notifications (dismissed_at) values ($1)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(
+      "column dashboard_notifications.dismissed_at does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."dashboard_notifications" SET "dismissed_at" = $1 WHERE "id" = $2 RETURNING * )',
+    ),
+    false,
+  );
+  // Both markers are required.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(
+      "column dashboard_notifications.dismissed_at does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(
+      "",
+      "select dismissed_at from public.dashboard_notifications",
+    ),
+    false,
+  );
+});
 
 test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise drops the PostgREST CTE wrapper lookup projecting the non-existent closed_at column", () => {
   // The captured incident shape (Control Tower `supabase-logs:7dc04785e9561d24`): a stale
