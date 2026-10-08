@@ -29,7 +29,7 @@ import { sendTicketReply } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { isAutomatedInbound } from "@/lib/automated-sender";
 import { decideOutreachRoute } from "@/lib/outreach-route";
-import { markFirstTouch } from "@/lib/first-touch";
+import { markFirstTouch, shouldDispatchSolFirstTouch } from "@/lib/first-touch";
 import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
 import { matchPlaybook, matchPlaybookScored, loadDeferThreshold, applyDeferThreshold, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
 import {
@@ -1039,6 +1039,39 @@ export const unifiedTicketHandler = inngest.createFunction(
       }
     }
 
+    // ── 1a3. INHERITED ACTIVE PLAYBOOK VIA MERGE ──
+    // Phase 1 of docs/brain/specs/playbooks-survive-merge-guard-teasers-watchdog-catches-stalls.md.
+    // Auto-merge (§ 1a above) picks the newest ticket as the merge target and carries the
+    // source ticket's active playbook forward. But that newest ticket is the one the handler
+    // is running on with is_new_ticket=true, so WITHOUT this check the turn would be treated
+    // as a first touch — a full Sol session runs instead of the inherited playbook continuing
+    // (ticket ccb423fe, Angelica Devine, 2026-10-08: she replied to a shipping email mid-Refund,
+    // the new ticket inherited the running playbook via merge, yet Sol first-touched it and sent
+    // a self-contradicting stand-firm reply). Re-read active_playbook_id AFTER the merge: when it
+    // is set on a new ticket, flag `inheritedActivePlaybook` so (a) the § 3b continuation path
+    // runs even though isNew is true and (b) the § 3.95 first-touch predicate is skipped. The
+    // playbook-related vs new-topic classifier inside § 3b still decides whether to execute the
+    // step or fall through to the orchestrator — we never force a step, we just stop treating an
+    // inherited-playbook ticket as a fresh Sol first touch.
+    let inheritedActivePlaybook = false;
+    if (isNew) {
+      inheritedActivePlaybook = await step.run("check-inherited-playbook", async () => {
+        const { data: t } = await admin
+          .from("tickets")
+          .select("active_playbook_id")
+          .eq("id", tid)
+          .maybeSingle();
+        return !!t?.active_playbook_id;
+      });
+      if (inheritedActivePlaybook) {
+        await sysNote(
+          admin,
+          tid,
+          "[System] Inherited active playbook via merge — continuing playbook, Sol first-touch skipped.",
+        );
+      }
+    }
+
     const cfg = await step.run("config", () => channelCfg(admin, wsId, st.ch));
     if (!cfg.enabled) return { status: "skipped", reason: "ai_disabled" };
     const pers = await step.run("personality", () => loadPersonality(admin, cfg.personality_id));
@@ -1471,7 +1504,10 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
     // ── 3b. Active playbook — check if customer message is playbook-related
     // If playbook is active, use Haiku to determine if the message is about the playbook
     // or a completely new topic. Playbook-related → execute step. New topic → Sonnet handles.
-    if (!isNew) {
+    // `inheritedActivePlaybook` (Phase 1 of the playbooks-survive-merge spec) lets a brand-new
+    // ticket that absorbed a running playbook via auto-merge take this SAME continuation path
+    // instead of Sol's first touch.
+    if (!isNew || inheritedActivePlaybook) {
       const pbActive = await step.run("check-playbook", async () => {
         const { data: t } = await admin.from("tickets").select("active_playbook_id").eq("id", tid).single();
         if (!t?.active_playbook_id) return null;
@@ -2015,7 +2051,12 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     // for account/general — but pinning the classifier bucket into the dispatch predicate itself
     // means a future refactor that moves the short-circuit block can't silently leak an outreach
     // ticket into a Max-tier ticket-handle session.
-    if (isNew && cfg.sol_first_touch_enabled && !agentAssigned && msgType !== "outreach") {
+    // `!inheritedActivePlaybook` (Phase 1 of the playbooks-survive-merge spec) is the belt that
+    // stops a new ticket which absorbed a running playbook via auto-merge from being first-touched
+    // — those turns already ran the § 3b continuation path above (which returns when the playbook
+    // executes) OR fell through to the orchestrator on a genuine new-topic classification; either
+    // way a fresh Sol session is never the right move for an inherited-playbook ticket.
+    if (shouldDispatchSolFirstTouch({ isNew, solFirstTouchEnabled: cfg.sol_first_touch_enabled, agentAssigned, msgType, inheritedActivePlaybook })) {
       const isChatChannel = st.ch === "chat";
       const acked = await step.run("sol-first-touch-ack", async () => {
         if (await newerActivity(admin, tid, t0)) return false;
