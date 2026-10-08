@@ -1313,20 +1313,39 @@ export async function shopifyRetimeContract(
     }
     startIndex = firstOpen.index;
   }
-  await shopifySyncBillingSchedule(workspaceId, contractId, { firstDate: nextBillingDate, startIndex });
+  // ⭐ RE-ANCHOR FIRST. The sync itself refuses (`success:false`) when its first pin back-resolves
+  // to a spent cycle; that refusal must STOP the retime, not be ignored. Charging ahead into
+  // shopifySetNextBillingDate anyway is exactly what left a refused date on the contract.
+  const sync = await shopifySyncBillingSchedule(workspaceId, contractId, { firstDate: nextBillingDate, startIndex });
+  if (!sync.success) {
+    return { success: false, stranded: true, error: sync.error ?? `could not re-anchor ${contractId} to carry ${nextBillingDate}` };
+  }
 
-  const set = await shopifySetNextBillingDate(workspaceId, contractId, nextBillingDate);
-  if (!set.success) return set;
-
-  // ⚠️ VERIFY. A silent strand is the exact failure this exists to prevent, so it must never be
-  // possible to succeed quietly into one.
+  // ⚠️ VERIFY *BEFORE* WRITING THE DISPLAY DATE. A silent strand is the exact failure this exists to
+  // prevent — and a REFUSED retime must leave NOTHING behind (Phase 2 of
+  // sol-checks-billability-and-delivery-before-answering-order-now-failures). The landing cycle is
+  // fixed by the re-anchored calendar above, NOT by the display `nextBillingDate` field (Shopify
+  // treats that as a storage field, verified), so resolving it here — BEFORE shopifySetNextBillingDate
+  // — is identical to resolving it afterward, minus the partial write. This check USED to run AFTER
+  // the set and still return `success:true, stranded:true`, so a refused retime left the new date on
+  // the contract — the 2026-10-08 Ashley Denson incident: an Oct-11 retime Shopify flagged unbillable
+  // stayed put, hiding the stuck state from the next reader.
   const landing = await getBillingCycleForDate(workspaceId, contractId, nextBillingDate);
   if (landing.success && landing.cycle && (landing.cycle.status === "BILLED" || landing.cycle.skipped)) {
     console.error(
-      `[shopcx-retime] ${contractId}: ${nextBillingDate} lands in cycle #${landing.cycle.index} (${landing.cycle.status}${landing.cycle.skipped ? ", skipped" : ""}) — the renewal worker WILL skip this subscription`,
+      `[shopcx-retime] ${contractId}: ${nextBillingDate} lands in cycle #${landing.cycle.index} (${landing.cycle.status}${landing.cycle.skipped ? ", skipped" : ""}) — refusing to set the next billing date (the renewal worker WOULD skip this subscription)`,
     );
-    return { success: true, stranded: true };
+    return {
+      success: false,
+      stranded: true,
+      error: `date_not_billable — ${nextBillingDate} lands in cycle #${landing.cycle.index} (${landing.cycle.status}${landing.cycle.skipped ? ", skipped" : ""})`,
+    };
   }
+
+  // Billable landing CONFIRMED — only now write Shopify's display nextBillingDate. If this write
+  // itself fails, nothing downstream (our row) is persisted either; the caller gates on success.
+  const set = await shopifySetNextBillingDate(workspaceId, contractId, nextBillingDate);
+  if (!set.success) return set;
   return { success: true };
 }
 
