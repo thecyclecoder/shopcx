@@ -517,8 +517,31 @@ Shopify's cycle #1 to end 11-01, and every date we could give her before Nov 1 w
   `max(due, now)` — the old `rollForwardToFutureBillingDate(due)` was a no-op when `due` was still in
   the future, which is exactly what froze Ashley on one date.
 
-(Phase 2 — portal timing changes writing only our row + Shopify's display date, and retiring the
-`stranded` reconciler kind — is tracked separately.)
+### ⭐ Portal timing changes write our row only — 2026-10-08 (Phase 2)
+
+Every strand came from trying to keep Shopify's cycle calendar in sync on each portal change. Now
+our DB row is the planner and we touch Shopify cycles only when we charge (Phase 1). So a portal
+timing change writes `subscriptions.next_billing_date` (rolled forward to a future date by cadence)
+plus Shopify's **display** `nextBillingDate` — and **never re-pins the cycle calendar**:
+
+- **Date change** — `subscriptionUpdateNextBillingDate` (ShopCX branch) now calls
+  `shopifySetNextBillingDate` (display-only), NOT `shopifyRetimeContract`. The pin was itself the
+  strander: `shopifyRetimeContract` → `shopifySyncBillingSchedule` dragged a spent cycle forward onto
+  the new date, which the old by-date resolver then skipped forever. It no longer returns
+  `date_not_billable` for ShopCX.
+- **Frequency change** ([[../../src/lib/portal/handlers/frequency.ts]]) — updates our cadence +
+  rolls `next_billing_date` forward by the new cadence, then syncs the display date through the
+  engine-dispatch chokepoint. No re-pin.
+- **Resume** — the manual handler ([[../../src/lib/portal/handlers/resume.ts]]) now sets a future
+  `next_billing_date` (it never did before); `retimeAfterResume` in [[../inngest/portal-auto-resume]]
+  sets display-only. Both roll forward by the customer's own cadence.
+- **Pause / skip / dunning reschedule** — already write our row; the dunning reschedule
+  (`resetBillingDateAfterDunning`) already used `shopifySetNextBillingDate` (display-only).
+- **The drift reconciler's `stranded` kind is retired** — a billed cycle no longer blocks a charge,
+  so there is nothing to strand (see [[../libraries/commerce__shopcx-drift-reconciler]]).
+
+`shopifySyncBillingSchedule` survives only for the migration create sync (first anchor on a freshly
+created contract), not for any post-create timing change.
 
 ## ⭐ First real renewals — 2026-09-19
 

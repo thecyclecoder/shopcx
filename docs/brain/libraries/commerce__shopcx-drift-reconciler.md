@@ -11,9 +11,15 @@ two disagree the failure is silent in both directions — nothing on the charge 
 | Drift | What it costs |
 |---|---|
 | `status` — our row `active`, contract `CANCELLED`/`PAUSED` | the renewal cron selects it forever and every attempt no-ops; the customer believes they are subscribed and is not |
-| **`stranded`** — our date lands in a cycle Shopify already marked `BILLED`/skipped | ⚠️ **the renewal worker skips that subscriber FOREVER.** The worker resolves the cycle by date and skips spent ones. Measured on the 2026-09-16 cohort: two of three subs that had just charged were already dead, one by eight minutes |
 | `date` — Shopify's `nextBillingDate` differs from ours | display only (we bill by our own date), but it is what the customer and every Shopify surface see |
 | `unreadable` | the contract is gone, or app ownership was lost |
+
+⭐ **`stranded` is RETIRED (Phase 2).** It used to flag a date landing in an already-`BILLED`/skipped
+cycle, because the old renewal worker resolved the cycle BY DATE and skipped spent ones — so such a
+date meant the subscriber was never charged again. With charge-time resolution
+([[commerce__shopify-subscription-client]] `resolveChargeableCycle`) the renewal worker and Order Now
+bill the first UNBILLED cycle by index, so a billed cycle no longer blocks a charge. There is nothing
+to strand, no per-row `getBillingCycleForDate` probe, and no re-pin to recommend.
 
 At eight rows a person can eyeball this. At three hundred nobody can — which is exactly when a
 migration wave makes it matter.
@@ -24,10 +30,9 @@ migration wave makes it matter.
 contract is authoritative by definition, and applies cancel-truth in the same write (`cancelled` ⇒
 `next_billing_date` null, first `cancelled_at` preserved).
 
-**Dates are never auto-written.** A strand needs a re-pin decision (`shopifyRetimeContract` — see
-[[commerce__shopify-subscription-client]] § "Keeping a customer's own dates"), not a blind
-overwrite: overwriting our date to match Shopify's would silently reschedule a customer, and
-overwriting Shopify's to match ours is what the pin already does properly.
+**Dates are never auto-written.** Display-date drift is reported, not fixed; syncing it is a
+display-only `shopifySetNextBillingDate` call (NEVER a cycle re-pin — the pin was itself the
+strander). Overwriting our own date to match Shopify's would silently reschedule a customer.
 
 ## First live run (2026-09-18)
 
@@ -49,8 +54,8 @@ Drift went 4 → 1 in one pass, and the remaining one is correct to leave.
   are exactly the ones never checked.
 - **`DATE_TOLERANCE_MS` is 36h**, because a date-only field's clock time varies and a few hours of
   difference is the same date, not drift.
-- The strand check costs one `getBillingCycleForDate` per row — the expensive part, and the only
-  one that finds a subscriber who will never be charged again.
+- **No more per-row `getBillingCycleForDate` probe.** Retiring the strand check removed the only
+  expensive Shopify read per row; the reconciler now reads each contract once (status + display date).
 
 ## Related
 

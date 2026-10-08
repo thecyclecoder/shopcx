@@ -279,10 +279,17 @@ await shopifySyncBillingSchedule(ws, contractId, { firstDate: nextBillingDate })
 // → { success, pinned: 13, stoppedAt?: "2027-09-14" }
 ```
 
-`shopifyRetimeContract` is the portal-facing wrapper: resolve the landing cycle for the new date
-with `getBillingCycleForDate`, then sync from that index. It is what a "change my next order date",
-a pause/resume, or a skip should call — **not** `shopifySetNextBillingDate` alone, which leaves the
-Shopify-visible schedule saying something different from what we will actually charge.
+`shopifyRetimeContract` is the pin+display wrapper: resolve the landing cycle for the new date with
+`getBillingCycleForDate`, then sync from that index AND set the display field.
+
+⭐ **Phase 2 (2026-10-08): portal timing changes NO LONGER call `shopifyRetimeContract`.** With
+charge-time cycle resolution (`resolveChargeableCycle` bills the first unbilled cycle by index), the
+cycle pin is unnecessary — and the pin was itself the strander (`shopifySyncBillingSchedule` dragged
+a spent cycle forward onto the customer's new date). So a date change, frequency change, pause, resume
+and skip now call **`shopifySetNextBillingDate` (display-only, mechanism 1)** and write our own
+`next_billing_date`. The Shopify-visible date can differ from a spent cycle boundary without harm,
+because we bill by index, not by that date. `shopifyRetimeContract` / `shopifySyncBillingSchedule`
+survive only for the migration create-sync and the (optional) rolling pin on charge.
 
 **⚠️ A refused retime leaves NOTHING behind (Phase 2 of [[../specs/sol-checks-billability-and-delivery-before-answering-order-now-failures]]).** The order inside `shopifyRetimeContract` is now: (1) `shopifySyncBillingSchedule` re-anchors the calendar — its own `success:false` (first pin back-resolves to a spent cycle) short-circuits the retime; (2) `getBillingCycleForDate` VERIFIES the target lands in an unbilled cycle **before** `shopifySetNextBillingDate` is called; (3) only on a confirmed-billable landing is the display `nextBillingDate` written. A stranded landing returns `{ success: false, stranded: true }` and writes neither Shopify's `nextBillingDate` nor our mirror row (the caller — [[commerce__subscription]] `subscriptionUpdateNextBillingDate` + [[action-executor]] `change_next_date` — gates its row write on `success`). Previously the verify ran AFTER the set and returned `success:true, stranded:true`, so a refused retime still left the new date on the contract — the 2026-10-08 Ashley Denson incident, where an Oct-11 retime Shopify flagged unbillable stayed put and hid the stuck state from Sol. The two direct renewal/auto-resume callers already branch on `.stranded` before `.success`, so the `success:false` is compatible.
 
@@ -303,8 +310,9 @@ One mutation per renewal buys a permanently-correct schedule:
   date.
 - **on every successful charge** — [[../inngest/shopify-subscription-renewals]] pins the cycle that
   lands on the new `advanceTo` (plus one), so the horizon advances with the customer.
-- **on any portal date change** — pause/resume ([[../inngest/portal-auto-resume]]), skip, or an
-  explicit reschedule go through `shopifyRetimeContract`.
+- **on any portal date change** — pause/resume ([[../inngest/portal-auto-resume]]), skip, frequency
+  or an explicit reschedule set the display date only (`shopifySetNextBillingDate`) and write our
+  `next_billing_date`; they do NOT re-pin (Phase 2).
 
 Every one of these is **non-fatal**. The renewal worker bills by an explicit
 `billingCycleSelector` it resolves itself, so a failed pin is a display drift, never a missed or
