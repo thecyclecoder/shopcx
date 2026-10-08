@@ -1736,6 +1736,66 @@ export function isForeignSupabasePostgresMissingOrdersSourceColumnNoise(
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `kill_switches.key`. Our `kill_switches` table keys each switch by its `node_id` (plus
+ * the ancestry columns) — there is no bare `key` column on it, and no in-tree reader
+ * (src/, scripts/, shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT
+ * that names `kill_switches.key`. The message appears on Supabase's `postgres_logs` feed
+ * only when an external / manual tool (Supabase Studio's Table Editor / API Docs, a
+ * foreign SQL client, a stale exploratory query) does a raw
+ * `select ... key ... from public.kill_switches` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."kill_switches" ... )` CTE wrapper the
+ * same client emits over the REST endpoint. There is no lever from ShopCX to make that
+ * query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:2b7d2d7c4dd771e1`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingOrdersSourceColumnNoise` — same narrow-
+ * gating shape, scoped to the non-existent `key` column being looked up on
+ * `public.kill_switches`.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column kill_switches.key does not exist` (with or without the
+ *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.kill_switches` — either
+ *      (a) the bare `select ... from public.kill_switches` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."kill_switches" ... )`
+ *      CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `kill_switches` (a real schema
+ *     regression on a live column) still pages,
+ *   - a column-missing error for `key` on ANY OTHER table still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL on `kill_switches`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column kill_switches.key does not exist" ||
+    stripped === "column public.kill_switches.key does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?kill_switches\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?kill_switches\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `transactions.source_name`. Our `transactions` table does NOT carry a `source_name`
  * column — `source_name` lives on `public.orders` (the Shopify order-source label), never
  * on `transactions`, and no in-tree reader (src/, scripts/, shopify-extension/,

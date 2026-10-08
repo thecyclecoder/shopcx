@@ -43,6 +43,7 @@ import {
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
+  isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise,
   isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
@@ -363,6 +364,16 @@ const LOG_QUERIES: LogQuery[] = [
       // column-missing error on any other table, or on `orders` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingOrdersSourceColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a manual Supabase Studio browse / external REST
+      // probe that selects a non-existent `key` column off `public.kill_switches` — or the
+      // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."kill_switches" ... )` CTE
+      // wrapper the same client emits. Our `kill_switches` table keys by `node_id`, has no
+      // bare `key` column, and no ShopCX code path selects it, so the Postgres
+      // 'column kill_switches.key does not exist' is a query we don't own (Control Tower
+      // signature `supabase-logs:2b7d2d7c4dd771e1`). Narrowly gated to require BOTH the exact
+      // column-missing message AND the SELECT-lookup shape — a real schema regression on
+      // kill_switches (any other column, or via a non-SELECT statement) still pages.
+      if (isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... source_name ... from
       // public.transactions` lookup by an external tool / stale exploratory query — or the
       // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."transactions" ... )` CTE
