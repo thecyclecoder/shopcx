@@ -123,6 +123,7 @@ settle → advance / dun.
   again would double-bill *and* reopen dunning.
 - **Claim before charging.** `claimCycleCharge` on `(subscription_id, cycle_key)` is our guard;
   Shopify's `idempotencyKey` is the second. An Inngest step retry is only safe because of both.
+- **Customer-pressed order-now on already-billed cycle (nothing_due marker).** When the dispatcher stamps `order_now: true` on the renewal-attempt event (indicating a customer-pressed order-now from the portal or AI executor, not a cron renewal), and the attempt resolves no chargeable cycle (`no_cycle_due`) or the cycle is already claimed (`cycle_already_claimed`), the handler calls [[../libraries/order-now-verify]] `logOrderNowNothingDue` to write a `subscription.order_now_nothing_due` customer_event. The async order-now verify reads this marker as `hasNothingDueSkip` and stamps `verified_outcome='nothing_due'` — a distinguishable outcome that lets the ticket confirm "no charge; next order <date>" instead of looping on `unknown` (ticket dd5e2ba0 — Ashley Denson). See [[../specs/order-now-verify-nothing-due-verdict-for-skipped-spent-cycle]].
 - **Always pass `billingCycleSelector`.** Omitting it bills Shopify's *current* calendar cycle,
   which after a migration re-anchor is usually not the one intended.
 - **A pending attempt is neither success nor failure.** 3DS/CHALLENGED or a poll timeout returns
