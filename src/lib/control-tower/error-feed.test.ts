@@ -11148,6 +11148,51 @@ test("isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise
   );
 });
 
+test("isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise ALSO drops the account_id projection variant of the foreign browse-rows read (observed supabase-logs:06728c8285287a40 account_id sample)", () => {
+  // The real-world signature: the same foreign browse-rows PostgREST CTE read, but the
+  // legacy sibling projection is `account_id` (not branch/merge_sha) alongside
+  // `updated_at` — still a column `agent_jobs` has never owned. Widening the
+  // sibling-projection guard to recognize account_id drops this variant at capture.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise(
+      "column agent_jobs.started_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs"."id", "public"."agent_jobs"."kind", "public"."agent_jobs"."status", "public"."agent_jobs"."created_at", "public"."agent_jobs"."started_at", "public"."agent_jobs"."updated_at", "public"."agent_jobs"."account_id" FROM "public"."agent_jobs" WHERE "public"."agent_jobs"."kind" = $1 ORDER BY "public"."agent_jobs"."created_at" DESC LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise(
+      "column agent_jobs.started_at does not exist",
+      "select id, kind, status, created_at, started_at, updated_at, account_id from public.agent_jobs where kind = $1 order by created_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise(
+      "column agent_jobs.completed_at does not exist",
+      "select completed_at, kind, account_id from agent_jobs limit 10",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise KEEPS a non-SELECT INSERT/UPDATE writing agent_jobs.started_at even with the account_id sibling (a real code-write bug still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise(
+      "column agent_jobs.started_at does not exist",
+      "insert into public.agent_jobs (kind, account_id, started_at) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise(
+      "column agent_jobs.started_at does not exist",
+      "update public.agent_jobs set started_at = $1 where kind = $2 and account_id = $3",
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise KEEPS a non-SELECT statement shape (a real code-bug writing agent_jobs.started_at still pages)", () => {
   assert.equal(
     isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise(
