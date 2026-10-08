@@ -88,6 +88,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
+  isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
@@ -1967,6 +1968,119 @@ test("isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise 
     isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(
       "operator does not exist: jsonb ~~ unknown",
       'WITH pgrst_source AS ( INSERT INTO "public"."appstle_contract_snapshots"("id","raw") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise ──
+// A Supabase Studio Table Editor quick-filter (or an external PostgREST probe) typed as a
+// case-insensitive free-text search over the jsonb `sample` column on `public.error_events`
+// emits `WHERE "sample" ILIKE $1`, which Postgres rejects with
+// `operator does not exist: jsonb ~~* unknown` — there is no `jsonb ~~* text` (ILIKE) operator
+// pairing. Control Tower signature `supabase-logs:51710834d2a73960`. Drop AT CAPTURE only when
+// BOTH the exact operator-missing message AND the SELECT-shape on `error_events` naming
+// `sample ilike` are present; a jsonb-ILIKE error on any OTHER table, a DIFFERENT operator
+// mismatch on this table, or a non-SELECT shape still pages.
+
+test("isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise drops the operator-missing message paired with the PostgREST CTE wrapper AND the bare SELECT shape", () => {
+  // The Studio-emitted PostgREST CTE wrapper form (double-quoted identifiers), sample ILIKE.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      'WITH pgrst_source AS ( SELECT "public"."error_events".* FROM "public"."error_events" WHERE "public"."error_events"."sample" ilike $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(
+      "ERROR: operator does not exist: jsonb ~~* unknown",
+      'WITH pgrst_source AS ( SELECT * FROM "public"."error_events" WHERE "sample" ilike $1 )',
+    ),
+    true,
+  );
+  // The bare SELECT shape (no PostgREST wrapper) drops too — the predicate accepts both.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      "select * from public.error_events where sample ilike '%foo%'",
+    ),
+    true,
+  );
+  // Unqualified `error_events` (no `public.`) + bare SELECT is still the same ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      "select id, sample from error_events where sample ilike $1",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise KEEPS the same operator-missing message when the FROM is a different table (a real jsonb-ILIKE code bug elsewhere still pages)", () => {
+  // Same jsonb ~~* unknown message, but the query ILIKEs a jsonb column on another table —
+  // that's a real code-bug shape in our own code, not Studio noise on error_events.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      "select * from public.orders where sample ilike '%foo%'",
+    ),
+    false,
+  );
+  // PostgREST CTE wrapper form, but FROM is a different table — must still page.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      'WITH pgrst_source AS ( SELECT * FROM "public"."orders" WHERE "sample" ilike $1 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise KEEPS a DIFFERENT operator-missing error on the same table (a real code-bug with a different operator mismatch still pages)", () => {
+  // The jsonb ~~ unknown (LIKE, not ILIKE) mismatch and other operators on error_events are
+  // real code bugs we WANT to see — the pin is the exact ~~* (ILIKE) operator.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(
+      "operator does not exist: jsonb ~~ unknown",
+      "select * from public.error_events where sample ilike $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(
+      "operator does not exist: jsonb @> unknown",
+      "select * from public.error_events where sample @> $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise KEEPS a non-SELECT statement shape on the same table (a real code-bug writing error_events still pages)", () => {
+  // An INSERT / UPDATE / DELETE naming sample ILIKE indicates real code trying to mutate the
+  // table — a bug we WANT to see, not the Studio-click read we drop.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      "update public.error_events set sample = $1 where sample ilike $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      "delete from public.error_events where sample ilike $1",
+    ),
+    false,
+  );
+  // A PostgREST INSERT inside the same `WITH pgrst_source AS (...)` envelope is a real
+  // code-write and must stay captured/paged — the CTE branch requires the wrapped op to be a
+  // SELECT.
+  assert.equal(
+    isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(
+      "operator does not exist: jsonb ~~* unknown",
+      'WITH pgrst_source AS ( INSERT INTO "public"."error_events"("id","sample") VALUES ($1,$2) RETURNING * )',
     ),
     false,
   );
