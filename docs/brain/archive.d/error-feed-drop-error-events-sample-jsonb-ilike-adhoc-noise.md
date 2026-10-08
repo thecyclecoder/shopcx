@@ -1,0 +1,1 @@
+- **Drop foreign error_events jsonb-sample ILIKE search noise at capture** · verified 2026-10-08 · → [[../libraries/control-tower]]
