@@ -1,0 +1,1 @@
+- **Drop the foreign direct-REST uuid LIKE-on-subscriptions.id probe from the Supabase log feed** · verified 2026-10-08 · → [[../libraries/control-tower]] + [[../inngest/supabase-log-poll]]
