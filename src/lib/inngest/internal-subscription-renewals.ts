@@ -996,7 +996,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     // to keep vs drop. Redemptions are recorded only AFTER a successful charge
     // (record-coupon-redemptions step below).
     const { resolveRenewalDiscount } = await import("@/lib/coupons");
-    const { discountCents, keepCodes, toRedeem } = await step.run("resolve-coupons", async () =>
+    const { discountCents, keepCodes, toRedeem, unavailableCodes } = await step.run("resolve-coupons", async () =>
       resolveRenewalDiscount(
         workspace_id,
         (ctx.sub.applied_discounts as Array<Record<string, unknown>> | null) ?? null,
@@ -1004,6 +1004,53 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         (ctx.sub.customer_id as string | null) ?? null,
       ),
     );
+
+    // ── Coupon lookup unavailable → HOLD, never bill full price ─────────
+    // A code whose live lookup FAILED (Shopify throttle / HTTP / GraphQL error) is not an
+    // invalid code. Before this, the renewal dropped it: one transient failure charged full price
+    // AND deleted the customer's discount for good. Now: no charge, next_billing_date NOT advanced
+    // (the next daily run retries), the code stays on the sub. Same shape as the overcharge guard
+    // above, and taken before the per-cycle charge claim, so nothing is left in flight. The
+    // THIRD hold on a sub inside 7 days also pages ops — a persistent outage must not quietly
+    // stall billing (CEO north star: hitting a rail escalates).
+    if ((unavailableCodes ?? []).length) {
+      await step.run("emit-outcome-coupon-unavailable-hold", () =>
+        emitRenewalOutcomeHeartbeat("skipped_other"),
+      );
+      await step.run("log-coupon-unavailable-hold", async () => {
+        const { logCustomerEvent } = await import("@/lib/customer-events");
+        await logCustomerEvent({
+          workspaceId: workspace_id,
+          customerId: (ctx.sub.customer_id as string | null) ?? null,
+          eventType: "subscription.renewal_held_coupon_unavailable",
+          source: "internal_subscription_renewal",
+          summary:
+            `Renewal held — could not verify coupon ${unavailableCodes.join(", ")} (lookup failed). ` +
+            `Not charged; the code stays on the subscription and the next daily run retries.`,
+          properties: { subscription_id, unavailable_codes: unavailableCodes },
+        });
+        const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const { count } = await admin
+          .from("customer_events")
+          .select("id", { count: "exact", head: true })
+          .eq("workspace_id", workspace_id)
+          .eq("event_type", "subscription.renewal_held_coupon_unavailable")
+          .eq("properties->>subscription_id", subscription_id)
+          .gte("created_at", since);
+        if ((count ?? 0) === 3) {
+          const { notifyOpsAlert } = await import("@/lib/notify-ops-alert");
+          await notifyOpsAlert(workspace_id, {
+            severity: "critical",
+            title: "Renewal held 3x — coupon lookup keeps failing",
+            lines: [
+              `Sub ${subscription_id}: coupon ${unavailableCodes.join(", ")} could not be verified on 3 runs in 7 days.`,
+              "The sub is not being billed. Check the Shopify connection, or move the code to an internal coupon.",
+            ],
+          });
+        }
+      });
+      return { skipped: true, reason: "coupon_lookup_unavailable" };
+    }
 
     // Post-coupon taxable base: scale the line prices by the coupon ratio for
     // the Avalara quote ONLY — the order still records full prices + discount_cents.

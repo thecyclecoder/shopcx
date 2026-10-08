@@ -11,6 +11,7 @@
  *
  * See docs/brain/specs/storefront-mvp.md § Phase 1b.
  */
+import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { couponApplicableToSubStatus } from "@/lib/subscription-items";
@@ -56,41 +57,64 @@ export async function resolveCoupon(
   code: string,
   customerId?: string | null,
 ): Promise<ResolvedCoupon | null> {
+  return (await resolveCouponDetailed(workspaceId, code, customerId)).coupon;
+}
+
+/**
+ * `resolveCoupon` plus whether the answer is TRUSTWORTHY. `unavailable: true` means the lookup
+ * itself failed (a Shopify throttle / HTTP / GraphQL / network error, or our coupons read
+ * erroring) — the code may be perfectly valid. `coupon: null, unavailable: false` is a
+ * DEFINITIVE "not usable" (no such code, wrong customer, used up, unsupported discount type).
+ *
+ * ⭐ The renewal needs the difference: it drops every code that resolves to null off the sub,
+ * permanently. Before this split, one throttled Shopify call during a renewal charged the
+ * customer full price AND deleted their lifetime discount.
+ */
+export async function resolveCouponDetailed(
+  workspaceId: string,
+  code: string,
+  customerId?: string | null,
+): Promise<{ coupon: ResolvedCoupon | null; unavailable: boolean }> {
   const admin = createAdminClient();
 
   // 1. Internal table exact match (internal wins). A MASTER row is never
   //    directly usable on its own — it's only redeemed via a derived
   //    "{PREFIX}-{short_code}" code (handled in step 2), so skip masters here.
-  const { data: rows } = await admin
+  const { data: rows, error: rowsError } = await admin
     .from("coupons")
     .select("id, code, type, value, recurring_cycle_limit, customer_id, single_use, used_at, is_master")
     .eq("workspace_id", workspaceId)
     .ilike("code", code)
     .limit(1);
+  // A failed read of our own table is not "no such coupon".
+  if (rowsError) return { coupon: null, unavailable: true };
   const row = rows?.[0];
   if (row && !row.is_master) {
     // Customer-scoped coupons only resolve for that customer, and only once.
-    if (row.customer_id && (!customerId || String(row.customer_id) !== String(customerId))) return null;
-    if (row.single_use && row.used_at) return null;
+    if (row.customer_id && (!customerId || String(row.customer_id) !== String(customerId))) return { coupon: null, unavailable: false };
+    if (row.single_use && row.used_at) return { coupon: null, unavailable: false };
     return {
-      code: row.code,
-      type: row.type as CouponType,
-      value: row.value,
-      recurring_cycle_limit: row.recurring_cycle_limit,
-      source: "internal",
-      coupon_id: row.id,
+      coupon: {
+        code: row.code,
+        type: row.type as CouponType,
+        value: row.value,
+        recurring_cycle_limit: row.recurring_cycle_limit,
+        source: "internal",
+        coupon_id: row.id,
+      },
+      unavailable: false,
     };
   }
 
   // 2. Derived master code — "{PREFIX}-{short_code}" (e.g. WELCOME-GSXN).
   const derived = await resolveDerivedCoupon(admin, workspaceId, code, customerId);
-  if (derived) return derived;
+  if (derived) return { coupon: derived, unavailable: false };
 
   // 3. Real-time Shopify lookup (transitional — legacy codes). Pass the
   //    redeeming customerId so a customer-scoped Shopify code (customerSelection
   //    with a customers.customers[].id list) rejects a non-owner, closing the
   //    gap our storefront had at src/lib/coupons.ts:167 pre-Phase-2.
-  return resolveShopifyCoupon(admin, workspaceId, code, customerId);
+  return resolveShopifyCouponDetailed(admin, workspaceId, code, customerId);
 }
 
 /**
@@ -170,18 +194,43 @@ async function resolveDerivedCoupon(
   };
 }
 
-async function resolveShopifyCoupon(
+/**
+ * Classify a Shopify `codeDiscountNodeByCode` response. PURE (exported for tests).
+ *   - `unavailable` — the lookup failed: HTTP error, any GraphQL `errors` (THROTTLED, internal),
+ *     or a body without `data`. The code may be perfectly valid; never treat this as "invalid".
+ *   - `not_found` — an error-free response whose node is null: the code does not exist.
+ *   - `found` — the node's `codeDiscount` (may still be a type we don't model).
+ */
+export function classifyShopifyCodeDiscountResponse(
+  httpOk: boolean,
+  body: unknown,
+):
+  | { kind: "unavailable" }
+  | { kind: "not_found" }
+  | { kind: "found"; codeDiscount: Record<string, any> } { // eslint-disable-line @typescript-eslint/no-explicit-any
+  if (!httpOk || !body || typeof body !== "object") return { kind: "unavailable" };
+  const b = body as { errors?: unknown; data?: { codeDiscountNodeByCode?: { codeDiscount?: unknown } | null } | null };
+  if ((Array.isArray(b.errors) && b.errors.length) || !b.data) return { kind: "unavailable" };
+  const cd = b.data.codeDiscountNodeByCode?.codeDiscount;
+  if (!cd || typeof cd !== "object") return { kind: "not_found" };
+  return { kind: "found", codeDiscount: cd as Record<string, any> }; // eslint-disable-line @typescript-eslint/no-explicit-any
+}
+
+async function resolveShopifyCouponDetailed(
   admin: Admin,
   workspaceId: string,
   code: string,
   customerId?: string | null,
-): Promise<ResolvedCoupon | null> {
-  const { data: ws } = await admin
+): Promise<{ coupon: ResolvedCoupon | null; unavailable: boolean }> {
+  const { data: ws, error: wsError } = await admin
     .from("workspaces")
     .select("shopify_myshopify_domain, shopify_access_token_encrypted")
     .eq("id", workspaceId)
     .single();
-  if (!ws?.shopify_access_token_encrypted || !ws?.shopify_myshopify_domain) return null;
+  if (wsError) return { coupon: null, unavailable: true };
+  // No Shopify credentials is a CONFIGURATION state, not a blip (and the end state once Shopify
+  // is sunset) — definitive, so a renewal is never held on it forever.
+  if (!ws?.shopify_access_token_encrypted || !ws?.shopify_myshopify_domain) return { coupon: null, unavailable: false };
   try {
     const token = decrypt(ws.shopify_access_token_encrypted);
     // customerSelection tells us which specific Shopify customers a discount is
@@ -228,9 +277,10 @@ async function resolveShopifyCoupon(
         cache: "no-store",
       },
     );
-    const gql = await res.json();
-    const cd = gql?.data?.codeDiscountNodeByCode?.codeDiscount;
-    if (!cd) return null;
+    const shape = classifyShopifyCodeDiscountResponse(res.ok, res.ok ? await res.json() : null);
+    if (shape.kind === "unavailable") return { coupon: null, unavailable: true };
+    if (shape.kind === "not_found") return { coupon: null, unavailable: false };
+    const cd = shape.codeDiscount;
     const val = cd.customerGets?.value;
     // recurringCycleLimit: 0/null = forever, 1 = one charge, N = N charges.
     const rawLimit = cd.recurringCycleLimit;
@@ -282,10 +332,10 @@ async function resolveShopifyCoupon(
 
     // Reject a mismatch exactly like the internal branch at line 70: if the
     // code is bound to a specific customer, only that customer may redeem.
-    if (ownerId && (!customerId || String(ownerId) !== String(customerId))) return null;
+    if (ownerId && (!customerId || String(ownerId) !== String(customerId))) return { coupon: null, unavailable: false };
 
     if (val?.percentage != null) {
-      return {
+      return { unavailable: false, coupon: {
         code,
         type: "percentage",
         value: Math.round(Number(val.percentage) * 100),
@@ -293,10 +343,10 @@ async function resolveShopifyCoupon(
         one_time,
         source: "shopify",
         customer_id: ownerId || undefined,
-      };
+      } };
     }
     if (val?.amount?.amount != null) {
-      return {
+      return { unavailable: false, coupon: {
         code,
         type: "fixed_amount",
         value: Math.round(parseFloat(val.amount.amount) * 100),
@@ -304,12 +354,13 @@ async function resolveShopifyCoupon(
         one_time,
         source: "shopify",
         customer_id: ownerId || undefined,
-      };
+      } };
     }
-    return null;
+    // A discount type we don't model (free shipping, buy-X-get-Y) — definitive, not transient.
+    return { coupon: null, unavailable: false };
   } catch (e) {
-    console.error("[coupons] Shopify resolve failed:", e instanceof Error ? e.message : e);
-    return null;
+    console.error("[coupons] Shopify resolve failed:", errText(e));
+    return { coupon: null, unavailable: true };
   }
 }
 
@@ -643,8 +694,11 @@ export async function resolveRenewalDiscount(
   appliedDiscounts: Array<Record<string, unknown>> | null,
   subtotalCents: number,
   customerId: string | null,
-): Promise<{ discountCents: number; keepCodes: string[]; toRedeem: ResolvedCoupon[] }> {
+): Promise<{ discountCents: number; keepCodes: string[]; toRedeem: ResolvedCoupon[]; unavailableCodes: string[] }> {
   const list = ((appliedDiscounts as AppliedDiscount[] | null) || []).filter(Boolean);
+  // Codes whose lookup FAILED (not "invalid"). Kept on the sub, never applied; the renewal holds
+  // the charge rather than bill full price on a discount it simply couldn't read.
+  const unavailableCodes: string[] = [];
   let remaining = subtotalCents;
   let discountCents = 0;
   const keepCodes: string[] = [];
@@ -659,8 +713,13 @@ export async function resolveRenewalDiscount(
     if (!code || seen.has(code.toLowerCase())) continue;
     seen.add(code.toLowerCase());
 
-    const resolved = await resolveCoupon(workspaceId, code, customerId);
-    if (!resolved) continue; // unresolvable / Appstle automatic → drop
+    const { coupon: resolved, unavailable } = await resolveCouponDetailed(workspaceId, code, customerId);
+    if (unavailable) {
+      keepCodes.push(code);
+      unavailableCodes.push(code);
+      continue;
+    }
+    if (!resolved) continue; // definitively unresolvable / Appstle automatic → drop
 
     // Per-customer cap: one_time → 1; else recurring_cycle_limit (null = forever).
     const limit = resolved.one_time ? 1 : resolved.recurring_cycle_limit;
@@ -679,7 +738,7 @@ export async function resolveRenewalDiscount(
     if (limit == null || usedCount + 1 < limit) keepCodes.push(resolved.code);
   }
 
-  return { discountCents, keepCodes, toRedeem };
+  return { discountCents, keepCodes, toRedeem, unavailableCodes };
 }
 
 /**

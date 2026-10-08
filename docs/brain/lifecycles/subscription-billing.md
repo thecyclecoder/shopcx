@@ -61,7 +61,7 @@ source of truth shared with the portal display. For each due sub:
    `codeDiscountNodeByCode` → value + `recurringCycleLimit` + `appliesOncePerCustomer`/
    `usageLimit`), checks this customer's prior `coupon_redemptions` by code, applies
    if still valid, and **drops the code off the sub once its one-time/cycle limit is
-   hit**. Redemptions are recorded only AFTER a successful charge (`record-coupon-
+   hit**. A code whose lookup **fails** (Shopify throttle or error), as opposed to one that is invalid, is kept on the sub, and the renewal is **held** (no charge, date not advanced) rather than billed at full price. See [[../inngest/internal-subscription-renewals]] § Coupon-unavailable hold. Redemptions are recorded only AFTER a successful charge (`record-coupon-
    redemptions` step). Appstle **automatic** discounts (Buy 3 / free shipping) carried
    on a migrated sub are silently dropped — our pricing rules own those. **Tax is
    quoted on the POST-coupon base** (line prices scaled by the coupon ratio for the
