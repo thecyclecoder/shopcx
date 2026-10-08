@@ -36,6 +36,12 @@ export interface RecordAuditInput {
    */
   droppedLines?: Array<{ title: string; shopifyVariantId: string; sku: string | null; priceCents: number; quantity: number; paid: boolean }>;
   /**
+   * The product lines the sub carried at migration (variant + quantity) — the item set the
+   * captured `preMigrationChargeCents` prices. Stored as a `migrated_items` note so a later
+   * re-verify can tell "the customer changed their box" from "the price is wrong".
+   */
+  migratedItems?: Array<{ variant_id: string; quantity: number }>;
+  /**
    * Lines deliberately left off the migrated sub: an excluded product (MIGRATION_EXCLUDED_PRODUCT_IDS
    * in migrate-to-internal — e.g. ACV Gummies, no stock) or an Appstle one-time promo line.
    * Logged once into `notes`; no page.
@@ -59,6 +65,7 @@ export async function recordMigrationAudit(input: RecordAuditInput): Promise<str
   const notes: Array<Record<string, unknown>> = [];
   if (input.droppedLines?.length) notes.push({ type: "dropped_unmappable_items", items: input.droppedLines });
   if (input.excludedLines?.length) notes.push({ type: "excluded_product_items", items: input.excludedLines });
+  if (input.migratedItems) notes.push({ type: "migrated_items", items: input.migratedItems });
   if (notes.length) row.notes = notes;
   const { data, error } = await admin
     .from("migration_audits")
@@ -146,6 +153,68 @@ export async function reverifyImmediateCharge(
   return { ok, detail };
 }
 
+/** Canonical multiset key for a product item set (variant × quantity), order-insensitive. */
+export function itemSetKey(items: ReadonlyArray<{ variant_id?: unknown; quantity?: unknown }>): string {
+  const m = new Map<string, number>();
+  for (const i of items) {
+    const v = String(i.variant_id || "");
+    if (!v) continue;
+    m.set(v, (m.get(v) || 0) + Number(i.quantity || 1));
+  }
+  return [...m.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([v, q]) => `${v}x${q}`).join(",");
+}
+
+/**
+ * Pure verdict for `pricing_preserved`. Two legitimate shapes used to false-fail forever:
+ *
+ *  A. **Moved to the standard rate.** Appstle billed ABOVE our standard subscriber price (no S&S
+ *     ever applied, or a base set before a catalog price drop) and every product line now prices
+ *     off the plain catalog (no override / no baked lock). That is the CEO rule of 2026-08-02:
+ *     apply standard S&S, never grandfather the HIGHER price. The engine can't reproduce the old
+ *     price (base ≤ MSRP invariant) and shouldn't, so `pre > engine` here is correct, not a defect.
+ *     Still FAILS when we'd charge MORE than Appstle, or less on a locked (grandfathered) line.
+ *  B. **The customer changed their items after migration.** The captured baseline prices the
+ *     migrated item set; once the box changes, comparing to it is meaningless → skip, with a note.
+ */
+export function judgePricingPreserved(input: {
+  pre: number;
+  noBreakCents: number;
+  tol: number;
+  /** Every product line is on the catalog price (no price_override_cents / baked price_cents). */
+  allProductLinesStandard: boolean;
+  itemsChangedSinceMigration: boolean;
+}): { ok: boolean; reason: "match" | "no_baseline" | "items_changed" | "moved_to_standard_rate" | "mismatch" } {
+  const { pre, noBreakCents, tol } = input;
+  if (pre <= 0) return { ok: true, reason: "no_baseline" };
+  if (Math.abs(noBreakCents - pre) <= tol) return { ok: true, reason: "match" };
+  if (input.itemsChangedSinceMigration) return { ok: true, reason: "items_changed" };
+  if (noBreakCents < pre && input.allProductLinesStandard) return { ok: true, reason: "moved_to_standard_rate" };
+  return { ok: false, reason: "mismatch" };
+}
+
+/** Did the customer change this sub's items after the audit was created? */
+async function itemsChangedSinceMigration(
+  admin: ReturnType<typeof createAdminClient>,
+  audit: Record<string, unknown>,
+  sub: Sub,
+): Promise<boolean> {
+  const productItems = ((Array.isArray(sub.items) ? sub.items : []) as Array<Record<string, unknown>>)
+    .filter((i) => !i.is_gift && !String(i.title || "").toLowerCase().includes("shipping protection"));
+  const notes = (Array.isArray(audit.notes) ? audit.notes : []) as Array<{ type?: string; items?: Array<{ variant_id: string; quantity: number }> }>;
+  const snap = notes.find((n) => n?.type === "migrated_items");
+  if (snap?.items) return itemSetKey(snap.items) !== itemSetKey(productItems);
+  // Audits recorded before the snapshot existed: fall back to the portal item-change events,
+  // which carry the sub's (internal) contract id.
+  if (!audit.created_at || !sub.shopify_contract_id) return false;
+  const { count } = await admin
+    .from("customer_events")
+    .select("id", { count: "exact", head: true })
+    .in("event_type", ["portal.items.swapped", "portal.items.removed", "portal.items.added", "subscription.items.removed"])
+    .eq("properties->>shopify_contract_id", String(sub.shopify_contract_id))
+    .gte("created_at", String(audit.created_at));
+  return (count ?? 0) > 0;
+}
+
 /** Run the full checklist against the current sub state. */
 async function runChecks(admin: ReturnType<typeof createAdminClient>, audit: Record<string, unknown>, sub: Sub): Promise<AuditCheck[]> {
   const checks: AuditCheck[] = [];
@@ -190,10 +259,26 @@ async function runChecks(admin: ReturnType<typeof createAdminClient>, audit: Rec
       .filter((l) => l.kind === "product")
       .reduce((s, l) => s + Math.round(l.base_cents * (1 - l.sns_pct / 100)) * l.quantity, 0);
     const breakCents = noBreakCents - engineCents; // ≥ 0 — the legitimate qty-break shortfall
+    const productLines = pricing.lines.filter((l) => l.kind === "product");
+    const lockedItem = items.some((i) =>
+      !i.is_gift && !String(i.title || "").toLowerCase().includes("shipping protection") &&
+      (i.price_override_cents != null || (i.price_cents != null && Number(i.price_cents) > 0)));
+    const verdict = judgePricingPreserved({
+      pre,
+      noBreakCents,
+      tol,
+      allProductLinesStandard: !lockedItem && productLines.every((l) => !l.is_grandfathered),
+      itemsChangedSinceMigration:
+        Math.abs(noBreakCents - pre) > tol ? await itemsChangedSinceMigration(admin, audit, sub) : false,
+    });
+    const why =
+      verdict.reason === "items_changed" ? " — skipped: the customer changed this sub's items after migration"
+      : verdict.reason === "moved_to_standard_rate" ? " — moved to the standard subscriber rate (Appstle billed above it; CEO rule 2026-08-02)"
+      : "";
     push(
       "pricing_preserved",
-      pre <= 0 || Math.abs(noBreakCents - pre) <= tol,
-      `engine ${engineCents}¢ (+${breakCents}¢ qty-break = ${noBreakCents}¢ pre-break) vs pre ${pre}¢`,
+      verdict.ok,
+      `engine ${engineCents}¢ (+${breakCents}¢ qty-break = ${noBreakCents}¢ pre-break) vs pre ${pre}¢${why}`,
     );
   } catch (e) {
     push("pricing_preserved", false, e instanceof Error ? e.message : "pricing engine threw");
@@ -302,6 +387,23 @@ async function autoHealMigration(
   }
 
   return changed;
+}
+
+/**
+ * READ-ONLY preview: run the checklist for one audit against the current sub state and return the
+ * checks, WITHOUT auto-healing or writing anything (verifyMigration both heals and persists). Lets an
+ * operator see what a re-verify would do — in particular whether a row would trigger an auto-heal
+ * (items_on_uuids remap / an Appstle cancel) — before running it.
+ */
+export async function previewMigrationChecks(auditId: string): Promise<{ checks: AuditCheck[]; wouldAutoHeal: boolean } | null> {
+  const admin = createAdminClient();
+  const { data: audit } = await admin.from("migration_audits").select("*").eq("id", auditId).maybeSingle();
+  if (!audit) return null;
+  const sub = await loadSub(admin, audit.subscription_id as string);
+  if (!sub) return { checks: [{ key: "subscription_exists", ok: false, detail: "subscription row gone" }], wouldAutoHeal: false };
+  const checks = await runChecks(admin, audit, sub);
+  const failedKey = (k: string) => checks.some((c) => c.key === k && !c.ok);
+  return { checks, wouldAutoHeal: failedKey("items_on_uuids") || failedKey("appstle_cancelled") || failedKey("no_double_bill") };
 }
 
 export async function verifyMigration(auditId: string): Promise<{ status: string; checks: AuditCheck[] }> {
