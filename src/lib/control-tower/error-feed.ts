@@ -5705,6 +5705,90 @@ export function isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNois
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column director_activity.kind does not exist`
+ * for an ad hoc / stale PostgREST direct-REST SELECT against `public.director_activity`
+ * asking for a non-existent `kind` column. The `director_activity` table exists but by
+ * design carries NO `kind` column — the row records a director's recorded call shape
+ * (decision / reasoning / target), and every ShopCX reader goes through the director
+ * SDK / joined queries which never select `kind`. The column-missing ERROR only reaches
+ * this feed when a foreign app / stale SQL Editor session / deprecated integration
+ * queries `/rest/v1/director_activity?select=id,kind,created_at`. There is no lever from
+ * ShopCX to make that query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:1f0ce6d7290bc2ee`,
+ * [[../specs/error-feed-drop-director-activity-kind-direct-rest-lookup-no]]) is repair
+ * work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise` and the
+ * `isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise` family — the
+ * same narrow-gating shape (exact `column <table>.<name> does not exist` + SELECT-lookup
+ * shape covering BOTH bare and PostgREST CTE wrapper forms), aimed at a different foreign
+ * caller on a different table. No co-mention guard: `kind` here IS the bogus column (not
+ * a real column paired with a bogus one), so the pin is message + SELECT-shape only.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column director_activity.kind does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.director_activity` —
+ *      either (a) the bare `select ... from public.director_activity` shape, OR (b) the
+ *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."director_activity" ... )` CTE wrapper form with double-quoted
+ *      identifiers. Both forms are the same foreign-owned read.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have a `kind` column — e.g. `agent_jobs.kind`) still pages — the
+ *     pin is `director_activity.kind` only,
+ *   - a column-missing error on `director_activity` for a DIFFERENT column (a real
+ *     rename regression) still pages — the pin covers `kind` only,
+ *   - a `director_activity.kind` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
+ *     SELECT-lookup shape; the CTE branch likewise requires the wrapped op to be a
+ *     SELECT (a PostgREST INSERT/UPDATE inside the same wrapper stays paged),
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `director_activity` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `director_activity.kind` (with or without the `public.` qualifier).
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column director_activity.kind does not exist" ||
+    stripped === "column public.director_activity.kind does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `director_activity`
+  // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to director_activity with a bogus `kind`
+  // column is a code bug we DO want to page on, not the ad hoc direct-REST read this
+  // drop targets.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?director_activity\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."director_activity" ... )` with double-quoted identifiers. Same
+  // foreign-owned read, different rendering — the plain SELECT regex above misses it
+  // because the statement starts with `with` and the FROM clause carries the quoted
+  // `"public"."director_activity"` shape. Guarded so the CTE branch requires the wrapped
+  // op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper stays paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?director_activity\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column workspaces.slug does not exist` for an
  * ad hoc / stale PostgREST direct-REST SELECT against `public.workspaces.slug`. The
  * `workspaces` table exists but by design carries NO `slug` column — the workspace slug

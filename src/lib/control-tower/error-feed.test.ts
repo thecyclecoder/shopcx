@@ -56,6 +56,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise,
+  isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
@@ -11519,6 +11520,171 @@ test("isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise returns false on 
     isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise(
       "column workspaces.slug does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/director_activity?select=id,kind,created_at` against our
+// `public.director_activity` table. The table exists but by design carries NO `kind`
+// column — no ShopCX reader selects it. Foreign-owned surface, no lever from us — drop
+// AT CAPTURE only when BOTH the exact column-missing message on `director_activity.kind`
+// AND a SELECT-lookup shape on `director_activity` (bare OR PostgREST CTE wrapper) are
+// present. A column-missing on any other table, a different column on
+// `director_activity`, or a non-SELECT statement still pages. Control Tower signature
+// `supabase-logs:1f0ce6d7290bc2ee`.
+
+test("isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise drops the foreign direct-REST SELECT lookup on the exact director_activity.kind column-missing shape", () => {
+  // The captured production sample: unqualified and public.-qualified message variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column director_activity.kind does not exist",
+      "select id, kind, created_at from public.director_activity",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column public.director_activity.kind does not exist",
+      "select id, kind, created_at from public.director_activity",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column director_activity.kind does not exist",
+      "select kind from director_activity limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column director_activity.kind does not exist",
+      "select id, kind from public.director_activity where kind = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column director_activity.kind does not exist",
+      "SELECT ID, KIND FROM PUBLIC.DIRECTOR_ACTIVITY",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "ERROR: column director_activity.kind does not exist",
+      "select kind from public.director_activity",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "  column director_activity.kind does not exist  ",
+      "   select kind from public.director_activity   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"director_activity\" ...)` CTE wrapper form", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column director_activity.kind does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."director_activity"."id", "public"."director_activity"."kind", "public"."director_activity"."created_at" FROM "public"."director_activity" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column public.director_activity.kind does not exist",
+      'WITH pgrst_source AS (SELECT "public"."director_activity"."kind" FROM "public"."director_activity")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "ERROR: column director_activity.kind does not exist",
+      'WITH pgrst_source AS (SELECT "public"."director_activity"."kind" FROM "public"."director_activity")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a kind column still pages)", () => {
+  // `agent_jobs.kind` is a real column — if it ever regressed we absolutely want the
+  // page. The pin is `director_activity.kind` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column agent_jobs.kind does not exist",
+      "select kind from public.agent_jobs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise KEEPS a DIFFERENT column on director_activity (a real rename regression still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column director_activity.decision does not exist",
+      "select id, decision from public.director_activity",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise KEEPS a non-SELECT statement shape on director_activity (an INSERT/UPDATE/DELETE with the same message is a real code-bug and still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column director_activity.kind does not exist",
+      "insert into public.director_activity (id, kind) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column director_activity.kind does not exist",
+      "update public.director_activity set kind = $1 where id = $2",
+    ),
+    false,
+  );
+  // The PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column director_activity.kind does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."director_activity"("kind") VALUES ($1) RETURNING "public"."director_activity"."id" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column director_activity.kind does not exist",
+      "",
     ),
     false,
   );
