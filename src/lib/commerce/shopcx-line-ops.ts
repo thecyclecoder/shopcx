@@ -489,6 +489,9 @@ export async function shopcxAddOneTimeLine(
  *
  *   PDP:       currentPrice $52.46/unit, ZERO discount allocations  — the selling plan's 25% is
  *              baked INTO the unit price
+ *   PDP, S&S from a checkout discount function (planned): currentPrice at MSRP, ZERO allocations —
+ *              the checkout discount lands on the contract as an inert $0 AUTOMATIC_DISCOUNT, so
+ *              without our own "Subscribe & Save" it renews at full MSRP
  *   migrated:  currentPrice $69.95/unit (catalog MSRP) + allocations "Subscribe & Save" 25%,
  *              "Volume discount" 8%
  *
@@ -504,6 +507,10 @@ export async function shopcxAddOneTimeLine(
  *
  * Idempotent, and SAFE to re-run: a contract already in our shape has its base at MSRP and its
  * grandfathered concession captured before anything is rewritten.
+ *
+ * ⚠️ Create-time only. A line pinned below MSRP on purpose (agent price restore) also carries no
+ * allocation, so this must never run on an established contract. Its one caller is the
+ * create-ingest in `inngest/shopcx-contract-ingest.ts`.
  */
 export async function shopcxNormalizeNewContract(
   workspaceId: string,
@@ -520,19 +527,25 @@ export async function shopcxNormalizeNewContract(
       return { success: true, normalized: false };
     }
 
-    // Which lines are priced BELOW their catalog MSRP with no allocation explaining it? That is
-    // the selling-plan-baked signature. A line already at MSRP needs no rebasing, and a line
-    // carrying allocations is already in our shape.
+    // Which rule lines carry NO structural allocation? A line carrying one is already in our shape.
+    // Two checkout shapes reach here, and both renew wrong until normalized:
+    //   - priced BELOW MSRP: the selling plan's 25% is baked into the unit price. Rebase to MSRP.
+    //   - priced AT MSRP: S&S came from a checkout discount function. Shopify copies a checkout
+    //     automatic onto the contract as an AUTOMATIC_DISCOUNT that allocates $0 on renewals, so the
+    //     line would renew at full MSRP. Nothing to rebase, but it still needs its S&S + tier.
+    // A line ABOVE MSRP is left alone: that is not a checkout shape we know how to read.
     const toRebase: { lineId: string; msrpCents: number }[] = [];
+    let needsDiscounts = false;
     for (const l of live.contract.lines) {
       const v = l.sku ? ctx.variantBySku.get(String(l.sku).toLowerCase()) : undefined;
-      if (!v || !ctx.ruleProducts.has(v.product_id)) continue;
+      if (!v || !ctx.ruleProducts.has(v.product_id) || isProtection(ctx, v.product_id)) continue;
       const unit = l.currentPrice != null ? Math.round(parseFloat(l.currentPrice) * 100) : 0;
-      if (unit > 0 && unit < v.price_cents && l.structuralDiscountCents === 0) {
-        toRebase.push({ lineId: l.id, msrpCents: v.price_cents });
+      if (unit > 0 && unit <= v.price_cents && l.structuralDiscountCents === 0) {
+        needsDiscounts = true;
+        if (unit < v.price_cents) toRebase.push({ lineId: l.id, msrpCents: v.price_cents });
       }
     }
-    if (!toRebase.length) return { success: true, normalized: false };
+    if (!needsDiscounts) return { success: true, normalized: false };
 
     // ⚠️ Rebase and recompute in the SAME draft. Committed separately, a charge landing between
     // them bills the customer at full MSRP with no discounts at all.

@@ -22,8 +22,17 @@ of not waiting is a corrupted row on a money path.
 ### `shopcx-contract-ingest`
 - **Trigger:** event `shopify/subscription-contract-created` (sent by the Shopify webhook route)
 - **Retries:** 3 · **Concurrency:** `{ limit: 4 }`
-- **Steps:** `sleep 3m` → kill-switch → `ingestShopifyContract` → heartbeat
-- **Heartbeat:** `emitReactiveHeartbeat("shopcx-contract-ingest", { produced: { outcome } })` on
+- **Steps:** `sleep 3m` → kill-switch → `ingestShopifyContract` → `normalize-pricing` (only when
+  ingested) → heartbeat
+- **`normalize-pricing`** calls `shopcxNormalizeNewContract` ([[../libraries/commerce__shopcx-line-ops]]).
+  A checkout contract arrives with the selling plan's 25% baked into the unit price and **no quantity
+  break**, because Shopify's automatic discounts (Buy 2/3) run only at checkout and never on an
+  app-led billing attempt. Without this step a Buy 2/3 subscriber gets the break on the first order
+  only, and the first portal edit applies 25% again on top of the baked price. The step rebases rule lines to
+  MSRP and adds "Subscribe & Save" + "Volume discount" in one draft. A failure is logged, not
+  thrown: the row is already ingested and billable, just at the plan price.
+  The normalizer shipped with no caller and was wired here on 2026-10-08 ahead of the product-page cutover.
+- **Heartbeat:** `emitReactiveHeartbeat("shopcx-contract-ingest", { produced: { outcome, normalized, normalize_failed } })` on
   every run, ingested or skipped — a skip is the common, healthy case (it means one of our own rails
   owns the contract), so beating only on success would read as a dead node.
 
@@ -34,6 +43,10 @@ of not waiting is a corrupted row on a money path.
   out; and if no row exists yet, `syncShopifyContract` falls through to a full ingest whose own claim
   check does the same job. That fallthrough is also what recovers a contract whose `create` webhook
   was lost.
+- **Never normalizes.** A line pinned below MSRP on purpose (agent price restore) carries no
+  allocation either, so running the normalizer on every update would undo the pin. ⚠️ So a contract
+  recovered through this fallthrough is NOT normalized. Run `shopcxNormalizeNewContract` by hand
+  for it.
 
 ## Node completeness
 

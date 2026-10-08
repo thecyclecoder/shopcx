@@ -22,10 +22,17 @@ import { join } from "node:path";
 const SRC = readFileSync(join(__dirname, "shopcx-line-ops.ts"), "utf8");
 const fn = SRC.slice(SRC.indexOf("export async function shopcxNormalizeNewContract"));
 
-test("only rebases a line priced below MSRP with NO allocation explaining it", () => {
-  // That conjunction is the selling-plan-baked signature. Dropping either half would rebase a
-  // GRANDFATHERED line (below MSRP on purpose) and silently raise the customer's price.
-  assert.match(fn, /unit < v\.price_cents && l\.structuralDiscountCents === 0/);
+test("only touches a rule line with NO structural allocation, priced at or below MSRP", () => {
+  // No-allocation is the checkout signature. Dropping it would rebase a GRANDFATHERED line (below
+  // MSRP on purpose, carrying a Legacy rate) and silently raise the customer's price.
+  assert.match(fn, /unit <= v\.price_cents && l\.structuralDiscountCents === 0/);
+});
+
+test("rebases only lines BELOW MSRP; an at-MSRP line just gets its discounts", () => {
+  // At MSRP is the S&S-from-a-discount-function shape: nothing to rebase, but without our own
+  // "Subscribe & Save" it renews at full price. It must still reach the recompute.
+  assert.match(fn, /needsDiscounts = true;\s*if \(unit < v\.price_cents\) toRebase\.push/);
+  assert.match(fn, /if \(!needsDiscounts\) return \{ success: true, normalized: false \}/);
 });
 
 test("rebase and recompute commit in the SAME draft", () => {
@@ -61,4 +68,25 @@ test("an inert automatic on the contract cannot double-count with our own discou
   // only allocations carrying OUR titles, so the arithmetic cannot pick the automatic up.
   const client = readFileSync(join(__dirname, "shopify-subscription-client.ts"), "utf8");
   assert.match(client, /STRUCTURAL_DISCOUNT_TITLES\.includes\(String\(a\?\.discount\?\.title \?\? ""\)\)/);
+});
+
+// ── Wiring: the normalizer must actually run on a newly-ingested checkout contract ──
+// It shipped with no caller, so every PDP contract would have kept the plan-baked price and lost
+// its quantity break from the first renewal on.
+const INGEST = readFileSync(join(__dirname, "..", "inngest", "shopcx-contract-ingest.ts"), "utf8");
+const ingestFn = INGEST.slice(INGEST.indexOf("export const shopcxContractIngest"), INGEST.indexOf("export const shopcxContractSync"));
+const syncFn = INGEST.slice(INGEST.indexOf("export const shopcxContractSync"));
+
+test("the create-ingest normalizes a contract it just ingested, after the ingest step", () => {
+  const ingestAt = ingestFn.indexOf('step.run("ingest"');
+  const normalizeAt = ingestFn.indexOf("shopcxNormalizeNewContract(");
+  assert.ok(ingestAt > 0 && normalizeAt > ingestAt, "normalize must run after the row exists");
+  assert.match(ingestFn, /result\.ingested\s*\?\s*await step\.run\("normalize-pricing"/,
+    "only an ingested contract is normalized — a claimed (migrated / one-time) contract is not ours to reprice");
+});
+
+test("the update-sync never normalizes", () => {
+  // A line pinned below MSRP on purpose (agent price restore) carries no allocation either; running
+  // the normalizer on every contract update would silently undo the pin.
+  assert.doesNotMatch(syncFn, /shopcxNormalizeNewContract/);
 });
