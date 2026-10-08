@@ -88,6 +88,7 @@ const { count } = await admin.from("journey_sessions")
 - `token` is the URL slug for `/journey/{token}`.
 - Steps + config are rebuilt **live** from current data on every mini-site click — no `config_snapshot` to go stale.
 - Customer-facing state — never edit directly outside the completion endpoint.
+- **`expires_at` is foreign adhoc noise.** An external/stale tool or direct-REST client may query `select ... from journey_sessions?select=expires_at,...`, but this column does NOT exist (the real token expiry is `token_expires_at`). The resulting `column journey_sessions.expires_at does not exist` error is dropped at capture by `isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise` ([[../libraries/control-tower]] § error-feed.ts) in [[../specs/scope-journey-sessions-expires-at-adhoc-rest-noise]], so foreign adhoc noise does not page Platform. Errors on real columns still surface normally.
 
 ---
 

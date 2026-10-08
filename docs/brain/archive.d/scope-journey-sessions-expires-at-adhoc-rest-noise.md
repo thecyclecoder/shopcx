@@ -1,0 +1,1 @@
+- **Drop foreign PostgREST `column journey_sessions.expires_at does not exist` noise at capture** · verified 2026-10-08 · → [[../libraries/control-tower]] (`isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise`)
