@@ -18,7 +18,8 @@
  *
  * The tier counts only `productIds` (the native Buy 2/3 list). The subscription
  * part covers any selling-plan line except `excludeProductIds` (Shipping
- * Protection, which is priced at $4.95 directly). Free gift lines (line property
+ * Protection, which is priced at $4.95 directly), optionally limited to
+ * `sellingPlanIds`. Free gift lines (line property
  * `_free_gift`) neither count nor get discounted.
  *
  * Discount titles must stay "Buy N Discount": ShopCX code reads them off orders
@@ -42,6 +43,10 @@ export const DEFAULT_CONFIG = {
   minQuantity: 2,
   percentage: 8,
   subscriptionPercentage: 0,
+  // Selling plan gids that get subscriptionPercentage; null = any selling plan.
+  // Set to ShopCX's own plans at cutover so a plan that still carries its own
+  // pricing policy (Appstle's 25%) can never get a second 25%.
+  sellingPlanIds: null,
 };
 
 const EMPTY = { operations: [] };
@@ -69,7 +74,9 @@ export function cartLinesDiscountsGenerateRun(input) {
   const byPct = new Map();
   for (const line of lines) {
     const tier = inTier(line) ? tierPct : 0;
-    const pct = line.sellingPlanAllocation ? 100 - ((100 - sns) * (100 - tier)) / 100 : tier;
+    const planId = line.sellingPlanAllocation?.sellingPlan.id;
+    const snsApplies = planId && (!config.sellingPlanIds || config.sellingPlanIds.includes(planId));
+    const pct = snsApplies ? 100 - ((100 - sns) * (100 - tier)) / 100 : tier;
     const value = Math.round(pct * 100) / 100;
     if (!(value > 0)) continue;
     if (!byPct.has(value)) byPct.set(value, []);

@@ -95,3 +95,9 @@ test("free gift is never discounted by the subscription part", () => {
 test("subscription-only discount covers a sub line with no tier products in the cart", () => {
   assert.deepEqual(values(run([sub("x", OTHER)], { ...SNS, minQuantity: 1, percentage: 0 })), { x: 25 });
 });
+
+test("sellingPlanIds limits S&S to listed plans; other plans get only the tier", () => {
+  const other = { ...sub("y", KCUPS), sellingPlanAllocation: { sellingPlan: { id: "gid://shopify/SellingPlan/2" } } };
+  const cfg = { ...SNS, sellingPlanIds: ["gid://shopify/SellingPlan/1"] };
+  assert.deepEqual(values(run([sub("s", KCUPS), other], cfg)), { s: 31, y: 8 });
+});
