@@ -1,0 +1,1 @@
+- **Scope out loop_alerts.message foreign direct-REST column noise in the Control Tower feed** · verified 2026-10-08 · → [[../libraries/control-tower]]
