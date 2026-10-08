@@ -2347,6 +2347,66 @@ export function isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `ticket_analyses.intents`. `ticket_analyses` DOES exist as a product table, but no ShopCX
+ * code path, migration, view, function or trigger references an `intents` column — our table
+ * carries `issues`, not `intents` (grep both to confirm), and every read goes through the
+ * ticket-analyses SDK. The message appears on Supabase's `postgres_logs` feed only when an
+ * external / manual tool, a stale integration, or a Supabase SQL Editor session does a raw
+ * `select ... intents ... from public.ticket_analyses` lookup (or the PostgREST-generated CTE
+ * wrapper form the same client emits). There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it (Control Tower signature `supabase-logs:7f83f37774a85b5b`,
+ * [[../specs/error-feed-drop-ticket-analyses-intents-adhoc-lookup-noise]]) is repair work for
+ * a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise` — same narrow-
+ * gating shape on an existing product table, scoped to the `intents` lookup on
+ * `ticket_analyses` instead of the `role` lookup on `ticket_messages`.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column — trimmed
+ *      equal to `column ticket_analyses.intents does not exist` (with or without the
+ *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.ticket_analyses` — either
+ *      (a) the bare `select ... from public.ticket_analyses` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."ticket_analyses" ... )`
+ *      CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `ticket_analyses` (a real product-schema
+ *     regression on a live column like `issues`, `score`) still pages,
+ *   - a column-missing error for `intents` on ANY OTHER table (a real code bug on another
+ *     table that DOES have such a column) still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL, a JOIN across other tables) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column ticket_analyses.intents does not exist" ||
+    stripped === "column public.ticket_analyses.intents does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?ticket_analyses\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?ticket_analyses\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `error_events.metadata`. `error_events` DOES exist as a product table, but no ShopCX code
  * path, migration, view, function or trigger references an `error_events.metadata` column
  * (grep both to confirm). The message appears on Supabase's `postgres_logs` feed only when

@@ -100,6 +100,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
+  isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isInngestStepWrappedNonErrorLog,
   isInngestTerminalFailureMirrorLog,
@@ -17516,6 +17517,88 @@ test("isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise KEEPS the mes
     isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
       "column ticket_messages.role does not exist",
       "delete from public.ticket_messages where role = 'system'",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise ──
+// Ad hoc `select ... intents ... from public.ticket_analyses` lookup by an external tool /
+// stale integration — or the PostgREST CTE wrapper the same client emits. Our
+// `ticket_analyses` table carries `issues`, not `intents`; no ShopCX code path / migration /
+// view / function / trigger references an `intents` column, so the column-missing ERROR is
+// repair work for a query we don't own (Control Tower signature
+// `supabase-logs:7f83f37774a85b5b`). Narrowly gated: a column-missing on a live
+// `ticket_analyses` column, `intents` on any other table, or a non-SELECT statement, still
+// surfaces / pages on first sighting.
+
+test("isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise drops the exact sample from signature supabase-logs:7f83f37774a85b5b", () => {
+  // The captured sample: bare SELECT-lookup shape on public.ticket_analyses naming a
+  // column that has never existed in our schema (our table has `issues`, not `intents`).
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise(
+      "column ticket_analyses.intents does not exist",
+      "select id, intents, score from public.ticket_analyses",
+    ),
+    true,
+  );
+  // PostgREST CTE wrapper form — same foreign-owned read via the REST endpoint.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise(
+      "column ticket_analyses.intents does not exist",
+      'with pgrst_source as ( select "id", "intents" from "public"."ticket_analyses" limit 100 ) select * from pgrst_source',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix + `public.` qualifier on the column name are tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise(
+      "ERROR: column public.ticket_analyses.intents does not exist",
+      "select intents from public.ticket_analyses",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise KEEPS a column-missing error for a DIFFERENT column on ticket_analyses (a real product-schema regression still pages)", () => {
+  // A missing `issues` / `score` on ticket_analyses IS a real live-column regression we
+  // want to page on — the pin is exact to `intents`.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise(
+      "column ticket_analyses.issues does not exist",
+      "select issues from public.ticket_analyses",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise KEEPS an intents miss on a DIFFERENT table (a real code bug on another table still pages)", () => {
+  // `intents` missing on any OTHER table is a real code bug we want to see, not the
+  // foreign ticket_analyses lookup we drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise(
+      "column ticket_directions.intents does not exist",
+      "select intents from public.ticket_directions",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise KEEPS the message on a non-SELECT statement shape (INSERT/UPDATE/DELETE — real code-bug shape)", () => {
+  // A ShopCX code-path bug that writes to `ticket_analyses` and names a nonexistent
+  // `intents` column is the shape we DO want to page on — the pin is the SELECT-lookup
+  // shape only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise(
+      "column ticket_analyses.intents does not exist",
+      "insert into public.ticket_analyses (id, intents) values (gen_random_uuid(), '{}')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise(
+      "column ticket_analyses.intents does not exist",
+      "update public.ticket_analyses set intents = '{}' where id = '00000000-0000-0000-0000-000000000000'",
     ),
     false,
   );
