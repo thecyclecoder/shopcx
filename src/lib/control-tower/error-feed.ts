@@ -1181,7 +1181,7 @@ export function isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
  *      columns on `loop_alerts` — trimmed equal to `column loop_alerts.<col> does not
  *      exist` (or the `public.` qualified variant, with any leading `ERROR: ` prefix
  *      Postgres includes on the logs surface stripped) for `<col>` in {`closed_at`,
- *      `error_signature`, `loop_key`}. The qualified `<table>.<name>` form is the shape
+ *      `error_signature`, `loop_key`, `message`}. The qualified `<table>.<name>` form is the shape
  *      Postgres emits when PostgREST's CTE wrapper names the relation on the column
  *      reference, AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.loop_alerts` — either
@@ -1197,7 +1197,7 @@ export function isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
  *     `loop_alerts.<col>` only,
  *   - a column-missing error on `loop_alerts` for a DIFFERENT column (e.g. a real
  *     column rename that broke a live query — `resolved_at`, `status`, `workspace_id`)
- *     still pages — the pin covers the two foreign-noise columns only,
+ *     still pages — the pin covers the foreign-noise columns only,
  *   - a `loop_alerts.<pinned col>` error attached to a DIFFERENT statement shape
  *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the
  *     pin is the SELECT-lookup shape, matching the ad hoc direct-REST read we've
@@ -1220,21 +1220,25 @@ export function isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
   const msg = (message ?? "").trim();
   if (!msg) return false;
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
-  // Pinned to the three columns observed as foreign direct-REST noise against
+  // Pinned to the four columns observed as foreign direct-REST noise against
   // `public.loop_alerts`: `closed_at` (`supabase-logs:7dc04785e9561d24`),
-  // `error_signature` (`supabase-logs:2f7afeedcba03d28`), and `loop_key`
-  // (`supabase-logs:1676b561414d21b9`). All are columns the table has never owned — the
-  // lifecycle lives on `status` + `resolved_at`, `error_signature` is an `error_events`
-  // concept, and `loop_key` is a `loop_heartbeats` concept. A different missing column on
-  // `loop_alerts` (e.g. `resolved_at`, `status`, `workspace_id`) is a real column rename
-  // / regression and is intentionally NOT in this set.
+  // `error_signature` (`supabase-logs:2f7afeedcba03d28`), `loop_key`
+  // (`supabase-logs:1676b561414d21b9`), and `message` (`supabase-logs:7be91db5b111b4fd`).
+  // All are columns the table has never owned — the lifecycle lives on `status` +
+  // `resolved_at`, `error_signature` is an `error_events` concept, `loop_key` is a
+  // `loop_heartbeats` concept, and `message` is likewise not a `loop_alerts` column. A
+  // different missing column on `loop_alerts` (e.g. `resolved_at`, `status`,
+  // `workspace_id`) is a real column rename / regression and is intentionally NOT in this
+  // set.
   const messageMatches =
     stripped === "column loop_alerts.closed_at does not exist" ||
     stripped === "column public.loop_alerts.closed_at does not exist" ||
     stripped === "column loop_alerts.error_signature does not exist" ||
     stripped === "column public.loop_alerts.error_signature does not exist" ||
     stripped === "column loop_alerts.loop_key does not exist" ||
-    stripped === "column public.loop_alerts.loop_key does not exist";
+    stripped === "column public.loop_alerts.loop_key does not exist" ||
+    stripped === "column loop_alerts.message does not exist" ||
+    stripped === "column public.loop_alerts.message does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
