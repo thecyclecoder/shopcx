@@ -48,21 +48,17 @@ export const shopcxDriftReconcileCron = inngest.createFunction(
     let checked = 0;
     let repaired = 0;
     const drift: Record<string, number> = {};
-    const loud: string[] = [];
 
     for (const workspaceId of workspaces) {
       const report = await step.run(`reconcile-${workspaceId}`, () =>
         // `apply` fixes ONLY the status disagreement, where the contract is authoritative by
-        // definition. Dates are reported, never auto-written — a strand needs a re-pin decision.
+        // definition. The only remaining drift kind is display-date drift, which is cosmetic.
         reconcileShopcxDrift(workspaceId, { apply: true }),
       );
       checked += report.checked;
       repaired += report.repaired;
       for (const d of report.drift) {
         drift[d.kind] = (drift[d.kind] ?? 0) + 1;
-        // A strand is the only kind that silently stops a live customer being charged, so it is
-        // the only one loud enough to name every instance in the log.
-        if (d.kind === "stranded") loud.push(`${d.contractId}: ${d.detail}`);
       }
       for (const e of report.errors) console.error(`[shopcx-drift] ${workspaceId}: ${e}`);
     }
@@ -84,39 +80,32 @@ export const shopcxDriftReconcileCron = inngest.createFunction(
 
     // ⭐ ESCALATE. Every defect in this subsystem through 2026-09-30 was found because a HUMAN
     // asked "check on things" — the cron logged perfectly and nobody read the logs. A monitor that
-    // only writes to console is not a monitor. Anything non-zero now opens a repair job, deduped by
-    // signature so a persisting condition does not re-open one daily.
-    if (loud.length || lateUnexplained.length) {
+    // only writes to console is not a monitor. The `stranded` kind is retired (Phase 2: a billed
+    // cycle no longer blocks a charge), so the remaining page-worthy signal is a sub late beyond its
+    // own cadence. Deduped by signature so a persisting condition does not re-open one daily.
+    if (lateUnexplained.length) {
       await step.run("escalate", async () => {
         const admin = createAdminClient();
-        const bits = [
-          loud.length ? `${loud.length} STRANDED (will never be charged again)` : "",
-          lateUnexplained.length ? `${lateUnexplained.length} late beyond their own cadence` : "",
-        ].filter(Boolean).join("; ");
+        const bits = `${lateUnexplained.length} late beyond their own cadence`;
         await enqueueRepairJob(admin, {
           source: "loop-alert",
           // Stable signature = deduped while the condition persists, re-opens once cleared.
-          signature: `shopcx-subscription-health:${loud.length ? "stranded" : "late"}`,
+          signature: `shopcx-subscription-health:late`,
           title: `ShopCX subscriptions unhealthy — ${bits}`,
         });
         console.error(
-          `[shopcx-drift] ESCALATED — ${bits}\n  stranded: ${loud.slice(0, 20).join("\n  ")}\n  late: ${lateUnexplained.slice(0, 20).map((l) => `${l.contractId} +${l.extraDays}d`).join(", ")}`,
+          `[shopcx-drift] ESCALATED — ${bits}\n  late: ${lateUnexplained.slice(0, 20).map((l) => `${l.contractId} +${l.extraDays}d`).join(", ")}`,
         );
       });
     }
 
-    if (loud.length) {
-      console.error(
-        `[shopcx-drift] ⚠️ ${loud.length} STRANDED subscription(s) — these will never be charged again:\n  ${loud.join("\n  ")}`,
-      );
-    }
     console.log(`[shopcx-drift] checked=${checked} repaired=${repaired} drift=${JSON.stringify(drift)} late=${lateUnexplained.length} (+${late.length - lateUnexplained.length} held by dunning)`);
 
     await step.run("beat", () =>
       emitCronHeartbeat(FN_ID, {
         produced: {
           checked, repaired,
-          stranded: drift.stranded ?? 0, date: drift.date ?? 0, status: drift.status ?? 0,
+          date: drift.date ?? 0, status: drift.status ?? 0,
           late: lateUnexplained.length,
           lateInDunning: late.filter((l) => l.inDunning).length,
           lateInherited: late.filter((l) => l.inherited && !l.inDunning).length,

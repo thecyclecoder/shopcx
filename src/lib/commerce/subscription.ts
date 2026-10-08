@@ -613,21 +613,16 @@ export async function subscriptionUpdateNextBillingDate(
     return internalSubUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
   }
   if (src === "shopcx") {
-    // ⭐ Our DB row PLANS the date; Shopify's billing calendar is resolved only AT CHARGE TIME
-    // (see `resolveChargeableCycle`). So a timing change only needs to move Shopify's DISPLAY
-    // nextBillingDate — a date that lands in an already-BILLED cycle is NO LONGER a reason to
-    // refuse. The renewal worker and Order Now bill the first UNBILLED cycle by index regardless of
-    // what calendar cycle our date falls in, so a "stranded" display is cosmetic drift (the daily
-    // reconciler catches it), never a missed renewal. We therefore never refuse a ShopCX retime.
-    const { shopifyRetimeContract } = await import("@/lib/commerce/shopify-subscription-client");
-    const r = await shopifyRetimeContract(workspaceId, contractId, nextBillingDate);
-    if (r.stranded) {
-      console.warn(
-        `[subscriptionUpdateNextBillingDate] ${contractId}: display date ${nextBillingDate} lands in a spent cycle — cosmetic drift only; the charge resolves the first unbilled cycle at charge time`,
-      );
-      return { success: true };
-    }
-    return r;
+    // ⭐ Phase 2: our DB row PLANS the date; Shopify's billing calendar is resolved only AT CHARGE
+    // TIME (see `resolveChargeableCycle`). A portal timing change therefore only moves Shopify's
+    // DISPLAY `nextBillingDate` — it must NOT re-pin the cycle calendar. We call
+    // `shopifySetNextBillingDate` (display-only), NOT `shopifyRetimeContract`, because the pin was
+    // itself the strander: `shopifyRetimeContract` → `shopifySyncBillingSchedule` dragged a spent
+    // cycle forward onto the new date and the old by-date renewal resolver then skipped it forever
+    // (ground truth 2026-10-08, Ashley Denson). With charge-time index resolution the pin is
+    // unnecessary, so a date landing in a BILLED cycle is cosmetic display drift, never a refusal.
+    const { shopifySetNextBillingDate } = await import("@/lib/commerce/shopify-subscription-client");
+    return shopifySetNextBillingDate(workspaceId, contractId, nextBillingDate);
   }
   return appstleUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
 }
