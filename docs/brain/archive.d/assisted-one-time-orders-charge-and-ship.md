@@ -1,0 +1,1 @@
+- **Assisted one-time orders actually charge the card and ship** · verified 2026-10-08 · → [[../libraries/one-time-charge]]
