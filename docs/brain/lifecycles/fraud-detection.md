@@ -80,6 +80,8 @@ Hold logic in `src/lib/shopify-order-tags.ts`.
 
 These produce [[../tables/fraud_cases]] rows the same way per-order checks do.
 
+**Reviewed cases stay closed.** The nightly shared-address scan dedupes against open cases, and also skips an address when a `confirmed_fraud` / `dismissed` case for the same rule + address already covers every order currently at that address. A new order landing there opens a fresh case. Ground truth: the 7704 Romaine St case (4 orders from 2026-08-31 to 2026-09-03, all refunded) was re-opened 9 times between 2026-09-27 and 2026-10-08 because the dedupe ignored closed cases.
+
 ## Phase 5 — reseller discovery
 
 [[../inngest/reseller-discovery]] runs weekly (Mondays 6 AM CT):

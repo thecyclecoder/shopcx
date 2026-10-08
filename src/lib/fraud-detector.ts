@@ -261,6 +261,22 @@ async function detectSharedAddress(
       .limit(1)
       .maybeSingle();
 
+    // A reviewed (confirmed/dismissed) case for this address is final unless
+    // NEW orders landed there since. Without this the nightly scan re-opened the
+    // same Romaine St case every night on 4 already-refunded orders.
+    if (!existing) {
+      const currentOrderIds = (orderDetails || []).map((o) => o.id);
+      const { data: closedCases } = await admin
+        .from("fraud_cases")
+        .select("order_ids")
+        .eq("rule_id", rule.id)
+        .eq("workspace_id", workspaceId)
+        .in("status", ["confirmed_fraud", "dismissed"])
+        .filter("evidence->>address", "eq", normalizedAddress);
+      const reviewedOrderIds = new Set((closedCases || []).flatMap((c) => (c.order_ids as string[]) || []));
+      if (currentOrderIds.length && currentOrderIds.every((id) => reviewedOrderIds.has(id))) continue;
+    }
+
     if (existing) {
       await admin
         .from("fraud_cases")
