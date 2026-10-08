@@ -1040,6 +1040,89 @@ test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS a Po
   );
 });
 
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise drops the PostgREST CTE wrapper lookup projecting the non-existent fingerprint column", () => {
+  // The captured incident shape (Control Tower `supabase-logs:0ebf66ac2f9a8f98`): a stale
+  // Supabase Studio / direct-REST client reads `loop_alerts?select=...signature,fingerprint...`
+  // (the error signature lives on `signature`, not `fingerprint`), PostgREST wraps it as a
+  // `WITH pgrst_source AS ( SELECT ... FROM "public"."loop_alerts" ... )` CTE, and Postgres
+  // rejects with `column loop_alerts.fingerprint does not exist` — `fingerprint` is not a
+  // `loop_alerts` column.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.fingerprint does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."signature", "public"."loop_alerts"."fingerprint" FROM "public"."loop_alerts" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column public.loop_alerts.fingerprint does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."fingerprint" FROM "public"."loop_alerts" LIMIT 1 )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper), projecting `signature` OR `fingerprint`,
+  // also drops — same foreign surface.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.fingerprint does not exist",
+      "select id, signature, fingerprint from loop_alerts where fingerprint = 'x' limit 10",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS a PostgREST CTE INSERT/UPDATE on loop_alerts naming fingerprint (a real code-bug write still pages)", () => {
+  // A PostgREST write wrapped in the same `WITH pgrst_source AS (...)` envelope is a real
+  // code-bug shape (someone trying to write a bogus `fingerprint` column), not the ad hoc
+  // read this drop targets — the CTE branch requires the wrapped op to be a SELECT.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.fingerprint does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."loop_alerts"("id","fingerprint") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.fingerprint does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."loop_alerts" SET "fingerprint" = $1 WHERE "id" = $2 RETURNING * )',
+    ),
+    false,
+  );
+  // A bare INSERT naming `fingerprint` is likewise a real code write, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.fingerprint does not exist",
+      "insert into public.loop_alerts (fingerprint) values ($1)",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS a FATAL / constraint error on the fingerprint shape and a fingerprint column-missing on a DIFFERENT relation (real errors still page)", () => {
+  // A FATAL / PANIC / constraint violation on the same loop_alerts read shape is a
+  // different message class and is NOT the ad hoc missing-column read — it still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      'duplicate key value violates unique constraint "loop_alerts_pkey"',
+      "select id, signature, fingerprint from loop_alerts limit 1",
+    ),
+    false,
+  );
+  // A real column-missing on another table that DOES carry (or could carry) a
+  // `fingerprint` column (e.g. `error_events.fingerprint`) is a genuine regression we want
+  // to see — the pin names `loop_alerts.fingerprint` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column error_events.fingerprint does not exist",
+      "select * from public.error_events where fingerprint = 'x'",
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS the closed_at column-missing message on a DIFFERENT relation (a real product-schema regression still pages)", () => {
   // A real column-missing on another table that DOES carry a `closed_at` column
   // (e.g. `tickets.closed_at`) is a genuine regression we want to see — the pin names
