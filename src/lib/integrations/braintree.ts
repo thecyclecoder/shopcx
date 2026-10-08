@@ -205,6 +205,49 @@ export async function findBraintreeTransactionByMetadata(
   return { id: preferred.id as string, status: preferred.status as string };
 }
 
+/** Braintree sale statuses that mean the customer WAS (or is being) charged. */
+export const CHARGED_SALE_STATUSES = ["authorized", "submitted_for_settlement", "settling", "settled"] as const;
+
+/**
+ * Pure: from Braintree search results, the sale that already charged this order, if any.
+ * Exported for tests. Refund/credit transactions and failed/voided sales never count.
+ */
+export function pickChargedSale(
+  txns: ReadonlyArray<{ id?: string; type?: string; status?: string }>,
+): { id: string; status: string } | null {
+  const hit = txns.find(
+    (t) => t?.type === "sale" && !!t.id && (CHARGED_SALE_STATUSES as readonly string[]).includes(String(t.status)),
+  );
+  return hit ? { id: String(hit.id), status: String(hit.status) } : null;
+}
+
+/**
+ * The successful sale already submitted under this `orderId`, or null. Used by the internal
+ * renewal's charge step on a RETRY so a sale that went through — but whose result was lost
+ * before Inngest recorded the step (a deploy reaping the function mid-step, a timeout) — is
+ * reused instead of charged again. THROWS on a search failure: the caller must not fall through
+ * to a fresh sale when it could not verify there isn't one already.
+ */
+export async function findChargedSaleByOrderId(
+  workspaceId: string,
+  orderId: string,
+): Promise<{ id: string; status: string } | null> {
+  const gateway = await getBraintreeGateway(workspaceId);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const matches: any[] = await new Promise<any[]>((resolveP, rejectP) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stream: any = gateway.transaction.search((s: any) => {
+      s.orderId().is(orderId);
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const out: any[] = [];
+    stream.on("data", (t: unknown) => out.push(t));
+    stream.on("end", () => resolveP(out));
+    stream.on("error", (e: Error) => rejectP(e));
+  });
+  return pickChargedSale(matches);
+}
+
 /**
  * Verify credentials by calling a cheap, read-only Braintree endpoint.
  * We use clientToken.generate — it's free, returns fast, and any
