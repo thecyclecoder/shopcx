@@ -443,10 +443,15 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     triggers: [{ event: "internal-subscription/renewal-attempt" }],
   },
   async ({ event, step, attempt }) => {
-    const { subscription_id, workspace_id, expected_next_billing_date } = event.data as {
+    const { subscription_id, workspace_id, expected_next_billing_date, order_now } = event.data as {
       subscription_id: string;
       workspace_id: string;
       expected_next_billing_date?: string | null;
+      /** True when fired by a customer-pressed order-now (subscriptionOrderNow),
+       *  not the nightly renewal cron. Drives the `nothing_due` marker on an
+       *  already-billed-cycle skip so the async order-now verify can report a
+       *  truthful no-op instead of looping on 'unknown'. */
+      order_now?: boolean;
     };
 
     const admin = createAdminClient();
@@ -1299,6 +1304,28 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
           },
         });
       });
+      // A customer-pressed order-now that lands on a cycle ALREADY resolved by a
+      // real charge (`succeeded`) is a truthful no-op: the current cycle already
+      // billed and shipped, nothing is due now. Surface the `nothing_due` marker
+      // the async order-now verify reads so the ticket confirms "no charge; next
+      // order <date>" instead of looping on 'unknown' → a false "it's processing"
+      // (spec: order-now verify 'nothing_due' verdict; ticket dd5e2ba0). A
+      // non-`succeeded` existing status (in_flight) is a genuine race, not a
+      // nothing-due — left to the verify's normal unknown/decline handling.
+      if (order_now && claim.existing_status === "succeeded") {
+        await step.run("log-order-now-nothing-due", async () => {
+          const { logOrderNowNothingDue } = await import("@/lib/commerce/order-now-verify");
+          await logOrderNowNothingDue({
+            workspace_id,
+            customer_id: (ctx.sub.customer_id as string | null) ?? null,
+            subscription_id,
+            contract_id: (ctx.sub.shopify_contract_id as string | null) ?? null,
+            next_billing_date: (ctx.sub.next_billing_date as string | null) ?? null,
+            reason: "refused_duplicate_cycle",
+            billing_source: "internal",
+          });
+        });
+      }
       return {
         skipped: true,
         reason: "refused_duplicate_cycle",

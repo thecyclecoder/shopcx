@@ -33,6 +33,7 @@ function baseEvidence(overrides: Partial<OrderNowEvidence> = {}): OrderNowEviden
     hasBillingSuccessEvent: false,
     lastPaymentStatus: null,
     hasNewPaidOrder: false,
+    hasNothingDueSkip: false,
     ...overrides,
   };
 }
@@ -103,6 +104,55 @@ test("computeOrderNowVerdict: last_payment_status='skipped' does NOT force a ver
   assert.equal(
     computeOrderNowVerdict(baseEvidence({ lastPaymentStatus: "skipped" })),
     "unknown",
+  );
+});
+
+// ── nothing_due: skipped spent-cycle renewal (ticket dd5e2ba0 — Ashley Denson) ──
+//
+// The named failing state: an order-now against a shopcx/internal sub whose
+// current cycle already billed and whose next renewal is in the future produces
+// NO paid order, NO billing-success, NO billing-failure — the old predicate
+// mapped that to 'unknown' and looped to a stale 'drifted'. With the pipeline's
+// explicit `subscription.order_now_nothing_due` marker the predicate now returns
+// the truthful terminal `nothing_due`.
+
+test("computeOrderNowVerdict: nothing-due skip marker, no other signal → 'nothing_due' (NOT 'unknown')", () => {
+  assert.equal(
+    computeOrderNowVerdict(baseEvidence({ hasNothingDueSkip: true })),
+    "nothing_due",
+  );
+});
+
+test("computeOrderNowVerdict: nothing-due skip wins over a spent cycle's leftover last_payment_status='succeeded' (must not read as a fresh paid order)", () => {
+  // The already-billed cycle left last_payment_status='succeeded'. Without the
+  // explicit skip precedence that WEAK signal would stamp a false 'paid' →
+  // "your order is processing". The skip marker makes it a truthful no-op.
+  assert.equal(
+    computeOrderNowVerdict(baseEvidence({
+      hasNothingDueSkip: true,
+      lastPaymentStatus: "succeeded",
+    })),
+    "nothing_due",
+  );
+});
+
+test("computeOrderNowVerdict: a STRONG paid signal still wins over a nothing-due marker (a real charge DID land)", () => {
+  // Defensive: if a genuine new paid order exists alongside a (stale) skip
+  // marker, the customer ended up charged — report 'paid', never 'nothing_due'.
+  assert.equal(
+    computeOrderNowVerdict(baseEvidence({ hasNothingDueSkip: true, hasNewPaidOrder: true })),
+    "paid",
+  );
+  assert.equal(
+    computeOrderNowVerdict(baseEvidence({ hasNothingDueSkip: true, hasBillingSuccessEvent: true })),
+    "paid",
+  );
+});
+
+test("computeOrderNowVerdict: a decline still wins over a nothing-due marker (a real failure landed)", () => {
+  assert.equal(
+    computeOrderNowVerdict(baseEvidence({ hasNothingDueSkip: true, hasBillingFailureEvent: true })),
+    "declined",
   );
 });
 

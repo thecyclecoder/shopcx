@@ -18,6 +18,13 @@
  *     verified_outcome='drifted'. The dispatcher's guard predicate
  *     (`dunning.recovery_email_sent` since fired_at) prevents a double-send
  *     when the billing-failure webhook's dunning cycle already delivered.
+ *   - nothing_due → the shopcx/internal renewal-attempt pipeline resolved the
+ *     order-now against an already-billed / not-yet-due cycle (no charge, no new
+ *     order). TERMINAL — no reschedule, no recovery journey. Stamps
+ *     verified_outcome='nothing_due' so the ticket confirms the truthful state
+ *     ('no charge; this cycle already shipped; next order <date>') instead of a
+ *     false 'your order is processing' that loops to 'drifted'. Ticket dd5e2ba0
+ *     (Ashley Denson) is the ground-truth case.
  *   - unknown → re-schedule one more time (attempt+1, capped at 3); the
  *     third unknown stamps 'drifted' so the ledger row terminally resolves.
  *
@@ -147,13 +154,16 @@ export const orderNowVerify = inngest.createFunction(
     }
 
     // Terminal verdict → ledger outcome. Paid + confirmed end state stamps
-    // `confirmed`; everything else (declined, unknown-terminal, paid but
-    // end-state drifted) stamps `drifted` so the message-is-last gate can't
+    // `confirmed`; a pipeline no-op stamps `nothing_due` (truthful "no charge,
+    // nothing to ship now"); everything else (declined, unknown-terminal, paid
+    // but end-state drifted) stamps `drifted` so the message-is-last gate can't
     // read a stale confirmation.
-    const outcomeForLedger =
+    const outcomeForLedger: "confirmed" | "nothing_due" | "drifted" =
       verdict === "paid" && confirmationOutcome?.confirmed
         ? "confirmed"
-        : "drifted";
+        : verdict === "nothing_due"
+          ? "nothing_due"
+          : "drifted";
 
     if (data.resolution_event_id) {
       await step.run("stamp-ledger", async () => {
@@ -186,7 +196,7 @@ export const orderNowVerify = inngest.createFunction(
 async function stampResolutionOutcome(
   workspaceId: string,
   resolutionEventId: string,
-  outcome: "confirmed" | "drifted",
+  outcome: "confirmed" | "nothing_due" | "drifted",
 ): Promise<void> {
   const admin = createAdminClient();
   try {
