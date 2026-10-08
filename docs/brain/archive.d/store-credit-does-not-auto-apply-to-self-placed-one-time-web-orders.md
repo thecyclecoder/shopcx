@@ -1,0 +1,1 @@
+- **Store credit does not auto-apply to self-placed one-time web orders** · verified 2026-10-08 · → [[../libraries/store-credit]]
