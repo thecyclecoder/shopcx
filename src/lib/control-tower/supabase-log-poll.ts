@@ -65,6 +65,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
+  isForeignSupabasePostgresUuidLikeOnSubscriptionsIdAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
@@ -680,6 +681,12 @@ const LOG_QUERIES: LogQuery[] = [
       // error on any other table, or a non-SELECT PostgREST wrapper (INSERT /
       // UPDATE) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a Supabase Studio / direct-REST quick-filter that
+      // LIKEs the uuid `subscriptions.id` column, which Postgres rejects with `operator does
+      // not exist: uuid ~~ unknown`. No ShopCX code path issues a uuid LIKE (a predeploy guard
+      // forbids LIKE on uuid columns), so the ERROR is repair work for a query we don't own.
+      // Control Tower signature `supabase-logs:a3e4adaac3bc5983`.
+      if (isForeignSupabasePostgresUuidLikeOnSubscriptionsIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / hand-typed SQL Editor lookup
       // against `public.approval_decisions` that references the non-existent
       // `agent_jobs.branch_name` column and dangles at the end, which Postgres reports as
