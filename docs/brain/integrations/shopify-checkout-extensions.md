@@ -1,6 +1,6 @@
 # shopify-checkout-extensions
 
-The Shopify **checkout UI extensions** in `shopify-extension/extensions/` — blocks that render inside Shopify's hosted checkout (not the theme). Each is a `purchase.checkout.block.render` target the merchant places in the checkout editor, and each reads from a ShopCX API route.
+The Shopify **checkout UI extensions** (and one discount function, § Free Cinnamon Roll Creamer discount function) in `shopify-extension/extensions/` — blocks that render inside Shopify's hosted checkout (not the theme). Each is a `purchase.checkout.block.render` target the merchant places in the checkout editor, and each reads from a ShopCX API route.
 
 | Extension | Handle | Shows | Calls |
 |---|---|---|---|
@@ -72,6 +72,17 @@ The logos are the Simple Icons (CC0) USPS and DHL marks in brand colour, rendere
 ## Fail-closed design
 
 Guarantee and reviews render **nothing** until data arrives and nothing on any error — no skeleton, no hardcoded fallback. A guarantee is a legal promise sourced from [[../tables/policies]] via `getPolicyCustomerFacing`; reviews come from `product_reviews`, the same corpus as the PDP. Neither declares `block_progress`, so neither can stop a checkout.
+
+## Free Cinnamon Roll Creamer discount function
+
+`creamer-gift-discount` is not a UI block: it is a **Shopify discount function** (`type = "function"`, target `cart.lines.discounts.generate.run`, JS compiled to wasm by the CLI). Shopify runs it on every cart and checkout once an automatic app discount points at it, so the $0 shows in the cart drawer, cart page and checkout alike. Promo started 2026-10-08 (founder's call: subscriptions or 2+ boxes).
+
+- **Rule.** The cart qualifies when any Amazing Coffee K-Cups line (product `7467749965997`) has a selling plan, or K-Cups quantities total 2+. Then **one unit** of the gift line is 100% off, message "Free Cinnamon Roll Creamer".
+- **Gift line.** The real Amazing Creamer Cinnamon Roll variant (`43512521523373`, SKU `SC-CREAMER-CINNAROLL`, $69.95), one-time, carrying line property `_free_gift=cinnamon-roll-creamer`. Only that tagged one-time line is ever discounted, so a creamer bought on purpose or on subscription stays paid. Being one-time, it never joins the subscription contract and never repeats on renewals.
+- **Who adds the line.** The function can only discount, never add. The theme cart script (`assets/cart-drawer-custom.js`, same pattern as the $140 mystery gift) adds and removes the tagged line as the cart starts or stops qualifying. Ship that only after the discount is live, or the creamer shows at full price.
+- **Config.** Production ids are defaults in `src/cart_lines_discounts_generate_run.js`; the discount's `$app:function-configuration` JSON metafield overrides `qualifyingProductIds`, `giftVariantId`, `giftTag`, `minQuantity`, `message` with no redeploy.
+- **Turning it on.** After `shopify app deploy`, create it with Admin `discountAutomaticAppCreate` (`functionHandle: "creamer-gift-discount"`, `discountClasses: [PRODUCT]`, `combinesWith` product/order/shipping all true so it stacks with Buy 2 and free shipping). End the promo by setting the discount's end date or deleting it.
+- **Tests.** `cd shopify-extension/extensions/creamer-gift-discount && npm test` (plain `node --test`, no build); `npx shopify app function run` runs the compiled wasm on a JSON input.
 
 ## Deploy
 

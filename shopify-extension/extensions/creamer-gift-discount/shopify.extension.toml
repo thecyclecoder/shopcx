@@ -1,0 +1,18 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "t:name"
+handle = "creamer-gift-discount"
+type = "function"
+description = "t:description"
+
+  # Product discount only. Create the automatic discount with
+  # discountClasses: [PRODUCT]; see docs/brain/integrations/shopify-checkout-extensions.md.
+  [[extensions.targeting]]
+  target = "cart.lines.discounts.generate.run"
+  input_query = "src/cart_lines_discounts_generate_run.graphql"
+  export = "cart-lines-discounts-generate-run"
+
+  [extensions.build]
+  command = ""
+  path = "dist/function.wasm"
