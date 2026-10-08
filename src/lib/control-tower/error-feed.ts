@@ -1478,6 +1478,74 @@ export function isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawA
 }
 
 /**
+ * Foreign-app noise — Postgres rejecting a case-insensitive free-text search that ILIKEs the
+ * jsonb `sample` column on `public.error_events`. A Supabase Studio Table Editor quick-filter
+ * (or an external PostgREST probe) typed against the jsonb `sample` payload emits
+ * `WHERE "sample" ILIKE $1`, which Postgres rejects with `operator does not exist: jsonb ~~*
+ * unknown` — there is no `jsonb ~~* text` (ILIKE) operator pairing. `error_events` is a real
+ * product table, but no ShopCX code path text-matches the jsonb `sample` payload (every
+ * in-tree reader filters structurally by `signature` / `workspace_id` / timestamps), so the
+ * resulting ERROR is repair work for a query no code owns
+ * ([[../specs/error-feed-drop-error-events-sample-jsonb-ilike-adhoc-noise]], Control Tower
+ * signature `supabase-logs:51710834d2a73960`) and is indistinguishable from the dozen sibling
+ * SQL-Editor-typo drops already filtered the same way.
+ *
+ * Sibling of `isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise` —
+ * same narrow-gating shape (exact operator-missing message + SELECT-lookup shape covering
+ * BOTH bare and PostgREST CTE wrapper forms), scoped to the jsonb-ILIKE-on-error_events.sample
+ * search instead of the jsonb-LIKE-on-appstle_contract_snapshots.raw typo.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical operator-missing shape for the jsonb ILIKE —
+ *      trimmed equal to `operator does not exist: jsonb ~~* unknown` (any leading `ERROR: `
+ *      prefix Postgres includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute (quote-stripped + lowercased) is a SELECT-shape on
+ *      `error_events` — either (a) the bare `select ... from (public.)?error_events` shape,
+ *      OR (b) the PostgREST-generated `with pgrst_source as ( select ... )` CTE wrapper form —
+ *      AND contains the `sample ilike` marker.
+ *
+ * Narrowly gated so:
+ *   - a jsonb-ILIKE operator-missing error on ANY OTHER table (a real code bug issuing a
+ *     jsonb ILIKE elsewhere) still pages,
+ *   - a DIFFERENT operator-missing error on `error_events` (e.g. `jsonb ~~ unknown` LIKE,
+ *     `jsonb @> unknown`, a real code-bug with a different operator mismatch) still pages,
+ *   - the same message attached to a non-SELECT statement on this table (INSERT / UPDATE /
+ *     DELETE / DDL — a real code-bug shape) still pages,
+ *   - a FATAL / PANIC / constraint violation / permission-denied on `error_events` is
+ *     untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped !== "operator does not exist: jsonb ~~* unknown") return false;
+  // Quote-stripped + lowercased so `"public"."error_events"` collapses to
+  // `public.error_events` and `"sample" ilike` collapses to `sample ilike`, covering both the
+  // bare and the double-quoted PostgREST-wrapper forms with one shape predicate.
+  const q = (query ?? "").trim().toLowerCase().replace(/"/g, "");
+  if (!q) return false;
+  // The free-text ILIKE marker on the jsonb `sample` column — the tell that distinguishes the
+  // Studio-click/REST search from any structural filter our own code issues.
+  if (!/\bsample\s+ilike\b/.test(q)) return false;
+  const bareSelect =
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q);
+  // PostgREST wraps direct-REST row reads as `WITH pgrst_source AS ( SELECT ... )` — the
+  // branch requires the wrapped op to be a SELECT so a PostgREST INSERT/UPDATE inside the
+  // same envelope (a real code-write) stays captured/paged.
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `orders.source`. Our `orders` table exposes `source_name`, not `source` — no ShopCX code
  * path (src/, scripts/, shopify-extension/, docs/brain/) issues a SELECT on `orders.source`.
