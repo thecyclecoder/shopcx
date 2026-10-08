@@ -1262,6 +1262,64 @@ export function isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `dashboard_notifications.dismissed_at`
+ * column for an ad hoc direct-REST lookup on a table ShopCX does not read that way. A
+ * stale external/REST client SELECTs `dismissed_at` from `public.dashboard_notifications`,
+ * Supabase's `postgres_logs` feed captures the resulting undefined_column ERROR, and
+ * log-poll mints a Control Tower incident for a query we don't own
+ * ([[../specs/error-feed-drop-dashboard-notifications-dismissed-at-direct-]], Control
+ * Tower signature `supabase-logs:a6332efa5c7a5ea8`). The direct twin of
+ * `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise` above.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column dashboard_notifications.dismissed_at does not exist` (with
+ *      or without the `public.` qualifier and any leading `ERROR: ` prefix Postgres
+ *      includes on the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.dashboard_notifications`
+ *      — either (a) the bare `select ... from public.dashboard_notifications` shape, OR
+ *      (b) the PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."dashboard_notifications" ... )` CTE wrapper form with double-quoted
+ *      identifiers.
+ *
+ * Intentionally narrow — any genuine schema regression still pages:
+ *   - a DIFFERENT missing column on `dashboard_notifications` (e.g. `dismissed`,
+ *     `read_at`, `workspace_id`) still pages — the pin covers `dismissed_at` only,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL, a JOIN, a non-SELECT wrapped op inside the CTE) still pages,
+ *   - a FATAL / PANIC / constraint violation / relation-missing on the table is untouched
+ *     (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — returning null fully suppresses the row (no error_event, no
+ * loop_alert, no signature). A capture-time drop, not a `transient` flag.
+ */
+export function isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column dashboard_notifications.dismissed_at does not exist" ||
+    stripped === "column public.dashboard_notifications.dismissed_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `dashboard_notifications` — any trailing WHERE/LIMIT/ORDER BY is
+  // fine; the pin is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement
+  // (real code-bug shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?dashboard_notifications\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."dashboard_notifications" ... )` with double-quoted identifiers. Guarded
+  // so the CTE branch requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE
+  // inside the same wrapper is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."dashboard_notifications"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc lookup that
  * mistypes `error_events.first_seen` (our schema has `first_seen_at`, not `first_seen`).
  * The twin of `isForeignSupabasePostgresMissingControlTowerEventsLookupNoise`, aimed at
