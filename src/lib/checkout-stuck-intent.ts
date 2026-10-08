@@ -6,11 +6,15 @@
  * intent, distinct from the coarse `account` bucket the [[unified-ticket-handler]]
  * classify-bucket step returns. A customer who "can't check out", whose OTP /
  * verification code isn't arriving, who is "stuck at the payment screen", asks
- * "how do I finish my order", OR who is BLOCKED PRE-PURCHASE on the storefront
+ * "how do I finish my order", who is BLOCKED PRE-PURCHASE on the storefront
  * itself (can't select a variant / can't choose a subscription tier / no option
- * to subscribe / can't add to cart) is a candidate for the assisted-purchase
- * concierge flow — not a stateless "try another card" dead-end reply and not a
- * cache-clear loop that invents UI to click through.
+ * to subscribe / can't add to cart), OR who is ALREADY mid add-payment-method
+ * journey but OBJECTS to the payment link itself ("I don't trust this to add
+ * payment" / "is this safe" / "looks like a scam") or asks for an ALTERNATIVE
+ * payment rail ("do you have PayPal?") is a candidate for the assisted-purchase
+ * concierge flow — not a stateless "try another card" dead-end reply, not a
+ * cache-clear loop that invents UI to click through, and not an escalation that
+ * abandons a live buying customer.
  *
  * Founder directive (2026-07-10): ANY checkout issue must default — as fast as
  * possible — to us CONCIERGING the purchase. Ticket aa0b6697 (Latrina C.) was
@@ -42,11 +46,16 @@ export interface CheckoutStuckClassification {
 
 /**
  * CUES — high-signal phrases seeded from the Phase 1 spec paragraph + real
- * customer language for the four categories:
+ * customer language for the categories:
  *   (a) "can't check out"
  *   (b) payment / OTP / verification code isn't arriving
  *   (c) "stuck at the payment or authentication screen"
  *   (d) "how do I finish my order"
+ *   (e) pre-purchase storefront block (variant / subscribe / add-to-cart)
+ *   (f) payment-link TRUST objection (ticket cd385c7f — "I don't trust this
+ *       to add payment" / "is this safe" / "looks like a scam")
+ *   (g) alternative payment-RAIL question (ticket cd385c7f — "do you have
+ *       PayPal?"; the same secure link already accepts PayPal Vault)
  *
  * Ordered most-specific → most-general so a message that could match two entries
  * gets labeled with the tightest one. Every entry must be a phrase a customer
@@ -101,6 +110,36 @@ const CUES: Array<{ id: string; re: RegExp }> = [
   {
     id: "cant_add_to_cart",
     re: /\b(?:can(?:'?t|not)|un(?:able|able\s+to)|won'?t\s+let\s+me|will\s+not\s+let\s+me)\s+add\s+(?:it\s+|this\s+|them\s+|the\s+\w+\s+)?to\s+(?:my\s+|the\s+)?cart\b/i,
+  },
+  // (f) Payment-link TRUST objection — a customer mid add-payment-method journey
+  //     balks at the secure Braintree Drop-in link itself ("I don't trust this
+  //     to add payment"). Ticket cd385c7f (Elvira Lamping) — these fell out of
+  //     the concierge lane, got re-classed "new topic → Sonnet", hit the
+  //     no-progress circuit (4 inbound in a row) and escalated, abandoning a
+  //     live buying customer. The right answer is in-policy and known: the SAME
+  //     secure link accepts PayPal (PayPal Vault) and no card ever touches us —
+  //     answer in-lane and re-present the link instead of escalating. These
+  //     cues keep the inflection re-session path (`stage1_checkout_stuck`)
+  //     firing so the ticket stays in the concierge lane.
+  {
+    id: "payment_link_trust_objection",
+    re: /\b(?:don'?t|do\s*not|can'?t|cannot|(?:not\s+sure|dont\s+know|don'?t\s+know|unsure)\s+(?:if\s+)?i\s+can)\s+(?:really\s+)?trust\s+(?:this|that|the|it|your|adding)\b/i,
+  },
+  {
+    id: "payment_link_safety_doubt",
+    re: /\b(?:is\s+(?:this|it|that|the\s+link|the\s+page)|(?:this|it|that|the\s+link)\s+(?:looks?|seems?|feels?))\s+(?:like\s+)?(?:a\s+)?(?:safe|secure|legit(?:imate)?|real|trustworthy|scam|phishing|sketchy|suspicious|fake|shady|phony|fishy)\b/i,
+  },
+  // (g) Alternative payment-RAIL question — a customer asks for PayPal (or
+  //     another off-card rail) mid-journey ("Do you have PayPal?"). The true
+  //     concierge fact: the SAME secure Braintree Drop-in already accepts PayPal
+  //     (PayPal Vault), so this is NOT a dead-end — answer that the link
+  //     supports it and re-present it. Distinct from the dead-end guard
+  //     ([[assisted-purchase-direction]] `assertSolFastDefaultToConcierge`),
+  //     which only BLOCKS Sol PROPOSING "try PayPal" as an escape from a failing
+  //     checkout — it never makes the orchestrator ANSWER this question.
+  {
+    id: "alt_rail_payment_question",
+    re: /\b(?:do\s+you\s+(?:have|take|accept|support|offer)|can\s+i\s+(?:use|pay\s+(?:with|via|using|by|in)|checkout\s+with)|is\s+there\s+(?:a\s+way\s+to\s+(?:use|pay\s+with)|an?\s+option\s+for)|any\s+(?:way|option)\s+to\s+(?:use|pay\s+(?:with|via)))\s+(?:an?\s+)?(?:pay\s*pal|venmo|apple\s*pay|google\s*pay|affirm|klarna|afterpay|cash\s*app|amazon\s*pay)\b/i,
   },
 ];
 
