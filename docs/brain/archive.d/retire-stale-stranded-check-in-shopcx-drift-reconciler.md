@@ -1,0 +1,1 @@
+- **Retire the stale 'stranded' check in the ShopCX drift reconciler to match charge-time cycle resolution** · verified 2026-10-09 · → [[../libraries/commerce__shopcx-drift-reconciler]]
