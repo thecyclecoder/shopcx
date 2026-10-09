@@ -19968,6 +19968,93 @@ test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise return
   );
 });
 
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise ALSO drops the payload / status direct-REST sample (supabase-logs:dbb86fe54d00aac0)", () => {
+  // The captured production CTE query shape — a stale foreign direct-REST client reads
+  // `select=payload,status,...` against the heartbeat table. Neither `payload` nor
+  // `status` has ever shipped as a column; real per-run state is `kind` / `ok` /
+  // `produced` / `detail`. PostgREST wraps the SELECT in `WITH pgrst_source AS ( ... )`.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.payload does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_heartbeats"."payload", "public"."loop_heartbeats"."status" FROM "public"."loop_heartbeats" WHERE "public"."loop_heartbeats"."loop_id" = $1 ORDER BY "public"."loop_heartbeats"."ran_at" DESC LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column public.loop_heartbeats.payload does not exist",
+      'WITH pgrst_source AS (SELECT "public"."loop_heartbeats"."payload" FROM "public"."loop_heartbeats")',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.status does not exist",
+      'WITH pgrst_source AS (SELECT "public"."loop_heartbeats"."status" FROM "public"."loop_heartbeats")',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column public.loop_heartbeats.status does not exist",
+      'WITH pgrst_source AS (SELECT "public"."loop_heartbeats"."status" FROM "public"."loop_heartbeats")',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "ERROR: column loop_heartbeats.payload does not exist",
+      'WITH pgrst_source AS (SELECT "public"."loop_heartbeats"."payload" FROM "public"."loop_heartbeats")',
+    ),
+    true,
+  );
+  // Bare SELECT lookup variant — same ad hoc read without the PostgREST CTE wrapper.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.payload does not exist",
+      "select payload, status from public.loop_heartbeats where loop_id = 'triage-escalations-cron'",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.status does not exist",
+      "select status from loop_heartbeats limit 10",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise KEEPS a non-SELECT / real-column message on payload / status (a real code-write still pages)", () => {
+  // Negative: an INSERT / UPDATE referencing the off-schema payload / status column is
+  // real code trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.payload does not exist",
+      "insert into public.loop_heartbeats (loop_id, payload, ran_at) values ($1, $2, now())",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.status does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."loop_heartbeats" SET "status" = $1 WHERE "public"."loop_heartbeats"."id" = $2 )',
+    ),
+    false,
+  );
+  // Negative: a real-column message (a genuine column regression on a shipped column)
+  // on the same SELECT shape still pages — the pin covers the off-schema names only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise(
+      "column loop_heartbeats.detail does not exist",
+      "select detail from public.loop_heartbeats where loop_id = 'x'",
+    ),
+    false,
+  );
+});
+
 // ── isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise ──
 // Spec: error-feed-drop-workspace-members-customer-id-direct-rest-no.
 // Control Tower signature: supabase-logs:a19c9bdd091bdaa8.
