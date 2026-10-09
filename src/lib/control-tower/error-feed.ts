@@ -3044,12 +3044,12 @@ export function isForeignSupabasePostgresOrdersNameLookupNoise(
  * off-schema columns on the same foreign caller.
  *
  * `true` ONLY when BOTH markers are present:
- *   1. the message is Postgres's canonical column-missing shape for one of the four pinned
+ *   1. the message is Postgres's canonical column-missing shape for one of the five pinned
  *      columns — trimmed equal to `column spec_phases.workspace_id does not exist`,
  *      `column spec_phases.spec_slug does not exist`, `column spec_phases.name does not
- *      exist`, or `column spec_phases.phase_order does not exist` (or the `public.`
- *      qualified variant of any), with any leading `ERROR: ` prefix Postgres includes on
- *      the logs surface stripped, AND
+ *      exist`, `column spec_phases.phase_order does not exist`, or `column
+ *      spec_phases.phase does not exist` (or the `public.` qualified variant of any), with
+ *      any leading `ERROR: ` prefix Postgres includes on the logs surface stripped, AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.spec_phases` — either
  *      (a) the bare `select ... from public.spec_phases` shape, OR (b) the PostgREST-
  *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."spec_phases" ... )`
@@ -3061,10 +3061,11 @@ export function isForeignSupabasePostgresOrdersNameLookupNoise(
  *     have `workspace_id` / `spec_slug` / `name` / `phase_order`) still pages — the pin
  *     is `spec_phases.` only,
  *   - a column-missing error on `spec_phases` for a DIFFERENT column (e.g. `spec_id`
- *     going missing — a real schema regression) still pages — the pin covers the four
+ *     going missing — a real schema regression) still pages — the pin covers the five
  *     off-schema columns only, not any column name,
  *   - a `spec_phases.workspace_id` / `spec_phases.spec_slug` / `spec_phases.name` /
- *     `spec_phases.phase_order` error attached to a DIFFERENT statement shape (INSERT /
+ *     `spec_phases.phase_order` / `spec_phases.phase` error attached to a DIFFERENT
+ *     statement shape (INSERT /
  *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
  *     SELECT-lookup shape, matching the ad hoc read we've observed; the CTE branch
  *     likewise requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside
@@ -3087,9 +3088,9 @@ export function isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoi
   // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
   // surface sometimes carries it, sometimes doesn't. The column-missing message itself
   // has a stable shape: `column <table>.<name> does not exist`, pinned here to
-  // `spec_phases` (with or without the `public.` qualifier) and one of the four columns
+  // `spec_phases` (with or without the `public.` qualifier) and one of the five columns
   // that only belong on the parent `specs` row or do not exist on the live phase shape
-  // (`workspace_id`, `spec_slug`, `name`, `phase_order`).
+  // (`workspace_id`, `spec_slug`, `name`, `phase_order`, `phase`).
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
   const messageMatches =
     stripped === "column spec_phases.workspace_id does not exist" ||
@@ -3099,7 +3100,9 @@ export function isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoi
     stripped === "column spec_phases.name does not exist" ||
     stripped === "column public.spec_phases.name does not exist" ||
     stripped === "column spec_phases.phase_order does not exist" ||
-    stripped === "column public.spec_phases.phase_order does not exist";
+    stripped === "column public.spec_phases.phase_order does not exist" ||
+    stripped === "column spec_phases.phase does not exist" ||
+    stripped === "column public.spec_phases.phase does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
