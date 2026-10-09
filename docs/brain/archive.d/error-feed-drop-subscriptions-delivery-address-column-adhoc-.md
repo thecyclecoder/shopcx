@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: subscriptions.delivery_address missing-column ad hoc SELECT** · verified 2026-10-09 · → [[../libraries/control-tower]]
