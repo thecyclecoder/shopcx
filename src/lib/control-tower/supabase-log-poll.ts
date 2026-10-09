@@ -51,6 +51,7 @@ import {
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
@@ -492,6 +493,24 @@ const LOG_QUERIES: LogQuery[] = [
       // `subscriptions` via a non-SELECT statement (real code-bug shape), still
       // surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... delivery_address ...
+      // from public.subscriptions` lookup by an external tool (Supabase Studio Table
+      // Editor / API Docs, foreign SQL client, stale exploratory session, third-party
+      // integration) or the PostgREST `WITH pgrst_source AS ( SELECT ... FROM
+      // "public"."subscriptions" ... )` CTE wrapper the same client emits over the REST
+      // endpoint. Our `subscriptions` table has NO `delivery_address` column — the live
+      // delivery/shipping columns are `shipping_address` (JSONB) and
+      // `delivery_price_cents` (int8). No ShopCX code path issues a SELECT on
+      // `subscriptions.delivery_address`, so the resulting column-missing ERROR is repair
+      // work for a query we don't own
+      // ([[../specs/error-feed-drop-subscriptions-delivery-address-column-adhoc-]],
+      // Control Tower signature `supabase-logs:926eb562770a4248`). Narrowly gated to
+      // require BOTH the exact column-missing message AND the SELECT-lookup shape — a
+      // column-missing error on any other column of `subscriptions` (including the real
+      // `shipping_address` / `delivery_price_cents`), or on `delivery_address` from any
+      // other table, or on `subscriptions` via a non-SELECT statement (real code-bug
+      // shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... address ... from
       // public.customers` lookup by an external tool (Supabase Studio Table Editor /
       // API Docs, foreign SQL client, stale exploratory session, third-party
