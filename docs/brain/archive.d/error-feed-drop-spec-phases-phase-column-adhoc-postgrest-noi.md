@@ -1,0 +1,1 @@
+- **Drop foreign spec_phases.phase PostgREST column-missing noise from the Control Tower error feed** · verified 2026-10-09 · → [[../libraries/control-tower]]
