@@ -76,6 +76,7 @@ import {
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
@@ -13942,6 +13943,96 @@ test("isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise KEEP
     isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(
       "column public.subscriptions.pause_resume_at does not exist",
       'WITH pgrst_source AS ( SELECT "public"."subscriptions"."pause_resume_at" FROM "public"."subscriptions" )',
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/subscriptions?select=...delivery_address...` against our
+// `public.subscriptions` table. The table exists but has NO `delivery_address` column —
+// the live delivery/shipping columns are `shipping_address` (JSONB) and
+// `delivery_price_cents` (int8). Foreign-owned surface, no lever from us — drop AT
+// CAPTURE only when BOTH the exact column-missing message on
+// `subscriptions.delivery_address` AND a SELECT-lookup shape on `subscriptions` (bare OR
+// PostgREST CTE wrapper) are present. A column-missing on a live `subscriptions` column
+// (`shipping_address`), on `delivery_address` from any other table, or via a non-SELECT
+// statement still pages. Control Tower signature `supabase-logs:926eb562770a4248`.
+
+test("isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise drops the captured 9a759241 sample message+query pair (PostgREST CTE SELECT on subscriptions.delivery_address)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `subscriptions.delivery_address` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise(
+      "column subscriptions.delivery_address does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."id", "public"."subscriptions"."delivery_address" FROM "public"."subscriptions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise(
+      "column public.subscriptions.delivery_address does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."delivery_address" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise(
+      "column subscriptions.delivery_address does not exist",
+      "select id, delivery_address from public.subscriptions",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise(
+      "column subscriptions.delivery_address does not exist",
+      "select delivery_address from subscriptions limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise(
+      "ERROR: column subscriptions.delivery_address does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."delivery_address" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise(
+      "column subscriptions.delivery_address does not exist",
+      "SELECT ID, DELIVERY_ADDRESS FROM PUBLIC.SUBSCRIPTIONS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise KEEPS other columns / tables / non-SELECT shapes (real regressions still page)", () => {
+  // A DIFFERENT subscriptions column — `shipping_address` IS live; if it regresses we
+  // WANT the page. The pin is `delivery_address` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise(
+      "column subscriptions.shipping_address does not exist",
+      "select shipping_address from public.subscriptions",
+    ),
+    false,
+  );
+  // `delivery_address` on ANOTHER table (orders) — not our pinned signature, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise(
+      "column orders.delivery_address does not exist",
+      "select delivery_address from public.orders",
+    ),
+    false,
+  );
+  // A NON-SELECT statement on subscriptions — real code-bug shape, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise(
+      "column subscriptions.delivery_address does not exist",
+      "update public.subscriptions set delivery_address = '{}' where id = 1",
     ),
     false,
   );
