@@ -8049,7 +8049,7 @@ export function isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
 }
 
 /**
- * Foreign-app noise — Postgres reporting `column loop_heartbeats.<beat_at|loop|loop_key>
+ * Foreign-app noise — Postgres reporting `column loop_heartbeats.<beat_at|loop|loop_key|payload|status>
  * does not exist` for an ad hoc / stale PostgREST direct-REST SELECT against
  * `public.loop_heartbeats`. The table exists (see
  * `supabase/migrations/20260622120000_control_tower.sql`) but has NEVER carried any
@@ -8058,17 +8058,21 @@ export function isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
  * columns (`src/lib/control-tower/heartbeat.ts` writes `loop_id` + `ran_at`;
  * `src/lib/inngest/sms-callback-drain.ts` + the Control Tower monitor read them back
  * the same way). `loop_key` is a stale synonym for the real `loop_id` identifier the
- * table has always used — not a product column that was ever shipped and renamed.
+ * table has always used — not a product column that was ever shipped and renamed;
+ * `payload` and `status` are likewise off-schema names the heartbeat table has never
+ * carried (per-run state lives in the real `kind`/`ok`/`produced`/`detail` columns).
  * The column-missing ERROR only reaches this feed when a foreign app / stale Supabase
  * Studio session / deprecated integration queries
- * `/rest/v1/loop_heartbeats?select=loop_key,beat_at,...` (a client assuming the
+ * `/rest/v1/loop_heartbeats?select=loop_key,beat_at,payload,status,...` (a client assuming the
  * heartbeat table carries legacy column names that never shipped). There is no lever
  * from ShopCX to make that query resolve — renaming the real `loop_id` / `ran_at`
  * columns would break every real reader + writer, and paging Platform on a one-off
  * stale direct-REST query burns repair time without giving us a product lever to pull
- * (Control Tower signatures `supabase-logs:1b4a323180ec8365` + `supabase-logs:2dde5e6c56fb408c`,
+ * (Control Tower signatures `supabase-logs:1b4a323180ec8365` + `supabase-logs:2dde5e6c56fb408c`
+ * + `supabase-logs:dbb86fe54d00aac0`,
  * [[../specs/error-feed-drop-loop-heartbeats-beat-at-direct-rest-noise]] +
- * [[../specs/error-feed-drop-loop-heartbeats-loop-key-direct-rest-noise]]).
+ * [[../specs/error-feed-drop-loop-heartbeats-loop-key-direct-rest-noise]] +
+ * [[../specs/error-feed-drop-loop-heartbeats-payload-status-direct-rest-n]]).
  *
  * Sibling of `isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise`
  * and `isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise` — the
@@ -8078,9 +8082,9 @@ export function isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
  * table.
  *
  * `true` ONLY when BOTH markers are present:
- *   1. the message is Postgres's canonical column-missing shape for ONE of the three
- *      legacy column names — trimmed equal to
- *      `column loop_heartbeats.<beat_at|loop|loop_key> does not exist` (or the
+ *   1. the message is Postgres's canonical column-missing shape for ONE of the five
+ *      legacy / off-schema column names — trimmed equal to
+ *      `column loop_heartbeats.<beat_at|loop|loop_key|payload|status> does not exist` (or the
  *      `public.` qualified variant, with any leading `ERROR: ` prefix Postgres
  *      includes on the logs surface stripped), AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.loop_heartbeats` —
@@ -8097,8 +8101,9 @@ export function isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(
  *   - a column-missing error on `loop_heartbeats` for a DIFFERENT column (e.g. a real
  *     column rename regression on `loop_id`, `ran_at`, `kind`, `ok`, `produced`,
  *     `detail`, `duration_ms`) still pages — the pin covers `beat_at` / `loop` /
- *     `loop_key` only,
- *   - a `loop_heartbeats.beat_at` / `loop_heartbeats.loop_key` error attached to a
+ *     `loop_key` / `payload` / `status` only,
+ *   - a `loop_heartbeats.beat_at` / `loop_heartbeats.loop_key` / `loop_heartbeats.payload`
+ *     / `loop_heartbeats.status` error attached to a
  *     DIFFERENT statement shape (INSERT / UPDATE / DELETE / DDL, or a JOIN whose first
  *     FROM is another table) still pages — the pin is the SELECT-lookup shape,
  *     matching the ad hoc direct-REST read we've observed; the CTE branch likewise
@@ -8123,9 +8128,11 @@ export function isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNo
   // surface sometimes carries it, sometimes doesn't. The column-missing message itself
   // has a stable shape: `column <table>.<name> does not exist`, pinned here to
   // `loop_heartbeats.beat_at` OR `loop_heartbeats.loop` OR `loop_heartbeats.loop_key`
-  // (with or without the `public.` qualifier). All three are legacy synonyms the
-  // table has never shipped — `loop_key` is the stale name for the real `loop_id`
-  // identifier column.
+  // OR `loop_heartbeats.payload` OR `loop_heartbeats.status`
+  // (with or without the `public.` qualifier). All five are legacy / off-schema names
+  // the table has never shipped — `loop_key` is the stale name for the real `loop_id`
+  // identifier column; `payload` / `status` are off-schema names the heartbeat table
+  // has never carried (real per-run state is `kind` / `ok` / `produced` / `detail`).
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
   const messageMatches =
     stripped === "column loop_heartbeats.beat_at does not exist" ||
@@ -8133,7 +8140,11 @@ export function isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNo
     stripped === "column loop_heartbeats.loop does not exist" ||
     stripped === "column public.loop_heartbeats.loop does not exist" ||
     stripped === "column loop_heartbeats.loop_key does not exist" ||
-    stripped === "column public.loop_heartbeats.loop_key does not exist";
+    stripped === "column public.loop_heartbeats.loop_key does not exist" ||
+    stripped === "column loop_heartbeats.payload does not exist" ||
+    stripped === "column public.loop_heartbeats.payload does not exist" ||
+    stripped === "column loop_heartbeats.status does not exist" ||
+    stripped === "column public.loop_heartbeats.status does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
@@ -8141,7 +8152,7 @@ export function isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNo
   // statement MUST start with `select` and its FROM clause MUST name `loop_heartbeats`
   // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
   // captured — a caller that actually writes to loop_heartbeats with a bogus `beat_at`,
-  // `loop`, or `loop_key` column is a code bug we DO want to page on, not the ad hoc
+  // `loop`, `loop_key`, `payload`, or `status` column is a code bug we DO want to page on, not the ad hoc
   // direct-REST read this drop targets. The `\b` around the table name keeps the
   // anchor from matching any sibling identifier.
   if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?loop_heartbeats\b/.test(q)) return true;
