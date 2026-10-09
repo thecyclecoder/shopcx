@@ -28,14 +28,10 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
-import {
-  getSubscriptionContract,
-  getBillingCycleForDate,
-} from "@/lib/commerce/shopify-subscription-client";
+import { getSubscriptionContract } from "@/lib/commerce/shopify-subscription-client";
 
 export type DriftKind =
   | "status"          // our status disagrees with the contract's
-  | "stranded"        // our date lands in a cycle Shopify already billed or skipped
   | "date"            // the Shopify-visible date differs from ours
   | "unreadable";     // the contract cannot be read at all
 
@@ -147,20 +143,9 @@ export async function reconcileShopcxDrift(
         // that were behaving perfectly. A false strand teaches people to ignore real ones.
         if (sub.status === "paused") continue;
 
-        // ⭐ The expensive check, and the one that actually costs money. Ask Shopify which cycle
-        // our billing date lands in; a BILLED or skipped cycle means the renewal worker will skip
-        // this subscription every run from here on, silently and forever.
-        const landing = await getBillingCycleForDate(
-          workspaceId, sub.shopify_contract_id, sub.next_billing_date,
-        );
-        if (landing.success && landing.cycle && (landing.cycle.status === "BILLED" || landing.cycle.skipped)) {
-          report.drift.push({
-            subscriptionId: sub.id, contractId: sub.shopify_contract_id, kind: "stranded",
-            ours: sub.next_billing_date, shopify: `cycle #${landing.cycle.index} ${landing.cycle.status}`,
-            detail: `our date lands in cycle #${landing.cycle.index} (${landing.cycle.status}${landing.cycle.skipped ? ", skipped" : ""}) — the renewal worker WILL skip this subscription. Needs a re-pin (shopifyRetimeContract), not a date overwrite.`,
-          });
-          continue;
-        }
+        // Strand check retired: resolveChargeableCycle now bills the first UNBILLED cycle by index
+        // (not by date), so a date landing in a spent cycle no longer strands a sub. See
+        // [[docs/brain/libraries/commerce__shopify-subscription-client]].
 
         if (c.nextBillingDate) {
           const delta = Math.abs(new Date(c.nextBillingDate).getTime() - new Date(sub.next_billing_date).getTime());
