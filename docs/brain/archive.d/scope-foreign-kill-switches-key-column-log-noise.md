@@ -1,0 +1,1 @@
+- **Filter foreign 'kill_switches.key does not exist' Postgres log noise from the Control Tower error feed** · verified 2026-10-08 · → [[../inngest/supabase-log-poll]] (capture-drop filters)

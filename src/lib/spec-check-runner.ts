@@ -27,7 +27,7 @@
  */
 import { spawn } from "node:child_process";
 import { errText } from "@/lib/error-text";
-import { lstatSync, readFileSync, readlinkSync } from "node:fs";
+import { lstatSync, readFileSync, readlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import {
   AUTO_TESTABLE_EXEC_KINDS,
@@ -422,11 +422,49 @@ export async function ensureRealTopLevelNodeModulesForBuild(
   return { ok: true, action: "materialized" };
 }
 
+/**
+ * Writes a uniquely named `<repoRoot>/tsconfig.spec-check.<id>.json` (gitignored), which extends the repo's tsconfig with every
+ * `.next/…` include dropped, and returns its name. Returns null when the repo's tsconfig has no
+ * `.next` includes or can't be read, so the caller falls back to plain `tsc --noEmit`.
+ */
+export function writeTscConfigWithoutNextTypes(repoRoot: string): string | null {
+  try {
+    const base = JSON.parse(readFileSync(resolvePath(repoRoot, "tsconfig.json"), "utf8")) as { include?: unknown };
+    const include = Array.isArray(base.include) ? (base.include as string[]) : null;
+    if (!include || !include.some((g) => g.startsWith(".next/"))) return null;
+    const config = {
+      extends: "./tsconfig.json",
+      compilerOptions: { incremental: false },
+      include: include.filter((g) => !g.startsWith(".next/")),
+    };
+    const name = `tsconfig.spec-check.${process.pid}-${Date.now().toString(36)}.json`;
+    writeFileSync(resolvePath(repoRoot, name), JSON.stringify(config));
+    return name;
+  } catch {
+    return null;
+  }
+}
+
 export const defaultExecutors: CheckExecutors = {
   tsc: async ({ repoRoot }) => {
-    const r = await runCmd("npx", ["tsc", "--noEmit"], repoRoot);
-    if (r.error) return { ok: false, evidence: `spawn error: ${r.error}` };
-    return { ok: r.code === 0, evidence: r.code === 0 ? "npx tsc --noEmit — clean" : (r.stderr || r.stdout || `exit ${r.code}`).slice(0, 4000) };
+    // A checkout's `.next/types` is a leftover of whatever branch last ran `next build` there, so it can
+    // reference routes this branch doesn't have. tsconfig includes it, which turned "tsc clean" into a
+    // permanent harness error on the box (a-braintree-side-refund-must-reach-our-books, 2026-09-24 →
+    // 10-08). Type-check the source with a throwaway config that drops the generated `.next` globs.
+    const tmpConfig = writeTscConfigWithoutNextTypes(repoRoot);
+    try {
+      const r = await runCmd("npx", tmpConfig ? ["tsc", "--noEmit", "-p", tmpConfig] : ["tsc", "--noEmit"], repoRoot);
+      if (r.error) return { ok: false, evidence: `spawn error: ${r.error}` };
+      return { ok: r.code === 0, evidence: r.code === 0 ? "npx tsc --noEmit — clean" : (r.stderr || r.stdout || `exit ${r.code}`).slice(0, 4000) };
+    } finally {
+      if (tmpConfig) {
+        try {
+          unlinkSync(resolvePath(repoRoot, tmpConfig));
+        } catch {
+          /* already gone */
+        }
+      }
+    }
   },
   grep: async ({ repoRoot, params }) => {
     const r = await runCmd("rg", buildGrepArgv(params), repoRoot);
