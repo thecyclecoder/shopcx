@@ -301,3 +301,44 @@ export async function setStorefrontAvailability(
     alreadyInTargetState,
   };
 }
+
+/** Audit action kind for the portal-only lever — distinct from the two-surface toggle. */
+export const PORTAL_SUPPRESSION_ACTION_KIND = "portal_variant_suppression_toggled";
+
+/**
+ * Portal-only half of the availability lever: add (suppressed=true) or remove
+ * (suppressed=false) a Shopify variant id in `workspaces.portal_config.suppressed_variant_ids`
+ * so it can't be newly added or swapped to in the customer portal. NEVER touches the Shopify
+ * theme — use this when a variant must leave the portal but the storefront is off-limits
+ * (e.g. a discontinued product the founder handles on Shopify separately).
+ *
+ * Same idempotency contract as `setStorefrontAvailability`: a call already in the target
+ * state is a full no-op (no write, no audit row). A real change records one
+ * `director_activity` row (Logistics, `portal_variant_suppression_toggled`) naming the reason.
+ */
+export async function setPortalVariantSuppression(
+  workspaceId: string,
+  variantId: string,
+  suppressed: boolean,
+  reason: string,
+): Promise<StorefrontAvailabilityResult["portal"]> {
+  const trimmedVariant = String(variantId ?? "").trim();
+  const trimmedReason = String(reason ?? "").trim();
+  if (!workspaceId || !trimmedVariant) {
+    throw new Error("setPortalVariantSuppression: workspaceId + variantId required");
+  }
+  if (!trimmedReason) {
+    throw new Error("setPortalVariantSuppression: reason required (recorded on the audit row)");
+  }
+  const portal = await togglePortalSuppression(workspaceId, trimmedVariant, !suppressed);
+  if (portal.attempted && portal.changed) {
+    await recordDirectorActivity(createAdminClient(), {
+      workspaceId,
+      directorFunction: LOGISTICS_FUNCTION,
+      actionKind: PORTAL_SUPPRESSION_ACTION_KIND,
+      reason: trimmedReason,
+      metadata: { variant_id: trimmedVariant, suppressed, portal_outcome: portal, autonomous: false },
+    });
+  }
+  return portal;
+}
