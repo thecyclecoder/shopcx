@@ -1,0 +1,24 @@
+query CartInput {
+  cart {
+    lines {
+      sellingPlanAllocation {
+        sellingPlan {
+          id
+        }
+      }
+    }
+    deliveryGroups {
+      id
+      deliveryOptions {
+        handle
+        title
+      }
+    }
+  }
+  discount {
+    discountClasses
+    metafield(namespace: "$app", key: "function-configuration") {
+      jsonValue
+    }
+  }
+}
