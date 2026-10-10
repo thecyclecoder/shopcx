@@ -184,8 +184,14 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
     triggers: [{ event: RENEWAL_ATTEMPT_EVENT }],
   },
   async ({ event, step }) => {
-    const { subscription_id, workspace_id, expected_next_billing_date } = event.data as {
+    const { subscription_id, workspace_id, expected_next_billing_date, order_now } = event.data as {
       subscription_id: string; workspace_id: string; expected_next_billing_date: string | null;
+      /** True when fired by a customer-pressed order-now (subscriptionOrderNow),
+       *  not the nightly renewal cron. Drives the `nothing_due` marker on a
+       *  no-chargeable-cycle / already-claimed skip so the async order-now verify
+       *  reports a truthful no-op instead of looping on 'unknown' (spec:
+       *  order-now verify 'nothing_due' verdict; ticket dd5e2ba0). */
+      order_now?: boolean;
     };
     const admin = createAdminClient();
 
@@ -250,6 +256,25 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
 
     if (!plan.ok) {
       await step.run("beat-nodue", () => emitReactiveHeartbeat(ATTEMPT_FN_ID, { produced: { outcome: "no_cycle_due" } }));
+      // A customer-pressed order-now with no chargeable cycle resolvable (the
+      // current cycle already billed, the next is not yet due) is a truthful
+      // no-op — surface the `nothing_due` marker the async order-now verify reads
+      // so the ticket confirms "no charge; next order <date>" instead of looping
+      // on 'unknown' (spec: order-now verify 'nothing_due' verdict; ticket dd5e2ba0).
+      if (order_now) {
+        await step.run("log-order-now-nothing-due", async () => {
+          const { logOrderNowNothingDue } = await import("@/lib/commerce/order-now-verify");
+          await logOrderNowNothingDue({
+            workspace_id,
+            customer_id: sub.customer_id,
+            subscription_id,
+            contract_id: sub.shopify_contract_id,
+            next_billing_date: sub.next_billing_date,
+            reason: `no_cycle_due:${plan.reason}`,
+            billing_source: "shopcx",
+          });
+        });
+      }
       return { status: "skipped", reason: plan.reason };
     }
 
@@ -270,6 +295,22 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
     );
     if (!claim.ok) {
       await step.run("beat-dupe", () => emitReactiveHeartbeat(ATTEMPT_FN_ID, { produced: { outcome: "duplicate_blocked" } }));
+      // Same truthful-no-op case as the no-cycle-due branch: a customer-pressed
+      // order-now hit a cycle already claimed by a real charge. Emit the marker.
+      if (order_now) {
+        await step.run("log-order-now-nothing-due", async () => {
+          const { logOrderNowNothingDue } = await import("@/lib/commerce/order-now-verify");
+          await logOrderNowNothingDue({
+            workspace_id,
+            customer_id: sub.customer_id,
+            subscription_id,
+            contract_id: sub.shopify_contract_id,
+            next_billing_date: sub.next_billing_date,
+            reason: "cycle_already_claimed",
+            billing_source: "shopcx",
+          });
+        });
+      }
       return { status: "skipped", reason: "cycle_already_claimed", cycle_key: cycleKey };
     }
 
@@ -378,18 +419,24 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
         // because the pin moved the schedule and nothing moved the date. `shopifyRetimeContract`
         // does both and then re-reads to confirm the new date did not land in a spent cycle.
         //
-        // Non-fatal: the charge already succeeded and the worker bills by explicit selector, so a
-        // failed retime is display drift, never a missed renewal. The daily drift reconciler
+        // Non-fatal: the charge already succeeded and the worker resolves the cycle by index at
+        // charge time, so a failed retime is display drift, never a missed renewal. The daily drift reconciler
         // catches whatever this misses.
         try {
           const { shopifyRetimeContract } = await import("@/lib/commerce/shopify-subscription-client");
           const retimed = await shopifyRetimeContract(
             workspace_id, sub.shopify_contract_id, advanceTo.toISOString(),
           );
-          if (retimed.stranded) {
-            console.error(`[shopcx-renewal] ${sub.shopify_contract_id}: advanced to ${advanceTo.toISOString()} but it lands in a spent cycle — will NOT be charged again without a re-pin`);
-          } else if (!retimed.success) {
-            console.error(`[shopcx-renewal] ${sub.shopify_contract_id}: retime failed (${retimed.error}) — Shopify-visible date is stale`);
+          // A refused pin is NOT a missed renewal: the next charge resolves the first unbilled cycle
+          // by index (`resolveChargeableCycle`). But a refused retime writes nothing, so fall back to
+          // the display-only set — the customer must still see the date we will actually bill on.
+          if (!retimed.success) {
+            console.warn(`[shopcx-renewal] ${sub.shopify_contract_id}: rolling pin refused (${retimed.error}) — setting display date only`);
+            const { shopifySetNextBillingDate } = await import("@/lib/commerce/shopify-subscription-client");
+            const shown = await shopifySetNextBillingDate(workspace_id, sub.shopify_contract_id, advanceTo.toISOString());
+            if (!shown.success) {
+              console.error(`[shopcx-renewal] ${sub.shopify_contract_id}: display date set failed (${shown.error}) — Shopify-visible date is stale`);
+            }
           }
         } catch (e) {
           console.error(`[shopcx-renewal] ${sub.shopify_contract_id}: retime threw (non-fatal):`, e instanceof Error ? e.message : e);

@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: ad hoc PostgREST SELECT of non-existent spec_status_history.from_status column** · verified 2026-10-08 · → [[../lifecycles/control-tower]]

@@ -134,6 +134,69 @@ export function isSessionChosenOnlyPlaybook(slug: string | null | undefined): bo
 export const ASSISTED_PURCHASE_LEAD_IN =
   "I can just place this for you — no need to fight that screen. Tap below to enter your card securely and I'll take it from there.";
 
+/**
+ * In-lane concierge answer for a payment-link TRUST objection — the customer is
+ * already mid add-payment-method journey ([[checkout-stuck-intent]] cue
+ * `payment_link_trust_objection` / `payment_link_safety_doubt`) and balks at the
+ * secure Braintree Drop-in link ("I don't trust this to add payment", "is this
+ * safe", "looks like a scam"). Ticket cd385c7f (Elvira Lamping): today this
+ * falls out of the concierge lane and escalates on the no-progress circuit,
+ * abandoning a live buying customer. The honest in-policy fact: the link is our
+ * Braintree payment page — PCI-scoped, card data goes straight to Braintree and
+ * never touches us. Answer, then re-present the link. Worded to avoid the
+ * dead-end patterns `assertSolFastDefaultToConcierge` blocks (no "try another
+ * card / try PayPal").
+ */
+export const ASSISTED_PURCHASE_TRUST_REPLY =
+  "That link is our secure Braintree payment page — your card details go straight to Braintree and never touch us. It's the same page our checkout uses, so you're safe to add your payment there. Tap it again whenever you're ready and I'll place your order from there.";
+
+/**
+ * In-lane concierge answer for an ALTERNATIVE payment-rail question
+ * ([[checkout-stuck-intent]] cue `alt_rail_payment_question`) — the customer
+ * asks "do you have PayPal?" mid-journey. The true concierge fact the spec
+ * (ticket cd385c7f) exists to surface: the SAME secure Braintree Drop-in link
+ * already accepts PayPal (PayPal Vault), so this is NOT a dead-end — say yes and
+ * re-present the link. This is the answer the dead-end guard deliberately does
+ * NOT produce: `assertSolFastDefaultToConcierge` only BLOCKS Sol PROPOSING "try
+ * PayPal" as an escape from a failing checkout; it never makes the orchestrator
+ * ANSWER that the existing link supports PayPal Vault. Worded with "pay with
+ * PayPal" (never "try PayPal") so the guard stays green on this reply.
+ */
+export const ASSISTED_PURCHASE_PAYPAL_REPLY =
+  "Yes — that same secure link accepts PayPal. Tap it and choose PayPal to pay, and your details never touch us. I'll place your order from there once you're in.";
+
+/**
+ * The [[checkout-stuck-intent]] cue ids that signal a payment-journey-stage
+ * objection the concierge must answer IN-LANE (rather than escalate). Exported
+ * as a Set so grep-based verification surfaces every caller and so the mapping
+ * from cue → concierge reply stays in one place.
+ */
+export const PAYMENT_JOURNEY_OBJECTION_CUES: ReadonlySet<string> = new Set([
+  "payment_link_trust_objection",
+  "payment_link_safety_doubt",
+  "alt_rail_payment_question",
+]);
+
+/**
+ * Pure selector — maps a [[checkout-stuck-intent]] cue id to the in-lane
+ * concierge reply that answers a payment-journey-stage objection and re-presents
+ * the add-payment-method link. Returns `null` for any cue that is NOT a
+ * payment-journey objection (the caller falls back to the normal stage reply /
+ * `ASSISTED_PURCHASE_LEAD_IN`). Ticket cd385c7f — this is the "answer in-lane,
+ * don't escalate" half the spec adds on top of the existing classifier cues.
+ */
+export function conciergeReplyForObjectionCue(cue: string | null | undefined): string | null {
+  switch (cue) {
+    case "payment_link_trust_objection":
+    case "payment_link_safety_doubt":
+      return ASSISTED_PURCHASE_TRUST_REPLY;
+    case "alt_rail_payment_question":
+      return ASSISTED_PURCHASE_PAYPAL_REPLY;
+    default:
+      return null;
+  }
+}
+
 export interface AssistedPurchaseBlueprintInput {
   /** Sol's distilled one-line customer intent (fills the Direction's `intent`). */
   intent?: string;

@@ -9,14 +9,12 @@
  *   every attempt no-ops. The customer thinks they are subscribed; they are not, and nobody is
  *   told. Found live on 35945087149 on 2026-09-18.
  * - our row says `active`, the contract is `PAUSED` → same shape.
+ * - our date sits inside a cycle Shopify has already marked `BILLED` → the worker resolves the
+ *   cycle by date and skips spent ones, so the subscription is **never charged again**. Measured on
+ *   the 2026-09-16 cohort: two of three subs that had just charged were already dead, one by eight
+ *   minutes. This is the one that costs money.
  * - the Shopify-visible date differs from ours → display drift only (we bill by our own date), but
  *   it is what the customer and every Shopify surface see.
- *
- * ⭐ Phase 2 retired the `stranded` kind. A date landing in an already-`BILLED` cycle USED TO mean
- * the subscription was never charged again (the old renewal worker resolved the cycle by date and
- * skipped spent ones). With charge-time resolution (`resolveChargeableCycle`) the renewal worker
- * and Order Now bill the first UNBILLED cycle by index, so a billed cycle no longer blocks a charge
- * — there is nothing to strand, and no re-pin to recommend.
  *
  * At eight rows a person can eyeball this. At three hundred nobody can, which is precisely when a
  * migration wave makes it matter. So it runs daily and reports.
@@ -30,9 +28,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
-import {
-  getSubscriptionContract,
-} from "@/lib/commerce/shopify-subscription-client";
+import { getSubscriptionContract } from "@/lib/commerce/shopify-subscription-client";
 
 export type DriftKind =
   | "status"          // our status disagrees with the contract's
@@ -139,21 +135,25 @@ export async function reconcileShopcxDrift(
 
         if (!sub.next_billing_date) continue;
 
-        // A PAUSED sub's date is frozen at its last charge; the renewal cron only selects `active`,
-        // and resume rolls the date forward. Nothing to compare while paused.
+        // ⚠️ A PAUSED sub is not a strand. Its date is frozen at its last charge, so it looks like
+        // it lands in a spent cycle — but the renewal cron only selects `active`, and
+        // `retimeAfterResume` ([[portal-auto-resume]]) rolls the date forward and re-pins when the
+        // pause ends. Measured 2026-09-21: two customers took a 60-day pause hours after renewing,
+        // and both were reported STRANDED — the loudest alert this module raises, on subscriptions
+        // that were behaving perfectly. A false strand teaches people to ignore real ones.
         if (sub.status === "paused") continue;
 
-        // ⭐ Phase 2: the `stranded` check (does our date land in a BILLED/skipped cycle?) is RETIRED.
-        // Charge-time resolution (`resolveChargeableCycle`) bills the first unbilled cycle by index,
-        // so a billed cycle no longer blocks a charge — there is nothing to strand. Only the
-        // display-date drift below remains, and it is cosmetic.
+        // Strand check retired: resolveChargeableCycle now bills the first UNBILLED cycle by index
+        // (not by date), so a date landing in a spent cycle no longer strands a sub. See
+        // [[docs/brain/libraries/commerce__shopify-subscription-client]].
+
         if (c.nextBillingDate) {
           const delta = Math.abs(new Date(c.nextBillingDate).getTime() - new Date(sub.next_billing_date).getTime());
           if (delta > DATE_TOLERANCE_MS) {
             report.drift.push({
               subscriptionId: sub.id, contractId: sub.shopify_contract_id, kind: "date",
               ours: sub.next_billing_date, shopify: c.nextBillingDate,
-              detail: `${Math.round(delta / 86_400_000)} day(s) apart — we bill on ours, but this is what the customer sees. Sync the display date with shopifySetNextBillingDate.`,
+              detail: `${Math.round(delta / 86_400_000)} day(s) apart — we bill on ours, but this is what the customer sees. Re-pin with shopifyRetimeContract.`,
             });
           }
         }
@@ -198,6 +198,25 @@ function cadenceDays(interval: string | null, count: number | null): number {
     default: return 30 * k;
   }
 }
+
+/**
+ * Dunning-cycle statuses that EXPLAIN a late next-billing-date, so the sub is not "unexplained late".
+ *
+ * Any cycle that has gone through dunning — whether still open (active/rotating/retrying/skipped/paused)
+ * OR already resolved to a terminal outcome (exhausted/recovered) — is late for a known, dunning-owned
+ * reason, not scheduling drift. The terminal states were originally missing, so a failed-card sub whose
+ * retries had been exhausted was mis-classified as drift and paged `shopcx-subscription-health:late`
+ * falsely. Only lateness with no dunning explanation at all should page.
+ */
+export const DUNNING_STATUSES_EXPLAINING_LATENESS = [
+  "active",
+  "rotating",
+  "retrying",
+  "skipped",
+  "paused",
+  "exhausted",
+  "recovered",
+] as const;
 
 /**
  * Find subs whose next charge is later than one cadence after their last one.
@@ -245,7 +264,7 @@ export async function findLateSubscriptions(
       const { count } = await admin
         .from("dunning_cycles").select("*", { count: "exact", head: true })
         .eq("workspace_id", workspaceId).eq("shopify_contract_id", s.shopify_contract_id)
-        .in("status", ["active", "rotating", "retrying", "skipped", "paused"]);
+        .in("status", DUNNING_STATUSES_EXPLAINING_LATENESS as unknown as string[]);
       // Did WE schedule this, or did it arrive late? Compare the last charge to the moment the
       // migration completed for this contract.
       let inherited = false;

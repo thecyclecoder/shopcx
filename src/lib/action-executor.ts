@@ -1818,7 +1818,16 @@ export const directActionHandlers: Record<
       ticket_id: ctx.ticketId,
       customer_id: ctx.customerId,
     });
-    if (result.success && result.pending) ctx._resolutionOutcomePending = true;
+    // ⭐ ANY successful fire schedules the async verify (internal AND Appstle),
+    // so the async commerce-order-now-verify job owns the ledger verdict in
+    // every case — NOT just when the wrapper flags `pending`. The return-time
+    // 'confirmed' stamp must be skipped even for an internal sub: the renewal
+    // pipeline can resolve an order-now against an already-billed / not-yet-due
+    // cycle and NOT charge, and the async verify is the only place that NO-OP is
+    // observable as `nothing_due`. Stamping 'confirmed' synchronously here would
+    // win the idempotent compare-and-set and the truthful verdict could never
+    // land (spec: order-now verify 'nothing_due' verdict; ticket dd5e2ba0).
+    if (result.success) ctx._resolutionOutcomePending = true;
     return {
       success: result.success,
       error: result.error,
@@ -1855,9 +1864,25 @@ export const directActionHandlers: Record<
    * emission gets a confirm-first turn before the charge fires.
    */
   order_now: async (ctx, p) => {
-    const { subscriptionOrderNow } = await import("@/lib/commerce/subscription");
     if (!p.contract_id) return { success: false, error: "order_now missing contract_id" };
-    return subscriptionOrderNow(ctx.workspaceId, p.contract_id);
+    // Same verified path as bill_now — route through subscriptionOrderNowVerified
+    // so the async commerce-order-now-verify job owns the ledger verdict (incl. a
+    // `nothing_due` no-op on an already-billed / not-yet-due cycle) rather than
+    // the return-time 'confirmed' stamp (spec: order-now verify 'nothing_due'
+    // verdict; ticket dd5e2ba0 — the customer was told her order was placed when
+    // nothing happened).
+    const { subscriptionOrderNowVerified } = await import("@/lib/commerce/order-now-verify");
+    const result = await subscriptionOrderNowVerified(ctx.workspaceId, p.contract_id, {
+      resolution_event_id: ctx._resolutionEventId,
+      ticket_id: ctx.ticketId,
+      customer_id: ctx.customerId,
+    });
+    if (result.success) ctx._resolutionOutcomePending = true;
+    return {
+      success: result.success,
+      error: result.error,
+      summary: result.summary,
+    };
   },
 
   add_item: async (ctx, p) => {

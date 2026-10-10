@@ -12,11 +12,36 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Stop the drift-reconcile late-page from firing on exhausted-dunning subscriptions** · verified 2026-10-10 · → [[../inngest/shopcx-drift-reconcile]]
+- **Widen the subscription_cycle_charges.created_at noise filter to match PostgREST-wrapped query shape** · verified 2026-10-10 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise`)
+- **Drop foreign PostgREST noise: loop_heartbeats.payload / status column-missing reads** · verified 2026-10-09 · → [[../libraries/control-tower#isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise]]
+- **Drop foreign spec_phases.phase PostgREST column-missing noise from the Control Tower error feed** · verified 2026-10-09 · → [[../libraries/control-tower]]
+- **Drop foreign-app noise: subscriptions.delivery_address missing-column ad hoc SELECT** · verified 2026-10-09 · → [[../libraries/control-tower]]
+- **Retire the stale 'stranded' check in the ShopCX drift reconciler to match charge-time cycle resolution** · verified 2026-10-09 · → [[../libraries/commerce__shopcx-drift-reconciler]]
+- **Assisted one-time orders actually charge the card and ship** · verified 2026-10-08 · → [[../libraries/one-time-charge]]
+- **Checkout-stuck concierge must answer in-journey payment-link trust + alt-rail (PayPal) objections, not escalate** · verified 2026-10-08 · → [[recipes/checkout-stuck-concierge-flow]]
+- **Scope out foreign dashboard_notifications.dismissed_at direct-REST column-missing noise from the Supabase logs feed** · verified 2026-10-08 · → [[../libraries/control-tower]]
 - **Scope out ad-hoc error_events free-text search noise (unqualified column "label"/"message")** · verified 2026-10-08 · → [[../lifecycles/control-tower]]
 - **Drop foreign error_events jsonb-sample ILIKE search noise at capture** · verified 2026-10-08 · → [[../libraries/control-tower]]
 - **Add fingerprint to the loop_alerts direct-REST missing-column noise filter** · verified 2026-10-08 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise`)
 - **Scope out loop_alerts.message foreign direct-REST column noise in the Control Tower feed** · verified 2026-10-08 · → [[../libraries/control-tower]]
+- **Drop foreign-app noise: ad hoc direct-REST SELECT of non-existent order_refunds.customer_id column** · verified 2026-10-08 · → [[../inngest/supabase-log-poll]]
+- **Scope out foreign direct-REST `column specs.merged_at does not exist` noise from the error feed** · verified 2026-10-08 · → [[../libraries/control-tower]]
+- **Drop foreign-app noise: subscription_cycle_charges.created_at direct-REST lookups** · verified 2026-10-08 · → [[../lifecycles/control-tower]]
+- **Drop the foreign direct-REST uuid LIKE-on-subscriptions.id probe from the Supabase log feed** · verified 2026-10-08 · → [[../libraries/control-tower]] + [[../inngest/supabase-log-poll]]
+- **Drop foreign-app noise: ad hoc PostgREST SELECT of non-existent ticket_analyses.intents column** · verified 2026-10-08 · → [[../inngest/supabase-log-poll]]
+- **Drop foreign direct-REST tickets.playbook_id missing-column noise at capture** · verified 2026-10-08 · → [[../libraries/control-tower]] + [[../inngest/supabase-log-poll]]
+- **Drop foreign-app noise: ad hoc SELECT of non-existent transactions.source_name column** · verified 2026-10-08 · → [[../inngest/supabase-log-poll]]
+- **Scope out the agent_jobs.started_at browse-rows REST noise (account_id projection variant)** · verified 2026-10-08 · → [[../libraries/control-tower]]
+- **June's approved remedies execute, or fail loudly and get re-owned** · verified 2026-10-08 · → [[../libraries/cs-director]]
+- **Order-now verify needs a 'nothing_due' verdict so a skipped spent-cycle renewal isn't reported as pending or as an order placed** · verified 2026-10-08 · → [[../libraries/order-now-verify]]
+- **Running playbooks survive auto-merge, hold-firm replies can't tease returns, and the watchdog catches stalled playbooks** · verified 2026-10-08 · → [[../inngest/unified-ticket-handler]] [[../libraries/sol-policy-bait-guard]] [[../inngest/ticket-response-sla-watchdog]] [[../lifecycles/ticket-lifecycle]]
+- **Filter foreign 'kill_switches.key does not exist' Postgres log noise from the Control Tower error feed** · verified 2026-10-08 · → [[../inngest/supabase-log-poll]] (capture-drop filters)
+- **Drop foreign-app noise: ad hoc PostgREST SELECT of non-existent spec_status_history.from_status column** · verified 2026-10-08 · → [[../lifecycles/control-tower]]
 - **Drop foreign PostgREST `column journey_sessions.expires_at does not exist` noise at capture** · verified 2026-10-08 · → [[../libraries/control-tower]] (`isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise`)
+- **ShopCX subscriptions: our DB plans the date, Shopify's billing cycle is resolved only at charge time** · verified 2026-10-08 · → [[../lifecycles/shopcx-subscriptions]]
+- **Sol verifies delivery status and subscription billability before answering an Order Now failure** · verified 2026-10-08 · → [[libraries/portal__remediation]]
+- **Store credit does not auto-apply to self-placed one-time web orders** · verified 2026-10-08 · → [[../libraries/store-credit]]
 - **CS Director close-no-action gate: fix ticket_required_outcomes column names (kind, authored_at)** · verified 2026-10-07 · → [[../lifecycles/ticket-lifecycle]]
 - **CX agents must read the engine's realized price, not the override base** · verified 2026-10-07 · → [[../libraries/cx-agent-sdk]], [[../libraries/action-executor]], [[../libraries/june-remedy-approval]]
 - **Drop stale agent_jobs.terminal_reason direct-REST lookup noise** · verified 2026-10-07 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)

@@ -37,21 +37,26 @@ import {
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
+  isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
+  isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise,
+  isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
+  isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
@@ -60,8 +65,10 @@ import {
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
   isForeignSupabasePostgresOrdersNameLookupNoise,
   isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise,
+  isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise,
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
@@ -78,6 +85,7 @@ import {
   isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise,
   isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecsFlagsAdhocNoise,
   isForeignSupabasePostgresMissingSpecsOwnerFunctionAdhocNoise,
@@ -95,6 +103,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsTargetDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise,
+  isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingWorkspacesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
@@ -284,6 +293,15 @@ const LOG_QUERIES: LogQuery[] = [
       // a `loop_alerts` column rename, a non-SELECT write, or a FATAL/PANIC/constraint
       // violation still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale external/REST client SELECTs a
+      // `dismissed_at` column from `dashboard_notifications` that the table never owned.
+      // The resulting undefined_column ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-dashboard-notifications-dismissed-at-direct-]], Control
+      // Tower signature `supabase-logs:a6332efa5c7a5ea8`). Narrowly gated to require BOTH
+      // the exact `column dashboard_notifications.dismissed_at does not exist` message AND
+      // the SELECT-lookup shape (bare or PostgREST CTE wrapper) — a different missing
+      // column on the table, or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an operator typo — a manual SQL client did a
       // `select ... from error_events` naming the wrong column (`first_seen` instead of
       // our real `first_seen_at`). The resulting undefined_column ERROR is repair work
@@ -347,6 +365,29 @@ const LOG_QUERIES: LogQuery[] = [
       // column-missing error on any other table, or on `orders` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingOrdersSourceColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a manual Supabase Studio browse / external REST
+      // probe that selects a non-existent `key` column off `public.kill_switches` — or the
+      // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."kill_switches" ... )` CTE
+      // wrapper the same client emits. Our `kill_switches` table keys by `node_id`, has no
+      // bare `key` column, and no ShopCX code path selects it, so the Postgres
+      // 'column kill_switches.key does not exist' is a query we don't own (Control Tower
+      // signature `supabase-logs:2b7d2d7c4dd771e1`). Narrowly gated to require BOTH the exact
+      // column-missing message AND the SELECT-lookup shape — a real schema regression on
+      // kill_switches (any other column, or via a non-SELECT statement) still pages.
+      if (isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... source_name ... from
+      // public.transactions` lookup by an external tool / stale exploratory query — or the
+      // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."transactions" ... )` CTE
+      // wrapper the same client emits over the REST endpoint. Our `transactions` table has
+      // NO `source_name` column — `source_name` lives on `public.orders`, never on
+      // `transactions`, and no ShopCX code path selects it off `transactions`, so the
+      // resulting column-missing ERROR is repair work for a query we don't own (Control
+      // Tower signature `supabase-logs:536f2f8f383676b7`). Narrowly gated to require BOTH
+      // the exact column-missing message AND the SELECT-lookup shape — a column-missing
+      // error on any other column of `transactions`, or on `source_name` from any other
+      // table (including the real `orders.source_name`), or on `transactions` via a
+      // non-SELECT statement (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... subtotal_cents ... from
       // public.orders` lookup by an external tool / stale exploratory query — or the
       // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE
@@ -452,6 +493,24 @@ const LOG_QUERIES: LogQuery[] = [
       // `subscriptions` via a non-SELECT statement (real code-bug shape), still
       // surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... delivery_address ...
+      // from public.subscriptions` lookup by an external tool (Supabase Studio Table
+      // Editor / API Docs, foreign SQL client, stale exploratory session, third-party
+      // integration) or the PostgREST `WITH pgrst_source AS ( SELECT ... FROM
+      // "public"."subscriptions" ... )` CTE wrapper the same client emits over the REST
+      // endpoint. Our `subscriptions` table has NO `delivery_address` column — the live
+      // delivery/shipping columns are `shipping_address` (JSONB) and
+      // `delivery_price_cents` (int8). No ShopCX code path issues a SELECT on
+      // `subscriptions.delivery_address`, so the resulting column-missing ERROR is repair
+      // work for a query we don't own
+      // ([[../specs/error-feed-drop-subscriptions-delivery-address-column-adhoc-]],
+      // Control Tower signature `supabase-logs:926eb562770a4248`). Narrowly gated to
+      // require BOTH the exact column-missing message AND the SELECT-lookup shape — a
+      // column-missing error on any other column of `subscriptions` (including the real
+      // `shipping_address` / `delivery_price_cents`), or on `delivery_address` from any
+      // other table, or on `subscriptions` via a non-SELECT statement (real code-bug
+      // shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... address ... from
       // public.customers` lookup by an external tool (Supabase Studio Table Editor /
       // API Docs, foreign SQL client, stale exploratory session, third-party
@@ -508,6 +567,20 @@ const LOG_QUERIES: LogQuery[] = [
       // another table (workspace_members / tickets), or via a non-SELECT statement (real
       // code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... intents ... from
+      // public.ticket_analyses` lookup by an external tool / stale integration. The
+      // `ticket_analyses` table exists but no ShopCX code path / migration / view /
+      // function / trigger references an `intents` column — our table carries `issues`,
+      // not `intents`, and every read goes through the ticket-analyses SDK — so the
+      // column-missing ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-ticket-analyses-intents-adhoc-lookup-noise]], Control
+      // Tower signature `supabase-logs:7f83f37774a85b5b`). Same narrow-gating shape as the
+      // `ticket_messages.role` sibling: BOTH the exact column-missing message AND the
+      // SELECT-lookup shape (bare or PostgREST-CTE) — a column-missing error on a live
+      // `ticket_analyses` column (issues / score), on `intents` for another table, or via
+      // a non-SELECT statement (real code-bug shape) still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... metadata ... from
       // public.error_events` lookup by an external tool / stale exploratory query. The
       // `error_events` table exists but no ShopCX code path / migration / view / function
@@ -606,6 +679,19 @@ const LOG_QUERIES: LogQuery[] = [
       // sighting.
       if (isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.order_refunds.customer_id`. The `order_refunds` table exists but
+      // has no `customer_id` column — every ShopCX refund lookup joins through
+      // `order_id` / `workspace_id`. The column-missing ERROR only reaches this feed when a
+      // foreign app / stale SQL Editor session queries
+      // `/rest/v1/order_refunds?select=...customer_id...`. There is no lever from ShopCX to
+      // make that query resolve — paging Platform on it (Control Tower signature
+      // `supabase-logs:d919f14fa13296c8`) is repair work for a query we don't own. Narrowly
+      // gated to require BOTH the exact column-missing message AND the bare-SELECT /
+      // PostgREST-CTE shape on order_refunds — a column-missing error on any other table, a
+      // different column on `order_refunds`, or on it via a non-SELECT statement (real
+      // code-bug / schema-regression shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.smart_patterns.content`. The `smart_patterns` table exists but
       // has no `content` column (grep confirms no ShopCX caller queries `.content`; its
       // text lives in `phrases` / `embedding_text` / `description` / `name`); the
@@ -637,6 +723,11 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_status_history`, or on it via a non-SELECT statement (real code-bug shape)
       // still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(message, query)) return null;
+      // Same foreign caller, `from_status` column: Postgres reports the first unresolved
+      // column, so when the ad hoc read is evaluated `from_status` first the `created_at`
+      // pin above never fires. Drop the `column spec_status_history.from_status does not
+      // exist` bare-SELECT shape too; a different column / table / non-SELECT still pages.
+      if (isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.subscription_cycle_charges.created_at`. The ledger exists but has no
       // `created_at` column (timestamps are `claimed_at` / `resolved_at`, and no ShopCX code
@@ -870,6 +961,26 @@ const LOG_QUERIES: LogQuery[] = [
       // through `spec_phases`, or on `specs` via a non-SELECT statement (real code-bug
       // shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.merged_at`. The `specs` table exists but has NEVER had a
+      // `merged_at` column — merge provenance lives on `specs.merged_pr` +
+      // `specs.last_merge_sha` (and the per-phase `spec_phases.build_sha`), and every
+      // ShopCX reader goes through the [[../libraries/specs-table]] SDK/RPC, which does
+      // NOT select `specs.merged_at`. The column-missing ERROR only reaches this feed
+      // when a foreign app / stale SQL Editor session / deprecated integration queries
+      // `/rest/v1/specs?select=slug,status,merged_at,...` (observed both as a bare SELECT
+      // and as the PostgREST-wrapped `WITH pgrst_source AS ( SELECT ... FROM
+      // "public"."specs" ... )` CTE form). There is no lever from ShopCX to make that
+      // query resolve — adding a fake `merged_at` column would make the data model worse
+      // — paging Platform on it (Control Tower signature
+      // `supabase-logs:a093e7c15c154c25`,
+      // [[../specs/error-feed-drop-specs-merged-at-direct-rest-noise]]) is repair work
+      // for a query we don't own. Narrowly gated to require BOTH the exact column-missing
+      // message AND a SELECT-on-specs shape (bare OR PostgREST CTE wrapper) — a
+      // column-missing error on any other table, a different column on `specs`, a JOIN
+      // through `spec_phases`, or on `specs` via a non-SELECT statement (real code-bug
+      // shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.specs.review_status`. The `specs` table exists but has NEVER
       // had a `review_status` column — review state lives in the Vale / Ada review
@@ -1212,6 +1323,24 @@ const LOG_QUERIES: LogQuery[] = [
       // Static-analysis fingerprint — `isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
       if (isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.director_activity` that asks for a non-existent `kind` column.
+      // The `director_activity` table exists but has NEVER carried a `kind` column — no
+      // ShopCX reader selects it. The column-missing ERROR only reaches this feed when a
+      // foreign app / stale SQL Editor session / deprecated integration queries
+      // `/rest/v1/director_activity?select=id,kind,created_at` — or the
+      // `WITH pgrst_source AS ( SELECT ... FROM "public"."director_activity" ... )` CTE
+      // wrapper the same client emits over the REST endpoint. There is no lever from
+      // ShopCX to make that query resolve — paging Platform on it (Control Tower
+      // signature `supabase-logs:1f0ce6d7290bc2ee`,
+      // [[../specs/error-feed-drop-director-activity-kind-direct-rest-lookup-no]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-director_activity shape (bare OR PostgREST
+      // CTE wrapper) — a column-missing on any other table, a different column on
+      // `director_activity`, or on `director_activity` via a non-SELECT statement (real
+      // code-bug shape) still surfaces / pages on first sighting.
+      // Static-analysis fingerprint — `isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
+      if (isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.workspaces.slug`. The `workspaces` table exists but has NO
       // `slug` column — the workspace slug shape lives on `workspaces.help_slug` (the
       // public mini-site slug). The column-missing ERROR only reaches this feed when a
@@ -1390,21 +1519,26 @@ const LOG_QUERIES: LogQuery[] = [
       // isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoisemessage, query
       if (isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
-      // against `public.loop_heartbeats` naming legacy column names (`beat_at`, `loop`,
-      // or `loop_key`) that have NEVER lived on the table — the real per-run columns
-      // are `ran_at` and `loop_id` (`loop_key` is a stale synonym for `loop_id`), and
+      // against `public.loop_heartbeats` naming legacy / off-schema column names
+      // (`beat_at`, `loop`, `loop_key`, `payload`, or `status`) that have NEVER lived on
+      // the table — the real per-run columns are `ran_at` and `loop_id` (`loop_key` is a
+      // stale synonym for `loop_id`; `payload` / `status` are off-schema — real state is
+      // `kind` / `ok` / `produced` / `detail`), and
       // every ShopCX reader + writer (heartbeat SDK, the Control Tower monitor) uses
       // the real column names. The column-missing ERROR only reaches this feed when a
       // foreign app / stale SQL Editor session / deprecated integration queries
-      // `/rest/v1/loop_heartbeats?select=loop_key,beat_at,...`. There is no lever from
+      // `/rest/v1/loop_heartbeats?select=loop_key,beat_at,payload,status,...`. There is no lever from
       // ShopCX to make that query resolve — renaming the migrated `loop_id` / `ran_at`
       // columns would break every real reader, and paging Platform on it
       // ([[../specs/error-feed-drop-loop-heartbeats-beat-at-direct-rest-noise]] +
-      // [[../specs/error-feed-drop-loop-heartbeats-loop-key-direct-rest-noise]], Control
-      // Tower signatures `supabase-logs:1b4a323180ec8365` + `supabase-logs:2dde5e6c56fb408c`)
+      // [[../specs/error-feed-drop-loop-heartbeats-loop-key-direct-rest-noise]] +
+      // [[../specs/error-feed-drop-loop-heartbeats-payload-status-direct-rest-n]], Control
+      // Tower signatures `supabase-logs:1b4a323180ec8365` + `supabase-logs:2dde5e6c56fb408c`
+      // + `supabase-logs:dbb86fe54d00aac0`)
       // is repair work for a query we don't own. Narrowly gated to require BOTH an
       // exact column-missing message on `loop_heartbeats.beat_at` OR `loop_heartbeats.loop`
-      // OR `loop_heartbeats.loop_key` AND a SELECT-on-loop_heartbeats shape (bare OR
+      // OR `loop_heartbeats.loop_key` OR `loop_heartbeats.payload` OR `loop_heartbeats.status`
+      // AND a SELECT-on-loop_heartbeats shape (bare OR
       // PostgREST CTE wrapper) — a column-missing error on any other table, a different
       // column on `loop_heartbeats` (e.g. a real `loop_id` / `ran_at` regression),
       // writes, joins, or FATAL/PANIC/constraint failures on `loop_heartbeats` still

@@ -25,11 +25,9 @@ date lands in a spent cycle and the subscription is **never charged again, silen
 - rolls forward from the sub's ORIGINAL date by its own cadence (`rollForwardToFutureBillingDate`),
   so a customer who billed on the 12th still bills on the 12th — the pause skips some of their days,
   it does not move them. Tomorrow is the floor if the roll cannot produce a future date.
-- on `shopcx`, calls `shopifyRetimeContract` so the **Shopify cycle schedule** moves too — setting
-  `nextBillingDate` alone only moves a display field
-  ([[../libraries/commerce__shopify-subscription-client]] § "Keeping a customer's own dates").
-- if the new date still lands in a spent cycle, `shopifyRetimeContract` returns `stranded` and this
-  logs it loudly rather than succeeding quietly into a sub that will never bill.
+- on `shopcx`, calls `shopifySetNextBillingDate` (display-only, Phase 2) — the charge resolves the
+  first unbilled cycle by index at charge time ([[../libraries/commerce__shopify-subscription-client]] `resolveChargeableCycle`), so a date landing in a spent cycle is cosmetic drift, never a missed renewal.
+  The cycle calendar is never re-pinned again (that was itself the strander).
 
 The resulting date is written to `subscriptions.next_billing_date` in the same update that clears
 `pause_resume_at`.

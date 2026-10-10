@@ -1364,6 +1364,20 @@ DRAFT ORDERS: orders flagged [DRAFT — not a renewal] are manual draft orders (
     if (totalCredit > 0) {
       const detail = perProfile.length > 1 ? ` (across linked profiles: ${perProfile.join("; ")})` : "";
       parts.push(`\nSTORE CREDIT: $${totalCredit.toFixed(2)} ${currency}${detail}`);
+      // Redemption-path knowledge (ground truth: ticket b26c64d2 / order SC140050).
+      // Store credit draws down ONLY on charges WE initiate (Appstle subscription
+      // renewals). A customer's self-placed one-time WEB checkout is a separate
+      // Shopify checkout where the balance is NOT auto-applied — that order is
+      // charged in full with the credit left intact. So do NOT tell a customer the
+      // credit "comes off automatically, nothing to do" unless their next charge is
+      // a subscription renewal. For a one-time/web order give the real redemption
+      // path: apply the credit at checkout while logged into their account, or we
+      // place an assisted order that draws the balance. If the customer has NO
+      // subscription, the credit will NEVER auto-apply — they must redeem it
+      // deliberately.
+      parts.push(
+        `  ↳ REDEMPTION: this balance auto-draws ONLY on charges we initiate (Appstle subscription renewals). It does NOT auto-apply to a customer's self-placed one-time/web checkout — that order is charged in full and the credit stays intact. Do NOT say "it comes off automatically / nothing to do" unless the next charge is a subscription renewal. For a one-time order, tell them the real path: apply the credit at checkout while logged into their account, or we place an assisted order that draws the balance. If they have no subscription, it will never auto-apply — they must redeem it deliberately.`,
+      );
     } else {
       parts.push(`\nSTORE CREDIT: $0 (no store credit balance on this customer or any linked profile)`);
     }

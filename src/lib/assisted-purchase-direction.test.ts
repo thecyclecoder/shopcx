@@ -20,12 +20,16 @@ import {
   ASSISTED_PURCHASE_FINAL_STAGE,
   ASSISTED_PURCHASE_JOURNEY_SLUG,
   ASSISTED_PURCHASE_LEAD_IN,
+  ASSISTED_PURCHASE_PAYPAL_REPLY,
   ASSISTED_PURCHASE_PLAYBOOK_SLUGS,
   ASSISTED_PURCHASE_SESSION_CHOSEN_ONLY_SLUGS,
   ASSISTED_PURCHASE_STAGES,
+  ASSISTED_PURCHASE_TRUST_REPLY,
+  PAYMENT_JOURNEY_OBJECTION_CUES,
   assertSolAssistedPurchaseReplyNeverClaimsPlaced,
   assertSolFastDefaultToConcierge,
   buildAssistedPurchaseFirstTurnDirection,
+  conciergeReplyForObjectionCue,
   isSessionChosenOnlyPlaybook,
 } from "./assisted-purchase-direction";
 
@@ -450,4 +454,48 @@ test("3dd271be: acknowledging what the customer already tried (incognito) → PA
       "I saw you already tried incognito and clearing your cache — none of that fixed it. I can just place this for you on my side.",
   });
   assert.equal(r.ok, true, "a reference (not a suggestion) must pass");
+});
+
+// ── cd385c7f: payment-journey objection concierge replies ───────────────────
+
+test("cd385c7f: trust + safety-doubt cues map to the trust concierge reply", () => {
+  assert.equal(conciergeReplyForObjectionCue("payment_link_trust_objection"), ASSISTED_PURCHASE_TRUST_REPLY);
+  assert.equal(conciergeReplyForObjectionCue("payment_link_safety_doubt"), ASSISTED_PURCHASE_TRUST_REPLY);
+});
+
+test("cd385c7f: alt-rail PayPal cue maps to the PayPal concierge reply (answers in-lane, Vault supported)", () => {
+  assert.equal(conciergeReplyForObjectionCue("alt_rail_payment_question"), ASSISTED_PURCHASE_PAYPAL_REPLY);
+  assert.match(ASSISTED_PURCHASE_PAYPAL_REPLY, /paypal/i);
+});
+
+test("cd385c7f: a non-objection cue returns null (caller falls back to the normal stage reply)", () => {
+  assert.equal(conciergeReplyForObjectionCue("otp_not_arriving"), null);
+  assert.equal(conciergeReplyForObjectionCue(null), null);
+  assert.equal(conciergeReplyForObjectionCue(undefined), null);
+});
+
+test("cd385c7f: the objection-cue set is exactly the three payment-journey cues", () => {
+  assert.deepEqual(
+    [...PAYMENT_JOURNEY_OBJECTION_CUES].sort(),
+    ["alt_rail_payment_question", "payment_link_safety_doubt", "payment_link_trust_objection"],
+  );
+});
+
+test("cd385c7f: the PayPal concierge reply does NOT trip the dead-end guard (answers, never 'try PayPal')", () => {
+  // The whole point of the spec: assertSolFastDefaultToConcierge only BLOCKS
+  // proposing PayPal as a dead-end; it must NOT block the in-lane answer that
+  // the existing secure link already accepts PayPal Vault.
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: ASSISTED_PURCHASE_PAYPAL_REPLY,
+  });
+  assert.equal(r.ok, true, "the PayPal-Vault answer must pass the dead-end guard");
+});
+
+test("cd385c7f: the trust concierge reply also passes the dead-end guard", () => {
+  const r = assertSolFastDefaultToConcierge({
+    isCheckoutStuck: true,
+    firstReply: ASSISTED_PURCHASE_TRUST_REPLY,
+  });
+  assert.equal(r.ok, true, "the trust answer must pass the dead-end guard");
 });

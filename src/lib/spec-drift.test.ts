@@ -372,6 +372,14 @@ test("pickPhasesBuiltInMerge: build_sha set wins even when merge diff is empty �
   assert.equal(v.stamped[0].reason, "build_sha");
 });
 
+test("pickPhasesBuiltInMerge: a box-built sibling disables the file-diff fallback — the shopcx-subscriptions #3189 shape (P2 unbuilt, its files overlap P1's merge) → only P1 stamps", () => {
+  const p1: PhaseBuiltCandidate = { position: 1, build_sha: "a4eba01", body: "Edit `src/lib/commerce/shopify-subscription-client.ts`." };
+  const p2: PhaseBuiltCandidate = { position: 2, build_sha: null, body: "Also `src/lib/commerce/subscription.ts` and `src/lib/inngest/portal-auto-resume.ts`." };
+  const v = pickPhasesBuiltInMerge([p1, p2], new Set(["src/lib/commerce/shopify-subscription-client.ts", "src/lib/commerce/subscription.ts"]));
+  assert.deepEqual(v.stamped, [{ position: 1, reason: "build_sha" }]);
+  assert.deepEqual(v.skipped, [2]);
+});
+
 // ── isMergeShaAncestorOfMain — reverse-drift-verify-merge-sha-on-main… Phase 1 ─────────────────
 //
 // The reverse-drift pre-filter was escalating just-merged phases as 'code-missing' because its

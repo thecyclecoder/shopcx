@@ -52,7 +52,7 @@ export const shopcxDriftReconcileCron = inngest.createFunction(
     for (const workspaceId of workspaces) {
       const report = await step.run(`reconcile-${workspaceId}`, () =>
         // `apply` fixes ONLY the status disagreement, where the contract is authoritative by
-        // definition. The only remaining drift kind is display-date drift, which is cosmetic.
+        // definition. Dates are reported, never auto-written — a strand needs a re-pin decision.
         reconcileShopcxDrift(workspaceId, { apply: true }),
       );
       checked += report.checked;
@@ -80,9 +80,12 @@ export const shopcxDriftReconcileCron = inngest.createFunction(
 
     // ⭐ ESCALATE. Every defect in this subsystem through 2026-09-30 was found because a HUMAN
     // asked "check on things" — the cron logged perfectly and nobody read the logs. A monitor that
-    // only writes to console is not a monitor. The `stranded` kind is retired (Phase 2: a billed
-    // cycle no longer blocks a charge), so the remaining page-worthy signal is a sub late beyond its
-    // own cadence. Deduped by signature so a persisting condition does not re-open one daily.
+    // only writes to console is not a monitor. Anything non-zero now opens a repair job, deduped by
+    // signature so a persisting condition does not re-open one daily.
+    //
+    // The 'stranded' escalation was retired with the strand probe in the reconciler
+    // (resolveChargeableCycle bills the first UNBILLED cycle by index, so a spent-cycle date no
+    // longer strands a sub) — only the cadence-lateness path still pages.
     if (lateUnexplained.length) {
       await step.run("escalate", async () => {
         const admin = createAdminClient();
