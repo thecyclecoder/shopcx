@@ -128,19 +128,23 @@ purpose so "Monthly" is a true 4-week cycle, not a drifting calendar month.
 | Monthly | WEEK × 4 | `gid://shopify/SellingPlan/4087021741` |
 | Every 2 Months | WEEK × 8 | `gid://shopify/SellingPlan/4087054509` |
 
-Every plan carries a **25% `PERCENTAGE` pricing policy** (verified live 2026-10-08), the same S&S
-Appstle's group applies. So a checkout on our plan prices like Appstle's, and the subscription
-Shipping Protection variant (`45036181651629`, $6.60) lands at $4.95 on either. No products are
-attached yet; that is the product-page cutover. Its steps: attach our group, swap the theme's
-hardcoded Appstle plan ids (`2310373549` → `4087021741`, `2310406317` → `4087054509` in
-`snippets/quantity-breaks.liquid` and the price-table landing pages), run test checkouts, then
-remove Appstle's group.
+**The plans carry NO pricing policy (CEO, 2026-10-10).** Subscribe & Save comes only from the
+checkout discount function "Subscription Discount" (`DiscountAutomaticNode/1491491881133`), which
+gives 25% to lines on these three plans, protection included, and stacks with Buy 2/3. It applies
+on every cycle so checkout shows the discounted recurring price. Shopify copies it onto the contract
+as a recurring automatic, and the ingest normalizer replaces that copy with our own "Subscribe &
+Save" + "Volume discount", which every later edit recomputes. Plan order is Monthly, Every 2 Months, Every 2 Weeks: the
+cart drawer and cross-sells take a product's first group's first plan, and our group lists before
+Appstle's.
 
-**Held for S&S-in-a-discount-function (CEO, 2026-10-08).** The 25% is moving off the selling plan
-into a checkout discount function, so checkout shows $79.95 with an S&S discount line. At cutover
-our plan's 25% policy must therefore come OFF, or new subs get 25% twice. The subscription
-protection variant then needs its own route to $4.95, either through the function or a variant
-price change. Normalization already handles the at-MSRP contract this produces.
+⚠️ `sellingPlanGroupUpdate` with only `position` in `sellingPlansToUpdate` WIPES that plan's
+`pricingPolicies`. Always resend every field you mean to keep.
+
+**Product-page cutover (2026-10-10).** Our group is on the 9 subscription products (the ACV products
+stay off; protection only on `8356945952941`). Theme commit `c51af2a` swapped the hardcoded Appstle
+plan ids (`2310373549` → `4087021741`, `2310406317` → `4087054509` in `snippets/quantity-breaks.liquid`,
+`sections/price-table.liquid` and the two Tabs landing pages), so product pages create ShopCX
+subscriptions. Remaining: test checkouts, then remove Appstle's group.
 
 A checkout contract is rebased into our pricing shape by `normalize-pricing` in
 [[../inngest/shopcx-contract-ingest]] right after it is ingested.

@@ -31,8 +31,22 @@ test("only touches a rule line with NO structural allocation, priced at or below
 test("rebases only lines BELOW MSRP; an at-MSRP line just gets its discounts", () => {
   // At MSRP is the S&S-from-a-discount-function shape: nothing to rebase, but without our own
   // "Subscribe & Save" it renews at full price. It must still reach the recompute.
-  assert.match(fn, /needsDiscounts = true;\s*if \(unit < v\.price_cents\) toRebase\.push/);
+  assert.match(fn, /needsDiscounts = true;\s*if \(unit < v\.price_cents\) \{\s*planBaked = true;\s*toRebase\.push/);
   assert.match(fn, /if \(!needsDiscounts\) return \{ success: true, normalized: false \}/);
+});
+
+test("protection gets the S&S baked into its own price in the function shape only", () => {
+  // Dylan 2026-10-10: the checkout function discounts protection too ($6.60 → $4.95). On the
+  // contract that is an inert automatic, so without this it renews at $6.60. Protection keeps the
+  // migration convention (final price in currentPrice, no S&S/Volume allocations), so it is a price
+  // move, gated on the RULE lines' shape: at MSRP (function) yes, below MSRP (plan-baked) no.
+  assert.match(fn, /if \(needsDiscounts && !planBaked && ctx\.snsPct > 0\) \{\s*for \(const \{ lineId, unit \} of protectionLines\)/);
+  assert.match(fn, /targetCents: Math\.round\(\(unit \* \(100 - ctx\.snsPct\)\) \/ 100\)/);
+  assert.match(fn, /if \(unit < v\.price_cents\) \{\s*planBaked = true;/);
+  // Never from protection's catalog price, which lags the store.
+  assert.doesNotMatch(fn, /isProtection\(ctx, v\.product_id\)\) \{[^}]*v\.price_cents/);
+  // The recompute still never gives protection structural discounts.
+  assert.match(SRC, /function rewriteStructuralDiscounts[\s\S]*?ruleProducts\.has\(v\.product_id\) \|\| isProtection\(ctx, v\.product_id\)\) continue;/);
 });
 
 test("rebase and recompute commit in the SAME draft", () => {
@@ -60,6 +74,23 @@ test("shop-wide AUTOMATIC discounts are never treated as the customer's coupon",
   const ops = readFileSync(join(__dirname, "shopcx-discount-ops.ts"), "utf8");
   assert.match(ops, /const isAutomatic = \(d: \{ type: string \| null \}\) => d\.type === "AUTOMATIC_DISCOUNT"/);
   assert.match(ops, /!isStructural\(d\) && !isAutomatic\(d\)/);
+});
+
+test("the recompute replaces checkout LINE_ITEM automatic copies with our own discounts", () => {
+  // Dylan 2026-10-10: the S&S / Buy 2-3 functions apply on EVERY cycle so checkout shows the
+  // discounted recurring price. Shopify copies them onto the contract as live recurring automatics;
+  // left there they stack with ours (double discount) and never follow a quantity change (a Buy 3
+  // rate living on after a downgrade). Shipping automatics and customer codes stay.
+  const rewrite = SRC.slice(SRC.indexOf("async function rewriteStructuralDiscounts"), SRC.indexOf("async function preparePricing"));
+  assert.match(rewrite, /d\.type === "AUTOMATIC_DISCOUNT" && d\.targetType === "LINE_ITEM"/);
+  assert.match(rewrite, /shopifyRemoveDraftDiscount\(workspaceId, draftId, d\.id\)/);
+  // Removal happens before our discounts are re-added, inside the same draft.
+  assert.ok(rewrite.indexOf("shopifyRemoveDraftDiscount") < rewrite.indexOf("shopifyAddDraftDiscount"));
+});
+
+test("the renewal price check counts a leftover automatic copy as drift", () => {
+  const check = readFileSync(join(__dirname, "shopcx-renewal-price-check.ts"), "utf8");
+  assert.match(check, /const actual = current \* qty - l\.structuralDiscountCents - l\.automaticDiscountCents;/);
 });
 
 test("an inert automatic on the contract cannot double-count with our own discount", () => {
