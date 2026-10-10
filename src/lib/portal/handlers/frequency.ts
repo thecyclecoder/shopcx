@@ -4,9 +4,10 @@ import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, checkPortalBa
 // vendor straight bypasses billing_source resolution, so a migrated subscription's change would
 // hit Appstle for a contract it no longer holds — failing there and returning BEFORE the local
 // write, leaving the customer's change silently unapplied.
-import { subscriptionUpdateBillingInterval } from "@/lib/commerce/subscription";
+import { subscriptionUpdateBillingInterval, subscriptionUpdateNextBillingDate } from "@/lib/commerce/subscription";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { shouldBlockForFailedPayment } from "@/lib/portal/failed-payment-guard";
+import { rollForwardToFutureBillingDate } from "@/lib/dunning";
 
 function s(v: unknown): string { return typeof v === "string" ? v.trim() : ""; }
 
@@ -43,6 +44,47 @@ export const frequency: RouteHandler = async ({ auth, route, req }) => {
   const result = await subscriptionUpdateBillingInterval(auth.workspaceId, String(contractId), intervalRaw, intervalCount);
   if (!result.success) {
     return jsonErr({ error: "frequency_update_failed", message: result.error }, 502);
+  }
+
+  // ⭐ Phase 2: our DB row is the PLANNER. A frequency change updates the cadence on our row and
+  // rolls `next_billing_date` forward to a future date by the NEW cadence, then sets Shopify's
+  // DISPLAY date to match through the engine-dispatch chokepoint — it never re-pins the cycle
+  // calendar (the charge resolves the first unbilled cycle by index at charge time). The old
+  // behaviour let Shopify re-shape the cycle window on a frequency change and strand the sub
+  // (ground truth 2026-10-08, Ashley Denson).
+  const admin = createAdminClient();
+  const newInterval = intervalRaw.toLowerCase();
+  const { data: subRow } = await admin.from("subscriptions")
+    .select("next_billing_date")
+    .eq("workspace_id", auth.workspaceId)
+    .eq("shopify_contract_id", String(contractId))
+    .maybeSingle();
+  const prior = (subRow as { next_billing_date: string | null } | null)?.next_billing_date ?? null;
+  const from = prior ? new Date(prior) : new Date();
+  let nextBillingDate: string;
+  try {
+    nextBillingDate = rollForwardToFutureBillingDate(
+      Number.isNaN(from.getTime()) ? new Date() : from,
+      newInterval,
+      intervalCount,
+    ).toISOString();
+  } catch {
+    nextBillingDate = new Date(Date.now() + 86_400_000).toISOString();
+  }
+  await admin.from("subscriptions")
+    .update({
+      billing_interval: newInterval,
+      billing_interval_count: intervalCount,
+      next_billing_date: nextBillingDate,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("workspace_id", auth.workspaceId)
+    .eq("shopify_contract_id", String(contractId));
+  // Display-only sync (never re-pins cycles). Non-fatal: cosmetic drift the daily reconciler catches.
+  try {
+    await subscriptionUpdateNextBillingDate(auth.workspaceId, String(contractId), nextBillingDate);
+  } catch (e) {
+    console.warn(`[frequency] ${contractId}: display next-billing-date sync threw (non-fatal):`, e instanceof Error ? e.message : e);
   }
 
   const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);

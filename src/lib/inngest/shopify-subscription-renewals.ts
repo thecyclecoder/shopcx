@@ -419,18 +419,24 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
         // because the pin moved the schedule and nothing moved the date. `shopifyRetimeContract`
         // does both and then re-reads to confirm the new date did not land in a spent cycle.
         //
-        // Non-fatal: the charge already succeeded and the worker bills by explicit selector, so a
-        // failed retime is display drift, never a missed renewal. The daily drift reconciler
+        // Non-fatal: the charge already succeeded and the worker resolves the cycle by index at
+        // charge time, so a failed retime is display drift, never a missed renewal. The daily drift reconciler
         // catches whatever this misses.
         try {
           const { shopifyRetimeContract } = await import("@/lib/commerce/shopify-subscription-client");
           const retimed = await shopifyRetimeContract(
             workspace_id, sub.shopify_contract_id, advanceTo.toISOString(),
           );
-          if (retimed.stranded) {
-            console.error(`[shopcx-renewal] ${sub.shopify_contract_id}: advanced to ${advanceTo.toISOString()} but it lands in a spent cycle — will NOT be charged again without a re-pin`);
-          } else if (!retimed.success) {
-            console.error(`[shopcx-renewal] ${sub.shopify_contract_id}: retime failed (${retimed.error}) — Shopify-visible date is stale`);
+          // A refused pin is NOT a missed renewal: the next charge resolves the first unbilled cycle
+          // by index (`resolveChargeableCycle`). But a refused retime writes nothing, so fall back to
+          // the display-only set — the customer must still see the date we will actually bill on.
+          if (!retimed.success) {
+            console.warn(`[shopcx-renewal] ${sub.shopify_contract_id}: rolling pin refused (${retimed.error}) — setting display date only`);
+            const { shopifySetNextBillingDate } = await import("@/lib/commerce/shopify-subscription-client");
+            const shown = await shopifySetNextBillingDate(workspace_id, sub.shopify_contract_id, advanceTo.toISOString());
+            if (!shown.success) {
+              console.error(`[shopcx-renewal] ${sub.shopify_contract_id}: display date set failed (${shown.error}) — Shopify-visible date is stale`);
+            }
           }
         } catch (e) {
           console.error(`[shopcx-renewal] ${sub.shopify_contract_id}: retime threw (non-fatal):`, e instanceof Error ? e.message : e);
