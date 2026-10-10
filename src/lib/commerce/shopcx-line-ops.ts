@@ -37,7 +37,7 @@ import { errText } from "@/lib/error-text";
 export interface LineOpResult { success: boolean; error?: string; alreadyAbsent?: boolean }
 
 /** The pricing rule every consumable is on. Read from the DB, never hardcoded per product. */
-async function activePricingRuleId(workspaceId: string): Promise<string | null> {
+export async function activePricingRuleId(workspaceId: string): Promise<string | null> {
   const admin = createAdminClient();
   const { data } = await admin
     .from("pricing_rules").select("id").eq("workspace_id", workspaceId).eq("is_active", true).limit(1).maybeSingle();

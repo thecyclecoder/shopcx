@@ -41,6 +41,7 @@ import {
 import { enforceSwitch } from "@/lib/control-tower/enforce-switch";
 import { rollForwardToFutureBillingDate } from "@/lib/dunning";
 import { errText } from "@/lib/error-text";
+import { checkShopcxRenewalPrice, surfaceRenewalPriceMismatch } from "@/lib/commerce/shopcx-renewal-price-check";
 
 /** A cycle whose expected date has passed by less than this is still "due now", not overdue. */
 const DUE_GRACE_MS = 6 * 60 * 60 * 1000;
@@ -313,6 +314,22 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
       }
       return { status: "skipped", reason: "cycle_already_claimed", cycle_key: cycleKey };
     }
+
+    // 3b. Log-only pricing check (CEO 2026-10-10). Compares the contract against the pricing rules
+    //     and files a billing_alert card on a material gap. It NEVER blocks, delays or changes the
+    //     charge below: the contract is the price, and a wrong contract is fixed at its write path.
+    //     Best-effort — both helpers swallow their own errors.
+    await step.run("price-check-log", async () => {
+      const verdict = await checkShopcxRenewalPrice(workspace_id, sub.shopify_contract_id);
+      if ("lines" in verdict) {
+        const alert = await surfaceRenewalPriceMismatch(admin, {
+          workspaceId: workspace_id, subscriptionId: sub.id, customerId: sub.customer_id,
+          contractId: sub.shopify_contract_id, cycleKey, verdict,
+        });
+        return { status: verdict.status, expected: verdict.expectedCents, actual: verdict.actualCents, alerted: alert.inserted };
+      }
+      return "reason" in verdict ? { status: "unchecked", reason: verdict.reason } : { status: "match" };
+    });
 
     // 4. Charge. Targeting the resolved cycle explicitly — omitting the selector bills Shopify's
     //    CURRENT calendar cycle, which after a migration re-anchor is usually not the one we mean.
