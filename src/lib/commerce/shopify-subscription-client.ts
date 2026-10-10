@@ -629,6 +629,12 @@ export interface ContractLine {
    * has no other representation and would simply be lost.
    */
   legacyRateCents: number;
+  /**
+   * Cents allocated by checkout AUTOMATIC discounts Shopify copied onto the contract (S&S or Buy 2/3
+   * function copies). Zero once the recompute has replaced them with ours. Read by the renewal price
+   * check, so a copy left stacking on top of our own discounts shows up as drift.
+   */
+  automaticDiscountCents: number;
   sellingPlanName: string | null;
 }
 
@@ -657,7 +663,7 @@ export async function getSubscriptionContract(
           lineDiscountedPrice { amount }
           discountAllocations { amount { amount }
             discount {
-              ... on SubscriptionManualDiscount { id title }
+              ... on SubscriptionManualDiscount { id title type }
               ... on SubscriptionAppliedCodeDiscount { id } } } } } } } }`,
     { id: contractGid(contractId) },
   );
@@ -666,7 +672,7 @@ export async function getSubscriptionContract(
     id: string; status: string; nextBillingDate: string | null; createdAt: string | null;
     billingPolicy?: { interval: string; intervalCount: number };
     customerPaymentMethod?: { id: string };
-    lines: { edges: { node: { id: string; title: string; quantity: number; sellingPlanName: string | null; variantId: string | null; sku: string | null; currentPrice?: { amount: string }; lineDiscountedPrice?: { amount: string }; discountAllocations?: { amount?: { amount: string }; discount?: { title?: string } }[] } }[] };
+    lines: { edges: { node: { id: string; title: string; quantity: number; sellingPlanName: string | null; variantId: string | null; sku: string | null; currentPrice?: { amount: string }; lineDiscountedPrice?: { amount: string }; discountAllocations?: { amount?: { amount: string }; discount?: { title?: string; type?: string } }[] } }[] };
   } | undefined;
   if (!k) return { success: false, error: "contract not found (or not owned by this app)" };
   return {
@@ -701,6 +707,13 @@ export async function getSubscriptionContract(
         legacyRateCents: (e.node.discountAllocations ?? []).reduce(
           (sum, a) =>
             String(a?.discount?.title ?? "") === LEGACY_RATE_TITLE
+              ? sum + Math.round(parseFloat(a?.amount?.amount ?? "0") * 100)
+              : sum,
+          0,
+        ),
+        automaticDiscountCents: (e.node.discountAllocations ?? []).reduce(
+          (sum, a) =>
+            a?.discount?.type === "AUTOMATIC_DISCOUNT"
               ? sum + Math.round(parseFloat(a?.amount?.amount ?? "0") * 100)
               : sum,
           0,
@@ -1569,7 +1582,7 @@ export async function getSubscriptionDraft(
   draftId: string,
 ): Promise<{
   success: boolean; error?: string; lines?: DraftLine[];
-  discounts?: { id: string; title: string | null; type: string | null }[];
+  discounts?: { id: string; title: string | null; type: string | null; targetType: string | null }[];
   /** True when Shopify had MORE lines or discounts than this read returned. See `truncated` below. */
   truncated?: boolean;
 }> {
@@ -1583,7 +1596,7 @@ export async function getSubscriptionDraft(
               ... on SubscriptionManualDiscount { id title }
               ... on SubscriptionAppliedCodeDiscount { id } } } } }
         discounts(first:250){ pageInfo { hasNextPage } nodes {
-          ... on SubscriptionManualDiscount { id title type }
+          ... on SubscriptionManualDiscount { id title type targetType }
           ... on SubscriptionAppliedCodeDiscount { id } } } } } }`,
     { id: draftId },
   );
@@ -1592,7 +1605,7 @@ export async function getSubscriptionDraft(
     lines?: { pageInfo?: { hasNextPage?: boolean }; nodes?: { id: string; quantity: number; sku: string | null; variantId: string | null;
       currentPrice?: { amount: string };
       discountAllocations?: { amount?: { amount: string }; discount?: { title?: string } }[] }[] };
-    discounts?: { pageInfo?: { hasNextPage?: boolean }; nodes?: { id: string; title?: string | null; type?: string | null }[] };
+    discounts?: { pageInfo?: { hasNextPage?: boolean }; nodes?: { id: string; title?: string | null; type?: string | null; targetType?: string | null }[] };
   } | undefined;
   if (!n) return { success: false, error: "draft not found" };
   return {
@@ -1618,7 +1631,7 @@ export async function getSubscriptionDraft(
     })),
     // A code discount has no `title`; it can never match a structural title, so it is excluded
     // from the structural clear by construction.
-    discounts: (n.discounts?.nodes ?? []).map((d) => ({ id: d.id, title: d.title ?? null, type: d.type ?? null })),
+    discounts: (n.discounts?.nodes ?? []).map((d) => ({ id: d.id, title: d.title ?? null, type: d.type ?? null, targetType: d.targetType ?? null })),
   };
 }
 
