@@ -75,6 +75,7 @@ cycle. See `shopcxAddOneTimeLine` below.
 | `shopcxAddItem(ws, contractId, variantId, qty)` | a variant already present RAISES the quantity |
 | `shopcxUpdateLineItemPrice(ws, contractId, variantId, baseCents)` | pins the pre-discount BASE |
 | `shopcxAddOneTimeLine(ws, contractId, variantId, qty, priceCents)` | cycle-scoped — the retention gift |
+| `shopcxSetDeliveryPrice(ws, contractId, cents)` | sets the contract's renewal shipping price (draft) and mirrors `subscriptions.delivery_price_cents`. Used to zero shipping on contracts created while the free-shipping discount was a one-cycle copy (CEO 2026-10-10, free shipping every cycle) |
 | `shopcxNormalizeNewContract(ws, contractId)` | brings a CHECKOUT-born contract into our pricing shape; create-time only, called by [[../inngest/shopcx-contract-ingest]] |
 
 ### `shopcxNormalizeNewContract` — the two checkout shapes
