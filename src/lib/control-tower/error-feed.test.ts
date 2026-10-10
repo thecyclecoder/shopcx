@@ -98,6 +98,7 @@ import {
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnSubscriptionsIdAdhocNoise,
+  isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
@@ -2166,6 +2167,109 @@ test("isForeignSupabasePostgresUuidLikeOnSubscriptionsIdAdhocNoise KEEPS a non-S
     isForeignSupabasePostgresUuidLikeOnSubscriptionsIdAdhocNoise(
       "operator does not exist: uuid ~~ unknown",
       "delete from public.subscriptions where id like $1",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise ──
+// The migration_audits twin of the subscriptions.id uuid-LIKE Studio/REST probe: a Supabase
+// Studio Table Editor quick-filter / direct-REST probe typed against the uuid
+// `migration_audits.id` column emits `WHERE "id" LIKE $1`, rejected with
+// `operator does not exist: uuid ~~ unknown`. Control Tower signature
+// `supabase-logs:a3e4adaac3bc5983`. Drop AT CAPTURE only when BOTH the exact operator-missing
+// message AND the SELECT-shape on `migration_audits` naming `id like` are present; a uuid-LIKE
+// error on any OTHER table, a DIFFERENT operator mismatch on this table, or a non-SELECT shape
+// still pages.
+
+test("isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise drops the operator-missing message paired with the PostgREST CTE wrapper AND the bare SELECT shape", () => {
+  // The Studio-emitted PostgREST CTE wrapper form (double-quoted identifiers), id LIKE.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      'WITH pgrst_source AS ( SELECT "public"."migration_audits".* FROM "public"."migration_audits" WHERE "public"."migration_audits"."id" like $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise(
+      "ERROR: operator does not exist: uuid ~~ unknown",
+      'WITH pgrst_source AS ( SELECT * FROM "public"."migration_audits" WHERE "id" like $1 )',
+    ),
+    true,
+  );
+  // The bare SELECT shape (no PostgREST wrapper) drops too — the predicate accepts both.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      "select * from public.migration_audits where id like '%abc%'",
+    ),
+    true,
+  );
+  // Unqualified `migration_audits` (no `public.`) + bare SELECT is still the same ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      "select id, status from migration_audits where id like $1",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise KEEPS the same operator-missing message when the FROM is a different table (a real uuid-LIKE code bug elsewhere still pages)", () => {
+  // Same uuid ~~ unknown message, but the query LIKEs a uuid column on another table — that's
+  // a real code-bug shape, not Studio noise on migration_audits.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      "select * from public.subscriptions where id like '%abc%'",
+    ),
+    false,
+  );
+  // PostgREST CTE wrapper form, but FROM is a different table — must still page.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      'WITH pgrst_source AS ( SELECT * FROM "public"."orders" WHERE "id" like $1 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise KEEPS a DIFFERENT operator-missing error on migration_audits (a real code-bug with a different operator mismatch still pages)", () => {
+  // A different operator mismatch on `migration_audits` is a real code bug we WANT to see.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise(
+      "operator does not exist: uuid = text",
+      "select * from public.migration_audits where id like $1",
+    ),
+    false,
+  );
+  // The uuid ILIKE (~~*) operator-missing message is a different shape — not this drop.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise(
+      "operator does not exist: uuid ~~* unknown",
+      "select * from public.migration_audits where id like $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise KEEPS a non-SELECT statement shape on migration_audits (a real code-bug writing migration_audits still pages)", () => {
+  // An UPDATE / DELETE naming id LIKE indicates real code trying to mutate the table — a bug
+  // we WANT to see, not the Studio-click read we drop.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      "update public.migration_audits set status = $1 where id like $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      "delete from public.migration_audits where id like $1",
     ),
     false,
   );
