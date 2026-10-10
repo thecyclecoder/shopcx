@@ -17,9 +17,11 @@
  * so nothing changes until the cutover sets it.
  *
  * The tier counts only `productIds` (the native Buy 2/3 list). The subscription
- * part covers any selling-plan line except `excludeProductIds` (Shipping
- * Protection, which is priced at $4.95 directly), optionally limited to
- * `sellingPlanIds`. Free gift lines (line property
+ * part covers any selling-plan line except `excludeProductIds`, optionally
+ * limited to `sellingPlanIds`. Live (2026-10-10) the tier discounts run tier-only
+ * and a separate "Subscription Discount" (excludeProductIds [], so Shipping
+ * Protection gets its 25% too) stacks with them on the same line through Plus
+ * tag stacking; see docs/brain/integrations/shopify-checkout-extensions.md. Free gift lines (line property
  * `_free_gift`) neither count nor get discounted.
  *
  * Discount titles must stay "Buy N Discount": ShopCX code reads them off orders
