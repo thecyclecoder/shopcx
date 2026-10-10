@@ -3443,10 +3443,15 @@ export function isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhoc
  *      trimmed equal to `column subscription_cycle_charges.created_at does not exist` (or
  *      the `public.` qualified variant, with any leading `ERROR: ` prefix stripped), AND
  *   2. the `parsed.query` attribute is a bare `select ... from public.subscription_cycle_charges`
- *      lookup shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *      lookup shape (any WHERE / LIMIT / ORDER BY tail is fine), or PostgREST's
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."subscription_cycle_charges" ... )`
+ *      direct-REST wrapper (double-quoted identifiers) — the shape actually recurring in the
+ *      feed for signature `supabase-logs:dc5495e4064edd50`.
  *
  * Narrowly gated so a column-missing error for ANY OTHER table, a DIFFERENT column on
- * `subscription_cycle_charges`, or a non-SELECT statement against the table still pages.
+ * `subscription_cycle_charges`, or a non-SELECT statement against the table still pages — the
+ * wrapped op must itself be a SELECT, so a PostgREST INSERT/UPDATE/DELETE naming the bogus
+ * `created_at` column is a real code bug we keep paging on.
  * Empty / nullish message OR query returns `false` — we need both markers. Consumed by the
  * `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]]: returning null drops the row
  * (no error_event, no loop_alert, no signature). A capture-time drop, not a transient flag.
@@ -3464,7 +3469,18 @@ export function isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedA
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
-  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?subscription_cycle_charges\b/.test(q);
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name
+  // `subscription_cycle_charges` (with or without the `public.` schema qualifier). A non-SELECT
+  // statement (a real code bug writing the bogus column) stays captured.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?subscription_cycle_charges\b/.test(q)) return true;
+  // PostgREST direct-REST reads arrive wrapped as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."subscription_cycle_charges" ... ORDER BY ...created_at DESC LIMIT ... )`
+  // (double-quoted identifiers) — same foreign read, the shape recurring in this signature.
+  // The wrapped op must be a SELECT, so a PostgREST write still pages.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?subscription_cycle_charges\b/.test(
+    q,
+  );
 }
 
 /**
