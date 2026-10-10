@@ -95,6 +95,15 @@ Guarantee and reviews render **nothing** until data arrives and nothing on any e
 - The native discounts (`DiscountAutomaticNode/1071780561069`, `/1072031400109`) are deactivated, not deleted, so switching back is one `discountAutomaticActivate` each.
 - ShopCX's own renewals don't use this: internal subs price breaks from `pricing_rules.quantity_breaks` ([[../libraries/pricing]]).
 
+## Subscription free shipping function (Economy only)
+
+`subscription-free-shipping` is a **shipping discount function** (target `cart.delivery-options.discounts.generate.run`). When any cart line has a selling plan, the delivery option titled **Economy** in every delivery group is 100% off, message "Free shipping with your subscription". Standard and Express stay paid. Founder's rule (2026-10-10): a subscription item anywhere in the cart means free Economy shipping.
+
+- **Why not the native discount.** The native automatic free-shipping discounts ("Free Shipping on Subscriptions" `DiscountAutomaticNode/1226102997165`, max $9.95, US; "Free Shipping With Subscriptions" `/1490612650157`, max $20, all countries) set to subscriptions only (a) stop applying entirely once the cart also holds a one-time line, and the free creamer gift is one, and (b) can only cap by rate price, so they freed Standard and Express too. Measured 2026-10-10 with Storefront API carts: sub-only cart → all three rates free; sub box + one-time creamer → no shipping discount at all.
+- **Config.** `$app:function-configuration` JSON overrides `optionTitles` (default `["Economy"]`, case-insensitive match on the option title) and `message`.
+- **Turning it on.** After `shopify app deploy`: `discountAutomaticAppCreate` with `functionHandle: "subscription-free-shipping"`, `discountClasses: [SHIPPING]`, `combinesWith` product + order true (shipping false). Then deactivate (don't delete) both native discounts above, so switching back is one `discountAutomaticActivate` each.
+- **Tests.** `cd shopify-extension/extensions/subscription-free-shipping && npm test`.
+
 ## Deploy
 
 `cd shopify-extension && npm install && npx shopify app deploy`. Network access for checkout extensions must also be approved for the app in the Partner Dashboard, or `fetch` is blocked at runtime. `api_endpoint` (and `workspace` for reviews) are merchant settings in the checkout editor; both default to production values.
