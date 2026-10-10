@@ -47,6 +47,7 @@ const { data } = await admin.from("migration_audits")
 
 - A `passed` row is a point-in-time assertion; the renewal still does its own authoritative charge.
 - Check 5 (`cancel_reason`) is best-effort — Appstle doesn't reliably return the cancellation feedback on the contract fetch, so it passes when the field is absent rather than false-failing the whole audit.
+- **Foreign-noise filter:** a Supabase Studio table-editor filter or direct-REST probe typing a text LIKE against the uuid `id` column is rejected by Postgres with `operator does not exist: uuid ~~ unknown`. This is a Studio/external-client query, never a ShopCX code path (a predeploy guard forbids LIKE on uuid columns), so the [[../inngest/supabase-log-poll]] capture-drop filter `isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise` (Control Tower signature `a3e4adaac3bc5983`) drops this at capture, preventing it from minting false incidents on the error-feed dashboard.
 
 ---
 
