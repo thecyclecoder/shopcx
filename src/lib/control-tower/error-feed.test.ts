@@ -4649,6 +4649,47 @@ test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNois
   );
 });
 
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise drops the PostgREST direct-REST WITH pgrst_source wrapper shape (signature dc5495e4064edd50)", () => {
+  // The real recurring query shape for signature `supabase-logs:dc5495e4064edd50` —
+  // PostgREST wraps the direct-REST read in a `WITH pgrst_source AS ( SELECT ... )` CTE with
+  // double-quoted identifiers. The current bare-SELECT regex could not match it; the widened
+  // filter must.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscription_cycle_charges".* FROM "public"."subscription_cycle_charges" ORDER BY "public"."subscription_cycle_charges"."created_at" DESC LIMIT 100 ) SELECT * FROM "pgrst_source"',
+    ),
+    true,
+  );
+  // Unqualified double-quoted table name inside the wrapper is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column public.subscription_cycle_charges.created_at does not exist",
+      'with pgrst_source as ( select "subscription_cycle_charges".* from "subscription_cycle_charges" order by created_at desc limit 10 )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise KEEPS a PostgREST INSERT/UPDATE wrapper writing created_at (a real code-bug still pages)", () => {
+  // A PostgREST write (INSERT/UPDATE) wrapped in the same CTE still targets a bogus column —
+  // that is a code bug we DO want to surface, so the pgrst_source branch must gate on SELECT.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
+      'with pgrst_source as ( insert into "public"."subscription_cycle_charges" ("created_at") values (now()) returning * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
+      'with pgrst_source as ( update "public"."subscription_cycle_charges" set "created_at" = now() returning * )',
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise KEEPS a column-missing error on any OTHER table (a different table's created_at still pages)", () => {
   assert.equal(
     isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
