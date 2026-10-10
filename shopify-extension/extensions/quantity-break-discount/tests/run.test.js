@@ -11,6 +11,7 @@ const line = (id, product, quantity = 1, gift = false) => ({
   quantity,
   giftTag: gift ? { value: "cinnamon-roll-creamer" } : null,
   merchandise: { __typename: "ProductVariant", product: { id: product } },
+  sellingPlanAllocation: null,
 });
 const run = (lines, config = null, discountClasses = ["PRODUCT"]) =>
   cartLinesDiscountsGenerateRun({
@@ -49,4 +50,54 @@ test("Buy 3 tier from metafield config", () => {
 
 test("does nothing without the PRODUCT discount class", () => {
   assert.deepEqual(run([line("a", KCUPS, 2)], null, ["ORDER"]).operations, []);
+});
+
+const SUB = { sellingPlan: { id: "gid://shopify/SellingPlan/1" } };
+const sub = (id, product, quantity = 1) => ({ ...line(id, product, quantity), sellingPlanAllocation: SUB });
+const OTHER = "gid://shopify/Product/9999";
+const SNS = { subscriptionPercentage: 25 };
+const values = (result) =>
+  Object.fromEntries(
+    (result.operations[0]?.productDiscountsAdd.candidates ?? []).flatMap((c) =>
+      c.targets.map((t) => [t.cartLine.id, c.value.percentage.value]),
+    ),
+  );
+
+test("subscriptionPercentage defaults to 0: subscription lines get only the tier", () => {
+  assert.deepEqual(values(run([sub("s", KCUPS, 2)])), { s: 8 });
+});
+
+test("subscription-only discount (minQuantity 1, percentage 0) gives 25% to sub lines only", () => {
+  const cfg = { ...SNS, minQuantity: 1, percentage: 0 };
+  const result = run([sub("s", KCUPS), line("o", CREAMER), sub("x", OTHER), sub("p", PROTECTION)], cfg);
+  assert.deepEqual(values(result), { s: 25, x: 25 });
+  assert.equal(result.operations[0].productDiscountsAdd.candidates[0].message, "Subscription Discount");
+  assert.equal(result.operations[0].productDiscountsAdd.selectionStrategy, "ALL");
+});
+
+test("Buy 2 stacks after 25% on subscription lines (31%), one-time lines keep 8%", () => {
+  assert.deepEqual(values(run([sub("s", KCUPS), line("o", CREAMER)], SNS)), { s: 31, o: 8 });
+});
+
+test("Buy 3 stacks after 25% on subscription lines (34%)", () => {
+  assert.deepEqual(values(run([sub("s", KCUPS, 3)], { ...SNS, minQuantity: 3, percentage: 12 })), { s: 34 });
+});
+
+test("subscription line outside the tier list still gets 25% from a tier discount", () => {
+  assert.deepEqual(values(run([sub("s", KCUPS, 2), sub("x", OTHER)], SNS)), { s: 31, x: 25 });
+});
+
+test("free gift is never discounted by the subscription part", () => {
+  const cfg = { ...SNS, minQuantity: 1, percentage: 0 };
+  assert.deepEqual(values(run([sub("s", KCUPS), line("g", CREAMER, 1, true)], cfg)), { s: 25 });
+});
+
+test("subscription-only discount covers a sub line with no tier products in the cart", () => {
+  assert.deepEqual(values(run([sub("x", OTHER)], { ...SNS, minQuantity: 1, percentage: 0 })), { x: 25 });
+});
+
+test("sellingPlanIds limits S&S to listed plans; other plans get only the tier", () => {
+  const other = { ...sub("y", KCUPS), sellingPlanAllocation: { sellingPlan: { id: "gid://shopify/SellingPlan/2" } } };
+  const cfg = { ...SNS, sellingPlanIds: ["gid://shopify/SellingPlan/1"] };
+  assert.deepEqual(values(run([sub("s", KCUPS), other], cfg)), { s: 31, y: 8 });
 });

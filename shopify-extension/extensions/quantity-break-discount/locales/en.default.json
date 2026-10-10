@@ -1,4 +1,4 @@
 {
-  "name": "Quantity break (Buy 2 / Buy 3)",
-  "description": "Percent off eligible products when the cart has enough of them, not counting free gift lines."
+  "name": "Quantity break + Subscribe & Save",
+  "description": "Buy 2 / Buy 3 percent off eligible products, plus an optional subscribe-and-save percent on subscription lines, not counting free gift lines."
 }
