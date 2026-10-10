@@ -200,6 +200,25 @@ function cadenceDays(interval: string | null, count: number | null): number {
 }
 
 /**
+ * Dunning-cycle statuses that EXPLAIN a late next-billing-date, so the sub is not "unexplained late".
+ *
+ * Any cycle that has gone through dunning — whether still open (active/rotating/retrying/skipped/paused)
+ * OR already resolved to a terminal outcome (exhausted/recovered) — is late for a known, dunning-owned
+ * reason, not scheduling drift. The terminal states were originally missing, so a failed-card sub whose
+ * retries had been exhausted was mis-classified as drift and paged `shopcx-subscription-health:late`
+ * falsely. Only lateness with no dunning explanation at all should page.
+ */
+export const DUNNING_STATUSES_EXPLAINING_LATENESS = [
+  "active",
+  "rotating",
+  "retrying",
+  "skipped",
+  "paused",
+  "exhausted",
+  "recovered",
+] as const;
+
+/**
  * Find subs whose next charge is later than one cadence after their last one.
  *
  * ⭐ This catches what `reconcileShopcxDrift` structurally cannot. The strand check asks "is my date
@@ -245,7 +264,7 @@ export async function findLateSubscriptions(
       const { count } = await admin
         .from("dunning_cycles").select("*", { count: "exact", head: true })
         .eq("workspace_id", workspaceId).eq("shopify_contract_id", s.shopify_contract_id)
-        .in("status", ["active", "rotating", "retrying", "skipped", "paused"]);
+        .in("status", DUNNING_STATUSES_EXPLAINING_LATENESS as unknown as string[]);
       // Did WE schedule this, or did it arrive late? Compare the last charge to the moment the
       // migration completed for this contract.
       let inherited = false;
