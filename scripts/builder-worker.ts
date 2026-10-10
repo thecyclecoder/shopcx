@@ -20867,6 +20867,21 @@ async function runDirectorCoachJob(job: Job) {
   }
 }
 
+/** Head SHA of the most recently merged PR whose head ref is `branch`, or null (none / GitHub error). */
+async function latestMergedPrHeadShaForBranch(branch: string): Promise<string | null> {
+  try {
+    const owner = REPO.split("/")[0];
+    const r = await gh("GET", `/repos/${REPO}/pulls?head=${encodeURIComponent(owner)}:${encodeURIComponent(branch)}&state=closed&per_page=50`);
+    if (!r.ok || !Array.isArray(r.json)) return null;
+    const merged = (r.json as Array<{ merged_at?: string | null; head?: { sha?: string } }>)
+      .filter((p) => !!p.merged_at && !!p.head?.sha)
+      .sort((a, b) => String(b.merged_at).localeCompare(String(a.merged_at)));
+    return merged[0]?.head?.sha ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Dirty-PR resolver (dirty-pr-resolver-agent) ─────────────────────────────
 // A Max `claude -p` that merges origin/main into a dirty claude/* PR + resolves the conflicts. Same
 // sandbox as a feature build (no ANTHROPIC_API_KEY, prod secrets stripped — NO prod creds), but it only
@@ -20885,9 +20900,18 @@ async function runPrResolveClaude(prompt: string, sessionId: string | null, cwd:
 // This pre-flight catches that case up front — read-only, no network — so the resolver can CLOSE the
 // PR as superseded (with a comment citing the duplicate symbols) instead of spending a Max resolve
 // budget on an unwinnable merge. Returns the overlapping symbols; empty means "safe to resolve".
-function findSupersededExportedSymbolsOnMain(wt: string): Array<{ symbol: string; kind: string; file: string }> {
+//
+// `alreadyMergedHeadSha`: when an earlier PR from this same branch already merged (a squash of Phase 1
+// while Phase 2 kept building on the branch), diff from that PR's head instead of the merge-base, so the
+// branch's own already-shipped exports don't read as "superseded" by their own squash on main. Before
+// this, PR #3193 (Phase 2 of shopcx-subscriptions-resolve-shopify-cycle-only-at-charge-time) was parked
+// for a human because Phase 1's `resolveChargeableCycle` + `nextDateAfterCharge` were "already on main".
+function findSupersededExportedSymbolsOnMain(wt: string, alreadyMergedHeadSha?: string | null): Array<{ symbol: string; kind: string; file: string }> {
   const out: Array<{ symbol: string; kind: string; file: string }> = [];
-  const diff = sh("git", ["diff", "--unified=0", "--no-color", "origin/main...HEAD", "--", "*.ts", "*.tsx"], { cwd: wt });
+  const useMergedBase =
+    !!alreadyMergedHeadSha && sh("git", ["merge-base", "--is-ancestor", alreadyMergedHeadSha, "HEAD"], { cwd: wt }).code === 0;
+  const range = useMergedBase ? `${alreadyMergedHeadSha}..HEAD` : "origin/main...HEAD";
+  const diff = sh("git", ["diff", "--unified=0", "--no-color", range, "--", "*.ts", "*.tsx"], { cwd: wt });
   if (diff.code !== 0 || !diff.out) return out;
   type Key = { file: string; kind: string; symbol: string };
   const adds: Key[] = [];
@@ -21249,7 +21273,7 @@ async function runPrResolveJob(job: Job) {
   // the internal branch. Automatic closure is retained ONLY for the DB-backed merged-sibling proof
   // handled above (findAlreadyMergedDuplicate) — a claim rooted in the DB, not a text match.
   try {
-    const superseded = findSupersededExportedSymbolsOnMain(wt);
+    const superseded = findSupersededExportedSymbolsOnMain(wt, await latestMergedPrHeadShaForBranch(branch));
     if (superseded.length > 0) {
       const list = superseded
         .slice(0, 10)
@@ -28241,6 +28265,7 @@ async function materializeOptimizerCampaign(
 // error ⇒ null ⇒ no flag ⇒ the Max default (no regression). modelForKind is dynamic-imported (matches
 // the file's lazy-import style and tolerates the table being absent pre-migration).
 async function runJob(job: Job) {
+  if (await skippedByRepeatVerdictBreaker(job)) return;
   let modelId: string | null = null;
   try {
     const { modelForKind } = await import("../src/lib/agent-model-tiers");
@@ -28249,6 +28274,72 @@ async function runJob(job: Job) {
     modelId = null; // never let a registry hiccup block a job — fall back to the Max default
   }
   return _modelCtx.run({ modelId }, () => dispatchJob(job));
+}
+
+// Repeat-verdict breaker ([[../src/lib/repeat-verdict-breaker]]): a per-target job whose last runs all
+// ended with the identical verdict line is completed without running, once per cooldown window, and the
+// loop is recorded once to director_activity so whatever keeps enqueuing it gets found. Fails open.
+async function skippedByRepeatVerdictBreaker(job: Job): Promise<boolean> {
+  try {
+    const { BREAKER_KINDS, BREAKER_SKIP_ERROR, decideRepeatVerdict } = await import("../src/lib/repeat-verdict-breaker");
+    if (!BREAKER_KINDS.has(job.kind) || job.created_by || !job.spec_slug) return false;
+    const db = await admin();
+    const [{ data: prior }, { data: change }] = await Promise.all([
+      db
+        .from("agent_jobs")
+        .select("status, log_tail, updated_at, error")
+        .eq("workspace_id", job.workspace_id)
+        .eq("kind", job.kind)
+        .eq("spec_slug", job.spec_slug)
+        .neq("id", job.id)
+        .in("status", ["completed", "failed", "needs_attention", "merged"])
+        .order("updated_at", { ascending: false })
+        .limit(10),
+      db
+        .from("agent_jobs")
+        .select("updated_at")
+        .eq("workspace_id", job.workspace_id)
+        .eq("spec_slug", job.spec_slug)
+        .in("kind", ["build", "pr-resolve"])
+        .order("updated_at", { ascending: false })
+        .limit(1),
+    ]);
+    const runs = ((prior ?? []) as Array<{ status: string; log_tail: string | null; updated_at: string; error: string | null }>).filter(
+      (r) => r.error !== BREAKER_SKIP_ERROR,
+    );
+    const lastChange = ((change ?? []) as Array<{ updated_at: string }>)[0]?.updated_at ?? null;
+    const d = decideRepeatVerdict(job, runs, Date.now(), lastChange);
+    if (!d.skip) return false;
+    const line = `repeat-verdict breaker: skipped — the last ${d.repeats} ${job.kind} runs on ${job.spec_slug} all ended "${d.verdict}" (newest ${d.lastRunAt}) and nothing changed since. One run per cooldown window still goes through.`;
+    await update(job.id, { status: "completed", error: BREAKER_SKIP_ERROR, log_tail: line });
+    console.log(`[repeat-verdict-breaker:${job.id.slice(0, 8)}] ${line}`);
+    // One director_activity row per target per window: only on the first skip after a real run.
+    const { data: lastSkip } = await db
+      .from("agent_jobs")
+      .select("updated_at")
+      .eq("workspace_id", job.workspace_id)
+      .eq("kind", job.kind)
+      .eq("spec_slug", job.spec_slug)
+      .eq("error", BREAKER_SKIP_ERROR)
+      .neq("id", job.id)
+      .gt("updated_at", d.lastRunAt)
+      .limit(1);
+    if (!lastSkip?.length) {
+      const { recordDirectorActivity } = await import("../src/lib/director-activity");
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "platform",
+        actionKind: "repeat_verdict_breaker_tripped",
+        specSlug: job.spec_slug,
+        reason: `${job.kind} on ${job.spec_slug} keeps returning "${d.verdict}". Something keeps re-enqueuing it without changing its inputs; the breaker now holds it to one run per cooldown window.`,
+        metadata: { job_id: job.id, kind: job.kind, verdict: d.verdict, repeats: d.repeats, last_run_at: d.lastRunAt },
+      });
+    }
+    return true;
+  } catch (e) {
+    console.error(`[repeat-verdict-breaker] check failed (running the job):`, e instanceof Error ? e.message : e);
+    return false;
+  }
 }
 
 // ⭐ DEPLOY BUILD GATE — extracted to [[../src/lib/deploy-build-gate]] (a-red-main-is-a-first-class-

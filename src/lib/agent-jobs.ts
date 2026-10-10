@@ -236,9 +236,21 @@ export async function getLiveJobForSlug(workspaceId: string, slug: string, admin
     .in("kind", ["build", "spec-test"])
     .in("status", ACTIVE_STATUSES)
     .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  return (data as AgentJob | null) ?? null;
+    .limit(10);
+  return ((data ?? []) as AgentJob[]).find(isFoldBlockingLiveJob) ?? null;
+}
+
+/**
+ * Whether an active build/spec-test row should hold a fold. A `needs_approval` card whose only pending
+ * actions are `broken_check` escalations is not live work: it asks a human to repair a check the
+ * accumulation gate couldn't evaluate, and nothing is running. Counting it as live parked
+ * a-braintree-side-refund-must-reach-our-books, fully shipped in PR 2864, unfoldable for 14 days
+ * (2026-09-24 → 10-08). Unevaluable checks are advisory, so they never hold a shipped spec.
+ */
+export function isFoldBlockingLiveJob(row: { status: string; pending_actions?: unknown }): boolean {
+  if (row.status !== "needs_approval") return true;
+  const actions = Array.isArray(row.pending_actions) ? (row.pending_actions as Array<{ type?: string }>) : [];
+  return !(actions.length > 0 && actions.every((a) => a?.type === "broken_check"));
 }
 
 /**
@@ -1043,6 +1055,24 @@ export async function enqueuePreMergeSpecTest(
  * Best-effort + never throws: a trigger hiccup must never fail the build it's chained off. Returns the
  * enqueue outcome (or a skip reason).
  */
+/**
+ * Whether a pending `kind='fix'` phase should force a pre-merge re-test past the terminal-verdict dedup:
+ * true only when such a phase was updated (built / stamped) AFTER the latest spec-test run on the branch,
+ * or when the branch has never been tested. A fix phase that hasn't moved since the last run means the
+ * code under test hasn't either, so re-testing would just repeat the same verdict forever.
+ */
+export function fixPhaseChangedSinceLatestRun(
+  phases: ReadonlyArray<{ kind: string; status: string; updated_at: string }>,
+  latestRunAt: string | null,
+): boolean {
+  const pendingFixes = phases.filter((p) => p.kind === "fix" && p.status !== "shipped" && p.status !== "rejected");
+  if (!pendingFixes.length) return false;
+  if (!latestRunAt) return true;
+  const runMs = Date.parse(latestRunAt);
+  if (Number.isNaN(runMs)) return false;
+  return pendingFixes.some((p) => Date.parse(p.updated_at) > runMs);
+}
+
 export async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
   workspaceId: string;
   slug: string;
@@ -1070,13 +1100,25 @@ export async function maybeEnqueuePreMergeSpecTestOnAccumulation(args: {
     // (a stale `issues` verdict that the normal dedup would let block the re-test → the fix stalls, PR held
     // forever). Derived HERE from the spec's phase state (not threaded by the caller) so EVERY trigger — the
     // deployment-ready webhook AND the standing-pass backstop — re-tests the fixed code. [[pre-merge-fix]].
+    //
+    // The force applies only when the fix phase CHANGED after the latest run on this branch. An unshipped
+    // fix phase alone is not enough: a fix that was authored but never built leaves the branch code
+    // unchanged, so forcing on every call re-ran the same test every standing pass (321 identical
+    // needs_human runs of agent-grade-spec-phase-position-query-fix in ~28h, 2026-10-07/08).
     let forceForFix = force ?? false;
     if (!forceForFix) {
       try {
         const specForFix = await getSpecFromDb(workspaceId, slug);
-        forceForFix = (specForFix?.phases || []).some(
-          (p) => p.kind === "fix" && p.status !== "shipped" && p.status !== "rejected",
-        );
+        const { data: latestRun } = await createAdminClient()
+          .from("spec_test_runs")
+          .select("run_at")
+          .eq("workspace_id", workspaceId)
+          .eq("spec_slug", slug)
+          .eq("spec_branch", branch)
+          .order("run_at", { ascending: false })
+          .limit(1);
+        const latestRunAt = (latestRun?.[0] as { run_at?: string } | undefined)?.run_at ?? null;
+        forceForFix = fixPhaseChangedSinceLatestRun(specForFix?.phases || [], latestRunAt);
       } catch {
         /* best-effort — a getSpec blip just means no force (the backstop is the safety net) */
       }

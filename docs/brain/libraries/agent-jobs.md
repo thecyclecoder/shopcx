@@ -61,6 +61,10 @@ Sibling of `enqueueSpecTestIfDue` for the **PRE-MERGE** lane. When a `claude/*` 
 
 **Owner-forced re-run ([[../specs/premerge-spectest-rerun-and-visibility]] Phase 3 — `opts.force`).** An owner-initiated re-run from the /dashboard/developer/spec-tests **Pre-merge** surface passes `{ force: true }` and skips the terminal-verdict block (case **(b)**) entirely — a stuck `approved`/`needs_human`/`issues` verdict on a fixed branch can be kicked from the dashboard without waiting for a `build`/`pr-resolve` row to age out the verdict, and without waiting for the standing-pass backstop. The in-flight block (case **(a)**) still applies — an open spec-test job on the same `(workspace, slug, branch)` still refuses stacking. `force` is set ONLY by the API path `POST /api/roadmap/spec-test` with `{ slug, branch }`, which also fresh-captures the branch's Vercel preview via [[preview-capture]] `capturePreviewUrlForJob` right before the enqueue — so the forced re-test always hits the branch's CURRENT HEAD, never a stale `preview_url`.
 
+### `isFoldBlockingLiveJob` — function *(2026-10-08)*
+
+`isFoldBlockingLiveJob(row: { status, pending_actions? }) → boolean` decides whether an active build or spec-test row holds a fold. A `needs_approval` card is not live work when its only pending actions are `broken_check` escalations. `getLiveJobForSlug` and the auto-fold gate ([[spec-test-runs]]) both use it.
+
 ### `maybeEnqueuePreMergeSpecTestOnAccumulation` — function  *(spec-goal-branch-pm-flow M3)*
 
 ```ts
@@ -74,6 +78,8 @@ The **M3 pre-merge spec-test TRIGGER**. Under the branch-accumulation model a sp
 2. **`backstopPreMergeChecks`** — the standing-pass heartbeat (below), the safety net that recovers a dropped webhook / a preview that was never captured.
 
 **Fix-force is now internal.** When the spec has an unshipped `kind='fix'` phase, the prior pre-merge run tested the PRE-fix code (a stale `issues` verdict that the dedup would let block the re-test → the fix stalls). This function now DERIVES that force from the spec's phase state ([[specs-table]] `getSpec`), so both callers re-test fixed code without threading a `force` flag (the worker used to compute it; that logic moved here when the poll was removed). The `force` arg remains as an override.
+
+**The fix-force fires only when the fix phase moved (`fixPhaseChangedSinceLatestRun`, 2026-10-08).** The force applies only if a pending fix phase's `updated_at` is newer than the latest `spec_test_runs.run_at` for `(workspace, slug, branch)`, or if the branch has never been tested. An authored-but-never-built fix phase leaves the branch code unchanged. Before this guard, that phase forced a re-test on every `backstopPreMergeChecks` pass, which meant one every ~5 min: `agent-grade-spec-phase-position-query-fix` ran 321 identical `needs_human` spec-tests in ~28h. Tests: `npm run test:premerge-fix-force`.
 
 The queued spec-test then materializes the spec from the DB row ([[build-spec-materializer]] reads `public.specs`+`spec_phases`, which M1/M2 stamped from this branch's commits) and points its probes at the preview URL — testing the BUILT spec on its branch preview, not main. Best-effort + never throws.
 

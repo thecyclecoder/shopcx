@@ -63,3 +63,6 @@ remotion/public/adbuild/
 # nobody remembered to negate.
 scripts/_tmp-*
 scripts/_scratch-*
+
+# spec-check runner throwaway tsc configs
+tsconfig.spec-check.*.json

@@ -38,7 +38,7 @@ Per `exec_kind` the runner delegates to one method of the injected `CheckExecuto
 
 | exec_kind | Default executor |
 |---|---|
-| `tsc` | `npx tsc --noEmit` in `repoRoot` |
+| `tsc` | `npx tsc --noEmit` in `repoRoot`, through a throwaway `tsconfig.spec-check.<id>.json` (gitignored, deleted after) that drops the `.next/…` includes. A checkout's `.next/types` comes from whatever branch last built there and can name routes this branch doesn't have, which made "tsc clean" a permanent harness error (`writeTscConfigWithoutNextTypes`, 2026-10-08) |
 | `grep` | `rg -e <pattern> -- <path>` — validated path passed after `--` separator to prevent option injection. Exit 0 → present, exit 1 → absent, else harness error. Path validation is enforced by [[spec-phase-checks-table]] `validateGrepPath` at authoring time; the `--` separator is defense-in-depth. **smart-case** ([[../specs/spec-phase-check-grep-is-smart-case]] Phase 1): `buildGrepArgv` prepends `-i` when the shared [[spec-phase-checks-table]] `shouldGrepCaseInsensitively(pattern)` predicate returns true — an all-lowercase pattern is a prose phrase (the author cannot know the source's casing), while a pattern carrying uppercase (`VERCEL_LOG_DRAIN`, `ErrorSource`, `onRequestError`) stays exact. We deliberately do NOT use ripgrep's own `-S`/`--smart-case` flag — the shared predicate is the sole source of truth, so the merge-gate `git grep` lane in [[specs-table]] `defaultRunGitGrepOnBranch` (which has no `--smart-case` available) cannot drift from this one. Evidence appends `[smart-case: -i]` when the case-insensitive path fired. |
 | `ci_status` | `gh pr checks` in `repoRoot` |
 | `http_get` | `fetch(url)` — status compared to `expect_status` |
