@@ -68,6 +68,26 @@ cycle. See `shopcxAddOneTimeLine` below.
 | `shopcxAddItem(ws, contractId, variantId, qty)` | a variant already present RAISES the quantity |
 | `shopcxUpdateLineItemPrice(ws, contractId, variantId, baseCents)` | pins the pre-discount BASE |
 | `shopcxAddOneTimeLine(ws, contractId, variantId, qty, priceCents)` | cycle-scoped — the retention gift |
+| `shopcxNormalizeNewContract(ws, contractId)` | brings a CHECKOUT-born contract into our pricing shape; create-time only, called by [[../inngest/shopcx-contract-ingest]] |
+
+### `shopcxNormalizeNewContract` — the two checkout shapes
+
+A checkout contract and a migrated one are built differently, and our recompute can only price the
+migrated shape (MSRP base + "Subscribe & Save" + "Volume discount" + optional "Legacy rate"). A rule
+line with **no structural allocation** that is priced at or below MSRP is a checkout line:
+
+| Shape | Unit price | What normalization does |
+|---|---|---|
+| S&S on the selling plan (today) | MSRP − 25%, baked in | rebase to MSRP, then add S&S + tier |
+| S&S from a checkout discount function (planned) | MSRP; the discount sits on the contract as an inert $0 `AUTOMATIC_DISCOUNT` | no rebase, add S&S + tier |
+
+Both shapes miss the quantity break: Shopify's automatic discounts (Buy 2/3) run at checkout only
+and never on an app-led billing attempt. Rebase and recompute share one draft. A line above
+MSRP, or one already carrying our titles, is left alone, so a re-run is a no-op.
+
+**Create-time only.** A line pinned below MSRP on purpose (`shopcxUpdateLineItemPrice`) also has
+no allocation, so running this on an established contract would undo the pin. It shipped with no
+caller; it was wired into the create-ingest on 2026-10-08.
 
 ### Deliberate behaviours worth stating
 
