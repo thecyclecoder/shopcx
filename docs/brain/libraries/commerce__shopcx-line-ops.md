@@ -78,8 +78,15 @@ line with **no structural allocation** that is priced at or below MSRP is a chec
 
 | Shape | Unit price | What normalization does |
 |---|---|---|
-| S&S on the selling plan (today) | MSRP − 25%, baked in | rebase to MSRP, then add S&S + tier |
-| S&S from a checkout discount function (planned) | MSRP; the discount sits on the contract as an inert $0 `AUTOMATIC_DISCOUNT` | no rebase, add S&S + tier |
+| S&S on the selling plan (legacy, before 2026-10-10) | MSRP − 25%, baked in | rebase to MSRP, then add S&S + tier |
+| S&S from a checkout discount function (live 2026-10-10) | MSRP; the discount sits on the contract as an inert $0 `AUTOMATIC_DISCOUNT` | no rebase, add S&S + tier |
+
+**Shipping protection** never gets structural discounts and never counts toward the tier: its final
+price lives in `currentPrice` (the migration convention). In the function shape, the checkout's 25%
+reached it only as an inert automatic, so normalization bakes the S&S into its price ($6.60 → $4.95).
+In the plan-baked shape it is already discounted and is left alone. The shape is read off the RULE
+lines, not protection's catalog price, which lags the store (`insure01` reads $5.00 while selling
+at $6.60).
 
 Both shapes miss the quantity break: Shopify's automatic discounts (Buy 2/3) run at checkout only
 and never on an app-led billing attempt. Rebase and recompute share one draft. A line above

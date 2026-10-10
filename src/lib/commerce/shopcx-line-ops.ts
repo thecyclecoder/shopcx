@@ -534,15 +534,38 @@ export async function shopcxNormalizeNewContract(
     //     automatic onto the contract as an AUTOMATIC_DISCOUNT that allocates $0 on renewals, so the
     //     line would renew at full MSRP. Nothing to rebase, but it still needs its S&S + tier.
     // A line ABOVE MSRP is left alone: that is not a checkout shape we know how to read.
-    const toRebase: { lineId: string; msrpCents: number }[] = [];
+    // Lines whose `currentPrice` moves: rule lines back UP to MSRP, protection DOWN to its S&S price.
+    const toRebase: { lineId: string; targetCents: number }[] = [];
+    const protectionLines: { lineId: string; unit: number }[] = [];
     let needsDiscounts = false;
+    let planBaked = false;
     for (const l of live.contract.lines) {
       const v = l.sku ? ctx.variantBySku.get(String(l.sku).toLowerCase()) : undefined;
-      if (!v || !ctx.ruleProducts.has(v.product_id) || isProtection(ctx, v.product_id)) continue;
       const unit = l.currentPrice != null ? Math.round(parseFloat(l.currentPrice) * 100) : 0;
+      if (v && isProtection(ctx, v.product_id)) {
+        if (unit > 0 && l.structuralDiscountCents === 0) protectionLines.push({ lineId: l.id, unit });
+        continue;
+      }
+      if (!v || !ctx.ruleProducts.has(v.product_id)) continue;
       if (unit > 0 && unit <= v.price_cents && l.structuralDiscountCents === 0) {
         needsDiscounts = true;
-        if (unit < v.price_cents) toRebase.push({ lineId: l.id, msrpCents: v.price_cents });
+        if (unit < v.price_cents) {
+          planBaked = true;
+          toRebase.push({ lineId: l.id, targetCents: v.price_cents });
+        }
+      }
+    }
+    // Protection keeps the migration convention: its final price lives in `currentPrice`, with no
+    // S&S / Volume allocations, and it never counts toward the tier. In the function shape (rule
+    // lines at MSRP) the checkout S&S reached protection only as an inert automatic, so it would
+    // renew at list ($6.60, not $4.95): bake the S&S into its price. In the plan-baked shape its
+    // price already carries the plan's 25%: leave it. The shape is read off the RULE lines, not
+    // protection's catalog price, which lags the store (insure01 reads $5.00 while it sells at $6.60).
+    // Idempotent: once normalized the rule lines carry allocations, `needsDiscounts` stays false and
+    // protection is not discounted twice.
+    if (needsDiscounts && !planBaked && ctx.snsPct > 0) {
+      for (const { lineId, unit } of protectionLines) {
+        toRebase.push({ lineId, targetCents: Math.round((unit * (100 - ctx.snsPct)) / 100) });
       }
     }
     if (!needsDiscounts) return { success: true, normalized: false };
@@ -551,9 +574,9 @@ export async function shopcxNormalizeNewContract(
     // them bills the customer at full MSRP with no discounts at all.
     const r = await mirrored(workspaceId, contractId,
       withDraft(workspaceId, contractId, async (draftId) => {
-        for (const { lineId, msrpCents } of toRebase) {
+        for (const { lineId, targetCents } of toRebase) {
           const u = await shopifyUpdateDraftLine(workspaceId, draftId, lineId, {
-            currentPrice: (msrpCents / 100).toFixed(2),
+            currentPrice: (targetCents / 100).toFixed(2),
           });
           if (!u.success) return u;
         }

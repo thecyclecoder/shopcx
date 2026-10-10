@@ -31,8 +31,22 @@ test("only touches a rule line with NO structural allocation, priced at or below
 test("rebases only lines BELOW MSRP; an at-MSRP line just gets its discounts", () => {
   // At MSRP is the S&S-from-a-discount-function shape: nothing to rebase, but without our own
   // "Subscribe & Save" it renews at full price. It must still reach the recompute.
-  assert.match(fn, /needsDiscounts = true;\s*if \(unit < v\.price_cents\) toRebase\.push/);
+  assert.match(fn, /needsDiscounts = true;\s*if \(unit < v\.price_cents\) \{\s*planBaked = true;\s*toRebase\.push/);
   assert.match(fn, /if \(!needsDiscounts\) return \{ success: true, normalized: false \}/);
+});
+
+test("protection gets the S&S baked into its own price in the function shape only", () => {
+  // Dylan 2026-10-10: the checkout function discounts protection too ($6.60 → $4.95). On the
+  // contract that is an inert automatic, so without this it renews at $6.60. Protection keeps the
+  // migration convention (final price in currentPrice, no S&S/Volume allocations), so it is a price
+  // move, gated on the RULE lines' shape: at MSRP (function) yes, below MSRP (plan-baked) no.
+  assert.match(fn, /if \(needsDiscounts && !planBaked && ctx\.snsPct > 0\) \{\s*for \(const \{ lineId, unit \} of protectionLines\)/);
+  assert.match(fn, /targetCents: Math\.round\(\(unit \* \(100 - ctx\.snsPct\)\) \/ 100\)/);
+  assert.match(fn, /if \(unit < v\.price_cents\) \{\s*planBaked = true;/);
+  // Never from protection's catalog price, which lags the store.
+  assert.doesNotMatch(fn, /isProtection\(ctx, v\.product_id\)\) \{[^}]*v\.price_cents/);
+  // The recompute still never gives protection structural discounts.
+  assert.match(SRC, /function rewriteStructuralDiscounts[\s\S]*?ruleProducts\.has\(v\.product_id\) \|\| isProtection\(ctx, v\.product_id\)\) continue;/);
 });
 
 test("rebase and recompute commit in the SAME draft", () => {
