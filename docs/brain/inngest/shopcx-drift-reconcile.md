@@ -57,7 +57,11 @@ meaningful and training operators to ignore alerts) is retired.
 
 `late` is split three ways, and just one of them escalates:
 
-- **held by an open dunning cycle** — the date is held on purpose; expected, never escalated.
+- **explained by dunning** — the current cycle went through dunning, so the late date is dunning-owned,
+  not scheduling drift; expected, never escalated. This covers both the *open* states
+  (`active`/`rotating`/`retrying`/`skipped`/`paused`) and the *terminal* outcomes (`exhausted`/`recovered`)
+  — see `DUNNING_STATUSES_EXPLAINING_LATENESS` in `src/lib/commerce/shopcx-drift-reconciler.ts`. The
+  terminal states were originally missing, so an exhausted-dunning failed-card sub was mis-paged as drift.
 - **inherited** — the last charge predates `migration_completed_at`, so the sub arrived already
   behind. 7 of 13 on 2026-09-30, last charged April–August, before we ever billed them.
 - **caused by us** — everything else. This is the only group that opens a repair job.
