@@ -11,7 +11,8 @@
  * What counts:
  *   expected = MSRP (or a deliberately pinned base) → S&S → quantity tier, with Shopify's own
  *              sequential-truncating math (`shopifyLineMath`), minus the line's `Legacy rate`
- *   actual   = currentPrice × qty − OUR structural allocations
+ *   actual   = currentPrice × qty − OUR structural allocations − any checkout AUTOMATIC copy still on
+ *              the contract (a leftover S&S / Buy 2-3 copy stacking on ours reads as an undercharge)
  *
  * A customer coupon is excluded from BOTH sides — it is something they were given, not drift.
  * A base below MSRP counts as a deliberate pin only when the line already carries our structural
@@ -74,7 +75,7 @@ export async function checkShopcxRenewalPrice(workspaceId: string, contractId: s
       const pinned = current < msrp && l.structuralDiscountCents > 0;
       const base = pinned ? current : msrp;
       const expected = shopifyLineMath(base, qty, ctx.snsPct, breakPct).lineTotalCents - l.legacyRateCents;
-      const actual = current * qty - l.structuralDiscountCents;
+      const actual = current * qty - l.structuralDiscountCents - l.automaticDiscountCents;
       lines.push({ title: l.title, sku: l.sku, quantity: qty, expectedCents: expected, actualCents: actual });
     }
     const expectedCents = lines.reduce((a, x) => a + x.expectedCents, 0);

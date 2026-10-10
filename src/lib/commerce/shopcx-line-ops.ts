@@ -27,6 +27,7 @@ import {
   shopifyUpdateDraftLine,
   shopifyAddDraftLine,
   shopifyRemoveStructuralDiscounts,
+  shopifyRemoveDraftDiscount,
   getSubscriptionDraft,
   STRUCTURAL_DISCOUNT_TITLES,
   type ManualDiscountInput,
@@ -128,6 +129,20 @@ async function rewriteStructuralDiscounts(
   );
   const cleared = await shopifyRemoveStructuralDiscounts(workspaceId, draftId, structural);
   if (!cleared.success) return cleared;
+
+  // ⭐ Checkout product discounts copied onto the contract are REPLACED by ours. The S&S and Buy 2/3
+  // checkout functions apply on every cycle (so checkout shows the discounted recurring price), and
+  // Shopify copies each onto the contract as a live recurring AUTOMATIC_DISCOUNT. Left there it
+  // stacks with our "Subscribe & Save" / "Volume discount" and renews double-discounted — and it
+  // would never follow a quantity change. Only LINE_ITEM automatics: a shipping automatic (free
+  // Economy shipping) is not a price we own, and a customer's CODE is never touched.
+  const checkoutCopies = (draft.discounts ?? []).filter(
+    (d) => d.type === "AUTOMATIC_DISCOUNT" && d.targetType === "LINE_ITEM",
+  );
+  for (const d of checkoutCopies) {
+    const r = await shopifyRemoveDraftDiscount(workspaceId, draftId, d.id);
+    if (!r.success) return r;
+  }
 
   // Mix-and-match tier over rule lines only — protection never counts toward it.
   const resolved = draft.lines.map((l) => ({

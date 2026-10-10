@@ -22,7 +22,14 @@ another, a charge landing between them bills the new quantity at the old tier.
 | | Titles | Who sets it | Touched by a recompute? |
 |---|---|---|---|
 | Structural | `Subscribe & Save`, `Volume discount`, `Legacy rate` (`STRUCTURAL_DISCOUNT_TITLES`) | us | rewritten every time |
+| Checkout copy | `AUTOMATIC_DISCOUNT` with `targetType: LINE_ITEM` (the S&S / Buy 2-3 function copies) | Shopify, at checkout | **removed**, replaced by our structural ones |
+| Shipping automatic | `AUTOMATIC_DISCOUNT` with `targetType: SHIPPING_LINE` (free Economy shipping) | Shopify, at checkout | never |
 | Customer | the coupon code itself, or any `CODE_DISCOUNT` | the customer | **never** |
+
+The S&S and Buy 2/3 checkout functions apply on every cycle (CEO 2026-10-10), so checkout shows the
+discounted recurring price. Shopify copies each onto the contract as a live recurring automatic.
+Left there, it would stack with ours and never follow a quantity change (a Buy 3 rate surviving a
+downgrade). So the recompute (and through it the create-time normalizer) strips the copies.
 
 A customer can never apply an S&S or a quantity break, so anything carrying a structural title is
 ours by construction. Conversely a `SubscriptionAppliedCodeDiscount` exposes no `title` at all, so

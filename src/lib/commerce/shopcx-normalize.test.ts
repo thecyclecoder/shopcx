@@ -76,6 +76,23 @@ test("shop-wide AUTOMATIC discounts are never treated as the customer's coupon",
   assert.match(ops, /!isStructural\(d\) && !isAutomatic\(d\)/);
 });
 
+test("the recompute replaces checkout LINE_ITEM automatic copies with our own discounts", () => {
+  // Dylan 2026-10-10: the S&S / Buy 2-3 functions apply on EVERY cycle so checkout shows the
+  // discounted recurring price. Shopify copies them onto the contract as live recurring automatics;
+  // left there they stack with ours (double discount) and never follow a quantity change (a Buy 3
+  // rate living on after a downgrade). Shipping automatics and customer codes stay.
+  const rewrite = SRC.slice(SRC.indexOf("async function rewriteStructuralDiscounts"), SRC.indexOf("async function preparePricing"));
+  assert.match(rewrite, /d\.type === "AUTOMATIC_DISCOUNT" && d\.targetType === "LINE_ITEM"/);
+  assert.match(rewrite, /shopifyRemoveDraftDiscount\(workspaceId, draftId, d\.id\)/);
+  // Removal happens before our discounts are re-added, inside the same draft.
+  assert.ok(rewrite.indexOf("shopifyRemoveDraftDiscount") < rewrite.indexOf("shopifyAddDraftDiscount"));
+});
+
+test("the renewal price check counts a leftover automatic copy as drift", () => {
+  const check = readFileSync(join(__dirname, "shopcx-renewal-price-check.ts"), "utf8");
+  assert.match(check, /const actual = current \* qty - l\.structuralDiscountCents - l\.automaticDiscountCents;/);
+});
+
 test("an inert automatic on the contract cannot double-count with our own discount", () => {
   // Both entities coexist after normalization (Buy 2 AUTOMATIC + our Volume discount MANUAL), and
   // the line still nets $96.54 because the automatic allocates $0. `structuralDiscountCents` counts

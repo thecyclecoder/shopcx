@@ -25,7 +25,7 @@ renewal, not that this one should stop.
 
 - **expected** = base → S&S → quantity tier via `shopifyLineMath` (Shopify's sequential, truncating
   allocation), minus the line's `Legacy rate` (`legacyRateCents`).
-- **actual** = `currentPrice × qty − structuralDiscountCents` (our titles only).
+- **actual** = `currentPrice × qty − structuralDiscountCents − automaticDiscountCents` (our titles, plus any checkout `AUTOMATIC_DISCOUNT` copy still on the contract, so a leftover S&S / Buy 2-3 copy stacking on ours reads as an undercharge). Customer codes are excluded.
 - **Customer coupons are excluded from both sides.** They are something the customer was given,
   not drift.
 - **Base:** MSRP, unless the line sits below MSRP *and* already carries our structural discounts,

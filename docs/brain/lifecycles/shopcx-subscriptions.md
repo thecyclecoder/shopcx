@@ -130,8 +130,10 @@ purpose so "Monthly" is a true 4-week cycle, not a drifting calendar month.
 
 **The plans carry NO pricing policy (CEO, 2026-10-10).** Subscribe & Save comes only from the
 checkout discount function "Subscription Discount" (`DiscountAutomaticNode/1491491881133`), which
-gives 25% to lines on these three plans, protection included, and stacks with Buy 2/3. Checkout
-shows MSRP with an S&S discount line. Plan order is Monthly, Every 2 Months, Every 2 Weeks: the
+gives 25% to lines on these three plans, protection included, and stacks with Buy 2/3. It applies
+on every cycle so checkout shows the discounted recurring price. Shopify copies it onto the contract
+as a recurring automatic, and the ingest normalizer replaces that copy with our own "Subscribe &
+Save" + "Volume discount", which every later edit recomputes. Plan order is Monthly, Every 2 Months, Every 2 Weeks: the
 cart drawer and cross-sells take a product's first group's first plan, and our group lists before
 Appstle's.
 
