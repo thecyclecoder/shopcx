@@ -111,8 +111,16 @@ kill-switch gate → keyset-paginated candidate select → dunning retry-window 
 event per sub → heartbeat carrying `{ due }`.
 
 **`shopifySubscriptionRenewalAttempt`** — per sub, concurrency 8:
-kill-switch → stale guard → resolve the due cycle from Shopify → **claim the cycle** → charge →
-settle → advance / dun.
+kill-switch → stale guard → resolve the due cycle from Shopify → **claim the cycle** →
+`price-check-log` → charge → settle → advance / dun.
+
+**`price-check-log` is log-only (CEO 2026-10-10).** [[../libraries/commerce__shopcx-renewal-price-check]]
+compares the contract with the pricing rules and files one `billing_alert` card on a gap over
+$1 / 2%. It never blocks, delays or changes the charge, because the contract is the price. A wrong
+contract gets fixed where it was written (ingest normalization, migration, line-ops). Earlier,
+Dylan had said not to check at all; he chose log-only on 2026-10-10. A dry run over the 172 active
+ShopCX subs on 2026-10-10 found 168 matching, 3 with no rule lines, and 1 real overcharge: Dylan's
+own test contract `35917070509`, which bills Amazing Creamer at $69.95 with no S&S.
 
 ## Gotchas
 

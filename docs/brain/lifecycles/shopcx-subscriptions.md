@@ -128,7 +128,22 @@ purpose so "Monthly" is a true 4-week cycle, not a drifting calendar month.
 | Monthly | WEEK × 4 | `gid://shopify/SellingPlan/4087021741` |
 | Every 2 Months | WEEK × 8 | `gid://shopify/SellingPlan/4087054509` |
 
-No products attached and no pricing policy on the group — both deliberate, pending decisions.
+Every plan carries a **25% `PERCENTAGE` pricing policy** (verified live 2026-10-08), the same S&S
+Appstle's group applies. So a checkout on our plan prices like Appstle's, and the subscription
+Shipping Protection variant (`45036181651629`, $6.60) lands at $4.95 on either. No products are
+attached yet; that is the product-page cutover. Its steps: attach our group, swap the theme's
+hardcoded Appstle plan ids (`2310373549` → `4087021741`, `2310406317` → `4087054509` in
+`snippets/quantity-breaks.liquid` and the price-table landing pages), run test checkouts, then
+remove Appstle's group.
+
+**Held for S&S-in-a-discount-function (CEO, 2026-10-08).** The 25% is moving off the selling plan
+into a checkout discount function, so checkout shows $79.95 with an S&S discount line. At cutover
+our plan's 25% policy must therefore come OFF, or new subs get 25% twice. The subscription
+protection variant then needs its own route to $4.95, either through the function or a variant
+price change. Normalization already handles the at-MSRP contract this produces.
+
+A checkout contract is rebased into our pricing shape by `normalize-pricing` in
+[[../inngest/shopcx-contract-ingest]] right after it is ingested.
 
 ### ⚠️ Two groups on one product = two frequency selectors on the PDP
 
