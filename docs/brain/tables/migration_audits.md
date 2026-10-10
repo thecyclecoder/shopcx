@@ -19,13 +19,13 @@ One row per **Appstle→internal migration**. Records the verification checklist
 | `checks` | `jsonb` | — | default `'[]'` — `[{ key, ok, detail }]` |
 | `retry_count` | `int4` | — | default `0` — incremented each re-verify; at `MAX_RETRIES=3` a still-failing audit flips to `failed` |
 | `last_error` | `text` | ✓ | concatenated failing-check details |
-| `notes` | `jsonb` | — | default `'[]'` — non-check annotations, written **once** at record time and **never** overwritten by re-verify (unlike `checks`/`last_error`). Currently `[{ type: "dropped_unmappable_items", items: [{ title, shopifyVariantId, sku, priceCents, quantity, paid }] }]` — lines the migration couldn't map to an internal variant and dropped (a `paid` drop is also escalated via [[../libraries/notify-ops-alert]]). Also `{ type: "excluded_product_items", items: [{ title, productId, variantId, priceCents, quantity }] }`: lines deliberately left off by policy (`MIGRATION_EXCLUDED_PRODUCT_IDS`, currently ACV Gummies). These are note-only, with no page. See [[../libraries/migrate-to-internal]]. |
+| `notes` | `jsonb` | — | default `'[]'` — non-check annotations, written **once** at record time and **never** overwritten by re-verify (unlike `checks`/`last_error`). Currently `[{ type: "dropped_unmappable_items", items: [{ title, shopifyVariantId, sku, priceCents, quantity, paid }] }]` — lines the migration couldn't map to an internal variant and dropped (a `paid` drop is also escalated via [[../libraries/notify-ops-alert]]). Also `{ type: "excluded_product_items", items: [{ title, productId, variantId, priceCents, quantity }] }`: lines deliberately left off by policy (`MIGRATION_EXCLUDED_PRODUCT_IDS`, currently ACV Gummies). These are note-only, with no page. Also `{ type: "migrated_items", items: [{ variant_id, quantity }] }`: the non-gift lines at migration time, so `pricing_preserved` can pass a mismatch caused by a later customer edit (see [[../libraries/migration-audit]]). See [[../libraries/migrate-to-internal]]. |
 | `created_at` / `updated_at` | `timestamptz` | — | default `now()` |
 
 ## The checklist (8 checks)
 
 Run by `verifyMigration` in [[../libraries/migration-audit]]:
-1. `is_internal` true · 2. `internal_contract_id` is `internal-*` · 3. `items_on_uuids` (no Shopify variant ids) · 4. `appstle_cancelled` (re-fetch the old contract, confirm `CANCELLED`) · 5. `cancel_reason` = "migrated to shopcx" (best-effort) · 6. `pricing_preserved` (engine charge ≈ `pre_migration_charge_cents`, ±2¢/line) · 7. recovery: `card_pinned` + `immediate_charge` succeeded · 8. `no_double_bill` (internal live AND Appstle cancelled).
+1. `is_internal` true · 2. `internal_contract_id` is `internal-*` · 3. `items_on_uuids` (no Shopify variant ids) · 4. `appstle_cancelled` (re-fetch the old contract, confirm `CANCELLED`) · 5. `cancel_reason` = "migrated to shopcx" (best-effort) · 6. `pricing_preserved` (engine charge ≈ `pre_migration_charge_cents`, ±2¢/line; passes on items changed since migration or a move to the standard subscriber rate) · 7. recovery: `card_pinned` + `immediate_charge` succeeded · 8. `no_double_bill` (internal live AND Appstle cancelled).
 
 ## Lifecycle
 

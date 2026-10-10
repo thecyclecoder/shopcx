@@ -921,6 +921,9 @@ export async function migrateCustomerAppstleSubsToInternal(
           isRecovery: !!opts.isRecovery,
           droppedLines,
           excludedLines,
+          migratedItems: items
+            .filter((i) => !i.is_gift)
+            .map((i) => ({ variant_id: String(i.variant_id || ""), quantity: Number(i.quantity || 1) })),
         });
         if (auditId) await verifyMigration(auditId);
       } catch (e) {
