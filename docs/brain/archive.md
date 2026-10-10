@@ -12,7 +12,11 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Stop the drift-reconcile late-page from firing on exhausted-dunning subscriptions** · verified 2026-10-10 · → [[../inngest/shopcx-drift-reconcile]]
+- **Widen the subscription_cycle_charges.created_at noise filter to match PostgREST-wrapped query shape** · verified 2026-10-10 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise`)
+- **Drop foreign PostgREST noise: loop_heartbeats.payload / status column-missing reads** · verified 2026-10-09 · → [[../libraries/control-tower#isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise]]
 - **Drop foreign spec_phases.phase PostgREST column-missing noise from the Control Tower error feed** · verified 2026-10-09 · → [[../libraries/control-tower]]
+- **Drop foreign-app noise: subscriptions.delivery_address missing-column ad hoc SELECT** · verified 2026-10-09 · → [[../libraries/control-tower]]
 - **Retire the stale 'stranded' check in the ShopCX drift reconciler to match charge-time cycle resolution** · verified 2026-10-09 · → [[../libraries/commerce__shopcx-drift-reconciler]]
 - **Assisted one-time orders actually charge the card and ship** · verified 2026-10-08 · → [[../libraries/one-time-charge]]
 - **Checkout-stuck concierge must answer in-journey payment-link trust + alt-rail (PayPal) objections, not escalate** · verified 2026-10-08 · → [[recipes/checkout-stuck-concierge-flow]]
