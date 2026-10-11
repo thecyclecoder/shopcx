@@ -1,0 +1,1 @@
+- **Fix Control Tower scheduler-gap suppression dead zone: arm it off the monitor's missed ticks, below the shortest peer cron window** · verified 2026-10-11 · → [[../libraries/control-tower]]
