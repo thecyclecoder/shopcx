@@ -70,6 +70,7 @@ import {
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnSubscriptionsIdAdhocNoise,
@@ -738,6 +739,14 @@ const LOG_QUERIES: LogQuery[] = [
       // `supabase-logs:dc5495e4064edd50`) is repair work for a query we don't own. Narrowly
       // gated: a different table, a different column, or a non-SELECT statement still pages.
       if (isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.ticket_resolution_events.event_type`. The ledger exists but has never
+      // had an `event_type` column — the column-missing ERROR only reaches this feed when a
+      // foreign app / stale PostgREST client reads `event_type`/`detail`/`created_at` off the
+      // table. There is no lever from ShopCX to resolve it — paging Platform (Control Tower
+      // signature `supabase-logs:c1d1e7efd5a0bfe6`) is repair work for a query we don't own.
+      // Narrowly gated: a different table, a different column, or a non-SELECT statement still pages.
+      if (isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.subscriptions.paused_until`. The `subscriptions` table exists but
       // has no `paused_until` column — the canonical pause timestamp is `pause_resume_at`
