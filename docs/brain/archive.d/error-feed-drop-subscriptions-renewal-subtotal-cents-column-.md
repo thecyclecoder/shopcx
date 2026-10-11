@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc SELECT of subscriptions.renewal_subtotal_cents from the supabase-logs feed** · verified 2026-10-11 · → [[../libraries/control-tower]]
