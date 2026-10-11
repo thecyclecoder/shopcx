@@ -1,0 +1,1 @@
+- **Stop the error feed paging on an external REST read of non-existent ticket_resolution_events.event_type column** · verified 2026-10-11 · → [[../inngest/supabase-log-poll]]
