@@ -77,6 +77,7 @@ import {
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
@@ -14235,6 +14236,96 @@ test("isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoi
     isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise(
       "column subscriptions.delivery_address does not exist",
       "update public.subscriptions set delivery_address = '{}' where id = 1",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/subscriptions?select=...line_items...` against our `public.subscriptions`
+// table. The table exists but has NO `line_items` column — a subscription's lines live
+// in the `items` JSONB column, and `line_items` belongs to `orders`. Foreign-owned
+// surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `subscriptions.line_items` AND a SELECT-lookup shape on `subscriptions`
+// (bare OR PostgREST CTE wrapper) are present. A column-missing on a live `subscriptions`
+// column (`items`), on `line_items` from any other table (orders), or via a non-SELECT
+// statement still pages. Control Tower signature `supabase-logs:fd1c3fe2de7a0051`.
+
+test("isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise drops the captured supabase-logs:fd1c3fe2de7a0051 message+query pair (PostgREST CTE SELECT on subscriptions.line_items)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `subscriptions.line_items` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise(
+      "column subscriptions.line_items does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."id", "public"."subscriptions"."line_items" FROM "public"."subscriptions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise(
+      "column public.subscriptions.line_items does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."line_items" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise(
+      "column subscriptions.line_items does not exist",
+      "select id, line_items from public.subscriptions",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise(
+      "column subscriptions.line_items does not exist",
+      "select line_items from subscriptions limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise(
+      "ERROR: column subscriptions.line_items does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."line_items" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise(
+      "column subscriptions.line_items does not exist",
+      "SELECT ID, LINE_ITEMS FROM PUBLIC.SUBSCRIPTIONS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise KEEPS other columns / tables / non-SELECT shapes (real regressions still page)", () => {
+  // A DIFFERENT subscriptions column — `items` IS the live lines column; if it regresses
+  // we WANT the page. The pin is `line_items` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise(
+      "column subscriptions.items does not exist",
+      "select items from public.subscriptions",
+    ),
+    false,
+  );
+  // `line_items` on ANOTHER table (orders — where it IS a live column) — not our pinned
+  // signature, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise(
+      "column orders.line_items does not exist",
+      "select line_items from public.orders",
+    ),
+    false,
+  );
+  // A NON-SELECT statement on subscriptions — real code-bug shape, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise(
+      "column subscriptions.line_items does not exist",
+      "update public.subscriptions set line_items = '{}' where id = 1",
     ),
     false,
   );
