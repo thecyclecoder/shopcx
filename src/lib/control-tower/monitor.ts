@@ -21,6 +21,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { notifyOpsAlert } from "@/lib/notify-ops-alert";
 import {
+  MONITOR_TICK_FLOOR_MS,
   MONITORED_LOOPS,
   OWNER_FUNCTIONS,
   RENEWAL_BAD_OUTCOMES,
@@ -113,6 +114,16 @@ export interface ControlTowerSnapshot {
 }
 
 const HISTORY_LIMIT = 10;
+
+/**
+ * Detection threshold for the watchdog-scheduler-gap suppression (buildSnapshot `monitorSchedulerGap`).
+ * Two missed monitor ticks (MONITOR_TICK_FLOOR_MS = 5 min, so ~10 min) — deliberately smaller than the
+ * monitor's 20-min liveness window. It MUST stay below the shortest peer cron freshness window (e.g.
+ * storefront-experiments-refresh-cron at 15 min) so a shared Inngest scheduler pause arms the
+ * suppression BEFORE any shorter-windowed peer can false-page cron_freshness. Keying it off the
+ * monitor's own tick cadence (a missed-ticks signal) is deploy-independent, so it tracks the real
+ * cadence even across deploys. */
+export const SCHEDULER_GAP_DETECT_MS = MONITOR_TICK_FLOOR_MS * 2;
 
 /**
  * Feeder-cadence grace for the `tickets-awaiting-qc` work probe (ticket-analyzer-workprobe-cron-grace).
@@ -2639,16 +2650,22 @@ export async function buildControlTowerSnapshot(adminClient?: Admin): Promise<Co
   // control-tower-suppress-cron-freshness-during-watchdog-gap Phase 1 — a shared Inngest/watchdog
   // scheduling pause silences every cron for the same window; on recovery, evalCron would fire a
   // cron_freshness red on each peer even though the useful page is loop:control-tower-monitor.
-  // Compute the shared-gap flag from the watchdog's OWN latest beat vs its livenessWindowMs (both
-  // deploy-independent, read from the same registry row the watchdog tile uses). Once the flag is
-  // set, peer crons whose freshness would otherwise red are held at amber; the watchdog loop
-  // itself is never passed the flag so its own red is preserved (see the loop-level pass below).
+  // Compute the shared-gap flag from the watchdog's OWN latest beat vs SCHEDULER_GAP_DETECT_MS —
+  // two missed 5-min monitor ticks (MONITOR_TICK_FLOOR_MS * 2 = ~10 min), NOT the wider 20-min
+  // liveness window. The detection threshold MUST stay below the shortest peer cron freshness
+  // window (e.g. storefront-experiments-refresh-cron at 15 min) so a shared Inngest scheduler pause
+  // arms this suppression BEFORE any shorter-windowed peer can false-page cron_freshness; keying it
+  // off the monitor's own tick cadence is the deploy-independent signal that guarantees that. Both
+  // inputs (the beat age and the tick floor) are read from the same registry the watchdog tile uses.
+  // Once the flag is set, peer crons whose freshness would otherwise red are held at amber; the
+  // watchdog loop itself is never passed the flag so its own red is preserved (see the loop-level
+  // pass below).
   const monitorLoop = MONITORED_LOOPS.find((l) => l.id === "control-tower-monitor");
   const monitorLatest = byLoop.get("control-tower-monitor")?.[0] ?? null;
   const monitorSchedulerGap = !beatsReadFailed
     && monitorLoop != null
     && monitorLatest != null
-    && ageMs(monitorLatest.ran_at) > (monitorLoop.livenessWindowMs ?? 20 * 60_000);
+    && ageMs(monitorLatest.ran_at) > SCHEDULER_GAP_DETECT_MS;
 
   // SHA-direction (control-tower-box-sha-direction-check, signal loop:box). Classify the box
   // worker's running_sha vs VERCEL_GIT_COMMIT_SHA via the GitHub compare API BEFORE evalWorker
