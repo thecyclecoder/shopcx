@@ -30,6 +30,7 @@ import {
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
@@ -4880,6 +4881,62 @@ test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNois
     ),
     false,
   );
+});
+
+// ── isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise ──
+test("isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise drops the exact signature message + pgrst_source SELECT query (signature c1d1e7efd5a0bfe6)", () => {
+  // Bare SELECT lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise(
+      "column ticket_resolution_events.event_type does not exist",
+      "select event_type, detail, created_at from public.ticket_resolution_events order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // PostgREST direct-REST WITH pgrst_source wrapper with double-quoted identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise(
+      "ERROR: column public.ticket_resolution_events.event_type does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."ticket_resolution_events"."event_type", "public"."ticket_resolution_events"."detail" FROM "public"."ticket_resolution_events" ORDER BY "public"."ticket_resolution_events"."created_at" DESC LIMIT 100 ) SELECT * FROM "pgrst_source"',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise KEEPS a non-SELECT (write) against the same table (a real code-bug still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise(
+      "column ticket_resolution_events.event_type does not exist",
+      'insert into public.ticket_resolution_events ("event_type") values (\'x\')',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise(
+      "column ticket_resolution_events.event_type does not exist",
+      'with pgrst_source as ( update "public"."ticket_resolution_events" set "event_type" = \'x\' returning * )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise KEEPS other tables/columns and returns false on empty input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise(
+      "column other_table.event_type does not exist",
+      "select event_type from public.other_table",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise(
+      "column ticket_resolution_events.detail does not exist",
+      "select detail from public.ticket_resolution_events",
+    ),
+    false,
+  );
+  assert.equal(isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise(null, null), false);
+  assert.equal(isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise("", ""), false);
 });
 
 // -- isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise --
