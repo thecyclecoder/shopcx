@@ -53,6 +53,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
@@ -530,6 +531,16 @@ const LOG_QUERIES: LogQuery[] = [
       // `line_items` from any other table (orders), or on `subscriptions` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise(message, query)) return null;
+      // Same foreign-app-noise drop for an ad hoc probe of the non-existent
+      // `subscriptions.renewal_subtotal_cents` column (the renewal subtotal is a computed
+      // JS field, never a stored column) — repair work for a query we don't own
+      // ([[../specs/error-feed-drop-subscriptions-renewal-subtotal-cents-column-adhoc-noise]],
+      // Control Tower signature `supabase-logs:0602aa09bb76d8dc`). Narrowly gated to require
+      // BOTH the exact column-missing message AND the SELECT-lookup shape — a column-missing
+      // error on any other column of `subscriptions` (including the real `items`), or on
+      // `renewal_subtotal_cents` from any other table, or on `subscriptions` via a non-SELECT
+      // statement (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... address ... from
       // public.customers` lookup by an external tool (Supabase Studio Table Editor /
       // API Docs, foreign SQL client, stale exploratory session, third-party
