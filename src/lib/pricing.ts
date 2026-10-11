@@ -198,7 +198,7 @@ export async function resolveSubscriptionPricing(
 
   const { data: ws } = await admin
     .from("workspaces")
-    .select("subscription_discount_pct")
+    .select("subscription_discount_pct, subscription_free_shipping, subscription_free_shipping_threshold_cents")
     .eq("id", workspaceId)
     .maybeSingle();
   const fallbackSns = ws?.subscription_discount_pct ?? 25;
@@ -319,13 +319,34 @@ export async function resolveSubscriptionPricing(
   const product_subtotal_cents = productLines.reduce((s, l) => s + l.unit_cents * l.quantity, 0);
   const product_msrp_cents = productLines.reduce((s, l) => s + l.base_cents * l.quantity, 0);
 
-  // 5. Free shipping. Authoritative semantics (mirrors the storefront price
-  //    tables): free_shipping && (!free_shipping_subscription_only || isSubscribing).
-  //    Internal subs are ALWAYS subscription-mode, so the subscription_only flag is
-  //    always satisfied and the threshold does NOT gate the decision — a rule with
-  //    free_shipping = true grants it outright.
+  // 5. Free shipping. Two independent grants — whichever applies zeroes shipping:
+  //
+  //   (a) a PRODUCT'S pricing rule sets free_shipping. Mirrors the storefront price
+  //       tables: free_shipping && (!free_shipping_subscription_only || isSubscribing).
+  //       Internal subs are ALWAYS subscription-mode, so the subscription_only flag is
+  //       always satisfied and the per-rule threshold does NOT gate — a rule with
+  //       free_shipping = true grants it outright.
+  //
+  //   (b) the WORKSPACE subscription free-shipping GUARANTEE
+  //       (workspaces.subscription_free_shipping) — the fleet-wide promise surfaced to
+  //       the AI as the `subs.free_shipping` rule that EVERY subscription order ships
+  //       free. Honors subscription_free_shipping_threshold_cents when set (free once
+  //       the product subtotal clears it); a null/0 threshold is the "no minimum"
+  //       guarantee. Internal subs are always subscription-mode, so the guarantee
+  //       always applies in-scope here.
+  //
+  //   Before this phase only (a) was consulted, so a workspace that guaranteed free
+  //   shipping but had no per-product free_shipping rule still charged
+  //   delivery_price_cents on every renewal — the recurring $4.95 overcharge in ticket
+  //   00618fac (June refunded it three cycles in a row before the structural fix).
+  //   See docs/brain/libraries/pricing.md § Free shipping.
   const subRules = [...ruleMap.values()];
-  const free_shipping = subRules.some((r) => r.free_shipping);
+  const ruleFreeShipping = subRules.some((r) => r.free_shipping);
+  const wsGuaranteeThreshold = Number(ws?.subscription_free_shipping_threshold_cents || 0);
+  const wsGuaranteeFreeShipping =
+    !!ws?.subscription_free_shipping &&
+    (wsGuaranteeThreshold <= 0 || product_subtotal_cents >= wsGuaranteeThreshold);
+  const free_shipping = ruleFreeShipping || wsGuaranteeFreeShipping;
   const shipping_cents = free_shipping ? 0 : Number(sub.delivery_price_cents || 0);
 
   // 6. Qualified-discount pills. S&S = the highest S&S any product line gets
