@@ -12,7 +12,10 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Fix Control Tower scheduler-gap suppression dead zone: arm it off the monitor's missed ticks, below the shortest peer cron window** · verified 2026-10-11 · → [[../libraries/control-tower]]
+- **Stop the error feed paging on an external REST read of non-existent ticket_resolution_events.event_type column** · verified 2026-10-11 · → [[../inngest/supabase-log-poll]]
 - **Stop the drift-reconcile late-page from firing on exhausted-dunning subscriptions** · verified 2026-10-10 · → [[../inngest/shopcx-drift-reconcile]]
+- **Drop the foreign direct-REST uuid LIKE-on-migration_audits.id probe from the Supabase log feed** · verified 2026-10-10 · → [[../tables/migration_audits]] + [[../inngest/supabase-log-poll]] + [[../libraries/control-tower]]
 - **Widen the subscription_cycle_charges.created_at noise filter to match PostgREST-wrapped query shape** · verified 2026-10-10 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise`)
 - **Drop foreign PostgREST noise: loop_heartbeats.payload / status column-missing reads** · verified 2026-10-09 · → [[../libraries/control-tower#isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise]]
 - **Drop foreign spec_phases.phase PostgREST column-missing noise from the Control Tower error feed** · verified 2026-10-09 · → [[../libraries/control-tower]]
