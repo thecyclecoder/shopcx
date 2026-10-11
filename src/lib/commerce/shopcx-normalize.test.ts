@@ -121,3 +121,23 @@ test("the update-sync never normalizes", () => {
   // the normalizer on every contract update would silently undo the pin.
   assert.doesNotMatch(syncFn, /shopcxNormalizeNewContract/);
 });
+
+// ── Renewal shipping + audit dismissal (CEO 2026-10-10) ──
+test("shopcxSetDeliveryPrice changes the contract through a draft and mirrors delivery_price_cents", () => {
+  const client = readFileSync(join(__dirname, "shopify-subscription-client.ts"), "utf8");
+  const setter = client.slice(client.indexOf("export async function shopifySetDeliveryPrice"));
+  assert.match(setter, /return withDraft\(workspaceId, contractId/);
+  assert.match(setter, /deliveryPrice: \(cents \/ 100\)\.toFixed\(2\)/);
+  const op = SRC.slice(SRC.indexOf("export async function shopcxSetDeliveryPrice"));
+  assert.match(op, /shopifySetDeliveryPrice\(workspaceId, contractId, cents\)/);
+  assert.match(op, /delivery_price_cents: cents/);
+});
+
+test("dismissMigrationAudit only clears a FAILED audit, needs a reason, and records it in notes", () => {
+  const audit = readFileSync(join(__dirname, "..", "migration-audit.ts"), "utf8");
+  const fn = audit.slice(audit.indexOf("export async function dismissMigrationAudit"), audit.indexOf("/** Create the pending audit row"));
+  assert.match(fn, /if \(!input\.reason\?\.trim\(\) \|\| !input\.by\?\.trim\(\)\)/);
+  assert.match(fn, /audit\.status !== "failed"/);
+  assert.match(fn, /type: "dismissed", by: input\.by, reason: input\.reason/);
+  assert.match(fn, /\.eq\("status", "failed"\)/);
+});

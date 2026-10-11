@@ -19,7 +19,7 @@ One row per **Appstle→internal migration**. Records the verification checklist
 | `checks` | `jsonb` | — | default `'[]'` — `[{ key, ok, detail }]` |
 | `retry_count` | `int4` | — | default `0` — incremented each re-verify; at `MAX_RETRIES=3` a still-failing audit flips to `failed` |
 | `last_error` | `text` | ✓ | concatenated failing-check details |
-| `notes` | `jsonb` | — | default `'[]'` — non-check annotations, written **once** at record time and **never** overwritten by re-verify (unlike `checks`/`last_error`). Currently `[{ type: "dropped_unmappable_items", items: [{ title, shopifyVariantId, sku, priceCents, quantity, paid }] }]` — lines the migration couldn't map to an internal variant and dropped (a `paid` drop is also escalated via [[../libraries/notify-ops-alert]]). Also `{ type: "excluded_product_items", items: [{ title, productId, variantId, priceCents, quantity }] }`: lines deliberately left off by policy (`MIGRATION_EXCLUDED_PRODUCT_IDS`, currently ACV Gummies). These are note-only, with no page. Also `{ type: "migrated_items", items: [{ variant_id, quantity }] }`: the non-gift lines at migration time, so `pricing_preserved` can pass a mismatch caused by a later customer edit (see [[../libraries/migration-audit]]). See [[../libraries/migrate-to-internal]]. |
+| `notes` | `jsonb` | — | default `'[]'` — non-check annotations, written **once** at record time and **never** overwritten by re-verify (unlike `checks`/`last_error`). Currently `[{ type: "dropped_unmappable_items", items: [{ title, shopifyVariantId, sku, priceCents, quantity, paid }] }]` — lines the migration couldn't map to an internal variant and dropped (a `paid` drop is also escalated via [[../libraries/notify-ops-alert]]). Also `{ type: "dismissed", by, reason, at }` when a human clears a failed audit. Also `{ type: "excluded_product_items", items: [{ title, productId, variantId, priceCents, quantity }] }`: lines deliberately left off by policy (`MIGRATION_EXCLUDED_PRODUCT_IDS`, currently ACV Gummies). These are note-only, with no page. Also `{ type: "migrated_items", items: [{ variant_id, quantity }] }`: the non-gift lines at migration time, so `pricing_preserved` can pass a mismatch caused by a later customer edit (see [[../libraries/migration-audit]]). See [[../libraries/migrate-to-internal]]. |
 | `created_at` / `updated_at` | `timestamptz` | — | default `now()` |
 
 ## The checklist (8 checks)
@@ -32,6 +32,7 @@ Run by `verifyMigration` in [[../libraries/migration-audit]]:
 - **Written** by [[migrate-to-internal]] — `recordMigrationAudit` (pending) then `verifyMigration` inline after each flip.
 - **Re-verified** by the [[../inngest/migration-audit-retry]] cron (every 10 min) — pending rows only; flips to `passed`/`failed`.
 - **Back-filled** by the [[../inngest/migration-integrity-sweep]] cron (daily) — seeds a one-off audit for any internal sub never audited.
+- **Dismissed** by `dismissMigrationAudit` in [[../libraries/migration-audit]]: a human-reviewed `failed` row flips to `passed` with a `dismissed` note (who, why, when).
 - **Read** by `/api/migrations` → the [[../dashboard/migrations]] monitor (owner-only).
 
 ## Common queries

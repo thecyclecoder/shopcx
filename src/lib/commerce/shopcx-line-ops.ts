@@ -29,6 +29,7 @@ import {
   shopifyRemoveStructuralDiscounts,
   shopifyRemoveDraftDiscount,
   getSubscriptionDraft,
+  shopifySetDeliveryPrice,
   STRUCTURAL_DISCOUNT_TITLES,
   type ManualDiscountInput,
 } from "@/lib/commerce/shopify-subscription-client";
@@ -601,5 +602,33 @@ export async function shopcxNormalizeNewContract(
       }),
     );
     return r.success ? { ...r, normalized: true } : r;
+  } catch (err) { return { success: false, error: errText(err) }; }
+}
+
+/**
+ * Set a ShopCX contract's renewal shipping price, and the mirror's `delivery_price_cents` with it.
+ *
+ * Free subscription shipping is a checkout discount. A contract created while that discount was a
+ * one-cycle copy keeps the quoted Economy rate and loses the discount after the first order, so its
+ * renewals would charge shipping. This zeroes it (CEO 2026-10-10, "Free every cycle"). Contracts
+ * created after the discount applies every cycle carry it as a live recurring shipping discount and
+ * need nothing.
+ */
+export async function shopcxSetDeliveryPrice(
+  workspaceId: string,
+  contractId: string,
+  cents: number,
+): Promise<LineOpResult> {
+  try {
+    const r = await shopifySetDeliveryPrice(workspaceId, contractId, cents);
+    if (!r.success) return r;
+    const admin = createAdminClient();
+    const { error } = await admin
+      .from("subscriptions")
+      .update({ delivery_price_cents: cents, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", String(contractId).replace("gid://shopify/SubscriptionContract/", ""));
+    if (error) console.error(`[shopcx-line-ops] delivery mirror failed for ${contractId}: ${error.message}`);
+    return { success: true };
   } catch (err) { return { success: false, error: errText(err) }; }
 }

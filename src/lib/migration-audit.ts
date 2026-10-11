@@ -49,6 +49,37 @@ export interface RecordAuditInput {
   excludedLines?: Array<{ title: string; productId: string; variantId: string; priceCents: number; quantity: number; reason: "excluded_product" | "one_time_promo" }>;
 }
 
+/**
+ * Clear an audit a human has reviewed and ruled not a risk: it flips to `passed` and records who
+ * cleared it and why in `notes`, so the monitor stops showing it as a renewal at risk.
+ *
+ * Only for a FAILED audit, and only with a reason. Typical cases: the subscription is cancelled
+ * (nothing will bill), or the baseline was itself wrong (Appstle overcharged, and the engine price
+ * is the correct rule price). Never use it to hide a real pricing or double-bill problem.
+ */
+export async function dismissMigrationAudit(
+  auditId: string,
+  input: { by: string; reason: string },
+): Promise<{ success: boolean; error?: string }> {
+  if (!input.reason?.trim() || !input.by?.trim()) return { success: false, error: "by and reason are required" };
+  const admin = createAdminClient();
+  const { data: audit, error } = await admin.from("migration_audits").select("id, status, notes").eq("id", auditId).maybeSingle();
+  if (error) return { success: false, error: error.message };
+  if (!audit) return { success: false, error: "audit not found" };
+  if (audit.status !== "failed") return { success: false, error: `audit is ${audit.status}, not failed` };
+  const notes = Array.isArray(audit.notes) ? audit.notes : [];
+  const { error: upErr } = await admin
+    .from("migration_audits")
+    .update({
+      status: "passed",
+      notes: [...notes, { type: "dismissed", by: input.by, reason: input.reason, at: new Date().toISOString() }],
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", auditId)
+    .eq("status", "failed");
+  return upErr ? { success: false, error: upErr.message } : { success: true };
+}
+
 /** Create the pending audit row at migration time. Returns its id. */
 export async function recordMigrationAudit(input: RecordAuditInput): Promise<string | null> {
   const admin = createAdminClient();

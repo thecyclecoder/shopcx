@@ -147,6 +147,29 @@ export async function withDraft(
   return toResult(commit as never, "subscriptionDraftCommit");
 }
 
+/**
+ * Set what every future renewal charges for shipping, by changing the contract's delivery price.
+ *
+ * Used where shipping is free by policy but the contract still stores a rate: a checkout-born
+ * contract keeps the Economy rate it was quoted, and its free-shipping discount may be a one-cycle
+ * copy that is already used up. Atomic through `withDraft`.
+ */
+export async function shopifySetDeliveryPrice(
+  workspaceId: string,
+  contractId: string,
+  cents: number,
+): Promise<SubscriptionActionResult> {
+  if (!Number.isFinite(cents) || cents < 0) return { success: false, error: `invalid delivery price ${cents}` };
+  return withDraft(workspaceId, contractId, async (draftId) => {
+    const env = await gql(
+      workspaceId,
+      `mutation($id:ID!,$in:SubscriptionDraftInput!){ subscriptionDraftUpdate(draftId:$id, input:$in){ draft { id } userErrors { message } } }`,
+      { id: draftId, in: { deliveryPrice: (cents / 100).toFixed(2) } },
+    );
+    return toResult(env as never, "subscriptionDraftUpdate");
+  });
+}
+
 // ── status: pause / cancel / resume ────────────────────────────────────────────────────────
 
 const STATUS_MUTATION = {
