@@ -46,6 +46,17 @@ When the sub carries `pricing_offer_id` ([[../tables/subscriptions]] → [[../ta
 
 Pricing data lives in [[../tables/pricing_rules]] (linked to products via [[../tables/product_pricing_rule]]): `quantity_breaks`, `subscribe_discount_pct`, `free_shipping`. Free shipping mirrors the storefront's authoritative rule — `free_shipping && (!free_shipping_subscription_only || isSubscribing)`. Internal subs are **always** subscription-mode, so a rule with `free_shipping = true` grants it outright; `free_shipping_threshold_cents` does **not** gate the decision (it's a one-time-order / banner concept).
 
+### Free shipping — two independent grants
+
+`shipping_cents` is zeroed when **either** grant applies (`free_shipping = ruleFreeShipping || wsGuaranteeFreeShipping`), otherwise it is the sub's locked `delivery_price_cents`:
+
+1. **Per-product rule** (above) — any assigned [[../tables/pricing_rules]] with `free_shipping = true`.
+2. **Workspace guarantee** — `workspaces.subscription_free_shipping` (the fleet-wide promise surfaced to the AI as the `subs.free_shipping` rule) grants free shipping on **every** subscription renewal. Honors `workspaces.subscription_free_shipping_threshold_cents` when set (free once `product_subtotal_cents` clears it); a null/0 threshold is the **no-minimum** guarantee.
+
+Before `subscription-renewals-must-honor-free-shipping-guarantee` shipped, only grant (1) was consulted, so a workspace that guaranteed free shipping but had no per-product `free_shipping` rule charged `delivery_price_cents` ($4.95) on **every** renewal — the recurring overcharge in ticket `00618fac` (CS Director June refunded it three consecutive cycles as one-off partial refunds and it recurred on the fourth, proving the customer-side refund could not close the gap). Both the charging path ([[internal-subscription-renewals]] reads `pricing.shipping_cents`) and the display path ([[commerce__price]] `priceSubscription`) consume this, so portal projections and the actual renewal charge agree.
+
+The fleet-wide remediation for renewals ALREADY charged shipping before this fix is `scripts/_backfill-renewal-free-shipping-refunds.ts` — an idempotent ship-time backfill ([[ship-time-backfill-detector]] auto-ledgers it to [[../tables/data_op_runs]] and escalates the money question to the CEO inbox). It refunds via [[refund]] `refundOrder` the **shipping + only the proportional tax-on-shipping** (never product sales tax — the mistake the prior ad-hoc refunds made), skips any order with a pre-existing `order_refunds` row, and is DRY-RUN by default (real money moves only on an explicit `--apply` after CEO authorization).
+
 ## Identifier discipline
 
 Items reference the **variant UUID** (`product_variants.id`), never the Shopify variant id. The engine resolves variants by id-shape (UUID → `id`, numeric → `shopify_variant_id`) and keys its lookup map by **both**, so legacy items that still hold a Shopify id keep working during the transition. New writes ([[internal-subscription]] mutations, [[migrate-to-internal]]) always store the UUID.
