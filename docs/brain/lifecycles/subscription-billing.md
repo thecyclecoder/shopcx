@@ -66,9 +66,8 @@ source of truth shared with the portal display. For each due sub:
    on a migrated sub are silently dropped — our pricing rules own those. **Tax is
    quoted on the POST-coupon base** (line prices scaled by the coupon ratio for the
    Avalara quote only). (Sharon Mogliotti, 2026-06-12.)
-5. **Shipping** = free when a rule has `free_shipping` (internal subs are always
-   subscription-mode, so the threshold doesn't gate it), else the sub's locked
-   rate. **Protection** line if
+5. **Shipping** = free when **either** (1) a rule has `free_shipping` (internal subs are always
+   subscription-mode, so the threshold doesn't gate it) **or** (2) the workspace carries `subscription_free_shipping` (the fleet-wide guarantee surfaced to the AI as the `subs.free_shipping` rule) — see [[../libraries/pricing]] § Free shipping — two independent grants. Otherwise the sub's locked rate. **Protection** line if
    `shipping_protection_added=true` (passthrough; excluded from the discountable
    product subtotal). **Compute pre-tax total**.
 
@@ -283,6 +282,8 @@ When a Braintree refund is issued via [[../inngest/returns]] → [[return-pipeli
 ## Status / open work
 
 **Shipped:** Both paths functional. Internal scheduler (hourly cron, line-item resolution, Avalara tax quote, Braintree charge, order create). Legacy Appstle path (webhook-driven, state mirroring, our subscription mutations dispatch on `is_internal`). Pause/resume/skip unified. Dunning integration. Tax void/adjust on refund.
+
+**Subscription free-shipping guarantee** ([[../specs/subscription-renewals-must-honor-free-shipping-guarantee]]): the pricing engine now honors `workspaces.subscription_free_shipping` as a workspace-level grant (in addition to per-product `pricing_rules.free_shipping`), zeroing renewal shipping when either grant applies. The fleet-wide remediation for renewals already charged before this fix is `scripts/_backfill-renewal-free-shipping-refunds.ts` — an idempotent ship-time backfill that refunds shipping + proportional tax-on-shipping (never product tax), skips pre-refunded orders, and is DRY-RUN by default. See [[../libraries/pricing]] § Free shipping — two independent grants for the full specification.
 
 **Appstle → internal migration is LIVE** (heal + smart-migration + monitor, verified 2026-06-18). Triggered on payment-method capture / portal load. Migrations are **born healed** (`inferAppstleLineBase`, [[appstle-pricing]]); every Appstle mutation heals `pricingPolicy: null` lines first via the `appstleMutate` gateway; each migration is verified by an 8-check audit ([[migration-audit]] → [[../tables/migration_audits]]), surfaced on [[../dashboard/migrations]], re-checked by [[../inngest/migration-audit-retry]] (10-min) and back-filled by [[../inngest/migration-integrity-sweep]] (daily).
 
