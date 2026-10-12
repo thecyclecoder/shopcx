@@ -1,0 +1,1 @@
+- **Subscription renewal orders must honor free-shipping guarantee** · verified 2026-10-12 · → [[../lifecycles/subscription-billing]] · [[../libraries/pricing]]
