@@ -12,7 +12,11 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Error feed: drop foreign ad-hoc journey_sessions.trigger_intent column-missing noise at capture** · verified 2026-10-12 · → [[libraries/control-tower]]
+- **Subscription renewal orders must honor free-shipping guarantee** · verified 2026-10-12 · → [[../lifecycles/subscription-billing]] · [[../libraries/pricing]]
 - **Fix Control Tower scheduler-gap suppression dead zone: arm it off the monitor's missed ticks, below the shortest peer cron window** · verified 2026-10-11 · → [[../libraries/control-tower]]
+- **Drop foreign ad-hoc SELECT of subscriptions.line_items from the supabase-logs feed** · verified 2026-10-11 · → [[../libraries/control-tower]]
+- **Drop foreign ad-hoc SELECT of subscriptions.renewal_subtotal_cents from the supabase-logs feed** · verified 2026-10-11 · → [[../libraries/control-tower]]
 - **Stop the error feed paging on an external REST read of non-existent ticket_resolution_events.event_type column** · verified 2026-10-11 · → [[../inngest/supabase-log-poll]]
 - **Stop the drift-reconcile late-page from firing on exhausted-dunning subscriptions** · verified 2026-10-10 · → [[../inngest/shopcx-drift-reconcile]]
 - **Drop the foreign direct-REST uuid LIKE-on-migration_audits.id probe from the Supabase log feed** · verified 2026-10-10 · → [[../tables/migration_audits]] + [[../inngest/supabase-log-poll]] + [[../libraries/control-tower]]
