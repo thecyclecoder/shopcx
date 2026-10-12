@@ -324,6 +324,8 @@
     "test:commerce-subscription-update-shipping-address": "tsx --test src/lib/commerce/subscription.updateShippingAddress.test.ts",
     "test:commerce-refund": "tsx --test src/lib/commerce/refund.test.ts",
     "test:commerce-price-freeship": "tsx --test src/lib/commerce/price.freeship.test.ts",
+    "test:pricing-freeship-guarantee": "tsx --test src/lib/pricing.freeship-guarantee.test.ts",
+    "test:backfill-renewal-free-shipping-refunds": "tsx --test scripts/_backfill-renewal-free-shipping-refunds.test.ts",
     "test:sol-stock-promise-guard": "tsx --test src/lib/sol-stock-promise-guard.test.ts",
     "test:refund-guard": "tsx --test src/lib/refund.guard.test.ts",
     "test:refund-derive-status": "tsx --test src/lib/refund.derive-status.test.ts",
