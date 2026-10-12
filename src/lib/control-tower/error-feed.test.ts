@@ -82,6 +82,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
@@ -14611,6 +14612,97 @@ test("isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise K
     isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise(
       "column journey_sessions.expires_at does not exist",
       "update public.journey_sessions set expires_at = $1 where id = $2",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/journey_sessions?select=...trigger_intent...` (or a Supabase Studio browse)
+// against our `public.journey_sessions` table with `journey_definitions` columns. The
+// table exists but has NO `trigger_intent` column — `trigger_intent` lives on
+// `journey_definitions`. Foreign-owned surface, no lever from us — drop AT CAPTURE only
+// when BOTH the exact column-missing message on `journey_sessions.trigger_intent` AND a
+// SELECT-lookup shape on `journey_sessions` (bare OR PostgREST CTE wrapper) are present. A
+// column-missing on a live `journey_sessions` column, on `trigger_intent` from any other
+// table (the live `journey_definitions.trigger_intent`), or via a non-SELECT statement
+// still pages.
+
+test("isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise drops the captured supabase-logs:edb0a5a90ef618d8 message+query pair (PostgREST CTE SELECT on journey_sessions.trigger_intent)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `journey_sessions.trigger_intent` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise(
+      "column journey_sessions.trigger_intent does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."journey_sessions"."id", "public"."journey_sessions"."trigger_intent" FROM "public"."journey_sessions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise(
+      "column public.journey_sessions.trigger_intent does not exist",
+      'WITH pgrst_source AS (SELECT "public"."journey_sessions"."trigger_intent" FROM "public"."journey_sessions")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise(
+      "column journey_sessions.trigger_intent does not exist",
+      "select id, trigger_intent from public.journey_sessions",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise(
+      "column journey_sessions.trigger_intent does not exist",
+      "select trigger_intent from journey_sessions limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise(
+      "ERROR: column journey_sessions.trigger_intent does not exist",
+      'WITH pgrst_source AS (SELECT "public"."journey_sessions"."trigger_intent" FROM "public"."journey_sessions")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise(
+      "column journey_sessions.trigger_intent does not exist",
+      "SELECT ID, TRIGGER_INTENT FROM PUBLIC.JOURNEY_SESSIONS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise KEEPS a column-missing on a live journey_sessions column (token_expires_at), on trigger_intent for another table, or via a non-SELECT statement (real regressions still page)", () => {
+  // A column-missing on a live `journey_sessions` column must still page — the pin is
+  // `journey_sessions.trigger_intent` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise(
+      "column journey_sessions.token_expires_at does not exist",
+      "select token_expires_at from public.journey_sessions",
+    ),
+    false,
+  );
+  // A column-missing on `trigger_intent` from a DIFFERENT table (the live
+  // `journey_definitions.trigger_intent`) must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise(
+      "column journey_definitions.trigger_intent does not exist",
+      "select trigger_intent from public.journey_definitions",
+    ),
+    false,
+  );
+  // A non-SELECT statement against `journey_sessions` (real code-bug shape) must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise(
+      "column journey_sessions.trigger_intent does not exist",
+      "update public.journey_sessions set trigger_intent = $1 where id = $2",
     ),
     false,
   );
