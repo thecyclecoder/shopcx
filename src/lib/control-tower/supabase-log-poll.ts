@@ -56,6 +56,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise,
@@ -570,6 +571,19 @@ const LOG_QUERIES: LogQuery[] = [
       // any other table, or on `journey_sessions` via a non-SELECT statement (real code-bug
       // shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... trigger_intent ... from
+      // public.journey_sessions` lookup by an external tool reading our `journey_sessions`
+      // table with `journey_definitions` columns, or the PostgREST CTE wrapper the same
+      // client emits. `trigger_intent` is a `journey_definitions` column — it does not exist
+      // on `journey_sessions`, and no ShopCX code path names it, so the resulting
+      // column-missing ERROR is foreign noise (Control Tower signature
+      // `supabase-logs:edb0a5a90ef618d8`, fired 31 times). Same narrow-gating shape as the
+      // `expires_at` sibling on the same table: BOTH the exact column-missing message AND
+      // the SELECT-lookup shape — a column-missing error on any live `journey_sessions`
+      // column, on `trigger_intent` from any other table (the live
+      // `journey_definitions.trigger_intent`), or on `journey_sessions` via a non-SELECT
+      // statement (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... sender_type ... from
       // public.ticket_messages` lookup by an external tool (Supabase Studio table editor,
       // foreign SQL client, third-party integration) or the PostgREST CTE wrapper the
