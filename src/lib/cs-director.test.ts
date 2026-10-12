@@ -41,6 +41,7 @@ import {
   canOfferOneTapApproval,
   composeFounderEscalationAck,
   csDirectorOutcomeLabel,
+  findUnsatisfiedCustomerRequests,
   extractRemedyCustomerMessage,
   extractRemedyOrderRefFromStep,
   planAuthorSpec,
@@ -3034,4 +3035,56 @@ test("every variant refuses an over-long subject, not just the first", () => {
 test("a subject that fits is still named, right up to the boundary", () => {
   const fits = "My subscription renewed twice this month";
   assert.ok(composeFounderEscalationAck({ subject: fits }).includes(fits));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// findUnsatisfiedCustomerRequests — notification / auto-reply exemption
+// ([[../../docs/brain/specs/close-no-action-guard-must-exempt-notification-and-auto-reply-emails.md]]).
+// Ticket f3977ec6: a GemX Terms/Privacy-update blast tripped the `change` cue on the word
+// "updated" and looped forever between June's close_no_action and Sol's re-session. A vendor
+// blast carries no actionable ask, so it must NOT count as an unsatisfied customer request.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const VENDOR_BLAST = {
+  id: "m-gemx",
+  direction: "inbound",
+  author_type: "customer",
+  visibility: "external" as const,
+  body: "We've updated our Terms of Service and Privacy Policy. Please review the changes.",
+  created_at: "2026-10-10T12:00:00.000Z",
+};
+
+test("vendor-notification blast is NOT an unsatisfied change request (ticket f3977ec6)", () => {
+  // Zero executed actions → floor is epoch, so the blast WOULD count under the old cue table.
+  const out = findUnsatisfiedCustomerRequests([VENDOR_BLAST], []);
+  assert.deepEqual(out, [], "a Terms/Privacy update blast must not block close_no_action");
+});
+
+test("out-of-office auto-reply is exempt even though it quotes a cue word", () => {
+  const ooo = {
+    ...VENDOR_BLAST,
+    id: "m-ooo",
+    body: "I am currently out of office until Monday. I will change my availability then.",
+  };
+  assert.deepEqual(findUnsatisfiedCustomerRequests([ooo], []), []);
+});
+
+test("no-reply sender is exempt via from_address even on a bare cue body", () => {
+  const noReply = {
+    ...VENDOR_BLAST,
+    id: "m-noreply",
+    from_address: "no-reply@vendor.com",
+    body: "Your account settings changed.",
+  };
+  assert.deepEqual(findUnsatisfiedCustomerRequests([noReply], []), []);
+});
+
+test("a REAL customer change ask is still flagged (exemption is scoped, not blanket)", () => {
+  const realAsk = {
+    ...VENDOR_BLAST,
+    id: "m-real",
+    body: "Please change my next delivery date to the 15th.",
+  };
+  const out = findUnsatisfiedCustomerRequests([realAsk], []);
+  assert.equal(out.length, 1, "a genuine customer ask must still block close_no_action");
 });

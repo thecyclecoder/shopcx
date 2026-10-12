@@ -12,7 +12,13 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isAutomatedSender, bodyHasAutomatedMarker, isAutomatedInbound } from "./automated-sender";
+import {
+  isAutomatedSender,
+  bodyHasAutomatedMarker,
+  isAutomatedInbound,
+  bodyHasAutoReplyOrNotificationMarker,
+  isAutoReplyOrNotificationInbound,
+} from "./automated-sender";
 
 test("verification bullet 1 — testflight_no_reply@email.apple.com trips the pre-filter", () => {
   assert.equal(isAutomatedSender("testflight_no_reply@email.apple.com"), true);
@@ -94,4 +100,42 @@ test("isAutomatedInbound — either sender OR body signal is sufficient", () => 
   assert.equal(isAutomatedInbound("news@retailer.com", "Please do not reply to this email."), true);
   // Neither.
   assert.equal(isAutomatedInbound("customer@gmail.com", "Where's my order?"), false);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auto-reply / OOO / vendor-notification exemption — the broader classifier used ONLY by the
+// CS Director close_no_action guard ([[../../docs/brain/specs/close-no-action-guard-must-exempt-notification-and-auto-reply-emails.md]]).
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("vendor Terms/Privacy-update blast trips the notification marker (ticket f3977ec6)", () => {
+  assert.equal(
+    bodyHasAutoReplyOrNotificationMarker(
+      "We've updated our Terms of Service and Privacy Policy. Please review the changes.",
+    ),
+    true,
+  );
+});
+
+test("out-of-office / vacation auto-replies trip the auto-reply marker", () => {
+  assert.equal(bodyHasAutoReplyOrNotificationMarker("I am currently out of office until Monday."), true);
+  assert.equal(bodyHasAutoReplyOrNotificationMarker("Automatic reply: I'm on vacation this week."), true);
+});
+
+test("isAutoReplyOrNotificationInbound is a superset of isAutomatedInbound", () => {
+  // no-reply sender → both true
+  assert.equal(isAutoReplyOrNotificationInbound("no-reply@vendor.com", "anything"), true);
+  // vendor blast body with a normal sender → only the broader predicate fires
+  assert.equal(isAutomatedInbound("team@gemx.net", "We've updated our Terms of Service"), false);
+  assert.equal(isAutoReplyOrNotificationInbound("team@gemx.net", "We've updated our Terms of Service"), true);
+});
+
+test("a real customer asking us to update their address does NOT trip (false-positive averse)", () => {
+  assert.equal(
+    bodyHasAutoReplyOrNotificationMarker("Can you please update my shipping address to 5 Main St?"),
+    false,
+  );
+  assert.equal(
+    bodyHasAutoReplyOrNotificationMarker("Please change my next delivery date to the 15th."),
+    false,
+  );
 });
