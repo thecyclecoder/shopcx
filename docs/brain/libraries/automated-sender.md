@@ -13,6 +13,8 @@ The unified handler's classify-bucket Haiku step (see [[../inngest/unified-ticke
 - `isAutomatedSender(fromAddress: string | null | undefined): boolean` — matches known automated senders by (a) local-part regex `/(no[-_]?reply|donotreply|do[-_]not[-_]reply)/i` (substring — `testflight_no_reply` counts), (b) standalone-mailer exact-match `/^(mailer[-_]daemon|postmaster|bounces?)$/i`, OR (c) domain / subdomain in the narrow `AUTOMATED_DOMAINS` allowlist (`email.apple.com`, `bounces.google.com`, `noreply.github.com`, `notify.trustpilot.com`). Null / empty / malformed → false.
 - `bodyHasAutomatedMarker(body: string | null | undefined): boolean` — four tight phrases only: "please do not reply to this email|message", "this mailbox|inbox|email address is not monitored", "this is an automated email|message|notification|response", "you are receiving this email|message because you (are|have) subscribed|subscribed|opted in". Conservative on purpose — a genuine customer would never write these.
 - `isAutomatedInbound(fromAddress, body): boolean` — the OR of the two above. This is what the handler calls.
+- `bodyHasAutoReplyOrNotificationMarker(body: string | null | undefined): boolean` — a BROADER body classifier for the out-of-office / auto-reply class (`out of office`, `automatic reply`, `auto-reply`, `on vacation|holiday|leave`, `I am currently out|away|unavailable`) AND the vendor-notification / legal-policy blast class (vendor-voiced "we've updated our … terms|privacy|policy|cookie", "changes/updates to our terms of service|privacy policy", etc.). Vendor-voiced + policy-scoped so a real customer asking us to "update my address / change my delivery date" never trips.
+- `isAutoReplyOrNotificationInbound(fromAddress, body): boolean` — `isAutomatedInbound(...) || bodyHasAutoReplyOrNotificationMarker(body)`. A SUPERSET of `isAutomatedInbound`, used ONLY by the CS Director `close_no_action` guard exclusion (see Callers) — NOT by the zero-cost outreach auto-close, which keeps the narrow `bodyHasAutomatedMarker` so a false-positive can't close a real customer without reply.
 
 ## Design invariants
 
@@ -23,6 +25,7 @@ The unified handler's classify-bucket Haiku step (see [[../inngest/unified-ticke
 ## Callers
 
 - [[../inngest/unified-ticket-handler]] § 1a2 — the pre-classifier short-circuit calls `isAutomatedInbound` (via [[outreach-route]] `decideOutreachRoute`) before the classify-bucket Haiku step. A true return path costs zero AI dollars.
+- [[cs-director]] `findUnsatisfiedCustomerRequests` — the `close_no_action` guard exclusion calls `isAutoReplyOrNotificationInbound` per inbound message, so a cue word (`change|update|…`) inside an auto-reply / OOO / vendor-notification blast does NOT count as an unsatisfied customer request. Ticket `f3977ec6` (a GemX Terms/Privacy-update blast) matched the `change` cue on "updated" and looped forever between June's close and Sol's re-session until this exclusion gave the notification class a real silent-close terminal. See [[../specs/close-no-action-guard-must-exempt-notification-and-auto-reply-emails]].
 
 ## Downstream progress accounting
 
@@ -30,7 +33,7 @@ The handler's sysNote on a pre-filter close (`[System] Automated-sender pre-filt
 
 ## Testing
 
-`src/lib/automated-sender.test.ts` — 12 node:test cases. Run:
+`src/lib/automated-sender.test.ts` — 16 node:test cases (the last 4 pin the auto-reply / OOO / vendor-notification exemption: the GemX Terms/Privacy blast + OOO/vacation replies trip `bodyHasAutoReplyOrNotificationMarker`, `isAutoReplyOrNotificationInbound` is a strict superset of `isAutomatedInbound`, and a real "update my address" / "change my delivery date" customer ask does NOT trip). Run:
 
 ```
 npx tsx --test src/lib/automated-sender.test.ts

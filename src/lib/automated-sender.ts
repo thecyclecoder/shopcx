@@ -98,3 +98,64 @@ export function isAutomatedInbound(
 ): boolean {
   return isAutomatedSender(fromAddress) || bodyHasAutomatedMarker(body);
 }
+
+/**
+ * Out-of-office / auto-reply body markers. These are the vacation-bounce + "automatic reply"
+ * class the active 'Auto-replies/OOO bounces — close, don't respond' policy rule recognizes.
+ * A genuine customer never opens a message with "I am currently out of office" — so matching
+ * one is a safe signal that the inbound carries no actionable ask.
+ */
+const AUTO_REPLY_BODY_MARKERS: readonly RegExp[] = [
+  /\b(?:out of (?:the )?office|away from (?:my|the) (?:desk|office|email|inbox))\b/i,
+  /\bautomatic reply\b/i,
+  /\bauto[-\s]?reply\b/i,
+  /\bon (?:vacation|holiday|annual leave|parental leave|maternity leave)\b/i,
+  /\bi(?:'| a)m currently (?:out|away|unavailable|on leave)\b/i,
+  /\bi will be (?:out of (?:the )?office|away|unavailable)\b/i,
+];
+
+/**
+ * Vendor-notification / legal-policy blast markers — the GemX class from ticket
+ * f3977ec6 ("We've updated our Terms of Service and Privacy Policy"). These are written in a
+ * vendor's broadcast voice, never a customer's: a notification ABOUT the sender's own terms /
+ * privacy / cookie policy, not a request from our customer. The 'change' cue
+ * (/\b(?:change|modify|update|edit)\b/) matches the word "updated" inside such a blast and
+ * would otherwise be mis-read as an unsatisfied change request, re-sessioning Sol forever. Kept
+ * vendor-voiced + policy-scoped so a real customer asking us to "update my address" never trips.
+ */
+const VENDOR_NOTIFICATION_BODY_MARKERS: readonly RegExp[] = [
+  /\bwe(?:'ve| have) (?:recently )?(?:updated|made changes to|revised|changed)\b[\s\S]{0,60}\b(?:terms|privacy|policy|policies|cookie)\b/i,
+  /\b(?:update|updates|changes?|revisions?) to our\b[\s\S]{0,20}\b(?:terms|privacy policy|terms of service|terms (?:&|and) conditions|policies)\b/i,
+  /\bour (?:updated|new|revised) (?:terms of service|privacy policy|terms (?:&|and) conditions|cookie policy)\b/i,
+  /\b(?:changes|updates) to (?:our|the) (?:terms of service|privacy policy|terms (?:&|and) conditions)\b/i,
+];
+
+/**
+ * Does the inbound body carry an out-of-office / auto-reply / vendor-notification marker — the
+ * class the active 'Auto-close tickets from automatic replies' and 'Auto-replies/OOO bounces'
+ * policy rules recognize? Complements `bodyHasAutomatedMarker` (whose markers stay narrow for the
+ * zero-cost outreach auto-close); this one is scoped to the `close_no_action` guard exclusion in
+ * `findUnsatisfiedCustomerRequests`, where a false-positive only honors a close June ALREADY chose.
+ */
+export function bodyHasAutoReplyOrNotificationMarker(body: string | null | undefined): boolean {
+  if (!body) return false;
+  return (
+    AUTO_REPLY_BODY_MARKERS.some(re => re.test(body)) ||
+    VENDOR_NOTIFICATION_BODY_MARKERS.some(re => re.test(body))
+  );
+}
+
+/**
+ * Is this inbound an auto-reply / OOO / vendor-notification blast that carries NO actionable
+ * customer ask? Superset of `isAutomatedInbound` (no-reply senders + automated boilerplate) plus
+ * the OOO / policy-blast body markers. Used ONLY by the CS Director's `close_no_action` guard to
+ * exclude a non-customer inbound from the unsatisfied-request check, so a cue word inside a vendor
+ * blast can't re-open a ticket that has nothing to act on (ticket f3977ec6 —
+ * [[../../docs/brain/specs/close-no-action-guard-must-exempt-notification-and-auto-reply-emails.md]]).
+ */
+export function isAutoReplyOrNotificationInbound(
+  fromAddress: string | null | undefined,
+  body: string | null | undefined,
+): boolean {
+  return isAutomatedInbound(fromAddress, body) || bodyHasAutoReplyOrNotificationMarker(body);
+}
