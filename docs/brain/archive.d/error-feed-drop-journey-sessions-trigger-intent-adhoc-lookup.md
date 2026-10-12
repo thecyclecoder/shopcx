@@ -1,0 +1,1 @@
+- **Error feed: drop foreign ad-hoc journey_sessions.trigger_intent column-missing noise at capture** · verified 2026-10-12 · → [[libraries/control-tower]]
