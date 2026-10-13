@@ -7,7 +7,7 @@ The trigger-agnostic apply-path — the shared pipeline both the ticket-trigger 
 ## Exports
 
 ### `applyReviewRequest(admin, input)`
-The trigger-agnostic apply pipeline. Returns a discriminated `ApplyReviewRequestResult` naming the exact step that decided (`skipped_journey_inactive` · `skipped_ladder_dedup` · `skipped_customer_missing` · `skipped_product_missing` · `skipped_unreachable` · `skipped_no_rubric` · `blocked_by_validator` · `queued`).
+The trigger-agnostic apply pipeline. Returns a discriminated `ApplyReviewRequestResult` naming the exact step that decided (`skipped_journey_inactive` · `skipped_ladder_dedup` · `skipped_customer_cooldown` · `skipped_customer_missing` · `skipped_product_missing` · `skipped_unreachable` · `skipped_no_rubric` · `blocked_by_validator` · `queued`).
 
 **Input shape:**
 ```
@@ -25,6 +25,7 @@ The trigger-agnostic apply pipeline. Returns a discriminated `ApplyReviewRequest
 
 1. **Reachability probe** — `assertProductReviewJourneyActive(admin, workspaceId)` from [[journey-definition-probe]]. Inactive/missing ⇒ `skipped_journey_inactive`.
 2. **Shared ladder dedup** — read `review_requests` for `(workspace, customer, product)`. Exists ⇒ `skipped_ladder_dedup`. This chokepoint is what makes the one-ladder invariant hold across both triggers; a race between the two detectors cannot both slip past because the write in step 9 also collides.
+   - **2b. Customer cooldown** — any `review_requests` row for the customer with `sent_at` inside `REVIEW_REQUEST_CUSTOMER_COOLDOWN_MS` (60 days, [[review-request-delivery]]) ⇒ `skipped_customer_cooldown`. One ask per customer per 60 days across ALL products, so a customer receives at most 2 review messages (ask + its nudge) per window (CEO 2026-10-13 — the per-product ladder alone let one customer get 5 asks + 5 nudges in a day). Callers must serialize per customer for this read to hold (the post-order handler does, via its concurrency key).
 3. **Workspace-scoped customer + product loads** — a cross-workspace id in the input cannot leak because each read carries `.eq('workspace_id', workspaceId)`.
 4. **Channel pick** — `pickReviewRequestChannel` from [[review-request-delivery]] on the customer's marketing status. Neither channel reachable ⇒ `skipped_unreachable`.
 5. **Rubric load** — `getActiveReviewRubric` from [[review-message-rubric]]. Missing ⇒ `skipped_no_rubric`. The spec's "the rubric with its self-score and revise-once" reuse contract fails at THIS SDK if the rubric row is missing.

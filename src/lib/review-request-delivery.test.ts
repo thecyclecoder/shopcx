@@ -9,11 +9,13 @@ import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import {
   REVIEW_REQUEST_CANARY_HOLD_MS,
+  REVIEW_REQUEST_CUSTOMER_COOLDOWN_MS,
   REVIEW_REQUEST_NUDGE_DELAY_MS,
   REVIEW_REQUEST_OUTCOMES,
   isReviewRequestReadyForNudge,
   mintReviewRequestToken,
   pickReviewRequestChannel,
+  reviewRequestCustomerCooldownStart,
   shouldSuppressReviewRequestNudge,
 } from "./review-request-delivery";
 import { composeReviewRequestNudgeBody } from "./inngest/review-request-nudge-cron";
@@ -231,4 +233,15 @@ test("composeReviewCanaryDigestBody — pluralizes noun + summarizes count", () 
     ticketLinks: [],
   });
   assert.match(many, /5 review requests drafted/);
+});
+
+test("customer cooldown — one ask (+ its nudge) per customer per 60 days", () => {
+  assert.equal(REVIEW_REQUEST_CUSTOMER_COOLDOWN_MS, 60 * 24 * 60 * 60 * 1000);
+  const now = Date.parse("2026-10-13T00:00:00.000Z");
+  assert.equal(
+    reviewRequestCustomerCooldownStart(now),
+    "2026-08-14T00:00:00.000Z",
+  );
+  // The nudge fires inside the same window as its ask, so ask + nudge = 2 max.
+  assert.ok(REVIEW_REQUEST_NUDGE_DELAY_MS < REVIEW_REQUEST_CUSTOMER_COOLDOWN_MS);
 });
