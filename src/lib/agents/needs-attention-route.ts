@@ -35,6 +35,7 @@ import {
 import { loadAutonomyMap } from "@/lib/agents/approval-router";
 import { activeParkCardExistsForJob, openBuildStuckCardExistsForSpec } from "@/lib/agents/approval-inbox";
 import { recordDirectorActivity } from "@/lib/director-activity";
+import { isLoopRecoveredSince, loopIdFromSignature } from "@/lib/repair-verdict-guard"; // repair-transient-park-verifies-itself Phase 2 — auto-verify a parked loop repair via heartbeats
 import { markSpecCardStatus } from "@/lib/spec-card-state";
 import { getSpec } from "@/lib/brain-roadmap";
 import { classifyAndStamp, BUILD_STYLE_KINDS, type NeedsAttentionClass } from "@/lib/agents/needs-attention-classify";
@@ -475,6 +476,93 @@ async function routeDesignChange(admin: Admin, row: ParkedRow): Promise<boolean>
  * diagnosis (the human-triage path). A row sitting in `needs_attention` past NEEDS_ATTENTION_ALARM_MS
  * also writes a `dashboard_notifications` alarm — the spec's invariant ("zero rows >70 min").
  */
+/** The exact park error a loop-alert repair writes when it holds the unverified-fix line. */
+const PARKED_LOOP_REPAIR_ERROR = "pending verification — unverified fix cited";
+
+/**
+ * repair-transient-park-verifies-itself Phase 2 — a parked LOOP-ALERT repair (`error` =
+ * "pending verification — unverified fix cited", signature `loop:<id>`) carries a machine-checkable
+ * recovery signal: fresh healthy `loop_heartbeats` after the originating alert. Before the backstop
+ * re-mints a CEO "Park needs eyes" card for it every sweep, check the loop — if it recovered, the
+ * `"transient"` verdict IS verified in production, so CLOSE the job (compare-and-set to `completed`,
+ * `error` null), stamp a `director_activity` `auto_verified_repair`, and dismiss any open
+ * `parkbackstop:<jobId>` card. Only a still-red loop stays parked. This drains the three existing
+ * Sep 18 parks (deploy-guardian-cron, meta-capi-dispatch-cron, amplifier-import-reconcile).
+ *
+ * Returns true when it auto-verified + closed the row (the caller skips all further routing).
+ */
+async function autoVerifyParkedLoopRepair(admin: Admin, row: ParkedRow): Promise<boolean> {
+  if (row.kind !== "repair" || row.error !== PARKED_LOOP_REPAIR_ERROR) return false;
+  const loopId = loopIdFromSignature(row.spec_slug);
+  if (!loopId) return false; // not a loop:* signature — a non-loop pending-verification park stays for a human
+
+  // Anchor: when the originating loop_alert opened (heartbeats after it prove recovery). Fall back to
+  // the repair job's own creation time if the alert id is missing/unparseable — a strictly-later,
+  // conservative anchor (requires the loop to be healthy NOW, not merely at some past moment).
+  let sinceIso = row.created_at;
+  try {
+    const instr = row.instructions ? (JSON.parse(row.instructions) as { loop_alert_id?: string | null }) : {};
+    if (instr.loop_alert_id) {
+      const { data: alertRow } = await admin.from("loop_alerts").select("opened_at").eq("id", instr.loop_alert_id).maybeSingle();
+      const openedAt = (alertRow as { opened_at?: string } | null)?.opened_at;
+      if (openedAt) sinceIso = openedAt;
+    }
+  } catch {
+    /* instructions not JSON — keep the created_at anchor */
+  }
+
+  if (!(await isLoopRecoveredSince(admin, loopId, sinceIso))) return false; // still red → leave parked
+
+  // Compare-and-set: only transition a row that is STILL parked — never resurrect one that moved on
+  // under us (a concurrent owner Dismiss / re-open). A 0-row result means we lost the race: bail.
+  const { data: flipped, error: flipErr } = await admin
+    .from("agent_jobs")
+    .update({ status: "completed", error: null, updated_at: new Date().toISOString() })
+    .eq("id", row.id)
+    .eq("status", "needs_attention")
+    .eq("error", PARKED_LOOP_REPAIR_ERROR)
+    .select("id");
+  if (flipErr || flipped?.length !== 1) {
+    if (flipErr) console.warn(`[needs-attention-route] auto-verify flip failed for ${row.id.slice(0, 8)}: ${flipErr.message}`);
+    return false;
+  }
+
+  await recordDirectorActivity(admin, {
+    workspaceId: row.workspace_id,
+    directorFunction: PLATFORM,
+    actionKind: "auto_verified_repair",
+    specSlug: row.spec_slug,
+    reason: `Auto-verified parked loop repair ${row.id.slice(0, 8)} (${loopId}): the loop has fresh healthy heartbeats since the alert opened (${sinceIso}) — the "transient" verdict is confirmed in production, closed without a human.`,
+    metadata: { job_id: row.id, action: "auto_verified_repair", loop_id: loopId, since: sinceIso, autonomous: true },
+  });
+
+  // Retire any open `parkbackstop:<jobId>` card the earlier backstop sweeps minted for this job — the
+  // condition it reported has self-healed, so it must not keep re-minting in the CEO inbox.
+  try {
+    const { data: cards } = await admin
+      .from("dashboard_notifications")
+      .select("id, metadata")
+      .eq("workspace_id", row.workspace_id)
+      .eq("metadata->>dedupe_key", `parkbackstop:${row.id}`)
+      .eq("dismissed", false);
+    for (const c of (cards ?? []) as Array<{ id: string; metadata: Record<string, unknown> | null }>) {
+      await admin
+        .from("dashboard_notifications")
+        .update({
+          dismissed: true,
+          metadata: { ...(c.metadata ?? {}), retire_reason: "auto_verified_repair — loop recovered via heartbeats", retired_at: new Date().toISOString() },
+        })
+        .eq("id", c.id)
+        .eq("dismissed", false);
+    }
+  } catch (e) {
+    console.warn(`[needs-attention-route] parkbackstop dismiss failed for ${row.id.slice(0, 8)}:`, e instanceof Error ? e.message : e);
+  }
+
+  console.log(`[needs-attention-route] auto-verified parked loop repair ${row.id.slice(0, 8)} (${loopId}) — loop recovered, closed + card retired`);
+  return true;
+}
+
 async function routeBackstop(admin: Admin, row: ParkedRow): Promise<{ backstopped: boolean; alarmed: boolean }> {
   const ageMs = Date.now() - new Date(row.created_at).getTime();
   let backstopped = false;
@@ -908,6 +996,14 @@ export async function routeNeedsAttention(admin: Admin): Promise<RouteResult> {
     // (which would otherwise alarm/re-report it every pass; the appstle-* board loop, 2026-06-26).
     if (isRoutedMarker) {
       await clearRoutedZombie(admin, row);
+      continue;
+    }
+
+    // repair-transient-park-verifies-itself Phase 2 — a parked loop-alert repair whose loop has
+    // recovered auto-verifies HERE, before the class dispatch + backstop escalation can re-mint a
+    // CEO card. Drains the three Sep 18 parks; only a still-red loop falls through to the backstop.
+    if (await autoVerifyParkedLoopRepair(admin, row)) {
+      dismissed.push(row.spec_slug ?? row.id.slice(0, 8));
       continue;
     }
 
