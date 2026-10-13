@@ -84,4 +84,4 @@ The pre-2026-08-11 backstop card titled itself `Park needs eyes: {spec_slug}` an
 
 ## Related
 
-[[needs-attention-classify]] · [[needs-attention-route-cs-owner]] · [[pre-merge-fix]] · [[platform-director]] · [[approval-inbox]] · [[../tables/agent_jobs]] · [[../operational-rules]]
+[[needs-attention-classify]] · [[needs-attention-route-cs-owner]] · [[repair-agent]] · [[repair-verdict-guard]] · [[pre-merge-fix]] · [[platform-director]] · [[approval-inbox]] · [[../tables/agent_jobs]] · [[../operational-rules]]

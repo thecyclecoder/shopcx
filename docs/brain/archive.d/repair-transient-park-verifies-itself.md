@@ -1,0 +1,1 @@
+- **Repair transient park verifies itself instead of waiting on a human** · verified 2026-10-13 · → [[../libraries/repair-verdict-guard]]
