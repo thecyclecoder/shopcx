@@ -110,7 +110,12 @@ test("shouldDiscardStaleResumeVerdict: FRESH attempt + needs-human + same text �
   );
 });
 
-test("shouldDiscardStaleResumeVerdict: REPAIR + legit human-needed verdict → KEEP", () => {
+test("shouldDiscardStaleResumeVerdict: REPAIR + ANY needs-human → DISCARD (Phase 2 structural rule)", () => {
+  // security-review-lane-must-always-produce-a-verdict Phase 2 broadened the rule: the repair prompt no
+  // longer OFFERS needs-human, and a genuinely-ambiguous finding would have parsed on the FRESH attempt 1
+  // (so repair is never reached for it). Therefore ANY needs-human emitted on a repair attempt is the
+  // stale-resume failure — discard it so the lane re-reviews fresh. Even review text that reads like a
+  // legit ambiguous call is discarded on a repair attempt.
   const review =
     "The authz check at src/lib/foo.ts:42 is ambiguous — a human familiar with the per-workspace isolation model should classify.";
   assert.equal(
@@ -120,7 +125,20 @@ test("shouldDiscardStaleResumeVerdict: REPAIR + legit human-needed verdict → K
       review,
       recognized: SECURITY_VERDICTS,
     }),
-    false,
+    true,
+  );
+});
+
+test("shouldDiscardStaleResumeVerdict: REPAIR + needs-human with NO recognizable stale phrase → still DISCARD", () => {
+  // The structural rule does not depend on the phrase match — a stale resume doesn't always say so.
+  assert.equal(
+    shouldDiscardStaleResumeVerdict({
+      useRepair: true,
+      verdict: "needs-human",
+      review: "I was unable to produce a verdict.",
+      recognized: SECURITY_VERDICTS,
+    }),
+    true,
   );
 });
 
@@ -151,4 +169,31 @@ test("shouldDiscardStaleResumeVerdict: recognized set without needs-human → ne
     }),
     false,
   );
+});
+
+// ── Phase 2 — resolveReviewVerdict only resumes a CLEAN, NON-EMPTY attempt 1 ──
+// resolveReviewVerdict is embedded in scripts/builder-worker.ts (importing it boots the worker), so this
+// pins the gate via static analysis: `useRepair` must require attempt 1 exited without error and emitted
+// a non-empty result. An errored / empty / timed-out attempt 1 → a FRESH review, never a --resume into a
+// session with no findings.
+test("resolveReviewVerdict gates the --resume on attempt 1 being clean + non-empty (no resume of a dead session)", async () => {
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(new URL("../../scripts/builder-worker.ts", import.meta.url), "utf8"),
+  );
+  const fn = src.slice(src.indexOf("async function resolveReviewVerdict"));
+  const body = fn.slice(0, 3500);
+  assert.match(body, /const attempt1Clean/, "must compute an attempt1Clean gate");
+  assert.match(body, /!last\.isError/, "attempt 1 must have exited without error to be resumed");
+  assert.match(body, /last\.resultText\.trim\(\)\.length > 0/, "attempt 1 must have emitted a non-empty result to be resumed");
+  assert.match(body, /const useRepair[^\n]*attempt1Clean/, "useRepair must require attempt1Clean");
+});
+
+test("the security-review repair prompt no longer offers needs-human", async () => {
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(new URL("../../scripts/builder-worker.ts", import.meta.url), "utf8"),
+  );
+  const fn = src.slice(src.indexOf("function securityReviewRepairPrompt"));
+  const body = fn.slice(0, 2000);
+  assert.ok(!body.includes('"status":"needs-human"'), "the repair prompt must not list a needs-human shape");
+  assert.ok(!body.includes("If you genuinely could not complete"), "the repair prompt must not offer the needs-human escape");
 });

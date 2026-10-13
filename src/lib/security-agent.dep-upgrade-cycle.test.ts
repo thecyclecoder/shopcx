@@ -15,7 +15,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { depUpgradeCycleSlug, SECURITY_DEP_UPGRADE_SLUG } from "./security-agent";
+import { depUpgradeCycleSlug, depUpgradeAdvisorySlug, SECURITY_DEP_UPGRADE_SLUG } from "./security-agent";
 
 test("the cycle slug is derived from the canonical one, so it stays greppable", () => {
   const slug = depUpgradeCycleSlug(new Date("2026-08-11T12:00:00Z"));
@@ -71,4 +71,41 @@ test("authorDepUpgradeSpec verifies the spec is readable on the board before rep
   assert.ok(successAt > verifyAt, "the read-back must happen BEFORE the success return");
   assert.match(body.slice(verifyAt, successAt), /if \(!landed\)/, "a null read-back must be treated as failure");
   assert.match(body.slice(verifyAt, successAt), /authorError/, "the failure must surface a concrete authorError, not a bare false");
+});
+
+// ── Phase 4 — the slug must be keyed on date + advisory signature when a cycle slug ALSO folds ──
+// RC4: `security-dep-upgrades-2026-09` folded and every later scan wedged on it because the lane only
+// checked the canonical slug and rolled to the (already-folded) month slug.
+
+test("depUpgradeAdvisorySlug extends the month cycle slug with a kebab-normalized signature tail", () => {
+  const slug = depUpgradeAdvisorySlug("GHSA-abc123/High", new Date("2026-09-15T00:00:00Z"));
+  assert.ok(slug.startsWith("security-dep-upgrades-2026-09-"), "must extend the month cycle slug");
+  assert.equal(slug, "security-dep-upgrades-2026-09-ghsa-abc123-high");
+});
+
+test("depUpgradeAdvisorySlug is deterministic + caps the signature tail (valid, readable slug)", () => {
+  const now = new Date("2026-09-15T00:00:00Z");
+  assert.equal(depUpgradeAdvisorySlug("sig-x", now), depUpgradeAdvisorySlug("sig-x", now), "deterministic for a fixed signature + clock");
+  const long = depUpgradeAdvisorySlug("a".repeat(100), now);
+  assert.equal(long, `security-dep-upgrades-2026-09-${"a".repeat(16)}`, "tail capped to 16 chars");
+  // An empty / symbol-only signature degrades to the plain cycle slug rather than a trailing dash.
+  assert.equal(depUpgradeAdvisorySlug("", now), "security-dep-upgrades-2026-09");
+  assert.equal(depUpgradeAdvisorySlug("///", now), "security-dep-upgrades-2026-09");
+});
+
+test("the signature slug is DISTINCT from a folded month slug — a new batch can never collide with the archive", () => {
+  const now = new Date("2026-09-15T00:00:00Z");
+  assert.notEqual(depUpgradeAdvisorySlug("new-batch", now), depUpgradeCycleSlug(now));
+});
+
+test("the lane rolls canonical → cycle → advisory-signature, checking the RESOLVED slug's fold status", async () => {
+  const src = await import("node:fs").then((fs) =>
+    fs.readFileSync(new URL("../../scripts/builder-worker.ts", import.meta.url), "utf8"),
+  );
+  const fn = src.slice(src.indexOf("async function authorDepUpgradeSpec"));
+  const body = fn.slice(0, 9000);
+  assert.match(body, /const advisorySignature = signature/, "must bind the advisory signature");
+  assert.match(body, /depUpgradeAdvisorySlug\(advisorySignature\)/, "must key the last-resort slug on the advisory signature");
+  // The cycle slug's OWN fold status must be re-checked (not just the canonical one) before authoring.
+  assert.match(body, /cycleRaw\?\.status === "folded"/, "must check the resolved cycle slug's fold status, not only the canonical");
 });
