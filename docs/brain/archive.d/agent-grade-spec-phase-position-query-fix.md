@@ -1,0 +1,1 @@
+- **Stop grader sessions querying nonexistent spec phase_number** · verified 2026-10-13 · → [[../libraries/agent-grader.md]]
