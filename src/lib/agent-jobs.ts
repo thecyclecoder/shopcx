@@ -592,6 +592,10 @@ export async function getBranchBuildSuccess(
   /** The branch-owning job's `spec_slug` (M4 promote-on-green Phase 1 — the TESTS gate needs it to read
    *  per-branch spec-test green). Null when no owning job was found. */
   specSlug: string | null;
+  /** The newest owning job's kind + error, so a caller can tell a merge-conflict / advisory park (which a
+   *  re-resolve clears once the PR is clean) from a failed build (which it must not paper over). */
+  ownerKind?: JobKind | null;
+  ownerError?: string | null;
 }> {
   if (!branch || !branch.startsWith("claude/")) {
     return { ok: false, status: null, reason: "not a claude/* branch", workspaceId: null, specSlug: null };
@@ -600,13 +604,13 @@ export async function getBranchBuildSuccess(
     const admin = adminClient || createAdminClient();
     const { data } = await admin
       .from("agent_jobs")
-      .select("status, kind, workspace_id, spec_slug")
+      .select("status, kind, workspace_id, spec_slug, error")
       .eq("spec_branch", branch)
       .in("kind", BRANCH_OWNING_KINDS)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
-    const job = data as { status: JobStatus; kind: JobKind; workspace_id: string; spec_slug: string } | null;
+    const job = data as { status: JobStatus; kind: JobKind; workspace_id: string; spec_slug: string; error: string | null } | null;
     if (!job) {
       return { ok: false, status: null, reason: "no build job owns this branch (manual/untracked push)", workspaceId: null, specSlug: null };
     }
@@ -653,6 +657,8 @@ export async function getBranchBuildSuccess(
       reason: `${job.kind} job is ${job.status} (not completed/merged)`,
       workspaceId: realWorkspaceId,
       specSlug: realSlug,
+      ownerKind: job.kind,
+      ownerError: job.error ?? null,
     };
   } catch (e) {
     return { ok: false, status: null, reason: `build-job lookup failed: ${e instanceof Error ? e.message : e}`, workspaceId: null, specSlug: null };
