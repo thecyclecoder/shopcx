@@ -25,7 +25,7 @@ Both sit **before** the backstop's CEO escalation, and both fall through to it w
 
 Per row, in order (bounded by `PLATFORM_DIRECTOR_ROUTE_CAP`, ledger-deduped per job):
 
-1. **Routed zombie** — class already starts with `routed_` → `clearRoutedZombie` flips it `completed`. Routing IS the disposition; leaving the row parked makes it re-report forever.
+1. **Routed zombie** — class already starts with `routed_` → `clearRoutedZombie` flips it `completed`. Routing IS the disposition; leaving the row parked makes it re-report forever. **EXCEPTION — `kind='security-review'` ([[../specs/security-review-lane-must-always-produce-a-verdict]] Phase 1):** `clearRoutedZombie` returns early WITHOUT flipping a security-review park to `completed`. A `needs-human` security finding IS the surfaced verdict; flipping it to `completed` made the rollups read it as clean (RC3 — a review that reviewed nothing counted as green). A security-review park stays surfaced (RED) until a fresh review produces a real `clean`/`false-positive` verdict — the only thing [[security-agent]] `isLatestSecurityReviewGreen` accepts as green.
 2. **Non-spec kinds** (`ticket-improve`) → dismissed outright, skipping the backstop entirely.
 3. **CS-owner rung** → June. `loop_guard_tripped` already escalated, so the backstop is skipped (no double-page).
 4. **`spec_row_missing`** → dismiss unless an open plan still owns the slug.

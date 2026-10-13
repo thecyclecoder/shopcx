@@ -57,10 +57,17 @@ export function looksLikeStaleResumeAcknowledgement(review: unknown): boolean {
 /**
  * Decide whether a parsed verdict should be DISCARDED (treated as inconclusive) given which attempt
  * emitted it. The guard only fires on a REPAIR attempt (useRepair=true): a FRESH attempt is a genuine
- * review and its `needs-human` is a real human-needed verdict even if the review text happens to mention
- * these phrases. A repair-attempt `needs-human` that cites "no prior findings" / "did not carry over" is
- * the stale-resume failure mode — discard it so the caller falls back to the actionable
- * "no parseable verdict" reason and the triage re-runs the review fresh.
+ * review and its `needs-human` is a real human-needed verdict.
+ *
+ * ⭐ security-review-lane-must-always-produce-a-verdict Phase 2 — STRUCTURAL rule (broadened from the
+ * original phrase match). A repair attempt is a parse-REPAIR of a review that already ran; the repair
+ * prompt no longer offers `needs-human` as a shape at all, so ANY `needs-human` emitted on a repair
+ * attempt means the resumed session had nothing to re-emit (the stale-resume failure) — NOT that a human
+ * is genuinely needed. Discard every repair-attempt `needs-human` so the caller falls back to the
+ * actionable "no parseable verdict" reason and the triage re-runs the review FRESH (the only recovery
+ * that actually re-reviews the code). The old phrase match (`looksLikeStaleResumeAcknowledgement`) is
+ * retained as an exported helper for diagnostics but is no longer the gate — a stale resume doesn't
+ * always emit a recognizable phrase, and the structural fact (repair-attempt needs-human) is sufficient.
  *
  * The `recognized` set is passed through so the helper stays decoupled from the specific verdict
  * vocabulary each lane uses.
@@ -74,5 +81,7 @@ export function shouldDiscardStaleResumeVerdict(input: {
   if (!input.useRepair) return false;
   if (input.verdict !== "needs-human") return false;
   if (!input.recognized.has("needs-human")) return false;
-  return looksLikeStaleResumeAcknowledgement(input.review);
+  // Structural rule: a repair-attempt needs-human is never trustworthy (see above) — discard it
+  // regardless of whether the review text carries a recognizable stale-resume phrase.
+  return true;
 }

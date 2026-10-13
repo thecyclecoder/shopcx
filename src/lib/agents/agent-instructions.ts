@@ -198,6 +198,28 @@ export async function appendAgentInstructions(
   return block ? `${basePrompt}\n\n${block}` : basePrompt;
 }
 
+/**
+ * ⭐ security-review-lane-must-always-produce-a-verdict Phase 3 guardrail — detect coaching guidance that
+ * would re-introduce a security-review EARLY EXIT (the RC2 class: a specs-row preflight that bails before
+ * reviewing, or a "fall straight to needs-human" / no-op shortcut). Pure + conservative — it matches the
+ * shortcut phrasings, NOT a legitimate "review X more carefully / check for Y" note. Exported so the
+ * guardrail can be unit-tested without a DB.
+ */
+export function coachingWouldAddSecurityEarlyExit(guidance: string): boolean {
+  const g = String(guidance || "").toLowerCase();
+  return (
+    /fall\s+(straight\s+|back\s+)?to\s+needs-human/.test(g) ||
+    /(default|fall back|go straight|jump)\s+to\s+needs-human/.test(g) ||
+    /return\s+needs-human\s+(immediately|first|up\s*front|without)/.test(g) ||
+    /\bearly[\s-]?exit\b/.test(g) ||
+    /\bshort[\s-]?circuit\b/.test(g) ||
+    /\bno-?op\b/.test(g) ||
+    /(skip|avoid|don'?t\s+(bother\s+)?(run|do))\b[^.]*\breview/.test(g) ||
+    /without\s+reviewing\s+the\s+diff/.test(g) ||
+    /preflight[^.]*\b(bail|exit|skip|return)\b/.test(g)
+  );
+}
+
 export interface CoachAgentInput {
   workspaceId: string;
   /** the worker being coached (an agent_jobs kind, e.g. 'repair'). */
@@ -236,6 +258,20 @@ export interface CoachAgentResult {
  */
 export async function coachAgent(admin: Admin, input: CoachAgentInput): Promise<CoachAgentResult> {
   if (!input.coachedBy) throw new Error("coachAgent: coachedBy (the supervising director) is required — coaching is director-gated");
+
+  // ⭐ security-review-lane-must-always-produce-a-verdict Phase 3 — the security-review lane must ALWAYS
+  // produce a real verdict (clean / false-positive / real-vuln). Coaching MUST NOT re-introduce the RC2
+  // early-exit shortcuts (a specs-row preflight that bails before reviewing, or a "fall straight to
+  // needs-human" no-op) — those were exactly the active coaching rows that turned the lane into reviews
+  // that reviewed nothing. Refuse to persist any security-review coaching whose guidance adds such an
+  // escape; a legitimate "review X more carefully" note is unaffected.
+  if (input.agentKind === "security-review" && coachingWouldAddSecurityEarlyExit(input.guidance)) {
+    throw new Error(
+      "coachAgent: refused — security-review coaching may not add a needs-human / no-op / preflight early-exit shortcut. " +
+        "The lane must always review the diff and produce a real verdict (clean/false-positive/real-vuln). " +
+        "See security-review-lane-must-always-produce-a-verdict Phase 3.",
+    );
+  }
 
   // Find the prior active instruction for this (worker, class) → supersede it (versioning + the diff).
   const { data: priorRows } = await admin
