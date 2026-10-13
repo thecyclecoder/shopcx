@@ -26,10 +26,14 @@ The daily cadence cron + per-workspace sweep that dispatches the [[../libraries/
 - **Signature:** `function mediaBuyerGradeSpecSlug(): string`
 - **What it does:** Returns the stable slug `"media-buyer-grade:workspace"` — helper form parallel to [[./media-buyer-cadence]] `mediaBuyerSpecSlug`.
 
-### `dispatchMediaBuyerGradeSweep(admin, workspaceId)`
-- **Signature:** `async function dispatchMediaBuyerGradeSweep(admin: Admin, workspaceId: string): Promise<{ dispatched: number }>`
+### `dispatchMediaBuyerGradeSweep(admin, workspaceId, deps?)`
+- **Signature:** `async function dispatchMediaBuyerGradeSweep(admin: Admin, workspaceId: string, deps?: { resolveSwitch? }): Promise<{ dispatched: number; killSwitchOff?; alreadyQueued? }>`
 - **What it does:** Pure per-workspace insert extracted from the Inngest handler — inserts ONE workspace-scoped `agent_jobs` row `kind='media-buyer-grade'` with a stable non-empty `spec_slug` (via `mediaBuyerGradeSpecSlug()`) and `instructions.limit=MEDIA_BUYER_GRADE_DEFAULT_LIMIT` (50). Throws if the insert fails.
-- **Returns** `{ dispatched: 1 }` on success.
+- **Enqueue guards (2026-10-13):**
+  - **Kill switch.** It consults [[../libraries/kill-switch-resolver]] `resolveEffectiveSwitch('media-buyer-grade')` first. When the node or an ancestor is off, it enqueues nothing and returns `killSwitchOff`. This is the same freeze-produces-nothing contract as [[ad-creative-cadence]].
+  - **One unfinished row per workspace.** When a row for the workspace is already in an `ACTIVE_MEDIA_BUYER_JOB_STATUSES` state, it enqueues nothing and returns `alreadyQueued`.
+  - **Ground truth.** The CEO switched the Media Buyer off on 2026-09-04. The claim RPC correctly refused every grade row after that, but the cron kept inserting one a day, and 39 sat queued on the box tile.
+- **Returns** `{ dispatched: 1 }` on insert, `{ dispatched: 0, ... }` when a guard held.
 
 ## Idempotency
 

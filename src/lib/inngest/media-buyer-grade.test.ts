@@ -20,10 +20,23 @@ import {
 type Row = Record<string, unknown>;
 type Tables = Record<string, Row[]>;
 
+/** The open-row read `dispatchMediaBuyerGradeSweep` makes before inserting. */
+function selectChain(rows: Row[]) {
+  let out = [...rows];
+  const chain = {
+    select: () => chain,
+    eq: (col: string, v: unknown) => { out = out.filter((r) => r[col] === v); return chain; },
+    in: (col: string, vs: unknown[]) => { out = out.filter((r) => vs.includes(r[col])); return chain; },
+    limit: async () => ({ data: out, error: null }),
+  };
+  return chain;
+}
+
 function makeAdmin(tables: Tables) {
   return {
     from(table: string) {
       return {
+        ...selectChain(tables[table] ?? []),
         insert: async (row: Row | Row[]) => {
           const arr = tables[table] ?? (tables[table] = []);
           const rows = Array.isArray(row) ? row : [row];
@@ -58,6 +71,7 @@ function makeAdmin(tables: Tables) {
 }
 
 const WS = "ws-1";
+const ON = { resolveSwitch: async () => ({ off: false as const }) };
 
 test("mediaBuyerGradeSpecSlug — stable, workspace-scoped, non-empty", () => {
   assert.equal(mediaBuyerGradeSpecSlug(), "media-buyer-grade:workspace");
@@ -68,7 +82,7 @@ test("mediaBuyerGradeSpecSlug — stable, workspace-scoped, non-empty", () => {
 test("dispatchMediaBuyerGradeSweep — inserted row carries spec_slug, kind='media-buyer-grade', instructions.limit=default", async () => {
   const tables: Tables = { agent_jobs: [] };
   const admin = makeAdmin(tables);
-  const r = await dispatchMediaBuyerGradeSweep(admin, WS);
+  const r = await dispatchMediaBuyerGradeSweep(admin, WS, ON);
   assert.equal(r.dispatched, 1);
   assert.equal(tables.agent_jobs.length, 1);
   const [job] = tables.agent_jobs;
@@ -92,6 +106,7 @@ test("dispatchMediaBuyerGradeSweep — omitting spec_slug throws the NOT NULL co
   const bareAdmin = {
     from() {
       return {
+        ...selectChain([]),
         insert: async () => ({
           data: null,
           error: {
@@ -103,8 +118,40 @@ test("dispatchMediaBuyerGradeSweep — omitting spec_slug throws the NOT NULL co
     },
   } as unknown as Parameters<typeof dispatchMediaBuyerGradeSweep>[0];
   await assert.rejects(
-    () => dispatchMediaBuyerGradeSweep(bareAdmin, WS),
+    () => dispatchMediaBuyerGradeSweep(bareAdmin, WS, ON),
     /spec_slug.*not-null constraint/,
   );
   assert.equal(tables.agent_jobs.length, 0);
+});
+
+test("dispatchMediaBuyerGradeSweep — a switched-off grader enqueues nothing (the 2026-09-04 pile-up)", async () => {
+  const tables: Tables = { agent_jobs: [] };
+  const r = await dispatchMediaBuyerGradeSweep(makeAdmin(tables), WS, {
+    resolveSwitch: async () => ({ off: true as const, offBy: "agent-kind:media-buyer-grade", scope: "agent", reason: "CEO off" }),
+  });
+  assert.equal(r.dispatched, 0);
+  assert.equal(r.killSwitchOff?.offBy, "agent-kind:media-buyer-grade");
+  assert.equal(tables.agent_jobs.length, 0);
+});
+
+test("dispatchMediaBuyerGradeSweep — an unfinished row for the workspace blocks a duplicate", async () => {
+  const tables: Tables = {
+    agent_jobs: [{ id: "old", workspace_id: WS, kind: "media-buyer-grade", status: "queued" }],
+  };
+  const r = await dispatchMediaBuyerGradeSweep(makeAdmin(tables), WS, ON);
+  assert.equal(r.dispatched, 0);
+  assert.equal(r.alreadyQueued, "old");
+  assert.equal(tables.agent_jobs.length, 1);
+});
+
+test("dispatchMediaBuyerGradeSweep — a finished row or another workspace's row does not block", async () => {
+  const tables: Tables = {
+    agent_jobs: [
+      { id: "done", workspace_id: WS, kind: "media-buyer-grade", status: "completed" },
+      { id: "other", workspace_id: "ws-2", kind: "media-buyer-grade", status: "queued" },
+    ],
+  };
+  const r = await dispatchMediaBuyerGradeSweep(makeAdmin(tables), WS, ON);
+  assert.equal(r.dispatched, 1);
+  assert.equal(tables.agent_jobs.length, 3);
 });
