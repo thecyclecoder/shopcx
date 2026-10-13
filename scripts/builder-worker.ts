@@ -3598,7 +3598,14 @@ async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
   for (let attempt = 1; attempt <= REVIEW_VERDICT_MAX_ATTEMPTS; attempt++) {
     // Attempt 2 (when `repair` is configured AND we have a prior session): use the cheap same-session
     // re-prompt instead of a fresh re-investigation. Attempt 1 + any other path is the fresh `run`.
-    const useRepair: boolean = attempt > 1 && !!opts.repair && !!last?.session;
+    //
+    // ⭐ security-review-lane-must-always-produce-a-verdict Phase 2 — ONLY resume when attempt 1 exited
+    // CLEANLY with a NON-EMPTY result. A `--resume` into a session that errored / timed out / emitted
+    // nothing has no findings to re-emit, so the model falls back to a stock `needs-human` (the stale-
+    // resume failure) — a "review" that reviewed nothing. When attempt 1 errored or was empty, run a
+    // FRESH review instead (the only recovery that actually re-reviews the code).
+    const attempt1Clean: boolean = !!last && !last.isError && last.resultText.trim().length > 0;
+    const useRepair: boolean = attempt > 1 && !!opts.repair && !!last?.session && attempt1Clean;
     const r: T = useRepair ? await opts.repair!(last!.session!) : await opts.run(attempt);
     last = r;
     if (opts.onRun) await opts.onRun(r, attempt);
@@ -26357,7 +26364,7 @@ function securityDiffPrompt(mergeSha: string, specSlug: string, prNumber?: numbe
     `You are the supervisor on the auto-merge proxy: auto-merge optimizes "ship the fix"; its degenerate state is shipping a fix that introduces a vulnerability. Give THIS merged diff an autonomous security pass.`,
     ``,
     `THE MERGED DIFF: commit ${mergeSha} on main${prNumber ? ` (PR #${prNumber})` : ""}, the merged build of spec "${specSlug}".`,
-    `First run \`git fetch origin main\` then \`git show ${mergeSha}\` (or \`git diff ${mergeSha}~1 ${mergeSha}\`) to read EXACTLY what changed. Then read the touched files in the working tree for context. Run the /security-review skill's checks over the diff.`,
+    `First run \`git fetch origin main\` then \`git show ${mergeSha}\` (or \`git diff ${mergeSha}~1 ${mergeSha}\`) to read EXACTLY what changed. Then read the touched files in the working tree for context. Apply the review checklist below over the diff (it is self-contained — do NOT depend on any slash-command / skill; everything you need is in this prompt).`,
     ...securityReviewChecksAndVerdictBlock(),
   ].join("\n");
 }
@@ -26377,7 +26384,7 @@ function securityBranchPrompt(branch: string, previewOrigin: string, specSlug: s
     `You are the supervisor on the auto-merge proxy: auto-merge optimizes "ship the fix"; its degenerate state is shipping a fix that introduces a vulnerability. Give this UNMERGED build branch an autonomous security pass BEFORE it merges — so a real vuln blocks the auto-merge instead of escaping into main.`,
     ``,
     `THE UNMERGED BRANCH: \`${branch}\`${prNumber ? ` (PR #${prNumber})` : ""}, the in-progress build of spec "${specSlug}".`,
-    `First run \`git fetch origin main\` and \`git fetch origin ${branch}\`, then \`git diff origin/main...origin/${branch}\` to read EXACTLY what the branch changes vs main. Then read the touched files in the working tree for context. Run the /security-review skill's checks over the branch diff. Your evidence MUST reference the branch diff (and the touched files at branch HEAD), NOT a post-merge commit on main.`,
+    `First run \`git fetch origin main\` and \`git fetch origin ${branch}\`, then \`git diff origin/main...origin/${branch}\` to read EXACTLY what the branch changes vs main. Then read the touched files in the working tree for context. Apply the review checklist below over the branch diff (it is self-contained — do NOT depend on any slash-command / skill; everything you need is in this prompt). Your evidence MUST reference the branch diff (and the touched files at branch HEAD), NOT a post-merge commit on main.`,
     previewLine,
     ...securityReviewChecksAndVerdictBlock(),
   ].join("\n");
@@ -26423,13 +26430,16 @@ function securityReviewRepairPrompt(): string {
     `Your previous message could not be parsed as the security-review JSON verdict envelope.`,
     `Return ONLY one valid JSON object — no prose before or after, no markdown, no commentary. If you must use a code fence the JSON must be the last thing in the message. Reuse the findings + reasoning you ALREADY produced; do NOT re-investigate, do NOT re-read files, do NOT re-run any tool.`,
     ``,
-    `Pick exactly ONE shape that matches your prior verdict:`,
+    `Pick exactly ONE shape that matches the review you ALREADY completed:`,
     `  {"status":"clean","review":"<what you checked + why it's safe>"}`,
     `  {"status":"false-positive","review":"<what looked risky + why it isn't>"}`,
-    `  {"status":"needs-human","review":"<ONE-LINE plain note on what's ambiguous + what a human should look at>"}`,
     `  {"status":"real-vuln","review":"<plain text: each finding (file:line + category + severity) + the fix; secrets by location only>","spec":{"slug":"<stable-kebab-slug>","title":"...","owner":"[[../functions/platform]]","parent":"[[../functions/platform]] — Infra & DevOps / reliability mandate","related_spec":"security-dependency-agent","intent":"<one paragraph>","fix":"<what to change to close it>","verification":["<bullet>","..."]}}`,
     ``,
-    `If you genuinely could not complete the review (timed out, blocked, etc.), return ONLY {"status":"needs-human","review":"<one line on why you couldn't complete the review>"}.`,
+    // ⭐ security-review-lane-must-always-produce-a-verdict Phase 2 — the repair prompt NO LONGER offers
+    // `needs-human` as an escape. This is a parse-REPAIR of a review that already ran; a `needs-human`
+    // from a resumed session means it has no findings in context, not that a human is needed. If you have
+    // nothing to re-emit, say so plainly — the lane will discard it and re-review from scratch as a FRESH
+    // session (the only recovery that works). Do NOT invent a needs-human verdict to end the turn.
   ].join("\n");
 }
 
@@ -26815,7 +26825,12 @@ async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, w
     DEP_UPGRADE_PARENT_REF,
     buildDepUpgradeSpecInput,
     depUpgradeCycleSlug,
+    depUpgradeAdvisorySlug,
   } = await import("../src/lib/security-agent");
+  // The advisory signature keying THIS batch — the escape hatch past a folded cycle slug (Phase 4 of
+  // security-review-lane-must-always-produce-a-verdict). A new advisory set can never collide with a
+  // folded row keyed on a different signature.
+  const advisorySignature = signature;
   let slug = SECURITY_DEP_UPGRADE_SLUG;
   try {
     // spec-pm-markdown-purge: the dep-upgrade spec lives ONLY in the DB. Find-or-update on the spec row.
@@ -26843,9 +26858,28 @@ async function authorDepUpgradeSpec(findings: DepFinding[], signature: string, w
     const { getSpec: getSpecRowAnyStatus } = await import("../src/lib/specs-table");
     const rawRow = await getSpecRowAnyStatus(workspaceId, slug);
     if (rawRow?.status === "folded") {
+      // Roll to the monthly cycle slug; but a cycle slug can ITSELF be folded (RC4 — the Sep-10 wedge
+      // keyed on the already-folded `security-dep-upgrades-2026-09`). NEVER author into a folded row:
+      // check the RESOLVED slug and, if it too is folded, key on date + advisory signature so a NEW
+      // batch of advisories gets a slug that cannot collide with any folded one.
       slug = depUpgradeCycleSlug();
+      const cycleRaw = await getSpecRowAnyStatus(workspaceId, slug);
+      if (cycleRaw?.status === "folded") {
+        slug = depUpgradeAdvisorySlug(advisorySignature);
+        const sigRaw = await getSpecRowAnyStatus(workspaceId, slug);
+        if (sigRaw?.status === "folded") {
+          // Astronomically unlikely (same month + same advisory signature already shipped + folded),
+          // but still never write into an archive — surface a concrete reason instead.
+          const authorError =
+            `AuthorWriteFailed: every dep-upgrade slug candidate is folded ` +
+            `(canonical ${SECURITY_DEP_UPGRADE_SLUG}, cycle ${depUpgradeCycleSlug()}, advisory ${slug}) — ` +
+            `cannot author without resurrecting an archived spec. Re-slug or re-open manually.`;
+          console.error(`[security] all dep-upgrade slug candidates folded — ${authorError}`);
+          return { authorError, slug };
+        }
+      }
       existing = await getSpec(slug, workspaceId);
-      console.log(`[security] canonical dep-upgrade spec is FOLDED — authoring this cycle as ${slug} (a fold must not kill the dep-upgrade loop)`);
+      console.log(`[security] canonical dep-upgrade spec is FOLDED — authoring this cycle as ${slug} (keyed on date + advisory signature so a fold can't kill the dep-upgrade loop)`);
     }
     const structuredInput = buildDepUpgradeSpecInput(findings, signature);
     // Mirror `markNewSpecInReview`'s side effect on FIRST creation — flip the spec card to

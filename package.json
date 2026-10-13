@@ -238,6 +238,7 @@
     "test:vercel-project-branch-preview-sha-scope": "tsx --test src/lib/vercel-project.branch-preview-sha-scope.test.ts",
     "test:preview-capture-persist-sha-scope": "tsx --test src/lib/preview-capture.persist-sha-scope.test.ts",
     "test:security-agent-fix-phase-landed": "tsx --test src/lib/security-agent.fix-phase-landed.test.ts",
+    "test:security-coaching-guardrail": "tsx --test src/lib/agents/agent-instructions.security-guardrail.test.ts",
     "test:pre-merge-fix": "tsx --test src/lib/pre-merge-fix.test.ts",
     "test:premerge-fix-force": "tsx --test src/lib/agent-jobs.premerge-fix-force.test.ts",
     "test:repeat-verdict-breaker": "tsx --test src/lib/repeat-verdict-breaker.test.ts",

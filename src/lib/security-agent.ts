@@ -70,6 +70,30 @@ export function depUpgradeCycleSlug(now: Date = new Date()): string {
   const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
   return `${SECURITY_DEP_UPGRADE_SLUG}-${yyyy}-${mm}`;
 }
+
+/**
+ * ⭐ security-review-lane-must-always-produce-a-verdict Phase 4 — the LAST-RESORT dep-upgrade slug.
+ *
+ * `depUpgradeCycleSlug` guarantees a fresh slug per MONTH, but a cycle slug can ITSELF fold (a month's
+ * batch shipped), and the lane previously had no escape past that — it rolled canonical→month and, if the
+ * month slug was also folded, wrote right back into the archived row (the RC4 dead loop:
+ * `security-dep-upgrades-2026-09` folded and every later scan since Sep 10 wedged on it). Keying on the
+ * month slug PLUS the advisory signature guarantees a distinct slug for a NEW batch of advisories even
+ * when the month's canonical cycle slug has already folded — a different advisory set can never collide
+ * with a folded one. The signature is the stable `depFindingSignature` the dep-watch lane already computes
+ * per advisory batch, kebab-normalized + length-capped so it is a valid, readable slug tail.
+ *
+ * `now` is injected so the slug is deterministic in tests.
+ */
+export function depUpgradeAdvisorySlug(advisorySignature: string, now: Date = new Date()): string {
+  const base = depUpgradeCycleSlug(now);
+  const sig = String(advisorySignature || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 16);
+  return sig ? `${base}-${sig}` : base;
+}
 /** The sentinel spec_slug carried by a dep-watch scan job (so it dedups distinctly from per-diff jobs). */
 export const SECURITY_DEP_WATCH_SLUG = "security-dep-watch";
 
@@ -93,6 +117,41 @@ export const SECURITY_RECENT_FIX_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h
  */
 export function isRealVulnVerdict(verdict: string | null | undefined): boolean {
   return String(verdict || "").trim().toLowerCase() === "real-vuln";
+}
+
+/**
+ * The ONLY two terminal verdicts that mean a review found nothing to fix: the box reviewed the diff
+ * and either saw no vulnerability (`clean`) or classified the flagged pattern as safe/already-mitigated
+ * (`false-positive`). Everything else — `real-vuln`, `needs-human`, or a MISSING verdict (a row that
+ * never reached a real classification) — is NOT clean.
+ */
+export function isCleanSecurityVerdict(verdict: string | null | undefined): boolean {
+  const v = String(verdict || "").trim().toLowerCase();
+  return v === "clean" || v === "false-positive";
+}
+
+/**
+ * ⭐ security-review-lane-must-always-produce-a-verdict Phase 1 — GREEN means the LATEST review is clean.
+ *
+ * A slug/branch is security-green iff the MOST RECENT security-review row (by `created_at`) reached a
+ * clean terminal verdict (`clean` / `false-positive`). A stale older clean row can NEVER mask a newer
+ * finding, and a `needs-human` park that was flipped to `completed` (the clearRoutedZombie bug, RC3) can
+ * never read as clean because its verdict is `needs-human`, not `clean`. Specifically RED:
+ *   - the latest row is not `completed` (still live / surfaced / failed → no verdict yet)
+ *   - the latest row has no verdict, `needs-human`, or `real-vuln`
+ *   - there are no review rows at all (absence ≠ clean)
+ *
+ * `rowsNewestFirst` MUST be ordered newest-first — the three rollups all query
+ * `.order("created_at", { ascending: false })`, so the first element is the latest review. Callers
+ * exclude dep-watch-mode rows before calling (a dep-watch scan is infra, not a per-spec verdict).
+ */
+export function isLatestSecurityReviewGreen(
+  rowsNewestFirst: ReadonlyArray<{ status: string; verdict?: string | null }>,
+): boolean {
+  const latest = rowsNewestFirst[0];
+  if (!latest) return false; // no review on record ≠ clean
+  if (latest.status !== "completed") return false; // live/surfaced/failed latest → no verdict yet
+  return isCleanSecurityVerdict(latest.verdict);
 }
 
 /** Statuses that mean a security-review job is still "live" — being worked or surfaced (awaiting owner). */
@@ -782,8 +841,14 @@ export async function enqueueDepWatchJob(admin: Admin, opts: { workspaceId?: str
       .order("created_at", { ascending: false })
       .limit(5);
     const rows = (recent ?? []) as Array<{ id: string; status: string; error: string | null; created_at: string }>;
-    if (rows.some((r) => LIVE_SECURITY_STATUSES.includes(r.status))) {
-      return { enqueued: false, reason: "live dep-watch scan exists" };
+    // ⭐ security-review-lane-must-always-produce-a-verdict Phase 4 — only an ACTIVELY-RUNNING scan
+    // blocks a fresh enqueue (RUNNING, not LIVE). A SURFACED dep-watch row — `needs_attention` (a
+    // parked scan whose fix-spec authoring failed, e.g. job d29f5989) or `needs_approval` (an upgrade
+    // awaiting the owner) — must NOT wedge the daily scan: that park counted as "live" and blocked
+    // every dep-watch for 33 days (since Sep 10). The park stays surfaced to the owner; a new scan
+    // still runs alongside it.
+    if (rows.some((r) => (RUNNING_SECURITY_STATUSES as ReadonlyArray<string>).includes(r.status))) {
+      return { enqueued: false, reason: "running dep-watch scan exists" };
     }
     const windowStart = Date.now() - SECURITY_RECENT_FIX_WINDOW_MS;
     const recentlyScanned = rows.some((r) => r.status === "completed" && Date.parse(r.created_at) >= windowStart);
@@ -904,9 +969,12 @@ export async function getSecurityStateBySlug(admin: Admin, workspaceId: string):
     .eq("kind", "security-review")
     .order("created_at", { ascending: false })
     .limit(1000);
-  const map: Record<string, SecurityStateBySlug> = {};
   const runningSet: ReadonlySet<string> = new Set(RUNNING_SECURITY_STATUSES);
   const surfacedSet: ReadonlySet<string> = new Set(SURFACED_SECURITY_STATUSES);
+  // Collect each slug's security-review rows newest-first (the query is already `created_at` desc), so
+  // `completedClean` can key on the LATEST row via [[isLatestSecurityReviewGreen]] rather than "any
+  // completed non-real-vuln row" (which let a stale clean / a flipped needs-human read as green).
+  const rowsBySlug: Record<string, Array<{ status: string; verdict: string }>> = {};
   for (const row of (data ?? []) as Array<{ spec_slug: string; status: string; instructions?: string }>) {
     const slug = String(row.spec_slug || "");
     // Exclude infra dep-watch jobs by IDENTITY: the sentinel slug OR the dep-watch mode. A real
@@ -921,15 +989,17 @@ export async function getSecurityStateBySlug(admin: Admin, workspaceId: string):
       /* not JSON — treat as a non-dep-watch (diff) review, unknown verdict */
     }
     if (!slug || slug === SECURITY_DEP_WATCH_SLUG || mode === "dep-watch") continue;
-    const cur = (map[slug] ||= { live: false, surfaced: false, completedClean: false });
-    if (runningSet.has(row.status)) cur.live = true;
-    else if (surfacedSet.has(row.status)) cur.surfaced = true;
-    else if (row.status === "completed" && !isRealVulnVerdict(verdict)) cur.completedClean = true;
+    (rowsBySlug[slug] ||= []).push({ status: row.status, verdict });
   }
-  // `completedClean` is the CLEAN terminal state — a live/surfaced job for the same slug overrides it
-  // (the Security node can never read "done" while a routed fix or running review is still open).
-  for (const s of Object.values(map)) {
-    if (s.live || s.surfaced) s.completedClean = false;
+  const map: Record<string, SecurityStateBySlug> = {};
+  for (const [slug, rows] of Object.entries(rowsBySlug)) {
+    map[slug] = {
+      live: rows.some((r) => runningSet.has(r.status)),
+      surfaced: rows.some((r) => surfacedSet.has(r.status)),
+      // GREEN keys on the latest review only — a live/surfaced latest row already reads red here (it is
+      // not a `completed` clean verdict), so no separate override is needed.
+      completedClean: isLatestSecurityReviewGreen(rows),
+    };
   }
   return map;
 }
@@ -958,6 +1028,7 @@ export async function getSecurityStateForSlug(
     .limit(200);
   const runningSet: ReadonlySet<string> = new Set(RUNNING_SECURITY_STATUSES);
   const surfacedSet: ReadonlySet<string> = new Set(SURFACED_SECURITY_STATUSES);
+  const rows: Array<{ status: string; verdict: string }> = [];
   for (const row of (data ?? []) as Array<{ status: string; instructions?: string }>) {
     let mode = "";
     let verdict = "";
@@ -969,11 +1040,13 @@ export async function getSecurityStateForSlug(
       /* not JSON — a diff review, unknown verdict */
     }
     if (mode === "dep-watch") continue; // infra scan, not a per-spec gate
-    if (runningSet.has(row.status)) state.live = true;
-    else if (surfacedSet.has(row.status)) state.surfaced = true;
-    else if (row.status === "completed" && !isRealVulnVerdict(verdict)) state.completedClean = true;
+    rows.push({ status: row.status, verdict }); // newest-first (query is created_at desc)
   }
-  if (state.live || state.surfaced) state.completedClean = false;
+  state.live = rows.some((r) => runningSet.has(r.status));
+  state.surfaced = rows.some((r) => surfacedSet.has(r.status));
+  // GREEN keys on the LATEST review ([[isLatestSecurityReviewGreen]]); a live/surfaced latest row is
+  // already red there, so no override is needed.
+  state.completedClean = isLatestSecurityReviewGreen(rows);
   return state;
 }
 
@@ -1012,23 +1085,23 @@ export async function getSecurityStateForBranch(admin: Admin, branch: string): P
     .limit(200);
   const runningSet: ReadonlySet<string> = new Set(RUNNING_SECURITY_STATUSES);
   const surfacedSet: ReadonlySet<string> = new Set(SURFACED_SECURITY_STATUSES);
+  const rows: Array<{ status: string; verdict: string }> = [];
   for (const row of (data ?? []) as Array<{ status: string; instructions?: string }>) {
     let verdict = "";
     try {
       verdict = String((JSON.parse(String(row.instructions || "{}")) as { verdict?: string }).verdict || "");
     } catch {
-      /* not JSON — unknown verdict; treat conservatively (not real-vuln → allow if completed) */
+      /* not JSON — unknown verdict; the latest-row rule treats a missing verdict as RED */
     }
-    if (runningSet.has(row.status)) state.live = true;
-    else if (surfacedSet.has(row.status)) state.surfaced = true;
-    else if (row.status === "completed" && !isRealVulnVerdict(verdict)) state.completedClean = true;
+    rows.push({ status: row.status, verdict }); // newest-first (query is created_at desc)
   }
-  // Mirrors getSecurityStateBySlug: a live/surfaced sibling for the same branch overrides the clean
-  // terminal — the gate can never read "green" while a routed fix or running review is still open.
-  // The two helpers MUST agree on the clean definition (the pre-merge gate and the post-ship fold gate
-  // are the same supervision rail; if they disagreed, a branch could promote past a finding the fold
-  // gate would block, or vice versa).
-  if (state.live || state.surfaced) state.completedClean = false;
+  state.live = rows.some((r) => runningSet.has(r.status));
+  state.surfaced = rows.some((r) => surfacedSet.has(r.status));
+  // GREEN keys on the LATEST review via [[isLatestSecurityReviewGreen]] — the SAME definition the
+  // post-ship fold gate reuses through getSecurityStateBySlug, so the pre-merge promote gate and the
+  // fold gate can never disagree. A live/surfaced latest row is already red there (it is not a
+  // `completed` clean verdict), so no separate override is needed.
+  state.completedClean = isLatestSecurityReviewGreen(rows);
   return state;
 }
 

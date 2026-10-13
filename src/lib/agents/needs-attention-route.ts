@@ -255,6 +255,12 @@ async function markRouted(admin: Admin, jobId: string, klass: BlockerRoute | Nee
  * status so it never flips a row that changed under us.
  */
 async function clearRoutedZombie(admin: Admin, row: ParkedRow): Promise<boolean> {
+  // ⭐ security-review-lane-must-always-produce-a-verdict Phase 1 — NEVER flip a security-review park
+  // to `completed`. A `needs-human` security finding IS the surfaced verdict; clearing it to completed
+  // would make the rollup read it as clean (a completed security-review row counted as green). A review
+  // is green ONLY when [[security-agent]] `isLatestSecurityReviewGreen` sees a real clean/false-positive
+  // verdict on the latest row — a security-review park stays surfaced (red) until a fresh review runs.
+  if (row.kind === "security-review") return false;
   const { error } = await admin
     .from("agent_jobs")
     .update({
