@@ -1,0 +1,18 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "t:name"
+handle = "subscription-free-shipping"
+type = "function"
+description = "t:description"
+
+  # Shipping discount only. Create the automatic discount with
+  # discountClasses: [SHIPPING]; see docs/brain/integrations/shopify-checkout-extensions.md.
+  [[extensions.targeting]]
+  target = "cart.delivery-options.discounts.generate.run"
+  input_query = "src/cart_delivery_options_discounts_generate_run.graphql"
+  export = "cart-delivery-options-discounts-generate-run"
+
+  [extensions.build]
+  command = ""
+  path = "dist/function.wasm"

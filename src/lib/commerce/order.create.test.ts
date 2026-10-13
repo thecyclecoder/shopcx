@@ -14,7 +14,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildCreateOrderRow, type CreateOrderInput } from "./order";
+import { buildCreateOrderRow, createOrder, type CreateOrderInput } from "./order";
 
 const WORKSPACE = "11111111-1111-1111-1111-111111111111";
 const CUSTOMER = "22222222-2222-2222-2222-222222222222";
@@ -116,4 +116,26 @@ test("buildCreateOrderRow: subscription_id + shipping_address + order_type pass 
   assert.equal(row.subscription_id, "sub-uuid");
   assert.deepEqual(row.shipping_address, { city: "Austin" });
   assert.equal(row.order_type, "recovery");
+});
+
+// ── Phase 2 of assisted-one-time-orders-charge-and-ship ──
+// createOrder(internal) writes a BARE mirror row (no charge, no fulfilment).
+// It must be an explicit opt-in so nothing customer-facing can produce an
+// unpaid, unshipped order by accident. The refusal is a pure input check and
+// runs BEFORE any Supabase client is constructed (no env needed in the test).
+
+test("createOrder(internal) WITHOUT mirror_only is refused — no bare unpaid/unshipped row", async () => {
+  const r = await createOrder(WORKSPACE, baseInput({ vendor: "internal" }));
+  assert.equal(r.success, false);
+  assert.equal(
+    r.error,
+    "createOrder(internal) requires mirror_only:true — use chargeOneTimeOrder to bill + ship",
+  );
+});
+
+test("createOrder(internal) refusal message names the mirror_only opt-in + the chargeOneTimeOrder alternative", async () => {
+  const r = await createOrder(WORKSPACE, baseInput({ vendor: "internal" }));
+  assert.equal(r.success, false);
+  assert.match(String(r.error), /requires mirror_only:true/);
+  assert.match(String(r.error), /chargeOneTimeOrder/);
 });

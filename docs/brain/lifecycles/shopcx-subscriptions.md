@@ -128,7 +128,26 @@ purpose so "Monthly" is a true 4-week cycle, not a drifting calendar month.
 | Monthly | WEEK × 4 | `gid://shopify/SellingPlan/4087021741` |
 | Every 2 Months | WEEK × 8 | `gid://shopify/SellingPlan/4087054509` |
 
-No products attached and no pricing policy on the group — both deliberate, pending decisions.
+**The plans carry NO pricing policy (CEO, 2026-10-10).** Subscribe & Save comes only from the
+checkout discount function "Subscription Discount" (`DiscountAutomaticNode/1491491881133`), which
+gives 25% to lines on these three plans, protection included, and stacks with Buy 2/3. It applies
+on every cycle so checkout shows the discounted recurring price. Shopify copies it onto the contract
+as a recurring automatic, and the ingest normalizer replaces that copy with our own "Subscribe &
+Save" + "Volume discount", which every later edit recomputes. Plan order is Monthly, Every 2 Months, Every 2 Weeks: the
+cart drawer and cross-sells take a product's first group's first plan, and our group lists before
+Appstle's.
+
+⚠️ `sellingPlanGroupUpdate` with only `position` in `sellingPlansToUpdate` WIPES that plan's
+`pricingPolicies`. Always resend every field you mean to keep.
+
+**Product-page cutover (2026-10-10).** Our group is on the 9 subscription products (the ACV products
+stay off; protection only on `8356945952941`). Theme commit `c51af2a` swapped the hardcoded Appstle
+plan ids (`2310373549` → `4087021741`, `2310406317` → `4087054509` in `snippets/quantity-breaks.liquid`,
+`sections/price-table.liquid` and the two Tabs landing pages), so product pages create ShopCX
+subscriptions. Remaining: test checkouts, then remove Appstle's group.
+
+A checkout contract is rebased into our pricing shape by `normalize-pricing` in
+[[../inngest/shopcx-contract-ingest]] right after it is ingested.
 
 ### ⚠️ Two groups on one product = two frequency selectors on the PDP
 
@@ -494,6 +513,55 @@ resolves the cycle by date and skips spent ones. Measured on the 2026-09-16 coho
 subs that had just charged were already dead, one by eight minutes. `shopifyRetimeContract` verifies
 after writing and returns `stranded` rather than succeeding quietly.
 
+### ⭐ Charge-time cycle resolution — 2026-10-08 (Phase 1)
+
+The stranding above is designed OUT at charge time. ShopCX-billed subs no longer resolve the cycle
+*from* `next_billing_date`; our DB row only PLANS the date, and Shopify's billing calendar is
+resolved only when we actually charge. Ground truth 2026-10-08, Ashley Denson (sub `9d657599`,
+contract `36109058221`): an early Order Now never advanced her date, a frequency change re-shaped
+Shopify's cycle #1 to end 11-01, and every date we could give her before Nov 1 was unbillable.
+
+- **`resolveChargeableCycle(ws, contractId, now)`** ([[../libraries/commerce__shopify-subscription-client]])
+  returns the **first non-skipped `UNBILLED` cycle by index** plus an `originTime` inside that cycle
+  (`now` if inside its window, else the cycle `startAt + 1s`). `shopifyAttemptBilling` now accepts
+  `originTime` so it can bill a FUTURE cycle (Shopify otherwise rejects it with *"Origin time needs
+  to be within the selected billing cycle"*).
+- **The renewal worker** (`resolve-chargeable-cycle` step) and the **Order Now ShopCX branch** bill
+  `{ index }` from the resolver. A `BILLED` date-cycle is **no longer a reason to skip or refuse** —
+  the `cycle_already_billed` skip and the Order Now `already_billed` pre-check are gone.
+- **Idempotency stays on our side:** `claimCycleCharge` keyed on our dispatched date, plus
+  `guardRecentOrderNow`. Shopify's own `idempotencyKey` is the second guard, never the calendar.
+- **An early Order Now always advances the date by one cadence.** `nextDateAfterCharge(due, now,
+  interval, count)` (in [[../libraries/dunning]]) advances by at least one cadence from
+  `max(due, now)` — the old `rollForwardToFutureBillingDate(due)` was a no-op when `due` was still in
+  the future, which is exactly what froze Ashley on one date.
+
+### ⭐ Portal timing changes write our row only — 2026-10-08 (Phase 2)
+
+Every strand came from trying to keep Shopify's cycle calendar in sync on each portal change. Now
+our DB row is the planner and we touch Shopify cycles only when we charge (Phase 1). So a portal
+timing change writes `subscriptions.next_billing_date` (rolled forward to a future date by cadence)
+plus Shopify's **display** `nextBillingDate` — and **never re-pins the cycle calendar**:
+
+- **Date change** — `subscriptionUpdateNextBillingDate` (ShopCX branch) now calls
+  `shopifySetNextBillingDate` (display-only), NOT `shopifyRetimeContract`. The pin was itself the
+  strander: `shopifyRetimeContract` → `shopifySyncBillingSchedule` dragged a spent cycle forward onto
+  the new date, which the old by-date resolver then skipped forever. It no longer returns
+  `date_not_billable` for ShopCX.
+- **Frequency change** ([[../../src/lib/portal/handlers/frequency.ts]]) — updates our cadence +
+  rolls `next_billing_date` forward by the new cadence, then syncs the display date through the
+  engine-dispatch chokepoint. No re-pin.
+- **Resume** — the manual handler ([[../../src/lib/portal/handlers/resume.ts]]) now sets a future
+  `next_billing_date` (it never did before); `retimeAfterResume` in [[../inngest/portal-auto-resume]]
+  sets display-only. Both roll forward by the customer's own cadence.
+- **Pause / skip / dunning reschedule** — already write our row; the dunning reschedule
+  (`resetBillingDateAfterDunning`) already used `shopifySetNextBillingDate` (display-only).
+- **The drift reconciler's `stranded` kind is retired** — a billed cycle no longer blocks a charge,
+  so there is nothing to strand (see [[../libraries/commerce__shopcx-drift-reconciler]]).
+
+`shopifySyncBillingSchedule` survives only for the migration create sync (first anchor on a freshly
+created contract), not for any post-create timing change.
+
 ## ⭐ First real renewals — 2026-09-19
 
 19 migrated subs came due in one cron tick. **17 charged clean ($1,811.38), 3 declined, 0 double
@@ -641,6 +709,51 @@ thin to act on. Worth re-checking once the clean population is several hundred.
   lookup map over this table must paginate.
 - **`orders.subscription_id` looked unpopulated** and wasn't — that was the same truncation. The
   link is actually 346 of 347.
+
+## A used-up coupon cannot fail a renewal (asked 2026-09-30)
+
+*"What does our system do when a coupon fails on a renewal — e.g. a one-use coupon already used? It
+should drop the coupon and retry."*
+
+**It cannot happen on this engine, and the reason is worth knowing.** Carried customer codes are
+minted as `SubscriptionManualDiscount` — **line discounts, not validated codes**. Shopify never
+re-validates them at charge time; it applies them for `recurringCycleLimit` cycles and then simply
+stops. An exhausted coupon reduces the discount to zero, it does not reject the charge.
+
+Two independent protections:
+
+1. `carryableCodes` refuses a code whose `usageCount >= recurringCycleLimit` at migration, and
+   carries the REMAINING cycles rather than the original limit (`max(1, limit - used)`) — copying
+   the limit verbatim would re-grant the whole run.
+2. Shopify enforces the remaining limit itself, silently.
+
+**Measured: 0 of 1,000 payment failures since 2026-09-01 were discount- or coupon-related.**
+
+⚠️ The general gap is still real but unexercised: if a discount ever DID cause a billing failure,
+nothing would strip it and retry — dunning would re-attempt the same contract with the same discount
+indefinitely. Worth a guard before that becomes reachable (e.g. if we ever attach real
+`SubscriptionAppliedCodeDiscount`s, which Shopify DOES validate at charge time).
+
+## ⭐ Plan to full migration off Appstle
+
+Tracked here rather than as a spec because it is an operational sequence, not a build.
+
+| # | Task | Gate / definition of done | State |
+|---|---|---|---|
+| 1 | Make the subsystem self-reporting | drift + strand + cadence checks escalate a repair job; only OUR lateness pages | ✅ done 2026-09-30 |
+| 2 | Codes wave (~30) | the thinnest-covered path: 7 of 133 code-carrying contracts migrated, 2 defects already found there | 🚧 in progress |
+| 3 | One clean week, 10-01 → 10-07 | **nothing escalates unprompted.** Not "drift is 0 when I look" — the alert stays quiet on its own | ⏳ |
+| 4 | Full migration in daily batches | ~300/day for 6 days, reconciler + parity between each; six chances to stop, not one 7-hour run | ⏳ |
+| 5 | Payment-troubled tail (~50) | deliberately deferred by every wave; migrate after they recover or decide to take them | ⏳ |
+| 6 | Retire Appstle | key rotation (outstanding), webhook teardown, `billing_source` cleanup | ⏳ |
+
+**Why the order.** Step 1 came first because every defect this month was found by a human asking —
+the gate for step 3 is meaningless without it. Step 2 before step 4 because codes have produced two
+of the five defects and 126 contracts still carry them; finding the third on 30 is cheap.
+
+**Standing pre-flight for every wave:** `--refresh` (snapshots go stale and drift-refuse),
+customer-atomic selection (never split a customer across engines), dunning deferral (a migration does
+not fix a dead card), then `_price-parity.ts` and the drift cron after.
 
 ## Open decisions
 

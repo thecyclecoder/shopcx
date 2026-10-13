@@ -1,0 +1,1 @@
+- **Drop foreign PostgREST agent_jobs.title column-missing noise at capture** · verified 2026-10-01 · → [[../libraries/control-tower]] (§ error-feed.ts captures & classifiers)

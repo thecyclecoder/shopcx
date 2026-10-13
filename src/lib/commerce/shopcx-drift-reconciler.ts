@@ -28,14 +28,10 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
-import {
-  getSubscriptionContract,
-  getBillingCycleForDate,
-} from "@/lib/commerce/shopify-subscription-client";
+import { getSubscriptionContract } from "@/lib/commerce/shopify-subscription-client";
 
 export type DriftKind =
   | "status"          // our status disagrees with the contract's
-  | "stranded"        // our date lands in a cycle Shopify already billed or skipped
   | "date"            // the Shopify-visible date differs from ours
   | "unreadable";     // the contract cannot be read at all
 
@@ -147,20 +143,9 @@ export async function reconcileShopcxDrift(
         // that were behaving perfectly. A false strand teaches people to ignore real ones.
         if (sub.status === "paused") continue;
 
-        // ⭐ The expensive check, and the one that actually costs money. Ask Shopify which cycle
-        // our billing date lands in; a BILLED or skipped cycle means the renewal worker will skip
-        // this subscription every run from here on, silently and forever.
-        const landing = await getBillingCycleForDate(
-          workspaceId, sub.shopify_contract_id, sub.next_billing_date,
-        );
-        if (landing.success && landing.cycle && (landing.cycle.status === "BILLED" || landing.cycle.skipped)) {
-          report.drift.push({
-            subscriptionId: sub.id, contractId: sub.shopify_contract_id, kind: "stranded",
-            ours: sub.next_billing_date, shopify: `cycle #${landing.cycle.index} ${landing.cycle.status}`,
-            detail: `our date lands in cycle #${landing.cycle.index} (${landing.cycle.status}${landing.cycle.skipped ? ", skipped" : ""}) — the renewal worker WILL skip this subscription. Needs a re-pin (shopifyRetimeContract), not a date overwrite.`,
-          });
-          continue;
-        }
+        // Strand check retired: resolveChargeableCycle now bills the first UNBILLED cycle by index
+        // (not by date), so a date landing in a spent cycle no longer strands a sub. See
+        // [[docs/brain/libraries/commerce__shopify-subscription-client]].
 
         if (c.nextBillingDate) {
           const delta = Math.abs(new Date(c.nextBillingDate).getTime() - new Date(sub.next_billing_date).getTime());
@@ -182,4 +167,126 @@ export async function reconcileShopcxDrift(
   }
 
   return report;
+}
+
+
+/** One subscription whose next charge is materially later than its own cadence allows. */
+export interface LateSub {
+  contractId: string;
+  cadenceDays: number;
+  extraDays: number;
+  lastChargedAt: string;
+  nextBillingDate: string;
+  /** An OPEN dunning cycle holds the date on purpose — that lateness is intended, not a defect. */
+  inDunning: boolean;
+  /**
+   * The last charge PREDATES the migration, so the subscription arrived already behind.
+   *
+   * ⚠️ This distinction is what makes the alert usable. 7 of the 13 late subs on 2026-09-30 were
+   * inherited — last charged April to August, before we ever billed them. Escalating those daily
+   * would train everyone to ignore the alert, and the one that mattered would go with it.
+   */
+  inheritedFromAppstle: boolean;
+}
+
+function cadenceDays(interval: string | null, count: number | null): number {
+  const k = count ?? 1;
+  switch (String(interval ?? "month").toLowerCase()) {
+    case "week": return 7 * k;
+    case "day": return k;
+    case "year": return 365 * k;
+    default: return 30 * k;
+  }
+}
+
+/**
+ * Dunning-cycle statuses that EXPLAIN a late next-billing-date, so the sub is not "unexplained late".
+ *
+ * Any cycle that has gone through dunning — whether still open (active/rotating/retrying/skipped/paused)
+ * OR already resolved to a terminal outcome (exhausted/recovered) — is late for a known, dunning-owned
+ * reason, not scheduling drift. The terminal states were originally missing, so a failed-card sub whose
+ * retries had been exhausted was mis-classified as drift and paged `shopcx-subscription-health:late`
+ * falsely. Only lateness with no dunning explanation at all should page.
+ */
+export const DUNNING_STATUSES_EXPLAINING_LATENESS = [
+  "active",
+  "rotating",
+  "retrying",
+  "skipped",
+  "paused",
+  "exhausted",
+  "recovered",
+] as const;
+
+/**
+ * Find subs whose next charge is later than one cadence after their last one.
+ *
+ * ⭐ This catches what `reconcileShopcxDrift` structurally cannot. The strand check asks "is my date
+ * in a spent cycle?" and the date check asks "does Shopify agree with me?" — **a subscription can
+ * pass both and still be a month late**, sitting in a correct unbilled cycle but pinned to the far
+ * end of its window. Measured 2026-09-28: 22 subs were late while both checks read green.
+ *
+ * The customer's own cadence is the only honest reference. Dunning-held subs are reported but
+ * flagged `inDunning`, because holding the date is exactly what an open cycle is supposed to do.
+ */
+export async function findLateSubscriptions(
+  workspaceId: string,
+  opts: { toleranceFraction?: number } = {},
+): Promise<LateSub[]> {
+  const admin = createAdminClient();
+  const tol = opts.toleranceFraction ?? 0.5;
+  const out: LateSub[] = [];
+
+  // ⚠️ Keyset-paginate: a bare select caps at the PostgREST 1000-row max.
+  let after = "";
+  for (;;) {
+    let q = admin
+      .from("subscriptions")
+      .select("id, shopify_contract_id, next_billing_date, billing_interval, billing_interval_count")
+      .eq("workspace_id", workspaceId).eq("billing_source", "shopcx").eq("status", "active")
+      .order("id").limit(200);
+    if (after) q = q.gt("id", after);
+    const { data: page } = await q;
+    if (!page?.length) break;
+
+    for (const s of page) {
+      if (!s.next_billing_date) continue;
+      const { data: last } = await admin
+        .from("orders").select("created_at")
+        .eq("workspace_id", workspaceId).eq("subscription_id", s.id)
+        .order("created_at", { ascending: false }).limit(1);
+      if (!last?.[0]) continue;
+      const cad = cadenceDays(s.billing_interval, s.billing_interval_count);
+      const extra = Math.round(
+        (new Date(s.next_billing_date).getTime() - new Date(last[0].created_at as string).getTime()) / 86_400_000,
+      ) - cad;
+      if (extra <= cad * tol) continue;
+      const { count } = await admin
+        .from("dunning_cycles").select("*", { count: "exact", head: true })
+        .eq("workspace_id", workspaceId).eq("shopify_contract_id", s.shopify_contract_id)
+        .in("status", DUNNING_STATUSES_EXPLAINING_LATENESS as unknown as string[]);
+      // Did WE schedule this, or did it arrive late? Compare the last charge to the moment the
+      // migration completed for this contract.
+      let inherited = false;
+      const { data: row } = await admin.from("subscriptions")
+        .select("migrated_from_contract_id").eq("id", s.id).maybeSingle();
+      const oldId = (row as { migrated_from_contract_id?: string } | null)?.migrated_from_contract_id;
+      if (oldId) {
+        const { data: snap } = await admin.from("appstle_contract_snapshots")
+          .select("migration_completed_at").eq("workspace_id", workspaceId)
+          .eq("appstle_contract_id", oldId).maybeSingle();
+        const at = (snap as { migration_completed_at?: string } | null)?.migration_completed_at;
+        if (at && new Date(last[0].created_at as string) < new Date(at)) inherited = true;
+      }
+      out.push({
+        contractId: s.shopify_contract_id, cadenceDays: cad, extraDays: extra,
+        lastChargedAt: String(last[0].created_at), nextBillingDate: s.next_billing_date,
+        inDunning: (count ?? 0) > 0,
+        inheritedFromAppstle: inherited,
+      });
+    }
+    if (page.length < 200) break;
+    after = page[page.length - 1].id;
+  }
+  return out;
 }

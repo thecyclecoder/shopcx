@@ -1,0 +1,32 @@
+api_version = "2025-10"
+
+[[extensions]]
+type = "ui_extension"
+name = "Shipping Trust"
+handle = "shipping-checkout"
+
+[[extensions.targeting]]
+module = "./src/Checkout.jsx"
+target = "purchase.checkout.block.render"
+
+# No capabilities: the block makes no network calls (the carrier logos are plain
+# image URLs) and must never be able to stop a checkout.
+
+[settings]
+[[settings.fields]]
+key = "api_endpoint"
+type = "single_line_text_field"
+name = "API Endpoint"
+description = "Base URL the carrier logos load from (e.g. https://shopcx.ai)"
+
+[[settings.fields]]
+key = "arrival_min_days"
+type = "number_integer"
+name = "Arrival window start (days)"
+description = "Days from today for the early end of the estimate. Default 6 (median order-to-delivered)."
+
+[[settings.fields]]
+key = "arrival_max_days"
+type = "number_integer"
+name = "Arrival window end (days)"
+description = "Days from today for the late end of the estimate. Default 9 (about 9 in 10 orders arrive by then)."

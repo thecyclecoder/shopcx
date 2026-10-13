@@ -34,6 +34,36 @@ export interface AmazonSalesSyncResult {
 /** Statuses that represent stock having LEFT the warehouse. */
 const SHIPPED_STATUSES = new Set(["shipped", "shipping"]);
 
+/**
+ * Columns `parseShippedUnits` reads out of the Amazon SP-API orders TSV. `product-name` is
+ * written when present but is NOT required (older marketplace exports omit it).
+ */
+const REQUIRED_AMAZON_REPORT_HEADERS = [
+  "asin",
+  "sku",
+  "quantity",
+  "item-price",
+  "purchase-date",
+  "promotion-ids",
+  "order-status",
+] as const;
+
+/**
+ * Validate that the Amazon shipped-units TSV has the headers the parser depends on. A missing
+ * header silently shifts every column index and reads garbage as a status — refuse to parse so
+ * the close source cannot write junk into qb_amazon_sales_snapshots.
+ */
+export function validateAmazonCloseReportHeaders(headers: string[]): void {
+  const missing = REQUIRED_AMAZON_REPORT_HEADERS.filter((h) => !headers.includes(h));
+  if (missing.length) {
+    throw new Error(
+      `Amazon close report missing required header(s): ${missing.join(", ")}. ` +
+        "Refusing to parse — a silent zero-row result would leave qb_amazon_sales_snapshots stale " +
+        "while the sync-qb-close-sources heartbeat still reported green.",
+    );
+  }
+}
+
 function bucketOf(promoIds: string): "recurring" | "sns_checkout" | "one_time" {
   if (promoIds.includes("FBA Subscribe & Save Discount") || promoIds.includes("FBA Subscribe and Save Discount")) return "recurring";
   if (promoIds.includes("Subscribe and Save Promotion V2")) return "sns_checkout";
@@ -57,9 +87,13 @@ export function parseShippedUnits(tsv: string): { byKey: Map<string, Agg>; exclu
   const lines = tsv.split("\n");
   const byKey = new Map<string, Agg>();
   let excluded = 0;
-  if (lines.length < 2) return { byKey, excluded };
+  // Treat a truly empty payload as "no report yet" — the connection-fetch layer owns that case.
+  // A header-only payload still has to prove the shape is right before we return empty.
+  if (!lines[0]?.trim()) return { byKey, excluded };
 
-  const headers = lines[0].split("\t");
+  const headers = lines[0].split("\t").map((h) => h.replace(/\r$/, ""));
+  validateAmazonCloseReportHeaders(headers);
+  if (lines.length < 2) return { byKey, excluded };
   const idx = (n: string) => headers.indexOf(n);
   const iAsin = idx("asin"), iSku = idx("sku"), iQty = idx("quantity"), iPrice = idx("item-price");
   const iDate = idx("purchase-date"), iPromo = idx("promotion-ids"), iStatus = idx("order-status"), iName = idx("product-name");
@@ -106,6 +140,78 @@ export function parseShippedUnits(tsv: string): { byKey: Map<string, Agg>; exclu
   return { byKey, excluded };
 }
 
+/**
+ * Guard against an "unexpectedly empty" close report. A trailing sync window that previously
+ * carried shipped activity (i.e. qb_amazon_sales_snapshots has at least one row inside
+ * [start, end]) must not parse to zero rows — that is the exact silent-stall failure mode
+ * flagged by the sync-qb-close-sources repair signature: the loop kept beating green while
+ * qb_amazon_sales_snapshots stayed stale after 2026-09-30.
+ *
+ * A truly cold start (no prior row in the window) is allowed to no-op — a brand-new workspace
+ * or a first-run after a schema rotation legitimately has nothing to compare against.
+ *
+ * Throwing escalates to the per-sync try/catch in `src/lib/inngest/sync-qb-close-sources.ts`,
+ * which records `amazon-sales` in the heartbeat's `detail` fan-out and flips the beat to
+ * `ok: false`. That gives Grace/Ada an actionable signal instead of a misleading green.
+ */
+export async function assertNonEmptyAmazonCloseReport(
+  admin: SupabaseClient,
+  workspaceId: string,
+  start: string,
+  end: string,
+  parsedShippedRows: number,
+): Promise<void> {
+  if (parsedShippedRows > 0) return;
+  const { data, error } = await admin
+    .from("qb_amazon_sales_snapshots")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .gte("sale_date", start)
+    .lte("sale_date", end)
+    .limit(1);
+  if (error) throw new Error(`qb_amazon_sales_snapshots probe failed: ${error.message}`);
+  if (!data || data.length === 0) return;
+  throw new Error(
+    `Amazon close report parsed 0 shipped rows for ${start}..${end} despite existing ` +
+      "qb_amazon_sales_snapshots data in that window. Failing the amazon-sales branch so the " +
+      "sync-qb-close-sources heartbeat surfaces this instead of a misleading green beat.",
+  );
+}
+
+/**
+ * SP-API refuses an orders report spanning more than 30 days. It does NOT error: the request
+ * succeeds and the downloaded document is a single line, "Date range exceeded. Report can be
+ * requested only upto 30 days". The close's 35-day trailing window hit exactly that on every
+ * cron run, so this sync never wrote a row (every qb_amazon_sales_snapshots row through
+ * 2026-09-30 was a Shoptics backfill copy).
+ */
+export const AMAZON_REPORT_MAX_DAYS = 30;
+
+/**
+ * Split an inclusive [start, end] YYYY-MM-DD window into consecutive, non-overlapping chunks of
+ * at most `maxDays` calendar days each. Non-overlap matters: chunk results are summed per
+ * (asin, sale_date), so a shared day would be double-counted.
+ */
+export function splitReportWindow(
+  start: string,
+  end: string,
+  maxDays = AMAZON_REPORT_MAX_DAYS,
+): { start: string; end: string }[] {
+  const day = (s: string) => new Date(`${s}T00:00:00Z`);
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  const last = day(end);
+  const chunks: { start: string; end: string }[] = [];
+  for (let cur = day(start); cur <= last; ) {
+    const chunkEnd = new Date(cur);
+    chunkEnd.setUTCDate(chunkEnd.getUTCDate() + maxDays - 1);
+    const e = chunkEnd < last ? chunkEnd : last;
+    chunks.push({ start: fmt(cur), end: fmt(e) });
+    cur = new Date(e);
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return chunks;
+}
+
 /** Wait for a requested report to finish. SP-API report generation is asynchronous. */
 async function waitForReport(
   connectionId: string,
@@ -137,19 +243,30 @@ export async function syncAmazonSalesForClose(
   const merged = new Map<string, Agg>();
   let excluded = 0;
   for (const c of conns) {
-    const reportId = await requestReport(c.id, c.marketplace_id, `${start}T00:00:00Z`, `${end}T23:59:59Z`);
-    const tsv = await waitForReport(c.id, c.marketplace_id, reportId);
-    const parsed = parseShippedUnits(tsv);
-    excluded += parsed.excluded;
-    for (const [k, v] of parsed.byKey) {
-      const cur = merged.get(k);
-      if (!cur) { merged.set(k, v); continue; }
-      cur.units += v.units; cur.revenue += v.revenue;
-      cur.recurringUnits += v.recurringUnits; cur.recurringRevenue += v.recurringRevenue;
-      cur.snsUnits += v.snsUnits; cur.snsRevenue += v.snsRevenue;
-      cur.oneTimeUnits += v.oneTimeUnits; cur.oneTimeRevenue += v.oneTimeRevenue;
+    // Chunks never overlap, so summing per (asin, sale_date) across them cannot double-count.
+    for (const w of splitReportWindow(start, end)) {
+      const reportId = await requestReport(c.id, c.marketplace_id, `${w.start}T00:00:00Z`, `${w.end}T23:59:59Z`);
+      const tsv = await waitForReport(c.id, c.marketplace_id, reportId);
+      if (/^Date range exceeded/i.test(tsv.trim())) {
+        throw new Error(`Amazon rejected report window ${w.start}..${w.end}: ${tsv.trim().slice(0, 120)}`);
+      }
+      const parsed = parseShippedUnits(tsv);
+      excluded += parsed.excluded;
+      for (const [k, v] of parsed.byKey) {
+        const cur = merged.get(k);
+        if (!cur) { merged.set(k, v); continue; }
+        cur.units += v.units; cur.revenue += v.revenue;
+        cur.recurringUnits += v.recurringUnits; cur.recurringRevenue += v.recurringRevenue;
+        cur.snsUnits += v.snsUnits; cur.snsRevenue += v.snsRevenue;
+        cur.oneTimeUnits += v.oneTimeUnits; cur.oneTimeRevenue += v.oneTimeRevenue;
+      }
     }
   }
+
+  // Fail LOUDLY when a window that already has close data parses to zero shipped rows — a
+  // silent no-op was the 2026-09-30 stall mode. Runs AFTER every connection is parsed so a
+  // single empty marketplace cannot mask another's success.
+  await assertNonEmptyAmazonCloseReport(admin, workspaceId, start, end, merged.size);
 
   const rows = [...merged.entries()].map(([key, v]) => {
     const [asin, sale_date] = key.split("|");

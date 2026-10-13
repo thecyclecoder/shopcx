@@ -96,7 +96,7 @@ export async function createForecast(params: {
     subId = sub?.id || null;
   }
 
-  const { data: inserted } = await admin.from("billing_forecasts").insert({
+  const { data: inserted, error } = await admin.from("billing_forecasts").insert({
     workspace_id: params.workspaceId,
     shopify_contract_id: params.contractId,
     subscription_id: subId,
@@ -113,6 +113,27 @@ export async function createForecast(params: {
     static_revenue_cents: revenueCents,
     static_date: dateOnly,
   }).select("id").single();
+
+  if (error) {
+    // Two concurrent webhooks that both saw no pending row race the INSERT; the loser hits
+    // idx_billing_forecasts_pending (partial unique on status='pending'). Re-read the winner and
+    // apply the same UPDATE as the existing-pending branch above so we converge on one pending row.
+    if (error.code === "23505" && error.message?.includes("idx_billing_forecasts_pending")) {
+      const winner = await getPendingForecast(params.workspaceId, params.contractId);
+      if (winner) {
+        await admin.from("billing_forecasts").update({
+          expected_date: dateOnly,
+          expected_revenue_cents: revenueCents,
+          expected_items: params.items,
+          billing_interval: params.billingInterval?.toLowerCase() || winner.billing_interval,
+          billing_interval_count: params.billingIntervalCount || winner.billing_interval_count,
+          updated_at: new Date().toISOString(),
+        }).eq("id", winner.id);
+        return winner.id;
+      }
+    }
+    throw error;
+  }
 
   return inserted?.id || null;
 }

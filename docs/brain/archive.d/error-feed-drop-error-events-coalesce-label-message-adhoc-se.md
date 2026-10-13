@@ -1,0 +1,1 @@
+- **Scope out ad-hoc error_events free-text search noise (unqualified column "label"/"message")** · verified 2026-10-08 · → [[../lifecycles/control-tower]]

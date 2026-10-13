@@ -33,8 +33,7 @@ import {
 } from "@/lib/subscription-cycle-charge-claim";
 import {
   getSubscriptionContract,
-  getUpcomingBillingCycles,
-  getBillingCycleForDate,
+  resolveChargeableCycle,
   shopifyAttemptBilling,
   awaitBillingAttempt,
   shopifySyncBillingSchedule,
@@ -42,6 +41,7 @@ import {
 import { enforceSwitch } from "@/lib/control-tower/enforce-switch";
 import { rollForwardToFutureBillingDate } from "@/lib/dunning";
 import { errText } from "@/lib/error-text";
+import { checkShopcxRenewalPrice, surfaceRenewalPriceMismatch } from "@/lib/commerce/shopcx-renewal-price-check";
 
 /** A cycle whose expected date has passed by less than this is still "due now", not overdue. */
 const DUE_GRACE_MS = 6 * 60 * 60 * 1000;
@@ -185,8 +185,14 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
     triggers: [{ event: RENEWAL_ATTEMPT_EVENT }],
   },
   async ({ event, step }) => {
-    const { subscription_id, workspace_id, expected_next_billing_date } = event.data as {
+    const { subscription_id, workspace_id, expected_next_billing_date, order_now } = event.data as {
       subscription_id: string; workspace_id: string; expected_next_billing_date: string | null;
+      /** True when fired by a customer-pressed order-now (subscriptionOrderNow),
+       *  not the nightly renewal cron. Drives the `nothing_due` marker on a
+       *  no-chargeable-cycle / already-claimed skip so the async order-now verify
+       *  reports a truthful no-op instead of looping on 'unknown' (spec:
+       *  order-now verify 'nothing_due' verdict; ticket dd5e2ba0). */
+      order_now?: boolean;
     };
     const admin = createAdminClient();
 
@@ -219,8 +225,13 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
       return { status: "skipped", reason: "stale_next_billing_date" };
     }
 
-    // 2. Ask SHOPIFY what is actually due. Our date only chose the candidate.
-    const plan = await step.run("resolve-due-cycle", async () => {
+    // 2. Resolve the cycle to bill AT CHARGE TIME — the first non-skipped UNBILLED cycle by index,
+    //    NOT the cycle that contains our date. Our DB row only PLANS the date; Shopify's billing
+    //    calendar is resolved here, when we charge. A date that lands inside an already-BILLED cycle
+    //    used to strand the sub forever (we skipped on BILLED and nothing ever advanced it); by
+    //    index, the first unbilled cycle is always billable. `scheduledFor` stays the un-clamped
+    //    `next_billing_date` — the only valid anchor for advancing the customer's anniversary.
+    const plan = await step.run("resolve-chargeable-cycle", async () => {
       const contract = await getSubscriptionContract(workspace_id, sub.shopify_contract_id);
       if (!contract.success || !contract.contract) {
         return { ok: false as const, reason: contract.error ?? "contract_unreadable" };
@@ -229,56 +240,42 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
         return { ok: false as const, reason: `contract_${contract.contract.status.toLowerCase()}` };
       }
 
-      // ⭐ Target the cycle CONTAINING our billing date — do NOT hunt for a past-due cycle.
-      // Shopify anchors the cycle calendar to the contract's createdAt, not to the nextBillingDate
-      // we set, so a MIGRATED contract is born up to a full interval out of step (observed on
-      // 35945087149: our date 2026-10-15 vs Shopify's first cycle 2026-11-05). Past-due hunting
-      // finds nothing there and the customer is silently never charged.
       const due = sub.next_billing_date;
       if (!due) return { ok: false as const, reason: "no_next_billing_date" };
 
-      // ⚠️ Shopify rejects a selector date BEFORE the contract's createdAt with
-      // "Billing cycle start date out of range" — and a migrated contract is created TODAY while
-      // the customer may already be overdue, so this is the normal case for anyone due on or
-      // before migration day (63 such subs live right now), not an edge case. Left unhandled they
-      // resolve to nothing and are silently never charged.
-      // Clamping to just inside the contract's first cycle is correct: that cycle covers the
-      // charge we owe, and the customer is due now.
-      const created = contract.contract.createdAt ? new Date(contract.contract.createdAt).getTime() : 0;
-      const selectorDate =
-        created && new Date(due).getTime() < created
-          ? new Date(created + 1000).toISOString()
-          : due;
-
-      const cyc = await getBillingCycleForDate(workspace_id, sub.shopify_contract_id, selectorDate);
-      if (!cyc.success || !cyc.cycle) return { ok: false as const, reason: cyc.error ?? "cycle_unresolvable" };
-      // BILLED is Shopify's own idempotency signal — this cycle already charged, whoever did it.
-      if (cyc.cycle.status === "BILLED") return { ok: false as const, reason: "cycle_already_billed" };
-      if (cyc.cycle.skipped) return { ok: false as const, reason: "cycle_skipped" };
-      // ⚠️ TWO DATES, and conflating them drifts the customer's anniversary.
-      //
-      //   selectorDate — clamped forward so Shopify will accept the cycle selector. Correct for
-      //                  CHOOSING which cycle to bill, and meaningless outside that.
-      //   scheduledFor — the date the customer was actually DUE. The only valid anchor for the
-      //                  next billing date.
-      //
-      // Reusing the clamp as the advance anchor shifts the schedule by however overdue the sub
-      // was. Measured on 2026-09-16: cohort sub 36018618541 was due 09-12 on a 2-month cadence
-      // and advanced to 11-15 instead of 11-12 — because its due date preceded the contract's
-      // createdAt, which is the NORMAL case for a migrated sub that was already overdue on
-      // migration day. A sub three weeks overdue would lose three weeks of anniversary, every
-      // time, compounding on each renewal.
+      const resolved = await resolveChargeableCycle(workspace_id, sub.shopify_contract_id, new Date());
+      if (!resolved.success || resolved.index == null || !resolved.originTime) {
+        return { ok: false as const, reason: resolved.error ?? "cycle_unresolvable" };
+      }
       return {
         ok: true as const,
-        cycleIndex: cyc.cycle.index,
-        expectedDate: cyc.cycle.endAt,
-        dueDate: selectorDate,
+        cycleIndex: resolved.index,
+        originTime: resolved.originTime,
         scheduledFor: due,
       };
     });
 
     if (!plan.ok) {
       await step.run("beat-nodue", () => emitReactiveHeartbeat(ATTEMPT_FN_ID, { produced: { outcome: "no_cycle_due" } }));
+      // A customer-pressed order-now with no chargeable cycle resolvable (the
+      // current cycle already billed, the next is not yet due) is a truthful
+      // no-op — surface the `nothing_due` marker the async order-now verify reads
+      // so the ticket confirms "no charge; next order <date>" instead of looping
+      // on 'unknown' (spec: order-now verify 'nothing_due' verdict; ticket dd5e2ba0).
+      if (order_now) {
+        await step.run("log-order-now-nothing-due", async () => {
+          const { logOrderNowNothingDue } = await import("@/lib/commerce/order-now-verify");
+          await logOrderNowNothingDue({
+            workspace_id,
+            customer_id: sub.customer_id,
+            subscription_id,
+            contract_id: sub.shopify_contract_id,
+            next_billing_date: sub.next_billing_date,
+            reason: `no_cycle_due:${plan.reason}`,
+            billing_source: "shopcx",
+          });
+        });
+      }
       return { status: "skipped", reason: plan.reason };
     }
 
@@ -299,8 +296,40 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
     );
     if (!claim.ok) {
       await step.run("beat-dupe", () => emitReactiveHeartbeat(ATTEMPT_FN_ID, { produced: { outcome: "duplicate_blocked" } }));
+      // Same truthful-no-op case as the no-cycle-due branch: a customer-pressed
+      // order-now hit a cycle already claimed by a real charge. Emit the marker.
+      if (order_now) {
+        await step.run("log-order-now-nothing-due", async () => {
+          const { logOrderNowNothingDue } = await import("@/lib/commerce/order-now-verify");
+          await logOrderNowNothingDue({
+            workspace_id,
+            customer_id: sub.customer_id,
+            subscription_id,
+            contract_id: sub.shopify_contract_id,
+            next_billing_date: sub.next_billing_date,
+            reason: "cycle_already_claimed",
+            billing_source: "shopcx",
+          });
+        });
+      }
       return { status: "skipped", reason: "cycle_already_claimed", cycle_key: cycleKey };
     }
+
+    // 3b. Log-only pricing check (CEO 2026-10-10). Compares the contract against the pricing rules
+    //     and files a billing_alert card on a material gap. It NEVER blocks, delays or changes the
+    //     charge below: the contract is the price, and a wrong contract is fixed at its write path.
+    //     Best-effort — both helpers swallow their own errors.
+    await step.run("price-check-log", async () => {
+      const verdict = await checkShopcxRenewalPrice(workspace_id, sub.shopify_contract_id);
+      if ("lines" in verdict) {
+        const alert = await surfaceRenewalPriceMismatch(admin, {
+          workspaceId: workspace_id, subscriptionId: sub.id, customerId: sub.customer_id,
+          contractId: sub.shopify_contract_id, cycleKey, verdict,
+        });
+        return { status: verdict.status, expected: verdict.expectedCents, actual: verdict.actualCents, alerted: alert.inserted };
+      }
+      return "reason" in verdict ? { status: "unchecked", reason: verdict.reason } : { status: "match" };
+    });
 
     // 4. Charge. Targeting the resolved cycle explicitly — omitting the selector bills Shopify's
     //    CURRENT calendar cycle, which after a migration re-anchor is usually not the one we mean.
@@ -309,9 +338,10 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
         workspace_id,
         sub.shopify_contract_id,
         `${sub.shopify_contract_id}:${cycleKey}`,
-        // Address by DATE, matching how the cycle was resolved — index is stable today but the
-        // date is what our schedule actually means.
-        { billingCycleSelector: { date: plan.dueDate } },
+        // Address by INDEX — the first unbilled cycle `resolveChargeableCycle` found — with an
+        // `originTime` guaranteed to sit inside that cycle (Shopify rejects a future-cycle attempt
+        // whose origin time is outside the selected cycle).
+        { billingCycleSelector: { index: plan.cycleIndex }, originTime: plan.originTime },
       );
       if (!started.success || !started.attemptId) {
         // ⚠️ `gql` funnels transport faults (HTTP 5xx, DNS, non-JSON) into the same {success:false}

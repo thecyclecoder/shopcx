@@ -1,0 +1,1 @@
+- **Fix _probe-spec-fold.ts: select specs.owner not specs.owner_function** · verified 2026-10-02 · → [[../libraries/builder-worker]]

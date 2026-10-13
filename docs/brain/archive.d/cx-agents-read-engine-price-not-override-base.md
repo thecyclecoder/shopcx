@@ -1,0 +1,1 @@
+- **CX agents must read the engine's realized price, not the override base** · verified 2026-10-07 · → [[../libraries/cx-agent-sdk]], [[../libraries/action-executor]], [[../libraries/june-remedy-approval]]

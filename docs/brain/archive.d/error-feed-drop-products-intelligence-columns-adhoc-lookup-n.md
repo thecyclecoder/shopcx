@@ -1,0 +1,1 @@
+- **Drop error-feed noise: foreign PostgREST reads on products.ingredients/supplement_facts/benefits** · verified 2026-09-28 · → [[../libraries/control-tower#error-feedts--the-error-feed]]

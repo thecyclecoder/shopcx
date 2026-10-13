@@ -1,0 +1,1 @@
+- **Fix fraud+returns routes selecting nonexistent orders.total_price_cents column** · verified 2026-09-28 · → [[../lifecycles/fraud-detection]], [[../lifecycles/return-pipeline]]

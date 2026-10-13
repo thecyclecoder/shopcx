@@ -1,0 +1,1 @@
+- **A green loop must not hide a stale output table** · verified 2026-09-30 · → [[lifecycles/shoptics-migration]], [[libraries/control-tower]]

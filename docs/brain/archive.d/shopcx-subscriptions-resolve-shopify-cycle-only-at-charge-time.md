@@ -1,0 +1,1 @@
+- **ShopCX subscriptions: our DB plans the date, Shopify's billing cycle is resolved only at charge time** · verified 2026-10-08 · → [[../lifecycles/shopcx-subscriptions]]

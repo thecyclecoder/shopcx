@@ -1,0 +1,1 @@
+- **Drop ad hoc approval-decision SQL syntax errors from Supabase log feed** · verified 2026-09-26 · → [[../libraries/control-tower]]

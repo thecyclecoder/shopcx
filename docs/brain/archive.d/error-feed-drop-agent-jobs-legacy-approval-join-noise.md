@@ -1,0 +1,1 @@
+- **Stop paging stale agent_jobs approval-join column lookups** · verified 2026-09-26 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise`)

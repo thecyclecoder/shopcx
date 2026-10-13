@@ -42,6 +42,15 @@ const ONE = arg("--contract");
  * Costs one extra metered Appstle call per contract, scoped to the wave and nothing else.
  */
 const REFRESH = process.argv.includes("--refresh");
+/**
+ * Only contracts carrying a customer CODE.
+ *
+ * ⭐ The thinnest-covered path in the whole migration. Codes have already produced two separate
+ * defects — `entitledLines` rejecting every one of them, and a fixed-amount code spreading onto an
+ * unmodelled line — and only 7 of 133 code-carrying contracts have migrated. Better to find the
+ * third defect on 30 contracts than on 126.
+ */
+const CODES_ONLY = process.argv.includes("--codes-only");
 const DUE_FROM_DAYS = Number(arg("--from") ?? 3);
 const DUE_TO_DAYS = Number(arg("--to") ?? 10);
 /** Exact calendar due date (UTC), e.g. --due 2026-09-19. Overrides the day window. */
@@ -120,10 +129,25 @@ async function main() {
     }
   }
 
+  // Which of these carry a carryable customer code? One snapshot read per candidate, local only.
+  const carriesCode = new Set<string>();
+  if (CODES_ONLY && ids.length) {
+    const { carryableCodes } = await import("../src/lib/commerce/shopify-subscription-migrate");
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data } = await admin.from("appstle_contract_snapshots")
+        .select("appstle_contract_id, raw")
+        .eq("workspace_id", WORKSPACE_ID).in("appstle_contract_id", ids.slice(i, i + 200));
+      for (const r of data ?? []) {
+        if (carryableCodes(r.raw as Record<string, unknown>).length) carriesCode.add(r.appstle_contract_id as string);
+      }
+    }
+  }
+
   const cands: Cand[] = [];
   for (const s of subs ?? []) {
     if (!snapOk.has(s.shopify_contract_id)) continue;
     if (troubled.has(s.shopify_contract_id)) continue;
+    if (CODES_ONLY && !carriesCode.has(s.shopify_contract_id)) continue;
     const items = (s.items as { quantity?: number; price_cents?: number }[]) ?? [];
     const cycleCents = items.reduce((t, i) => t + (i.price_cents ?? 0) * (i.quantity ?? 1), 0);
     cands.push({
@@ -139,7 +163,7 @@ async function main() {
 
   const byCadence: Record<string, Cand[]> = {};
   for (const c of cands) (byCadence[c.cadence] ??= []).push(c);
-  console.log(`candidates due ${DUE_ON ?? `+${DUE_FROM_DAYS}d..+${DUE_TO_DAYS}d`} with a clean snapshot: ${cands.length}${troubled.size ? `  (${troubled.size} deferred — recent payment trouble)` : ""}`);
+  console.log(`candidates due ${DUE_ON ?? `+${DUE_FROM_DAYS}d..+${DUE_TO_DAYS}d`} with a clean snapshot: ${cands.length}${CODES_ONLY ? " (codes only)" : ""}${troubled.size ? `  (${troubled.size} deferred — recent payment trouble)` : ""}`);
   for (const [k, v] of Object.entries(byCadence)) console.log(`  ${k.padEnd(10)} ${v.length}`);
 
   // ── pick the wave: round-robin across cadences, preferring multi-line ───────

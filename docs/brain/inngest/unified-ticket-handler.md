@@ -63,6 +63,18 @@ Playbook-active tickets still enter this gate. `applyInflectionGate` reads `tick
 
 Guards (coaching #1/#2 pattern): `reSessionSol` wraps `superseDirection`'s workspace-scoped compare-and-set (so a racing caller can't fan out a duplicate ticket-handle session), the DB partial UNIQUE on ticket_directions is a second belt, the ledger stage is best-effort (a diagnostic-substrate failure MUST NOT block the bounce), and the holding-message send is doubly-gated (kind==='frustration' AND the config column true).
 
+## Step 3.975 — Date-change-ask gate ([[../libraries/date-change-ask]])
+
+Phase 4 of [[../specs/every-inbound-handled-within-30-min]]. Between the `sonnet-orchestrate` step (Sonnet decision drafted) and the `sonnet-execute` step (decision applied), the `date-change-ask-gate` step calls [[../libraries/date-change-ask]] `detectDateChangeAsk` and `decisionAddressesDateChange` to decide whether the drafted reply should ship or be held for re-session. Ground truth: ticket 09f7257a (Angelica Devine, 2026-10-07 16:26); her forwarded order-confirmation email contained "Skip delivery · Pause" buttons and date headers that false-positived on `detectDateChangeAsk` (triggering an order-subject anchor + date token), so the gate held the outbound reply. The re-session it triggered then failed, and the held reply was abandoned.
+
+The gate runs `stripQuotedAndForwarded` (new pure helper in date-change-ask.ts) on the inbound message BEFORE passing it to the detector — the helper drops 'On <date> … wrote:' quoted-reply blocks, '---------- Forwarded message' footers, and '> ' prefixed lines so forwarded/quoted email structure doesn't trip the change-verb anchor. On a detected ask, the gate checks whether `sonnetDecision.actions[]` contains `change_next_date` / `skip_next_order` / `pause`, or whether the decision asks a clarifying question (either `needs_clarification=true` or `clarification_question` is non-empty). If the Sonnet draft addresses the ask, the gate returns and the pipeline proceeds to `sonnet-execute`. If not, the gate holds the draft (`[System] date-change-ask gate: holding reply …`), enqueues a `reSessionSol` with `instructions.reason='unaddressed_date_ask'`, and returns `{ status: "date_change_ask_held" }`. If the re-session itself fails or produces no Direction, the held reply is escalated rather than dropped — no customer silence (same [[../libraries/cs-director]] enqueue as Phase 1's SLA watchdog).
+
+Ledger stamp: `ticket_resolution_events.reasoning = 'sol:unaddressed_date_ask'` (tagged at the reSessionSol call site via [[../libraries/ticket-resolution-events]]).
+
+## Step 2c — Refund-intent to Refund playbook deterministic router
+
+Phase 2 of [[../specs/every-inbound-handled-within-30-min]]. Before Sol/Sonnet dispatch, the handler calls [[../libraries/playbook-executor]] `routeIntentToPlaybook(admin, wsId, ticketId, intent.intent)` with the classified inbound intent. If the intent matches an active playbook's `trigger_intents` and no playbook is already active on the ticket, the router starts that playbook deterministically via `startPlaybook` — the customer's stated intent (e.g. "refund_request", "unwanted_charge", "charged_without_permission") is now the authoritative routing signal, not a bare cancel-journey fallback. Ground truth: ticket 09f7257a (Angelica Devine, 2026-10-07); her message matched the Refund playbook's trigger intents exactly, yet Sol and Sonnet both routed to a cancel journey and called it out-of-policy, bypassing the playbook's tier ladder. The deterministic intent router closes that gap at the entry point. Ledger stamp: `[System] Intent→playbook router: classified intent="<intent>" matched <playbook_name> … Starting playbook deterministically`.
+
 ## Step 2d — Sol-chosen vs signal-matched playbook dispatch
 
 Phase 2 of [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] moves playbook selection inside Sol's first-touch box session for the Sol cohort. `routeExec` § 2 now branches on the live [[../tables/ticket_directions]] row BEFORE the deterministic matcher fires:
@@ -113,6 +125,15 @@ Applying a playbook sets `active_playbook_id`, `playbook_step:0`, `status:closed
 **Silent-turn escape hatch** ([[../libraries/silent-turn-guard]]). After the exec-playbook-step + auto-advance block finishes, the handler calls `detectSilentTurn` on the tracked `responseSent` / `escalationRaised` / `cancelled` / `finalAction` / `finalError` signals. On `silent:true` (dead playbook resume with no reply, or a failed subscription/refund mutation whose error string wasn't translated to `action='escalate_api_failure'`), the handler runs the SAME `raiseHoldingMessageEscalation` closure the escalate_api_failure branch uses — the byte-identical `SILENT_TURN_HOLDING_MESSAGE`, ticket → open + escalated, Slack notify — so a customer is never left silent by construction. Return-value shape is `{ status: "playbook_silent_turn", reason }`. [[../specs/post-resolution-inbound-reroute-and-silent-turn-guard]] § Phase 2 (Melissa/eca3f43b measured 5 of 13 backstopped tickets ended silent).
 
 
+## Holding message escalation — Slack via dispatchSlackNotification
+
+When a ticket's playbook step fails with an escalation-class error (`action='escalate_api_failure'`) OR the silent-turn guard detects a dead playbook (no reply sent) OR the repeat-question loop guard trips, the handler calls `raiseHoldingMessageEscalation(ticket, reason)`. This closure:
+1. Loads the ticket's workspace, stamps `status='open'`, `escalated_to='system'`, and writes a system note.
+2. Sends `SILENT_TURN_HOLDING_MESSAGE` to the customer (a terse "we're looking into this" message).
+3. Routes a Slack notification through [[../libraries/slack-notify]] `dispatchSlackNotification(wsId, 'escalation', {...})` instead of the historical raw webhook. The notification is delivered per [[../tables/slack_notification_rules]] rows where `event_type='escalation'`; if no matching rule exists, the Slack ping is dropped (silent, expected). The closure wraps the dispatch in try/catch so a Slack outage never blocks the customer-facing message.
+
+The stale raw-webhook block that queried `workspaces.slack_webhook_url` (a non-existent column) was replaced with this rules-driven path; that eliminates the postgres ERROR that filled the error feed on every escalation.
+
 ## Downstream events sent
 
 _None._
@@ -144,6 +165,10 @@ Per-channel settings come from [[../tables/ai_channel_config]] (`channelCfg`) an
 - [[../tables/workflows]]
 - [[../tables/workspace_members]]
 - [[../tables/workspaces]]
+
+## Related
+
+[[../specs/every-inbound-handled-within-30-min]] (Phase 2: intent→playbook routing, Phase 4: date-change gate) · [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] · [[../specs/sol-cheap-execution-over-ticket-direction]] · [[../libraries/date-change-ask]] · [[../libraries/playbook-executor]]
 
 ---
 

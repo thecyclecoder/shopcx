@@ -1,0 +1,1 @@
+- **CS Director close-no-action gate: fix ticket_required_outcomes column names (kind, authored_at)** · verified 2026-10-07 · → [[../lifecycles/ticket-lifecycle]]

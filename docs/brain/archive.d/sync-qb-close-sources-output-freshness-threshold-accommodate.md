@@ -1,0 +1,1 @@
+- **Widen sync-qb-close-sources output-freshness threshold to accommodate Amazon shipping-lag** · verified 2026-10-02 · → [[../libraries/control-tower]]

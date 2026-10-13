@@ -203,7 +203,7 @@ export async function appstleRemoveLineItem(
   workspaceId: string,
   contractId: string,
   variantOrLine: { variantId?: string; lineGid?: string },
-): Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }> {
+): Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean; pending?: boolean }> {
   await healOnTouch(workspaceId, contractId);
   const config = await getAppstleConfig(workspaceId);
   if (!config) return { success: false, error: "Appstle not configured" };
@@ -305,59 +305,114 @@ export async function appstleRemoveLineItem(
       return { success: false, error: `Appstle API error: ${res.status} — ${text.slice(0, 200)}` };
     }
 
-    // Phase 1 — a 200 from remove-line-item is not proof the line is gone. Re-read the live
-    // contract and refuse to report success unless the variant is actually absent. syncContractItems
-    // only fires on verified success — mirroring the sub back to the intended shape on an
-    // unverified mutation would durable-store the lie.
+    // A 200 from `subscription-contracts-remove-line-item` means Appstle ACCEPTED
+    // the request — but the mutation applies asynchronously, and the live contract
+    // can still show the line for well past our settle window (ticket 3601e5b5:
+    // contract 32096387245 took ≈6 minutes to reflect — Mixed Berry was removed,
+    // but the portal surfaced "remove did not apply" at the 800ms verify timeout
+    // and the customer was forced to work around it with a swap). The widened
+    // window below is the first lever; the applied-but-unconfirmed soft path
+    // below is the second — a 200 PUT + genuine still-present after the wait
+    // is reported as pending success, NOT a hard false-failure. Spec:
+    // docs/brain/specs/portal-removelineitem-appstle-verify-false-negative.md.
+    //
+    // Verify opts default to a wider window for removes (5 × 500ms ≈ 2.5s worst
+    // case) than the shared defaults (3 × 400ms ≈ 800ms). Overridable via env
+    // (`APPSTLE_REMOVE_VERIFY_ATTEMPTS` / `APPSTLE_REMOVE_VERIFY_DELAY_MS`) so
+    // the window can be tuned without a code deploy.
     //
     // The variant id we verify on is the numeric variant behind the resolved `lineGid`. When the
     // caller only handed us a `lineGid` (no `variantId`), we resolve the numeric variant from the
     // just-resolved line so the predicate can classify "still-present". Skipping verification when
     // we cannot identify the variant is safer than a false success — bail as unverifiable.
-    let verifyVariantId: string | null = variantOrLine.variantId ? String(variantOrLine.variantId) : null;
-    if (!verifyVariantId && lineGid) {
-      try {
-        const detailRes = await fetch(
-          `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
-          { cache: "no-store" },
-        );
-        if (detailRes.ok) {
+    const removeVerifyOpts: { attempts: number; delayMs: number } = {
+      attempts: Math.max(1, Number(process.env.APPSTLE_REMOVE_VERIFY_ATTEMPTS ?? 5)),
+      delayMs: Math.max(0, Number(process.env.APPSTLE_REMOVE_VERIFY_DELAY_MS ?? 500)),
+    };
+    const verifyVariantId: string | null = variantOrLine.variantId ? String(variantOrLine.variantId) : null;
+    let pending = false;
+    if (verifyVariantId && /^\d+$/.test(verifyVariantId)) {
+      const verdict = await verifyContractEndState(
+        config.apiKey,
+        contractId,
+        { kind: "remove", variantId: verifyVariantId },
+        removeVerifyOpts,
+      );
+      if (!verdict.ok) {
+        if (verdict.snapshotReadable) {
+          // We DID read the live contract and the line is genuinely still there.
+          // Appstle accepted the PUT (we're in the 2xx branch) and will apply it
+          // out-of-band — the ticket 3601e5b5 pattern. Return a soft pending
+          // success rather than the hard false-failure that forced Janet into a
+          // swap workaround. Still run syncContractItems so the DB mirrors live
+          // state (truthfully "still there, pending apply"); the next natural
+          // fetch after Appstle finishes will reconcile.
+          console.warn(
+            `[appstleRemoveLineItem] applied-but-unconfirmed on contract ${contractId}: ${verdict.reason}`,
+          );
+          pending = true;
+        } else {
+          // Every fetch failed — we have NO evidence the mutation landed. Keep
+          // the hard failure so the caller can retry or escalate rather than
+          // record a lie.
+          return {
+            success: false,
+            error: `remove did not apply on contract ${contractId}: ${verdict.reason}`,
+          };
+        }
+      }
+    } else if (lineGid) {
+      // lineGid-only path (no variantId handed in): poll for the line to vanish
+      // using the same widened window and same applied-but-unconfirmed soft
+      // path. A snapshot that still carries the GID means Appstle hasn't
+      // applied yet; a snapshot that doesn't means verification succeeded by
+      // construction.
+      let seenReadable = false;
+      let stillPresentLast = false;
+      let lastReadErr: string | undefined;
+      for (let attempt = 0; attempt < removeVerifyOpts.attempts; attempt++) {
+        if (attempt > 0 && removeVerifyOpts.delayMs > 0) {
+          await new Promise((r) => setTimeout(r, removeVerifyOpts.delayMs));
+        }
+        try {
+          const detailRes = await fetch(
+            `https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${contractId}?api_key=${config.apiKey}`,
+            { cache: "no-store" },
+          );
+          if (!detailRes.ok) {
+            lastReadErr = `contract fetch failed: ${detailRes.status}`;
+            continue;
+          }
           const detail = await detailRes.json();
           const lines = (detail?.lines?.nodes || []) as Array<Record<string, unknown>>;
-          // The line we just removed is gone by now — but a fresh read still tells us what remains,
-          // and any pre-remove read of the same lineGid would have named its variant. We accept
-          // that a lineGid-only remove without variantId can only verify by looking at the AFTER
-          // state; if the caller never gave us a variantId and no line remains that maps to that
-          // GID, verification succeeds by construction.
-          const stillPresent = lines.find((l) => String(l.id || "") === String(lineGid));
-          if (stillPresent) {
-            return {
-              success: false,
-              error: `remove did not apply on contract ${contractId}: lineGid ${lineGid} still present on live contract`,
-            };
+          seenReadable = true;
+          const stillPresent = lines.some((l) => String(l.id || "") === String(lineGid));
+          if (!stillPresent) {
+            stillPresentLast = false;
+            break;
           }
+          stillPresentLast = true;
+        } catch (err) {
+          lastReadErr = errText(err);
         }
-      } catch (err) {
-        console.warn("[appstleRemoveLineItem] verify fetch failed:", errText(err));
       }
-    }
-    if (verifyVariantId && /^\d+$/.test(verifyVariantId)) {
-      const verdict = await verifyContractEndState(config.apiKey, contractId, {
-        kind: "remove",
-        variantId: verifyVariantId,
-      });
-      if (!verdict.ok) {
-        return {
-          success: false,
-          error: `remove did not apply on contract ${contractId}: ${verdict.reason}`,
-        };
+      if (stillPresentLast && seenReadable) {
+        console.warn(
+          `[appstleRemoveLineItem] applied-but-unconfirmed on contract ${contractId}: lineGid ${lineGid} still present on live contract after ${removeVerifyOpts.attempts}× ${removeVerifyOpts.delayMs}ms`,
+        );
+        pending = true;
+      } else if (!seenReadable && lastReadErr) {
+        console.warn("[appstleRemoveLineItem] verify fetch failed:", lastReadErr);
       }
     }
 
-    // Update local DB
+    // Update local DB — safe in the pending case too: syncContractItems mirrors
+    // whatever Appstle currently shows (if the line is still visible, it stays;
+    // if it has already vanished between our verify poll and the sync fetch,
+    // the mirror captures that). No lie is durable-stored either way.
     await syncContractItems(workspaceId, contractId, config.apiKey);
 
-    return { success: true };
+    return pending ? { success: true, pending: true } : { success: true };
   } catch (err) {
     console.error("[appstleRemoveLineItem] failed:", err);
     return { success: false, error: errText(err) };
@@ -512,6 +567,19 @@ export interface EndStateVerdict {
   ok: boolean;
   /** Present when `ok=false` — describes what was expected vs what is on the contract. */
   reason?: string;
+  /**
+   * True when the live contract was successfully READ at least once during the
+   * poll — so `ok:false` means the snapshot genuinely did not satisfy the
+   * expectation (not just "we couldn't reach Appstle"). False/undefined when
+   * every attempt failed on the HTTP read.
+   *
+   * The remove path uses this to distinguish "Appstle accepted the PUT but is
+   * applying asynchronously beyond our settle window" (snapshotReadable:true →
+   * applied-but-unconfirmed, soft success) from "we don't know if the mutation
+   * landed because we couldn't read the contract" (snapshotReadable:false →
+   * stays a failure).
+   */
+  snapshotReadable?: boolean;
 }
 
 /** Pull a numeric-string variant id out of an Appstle line's GID-shaped `variantId`. */
@@ -668,6 +736,7 @@ async function verifyContractEndState(
   const delayMs = Math.max(0, opts.delayMs ?? Number(process.env.APPSTLE_MUTATION_VERIFY_DELAY_MS ?? 400));
   let lastReason: string | undefined;
   let lastFetchError: string | undefined;
+  let snapshotReadable = false;
   for (let attempt = 0; attempt < attempts; attempt++) {
     if (attempt > 0 && delayMs > 0) {
       await new Promise((r) => setTimeout(r, delayMs));
@@ -683,8 +752,9 @@ async function verifyContractEndState(
       }
       const detail = await res.json();
       const lines = (detail?.lines?.nodes || []) as AppstleLine[];
+      snapshotReadable = true;
       const verdict = checkContractSatisfiesExpectation(lines, expected);
-      if (verdict.ok) return verdict;
+      if (verdict.ok) return { ...verdict, snapshotReadable: true };
       lastReason = verdict.reason;
     } catch (err) {
       lastFetchError = errText(err);
@@ -694,6 +764,7 @@ async function verifyContractEndState(
     ok: false,
     reason: lastReason
       ?? `contract could not be verified (${lastFetchError || "no successful read"}) — treating as unverified, not success`,
+    snapshotReadable,
   };
 }
 
@@ -1118,7 +1189,7 @@ export async function subRemoveItem(
   workspaceId: string,
   contractId: string,
   variantOrLine: string | { variantId?: string; lineGid?: string },
-): Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean }> {
+): Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean; pending?: boolean }> {
   const arg = typeof variantOrLine === "string" ? { variantId: variantOrLine } : variantOrLine;
   // Internal subs are matched by variant_id (no Appstle line gids). Check
   // internal FIRST so a lineId-only call can't silently fall through to the

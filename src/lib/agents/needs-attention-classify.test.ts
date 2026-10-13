@@ -122,3 +122,83 @@ test("classifyByHeuristic routes the bare-envelope-missing classifier reason to 
   assert.ok(result, "expected a heuristic classification result");
   assert.equal(result.klass, "tooling_failure");
 });
+
+// error-feed-scope-postgres-client-lost-fatal-transient Fix 1 — the security-review preflight
+// cannot start when `.claude/skills/security-review/SKILL.md` is absent on the agent's box or no
+// Supabase env is wired in to verify the spec row before opening the diff. That is a TOOLING_FAILURE
+// (the agent's environment is incomplete), NOT a real_blocker (the spec has no missing code
+// prerequisite the branch should build inline). The park reason the worker records is "needs-human"
+// — which previously matched REAL_BLOCKER_PATTERNS /needs[- ]human/i FIRST and spawned a Fix-phase
+// against the origin demanding a prerequisite that doesn't exist. Adding the preflight phrase to
+// TOOLING_FAILURE_PATTERNS routes it to auto-spec-tooling-fix (the correct destination) and
+// prevents the same `blocker:real_blocker` check_key from re-appearing on this spec's next
+// `spec_test_runs` row (parked security-review job d3ef27e6 observed sample).
+test("classifyByHeuristic routes a security-review preflight env/SKILL-absent failure to tooling_failure", () => {
+  const result = classifyByHeuristic({
+    jobKind: "security-review",
+    specSlug: "error-feed-scope-postgres-client-lost-fatal-transient",
+    error: "needs-human",
+    logTail:
+      "Cannot run the required preflight: .claude/skills/security-review/SKILL.md is absent and no Supabase env/.env is available to verify the specs row is active before opening the branch diff.",
+    agentSummary: null,
+  });
+  assert.ok(result, "expected a heuristic classification result");
+  assert.equal(result.klass, "tooling_failure");
+  assert.equal(result.source, "heuristic");
+});
+
+// Boundary — a nearby park reason with "needs-human" but no preflight phrase (a GENUINE missing
+// prerequisite surfaced by the agent) must STILL route to real_blocker.
+test("classifyByHeuristic KEEPS a nearby needs-human park (no preflight phrase) as real_blocker", () => {
+  const result = classifyByHeuristic({
+    jobKind: "security-review",
+    specSlug: "any-spec",
+    error: "needs-human",
+    logTail: "the branch references a missing API surface the spec didn't declare — no fix possible on this branch alone",
+    agentSummary: null,
+  });
+  assert.ok(result, "expected a heuristic classification result");
+  assert.equal(result.klass, "real_blocker");
+});
+
+// error-feed-drop-workspaces-updated-at-column-adhoc-noise Fix 1 — the security-review session's
+// repair-attempt verdict can land as a stock `needs-human` whose review text says "No prior review
+// context available in this session — the previous security-review turn was not captured; a human
+// should re-trigger /security-review to get a fresh scan." That phrasing is the SAME stale-resume
+// failure mode `security-stale-resume.ts` describes (the resumed session has no prior findings to
+// re-emit), reskinned with new wording. It is a TOOLING_FAILURE (the review agent itself produced
+// no real verdict), NOT a real_blocker (the on-branch diff has no missing prerequisite). Without a
+// pattern tripping here, the park's `needs-human` error matches /needs[- ]human/i in
+// REAL_BLOCKER_PATTERNS and spawns a bogus `*-fix-real_blocker` child on the origin — exactly the
+// `blocker:real_blocker` check that resumed us for parked security-review job 15ebb395. Adding the
+// stale-resume phrasing to TOOLING_FAILURE_PATTERNS routes it to auto-spec-tooling-fix (the
+// correct destination for an LLM-session-infra failure) and prevents the same
+// `blocker:real_blocker` check_key from re-appearing on the origin's next `spec_test_runs` row.
+test("classifyByHeuristic routes a stale-resume security-review park (no prior review context) to tooling_failure", () => {
+  const result = classifyByHeuristic({
+    jobKind: "security-review",
+    specSlug: "error-feed-drop-workspaces-updated-at-column-adhoc-noise",
+    error: "needs-human",
+    logTail:
+      "No prior review context available in this session — the previous security-review turn was not captured; a human should re-trigger /security-review to get a fresh scan.",
+    agentSummary: null,
+  });
+  assert.ok(result, "expected a heuristic classification result");
+  assert.equal(result.klass, "tooling_failure");
+  assert.equal(result.source, "heuristic");
+});
+
+// Belt-and-suspenders — the sibling phrasing "security-review turn was not captured" alone also
+// trips the stale-resume route. Covers wording variants a future repair-prompt rewrite may emit
+// without the exact "No prior review context" opener.
+test("classifyByHeuristic routes 'security-review turn was not captured' phrasing to tooling_failure", () => {
+  const result = classifyByHeuristic({
+    jobKind: "security-review",
+    specSlug: "any-spec",
+    error: "needs-human",
+    logTail: "The previous security-review turn was not captured — rerun fresh.",
+    agentSummary: null,
+  });
+  assert.ok(result, "expected a heuristic classification result");
+  assert.equal(result.klass, "tooling_failure");
+});

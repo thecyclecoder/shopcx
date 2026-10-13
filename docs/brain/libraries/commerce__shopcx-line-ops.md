@@ -22,7 +22,14 @@ another, a charge landing between them bills the new quantity at the old tier.
 | | Titles | Who sets it | Touched by a recompute? |
 |---|---|---|---|
 | Structural | `Subscribe & Save`, `Volume discount`, `Legacy rate` (`STRUCTURAL_DISCOUNT_TITLES`) | us | rewritten every time |
+| Checkout copy | `AUTOMATIC_DISCOUNT` with `targetType: LINE_ITEM` (the S&S / Buy 2-3 function copies) | Shopify, at checkout | **removed**, replaced by our structural ones |
+| Shipping automatic | `AUTOMATIC_DISCOUNT` with `targetType: SHIPPING_LINE` (free Economy shipping) | Shopify, at checkout | never |
 | Customer | the coupon code itself, or any `CODE_DISCOUNT` | the customer | **never** |
+
+The S&S and Buy 2/3 checkout functions apply on every cycle (CEO 2026-10-10), so checkout shows the
+discounted recurring price. Shopify copies each onto the contract as a live recurring automatic.
+Left there, it would stack with ours and never follow a quantity change (a Buy 3 rate surviving a
+downgrade). So the recompute (and through it the create-time normalizer) strips the copies.
 
 A customer can never apply an S&S or a quantity break, so anything carrying a structural title is
 ours by construction. Conversely a `SubscriptionAppliedCodeDiscount` exposes no `title` at all, so
@@ -68,6 +75,34 @@ cycle. See `shopcxAddOneTimeLine` below.
 | `shopcxAddItem(ws, contractId, variantId, qty)` | a variant already present RAISES the quantity |
 | `shopcxUpdateLineItemPrice(ws, contractId, variantId, baseCents)` | pins the pre-discount BASE |
 | `shopcxAddOneTimeLine(ws, contractId, variantId, qty, priceCents)` | cycle-scoped — the retention gift |
+| `shopcxSetDeliveryPrice(ws, contractId, cents)` | sets the contract's renewal shipping price (draft) and mirrors `subscriptions.delivery_price_cents`. Used to zero shipping on contracts created while the free-shipping discount was a one-cycle copy (CEO 2026-10-10, free shipping every cycle). Never run it on contracts migrated from Appstle that pay shipping today: they keep their shipping charge (CEO 2026-10-10) |
+| `shopcxNormalizeNewContract(ws, contractId)` | brings a CHECKOUT-born contract into our pricing shape; create-time only, called by [[../inngest/shopcx-contract-ingest]] |
+
+### `shopcxNormalizeNewContract` — the two checkout shapes
+
+A checkout contract and a migrated one are built differently, and our recompute can only price the
+migrated shape (MSRP base + "Subscribe & Save" + "Volume discount" + optional "Legacy rate"). A rule
+line with **no structural allocation** that is priced at or below MSRP is a checkout line:
+
+| Shape | Unit price | What normalization does |
+|---|---|---|
+| S&S on the selling plan (legacy, before 2026-10-10) | MSRP − 25%, baked in | rebase to MSRP, then add S&S + tier |
+| S&S from a checkout discount function (live 2026-10-10) | MSRP; the discount sits on the contract as an inert $0 `AUTOMATIC_DISCOUNT` | no rebase, add S&S + tier |
+
+**Shipping protection** never gets structural discounts and never counts toward the tier: its final
+price lives in `currentPrice` (the migration convention). In the function shape, the checkout's 25%
+reached it only as an inert automatic, so normalization bakes the S&S into its price ($6.60 → $4.95).
+In the plan-baked shape it is already discounted and is left alone. The shape is read off the RULE
+lines, not protection's catalog price, which lags the store (`insure01` reads $5.00 while selling
+at $6.60).
+
+Both shapes miss the quantity break: Shopify's automatic discounts (Buy 2/3) run at checkout only
+and never on an app-led billing attempt. Rebase and recompute share one draft. A line above
+MSRP, or one already carrying our titles, is left alone, so a re-run is a no-op.
+
+**Create-time only.** A line pinned below MSRP on purpose (`shopcxUpdateLineItemPrice`) also has
+no allocation, so running this on an established contract would undo the pin. It shipped with no
+caller; it was wired into the create-ingest on 2026-10-08.
 
 ### Deliberate behaviours worth stating
 

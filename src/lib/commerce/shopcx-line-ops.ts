@@ -27,7 +27,9 @@ import {
   shopifyUpdateDraftLine,
   shopifyAddDraftLine,
   shopifyRemoveStructuralDiscounts,
+  shopifyRemoveDraftDiscount,
   getSubscriptionDraft,
+  shopifySetDeliveryPrice,
   STRUCTURAL_DISCOUNT_TITLES,
   type ManualDiscountInput,
 } from "@/lib/commerce/shopify-subscription-client";
@@ -37,7 +39,7 @@ import { errText } from "@/lib/error-text";
 export interface LineOpResult { success: boolean; error?: string; alreadyAbsent?: boolean }
 
 /** The pricing rule every consumable is on. Read from the DB, never hardcoded per product. */
-async function activePricingRuleId(workspaceId: string): Promise<string | null> {
+export async function activePricingRuleId(workspaceId: string): Promise<string | null> {
   const admin = createAdminClient();
   const { data } = await admin
     .from("pricing_rules").select("id").eq("workspace_id", workspaceId).eq("is_active", true).limit(1).maybeSingle();
@@ -128,6 +130,20 @@ async function rewriteStructuralDiscounts(
   );
   const cleared = await shopifyRemoveStructuralDiscounts(workspaceId, draftId, structural);
   if (!cleared.success) return cleared;
+
+  // ⭐ Checkout product discounts copied onto the contract are REPLACED by ours. The S&S and Buy 2/3
+  // checkout functions apply on every cycle (so checkout shows the discounted recurring price), and
+  // Shopify copies each onto the contract as a live recurring AUTOMATIC_DISCOUNT. Left there it
+  // stacks with our "Subscribe & Save" / "Volume discount" and renews double-discounted — and it
+  // would never follow a quantity change. Only LINE_ITEM automatics: a shipping automatic (free
+  // Economy shipping) is not a price we own, and a customer's CODE is never touched.
+  const checkoutCopies = (draft.discounts ?? []).filter(
+    (d) => d.type === "AUTOMATIC_DISCOUNT" && d.targetType === "LINE_ITEM",
+  );
+  for (const d of checkoutCopies) {
+    const r = await shopifyRemoveDraftDiscount(workspaceId, draftId, d.id);
+    if (!r.success) return r;
+  }
 
   // Mix-and-match tier over rule lines only — protection never counts toward it.
   const resolved = draft.lines.map((l) => ({
@@ -489,6 +505,9 @@ export async function shopcxAddOneTimeLine(
  *
  *   PDP:       currentPrice $52.46/unit, ZERO discount allocations  — the selling plan's 25% is
  *              baked INTO the unit price
+ *   PDP, S&S from a checkout discount function (planned): currentPrice at MSRP, ZERO allocations —
+ *              the checkout discount lands on the contract as an inert $0 AUTOMATIC_DISCOUNT, so
+ *              without our own "Subscribe & Save" it renews at full MSRP
  *   migrated:  currentPrice $69.95/unit (catalog MSRP) + allocations "Subscribe & Save" 25%,
  *              "Volume discount" 8%
  *
@@ -504,6 +523,10 @@ export async function shopcxAddOneTimeLine(
  *
  * Idempotent, and SAFE to re-run: a contract already in our shape has its base at MSRP and its
  * grandfathered concession captured before anything is rewritten.
+ *
+ * ⚠️ Create-time only. A line pinned below MSRP on purpose (agent price restore) also carries no
+ * allocation, so this must never run on an established contract. Its one caller is the
+ * create-ingest in `inngest/shopcx-contract-ingest.ts`.
  */
 export async function shopcxNormalizeNewContract(
   workspaceId: string,
@@ -520,27 +543,56 @@ export async function shopcxNormalizeNewContract(
       return { success: true, normalized: false };
     }
 
-    // Which lines are priced BELOW their catalog MSRP with no allocation explaining it? That is
-    // the selling-plan-baked signature. A line already at MSRP needs no rebasing, and a line
-    // carrying allocations is already in our shape.
-    const toRebase: { lineId: string; msrpCents: number }[] = [];
+    // Which rule lines carry NO structural allocation? A line carrying one is already in our shape.
+    // Two checkout shapes reach here, and both renew wrong until normalized:
+    //   - priced BELOW MSRP: the selling plan's 25% is baked into the unit price. Rebase to MSRP.
+    //   - priced AT MSRP: S&S came from a checkout discount function. Shopify copies a checkout
+    //     automatic onto the contract as an AUTOMATIC_DISCOUNT that allocates $0 on renewals, so the
+    //     line would renew at full MSRP. Nothing to rebase, but it still needs its S&S + tier.
+    // A line ABOVE MSRP is left alone: that is not a checkout shape we know how to read.
+    // Lines whose `currentPrice` moves: rule lines back UP to MSRP, protection DOWN to its S&S price.
+    const toRebase: { lineId: string; targetCents: number }[] = [];
+    const protectionLines: { lineId: string; unit: number }[] = [];
+    let needsDiscounts = false;
+    let planBaked = false;
     for (const l of live.contract.lines) {
       const v = l.sku ? ctx.variantBySku.get(String(l.sku).toLowerCase()) : undefined;
-      if (!v || !ctx.ruleProducts.has(v.product_id)) continue;
       const unit = l.currentPrice != null ? Math.round(parseFloat(l.currentPrice) * 100) : 0;
-      if (unit > 0 && unit < v.price_cents && l.structuralDiscountCents === 0) {
-        toRebase.push({ lineId: l.id, msrpCents: v.price_cents });
+      if (v && isProtection(ctx, v.product_id)) {
+        if (unit > 0 && l.structuralDiscountCents === 0) protectionLines.push({ lineId: l.id, unit });
+        continue;
+      }
+      if (!v || !ctx.ruleProducts.has(v.product_id)) continue;
+      if (unit > 0 && unit <= v.price_cents && l.structuralDiscountCents === 0) {
+        needsDiscounts = true;
+        if (unit < v.price_cents) {
+          planBaked = true;
+          toRebase.push({ lineId: l.id, targetCents: v.price_cents });
+        }
       }
     }
-    if (!toRebase.length) return { success: true, normalized: false };
+    // Protection keeps the migration convention: its final price lives in `currentPrice`, with no
+    // S&S / Volume allocations, and it never counts toward the tier. In the function shape (rule
+    // lines at MSRP) the checkout S&S reached protection only as an inert automatic, so it would
+    // renew at list ($6.60, not $4.95): bake the S&S into its price. In the plan-baked shape its
+    // price already carries the plan's 25%: leave it. The shape is read off the RULE lines, not
+    // protection's catalog price, which lags the store (insure01 reads $5.00 while it sells at $6.60).
+    // Idempotent: once normalized the rule lines carry allocations, `needsDiscounts` stays false and
+    // protection is not discounted twice.
+    if (needsDiscounts && !planBaked && ctx.snsPct > 0) {
+      for (const { lineId, unit } of protectionLines) {
+        toRebase.push({ lineId, targetCents: Math.round((unit * (100 - ctx.snsPct)) / 100) });
+      }
+    }
+    if (!needsDiscounts) return { success: true, normalized: false };
 
     // ⚠️ Rebase and recompute in the SAME draft. Committed separately, a charge landing between
     // them bills the customer at full MSRP with no discounts at all.
     const r = await mirrored(workspaceId, contractId,
       withDraft(workspaceId, contractId, async (draftId) => {
-        for (const { lineId, msrpCents } of toRebase) {
+        for (const { lineId, targetCents } of toRebase) {
           const u = await shopifyUpdateDraftLine(workspaceId, draftId, lineId, {
-            currentPrice: (msrpCents / 100).toFixed(2),
+            currentPrice: (targetCents / 100).toFixed(2),
           });
           if (!u.success) return u;
         }
@@ -550,5 +602,33 @@ export async function shopcxNormalizeNewContract(
       }),
     );
     return r.success ? { ...r, normalized: true } : r;
+  } catch (err) { return { success: false, error: errText(err) }; }
+}
+
+/**
+ * Set a ShopCX contract's renewal shipping price, and the mirror's `delivery_price_cents` with it.
+ *
+ * Free subscription shipping is a checkout discount. A contract created while that discount was a
+ * one-cycle copy keeps the quoted Economy rate and loses the discount after the first order, so its
+ * renewals would charge shipping. This zeroes it (CEO 2026-10-10, "Free every cycle"). Contracts
+ * created after the discount applies every cycle carry it as a live recurring shipping discount and
+ * need nothing.
+ */
+export async function shopcxSetDeliveryPrice(
+  workspaceId: string,
+  contractId: string,
+  cents: number,
+): Promise<LineOpResult> {
+  try {
+    const r = await shopifySetDeliveryPrice(workspaceId, contractId, cents);
+    if (!r.success) return r;
+    const admin = createAdminClient();
+    const { error } = await admin
+      .from("subscriptions")
+      .update({ delivery_price_cents: cents, updated_at: new Date().toISOString() })
+      .eq("workspace_id", workspaceId)
+      .eq("shopify_contract_id", String(contractId).replace("gid://shopify/SubscriptionContract/", ""));
+    if (error) console.error(`[shopcx-line-ops] delivery mirror failed for ${contractId}: ${error.message}`);
+    return { success: true };
   } catch (err) { return { success: false, error: errText(err) }; }
 }

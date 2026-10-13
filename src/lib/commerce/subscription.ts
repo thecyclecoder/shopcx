@@ -56,6 +56,7 @@ import type {
 import {
   isInternalSubscription,
   resolveBillingSource,
+  resolveLiveContractId,
   internalSubGetUpcomingOrders,
   internalSubSwitchPaymentMethod,
   internalSubAddFreeProduct,
@@ -96,6 +97,7 @@ import {
   appstleUnskipOrder,
   appstleGetUpcomingOrders,
   appstleOrderNowByContract,
+  appstleCancelContractVendorOnly,
 } from "@/lib/appstle";
 import {
   subAddItem,
@@ -453,6 +455,8 @@ export async function subscriptionAction(
   cancelReason?: string,
   cancelledBy?: string,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
     const r = await internalSubscriptionAction(workspaceId, contractId, action);
@@ -478,12 +482,36 @@ export async function subscriptionAction(
   return appstleSubscriptionAction(workspaceId, contractId, action, cancelReason, cancelledBy);
 }
 
+/**
+ * Cancel the OLD engine's contract during an engine migration — at the VENDOR ONLY.
+ *
+ * ⚠️ Not `subscriptionAction(..., "cancel")`. That is a customer cancel: it also writes
+ * cancel-truth onto our row (status='cancelled', `cancelled_at`, next date nulled), ends open
+ * dunning, and recomputes `customers.subscription_status`. During a migration the subscription
+ * is NOT ending, it is changing engines, and the row is flipped in place right after. The flip
+ * restored `status` but never cleared `cancelled_at`, so every live migrated sub carried a
+ * phantom cancellation date (33 of them, each stamped seconds before its own flip).
+ *
+ * The engine is passed explicitly: the caller already knows it, and after the flip the old
+ * contract id no longer resolves to a row.
+ */
+export async function subscriptionCancelAtVendorForMigration(
+  workspaceId: string,
+  contractId: string,
+  engine: "appstle" | "shopcx",
+): Promise<OpResult> {
+  if (engine === "shopcx") return shopifySubscriptionAction(workspaceId, contractId, "cancel");
+  return appstleCancelContractVendorOnly(workspaceId, contractId);
+}
+
 // ── Schedule ────────────────────────────────────────────────────────
 
 export async function subscriptionSkipNextOrder(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
     return internalSubSkipNextOrder(workspaceId, contractId);
@@ -503,6 +531,8 @@ export async function subscriptionSkipUpcomingOrder(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") return internalSkipUpcoming(workspaceId, contractId);
   if (src === "shopcx") return shopifySkipBillingCycle(workspaceId, contractId);
@@ -536,6 +566,8 @@ export async function subscriptionGetUpcomingOrders(
   orders?: { id: string; billingDate: string; status: string }[];
   error?: string;
 }> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const srcUpcoming = await resolveBillingSource(workspaceId, contractId);
   if (srcUpcoming === "internal") return internalSubGetUpcomingOrders(workspaceId, contractId);
   if (srcUpcoming === "shopcx") {
@@ -559,6 +591,8 @@ export async function subscriptionUpdateBillingInterval(
   interval: "DAY" | "WEEK" | "MONTH" | "YEAR",
   intervalCount: number,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
     return internalSubUpdateBillingInterval(workspaceId, contractId, interval, intervalCount);
@@ -572,19 +606,26 @@ export async function subscriptionUpdateNextBillingDate(
   contractId: string,
   nextBillingDate: string,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
     return internalSubUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
   }
   if (src === "shopcx") {
-    // ⭐ RETIME, not just set. `shopifySetNextBillingDate` moves only the display field; the cycle
-    // calendar underneath stays where it was, and the renewal worker picks the cycle BY DATE and
-    // skips one already BILLED. A new date landing in a spent cycle strands the subscription
-    // silently. `shopifyRetimeContract` re-anchors the calendar and verifies the date is billable.
+    // ⭐ Our DB row PLANS the date; Shopify's billing calendar is resolved only AT CHARGE TIME
+    // (see `resolveChargeableCycle`). So a timing change only needs to move Shopify's DISPLAY
+    // nextBillingDate — a date that lands in an already-BILLED cycle is NO LONGER a reason to
+    // refuse. The renewal worker and Order Now bill the first UNBILLED cycle by index regardless of
+    // what calendar cycle our date falls in, so a "stranded" display is cosmetic drift (the daily
+    // reconciler catches it), never a missed renewal. We therefore never refuse a ShopCX retime.
     const { shopifyRetimeContract } = await import("@/lib/commerce/shopify-subscription-client");
     const r = await shopifyRetimeContract(workspaceId, contractId, nextBillingDate);
     if (r.stranded) {
-      return { success: false, error: "date_not_billable — it lands in a cycle already charged" };
+      console.warn(
+        `[subscriptionUpdateNextBillingDate] ${contractId}: display date ${nextBillingDate} lands in a spent cycle — cosmetic drift only; the charge resolves the first unbilled cycle at charge time`,
+      );
+      return { success: true };
     }
     return r;
   }
@@ -602,6 +643,8 @@ export async function subscriptionSwitchPaymentMethod(
   // token → customer_payment_methods.is_default flip). Delegate to preserve
   // that path exactly; the wrapper top-guards with healOnTouch on the
   // Appstle branch.
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const srcPm = await resolveBillingSource(workspaceId, contractId);
   if (srcPm === "internal") return internalSubSwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
   if (srcPm === "shopcx") return shopifySwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
@@ -630,6 +673,8 @@ export async function subscriptionSendPaymentUpdateEmail(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const srcEmail = await resolveBillingSource(workspaceId, contractId);
   if (srcEmail === "appstle") return appstleSendPaymentUpdateEmail(workspaceId, contractId);
 
@@ -664,7 +709,7 @@ export async function subscriptionRemoveItem(
   workspaceId: string,
   contractId: string,
   variantOrLine: string | { variantId?: string; lineGid?: string },
-): Promise<OpResult & { alreadyAbsent?: boolean }> {
+): Promise<OpResult & { alreadyAbsent?: boolean; pending?: boolean }> {
   return subRemoveItem(workspaceId, contractId, variantOrLine);
 }
 
@@ -928,6 +973,8 @@ export async function subscriptionAddFreeProduct(
   variantId: string,
   quantity: number = 1,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const srcGift = await resolveBillingSource(workspaceId, contractId);
   if (srcGift === "internal") return internalSubAddFreeProduct(workspaceId, contractId, variantId, quantity);
   if (srcGift === "shopcx") {
@@ -947,6 +994,8 @@ export async function subscriptionSwapProduct(
   oldVariantId: string,
   newVariantId: string,
 ): Promise<OpResult> {
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const srcSwap = await resolveBillingSource(workspaceId, contractId);
   if (srcSwap === "internal") return internalSwapProduct(workspaceId, contractId, oldVariantId, newVariantId);
   if (srcSwap === "shopcx") {
@@ -1009,6 +1058,8 @@ export async function subscriptionOrderNow(
   workspaceId: string,
   contractId: string,
 ): Promise<OpResult & { summary?: string; internal?: boolean }> {
+  // An old (pre-migration) id resolves to the live migrated row before the lookup below.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions")
@@ -1018,16 +1069,40 @@ export async function subscriptionOrderNow(
     .maybeSingle();
   if (!sub) return { success: false, error: "subscription_not_found" };
 
+  // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
+  contractId = await resolveLiveContractId(workspaceId, contractId);
   const src = await resolveBillingSource(workspaceId, contractId);
 
   if (src === "internal" || src === "shopcx") {
     if (sub.status !== "active") return { success: false, error: `not_active (${sub.status})` };
+    // ⭐ Repeat-press guard, shared with the portal: refuse when a charge for this sub is in
+    // flight or an order for it landed inside the window. This is the chokepoint for the
+    // dashboard bill-now route AND every agent action (bill_now / order_now /
+    // change_next_date's ship-today path), none of which had any recent-charge check — an
+    // agent picking up "I just ordered but didn't get an email" could otherwise charge again.
+    const { guardRecentOrderNow, ORDER_IN_PROGRESS } = await import("@/lib/portal/order-now-guard");
+    const recent = await guardRecentOrderNow(admin, {
+      subscription_id: sub.id as string,
+      workspace_id: workspaceId,
+    });
+    if (recent.action === "block") {
+      return {
+        success: false,
+        error: `${ORDER_IN_PROGRESS}: an order for this subscription was already placed in the last 15 minutes, so it was not charged again`,
+      };
+    }
     const { inngest } = await import("@/lib/inngest/client");
+    // `order_now: true` marks this as a customer-pressed order-now (vs the nightly
+    // renewal-cron fan-out, which omits it). When the pipeline resolves against an
+    // already-billed / not-yet-due cycle and skips without charging, that flag is
+    // what lets it emit the `subscription.order_now_nothing_due` marker the async
+    // order-now verify reads as its `nothing_due` verdict (spec: order-now verify
+    // needs a 'nothing_due' verdict for a skipped spent-cycle renewal).
     if (src === "shopcx") {
       const { RENEWAL_ATTEMPT_EVENT } = await import("@/lib/inngest/shopify-subscription-renewals");
       await inngest.send({
         name: RENEWAL_ATTEMPT_EVENT,
-        data: { subscription_id: sub.id, workspace_id: workspaceId, expected_next_billing_date: null },
+        data: { subscription_id: sub.id, workspace_id: workspaceId, expected_next_billing_date: null, order_now: true },
       });
       return { success: true, summary: "Triggered ShopCX renewal (order now)" };
     }
@@ -1037,6 +1112,7 @@ export async function subscriptionOrderNow(
         subscription_id: sub.id,
         workspace_id: workspaceId,
         expected_next_billing_date: (sub as { next_billing_date?: string | null }).next_billing_date ?? null,
+        order_now: true,
       },
     });
     return { success: true, internal: true, summary: "Triggered internal renewal (order now)" };

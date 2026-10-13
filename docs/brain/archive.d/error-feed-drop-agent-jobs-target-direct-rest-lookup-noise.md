@@ -1,0 +1,1 @@
+- **Drop stale agent_jobs.target direct-REST Supabase log noise** · verified 2026-10-03 · → [[../libraries/control-tower]]

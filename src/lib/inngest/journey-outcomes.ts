@@ -118,6 +118,8 @@ export const journeySessionCompleted = inngest.createFunction(
               .from("subscriptions")
               .update({ status: "cancelled", next_billing_date: null })
               .eq("id", session.subscription_id);
+            const { stampCancelledAtIfUnset } = await import("@/lib/internal-subscription");
+            await stampCancelledAtIfUnset(admin, session.subscription_id as string);
           }
         }
         // Close ticket

@@ -1,0 +1,1 @@
+- **Drop stale orders.shopify_order_name PostgREST lookup noise** · verified 2026-10-04 · → [[../libraries/control-tower]] § error-feed.ts classifier `isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise`; cross-link in [[../tables/orders]]

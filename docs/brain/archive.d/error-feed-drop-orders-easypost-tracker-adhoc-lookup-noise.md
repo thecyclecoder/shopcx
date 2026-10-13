@@ -1,0 +1,1 @@
+- **Scope foreign direct-REST `orders.easypost_tracker_id` lookup noise out of the error feed** · verified 2026-10-07 · → [[../libraries/control-tower]]

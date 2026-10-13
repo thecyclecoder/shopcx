@@ -1,0 +1,1 @@
+- **Drop stale `spec_phases.name` / `spec_phases.phase_order` PostgREST foreign-app noise at capture** · verified 2026-10-06 · → [[../libraries/control-tower]]

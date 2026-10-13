@@ -1,0 +1,1 @@
+- **Drop foreign PostgREST noise: loop_heartbeats.payload / status column-missing reads** · verified 2026-10-09 · → [[../libraries/control-tower#isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise]]

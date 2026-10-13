@@ -186,3 +186,14 @@ Do NOT expose to any request-time or agent-driven caller. Returns null on unique
 ---
 
 [[../README]] · [[../tables/coupons]] · [[../tables/loyalty_redemptions]] · [[../tables/coupon_redemptions]] · [[../../CLAUDE]]
+
+## Lookup failures are not "invalid" — `resolveCouponDetailed`
+
+`resolveCoupon` returns `null` for both "no such / unusable code" and "the lookup failed". Interactive callers (checkout, portal) are fine with that, because they show an error and the customer retries. The renewal is not fine with it: `resolveRenewalDiscount` drops every null-resolving code off the sub **permanently**.
+
+`resolveCouponDetailed(workspaceId, code, customerId) → { coupon, unavailable }` separates the two cases:
+- **`unavailable: true`:** the lookup itself failed, and the code may be perfectly valid. Causes: a Shopify HTTP error; any GraphQL `errors` such as THROTTLED; a body without `data`; a thrown fetch; or a failed read of our own `coupons` / `workspaces` row.
+- **`coupon: null, unavailable: false`:** definitive. Causes: an error-free null node (no such code); the wrong customer; already used; a discount type we don't model (free shipping, buy-X-get-Y); or no Shopify credentials (a configuration state, not a blip).
+
+The response shape is classified by the pure, tested `classifyShopifyCodeDiscountResponse` (`test:coupons-shopify-classify`). `resolveRenewalDiscount` keeps unavailable codes, never applies them, and returns them as `unavailableCodes`; the renewal then holds instead of charging (see [[../inngest/internal-subscription-renewals]]). `resolveCoupon` keeps its signature and now delegates to `resolveCouponDetailed`.
+

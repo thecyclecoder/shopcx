@@ -1,0 +1,1 @@
+- **Error-feed drop: agent_jobs.config_dir direct-REST lookup noise** · verified 2026-10-02 · → [[../libraries/control-tower]]

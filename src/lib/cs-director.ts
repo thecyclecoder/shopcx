@@ -61,6 +61,8 @@ import { errText } from "@/lib/error-text";
 import type { ActionContext, ActionParams, SonnetDecision } from "@/lib/action-executor";
 import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
 import type { CxOrderRemedyState, CxOrderRemedyStateRef } from "@/lib/cx-agent-sdk";
+import { detectDateChangeAsk } from "@/lib/date-change-ask";
+import { isAutoReplyOrNotificationInbound } from "@/lib/automated-sender";
 import { MONEY_ACTION_TYPES, isNonOrderScopedLoyaltyAction, isNonRefundReplacementAction } from "@/lib/june-remedy-approval";
 import { recordDirectorActivity, type DirectorActivityInput } from "@/lib/director-activity";
 import { getAgentPolicyPackage, formatAgentPolicyPackage } from "@/lib/policies";
@@ -265,6 +267,162 @@ export interface RemedyExecutionPlan {
   customerMessage: string | null;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 3 of [[../../docs/brain/specs/inflection-resession-must-act-on-newest-ask.md]] —
+// findUnsatisfiedCustomerRequests. The dc31bf31 scar's SECOND failure mode: the customer
+// repeated his ask on 08-08 ("Still do not Knw date?????"), June (session 4543b96b) chose
+// `close_no_action`, calling his last message a positive thank-you. He then paused 30 days in
+// the portal on 08-27, auto-resumed 09-26, and renewed 10-02 — a $237.16 refund + cancelled
+// subscriber that `close_no_action` should never have been allowed to produce.
+//
+// This pure helper lists the customer's explicit requests made AFTER the last successful
+// action executed on the ticket. The transition builder consumes it to refuse a
+// `close_no_action` while any inbound ask is unsatisfied (and the runner posts the internal
+// note + re-sessions Sol per the spec).
+//
+// Pure (no DB, no clock) so unit tests can drive it with fixture messages and the pure
+// transition can call it from any lane.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The subset of a `ticket_messages` row the predicate needs. */
+export interface UnsatisfiedRequestMessage {
+  id: string;
+  direction: string; // 'inbound' | 'outbound'
+  author_type: string; // 'customer' | 'agent' | 'ai' | 'system'
+  visibility?: string | null; // 'external' | 'internal'
+  body?: string | null;
+  body_clean?: string | null;
+  created_at: string; // ISO
+  /**
+   * Optional sender address. When supplied, a no-reply / mailer-daemon / known-automated-domain
+   * sender lets the notification exclusion fire on the sender alone (see
+   * `isAutoReplyOrNotificationInbound`). `ticket_messages` carries no sender column, so the
+   * shipped close-gate loader leaves this undefined and the exclusion runs on the body markers —
+   * which is the GemX / f3977ec6 vendor-blast case. Present so a future caller that CAN resolve
+   * the sender gets the stronger signal for free.
+   */
+  from_address?: string | null;
+}
+
+/** A SUCCESSFUL action's descriptor — only `type` + `executed_at` are consulted. */
+export interface UnsatisfiedRequestExecutedAction {
+  type: string;
+  executed_at: string; // ISO
+}
+
+/** One request the predicate flags as unsatisfied. */
+export interface UnsatisfiedCustomerRequest {
+  message_id: string;
+  message_created_at: string;
+  excerpt: string;
+  kind: "date_change" | "refund" | "cancel" | "change" | "move" | "skip";
+  cue: string;
+}
+
+const SIMPLE_REQUEST_CUES: Array<{ kind: UnsatisfiedCustomerRequest["kind"]; cue: string; re: RegExp }> = [
+  { kind: "refund", cue: "refund", re: /\brefund(?:s|ed|ing)?\b/i },
+  { kind: "cancel", cue: "cancel", re: /\bcancel(?:s|ed|led|ling|lation)?\b/i },
+  { kind: "change", cue: "change", re: /\b(?:change|modify|update|edit)\b/i },
+  { kind: "move", cue: "move", re: /\bmove(?:s|d|ing)?\b/i },
+  { kind: "skip", cue: "skip", re: /\b(?:skip|push|delay|postpone|hold\s+off)\b/i },
+];
+
+function excerpt(text: string, cap = 160): string {
+  const t = text.trim();
+  if (t.length <= cap) return t;
+  return t.slice(0, cap - 1).trim() + "…";
+}
+
+/**
+ * Phase 3 of [[../../docs/brain/specs/inflection-resession-must-act-on-newest-ask.md]].
+ * Lists explicit customer requests (date-change asks + simple refund/cancel/change/move/skip
+ * cues) made AFTER the last successful action's `executed_at`. Pure — no DB, no clock.
+ *
+ * `messages` is the ordered or unordered set of `ticket_messages` rows for the ticket; the
+ * helper filters to `direction='inbound'` + `author_type='customer'` + `visibility!='internal'`
+ * internally, so a caller can safely pass the full conversation.
+ *
+ * `executedActions` is the set of actions whose terminal status was `verified`/`ok` on the
+ * ticket. The caller filters out failed actions BEFORE passing them in — a failed cancel is
+ * NOT a satisfaction. The predicate takes the MAX `executed_at` as the floor.
+ *
+ * Returns an empty array when every inbound ask has been satisfied (or there was never an
+ * explicit ask). Returns one entry per unsatisfied inbound message (not per cue — multiple
+ * cues on the same message collapse to a single entry, preferring `date_change` which is the
+ * dc31bf31-specific signal) so the caller's note can name the open request without flooding.
+ */
+export function findUnsatisfiedCustomerRequests(
+  messages: UnsatisfiedRequestMessage[] | null | undefined,
+  executedActions: UnsatisfiedRequestExecutedAction[] | null | undefined,
+): UnsatisfiedCustomerRequest[] {
+  const inbound = (messages ?? []).filter(
+    (m) =>
+      m.direction === "inbound" &&
+      m.author_type === "customer" &&
+      (m.visibility ?? "external") !== "internal",
+  );
+  if (inbound.length === 0) return [];
+
+  // Latest successful-action timestamp — the "floor" above which an ask is unsatisfied.
+  // The empty-actions case uses the epoch so EVERY inbound ask counts (no action has
+  // satisfied anything yet).
+  let floor = 0;
+  for (const a of executedActions ?? []) {
+    const t = Date.parse(a.executed_at);
+    if (Number.isFinite(t) && t > floor) floor = t;
+  }
+
+  const out: UnsatisfiedCustomerRequest[] = [];
+
+  for (const m of inbound) {
+    const ts = Date.parse(m.created_at);
+    if (!Number.isFinite(ts) || ts <= floor) continue;
+    const text = (m.body_clean ?? m.body ?? "").toString();
+    if (!text.trim()) continue;
+
+    // 0) Exempt auto-reply / OOO / vendor-notification blasts
+    // ([[../../docs/brain/specs/close-no-action-guard-must-exempt-notification-and-auto-reply-emails.md]]).
+    // Ticket f3977ec6 (a GemX Terms/Privacy-update blast, no customer identity, no ask) tripped the
+    // `change` cue on the word "updated" and looped forever between June's `close_no_action` and
+    // Sol's re-session. A non-customer / auto-reply / OOO / vendor-notification inbound carries no
+    // actionable ask, so a cue word inside it must NOT count as an unsatisfied customer request —
+    // the same class the active 'Auto-close tickets from automatic replies' / 'Auto-replies/OOO
+    // bounces — close, don't respond' policy rules recognize. Scoped to the close gate only: a
+    // false-positive here merely honors a close June ALREADY chose (silent-close terminal), never
+    // force-closes over a real ask.
+    if (isAutoReplyOrNotificationInbound(m.from_address ?? null, text)) continue;
+
+    // 1) Date-change ask wins when it fires — the dc31bf31-specific signal.
+    const dateAsk = detectDateChangeAsk(text);
+    if (dateAsk.isAsk) {
+      out.push({
+        message_id: m.id,
+        message_created_at: m.created_at,
+        excerpt: excerpt(text),
+        kind: "date_change",
+        cue: "date_change_ask",
+      });
+      continue;
+    }
+
+    // 2) Fall through to the simple cue table (refund / cancel / change / move / skip).
+    for (const c of SIMPLE_REQUEST_CUES) {
+      if (c.re.test(text)) {
+        out.push({
+          message_id: m.id,
+          message_created_at: m.created_at,
+          excerpt: excerpt(text),
+          kind: c.kind,
+          cue: c.cue,
+        });
+        break;
+      }
+    }
+  }
+
+  return out;
+}
+
 /**
  * Extract the customer-facing message from a RemedyPlan. The RemedyPlan shape is `Record<string,
  * unknown>` (the formal type lands alongside this executor), so we check the plausible field names
@@ -278,6 +436,44 @@ export function extractRemedyCustomerMessage(remedy: Record<string, unknown>): s
     if (typeof value === "string" && value.trim()) return value;
   }
   return null;
+}
+
+/**
+ * Build the human-readable outcome label for June's session-complete note — the ONE line a human
+ * scanning the box queue reads to know what actually happened to the ticket. Pure so
+ * `runCsDirectorCallJob` (scripts/builder-worker.ts) can delegate and the branch logic is unit-
+ * tested without a Supabase mock.
+ *
+ * Honest-apply-status ([[../specs/june-remedy-shape-and-honest-apply-status]] Phase 2): the label is
+ * derived from the REAL `applyResult`, not the verdict's decision alone. On 2026-10-07 (ticket
+ * 2acc8634, June job c97852a5) the runner stamped 'ticket handled — closed + de-escalated' while
+ * `applyResult.ok` was FALSE (the $43.20 refund had been refused by the safety guard), hiding the
+ * failure from every reader. The branch order:
+ *   1. `awaiting_founder_approval` — a legitimate hold (money over threshold), NOT a failure.
+ *   2. `ok === false` OR `needs_attention` — a FAILED apply: say so + name the guard's reason, and
+ *      NEVER claim the ticket was handled.
+ *   3. decision-based labels (escalate_founder / author_spec / default handled) only on a clean apply.
+ */
+export function csDirectorOutcomeLabel(input: {
+  decision: string;
+  ok: boolean;
+  needs_attention?: boolean;
+  awaiting_founder_approval?: boolean;
+  reason?: string | null;
+}): string {
+  if (input.awaiting_founder_approval) {
+    return "remedy parked for founder approval (via Eve's SMS) — stays escalated";
+  }
+  if (input.ok === false || input.needs_attention === true) {
+    return `apply FAILED (${input.reason ?? "unknown"}) — ticket NOT handled`;
+  }
+  if (input.decision === "escalate_founder") {
+    return "escalated to the founder (CEO inbox + Eve) for a ruling";
+  }
+  if (input.decision === "author_spec") {
+    return "closed + de-escalated (structural fix authored to the Roadmap)";
+  }
+  return "handled — closed + de-escalated";
 }
 
 /**
@@ -307,16 +503,92 @@ function stepPayloadHasReservedType(raw: unknown): boolean {
   return Object.prototype.hasOwnProperty.call(payload, "type");
 }
 
+/**
+ * Top-level remedy keys that are NEVER action params — they're either remedy-level metadata
+ * (`action_type`, `actions`, `reason`, `summary`, `instructions`), customer-message aliases
+ * (`customer_message` / `response_message` / `message` / `customer_reply` — all consumed by
+ * `extractRemedyCustomerMessage`, so they must not leak into `payload`), or the reserved `type`
+ * selector (kept out of the lift so a flat `type` can never become a `payload.type` handler
+ * override — the bypass class `stepPayloadHasReservedType` already fails on for explicit payloads).
+ * Everything else on a payload-LESS step is a flat action param we lift into `payload`.
+ */
+const RESERVED_REMEDY_TOP_LEVEL_KEYS = new Set<string>([
+  "action_type",
+  "actions",
+  "payload",
+  "type",
+  "reason",
+  "summary",
+  "instructions",
+  "customer_message",
+  "response_message",
+  "message",
+  "customer_reply",
+]);
+
+/**
+ * Normalize a FLAT remedy shape — one where June put the action params at the top level and emitted
+ * no `payload` wrapper — by lifting every non-reserved top-level key into a `payload` object.
+ *
+ * Ground truth (ticket 2acc8634, 2026-10-07): June approved a $43.20 refund as
+ * `{action_type:'partial_refund', amount_cents:4320, order_number:'SC136413', response_message:…}`
+ * with the params at the top level and NO `payload`. `extractActionStep` read only `obj.payload`,
+ * so `actionParams` came out `{}`, the remedy-state guard refused it ('missing_order_reference'),
+ * and Susan was refunded 6.5h late only after re-emailing. Lifting the flat keys makes the same
+ * remedy produce `{amount_cents:4320, order_number:'SC136413'}` so the executor can fire it.
+ *
+ * Only called when a step carries no explicit `payload` object — an authored `payload` wins verbatim
+ * (it's the canonical shape and may intentionally be empty). Returns the normalized action params
+ * (the would-be `payload`). Pure.
+ */
+function normalizeFlatRemedyStep(obj: Record<string, unknown>): Record<string, unknown> {
+  const lifted: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    if (RESERVED_REMEDY_TOP_LEVEL_KEYS.has(key)) continue;
+    lifted[key] = value;
+  }
+  return lifted;
+}
+
+/**
+ * Normalize a `type`-keyed action step into the canonical `action_type` shape. June (and hand-
+ * assembled plans) sometimes author a step using the EXECUTOR's own `ActionParams.type` key as the
+ * action selector — `{ type: 'partial_refund', amount_cents: 4320, order_number: 'SC136413' }` —
+ * instead of the remedy-level `action_type`. When a step carries a non-empty top-level string `type`
+ * and NO usable `action_type`, promote `type` → `action_type` so the planner resolves the SAME
+ * action the executor would fire, and DROP the top-level `type` key (it's the selector, not a param,
+ * so it must not then be lifted into `payload` nor trip the reserved-payload-type guard).
+ *
+ * Scope is deliberately narrow — this ONLY touches the TOP-LEVEL selector:
+ *   - a step that already names a usable `action_type` is returned UNCHANGED (the explicit
+ *     `action_type` always wins; a stray top-level `type` can never override it);
+ *   - a `payload.type` is untouched here and STILL rejected by `stepPayloadHasReservedType` /
+ *     `extractActionStep` — the override-bypass class the 2026-07-10 security fix closed stays closed
+ *     (the gate sums on the canonical `action_type`, so a promoted selector can't diverge from it).
+ * Pure.
+ */
+function normalizeTypeKeyedStep(obj: Record<string, unknown>): Record<string, unknown> {
+  const hasActionType = typeof obj.action_type === "string" && obj.action_type.trim().length > 0;
+  const typeSelector = typeof obj.type === "string" ? obj.type.trim() : "";
+  if (hasActionType || !typeSelector) return obj;
+  const { type: _selector, ...rest } = obj;
+  return { ...rest, action_type: typeSelector };
+}
+
 function extractActionStep(raw: unknown): RemedyActionStep | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const obj = raw as Record<string, unknown>;
+  // Promote a top-level `type` selector to `action_type` BEFORE reading action_type, so a
+  // `type`-keyed step (the executor's own ActionParams shape) resolves the same action.
+  const obj = normalizeTypeKeyedStep(raw as Record<string, unknown>);
   const actionTypeRaw = obj.action_type;
   const actionType = typeof actionTypeRaw === "string" ? actionTypeRaw.trim() : "";
   if (!actionType) return null;
+  // An explicit `payload` object wins verbatim (canonical shape). When it's absent, normalize the
+  // FLAT shape by lifting the non-reserved top-level keys into `payload` (Susan Knudson incident).
   const payload =
     obj.payload && typeof obj.payload === "object" && !Array.isArray(obj.payload)
       ? (obj.payload as Record<string, unknown>)
-      : {};
+      : normalizeFlatRemedyStep(obj);
   if (Object.prototype.hasOwnProperty.call(payload, "type")) return null;
   return { actionType, actionParams: payload };
 }
@@ -333,6 +605,13 @@ function extractActionStep(raw: unknown): RemedyActionStep | null {
  *      Each step is validated (any malformed step fails the WHOLE plan — no partial fire).
  *   2. Single-action (the legacy shape kept for back-compat):
  *      `{ action_type, payload?, customer_message }` → normalizes to `actions: [one]`.
+ *
+ * Within either shape a step may be FLAT — the action params sit at the top level with no `payload`
+ * wrapper (`{ action_type, amount_cents, order_number }`). `extractActionStep` normalizes that via
+ * `liftFlatRemedyPayload` (the 2026-10-07 Susan Knudson incident), so a flat remedy fires instead
+ * of being silently dropped to `{}` params. A step with no resolvable `action_type` is the unknown
+ * flat shape that still fails the plan with a distinct reason (`remedy_missing_action_type` /
+ * `remedy_action_N_malformed`) — no customer is touched against a shape the executor can't run.
  *
  * When BOTH shapes appear on the same remedy, `actions[]` wins (it's the newer, richer authoring
  * form; the top-level `action_type` was likely a duplicate of `actions[0]`).

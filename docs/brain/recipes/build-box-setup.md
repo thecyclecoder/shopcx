@@ -19,7 +19,7 @@ sudo -iu builder           # become the worker user — EVERYTHING lives under /
 As `builder`:
 - **Repo (the worker's OWN checkout):** `~/shopcx` (`/home/builder/shopcx`) — the SHA the dashboard/heartbeat reports (`git -C ~/shopcx rev-parse --short HEAD`).
 - **Build worktrees:** `~/builds/build-<slug>` — named for the **spec slug**, stable across all of a spec's phases (see the `--resume` invariant below). plan/pr-resolve/fold lanes still use `~/builds/<job-id>` (dir name = `agent_jobs.id`); spec-chat/dev-ask/director-* use stable per-session names. A running `claude` whose `cwd` is a `~/builds/*` with **no matching active `agent_jobs` row** (no active build for that slug, or a deleted job) is a ZOMBIE — safe to `kill <pid>` that PID *only*.
-- **Max creds:** `~/.claude` (the round-robin login config dirs).
+- **Max creds:** `~/.claude` (the round-robin login config dirs) — each holds the `/login` `.credentials.json` and, once installed, a one-year `.oauth-token` (see § Long-lived setup-token auth).
 
 Service ops (as **root**): `systemctl {status,restart,stop} shopcx-builder` · live logs `journalctl -u shopcx-builder -f`. List build sessions + their worktrees: `for p in $(pgrep -f claude); do echo "$p $(readlink /proc/$p/cwd)"; done`. (Service `User=builder`; a hard `systemctl restart` orphans in-flight builds — prefer the dashboard "Queue restart" which drains first.)
 
@@ -44,6 +44,8 @@ The box round-robins across four Max logins. The dashboard ([[../dashboard/roadm
 Slot order = the `CLAUDE_CONFIG_DIRS` order — **this box sets it explicitly in `/root/shopcx-worker.env`** (the `builder-worker.ts` default is the fallback for an env-unset / fresh box). To add or remove an account, edit that env line + restart the worker (`systemctl restart shopcx-builder`); the login is a separate one-time op (below). A build card on the box view shows the **Round Robin N** it's running on, so you can see which account a live build is drawing down.
 
 **Cap reset times.** When an account hits its wall the CLI message carries the reset clock time, **localized to the running env's timezone** — the box runs in **UTC** so it always reads `resets 7pm (UTC)` / `resets 2am (UTC)` (the same limit shows `resets 10pm (America/Puerto_Rico)` in a PR-timezone terminal). `parseResetTime` (in `builder-worker.ts`) sets the account's `cappedUntil` to its REAL reset (not a flat now+5h guess), parsing in priority order: the **`resetsAt` unix-seconds epoch** in the structured `rate_limit_info` JSON → a "resets at &lt;ISO&gt;" / "try again at" phrase → that legacy UTC clock-hour ("resets 7pm (UTC)"); no parseable time → the default ~5h cooldown (never caps forever). The box view (`/dashboard/roadmap/box`) renders the reset as an **AST clock time** (`America/Puerto_Rico`, the CEO's tz) — e.g. "resets 10:00 PM AST (~9h)". (Future-time display uses a `until()` helper, not `elapsed()` — `elapsed()` clamps a future time to "~0s".)
+
+**Plans + tiers (box-account-tiers, CEO 2026-10-02).** RR1 + RR2 are **Max** (primary — the workhorses); RR3 + RR4 were downgraded to **Pro** and are **overflow only**. A NEW session goes to the least-loaded healthy primary that is under `BOX_PRIMARY_ACCOUNT_SOFT_MAX` (default 4) concurrent sessions; only when every healthy primary is at that limit, or capped/held, does it spill to the least-loaded Pro account; if no Pro account is healthy either, it stacks on a primary rather than parking. Resumes still pin to their owning account. Pure logic + tests: `scripts/builder-worker.account-tier.ts` (`npm run test:box-account-tier`). Defaults live in code (overflow = `~/.claude-third`, `~/.claude-fourth`); override with `BOX_OVERFLOW_CONFIG_DIRS` (comma list, or `none` for the old flat pool) in `/root/shopcx-worker.env`. The heartbeat `accounts.pool[].tier` reads `primary` / `overflow`.
 
 ## Multi-account round-robin + usage-cap failover (box-multi-account-failover)
 
@@ -149,6 +151,52 @@ The `~/.claude-<slot>` matches the config dir the card names (`~/.claude` for Ro
 - Phase 1 — Added `reauth_required` to `AccountHoldReason`; stopped defaulting `hold_reason` to `usage_cap` on the snapshot + heartbeat restore + pool-holds summary + parked-job log_tail; `decideSweepAction` now emits `reauth_required` (not `auth_expired`) when the credentials file has no `refreshToken`.
 - Phase 2 — First time an account enters `reauth_required`, `emitCeoReauthCardBestEffort` writes ONE `dashboard_notifications` card (`type='agent_approval_request'`, `metadata.routed_to_function='ceo'`, deduped by config dir) carrying the exact command chain above + how long the account has been dead. `dismissCeoReauthCardBestEffort` clears the card on recovery. Box page renders the `reauth_required` chip amber ("needs re-login"), distinct from rose ("capped").
 - Phase 3 — Added the pure classifier `classifyAccountHealth`; unit-tested the four spec-named cases + the warning case (`scripts/builder-worker.auth-refresh.test.ts`, wired into `test:box-auth-refresh`); added `sweepUpcomingExpiries` on the heartbeat cadence that runs against BOTH healthy AND held accounts (the ordering-trap fix), raises the reauth card EARLY for no-refreshToken accounts within 24h of expiry, and clears the hold + card the moment a CEO /login puts fresh credentials in place. Updated `applyRefreshOutcome` to clear a `reauth_required` hold on a successful refresh (so a CEO re-login shortcuts the weekly-window wait).
+
+## Long-lived setup-token auth (box-setup-token-auth, 2026-10-02) — the durable fix for dead accounts
+
+**Root cause of the recurring dead accounts.** A `/login` credential's refresh token **rotates**: every refresh mints a new one and retires the old one, and the CLI does no file locking on `.credentials.json`. When the ~8h access token expires while several lanes (plus the worker's own `attemptCredentialRefresh` exercise) run on the same account, their refreshes race; the losers present a just-retired refresh token and the account is left with a dead/missing one — `refresh_failed` / `reauth_required` ([anthropics/claude-code#48786](https://github.com/anthropics/claude-code/issues/48786)). That is what took out all four accounts on 2026-09-24→10-02 (and the 2026-07-25 / 2026-08-03 incidents). A keep-alive cron would not help — it is one more racer.
+
+**The fix: one `claude setup-token` per account.** `claude setup-token` mints a **one-year**, inference-only, subscription-billed OAuth token ([docs](https://code.claude.com/docs/en/authentication.md#generate-a-long-lived-token)). Passed as `CLAUDE_CODE_OAUTH_TOKEN` it ranks above the `/login` credential, and it has no refresh token to race on. Limits: inference only — no Remote Control, no claude.ai connectors (box lanes use neither; local MCP servers still work); not read under `--bare`.
+
+**How the worker uses it** (`scripts/builder-worker.oauth-token.ts`, tests `npm run test:box-oauth-token`):
+- Each account's token lives in **`<configDir>/.oauth-token`** (0600). The file's mtime is the mint time.
+- `runBoxSession` sets `CLAUDE_CODE_OAUTH_TOKEN` from the session's account's file (after the sandbox branch, so `build`/`qc` sandboxes still get it) and always drops any inherited global one so accounts can't cross. `CLAUDE_CONFIG_DIR` stays set — `--resume` transcripts still live in the config dir.
+- `sweepExpiredCredentials` **skips** `.credentials.json` for a token account (no expiry eject, no refresh exercise). A newly-installed token **releases an auth hold** (`reauth_required` / `refresh_failed` / `auth_expired`) within ~30s, no restart — including holds restored from the heartbeat. A usage-cap hold is never released by a token.
+- If the token itself 401s, the reactive path holds the account and records which token was rejected; only a **newer** token file releases it (no flapping). The CEO card then carries the setup-token remedy, not `/login`.
+- `sweepUpcomingExpiries` raises the CEO renewal card (same `box_account_reauth_required:<dir>` dedupe key) **30 days** before the token's estimated one-year expiry, and dismisses it once a fresh token is in place.
+- An account **without** `.oauth-token` behaves exactly as before (opt-in per account).
+
+**Install / renew a token (per account, one at a time):**
+
+```bash
+ssh root@claude-server
+sudo -iu builder
+cd ~/shopcx
+CLAUDE_CONFIG_DIR=~/.claude-personal claude setup-token     # approve in a browser signed in to THAT account's email; copy the printed token
+bash scripts/box-install-oauth-token.sh ~/.claude-personal  # paste it (hidden); verifies with a tiny claude -p, then writes ~/.claude-personal/.oauth-token
+```
+
+Repeat with `~/.claude` (RR1), `~/.claude-personal` (RR2), `~/.claude-third` (RR3), `~/.claude-fourth` (RR4). The script refuses to save a token that fails its verification run. Verify billing once after switching: claude.ai/settings/usage moves, the API console stays flat.
+
+**⚠️ The token changes the CLI's default model — pin it.** Under `/login` the unpinned default was Opus 4.8; under the setup-token it fell to **Sonnet 4.6** (2026-10-02 → 10-07, unnoticed), which ended ~half of `ticket-handle` sessions without their final JSON. Every account's `<configDir>/settings.json` therefore carries `"model": "claude-opus-4-8"` (set 2026-10-07; backups at `settings.json.bak-20261007`). A new account / re-provisioned config dir must get the same line. Kinds pinned in [[../tables/agent_model_tiers]] still override it via `--model` ([[../libraries/agent-model-tiers]]). Check the live model from any transcript's `message.model`.
+
+## Blank final results + reading a session transcript (box-blank-session-result, 2026-10-07)
+
+**Symptom.** From 2026-10-03 about half of Sol's `ticket-handle` sessions (and most `cs-director-call` / `agent-grade` runs) ended `subtype:"success"` with `"result":""` — the last turn emitted ~2 tokens — so the lane found no JSON and failed the job ("Sol first-touch returned no completed direction JSON"). It began the day after the pool moved to setup-token auth; the CLI also self-updates, so the cause is not yet pinned.
+
+**Root cause (found 2026-10-07): the model, not the auth.** The setup-token switch silently moved unpinned sessions from Opus 4.8 to Sonnet 4.6 (see the ⚠️ note above). Sonnet writes the JSON beside a `TaskUpdate` call, then ends on an empty or prose turn; Opus didn't. Fixed by pinning the model, so the recovery below is now a safety net.
+
+**Recovery (in `runBoxSession`, so every lane gets it).** `scripts/builder-worker.session-result.ts` (tests: `npm run test:box-session-result`): (1) use the `result` text when non-blank; (2) else the session's last non-blank assistant text block (the answer the agent already wrote); (3) else resume the SAME session once (same account + cwd, Claude only, ≤5 min) with `BLANK_RESULT_NUDGE_PROMPT` asking it to restate its final output. An `is_error` result is never swapped (the wall/auth classifiers read it).
+
+**Diagnosis data.** The heartbeat's `accounts.session_results` carries since-boot counters of successful sessions split by auth mode (`setup_token` / `login`) and by kind × answer source (`result` / `assistant_fallback` / `blank`), plus nudge outcomes; `accounts.cli_version` is the box's `claude --version` (re-read hourly). If blanks cluster on `setup_token`, the token is implicated; if they track a `cli_version` change, the CLI is.
+
+**Reading a transcript.** Transcripts live at `<config dir>/projects/<cwd-slug>/<session-id>.jsonl` under whichever account ran the session. The session id is `agent_jobs.claude_session_id` (or `"session_id"` in the job's `log_tail`). On the box:
+
+```bash
+ssh root@claude-server
+sudo -iu builder
+bash ~/shopcx/scripts/box-show-session.sh <session-id> 60   # finds it across all four config dirs, prints the last 60 events
+```
 
 ## Second runtime: Codex on a ChatGPT plan (box-codex-runner)
 

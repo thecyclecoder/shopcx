@@ -37,7 +37,7 @@ await appstleAttemptBilling(workspaceId, nextBillingAttemptId);
 
 - **Dunning recovery** — `dunning-new-card-recovery` calls this after switching cards.
 - **Customer portal "bill now"** — see [[../libraries/portal__handlers__order-now]].
-- **Dashboard agent "bill now"** — `src/app/api/workspaces/[id]/subscriptions/[subId]/bill-now/route.ts` (agent UI button on a subscription); gates on [[../libraries/portal__order-now-guard]] for Appstle subs, returning 409 if the contract is cancelled/inactive.
+- **Dashboard agent "bill now"** — `src/app/api/workspaces/[id]/subscriptions/[subId]/bill-now/route.ts` (agent UI button on a subscription); gates on [[../libraries/portal__order-now-guard]] for Appstle subs, returning 409 if the contract is cancelled/inactive. On internal and ShopCX subs, `subscriptionOrderNow` refuses when a charge for the sub is in flight or an order for it landed in the last 15 minutes. The route returns that refusal as 409 `order_in_progress`, and the agent actions get the same refusal (`guardRecentOrderNow`).
 - **Manual admin retry** — agent UI button on a dunning-stuck sub.
 
 ## Gotchas

@@ -1,0 +1,1 @@
+- **Drop foreign PostgREST specs.current_phase column-missing noise** · verified 2026-09-28 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise]] (§ wired in [[../inngest/supabase-log-poll.md]])

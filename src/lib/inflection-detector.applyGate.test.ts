@@ -200,17 +200,40 @@ function makeAdmin(seed: {
     };
   }
 
+  // Phase 1 of inflection-resession-must-act-on-newest-ask — reSessionSol now READS
+  // ticket_messages to snapshot the newest customer ask. The gate still never WRITES there
+  // (the gate's holding-message callback is injected, so even the deferred-send path doesn't
+  // route through this stub). The read handler returns an empty list (no messages seeded in
+  // these tests), which `loadTriggerMessageForTicket` tolerates with a null — the gate's
+  // behavior-under-test is unaffected. Any insert/update is still a hard failure.
+  function fromTicketMessages() {
+    const builder: Record<string, unknown> = {
+      select(_cols?: string) { return builder; },
+      eq(_c: string, _v: unknown) { return builder; },
+      neq(_c: string, _v: unknown) { return builder; },
+      order(_c: string, _o: unknown) { return builder; },
+      limit(_n: number) { return Promise.resolve({ data: [], error: null }); },
+      insert(_row: unknown) {
+        throw new Error(
+          "applyInflectionGate must never write to ticket_messages — the router doesn't send",
+        );
+      },
+      update(_patch: unknown) {
+        throw new Error(
+          "applyInflectionGate must never write to ticket_messages — the router doesn't send",
+        );
+      },
+    };
+    return builder;
+  }
+
   const admin = {
     from(table: string) {
       if (table === "ticket_directions") return fromTicketDirections();
       if (table === "ticket_resolution_events") return fromTicketResolutionEvents();
       if (table === "tickets") return fromTickets();
       if (table === "agent_jobs") return fromAgentJobs();
-      if (table === "ticket_messages") {
-        throw new Error(
-          "applyInflectionGate must never write to ticket_messages — the router doesn't send",
-        );
-      }
+      if (table === "ticket_messages") return fromTicketMessages();
       throw new Error(`unexpected table: ${table}`);
     },
   } as unknown as import("@supabase/supabase-js").SupabaseClient;

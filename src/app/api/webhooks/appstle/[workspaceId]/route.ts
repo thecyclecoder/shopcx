@@ -183,9 +183,12 @@ async function handleSubscriptionEvent(
     // rows non-internal the newest won, i.e. the dead shell — which is precisely the Ellyn /
     // ticket 183d28b9 incident, at migration scale.
     //
-    // Keying on `migrated_from_contract_id` cannot match the live pre-migration row (that row
-    // carries the id in `shopify_contract_id`), so a genuine customer cancellation still passes
-    // through, while any contract we migrated AWAY from is recognised whichever engine it moved to.
+    // A live, un-migrated row has no `migrated_from_contract_id` equal to its own contract id, so
+    // a genuine customer cancellation still passes through, while any contract we migrated AWAY
+    // from is recognised whichever engine it moved to. The one deliberate exception: the internal
+    // migration stamps it on the row just BEFORE cancelling the Appstle contract (and restores it
+    // if the cancel fails), so its own cancel webhook is ignored even if it lands before the flip.
+    // See cancelOldEngineForMigration in migrate-to-internal.ts.
     const { data: existingSub } = await admin.from("subscriptions")
       .select("id, is_internal, billing_source")
       .eq("workspace_id", workspaceId)

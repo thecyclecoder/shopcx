@@ -1,0 +1,1 @@
+- **Drop stale agent_jobs branch_name direct-REST log noise** · verified 2026-10-03 · → [[../libraries/control-tower]]

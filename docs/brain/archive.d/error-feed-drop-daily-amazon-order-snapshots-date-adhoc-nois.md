@@ -1,0 +1,1 @@
+- **Drop foreign daily Amazon snapshot date lookups from Supabase logs** · verified 2026-10-04 · → [[../inngest/supabase-log-poll]]

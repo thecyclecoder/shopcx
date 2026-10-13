@@ -42,6 +42,7 @@ Written by Sol's box session (`runTicketHandleJob` — Phase 2 wire-in of the pa
 - **Phase 2 executor — [[../libraries/honor-required-outcomes]]** — walks `listRequiredOutcomes(admin, ticket_id)` and, per row, fires the action via `directActionHandlers` + verifies via `verifyActionInDB` and marks the row `verified` or `failed`. Stamps `resolution_event_id` back to the [[ticket_resolution_events]] row it authored.
 - **Phase 3 send guard** — before a customer-facing message ships, checks that every outcome the message asserts is backed by a row with `status='verified'`. An unbacked claim is BLOCKED (ledger stamp `verified_outcome='unbacked'`) and rewritten to the truthful state.
 - **Phase 4 completion gate** — a ticket cannot auto-resolve while `hasUnverifiedOutcomes` is true; escalations name the specific unfinished items via `countOutcomesByStatus`.
+- **Close-no-action pre-read — [[../libraries/cs-director-close-gate]]** — the close-no-action gate in `decideCsDirectorTicketTransition` (scripts/builder-worker.ts) loads this table to populate `executedActions` for the unsatisfied-ask predicate. Reads: `kind`, `status`, `verified_at`, `authored_at`. The column names MUST match exactly — a prior schema drift caused the pre-read to crash silently and leave `executedActions` empty, defeating the Phase-3 gate that checks for unsatisfied customer asks before closing (ticket dc31bf31 case).
 
 ## Row lifecycle
 

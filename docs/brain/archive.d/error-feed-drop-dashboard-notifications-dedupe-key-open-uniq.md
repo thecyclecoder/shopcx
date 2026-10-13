@@ -1,0 +1,1 @@
+- **Drop expected 23505 on dashboard_notifications_dedupe_key_open_uniq from supabase-logs capture** · verified 2026-09-28 · → [[lifecycles/control-tower]]

@@ -1,0 +1,1 @@
+- **Drop stale loop_heartbeats beat_at direct-REST noise** · verified 2026-10-05 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise`)

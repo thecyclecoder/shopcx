@@ -29,7 +29,7 @@ export async function POST(
   // Look up order with shipping address from fulfillments JSONB
   const { data: order } = await admin
     .from("orders")
-    .select("id, shopify_order_id, line_items, fulfillments, total_price_cents, order_number")
+    .select("id, shopify_order_id, line_items, fulfillments, total_cents, order_number")
     .eq("id", order_id)
     .eq("workspace_id", workspaceId)
     .single();
@@ -127,7 +127,7 @@ export async function POST(
       lineItems: rateLineItems,
     });
 
-    const orderTotalCents = order.total_price_cents || 0;
+    const orderTotalCents = order.total_cents || 0;
     const netRefundCents = Math.max(0, orderTotalCents - result.rate.costCents);
 
     return NextResponse.json({

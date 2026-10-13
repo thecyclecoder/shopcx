@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST noise: crisis_customer_actions missing-column reads** · verified 2026-10-07 · → [[../libraries/control-tower]], [[../inngest/supabase-log-poll]]

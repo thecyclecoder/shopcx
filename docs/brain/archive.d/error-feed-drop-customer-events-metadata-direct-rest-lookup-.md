@@ -1,0 +1,1 @@
+- **Drop foreign-app PostgREST noise: `customer_events.metadata` ad hoc lookup** · verified 2026-10-01 · → [[../libraries/control-tower]]

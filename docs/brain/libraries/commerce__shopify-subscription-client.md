@@ -34,6 +34,7 @@ Design + migration plan: [[../lifecycles/shopcx-subscriptions]]. Dunning interac
 | `getSubscriptionContract(ws, contractId)` | — | read |
 | `getUpcomingBillingCycles(ws, contractId, opts?)` | `appstleGetUpcomingOrders` | read |
 | `getBillingCycleForDate(ws, contractId, date)` | — | read |
+| `resolveChargeableCycle(ws, contractId, now?)` | — | read |
 | `shopifySyncBillingSchedule(ws, contractId, {firstDate, startIndex?, cycles?})` | — | pin |
 | `shopifyRetimeContract(ws, contractId, nextDate)` | `appstleUpdateNextBillingDate` (done right) | pin |
 | `anchorsForDate(date, interval)` | — | helper |
@@ -146,6 +147,22 @@ commits, a charge landing in the window bills the new quantity at the old tier.
 - **Omitting `billingCycleSelector` on a charge bills Shopify's CURRENT calendar cycle**, not the
   renewal we decided to fire. On the live contract that cycle was already `BILLED`. Pass a
   selector once the worker knows which cycle it is charging.
+- **⭐ Charge-time cycle resolution — `resolveChargeableCycle(ws, contractId, now?)`.** The charge-time
+  replacement for `getBillingCycleForDate(next_billing_date)`. Our DB row PLANS the date; Shopify's
+  billing calendar is resolved only here, when we actually charge. It reads `getUpcomingBillingCycles`
+  and returns the **first non-skipped `UNBILLED` cycle by index** plus an `originTime` guaranteed to
+  fall inside that cycle's window (`now` when `now` is inside the window, otherwise the cycle's
+  `startAt + 1s`). This is why **a `BILLED` date-cycle is no longer a reason to skip or refuse**: by
+  index the first unbilled cycle is always billable, so a date landing inside a spent cycle can no
+  longer strand the sub. Double-charge protection moves entirely to our claim ledger
+  ([[subscription-cycle-charge-claim]] / `guardRecentOrderNow`), not Shopify's calendar. Callers:
+  [[../inngest/shopify-subscription-renewals]] (`resolve-chargeable-cycle` step) and
+  `portal/handlers/order-now.ts` (the ShopCX branch).
+- **`originTime` on `shopifyAttemptBilling`.** Shopify validates the attempt's origin time against the
+  SELECTED cycle and rejects a future-cycle attempt with *"Origin time needs to be within the selected
+  billing cycle"*. `shopifyAttemptBilling` now accepts `opts.originTime`, which `resolveChargeableCycle`
+  computes to always land inside the cycle it picked — this is what lets a renewal or Order Now bill a
+  FUTURE unbilled cycle by index. Omitting it keeps Shopify's default (origin time = now).
 - **The billing/delivery policies are WHOLE-OBJECT replacements.** Sending only
   `{interval, intervalCount}` wipes `anchors` / `minCycles` / `maxCycles`, silently moving every
   future charge date on an anchored contract. `shopifyUpdateBillingInterval` read-modify-writes.
@@ -262,10 +279,19 @@ await shopifySyncBillingSchedule(ws, contractId, { firstDate: nextBillingDate })
 // → { success, pinned: 13, stoppedAt?: "2027-09-14" }
 ```
 
-`shopifyRetimeContract` is the portal-facing wrapper: resolve the landing cycle for the new date
-with `getBillingCycleForDate`, then sync from that index. It is what a "change my next order date",
-a pause/resume, or a skip should call — **not** `shopifySetNextBillingDate` alone, which leaves the
-Shopify-visible schedule saying something different from what we will actually charge.
+`shopifyRetimeContract` is the pin+display wrapper: resolve the landing cycle for the new date with
+`getBillingCycleForDate`, then sync from that index AND set the display field.
+
+⭐ **Phase 2 (2026-10-08): portal timing changes NO LONGER call `shopifyRetimeContract`.** With
+charge-time cycle resolution (`resolveChargeableCycle` bills the first unbilled cycle by index), the
+cycle pin is unnecessary — and the pin was itself the strander (`shopifySyncBillingSchedule` dragged
+a spent cycle forward onto the customer's new date). So a date change, frequency change, pause, resume
+and skip now call **`shopifySetNextBillingDate` (display-only, mechanism 1)** and write our own
+`next_billing_date`. The Shopify-visible date can differ from a spent cycle boundary without harm,
+because we bill by index, not by that date. `shopifyRetimeContract` / `shopifySyncBillingSchedule`
+survive only for the migration create-sync and the (optional) rolling pin on charge.
+
+**⚠️ A refused retime leaves NOTHING behind (Phase 2 of [[../specs/sol-checks-billability-and-delivery-before-answering-order-now-failures]]).** The order inside `shopifyRetimeContract` is now: (1) `shopifySyncBillingSchedule` re-anchors the calendar — its own `success:false` (first pin back-resolves to a spent cycle) short-circuits the retime; (2) `getBillingCycleForDate` VERIFIES the target lands in an unbilled cycle **before** `shopifySetNextBillingDate` is called; (3) only on a confirmed-billable landing is the display `nextBillingDate` written. A stranded landing returns `{ success: false, stranded: true }` and writes neither Shopify's `nextBillingDate` nor our mirror row (the caller — [[commerce__subscription]] `subscriptionUpdateNextBillingDate` + [[action-executor]] `change_next_date` — gates its row write on `success`). Previously the verify ran AFTER the set and returned `success:true, stranded:true`, so a refused retime still left the new date on the contract — the 2026-10-08 Ashley Denson incident, where an Oct-11 retime Shopify flagged unbillable stayed put and hid the stuck state from Sol. The two direct renewal/auto-resume callers already branch on `.stranded` before `.success`, so the `success:false` is compatible.
 
 ### Why the 12-month horizon does not need solving with a cadence change
 
@@ -284,9 +310,97 @@ One mutation per renewal buys a permanently-correct schedule:
   date.
 - **on every successful charge** — [[../inngest/shopify-subscription-renewals]] pins the cycle that
   lands on the new `advanceTo` (plus one), so the horizon advances with the customer.
-- **on any portal date change** — pause/resume ([[../inngest/portal-auto-resume]]), skip, or an
-  explicit reschedule go through `shopifyRetimeContract`.
+- **on any portal date change** — pause/resume ([[../inngest/portal-auto-resume]]), skip, frequency
+  or an explicit reschedule set the display date only (`shopifySetNextBillingDate`) and write our
+  `next_billing_date`; they do NOT re-pin (Phase 2).
 
 Every one of these is **non-fatal**. The renewal worker bills by an explicit
 `billingCycleSelector` it resolves itself, so a failed pin is a display drift, never a missed or
 duplicated charge.
+
+
+## 🔴 NEVER pin a spent cycle — the rolling retime stranded 90 subs
+
+`shopifyRetimeContract` pinned whichever cycle the target date resolved to. After a successful
+charge that is the cycle that **just billed** — so the retime dragged a BILLED cycle forward onto the
+customer's next date. The renewal worker resolves by date and skips spent cycles, so the
+subscription became silently unbillable: row active, date correct-looking, never charged again.
+
+**Measured 2026-09-28: 90 of 209 migrated subs, every one stranded by our own retime.** Drift had
+read 0 three days earlier, because the strand only appears after the *next* charge.
+
+Fixed: the retime now steps past BILLED/skipped cycles to the first open one before pinning. The
+customer's date is unchanged; only which cycle carries it moves.
+
+### ⚠️ The damage is only half-repairable
+
+Probed directly while fixing it:
+
+- a spent cycle **can** be pinned back into its own window (accepted, no error);
+- but the FOLLOWING cycle then refuses `OUT_OF_BOUNDS` when pulled back to the customer's date.
+
+A stranded customer can be re-dated, but only **inside the open cycle's window**.
+
+⚠️ **`billingAttemptExpectedDate` is the cycle END, not "the date".** The first repair used it as the
+target and pushed all 88 customers to the far edge of their next cycle — mean **+40 days**, worst
+**+140 on a 28-day cadence**, five cycles skipped. A cycle can be pinned anywhere inside
+`[startAt, endAt]`, and the window START is usually exactly one cadence after the customer's last
+charge: their real date. `scripts/_repair-strand-dates.ts` targets
+`last charge + cadence`, clamped into the window — which **removed 3,436 days of delay across 88
+customers (mean 39d each)** and took the delayed count from 88 to 4.
+
+The 4 that remain sit at the earliest date their window allows, and their gaps are **not** from this
+bug — all four were already overdue on Appstle before migration (last charged 06-30 to 08-28 on
+28-day cadences).
+
+Revenue is delayed, never lost, and a re-dated customer only ever moves LATER — nobody is surprised
+by an early charge.
+
+That asymmetry is the reason the guard matters more than the repair: this is cheap to prevent and
+impossible to undo cleanly.
+
+
+## ⚠️ A sub can be in the RIGHT cycle and still be dated a month too late
+
+The strand check asks "is my date in a spent cycle?" and the drift check asks "does Shopify's date
+match mine?" **A subscription can pass both and still be wrong**: sitting in a correct, unbilled
+cycle but pinned to the far end of its window, a full extra cycle after the customer's last charge.
+
+Nothing flags it. The reconciler sees an unbilled cycle (not stranded) and a date that matches ours
+(no drift). It is visible *only* by comparing the date against the customer's own cadence —
+`last charge + one interval` — which is what `scripts/_delay-audit.ts` does.
+
+Found 2026-09-28 while verifying a claim that "only 4 customers are delayed". The real figure across
+183 active subs was **22**, of which 3 were this shape. `scripts/_pull-late-dates-earlier.ts` moved
+14 subs to the earliest date their window allows, recovering **379 days** and taking
+strand-attributable delay to **0**.
+
+The 15 that remain are all legitimate: 7 held by an open dunning cycle (which holds the date on
+purpose) and 8 that were already overdue on Appstle before migration.
+
+**The lesson for any future audit: a metric that reads "fine" is not the same as a customer being
+charged on the right day.** Both automated checks were green on subs that were a month late.
+
+
+## 🔴 Verify every pin — the edit that schedules a customer can strand them
+
+Pinning cycle N to date X makes X the **END BOUNDARY** of cycle N−1's window, and a date lookup
+resolves a boundary to the **earlier** cycle. If N−1 is BILLED, the edit meant to schedule the
+customer has just made them unbillable — and `subscriptionBillingCycleScheduleEdit` returns success.
+
+Measured 2026-09-30: a repair script pinned 14 subs to earlier dates and **re-stranded 3 of them**
+this way, one day after a different repair fixed 90. It trusted the mutation's own success; the
+earlier repair had verified and did not.
+
+`shopifySyncBillingSchedule` now re-reads after the first pin and fails loudly if the date resolves
+to a spent cycle. It lives in the SDK rather than in any one caller because **every** caller needs
+it — the renewal worker, the portal, and every repair script.
+
+**Never trust a schedule edit's own success.** Ask where the date actually lands.
+
+### Recovering a sub whose next live cycle is far away
+
+A stranded sub is not always fixable by walking the date forward: if the following cycle sits months
+out (one was at +104 days on a 56-day cadence), the walk never reaches it. Pin that cycle back
+instead — its window starts at the spent cycle's date, so `last charge + one cadence` is usually
+inside it and restores the customer's real rhythm.

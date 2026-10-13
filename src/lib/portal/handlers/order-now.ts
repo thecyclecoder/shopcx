@@ -3,7 +3,7 @@ import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstle
 import { appstleAttemptBilling } from "@/lib/appstle";
 import { subscriptionGetUpcomingOrders } from "@/lib/commerce/subscription";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { guardAppstleOrderNow, guardInternalOrderNow } from "@/lib/portal/order-now-guard";
+import { guardAppstleOrderNow, guardInternalOrderNow, guardRecentOrderNow } from "@/lib/portal/order-now-guard";
 
 export const orderNow: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -36,6 +36,7 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
     // placed.') — a silent no-op is what made the customer press again.
     const internalGuard = await guardInternalOrderNow(createAdminClient(), {
       subscription_id: resolved.id,
+      workspace_id: auth.workspaceId,
     });
     if (internalGuard.action === "block") {
       return jsonErr({ error: internalGuard.reason, message: internalGuard.message }, 409);
@@ -85,23 +86,37 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
   // reaches subscriptionAttemptBilling the contract id has already been traded for an attempt id.
   const { resolveBillingSource } = await import("@/lib/internal-subscription");
   if ((await resolveBillingSource(auth.workspaceId, String(contractId))) === "shopcx") {
-    const { shopifyAttemptBilling, awaitBillingAttempt } = await import("@/lib/commerce/shopify-subscription-client");
+    // Same repeat-press refusal as the internal branch. The BILLED pre-check below only
+    // covers the CURRENT cycle; once the first press advances next_billing_date, a second
+    // press targets the next cycle and would charge again.
+    const recentGuard = await guardRecentOrderNow(createAdminClient(), {
+      subscription_id: resolved.id,
+      workspace_id: auth.workspaceId,
+    });
+    if (recentGuard.action === "block") {
+      return jsonErr({ error: recentGuard.reason, message: recentGuard.message }, 409);
+    }
+    const { shopifyAttemptBilling, awaitBillingAttempt, resolveChargeableCycle } = await import("@/lib/commerce/shopify-subscription-client");
     const { cycleKeyFromNextBillingDate } = await import("@/lib/subscription-cycle-charge-claim");
     const due = (resolved as { next_billing_date?: string | null }).next_billing_date ?? null;
     const cycleKey = cycleKeyFromNextBillingDate(due);
     // ⚠️ NOT the renewal worker's key. Reusing it makes Shopify REPLAY that cycle's cached
     // attempt: if the cron already succeeded the customer is told a new order was placed when none
     // was, and if it declined they can never self-serve after fixing their card — the stale
-    // decline replays forever. A distinct key means this is a real, fresh attempt; the BILLED
-    // pre-check below is what stops a genuine double charge.
-    const cycleCheck = await (await import("@/lib/commerce/shopify-subscription-client"))
-      .getBillingCycleForDate(auth.workspaceId, String(contractId), due ?? new Date().toISOString());
-    if (cycleCheck.success && cycleCheck.cycle?.status === "BILLED") {
-      return jsonErr({ error: "already_billed", message: "This order has already been placed." }, 409);
+    // decline replays forever. A distinct key means this is a real, fresh attempt; `guardRecentOrderNow`
+    // above (our claim ledger) is what stops a genuine double charge, not Shopify's calendar.
+    //
+    // ⭐ Resolve the cycle AT CHARGE TIME — the first non-skipped UNBILLED cycle by index. A BILLED
+    // cycle is no longer a reason to refuse: our date only plans when, Shopify's calendar is resolved
+    // here. Billing by index with an in-window originTime lets an Order Now charge a future unbilled
+    // cycle instead of refusing with "already placed" when the date sits in a spent cycle.
+    const cycle = await resolveChargeableCycle(auth.workspaceId, String(contractId), new Date());
+    if (!cycle.success || cycle.index == null || !cycle.originTime) {
+      return jsonErr({ error: "no_chargeable_cycle", message: cycle.error ?? "No upcoming cycle to bill." }, 409);
     }
     const started = await shopifyAttemptBilling(
       auth.workspaceId, String(contractId), `${contractId}:${cycleKey}:portal`,
-      due ? { billingCycleSelector: { date: due } } : {},
+      { billingCycleSelector: { index: cycle.index }, originTime: cycle.originTime },
     );
     if (!started.success || !started.attemptId) {
       return jsonErr({ error: "billing_failed", message: started.error ?? "Could not start billing." }, 502);
@@ -119,17 +134,18 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
     // its own, so the sub silently stops earning and the skip is indistinguishable from a healthy
     // "nothing due" beat.
     {
-      // ⭐ Advance by the customer's OWN cadence, not to Shopify's next cycle END. Its calendar is
-      // anchored to the contract's createdAt, so the next cycle's end can be most of an extra
-      // interval away — one whole interval of revenue deferred per charge.
-      //
-      // Anchored to `due` (the date they were scheduled for) rather than to now, so an early
-      // "order now" does not permanently pull the customer's whole schedule forward.
-      const { rollForwardToFutureBillingDate } = await import("@/lib/dunning");
+      // ⭐ Advance by the customer's OWN cadence, at least one cadence from `max(due, now)`. An
+      // EARLY press (due still in the future) must ALWAYS move the date by one cadence — the old
+      // `rollForwardToFutureBillingDate(due)` was a no-op there, so the date never moved, the next
+      // nightly run re-resolved the same cycle, and the sub was stranded on one date (ground truth
+      // 2026-10-08, Ashley Denson). A late press rolls forward past now. `nextDateAfterCharge`
+      // encodes both.
+      const { nextDateAfterCharge } = await import("@/lib/dunning");
       const admin = createAdminClient();
       const r = resolved as { billing_interval?: string | null; billing_interval_count?: number | null };
-      const advanceTo = rollForwardToFutureBillingDate(
+      const advanceTo = nextDateAfterCharge(
         new Date(due ?? new Date().toISOString()),
+        new Date(),
         r.billing_interval ?? "month",
         r.billing_interval_count ?? 1,
       );

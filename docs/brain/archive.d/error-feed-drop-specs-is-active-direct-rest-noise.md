@@ -1,0 +1,1 @@
+- **Drop stale specs.is_active direct-REST noise from Supabase logs** · verified 2026-09-26 · → [[lifecycles/control-tower]]

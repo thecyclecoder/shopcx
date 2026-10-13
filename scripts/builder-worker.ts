@@ -58,7 +58,10 @@ import { buildQcChildEnv } from "../src/lib/ads/creative-qc-sandbox";
 import { recoverSpecsForSession, type RecoveredSpec } from "./planner-transcript-recover";
 import { isStrandedFoldCandidate } from "./builder-worker.stranded-fold"; // fold-never-strands-a-shipped-spec-with-a-zero-machine-check-spec-test Phase 1 — pure decision predicate for sweepStrandedFolds
 import { shouldReAskForJsonEnvelope, storefrontOptimizerReAskPrompt } from "../src/lib/storefront-optimizer-reask"; // storefront-optimizer-re-asks-once-before-parking Phase 1 — pure decision helper for the one bounded re-ask before park
-import { applyRefreshOutcome, classifyAccountHealth, decideHeldAccountRecovery, decideSweepAction } from "./builder-worker.auth-refresh"; // a-test-that-no-runner-executes-is-not-a-test Phase 1 — pure decision predicates for sweepExpiredCredentials + attemptCredentialRefresh, extracted so scripts/builder-worker.auth-refresh.test.ts can pin the four cases the outage named. build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 — classifyAccountHealth is the shared account-health classifier the sweepUpcomingExpiries + brain runbook document as the SoT for the reason vocabulary. Re-authored Phase 1 — decideHeldAccountRecovery is the pure predicate the sweep consults for accounts ALREADY held, so a CEO re-auth returns them to rotation on the next sweep tick instead of waiting out the 25-hour weekly-cap window.
+import { applyRefreshOutcome, classifyAccountHealth, decideHeldAccountRecovery, decideSweepAction } from "./builder-worker.auth-refresh";
+import { BLANK_RESULT_NUDGE_PROMPT, chooseFinalText, parseSessionStream } from "./builder-worker.session-result"; // box-blank-session-result — recover a blank final `result` (2026-10-03 regression).
+import { parseOverflowDirs, parsePrimarySoftMax, pickTieredAccount } from "./builder-worker.account-tier"; // box-account-tiers — Max primaries carry the load, Pro accounts take overflow only.
+import { applyOauthTokenEnv, decideTokenHoldRelease, readOauthToken, tokenExpiryStatus, type OauthToken } from "./builder-worker.oauth-token"; // box-setup-token-auth — per-account one-year `claude setup-token` tokens replace the race-prone /login refresh tokens (anthropics/claude-code#48786); see docs/brain/recipes/build-box-setup.md § Long-lived setup-token auth. // a-test-that-no-runner-executes-is-not-a-test Phase 1 — pure decision predicates for sweepExpiredCredentials + attemptCredentialRefresh, extracted so scripts/builder-worker.auth-refresh.test.ts can pin the four cases the outage named. build-an-account-that-needs-a-human-login-says-so-instead-of-hiding-as-capped Phase 3 — classifyAccountHealth is the shared account-health classifier the sweepUpcomingExpiries + brain runbook document as the SoT for the reason vocabulary. Re-authored Phase 1 — decideHeldAccountRecovery is the pure predicate the sweep consults for accounts ALREADY held, so a CEO re-auth returns them to rotation on the next sweep tick instead of waiting out the 25-hour weekly-cap window.
 // planner-authoring-survives-large-multi-spec-output Phase 2 — bounded per-result size for the
 // planner authoring turn: split the approved specs into small batches (K=2), one runClaude call
 // per batch, so no single result approaches the size at which the ingestion drop kicked in.
@@ -83,7 +86,7 @@ import { runBoxTurnWithFreshFallback, pickNextSession, isMissingSessionError } f
 // vocabulary the migration-fix lane branches on. Sourced from src/lib/migration-fix.ts so a `code_gap`
 // (or any future) verdict is a RECOGNIZED terminal outcome carried forward with its diagnosis, not a
 // silent fallthrough into the "ended without propose/human_needed" park that discarded the finding.
-import { RECOGNIZED_MIGRATION_FIX_VERDICTS, isRecognisedMigrationFixVerdict } from "../src/lib/migration-fix";
+import { RECOGNIZED_MIGRATION_FIX_VERDICTS, isRecognisedMigrationFixVerdict, migrationGapSpecMarkdown, type MigrationGapSpec } from "../src/lib/migration-fix";
 import type { CopyAuthorSessionDispatcher } from "../src/lib/ads/creative-agent"; // type-only — the impl is dynamic-imported; this pins the resume-aware dispatcher signature at compile time
 import type { CopyQcSessionDispatcher } from "../src/lib/ads/creative-qa"; // type-only — max-final-qa-7of10-eligibility-gate-with-bounce-to-dahlia Phase 1 dispatcher signature; the impl is dynamic-imported like the author/qa dispatchers
 
@@ -1205,6 +1208,10 @@ interface AccountState {
   authRefreshInFlight?: boolean;    // a `claude -p` refresh call is currently running for this account
   lastAuthRefreshAttemptAt?: number; // epoch-ms of the last refresh attempt — throttles re-attempts
   lastAuthRefreshFailed?: boolean;   // last completed refresh attempt did NOT renew expiresAt
+  // box-setup-token-auth — the mint time (token-file mtime) of the setup-token the account was on when
+  // an auth hold was placed. A hold on a token that itself 401'd is only released by a NEWER token file
+  // (decideTokenHoldRelease); null/undefined = the hold predates the token (a /login-era hold) → release.
+  tokenMintedAtWhenHeld?: number | null;
 }
 const accounts: AccountState[] = ACCOUNT_POOL.map((d) => ({ configDir: d, inFlight: 0, lastAssignedAt: 0, cappedUntil: 0, capEventLogged: false, holdReason: null }));
 const accountByDir = new Map(accounts.map((a) => [a.configDir, a]));
@@ -1290,6 +1297,38 @@ function noteAccountRecoveries(now: number) {
   }
 }
 
+// ── box-blank-session-result diagnostics (2026-10-07) ──────────────────────────────────────────────
+// From 2026-10-03 many box sessions finished OK but with a BLANK final result. It began the day after
+// the pool moved to `claude setup-token` auth, and the CLI on the box self-updates, so either could be the
+// cause. These since-boot counters (on the heartbeat as `accounts.session_results`) split every
+// successful session by auth mode and by how its answer was obtained, plus the box's CLI version, so
+// the cause shows up in data instead of needing a manual A/B on the box.
+type FinalSourceKey = "result" | "assistant_fallback" | "blank";
+const emptyBucket = (): Record<FinalSourceKey, number> => ({ result: 0, assistant_fallback: 0, blank: 0 });
+const sessionResultStats = {
+  since: new Date().toISOString(),
+  by_auth: { setup_token: emptyBucket(), login: emptyBucket() } as Record<"setup_token" | "login", Record<FinalSourceKey, number>>,
+  by_kind: {} as Record<string, Record<FinalSourceKey, number>>,
+  nudges: { recovered: 0, failed: 0 },
+};
+function noteSessionResult(kind: string, auth: "setup_token" | "login", source: FinalSourceKey): void {
+  sessionResultStats.by_auth[auth][source]++;
+  (sessionResultStats.by_kind[kind] ??= emptyBucket())[source]++;
+}
+function noteBlankNudgeOutcome(kind: string, recovered: boolean): void {
+  sessionResultStats.nudges[recovered ? "recovered" : "failed"]++;
+  if (!recovered) console.warn(`[runBoxSession:${kind}] blank-result resume nudge did not recover an answer`);
+}
+let _claudeCliVersion: string | null | undefined;
+function claudeCliVersion(): string | null {
+  if (_claudeCliVersion !== undefined) return _claudeCliVersion;
+  const r = sh("claude", ["--version"], { timeout: 15_000 });
+  _claudeCliVersion = r.code === 0 ? r.out.trim().split("\n")[0].slice(0, 80) || null : null;
+  return _claudeCliVersion;
+}
+// Re-read the CLI version at most hourly — the CLI self-updates under a long-running worker.
+setInterval(() => { _claudeCliVersion = undefined; }, 60 * 60 * 1000).unref?.();
+
 // The per-account snapshot the worker writes onto its heartbeat (box-multi-account-failover Phase 2). Carries
 // per-account in-flight load + capped state, the healthy count, the all-capped flag, and the recent event
 // ring — everything the box-health view + Control Tower box tile need to show how each Max account is burning.
@@ -1312,12 +1351,16 @@ function accountsSnapshot(now: number) {
       // quota claim we cannot substantiate. Defaulting to 'usage_cap' is what sent the founder to
       // check usage twice on 2026-08-03 while two accounts had actually been dead for 49h/66h.
       hold_reason: a.cappedUntil > now ? (a.holdReason ?? null) : null,
+      tier: OVERFLOW_CONFIG_DIRS.has(a.configDir) ? "overflow" : "primary", // box-account-tiers
     })),
     healthy: healthyAccounts(now).length,
     total: accounts.length,
     all_capped: allAccountsCapped(now),
     soonest_reset: allAccountsCapped(now) ? new Date(soonestReset(now)).toISOString() : null,
     events: accountEvents.slice().reverse(), // newest first
+    // box-blank-session-result — since-boot blank-result counters by auth mode + kind, and the CLI version.
+    cli_version: claudeCliVersion(),
+    session_results: sessionResultStats,
     // The second runtime (box-codex-runner): the box view renders this as a Codex runner card alongside the
     // Max accounts. null when Codex is disabled (kill-switch) so a Codex-less box shows only the Max pool.
     codex: CODEX_ENABLED
@@ -1380,6 +1423,11 @@ async function restoreAccountCapsOnBoot(): Promise<void> {
   }
 }
 
+// box-account-tiers (CEO 2026-10-02) — RR1/RR2 are Max (primary), RR3/RR4 are Pro (overflow only: they
+// get a NEW session only when every healthy primary already carries BOX_PRIMARY_ACCOUNT_SOFT_MAX sessions,
+// or is capped/held). Override with BOX_OVERFLOW_CONFIG_DIRS (comma list, or "none" for a flat pool).
+const OVERFLOW_CONFIG_DIRS = parseOverflowDirs(process.env.BOX_OVERFLOW_CONFIG_DIRS);
+const PRIMARY_ACCOUNT_SOFT_MAX = parsePrimarySoftMax(process.env.BOX_PRIMARY_ACCOUNT_SOFT_MAX);
 function healthyAccounts(now: number): AccountState[] {
   return accounts.filter((a) => a.cappedUntil <= now);
 }
@@ -1496,8 +1544,9 @@ function pickNewSessionAccount(now: number): AccountState | null {
   // Floor at 0: the reconcile can briefly leave a counter negative when both decrements of a just-ended
   // double-counted lane land after a heartbeat reconciled it to the ground truth — a negative must not make
   // an account look "emptiest". Self-heals on the next reconcile tick regardless.
-  healthy.sort((a, b) => Math.max(0, a.inFlight) - Math.max(0, b.inFlight) || a.lastAssignedAt - b.lastAssignedAt);
-  return healthy[0];
+  // box-account-tiers — least-loaded among Max primaries under their soft max, else Pro overflow, else
+  // stack on a primary (see scripts/builder-worker.account-tier.ts for the full rule + tests).
+  return pickTieredAccount(healthy, OVERFLOW_CONFIG_DIRS, PRIMARY_ACCOUNT_SOFT_MAX);
 }
 
 // The rollover entry-point for EVERY autonomous box runner (repair/regression/security/seed/improve/
@@ -1625,6 +1674,10 @@ function markAccountAuthExpired(dir: string, now: number, detail: string, explic
   const reason: AccountHoldReason =
     explicitReason ?? (a.lastAuthRefreshFailed ? "refresh_failed" : "auth_expired");
   a.holdReason = reason;
+  // box-setup-token-auth — on a token account the rejected credential IS the setup-token (it ranks above
+  // /login), so remember which token was rejected: only a newer token file releases this hold.
+  const heldToken = cachedOauthToken(dir, now);
+  a.tokenMintedAtWhenHeld = heldToken ? heldToken.mintedAt : null;
   if (!a.capEventLogged) {
     a.capEventLogged = true;
     const detailForEvent =
@@ -1643,7 +1696,11 @@ function markAccountAuthExpired(dir: string, now: number, detail: string, explic
     // sat unreported for three days on 2026-08-03). The `auth_expired` / `refresh_failed` paths
     // keep the historical card body — Phase 2 explicitly names the unrecoverable case as the one
     // that needs to escalate; the auto-recoverable cases don't warrant a founder page.
-    if (reason === "reauth_required") {
+    if (heldToken) {
+      // box-setup-token-auth — the account's setup-token was rejected (revoked, or past its year). The
+      // remedy is a fresh `claude setup-token`, not /login, so it gets the token card.
+      void emitCeoReauthCardBestEffort(dir, 0, now, { why: "rejected", expiresAt: tokenExpiryStatus(heldToken.mintedAt, now).expiresAt });
+    } else if (reason === "reauth_required") {
       // Read the credentials file's expiresAt so the card body can name how long the account
       // has been dead ("expired ~49h ago") — the exact signal the CEO would use to prioritize
       // the login. `readCredentialsFields` returns `{ expiresAt: 0 }` on any read error; the
@@ -1757,7 +1814,12 @@ async function emitCeoAuthExpiryAlertBestEffort(configDir: string, reason: Accou
 //   plus the expired-for duration so the CEO can see "this account went dead ~66h ago" at a glance.
 const REAUTH_REQUIRED_CARD_TYPE = "agent_approval_request";
 const REAUTH_REQUIRED_ESCALATION_KIND = "box_account_reauth_required";
-async function emitCeoReauthCardBestEffort(configDir: string, expiresAtMs: number, nowMs: number): Promise<void> {
+// box-setup-token-auth — `tokenCtx` switches the card to the setup-token remedy for an account that
+// runs on a `<configDir>/.oauth-token` token: "rejected" (the token 401'd), "expiring_soon" (inside the
+// 30-day warn window of its one-year life), "expired". Same type + dedupe key as the /login card, so the
+// existing dismiss-on-recovery path closes it.
+type TokenCardContext = { why: "rejected" | "expiring_soon" | "expired"; expiresAt: number };
+async function emitCeoReauthCardBestEffort(configDir: string, expiresAtMs: number, nowMs: number, tokenCtx?: TokenCardContext): Promise<void> {
   try {
     const workspaceId = await resolveOwnerWorkspaceId();
     if (!workspaceId) return;
@@ -1797,14 +1859,22 @@ async function emitCeoReauthCardBestEffort(configDir: string, expiresAtMs: numbe
 
     // The literal command chain the spec named — one command per line so the CEO can copy each
     // step in sequence (paste-safe: no shell metachars beyond the assignment).
-    const commandLines = [
-      "ssh root@claude-server",
-      "sudo -iu builder",
-      `CLAUDE_CONFIG_DIR=${homeRelDir} claude`,
-      "/login",
-    ];
-    const title = `Box pool account ${label} needs a human /login (expired ${expiredForLabel})`;
-    const body =
+    const commandLines = tokenCtx
+      ? [
+          "ssh root@claude-server",
+          "sudo -iu builder",
+          "cd ~/shopcx",
+          `CLAUDE_CONFIG_DIR=${homeRelDir} claude setup-token`,
+          `bash scripts/box-install-oauth-token.sh ${homeRelDir}`,
+        ]
+      : [
+          "ssh root@claude-server",
+          "sudo -iu builder",
+          `CLAUDE_CONFIG_DIR=${homeRelDir} claude`,
+          "/login",
+        ];
+    let title = `Box pool account ${label} needs a human /login (expired ${expiredForLabel})`;
+    let body =
       `The box pool account ${label} (${configDir}) has an expired OAuth access token AND NO ` +
       `refreshToken in \`.credentials.json\` — no wait or retry can renew it. Only an interactive ` +
       `\`/login\` restores this account.\n\n` +
@@ -1812,6 +1882,23 @@ async function emitCeoReauthCardBestEffort(configDir: string, expiresAtMs: numbe
       `To re-login:\n` +
       commandLines.map((l) => `  ${l}`).join("\n") +
       `\n\nThis account has been pulled from rotation. The pool is one account down until you re-login.`;
+    if (tokenCtx) {
+      const days = Math.round((tokenCtx.expiresAt - nowMs) / 86_400_000);
+      const situation =
+        tokenCtx.why === "rejected"
+          ? `rejected its long-lived setup-token (revoked, or past its one-year life — estimated expiry ${astTime(tokenCtx.expiresAt)}). It has been pulled from rotation; the pool is one account down until you mint a new token.`
+          : tokenCtx.why === "expired"
+            ? `is on a setup-token that is past its estimated one-year life (${astTime(tokenCtx.expiresAt)}). Expect it to start failing — mint a new token now.`
+            : `is on a setup-token that expires in ~${days} day(s) (estimated ${astTime(tokenCtx.expiresAt)}). Nothing is broken yet — renew it before then so the account never drops out.`;
+      title =
+        tokenCtx.why === "expiring_soon"
+          ? `Box pool account ${label}: setup-token expires in ~${days}d — renew it`
+          : `Box pool account ${label} needs a new setup-token`;
+      body =
+        `The box pool account ${label} (${configDir}) ${situation}\n\n` +
+        `To renew (approve in a browser signed in to THIS account's email, then paste the printed token when the script asks):\n` +
+        commandLines.map((l) => `  ${l}`).join("\n");
+    }
 
     const { error: notifErr } = await db.from("dashboard_notifications").insert({
       workspace_id: workspaceId,
@@ -1829,7 +1916,10 @@ async function emitCeoReauthCardBestEffort(configDir: string, expiresAtMs: numbe
         config_dir: configDir,
         config_dir_home_relative: homeRelDir,
         account_label: label,
-        hold_reason: "reauth_required",
+        hold_reason: tokenCtx ? (tokenCtx.why === "rejected" ? "auth_expired" : null) : "reauth_required",
+        auth_mode: tokenCtx ? "setup_token" : "login",
+        token_card_reason: tokenCtx?.why ?? null,
+        token_expires_at: tokenCtx ? new Date(tokenCtx.expiresAt).toISOString() : null,
         expired_at: expiresAtMs > 0 ? new Date(expiresAtMs).toISOString() : null,
         expired_for_ms: expiredForMs,
         login_command_chain: commandLines,
@@ -1902,6 +1992,17 @@ async function dismissCeoReauthCardBestEffort(configDir: string): Promise<void> 
 // could ever refresh them because nothing could ever run against them — 37 hours of downtime. See spec.
 const CRED_EXPIRY_CACHE_MS = 30_000; // 30s TTL — token expiry is a slow-moving fact
 const credentialsCache = new Map<string, { expiresAt: number; checkedAt: number }>();
+// box-setup-token-auth — per-account `claude setup-token` token (`<configDir>/.oauth-token`), cached on
+// the same 30s TTL so the spawn + sweep hot paths don't re-read the file on every call. Installing or
+// replacing a token takes effect within one TTL — no worker restart needed.
+const oauthTokenCache = new Map<string, { token: OauthToken | null; checkedAt: number }>();
+function cachedOauthToken(configDir: string, now: number = Date.now()): OauthToken | null {
+  const cached = oauthTokenCache.get(configDir);
+  if (cached && now - cached.checkedAt < CRED_EXPIRY_CACHE_MS) return cached.token;
+  const token = readOauthToken(configDir);
+  oauthTokenCache.set(configDir, { token, checkedAt: now });
+  return token;
+}
 // Read `$configDir/.credentials.json` and return the `claudeAiOauth.expiresAt` (ms) + whether a
 // refresh_token is present. Returns { expiresAt: 0, hasRefreshToken: false } on any error (missing file,
 // malformed JSON, missing field) so a malformed credential can NEVER cause a silent proactive eject — the
@@ -1965,6 +2066,8 @@ async function attemptCredentialRefresh(configDir: string): Promise<void> {
     // silently authing via the env-provided API key and NEVER touching the credentials file). The Max
     // pool is OAuth-only; the API key exists on some environments and would win otherwise.
     delete env.ANTHROPIC_API_KEY;
+    // Same reason for CLAUDE_CODE_OAUTH_TOKEN: this call exists to renew the /login credentials file.
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
     // Minimal prompt — the goal is CLI startup (which does the token refresh), not a real response.
     const result = await shAsync("claude", ["-p", "noop"], {
       env,
@@ -2015,6 +2118,24 @@ async function attemptCredentialRefresh(configDir: string): Promise<void> {
 // fires four refreshes in parallel and clears the pool.
 function sweepExpiredCredentials(now: number): void {
   for (const a of accounts) {
+    // box-setup-token-auth — an account with a setup-token never consults `.credentials.json`: the token
+    // ranks above /login, so the /login file's expiry is irrelevant (ejecting on it would pull a healthy
+    // account) and a refresh exercise would only re-enter the refresh-token race the token exists to
+    // avoid. The only decision is whether a token newly installed should release an auth hold.
+    const token = cachedOauthToken(a.configDir, now);
+    if (token) {
+      if (decideTokenHoldRelease({ holdReason: a.holdReason, cappedUntil: a.cappedUntil, now, token, tokenMintedAtWhenHeld: a.tokenMintedAtWhenHeld }) === "release") {
+        const priorHoldReason = a.holdReason;
+        a.cappedUntil = 0;
+        a.holdReason = null;
+        a.tokenMintedAtWhenHeld = null;
+        a.capEventLogged = false;
+        recordAccountEvent("recovered", a.configDir, `setup-token installed (minted ${astTime(token.mintedAt)}) — ${priorHoldReason ?? "auth"} hold cleared, back in rotation`);
+        console.warn(`[multi-account] ${a.configDir} ${priorHoldReason ?? "auth"} hold cleared — setup-token installed; back in rotation`);
+        void dismissCeoReauthCardBestEffort(a.configDir);
+      }
+      continue;
+    }
     const { expiresAt, hasRefreshToken } = (() => {
       const cached = credentialsCache.get(a.configDir);
       // Fresh cache hit — trust the cached expiresAt, re-read hasRefreshToken cheaply (small file, hot).
@@ -2134,10 +2255,30 @@ function sweepExpiredCredentials(now: number): void {
 const AUTH_EXPIRY_WARN_MS = 24 * 60 * 60 * 1000; // 24h — warn a full day before the wall
 const AUTH_EXPIRY_WARN_INTERVAL_MS = 15 * 60 * 1000; // 15 min — heartbeat runs every 5s; throttle
 let lastUpcomingExpirySweepAt = 0;
+// box-setup-token-auth — whether a token-renewal card may be open per account (unknown after a boot ⇒
+// dismiss once when the token reads fresh, so a renewal done across a restart still clears its card).
+const tokenRenewCardMaybeOpen = new Map<string, boolean>();
 function sweepUpcomingExpiries(now: number): void {
   if (now - lastUpcomingExpirySweepAt < AUTH_EXPIRY_WARN_INTERVAL_MS) return;
   lastUpcomingExpirySweepAt = now;
   for (const a of accounts) {
+    // box-setup-token-auth — token accounts: warn a month before the token's one-year life ends; once a
+    // renewed token is in place, close any open renewal card (once per boot + after each raise).
+    const token = readOauthToken(a.configDir);
+    if (token) {
+      const exp = tokenExpiryStatus(token.mintedAt, now);
+      if (exp.kind === "ok") {
+        if (tokenRenewCardMaybeOpen.get(a.configDir) !== false && !(a.cappedUntil > now)) {
+          tokenRenewCardMaybeOpen.set(a.configDir, false);
+          void dismissCeoReauthCardBestEffort(a.configDir);
+        }
+      } else {
+        console.warn(`[multi-account] ${a.configDir} setup-token ${exp.kind === "expired" ? "is past its estimated one-year life" : `expires in ~${(exp.msUntilExpiry / 86_400_000).toFixed(0)}d`} — renewal card raised`);
+        tokenRenewCardMaybeOpen.set(a.configDir, true);
+        void emitCeoReauthCardBestEffort(a.configDir, 0, now, { why: exp.kind, expiresAt: exp.expiresAt });
+      }
+      continue;
+    }
     // Ground-truth read of the credentials file — cache is fine for expiresAt (the sweep hot path
     // already re-uses it) but refreshToken must be read fresh so a CEO re-login is picked up on the
     // next warn tick, not the next expiry cycle.
@@ -3032,6 +3173,9 @@ interface RunBoxSessionOpts {
   // Extra env vars merged into the spawned env (after the sandbox branch). The godmode
   // lane uses this to pass GOD_MODE_SESSION_ID down to the PreToolUse hook.
   extraEnv?: Record<string, string>;
+  // box-blank-session-result — internal: this call IS the one-shot "restate your final output" resume
+  // nudge for a session whose result came back blank. Never set by callers.
+  blankResultNudge?: boolean;
 }
 
 interface RunResult {
@@ -3115,7 +3259,7 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   // box-codex-runner: a Codex-primary kind runs on `codex exec` FIRST; on a Codex cap/error/throw we fall
   // THROUGH to the Claude path below — on the healthy account the failover wrapper already picked. All
   // Codex-routed kinds are single-shot, so nulling the session for the Claude fallback is a safe no-op.
-  if (runtimeForKind(opts.kind, Date.now()) === "codex") {
+  if (!opts.blankResultNudge && runtimeForKind(opts.kind, Date.now()) === "codex") {
     const cx = await runCodexSession(prompt, sessionId, cwd, opts).catch((e) => {
       console.error(`[runtime] codex ${opts.kind} threw — Claude fallback:`, e);
       return null;
@@ -3177,6 +3321,13 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   // object itself. Unset → the CLI's default (~/.claude = pool[0]) — back-compat for callers not yet
   // wired into the pool (box-multi-account-failover Phase 1).
   if (opts.configDir) env.CLAUDE_CONFIG_DIR = opts.configDir;
+  // box-setup-token-auth — hand the CLI this account's one-year setup-token when it has one (ranks above
+  // the /login credential, so the session never touches the race-prone rotating refresh token). Set AFTER
+  // the sandbox branch on purpose: `build` strips *_TOKEN via SECRET_RE and `qc` copies an allowlist, and
+  // the session needs its own account's auth either way (it could already read .credentials.json). Any
+  // inherited global CLAUDE_CODE_OAUTH_TOKEN is always dropped so accounts can never cross. Unset
+  // configDir ⇒ the CLI's default dir (~/.claude), so read that dir's token.
+  applyOauthTokenEnv(env, cachedOauthToken(opts.configDir ?? join(process.env.HOME || "/home/builder", ".claude")));
   const base = sessionId ? ["--resume", sessionId] : [];
   // stream-json (not json): every box session must emit output continuously so the hang detector can
   // tell "actively running" from "stuck", AND so the live TaskCreate/TaskUpdate events arrive while
@@ -3261,28 +3412,27 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
     await new Promise((res) => setTimeout(res, BOX_AUTH_RETRY_BACKOFF_MS));
   }
   if (writer) await writer.flush();
-  let session = sessionId;
-  let resultText = "";
   let isError = r.code !== 0;
   // stream-json output is newline-delimited JSON events; the final {type:"result"} carries the
-  // result text + session_id + is_error. Parse line-by-line; the last result event wins.
-  let parsedResult = false;
+  // result text + session_id + is_error. The last result event wins (parseSessionStream).
+  // box-blank-session-result: when that result text is BLANK on a successful run (the 2026-10-03
+  // regression — ~half of Sol's ticket-handle sessions), fall back to the agent's last non-blank
+  // assistant message, and failing that, resume the same session once asking it to restate its answer.
+  const parsed = parseSessionStream(r.out || "", sessionId);
+  let session = parsed.session;
+  let resultText = "";
+  const parsedResult = parsed.resultText !== null;
   let usage: RunUsage = null;
   let model: string | null = null;
-  for (const line of (r.out || "").split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let obj: { type?: string; session_id?: string; result?: unknown; is_error?: boolean };
-    try { obj = JSON.parse(trimmed); } catch { continue; }
-    if (typeof obj.session_id === "string") session = obj.session_id;
-    if (obj.type === "result") {
-      resultText = typeof obj.result === "string" ? obj.result : JSON.stringify(obj);
-      isError = isError || obj.is_error === true;
-      parsedResult = true;
-      // fleet-cost-metering Phase 1: the result event carries the run's token usage.
-      const ex = extractClaudeUsage(obj as Record<string, unknown>);
-      if (ex.usage) { usage = ex.usage; model = ex.model; }
-    }
+  let finalSource: "result" | "assistant_fallback" | "blank" = "result";
+  if (parsedResult) {
+    const chosen = chooseFinalText(parsed);
+    resultText = chosen.text;
+    finalSource = chosen.source;
+    isError = isError || parsed.resultIsError;
+    // fleet-cost-metering Phase 1: the result event carries the run's token usage.
+    const ex = extractClaudeUsage(parsed.resultEvent as Record<string, unknown>);
+    if (ex.usage) { usage = ex.usage; model = ex.model; }
   }
   if (!parsedResult) {
     // No result event — killed mid-run (hang/cap) or non-stream output. Surface raw + treat as error.
@@ -3296,6 +3446,18 @@ async function runBoxSession(prompt: string, sessionId: string | null, cwd: stri
   } else if (r.killed === "hardcap") {
     isError = true;
     resultText = `[${kind} killed: exceeded the ${Math.round(opts.timeout / 60000)} min hard cap]\n` + resultText;
+  }
+  if (parsedResult && !isError && !opts.blankResultNudge) {
+    noteSessionResult(kind, env.CLAUDE_CODE_OAUTH_TOKEN ? "setup_token" : "login", finalSource);
+  }
+  if (finalSource === "assistant_fallback" && !isError) {
+    console.warn(`[runBoxSession:${kind}] blank final result — recovered the answer from the last assistant message (session ${session ?? "?"})`);
+  } else if (finalSource === "blank" && !isError && session && !opts.blankResultNudge) {
+    console.warn(`[runBoxSession:${kind}] blank final result and no assistant text — resuming session ${session} once to restate it`);
+    const nudged = await runBoxSession(BLANK_RESULT_NUDGE_PROMPT, session, cwd, { ...opts, blankResultNudge: true, timeout: Math.min(opts.timeout, 5 * 60 * 1000) });
+    noteBlankNudgeOutcome(kind, !nudged.isError && !!nudged.resultText.trim());
+    // Keep the first run's usage when the nudge reports none, so metering never drops the main run.
+    return { ...nudged, usage: nudged.usage ?? usage, model: nudged.model ?? model, raw: `${(r.out || "") + (r.err || "")}\n${nudged.raw}` };
   }
   return { session, resultText, isError, raw: (r.out || "") + (r.err || ""), usage, model };
 }
@@ -3429,6 +3591,7 @@ async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
   /** per-attempt side effects (metering + session persist) — runs after EACH attempt, not just the last. */
   onRun?: (r: T, attempt: number) => Promise<void>;
 }): Promise<{ run: T; parsed: Record<string, unknown> | null; verdict: string; fallbackReason: string | null }> {
+  const { shouldDiscardStaleResumeVerdict } = await import("../src/lib/security-stale-resume");
   let last: T | null = null;
   let parsed: Record<string, unknown> | null = null;
   let verdict = "";
@@ -3442,6 +3605,18 @@ async function resolveReviewVerdict<T extends ReviewClaudeRun>(opts: {
     parsed = extractJson<Record<string, unknown>>(r.resultText);
     verdict = String(parsed?.status || "");
     if (parsed && verdict && opts.recognized.has(verdict)) {
+      // ⭐ Phase 5 of [[../.box/spec-inflection-resession-must-act-on-newest-ask.md]] — a repair-attempt
+      // `needs-human` that cites "no prior findings in this session context" is the resumed session
+      // telling us it has nothing to re-emit (its own first attempt left no findings in context). That
+      // isn't a human-needed verdict — it's a stale-resume failure. Discard it and fall through to the
+      // actionable fallbackReason ("no parseable verdict …") so the platform-director's
+      // reconcileNeedsAttention triage re-runs the review ONCE as a fresh session (which actually
+      // reviews the branch from scratch — the only recovery that works for this signature). See
+      // [[../src/lib/security-stale-resume]].
+      if (shouldDiscardStaleResumeVerdict({ useRepair, verdict, review: parsed.review, recognized: opts.recognized })) {
+        verdict = "";
+        continue;
+      }
       return { run: r, parsed, verdict, fallbackReason: null };
     }
     // unparseable / empty / unrecognized verdict → retry once more, then fail safe.
@@ -12696,7 +12871,17 @@ async function stampAgentSessionNote(ticketId: string, body: string): Promise<vo
 async function runTicketHandleJob(job: Job) {
   const tag = `[handle:${job.id.slice(0, 8)}]`;
   const sessShort = job.id.slice(0, 8);
-  let params: { ticket_id?: string; workspace_id?: string; turn_index?: number; reason?: string } = {};
+  let params: {
+    ticket_id?: string;
+    workspace_id?: string;
+    turn_index?: number;
+    reason?: string;
+    // Phase 1 of inflection-resession-must-act-on-newest-ask — reSessionSol snapshots the
+    // newest inbound customer `ticket_messages` row and threads it here so Sol's prompt can
+    // tell her WHICH message her Direction must address (the inflection `kind` is tone
+    // context only; it does not replace the customer's words).
+    trigger_message?: { id?: string; created_at?: string; text?: string } | null;
+  } = {};
   try {
     params = job.instructions ? JSON.parse(job.instructions) : {};
   } catch {
@@ -12714,16 +12899,39 @@ async function runTicketHandleJob(job: Job) {
   // Session-start stamp — fires before the (expensive, timeout-prone) box session so even a hang / crash
   // / timeout leaves a "Sol is reviewing this" trace on the ticket. The failure branches below then add
   // the terminal note; a session that vanishes mid-run leaves only this start note, which is the signal.
+  // Phase 3 of every-inbound-handled-within-30-min: capture the session-start timestamp so the
+  // "no recognizable verdict" branch can recover a Direction Sol wrote mid-session (ticket 09f7257a
+  // scar — Sol's completed-direction write landed on-disk but the final output JSON didn't carry
+  // the `direction` key, so the worker threw $0.90 of work away and the customer stranded).
+  const sessionStartedAt = new Date().toISOString();
   await stampAgentSessionNote(ticketId, `Sol is reviewing this ticket in session ${sessShort}.`);
 
   try {
     const brief = await loadTicketHandleBrief(ticketId);
+    // Phase 1 of inflection-resession-must-act-on-newest-ask — when the ticket-handle job is
+    // a bounce (`reason='inflection'`), reSessionSol snapshotted the customer's newest inbound
+    // message and threaded it here. Surface it to Sol as a non-negotiable framing line so she
+    // cannot read the inflection `kind` ('frustration'/'drift') as a license to re-answer an
+    // older question — the dc31bf31 scar (Sol re-answered the Sep 2 ship date while the
+    // customer's actual 14:14 ask to move to Oct 30 went unaddressed, costing a $237.16 refund
+    // and a cancelled subscriber).
+    const triggerMessageLines: string[] = [];
+    const trig = params.trigger_message;
+    if (trig && typeof trig === "object" && typeof trig.text === "string" && trig.text.trim().length > 0) {
+      triggerMessageLines.push(
+        `NEWEST CUSTOMER ASK (the message that triggered this re-session — ${trig.created_at ?? "(no timestamp)"}):`,
+        `  "${trig.text.trim()}"`,
+        `Your Direction MUST address THIS message. The inflection kind (${params.reason === "inflection" ? "frustration/drift tone label" : "tone context"}) is CONTEXT ONLY — it does not replace the customer's words. If the ask is a date change / refund / cancel / specific account request, your Direction's actions must reflect it (or your \`context_summary\` must explicitly state why no action is possible); never read the tone label as license to re-answer an older question. Your Direction's \`newest_customer_ask\` field MUST quote this message verbatim and state how this turn resolves it.`,
+        ``,
+      );
+    }
     const prompt = [
       `Use the ticket-handle skill (cwd is the repo root). You are Sol, June's Ticket Handler agent, running the FIRST-TOUCH box session on Max.`,
       ``,
       `TICKET id ${ticketId} · workspace ${workspaceId} — full context loaded for you:`,
       brief,
       ``,
+      ...triggerMessageLines,
       `For deterministic READ-ONLY CX data (customer + merged identity, subscriptions w/ realized pricing + discounts, orders w/ per-unit computed, active products, active policies) — CALL THE SDK, NEVER improvise SQL:`,
       `  npx tsx scripts/cx-agent-sdk-tool.ts <verb> ${ticketId}   (verbs: customer · orders · subscriptions · products · policies · bundle)`,
       `For deeper/fresh READ-ONLY data, run: npx tsx scripts/improve-box-tools.ts <tool> ${ticketId} [json_input]`,
@@ -13560,11 +13768,69 @@ async function runTicketHandleJob(job: Job) {
 
     // No recognizable verdict. If the agent actually produced output (prose, not a hard run error),
     // it over-ran the single-turn envelope — surface a failure without a park so a human can look.
+    //
+    // Phase 3 of every-inbound-handled-within-30-min: before failing, check whether Sol WROTE a
+    // Direction row during this session (via `findDirectionWrittenDuringSession` → the
+    // ticket_directions table). Three sessions on 2026-10-07 ran to terminal_reason=completed and
+    // the "Direction written" session_note, but the FINAL JSON didn't carry a `direction` key, so
+    // this branch threw ~$0.90 of real work away. Recover the row if it exists; otherwise fail AND
+    // enqueue a cs-director-call so the ticket never ends unowned.
     if (!isError) {
-      await stampAgentSessionNote(ticketId, `Sol's session ${sessShort} failed: returned no completed direction (session over-ran without a verdict).`);
+      try {
+        const { findDirectionWrittenDuringSession } = await import("../src/lib/ticket-directions");
+        const recovered = await findDirectionWrittenDuringSession(db, ticketId, sessionStartedAt);
+        if (recovered) {
+          await stampAgentSessionNote(
+            ticketId,
+            `Sol's session ${sessShort} recovered: FINAL JSON missing \`direction\` key, but a live Direction (${String(recovered.id).slice(0, 8)}, chosen_path=${recovered.chosen_path}) was written mid-session — accepting it instead of discarding the work.`,
+          );
+          await update(job.id, {
+            status: "completed",
+            session_note: `recovered_direction:${String(recovered.id).slice(0, 8)} chosen_path=${recovered.chosen_path}`,
+            log_tail: raw.slice(-2000),
+          });
+          return;
+        }
+      } catch (recErr) {
+        console.warn(`${tag} direction recovery probe threw: ${errText(recErr)}`);
+      }
+
+      // Nothing usable on-disk. Fail the job AND route to June so the ticket never sits.
+      await stampAgentSessionNote(
+        ticketId,
+        `Sol's session ${sessShort} failed: returned no completed direction (session over-ran without a verdict) — routing to June (cs-director-call) so the ticket never strands.`,
+      );
+      try {
+        const { data: inflight } = await db
+          .from("agent_jobs")
+          .select("id")
+          .eq("workspace_id", workspaceId)
+          .eq("kind", "cs-director-call")
+          .eq("spec_slug", ticketId)
+          .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input"])
+          .limit(1);
+        if (!inflight || !inflight.length) {
+          await db.from("agent_jobs").insert({
+            workspace_id: workspaceId,
+            spec_slug: ticketId,
+            kind: "cs-director-call",
+            status: "queued",
+            instructions: JSON.stringify({
+              ticket_id: ticketId,
+              source: "runTicketHandleJob:no-recognizable-verdict",
+              parked_from: { kind: "ticket-handle", job_id: job.id },
+            }),
+            created_by: null,
+          });
+        }
+      } catch (eqErr) {
+        console.warn(`${tag} cs-director-call enqueue failed on no-verdict path: ${errText(eqErr)}`);
+      }
       await update(job.id, {
         status: "failed",
         error: "Sol first-touch returned no completed direction JSON",
+        // Phase 3 of every-inbound-handled-within-30-min: carry the final 2KB of raw output on
+        // the failure note so diagnosis doesn't need a separate archaeological dig.
         log_tail: raw.slice(-2000),
       });
       return;
@@ -14684,30 +14950,9 @@ function normalizeMigrationFixActions(raw: unknown, jobId: string): PendingActio
 // Roadmap board to commission a build. The migration itself still fails-closed to a human with the
 // diagnosis (the spec fixes the CLASS, not this one sub's renewal). Idempotent: a STABLE gap-class slug
 // means recurring failures converge on one spec instead of spawning a duplicate per sub.
-interface GapSpec { slug: string; title: string; intent: string; problem: string; target?: string }
-
-function migrationGapSpecMarkdown(spec: GapSpec, auditId: string, subId: string): string {
-  return [
-    `# ${spec.title}`,
-    ``,
-    `**Owner:** [[../functions/retention]] · **Parent:** Retention mandate "Subscription continuity & billing integrity" · **Derived-from-migration:** \`${auditId}\``,
-    ``,
-    spec.intent.trim(),
-    ``,
-    `## Problem (from failed migration \`${auditId}\`, sub \`${subId}\`)`,
-    spec.problem.trim(),
-    spec.target ? `\n**Likely target:** \`${spec.target}\`` : ``,
-    ``,
-    `## Phases`,
-    `- **P1 — close the gap** — scope from the problem above; land the code/data fix + its brain page; gate on \`npx tsc --noEmit\`.`,
-    ``,
-    `## Verification`,
-    `- Re-run \`verifyMigration\` on a migration that hit this gap → expect it to auto-heal/pass without a hand fix, and confirm the class of failure no longer recurs.`,
-    ``,
-    `> Authored by the box migration-fix routine from failed migration \`${auditId}\`. Commission the build from the Roadmap board (owner = retention).`,
-    ``,
-  ].join("\n");
-}
+// The template (and the GapSpec shape) live in src/lib/migration-fix.ts so the authoring gates can be
+// unit-tested against it — see migrationGapSpecMarkdown there.
+type GapSpec = MigrationGapSpec;
 
 // Commit the gap-fix spec to main. Idempotent: if a spec with this (stable, gap-class) slug already
 // exists, leave it for the in-flight fix rather than clobbering. Returns a one-line result for log_tail.
@@ -15482,6 +15727,15 @@ interface CsDirectorCallInstructions {
   // prompt as a fresh-eyes SECOND opinion (not the primary triage), and records the resulting
   // triage_runs row with `verdict='second_opinion'`.
   second_opinion_of?: string;
+  // june-remedy-shape-and-honest-apply-status Phase 3 — set by `needs-attention-route-cs-owner`
+  // when this call is the ONE re-dispatch of a prior approve_remedy whose APPLY was refused (e.g. a
+  // flat remedy shape the guard rejected). Carries the guard's rejection reason so June re-emits the
+  // remedy in a runnable shape instead of repeating the refused one. Its presence also marks the job
+  // as a retry (the router will NOT re-dispatch a second time — one retry, then the SLA watchdog).
+  prior_apply_failure_reason?: string;
+  // Marks this cs-director-call as the remedy-apply retry so a SECOND apply failure falls through to
+  // the 30-min SLA watchdog rather than looping (idempotent per original failure).
+  remedy_apply_retry?: boolean;
 }
 
 // Kept in sync with src/lib/cs-director.ts `CsDirectorDecision`. `close_no_action` +
@@ -16089,12 +16343,16 @@ async function loadCsDirectorCallBrief(
   return parts.join("\n");
 }
 
-function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false): string {
+function csDirectorCallPrompt(brief: string, secondOpinion: boolean = false, priorApplyFailureReason: string | null = null): string {
   const roleLine = secondOpinion
     ? `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. This is an ON-DEMAND SECOND OPINION on a prior June review of this ticket (june-review-replaces-solver-skeptic-quorum-triage Phase 2) — a supervisor asked for fresh eyes because the first verdict was borderline. Read the FIRST JUNE REVIEW section in the brief FIRST, then independently re-investigate the ticket READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict) that AGREES with the first review OR REFUTES it with concrete new evidence. Do NOT rubber-stamp — if you can find a genuine reason to differ, differ; the whole point of this seat is a second opinion, not a co-sign. The WORKER (deterministic Node) records your verdict to director_activity + triage_runs (verdict='second_opinion') and materializes it via applyBoxCsDirectorCall (src/lib/cs-director.ts) — approve_remedy fires via executeSonnetDecision then delivers via deliverTicketMessage (execute-then-message); author_spec writes through the specs SDK; escalate_founder returns linkage-back for the runner-minted CEO card. You NEVER mutate anything from here.`
     : `Use the cs-director-call skill (cwd is the repo root). You are the CS Director (💬 June) on Max — web search on, no API key. You are the PRIMARY escalation triage: every routine-owned escalated ticket routes to your review (june-review-replaces-solver-skeptic-quorum-triage Phase 1). You investigate READ-ONLY — read the ticket's handling (ticket_resolution_events / the Direction when present), the analyzer's grade + issue tags (ticket_analyses), the customer + subscriptions + orders — and emit ONE JSON object (a typed verdict). The WORKER (deterministic Node) records the verdict to director_activity + triage_runs and materializes it via applyBoxCsDirectorCall (src/lib/cs-director.ts) — approve_remedy fires via executeSonnetDecision then delivers via deliverTicketMessage (execute-then-message); author_spec writes through the specs SDK; escalate_founder returns linkage-back for the runner-minted CEO card. You NEVER mutate anything from here.`;
+  const retryLine = priorApplyFailureReason
+    ? `⚠️ RE-DISPATCH AFTER A FAILED APPLY (june-remedy-shape-and-honest-apply-status Phase 3): your PRIOR approve_remedy on this ticket was approved but the executor REFUSED the apply — rejection reason: "${priorApplyFailureReason}". This is your ONE retry. Re-emit the remedy in a RUNNABLE shape — put the action params INSIDE \`payload\` (\`{"action_type":"partial_refund","payload":{"amount_cents":4320,"order_number":"SC136413"}}\`), not at the top level, and the customer message under \`customer_message\`. If you cannot produce a runnable remedy, escalate_founder instead of repeating the refused shape.`
+    : null;
   return [
     roleLine,
+    ...(retryLine ? [``, retryLine] : []),
     ``,
     `HOW YOU DECIDE (three verdicts, see docs/brain/libraries/cs-director.md § How it decides):`,
     `  • 'approve_remedy'   — the right customer-facing fix is clear + IN LEASH (no refund past the CS ceiling, no destructive/irreversible action). Return a RemedyPlan the Phase-2 executor fires through executeSonnetDecision + then delivers via deliverTicketMessage (execute-then-message rule).`,
@@ -16152,7 +16410,7 @@ async function runCsDirectorCallJob(job: Job) {
 
   try {
     const brief = await loadCsDirectorCallBrief(job.workspace_id, ticketId, triageRunId, secondOpinionOfRunId);
-    const prompt = csDirectorCallPrompt(brief, !!secondOpinionOfRunId);
+    const prompt = csDirectorCallPrompt(brief, !!secondOpinionOfRunId, inst.prior_apply_failure_reason ?? null);
     const { session, resultText, isError, raw, usage, model, configDir: csDir } = await runBoxLane(
       (cfg, sid) => runCsDirectorCallClaude(prompt, sid, REPO_DIR, cfg, job.id),
     );
@@ -16500,6 +16758,14 @@ async function runCsDirectorCallJob(job: Job) {
         applyResult.ok === true &&
         applyResult.needs_attention !== true &&
         applyResult.awaiting_founder_approval !== true;
+      // june-remedy-shape-and-honest-apply-status Phase 2 — a FAILED approve_remedy apply (not ok /
+      // parked needs_attention, and NOT a legitimate founder-approval hold) must never close OR
+      // de-escalate the ticket. The transition gates on this so Susan Knudson's de-escalate-with-no-
+      // owner outcome (ticket 2acc8634) cannot recur; Phase 3 re-owns the needs_attention job.
+      const approveRemedyApplyFailed =
+        verdict.decision === "approve_remedy" &&
+        applyResult.awaiting_founder_approval !== true &&
+        (applyResult.ok === false || applyResult.needs_attention === true);
       // Phase 2 of a-cs-director-verdict-cannot-clear-an-unruled-founder-escalation — read the
       // ticket's PRE-patch state BEFORE `decideCsDirectorTicketTransition` runs so the pure
       // builder can see whether an earlier `escalate_founder` verdict already stamped the
@@ -16533,11 +16799,64 @@ async function runCsDirectorCallJob(job: Job) {
       } catch (e) {
         console.warn(`${tag} pre-patch ticket read failed:`, e instanceof Error ? e.message : e);
       }
+      // Phase 3 of inflection-resession-must-act-on-newest-ask — pre-close read of inbound
+      // ticket_messages + successful executed actions so the pure builder can refuse a
+      // close_no_action when any customer ask is still unsatisfied. Scoped reads only (same
+      // workspace_id as the ticket); a read failure leaves the lists empty, which maps to
+      // today's close_no_action behavior exactly (fail-safe fallthrough — a DB blip must
+      // never force-close over an unresolved customer ask).
+      let inboundMessages: Array<{
+        id: string;
+        direction: string;
+        author_type: string;
+        visibility: string | null;
+        body: string | null;
+        body_clean: string | null;
+        created_at: string;
+      }> = [];
+      let executedActions: Array<{ type: string; executed_at: string }> = [];
+      if (verdict.decision === "close_no_action") {
+        try {
+          // Cross-tenant guard — scope the ticket_messages read via a tickets!inner workspace
+          // join. The sibling of the Phase 5 fix on `loadTriggerMessageForTicket`
+          // (src/lib/inflection-detector.ts:498-508): ticket_messages has no workspace_id
+          // column of its own, so a bare `.eq('ticket_id', …)` service-role read could leak
+          // messages from a foreign workspace into the close-no-action builder. See
+          // [[../src/lib/cs-director-close-gate]].
+          const { loadInboundMessagesForCloseGate } = await import("../src/lib/cs-director-close-gate");
+          inboundMessages = await loadInboundMessagesForCloseGate(db, job.workspace_id, ticketId);
+        } catch (e) {
+          console.warn(`${tag} inbound-messages read for close-no-action gate failed:`, e instanceof Error ? e.message : e);
+        }
+        try {
+          const { data: outcomes } = await db
+            .from("ticket_required_outcomes")
+            .select("kind, status, verified_at, authored_at")
+            .eq("workspace_id", job.workspace_id)
+            .eq("ticket_id", ticketId)
+            .eq("status", "verified");
+          executedActions = ((outcomes as Array<{
+            kind: string | null;
+            status: string | null;
+            verified_at: string | null;
+            authored_at: string | null;
+          }> | null) ?? [])
+            .filter((r) => typeof r.kind === "string")
+            .map((r) => ({
+              type: r.kind as string,
+              executed_at: (r.verified_at ?? r.authored_at ?? "") as string,
+            }))
+            .filter((r) => r.executed_at.length > 0);
+        } catch (e) {
+          console.warn(`${tag} executed-actions read for close-no-action gate failed:`, e instanceof Error ? e.message : e);
+        }
+      }
       const transition = decideCsDirectorTicketTransition({
         decision: verdict.decision,
         reasoning: verdict.reasoning,
         remedy: verdict.remedy ?? null,
         remedyResolved,
+        approveRemedyApplyFailed,
         // Phase 2 of cs-director-spec-claim-must-match-the-actual-write — gate the author_spec
         // close on a CONFIRMED write. A failed write returns `keep_escalated_needs_attention` so
         // the ticket stays open + escalated + escalation_reason stamped with the failure reason,
@@ -16552,6 +16871,9 @@ async function runCsDirectorCallJob(job: Job) {
         // still pending (ticket c969f235). `null` when the read failed → no downgrade, so a DB
         // error CANNOT strand a ticket escalated forever.
         priorEscalation,
+        // Phase 3 of inflection-resession-must-act-on-newest-ask — close_no_action downgrade.
+        inboundMessages: verdict.decision === "close_no_action" ? inboundMessages : null,
+        executedActions: verdict.decision === "close_no_action" ? executedActions : null,
         ceoUserId,
         now: new Date().toISOString(),
       });
@@ -16616,6 +16938,57 @@ async function runCsDirectorCallJob(job: Job) {
               if (noteErr) console.warn(`${tag} founder-ruling-pending sysNote insert failed: ${noteErr.message}`);
             } catch (e) {
               console.warn(`${tag} founder-ruling-pending sysNote write threw:`, e instanceof Error ? e.message : e);
+            }
+          }
+          // Phase 3 of inflection-resession-must-act-on-newest-ask — the downgrade's side
+          // effect: name the open request(s) on the thread AND re-session Sol so a fresh
+          // Direction can address the ask instead of silently closing it. Mirrors the pattern
+          // the founder-ruling-pending branch uses: the pure transition decides; the runner
+          // emits the human-visible note + the mutation.
+          if (transition.action_key === "needs_sol_resession_unsatisfied_ask") {
+            const asks = transition.unsatisfiedRequests ?? [];
+            try {
+              const summary = asks
+                .map((a) => `${a.kind} ("${a.excerpt}" at ${a.message_created_at})`)
+                .join("; ");
+              const noteBody = `[System] CS Director verdict 'close_no_action' DOWNGRADED by the unsatisfied-request guard — ${asks.length} open customer ask(s) made after the last successful action: ${summary || "(no excerpt)"}. Ticket stays OPEN; re-sessioning Sol so a fresh Direction addresses the newest ask.`;
+              const { error: noteErr } = await db.from("ticket_messages").insert({
+                ticket_id: ticketId,
+                direction: "outbound",
+                visibility: "internal",
+                author_type: "system",
+                body: noteBody.slice(0, 2000),
+              });
+              if (noteErr) console.warn(`${tag} unsatisfied-ask sysNote insert failed: ${noteErr.message}`);
+            } catch (e) {
+              console.warn(`${tag} unsatisfied-ask sysNote write threw:`, e instanceof Error ? e.message : e);
+            }
+            try {
+              const { reSessionSol } = await import("../src/lib/inflection-detector");
+              // Resolve the channel for the sol_max_resessions lookup. A missing config falls
+              // back to 'email' (the dominant channel + the default `ai_channel_config` row), so
+              // a ticket whose channel can't be read still re-sessions correctly.
+              let channel = "email";
+              try {
+                const { data: ch } = await db
+                  .from("tickets")
+                  .select("channel")
+                  .eq("id", ticketId)
+                  .maybeSingle();
+                if (ch?.channel) channel = String(ch.channel);
+              } catch { /* fall through to 'email' */ }
+              await reSessionSol(db, ticketId, {
+                workspace_id: job.workspace_id,
+                channel,
+                kind: "drift",
+                evidence: {
+                  stage: 1,
+                  reason: "unsatisfied_customer_request_blocking_close",
+                  cues: asks.map((a) => `${a.kind}:${a.cue}`),
+                },
+              });
+            } catch (e) {
+              console.warn(`${tag} unsatisfied-ask reSessionSol threw:`, e instanceof Error ? e.message : e);
             }
           }
         }
@@ -16855,13 +17228,18 @@ async function runCsDirectorCallJob(job: Job) {
     // June-session completion note — the session-boundary marker (complements her detailed per-verdict
     // note above). Names the decision + the ticket outcome (approve_remedy/author_spec close +
     // de-escalate; escalate_founder stays escalated, now founder-owned + routed to Eve's SMS).
-    const outcomeLabel = applyResult?.awaiting_founder_approval
-      ? "remedy parked for founder approval (via Eve's SMS) — stays escalated"
-      : verdict.decision === "escalate_founder"
-        ? "escalated to the founder (CEO inbox + Eve) for a ruling"
-        : verdict.decision === "author_spec"
-          ? "closed + de-escalated (structural fix authored to the Roadmap)"
-          : "handled — closed + de-escalated";
+    // june-remedy-shape-and-honest-apply-status Phase 2 — the outcome label is derived from the REAL
+    // applyResult (a failed/needs_attention apply reads 'apply FAILED (<reason>) — ticket NOT
+    // handled'), never the decision alone. Extracted as the pure, unit-tested `csDirectorOutcomeLabel`
+    // so the branch order (founder-hold → failed → decision-based) cannot drift from the transition.
+    const { csDirectorOutcomeLabel } = await import("../src/lib/cs-director");
+    const outcomeLabel = csDirectorOutcomeLabel({
+      decision: verdict.decision,
+      ok: applyResult.ok,
+      needs_attention: applyResult.needs_attention,
+      awaiting_founder_approval: applyResult.awaiting_founder_approval,
+      reason: applyResult.reason ?? applyResult.error ?? null,
+    });
     await stampAgentSessionNote(ticketId, `June's session ${sessShort} is complete — decision: ${verdict.decision}; ticket ${outcomeLabel}.`);
 
     if (isError) {
@@ -16881,8 +17259,16 @@ async function runCsDirectorCallJob(job: Job) {
     // director_activity write above; parking `needs_attention` is what the derived-from ticket
     // 115350d5 required so the escalation reaches an operator instead of dead-ending in the log.
     if (applyResult.needs_attention) {
+      // june-remedy-shape-and-honest-apply-status Phase 3 — a failed approve_remedy apply gets an
+      // EXPLICIT needs_attention_class ('cs_remedy_apply_failed') so it routes back to a fresh
+      // cs-director-call (one retry, carrying the guard's rejection reason) via
+      // needs-attention-route-cs-owner instead of sitting as class='unknown' that no surface owns
+      // (Susan Knudson, ticket 2acc8634). Non-approve_remedy failures pass `undefined` so the
+      // auto-classifier in `update` still stamps their class.
+      const remedyApplyFailed = verdict.decision === "approve_remedy";
       await update(job.id, {
         status: "needs_attention",
+        needs_attention_class: remedyApplyFailed ? "cs_remedy_apply_failed" : undefined,
         error: applyResult.error ?? `cs-director-call ${verdict.decision} action failed — human review needed`,
         log_tail: summary.slice(-2000),
       });
@@ -20481,6 +20867,21 @@ async function runDirectorCoachJob(job: Job) {
   }
 }
 
+/** Head SHA of the most recently merged PR whose head ref is `branch`, or null (none / GitHub error). */
+async function latestMergedPrHeadShaForBranch(branch: string): Promise<string | null> {
+  try {
+    const owner = REPO.split("/")[0];
+    const r = await gh("GET", `/repos/${REPO}/pulls?head=${encodeURIComponent(owner)}:${encodeURIComponent(branch)}&state=closed&per_page=50`);
+    if (!r.ok || !Array.isArray(r.json)) return null;
+    const merged = (r.json as Array<{ merged_at?: string | null; head?: { sha?: string } }>)
+      .filter((p) => !!p.merged_at && !!p.head?.sha)
+      .sort((a, b) => String(b.merged_at).localeCompare(String(a.merged_at)));
+    return merged[0]?.head?.sha ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Dirty-PR resolver (dirty-pr-resolver-agent) ─────────────────────────────
 // A Max `claude -p` that merges origin/main into a dirty claude/* PR + resolves the conflicts. Same
 // sandbox as a feature build (no ANTHROPIC_API_KEY, prod secrets stripped — NO prod creds), but it only
@@ -20499,9 +20900,18 @@ async function runPrResolveClaude(prompt: string, sessionId: string | null, cwd:
 // This pre-flight catches that case up front — read-only, no network — so the resolver can CLOSE the
 // PR as superseded (with a comment citing the duplicate symbols) instead of spending a Max resolve
 // budget on an unwinnable merge. Returns the overlapping symbols; empty means "safe to resolve".
-function findSupersededExportedSymbolsOnMain(wt: string): Array<{ symbol: string; kind: string; file: string }> {
+//
+// `alreadyMergedHeadSha`: when an earlier PR from this same branch already merged (a squash of Phase 1
+// while Phase 2 kept building on the branch), diff from that PR's head instead of the merge-base, so the
+// branch's own already-shipped exports don't read as "superseded" by their own squash on main. Before
+// this, PR #3193 (Phase 2 of shopcx-subscriptions-resolve-shopify-cycle-only-at-charge-time) was parked
+// for a human because Phase 1's `resolveChargeableCycle` + `nextDateAfterCharge` were "already on main".
+function findSupersededExportedSymbolsOnMain(wt: string, alreadyMergedHeadSha?: string | null): Array<{ symbol: string; kind: string; file: string }> {
   const out: Array<{ symbol: string; kind: string; file: string }> = [];
-  const diff = sh("git", ["diff", "--unified=0", "--no-color", "origin/main...HEAD", "--", "*.ts", "*.tsx"], { cwd: wt });
+  const useMergedBase =
+    !!alreadyMergedHeadSha && sh("git", ["merge-base", "--is-ancestor", alreadyMergedHeadSha, "HEAD"], { cwd: wt }).code === 0;
+  const range = useMergedBase ? `${alreadyMergedHeadSha}..HEAD` : "origin/main...HEAD";
+  const diff = sh("git", ["diff", "--unified=0", "--no-color", range, "--", "*.ts", "*.tsx"], { cwd: wt });
   if (diff.code !== 0 || !diff.out) return out;
   type Key = { file: string; kind: string; symbol: string };
   const adds: Key[] = [];
@@ -20863,7 +21273,7 @@ async function runPrResolveJob(job: Job) {
   // the internal branch. Automatic closure is retained ONLY for the DB-backed merged-sibling proof
   // handled above (findAlreadyMergedDuplicate) — a claim rooted in the DB, not a text match.
   try {
-    const superseded = findSupersededExportedSymbolsOnMain(wt);
+    const superseded = findSupersededExportedSymbolsOnMain(wt, await latestMergedPrHeadShaForBranch(branch));
     if (superseded.length > 0) {
       const list = superseded
         .slice(0, 10)
@@ -27855,6 +28265,7 @@ async function materializeOptimizerCampaign(
 // error ⇒ null ⇒ no flag ⇒ the Max default (no regression). modelForKind is dynamic-imported (matches
 // the file's lazy-import style and tolerates the table being absent pre-migration).
 async function runJob(job: Job) {
+  if (await skippedByRepeatVerdictBreaker(job)) return;
   let modelId: string | null = null;
   try {
     const { modelForKind } = await import("../src/lib/agent-model-tiers");
@@ -27863,6 +28274,72 @@ async function runJob(job: Job) {
     modelId = null; // never let a registry hiccup block a job — fall back to the Max default
   }
   return _modelCtx.run({ modelId }, () => dispatchJob(job));
+}
+
+// Repeat-verdict breaker ([[../src/lib/repeat-verdict-breaker]]): a per-target job whose last runs all
+// ended with the identical verdict line is completed without running, once per cooldown window, and the
+// loop is recorded once to director_activity so whatever keeps enqueuing it gets found. Fails open.
+async function skippedByRepeatVerdictBreaker(job: Job): Promise<boolean> {
+  try {
+    const { BREAKER_KINDS, BREAKER_SKIP_ERROR, decideRepeatVerdict } = await import("../src/lib/repeat-verdict-breaker");
+    if (!BREAKER_KINDS.has(job.kind) || job.created_by || !job.spec_slug) return false;
+    const db = await admin();
+    const [{ data: prior }, { data: change }] = await Promise.all([
+      db
+        .from("agent_jobs")
+        .select("status, log_tail, updated_at, error")
+        .eq("workspace_id", job.workspace_id)
+        .eq("kind", job.kind)
+        .eq("spec_slug", job.spec_slug)
+        .neq("id", job.id)
+        .in("status", ["completed", "failed", "needs_attention", "merged"])
+        .order("updated_at", { ascending: false })
+        .limit(10),
+      db
+        .from("agent_jobs")
+        .select("updated_at")
+        .eq("workspace_id", job.workspace_id)
+        .eq("spec_slug", job.spec_slug)
+        .in("kind", ["build", "pr-resolve"])
+        .order("updated_at", { ascending: false })
+        .limit(1),
+    ]);
+    const runs = ((prior ?? []) as Array<{ status: string; log_tail: string | null; updated_at: string; error: string | null }>).filter(
+      (r) => r.error !== BREAKER_SKIP_ERROR,
+    );
+    const lastChange = ((change ?? []) as Array<{ updated_at: string }>)[0]?.updated_at ?? null;
+    const d = decideRepeatVerdict(job, runs, Date.now(), lastChange);
+    if (!d.skip) return false;
+    const line = `repeat-verdict breaker: skipped — the last ${d.repeats} ${job.kind} runs on ${job.spec_slug} all ended "${d.verdict}" (newest ${d.lastRunAt}) and nothing changed since. One run per cooldown window still goes through.`;
+    await update(job.id, { status: "completed", error: BREAKER_SKIP_ERROR, log_tail: line });
+    console.log(`[repeat-verdict-breaker:${job.id.slice(0, 8)}] ${line}`);
+    // One director_activity row per target per window: only on the first skip after a real run.
+    const { data: lastSkip } = await db
+      .from("agent_jobs")
+      .select("updated_at")
+      .eq("workspace_id", job.workspace_id)
+      .eq("kind", job.kind)
+      .eq("spec_slug", job.spec_slug)
+      .eq("error", BREAKER_SKIP_ERROR)
+      .neq("id", job.id)
+      .gt("updated_at", d.lastRunAt)
+      .limit(1);
+    if (!lastSkip?.length) {
+      const { recordDirectorActivity } = await import("../src/lib/director-activity");
+      await recordDirectorActivity(db, {
+        workspaceId: job.workspace_id,
+        directorFunction: "platform",
+        actionKind: "repeat_verdict_breaker_tripped",
+        specSlug: job.spec_slug,
+        reason: `${job.kind} on ${job.spec_slug} keeps returning "${d.verdict}". Something keeps re-enqueuing it without changing its inputs; the breaker now holds it to one run per cooldown window.`,
+        metadata: { job_id: job.id, kind: job.kind, verdict: d.verdict, repeats: d.repeats, last_run_at: d.lastRunAt },
+      });
+    }
+    return true;
+  } catch (e) {
+    console.error(`[repeat-verdict-breaker] check failed (running the job):`, e instanceof Error ? e.message : e);
+    return false;
+  }
 }
 
 // ⭐ DEPLOY BUILD GATE — extracted to [[../src/lib/deploy-build-gate]] (a-red-main-is-a-first-class-

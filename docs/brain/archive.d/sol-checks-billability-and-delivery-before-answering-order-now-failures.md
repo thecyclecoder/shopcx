@@ -1,0 +1,1 @@
+- **Sol verifies delivery status and subscription billability before answering an Order Now failure** · verified 2026-10-08 · → [[libraries/portal__remediation]]

@@ -1,0 +1,1 @@
+- **Drop foreign-app noise — PostgREST direct-REST reads of a non-existent specs.phase column** · verified 2026-10-01 · → [[../libraries/control-tower]]

@@ -40,7 +40,7 @@ import { subscriptionOrderNow } from "@/lib/commerce/subscription";
 
 // ── Evidence + verdict ────────────────────────────────────────────
 
-export type OrderNowVerdict = "paid" | "declined" | "unknown";
+export type OrderNowVerdict = "paid" | "declined" | "nothing_due" | "unknown";
 
 /** Evidence collected from the DB about the async outcome. */
 export interface OrderNowEvidence {
@@ -56,6 +56,14 @@ export interface OrderNowEvidence {
   /** An orders row with subscription_id = ours and created_at > fired_at
    *  and financial_status = 'paid' — the real proof of a successful charge. */
   hasNewPaidOrder: boolean;
+  /** A customer_events row of type 'subscription.order_now_nothing_due' since
+   *  fired_at — the shopcx/internal renewal-attempt pipeline resolved this
+   *  order-now against an already-billed / not-yet-due cycle and so did NOT
+   *  charge and did NOT create an order (no paid order, no billing-success, no
+   *  billing-failure will ever land). Distinguishes a truthful NO-OP from the
+   *  'unknown' processing window. See `verifyOrderNowOutcome` + the pipeline
+   *  emitters in {internal,shopify}-subscription-renewals.ts. */
+  hasNothingDueSkip: boolean;
 }
 
 /**
@@ -64,23 +72,32 @@ export interface OrderNowEvidence {
  *
  * - declined: any billing-failure event, OR last_payment_status='failed'
  *   without a competing paid order.
- * - paid: a new paid order after fired_at, OR a billing-success event.
- * - unknown: neither has landed yet — the caller should schedule one more
+ * - paid: a new paid order after fired_at, OR a billing-success event (the
+ *   STRONG signals), OR last_payment_status='succeeded' (the WEAK signal —
+ *   only consulted after nothing_due so a spent cycle's leftover 'succeeded'
+ *   status can't masquerade as a fresh charge).
+ * - nothing_due: the pipeline explicitly skipped an already-billed / not-yet-
+ *   due cycle. No charge, nothing to ship now — the truthful terminal state
+ *   that used to loop on 'unknown' (ticket dd5e2ba0 — Ashley Denson, told her
+ *   card would be charged $44.97 when nothing happened).
+ * - unknown: nothing has landed yet — the caller should schedule one more
  *   re-check.
  *
- * If both failure AND success/paid-order evidence are present (rare: card
- * rotation between the fire and the verify) we resolve to 'paid' — the
- * customer's account state ends up ok.
+ * Precedence: a STRONG paid signal (new paid order / billing-success) wins over
+ * everything (card rotation between fire + verify ends the customer ok). A hard
+ * decline wins next. An explicit nothing_due skip wins over the WEAK
+ * 'succeeded' status (a spent cycle leaves last_payment_status='succeeded' from
+ * the cycle that already shipped — that must not read as a fresh paid order).
  */
 export function computeOrderNowVerdict(input: OrderNowEvidence): OrderNowVerdict {
-  const paidSignal = input.hasNewPaidOrder
-    || input.hasBillingSuccessEvent
-    || input.lastPaymentStatus === "succeeded";
+  const strongPaidSignal = input.hasNewPaidOrder || input.hasBillingSuccessEvent;
   const declinedSignal = input.hasBillingFailureEvent
     || input.lastPaymentStatus === "failed";
 
-  if (paidSignal) return "paid";
+  if (strongPaidSignal) return "paid";
   if (declinedSignal) return "declined";
+  if (input.hasNothingDueSkip) return "nothing_due";
+  if (input.lastPaymentStatus === "succeeded") return "paid";
   return "unknown";
 }
 
@@ -102,15 +119,23 @@ export async function verifyOrderNowOutcome(
     contract_id: string;
     fired_at: string;
   },
-): Promise<{ verdict: OrderNowVerdict; evidence: OrderNowEvidence }> {
+): Promise<{
+  verdict: OrderNowVerdict;
+  evidence: OrderNowEvidence;
+  /** Current next_billing_date — carried so a `nothing_due` verdict can tell the
+   *  customer the REAL next order date ("no charge; your next order is <date>")
+   *  rather than a false "your order is processing". Null when unknown. */
+  nextBillingDate: string | null;
+}> {
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, last_payment_status")
+    .select("id, last_payment_status, next_billing_date")
     .eq("workspace_id", opts.workspace_id)
     .eq("id", opts.subscription_id)
     .maybeSingle();
 
   const lastPaymentStatus = (sub?.last_payment_status as string | null) ?? null;
+  const nextBillingDate = (sub?.next_billing_date as string | null) ?? null;
 
   const { count: failureCount } = await admin
     .from("customer_events")
@@ -136,14 +161,88 @@ export async function verifyOrderNowOutcome(
     .eq("financial_status", "paid")
     .gt("created_at", opts.fired_at);
 
+  // The pipeline's explicit no-op marker: an order-now that resolved against an
+  // already-billed / not-yet-due cycle. Scoped by subscription_id (the property
+  // both pipelines stamp) and the fired_at cursor so a prior press's marker can't
+  // be read for this attempt.
+  const { count: nothingDueCount } = await admin
+    .from("customer_events")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", opts.workspace_id)
+    .eq("event_type", "subscription.order_now_nothing_due")
+    .eq("properties->>subscription_id", opts.subscription_id)
+    .gt("created_at", opts.fired_at);
+
   const evidence: OrderNowEvidence = {
     hasBillingFailureEvent: (failureCount ?? 0) > 0,
     hasBillingSuccessEvent: (successCount ?? 0) > 0,
     lastPaymentStatus,
     hasNewPaidOrder: (paidOrderCount ?? 0) > 0,
+    hasNothingDueSkip: (nothingDueCount ?? 0) > 0,
   };
 
-  return { verdict: computeOrderNowVerdict(evidence), evidence };
+  return { verdict: computeOrderNowVerdict(evidence), evidence, nextBillingDate };
+}
+
+// ── Nothing-due marker ────────────────────────────────────────────
+//
+// The shopcx + internal renewal-attempt pipelines call this when a
+// customer-pressed order-now resolves against an already-billed / not-yet-due
+// cycle and therefore does NOT charge (an already-claimed `succeeded` cycle, a
+// stale next_billing_date another attempt already advanced, or no chargeable
+// cycle). It writes ONE `subscription.order_now_nothing_due` customer_event
+// that `verifyOrderNowOutcome` reads as the `nothing_due` evidence signal — the
+// async verify cannot otherwise observe an in-pipeline skip (the skip leaves no
+// order, no billing-success/failure, and the sub's leftover
+// last_payment_status='succeeded' from the cycle that already shipped would
+// otherwise read as a fresh paid order).
+//
+// Kept here (not inlined) so the event_type + property shape stays identical
+// across both pipelines and matches the reader's query exactly.
+
+export const ORDER_NOW_NOTHING_DUE_EVENT = "subscription.order_now_nothing_due";
+
+/** Write the nothing-due marker. Best-effort — a logging failure must never
+ *  break the renewal pipeline's skip path (the skip already happened; the
+ *  worst case is the verify loops to its unknown-terminal `drifted` stamp
+ *  instead of the truthful `nothing_due` one). */
+export async function logOrderNowNothingDue(input: {
+  workspace_id: string;
+  customer_id: string | null;
+  subscription_id: string;
+  contract_id?: string | null;
+  next_billing_date?: string | null;
+  /** The pipeline's own skip reason (e.g. 'refused_duplicate_cycle',
+   *  'cycle_already_claimed', 'no_cycle_due') — recorded for the timeline. */
+  reason: string;
+  billing_source?: string | null;
+}): Promise<void> {
+  try {
+    const { logCustomerEvent } = await import("@/lib/customer-events");
+    await logCustomerEvent({
+      workspaceId: input.workspace_id,
+      customerId: input.customer_id,
+      eventType: ORDER_NOW_NOTHING_DUE_EVENT,
+      source: "order_now_verify",
+      summary:
+        "Order-now resolved against an already-billed / not-yet-due cycle — no charge and no new order. " +
+        (input.next_billing_date
+          ? `The next order is scheduled for ${input.next_billing_date}.`
+          : "This cycle already shipped."),
+      properties: {
+        subscription_id: input.subscription_id,
+        shopify_contract_id: input.contract_id ?? null,
+        next_billing_date: input.next_billing_date ?? null,
+        reason: input.reason,
+        billing_source: input.billing_source ?? null,
+      },
+    });
+  } catch (e) {
+    console.warn(
+      `[logOrderNowNothingDue] failed for subscription=${input.subscription_id}:`,
+      e instanceof Error ? e.message : e,
+    );
+  }
 }
 
 // ── Schedule + fire ───────────────────────────────────────────────

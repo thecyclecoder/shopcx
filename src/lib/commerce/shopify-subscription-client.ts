@@ -147,6 +147,29 @@ export async function withDraft(
   return toResult(commit as never, "subscriptionDraftCommit");
 }
 
+/**
+ * Set what every future renewal charges for shipping, by changing the contract's delivery price.
+ *
+ * Used where shipping is free by policy but the contract still stores a rate: a checkout-born
+ * contract keeps the Economy rate it was quoted, and its free-shipping discount may be a one-cycle
+ * copy that is already used up. Atomic through `withDraft`.
+ */
+export async function shopifySetDeliveryPrice(
+  workspaceId: string,
+  contractId: string,
+  cents: number,
+): Promise<SubscriptionActionResult> {
+  if (!Number.isFinite(cents) || cents < 0) return { success: false, error: `invalid delivery price ${cents}` };
+  return withDraft(workspaceId, contractId, async (draftId) => {
+    const env = await gql(
+      workspaceId,
+      `mutation($id:ID!,$in:SubscriptionDraftInput!){ subscriptionDraftUpdate(draftId:$id, input:$in){ draft { id } userErrors { message } } }`,
+      { id: draftId, in: { deliveryPrice: (cents / 100).toFixed(2) } },
+    );
+    return toResult(env as never, "subscriptionDraftUpdate");
+  });
+}
+
 // ── status: pause / cancel / resume ────────────────────────────────────────────────────────
 
 const STATUS_MUTATION = {
@@ -509,6 +532,14 @@ export async function shopifyAttemptBilling(
      * renewal worker knows which cycle it is firing.
      */
     billingCycleSelector?: { index: number } | { date: string };
+    /**
+     * ⭐ The time the attempt is considered to be made. Shopify validates it against the SELECTED
+     * cycle — a future-cycle attempt with no (or a now-valued) origin time is rejected with
+     * "Origin time needs to be within the selected billing cycle". `resolveChargeableCycle` computes
+     * a value that always lands inside the cycle it picked, so renewals and Order Now can bill a
+     * future unbilled cycle. Omitting it keeps Shopify's default (the attempt time = now).
+     */
+    originTime?: string;
   } = {},
 ): Promise<BillingAttemptResult> {
   const env = await gql<{ subscriptionBillingAttemptCreate: { subscriptionBillingAttempt?: { id: string; ready: boolean }; userErrors: { message: string }[] } }>(
@@ -522,6 +553,7 @@ export async function shopifyAttemptBilling(
         idempotencyKey,
         ...(opts.inventoryPolicy ? { inventoryPolicy: opts.inventoryPolicy } : {}),
         ...(opts.billingCycleSelector ? { billingCycleSelector: opts.billingCycleSelector } : {}),
+        ...(opts.originTime ? { originTime: opts.originTime } : {}),
       },
     },
   );
@@ -620,6 +652,12 @@ export interface ContractLine {
    * has no other representation and would simply be lost.
    */
   legacyRateCents: number;
+  /**
+   * Cents allocated by checkout AUTOMATIC discounts Shopify copied onto the contract (S&S or Buy 2/3
+   * function copies). Zero once the recompute has replaced them with ours. Read by the renewal price
+   * check, so a copy left stacking on top of our own discounts shows up as drift.
+   */
+  automaticDiscountCents: number;
   sellingPlanName: string | null;
 }
 
@@ -648,7 +686,7 @@ export async function getSubscriptionContract(
           lineDiscountedPrice { amount }
           discountAllocations { amount { amount }
             discount {
-              ... on SubscriptionManualDiscount { id title }
+              ... on SubscriptionManualDiscount { id title type }
               ... on SubscriptionAppliedCodeDiscount { id } } } } } } } }`,
     { id: contractGid(contractId) },
   );
@@ -657,7 +695,7 @@ export async function getSubscriptionContract(
     id: string; status: string; nextBillingDate: string | null; createdAt: string | null;
     billingPolicy?: { interval: string; intervalCount: number };
     customerPaymentMethod?: { id: string };
-    lines: { edges: { node: { id: string; title: string; quantity: number; sellingPlanName: string | null; variantId: string | null; sku: string | null; currentPrice?: { amount: string }; lineDiscountedPrice?: { amount: string }; discountAllocations?: { amount?: { amount: string }; discount?: { title?: string } }[] } }[] };
+    lines: { edges: { node: { id: string; title: string; quantity: number; sellingPlanName: string | null; variantId: string | null; sku: string | null; currentPrice?: { amount: string }; lineDiscountedPrice?: { amount: string }; discountAllocations?: { amount?: { amount: string }; discount?: { title?: string; type?: string } }[] } }[] };
   } | undefined;
   if (!k) return { success: false, error: "contract not found (or not owned by this app)" };
   return {
@@ -692,6 +730,13 @@ export async function getSubscriptionContract(
         legacyRateCents: (e.node.discountAllocations ?? []).reduce(
           (sum, a) =>
             String(a?.discount?.title ?? "") === LEGACY_RATE_TITLE
+              ? sum + Math.round(parseFloat(a?.amount?.amount ?? "0") * 100)
+              : sum,
+          0,
+        ),
+        automaticDiscountCents: (e.node.discountAllocations ?? []).reduce(
+          (sum, a) =>
+            a?.discount?.type === "AUTOMATIC_DISCOUNT"
               ? sum + Math.round(parseFloat(a?.amount?.amount ?? "0") * 100)
               : sum,
           0,
@@ -877,15 +922,15 @@ export async function getUpcomingBillingCycles(
   workspaceId: string,
   contractId: string,
   opts: { startDate?: string; endDate?: string; first?: number } = {},
-): Promise<{ success: boolean; error?: string; cycles?: { index: number; expectedDate: string; skipped: boolean; status: string }[] }> {
+): Promise<{ success: boolean; error?: string; cycles?: { index: number; expectedDate: string; startAt: string; endAt: string; skipped: boolean; status: string }[] }> {
   const start = opts.startDate ?? new Date().toISOString();
   const end = opts.endDate ?? new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
-  const env = await gql<{ subscriptionBillingCycles?: { edges: { node: { cycleIndex: number; billingAttemptExpectedDate: string; skipped: boolean; status: string } }[] } }>(
+  const env = await gql<{ subscriptionBillingCycles?: { edges: { node: { cycleIndex: number; billingAttemptExpectedDate: string; cycleStartAt: string; cycleEndAt: string; skipped: boolean; status: string } }[] } }>(
     workspaceId,
     `query($id:ID!,$s:DateTime!,$e:DateTime!,$n:Int!){
        subscriptionBillingCycles(contractId:$id, first:$n,
          billingCyclesDateRangeSelector:{ startDate:$s, endDate:$e }){
-         edges { node { cycleIndex billingAttemptExpectedDate skipped status } } } }`,
+         edges { node { cycleIndex billingAttemptExpectedDate cycleStartAt cycleEndAt skipped status } } } }`,
     { id: contractGid(contractId), s: start, e: end, n: opts.first ?? 10 },
   );
   if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
@@ -894,10 +939,51 @@ export async function getUpcomingBillingCycles(
     cycles: (env.data?.subscriptionBillingCycles?.edges ?? []).map((e) => ({
       index: e.node.cycleIndex,
       expectedDate: e.node.billingAttemptExpectedDate,
+      // ⭐ The cycle WINDOW (start/end), not just its expected charge date — `resolveChargeableCycle`
+      // needs it to compute an `originTime` that lands inside the cycle Shopify is being asked to bill.
+      startAt: e.node.cycleStartAt,
+      endAt: e.node.cycleEndAt,
       skipped: e.node.skipped,
       status: e.node.status,
     })),
   };
+}
+
+/**
+ * ⭐ Charge-time cycle resolution. Returns the FIRST non-skipped UNBILLED cycle by index, plus an
+ * `originTime` guaranteed to fall inside that cycle's window.
+ *
+ * This is the charge-time replacement for `getBillingCycleForDate(next_billing_date)`. Our DB row
+ * PLANS the date; Shopify's billing calendar is resolved only HERE, when we actually charge. The
+ * date we set never has to agree with Shopify's cycle boundaries — a date landing inside an
+ * already-BILLED cycle used to strand the sub forever (the renewal cron skipped on BILLED and
+ * Order Now refused with "already placed"). By index, the first unbilled cycle is always billable.
+ *
+ * Shopify rejects a billing attempt whose origin time is outside the selected cycle
+ * ("Origin time needs to be within the selected billing cycle"). So:
+ *   - `now` inside the chosen cycle's window → use `now` (the normal case, charging the open cycle);
+ *   - otherwise (a FUTURE cycle whose window has not opened yet) → the cycle's `startAt + 1s`.
+ */
+export async function resolveChargeableCycle(
+  workspaceId: string,
+  contractId: string,
+  now: Date | string = new Date(),
+): Promise<{ success: boolean; error?: string; index?: number; originTime?: string }> {
+  const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
+  const cycles = await getUpcomingBillingCycles(workspaceId, contractId, { first: 25 });
+  if (!cycles.success) return { success: false, error: cycles.error ?? "could not read billing cycles" };
+  const chargeable = (cycles.cycles ?? [])
+    .filter((c) => c.status === "UNBILLED" && !c.skipped)
+    .sort((a, b) => a.index - b.index)[0];
+  if (!chargeable) return { success: false, error: "no unbilled chargeable cycle" };
+  const startMs = chargeable.startAt ? new Date(chargeable.startAt).getTime() : NaN;
+  const endMs = chargeable.endAt ? new Date(chargeable.endAt).getTime() : NaN;
+  const inside =
+    Number.isFinite(startMs) && Number.isFinite(endMs) && nowMs >= startMs && nowMs < endMs;
+  const originTime = inside
+    ? new Date(nowMs).toISOString()
+    : new Date((Number.isFinite(startMs) ? startMs : nowMs) + 1000).toISOString();
+  return { success: true, index: chargeable.index, originTime };
 }
 
 
@@ -1242,6 +1328,24 @@ export async function shopifySyncBillingSchedule(
       // Expected at the horizon, and on any cycle already billed. Not a failure.
       return { success: true, pinned, stoppedAt: `cycle ${index}: ${ue[0]?.message ?? env.errors?.[0]?.message}` };
     }
+    // ⚠️ VERIFY THE PIN RESOLVES BACK. Pinning cycle N to date X makes X the END BOUNDARY of cycle
+    // N−1's window, and a date lookup resolves a boundary to the EARLIER cycle. If N−1 is BILLED,
+    // the edit that was meant to schedule the customer has just stranded them — the mutation
+    // reports success and the subscription becomes unbillable.
+    //
+    // Measured 2026-09-30: a repair script pinned 14 subs to earlier dates and re-stranded 3 of
+    // them exactly this way, because it trusted the mutation's own success. Every caller needs this,
+    // so it lives here rather than in any one of them.
+    if (pinned === 0) {
+      const back = await getBillingCycleForDate(workspaceId, contractId, when.toISOString());
+      if (back.success && back.cycle && (back.cycle.status === "BILLED" || back.cycle.skipped)) {
+        return {
+          success: false,
+          pinned,
+          error: `pinned cycle #${index} to ${when.toISOString().slice(0, 10)} but that date resolves to cycle #${back.cycle.index} (${back.cycle.status}) — the subscription would be unbillable`,
+        };
+      }
+    }
     pinned++;
     when = stepSchedule(when, interval, intervalCount);
   }
@@ -1265,22 +1369,69 @@ export async function shopifyRetimeContract(
   nextBillingDate: string,
 ): Promise<SubscriptionActionResult & { stranded?: boolean }> {
   const landingBefore = await getBillingCycleForDate(workspaceId, contractId, nextBillingDate);
-  // Pin from whichever cycle the new date belongs to, so the walk does not try to rewrite history.
-  const startIndex = landingBefore.cycle?.index ?? 1;
-  await shopifySyncBillingSchedule(workspaceId, contractId, { firstDate: nextBillingDate, startIndex });
 
-  const set = await shopifySetNextBillingDate(workspaceId, contractId, nextBillingDate);
-  if (!set.success) return set;
+  // ⭐ NEVER PIN A SPENT CYCLE. If the target date resolves to a cycle Shopify has already BILLED
+  // (or that was skipped), pinning it DRAGS THAT BILLED CYCLE FORWARD onto the new date — and the
+  // renewal worker resolves by date and skips spent cycles, so the subscription is instantly and
+  // permanently unbillable.
+  //
+  // This is self-inflicted and compounding: the rolling retime after each charge lands on the cycle
+  // that just billed, moves it forward, and the next lookup finds that same billed cycle sitting on
+  // the customer's next date. Measured 2026-09-28 — 90 of 209 migrated subs were stranded exactly
+  // this way, every one of them by our own retime.
+  //
+  // So step past spent cycles to the first UNBILLED one and pin from there. The customer's date is
+  // unchanged; only which cycle carries it moves.
+  let startIndex = landingBefore.cycle?.index ?? 1;
+  if (landingBefore.success && landingBefore.cycle
+      && (landingBefore.cycle.status === "BILLED" || landingBefore.cycle.skipped)) {
+    const live = await getSubscriptionContract(workspaceId, contractId);
+    const upcoming = await getUpcomingBillingCycles(workspaceId, contractId, {
+      startDate: live.contract?.createdAt ?? undefined,
+      endDate: new Date(Date.now() + 400 * 86_400_000).toISOString(),
+      first: 30,
+    });
+    const firstOpen = (upcoming.cycles ?? []).find(
+      (c) => c.index > landingBefore.cycle!.index && c.status !== "BILLED" && !c.skipped,
+    );
+    if (!firstOpen) {
+      return { success: false, error: `no unbilled cycle after #${landingBefore.cycle.index} to carry ${nextBillingDate}` };
+    }
+    startIndex = firstOpen.index;
+  }
+  // ⭐ RE-ANCHOR FIRST. The sync itself refuses (`success:false`) when its first pin back-resolves
+  // to a spent cycle; that refusal must STOP the retime, not be ignored. Charging ahead into
+  // shopifySetNextBillingDate anyway is exactly what left a refused date on the contract.
+  const sync = await shopifySyncBillingSchedule(workspaceId, contractId, { firstDate: nextBillingDate, startIndex });
+  if (!sync.success) {
+    return { success: false, stranded: true, error: sync.error ?? `could not re-anchor ${contractId} to carry ${nextBillingDate}` };
+  }
 
-  // ⚠️ VERIFY. A silent strand is the exact failure this exists to prevent, so it must never be
-  // possible to succeed quietly into one.
+  // ⚠️ VERIFY *BEFORE* WRITING THE DISPLAY DATE. A silent strand is the exact failure this exists to
+  // prevent — and a REFUSED retime must leave NOTHING behind (Phase 2 of
+  // sol-checks-billability-and-delivery-before-answering-order-now-failures). The landing cycle is
+  // fixed by the re-anchored calendar above, NOT by the display `nextBillingDate` field (Shopify
+  // treats that as a storage field, verified), so resolving it here — BEFORE shopifySetNextBillingDate
+  // — is identical to resolving it afterward, minus the partial write. This check USED to run AFTER
+  // the set and still return `success:true, stranded:true`, so a refused retime left the new date on
+  // the contract — the 2026-10-08 Ashley Denson incident: an Oct-11 retime Shopify flagged unbillable
+  // stayed put, hiding the stuck state from the next reader.
   const landing = await getBillingCycleForDate(workspaceId, contractId, nextBillingDate);
   if (landing.success && landing.cycle && (landing.cycle.status === "BILLED" || landing.cycle.skipped)) {
     console.error(
-      `[shopcx-retime] ${contractId}: ${nextBillingDate} lands in cycle #${landing.cycle.index} (${landing.cycle.status}${landing.cycle.skipped ? ", skipped" : ""}) — the renewal worker WILL skip this subscription`,
+      `[shopcx-retime] ${contractId}: ${nextBillingDate} lands in cycle #${landing.cycle.index} (${landing.cycle.status}${landing.cycle.skipped ? ", skipped" : ""}) — refusing to set the next billing date (the renewal worker WOULD skip this subscription)`,
     );
-    return { success: true, stranded: true };
+    return {
+      success: false,
+      stranded: true,
+      error: `date_not_billable — ${nextBillingDate} lands in cycle #${landing.cycle.index} (${landing.cycle.status}${landing.cycle.skipped ? ", skipped" : ""})`,
+    };
   }
+
+  // Billable landing CONFIRMED — only now write Shopify's display nextBillingDate. If this write
+  // itself fails, nothing downstream (our row) is persisted either; the caller gates on success.
+  const set = await shopifySetNextBillingDate(workspaceId, contractId, nextBillingDate);
+  if (!set.success) return set;
   return { success: true };
 }
 
@@ -1454,7 +1605,7 @@ export async function getSubscriptionDraft(
   draftId: string,
 ): Promise<{
   success: boolean; error?: string; lines?: DraftLine[];
-  discounts?: { id: string; title: string | null; type: string | null }[];
+  discounts?: { id: string; title: string | null; type: string | null; targetType: string | null }[];
   /** True when Shopify had MORE lines or discounts than this read returned. See `truncated` below. */
   truncated?: boolean;
 }> {
@@ -1468,7 +1619,7 @@ export async function getSubscriptionDraft(
               ... on SubscriptionManualDiscount { id title }
               ... on SubscriptionAppliedCodeDiscount { id } } } } }
         discounts(first:250){ pageInfo { hasNextPage } nodes {
-          ... on SubscriptionManualDiscount { id title type }
+          ... on SubscriptionManualDiscount { id title type targetType }
           ... on SubscriptionAppliedCodeDiscount { id } } } } } }`,
     { id: draftId },
   );
@@ -1477,7 +1628,7 @@ export async function getSubscriptionDraft(
     lines?: { pageInfo?: { hasNextPage?: boolean }; nodes?: { id: string; quantity: number; sku: string | null; variantId: string | null;
       currentPrice?: { amount: string };
       discountAllocations?: { amount?: { amount: string }; discount?: { title?: string } }[] }[] };
-    discounts?: { pageInfo?: { hasNextPage?: boolean }; nodes?: { id: string; title?: string | null; type?: string | null }[] };
+    discounts?: { pageInfo?: { hasNextPage?: boolean }; nodes?: { id: string; title?: string | null; type?: string | null; targetType?: string | null }[] };
   } | undefined;
   if (!n) return { success: false, error: "draft not found" };
   return {
@@ -1503,7 +1654,7 @@ export async function getSubscriptionDraft(
     })),
     // A code discount has no `title`; it can never match a structural title, so it is excluded
     // from the structural clear by construction.
-    discounts: (n.discounts?.nodes ?? []).map((d) => ({ id: d.id, title: d.title ?? null, type: d.type ?? null })),
+    discounts: (n.discounts?.nodes ?? []).map((d) => ({ id: d.id, title: d.title ?? null, type: d.type ?? null, targetType: d.targetType ?? null })),
   };
 }
 

@@ -19,7 +19,7 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat, emitRenewalOutcomeHeartbeat, aggregateRenewalOutcomes } from "@/lib/control-tower/heartbeat";
-import { getBraintreeGateway } from "@/lib/integrations/braintree";
+import { getBraintreeGateway, findChargedSaleByOrderId } from "@/lib/integrations/braintree";
 import { createAmplifierOrder, stampAmplifierImportFailure } from "@/lib/integrations/amplifier";
 import { generateOrderNumber } from "@/lib/order-number";
 import {
@@ -442,11 +442,16 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     concurrency: [{ limit: 10 }],
     triggers: [{ event: "internal-subscription/renewal-attempt" }],
   },
-  async ({ event, step }) => {
-    const { subscription_id, workspace_id, expected_next_billing_date } = event.data as {
+  async ({ event, step, attempt }) => {
+    const { subscription_id, workspace_id, expected_next_billing_date, order_now } = event.data as {
       subscription_id: string;
       workspace_id: string;
       expected_next_billing_date?: string | null;
+      /** True when fired by a customer-pressed order-now (subscriptionOrderNow),
+       *  not the nightly renewal cron. Drives the `nothing_due` marker on an
+       *  already-billed-cycle skip so the async order-now verify can report a
+       *  truthful no-op instead of looping on 'unknown'. */
+      order_now?: boolean;
     };
 
     const admin = createAdminClient();
@@ -996,7 +1001,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     // to keep vs drop. Redemptions are recorded only AFTER a successful charge
     // (record-coupon-redemptions step below).
     const { resolveRenewalDiscount } = await import("@/lib/coupons");
-    const { discountCents, keepCodes, toRedeem } = await step.run("resolve-coupons", async () =>
+    const { discountCents, keepCodes, toRedeem, unavailableCodes } = await step.run("resolve-coupons", async () =>
       resolveRenewalDiscount(
         workspace_id,
         (ctx.sub.applied_discounts as Array<Record<string, unknown>> | null) ?? null,
@@ -1004,6 +1009,53 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
         (ctx.sub.customer_id as string | null) ?? null,
       ),
     );
+
+    // ── Coupon lookup unavailable → HOLD, never bill full price ─────────
+    // A code whose live lookup FAILED (Shopify throttle / HTTP / GraphQL error) is not an
+    // invalid code. Before this, the renewal dropped it: one transient failure charged full price
+    // AND deleted the customer's discount for good. Now: no charge, next_billing_date NOT advanced
+    // (the next daily run retries), the code stays on the sub. Same shape as the overcharge guard
+    // above, and taken before the per-cycle charge claim, so nothing is left in flight. The
+    // THIRD hold on a sub inside 7 days also pages ops — a persistent outage must not quietly
+    // stall billing (CEO north star: hitting a rail escalates).
+    if ((unavailableCodes ?? []).length) {
+      await step.run("emit-outcome-coupon-unavailable-hold", () =>
+        emitRenewalOutcomeHeartbeat("skipped_other"),
+      );
+      await step.run("log-coupon-unavailable-hold", async () => {
+        const { logCustomerEvent } = await import("@/lib/customer-events");
+        await logCustomerEvent({
+          workspaceId: workspace_id,
+          customerId: (ctx.sub.customer_id as string | null) ?? null,
+          eventType: "subscription.renewal_held_coupon_unavailable",
+          source: "internal_subscription_renewal",
+          summary:
+            `Renewal held — could not verify coupon ${unavailableCodes.join(", ")} (lookup failed). ` +
+            `Not charged; the code stays on the subscription and the next daily run retries.`,
+          properties: { subscription_id, unavailable_codes: unavailableCodes },
+        });
+        const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+        const { count } = await admin
+          .from("customer_events")
+          .select("id", { count: "exact", head: true })
+          .eq("workspace_id", workspace_id)
+          .eq("event_type", "subscription.renewal_held_coupon_unavailable")
+          .eq("properties->>subscription_id", subscription_id)
+          .gte("created_at", since);
+        if ((count ?? 0) === 3) {
+          const { notifyOpsAlert } = await import("@/lib/notify-ops-alert");
+          await notifyOpsAlert(workspace_id, {
+            severity: "critical",
+            title: "Renewal held 3x — coupon lookup keeps failing",
+            lines: [
+              `Sub ${subscription_id}: coupon ${unavailableCodes.join(", ")} could not be verified on 3 runs in 7 days.`,
+              "The sub is not being billed. Check the Shopify connection, or move the code to an internal coupon.",
+            ],
+          });
+        }
+      });
+      return { skipped: true, reason: "coupon_lookup_unavailable" };
+    }
 
     // Post-coupon taxable base: scale the line prices by the coupon ratio for
     // the Avalara quote ONLY — the order still records full prices + discount_cents.
@@ -1252,6 +1304,28 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
           },
         });
       });
+      // A customer-pressed order-now that lands on a cycle ALREADY resolved by a
+      // real charge (`succeeded`) is a truthful no-op: the current cycle already
+      // billed and shipped, nothing is due now. Surface the `nothing_due` marker
+      // the async order-now verify reads so the ticket confirms "no charge; next
+      // order <date>" instead of looping on 'unknown' → a false "it's processing"
+      // (spec: order-now verify 'nothing_due' verdict; ticket dd5e2ba0). A
+      // non-`succeeded` existing status (in_flight) is a genuine race, not a
+      // nothing-due — left to the verify's normal unknown/decline handling.
+      if (order_now && claim.existing_status === "succeeded") {
+        await step.run("log-order-now-nothing-due", async () => {
+          const { logOrderNowNothingDue } = await import("@/lib/commerce/order-now-verify");
+          await logOrderNowNothingDue({
+            workspace_id,
+            customer_id: (ctx.sub.customer_id as string | null) ?? null,
+            subscription_id,
+            contract_id: (ctx.sub.shopify_contract_id as string | null) ?? null,
+            next_billing_date: (ctx.sub.next_billing_date as string | null) ?? null,
+            reason: "refused_duplicate_cycle",
+            billing_source: "internal",
+          });
+        });
+      }
       return {
         skipped: true,
         reason: "refused_duplicate_cycle",
@@ -1284,11 +1358,31 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
 
     // ── 4. Charge ───────────────────────────────────────────────
     const charge = await step.run("braintree-sale", async () => {
+      // ⭐ Idempotent charge. The sale carries the reserved order number as its Braintree
+      // `orderId` (memoized by reserve-order-number, so identical across retries). If Braintree
+      // approved the sale but the result was lost before Inngest recorded this step — a deploy
+      // reaping the function mid-step, a timeout — the retry re-ran a fresh sale and charged the
+      // customer twice. On any retry we first look the order up and reuse a sale that already
+      // charged. A failed lookup throws (the step retries), never falls through to a blind sale.
+      if (attempt > 0) {
+        const prior = await findChargedSaleByOrderId(workspace_id, orderNumber);
+        if (prior) {
+          console.warn(`[renewal] retry found existing sale ${prior.id} (${prior.status}) for ${orderNumber} — not charging again`);
+          return {
+            success: true,
+            message: `reused existing sale ${prior.id} (retry)`,
+            transactionId: prior.id,
+            processorResponseCode: null,
+            processorResponseText: null,
+          };
+        }
+      }
       const gateway = await getBraintreeGateway(workspace_id);
       const result = await gateway.transaction.sale({
         amount: (totalCents / 100).toFixed(2),
         paymentMethodToken: ctx.pm.braintree_payment_method_token,
         customerId: ctx.pm.braintree_customer_id,
+        orderId: orderNumber,
         options: { submitForSettlement: true },
       });
       return {

@@ -35,8 +35,12 @@ export function uuidLineItemProductIds(ids: ReadonlyArray<string | null | undefi
 
 /**
  * Non-reviewable add-on / system product identity markers. Shipping
- * Protection is the confirmed live case (product_type "ShopWill",
- * handle "shipping-insurance" on the workspace's `ee261540…` product).
+ * Protection is the confirmed live case; two distinct apps ship it in
+ * the wild — ShopWill (product_type "ShopWill", handle
+ * "shipping-insurance" on the workspace's `ee261540…` product) and
+ * Upcart (product_type "Upcart - Shipping Protection", handle
+ * "shipping-protection"). Register BOTH so the identity filter matches
+ * whichever app is live on the storefront.
  * The UUID guard above happens to exclude Shipping Protection today
  * only because its line-item id is a Shopify numeric — if a
  * shipping-protection line ever carried a valid product UUID (or a new
@@ -44,8 +48,8 @@ export function uuidLineItemProductIds(ids: ReadonlyArray<string | null | undefi
  * sourcing. Exclude by identity so the review block always sources
  * only from real, reviewable products the customer actually bought.
  */
-const NON_REVIEWABLE_PRODUCT_TYPES = new Set(["shopwill"]);
-const NON_REVIEWABLE_PRODUCT_HANDLES = new Set(["shipping-insurance"]);
+const NON_REVIEWABLE_PRODUCT_TYPES = new Set(["shopwill", "upcart - shipping protection"]);
+const NON_REVIEWABLE_PRODUCT_HANDLES = new Set(["shipping-insurance", "shipping-protection"]);
 
 export function isReviewableProduct(product: {
   product_type?: string | null;

@@ -59,3 +59,12 @@ Braintree posts webhooks for disputes, recurring billing events, etc. Verified v
 ## Related
 
 [[../tables/transactions]] · [[../tables/customer_payment_methods]] · [[../tables/orders]] · [[../tables/subscriptions]] · [[../tables/dunning_cycles]] · [[../tables/payment_failures]] · [[../tables/dunning_error_codes]] · [[../tables/chargeback_events]] · [[../inngest/dunning]] · [[../inngest/internal-subscription-renewals]]
+
+## Idempotent renewal sales — `findChargedSaleByOrderId` / `pickChargedSale`
+
+Internal renewal sales carry the order number as the Braintree `orderId`.
+- **`findChargedSaleByOrderId(workspaceId, orderId)`** searches by `orderId` and returns the first `sale` whose status is in `CHARGED_SALE_STATUSES` (authorized, submitted_for_settlement, settling, settled), or null. It **throws** on a search failure, so callers never fall through to a fresh sale they couldn't rule out.
+- **`pickChargedSale`** is the pure filter (credits, declines and voids never count).
+
+Used by [[../inngest/internal-subscription-renewals]] on charge-step retries. The storefront checkout and `one-time-charge` sales are synchronous, not Inngest-retried, and don't use it.
+

@@ -415,16 +415,40 @@ export async function insertBraintreeRefundMirror(
 // row; we do NOT re-verify that the refund settled — the transaction's
 // existence in the .refunds list IS the gateway's confirmation.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractBraintreeRefunds(txn: any): ParsedBraintreeRefund[] {
+/**
+ * Map a sale transaction's refunds into mirror rows.
+ *
+ * ⚠️ The Braintree Node SDK does NOT populate an inline `refunds` array on
+ * `transaction.find()` — it returns `refundIds` (ids only) plus, on the refund
+ * transaction itself, `refundedTransactionId` pointing back at the sale. Reading
+ * `txn.refunds` therefore ALWAYS yielded `[]`, so `reconcileBraintreeRefundsForOrder`
+ * mirrored nothing while returning `ok:true` — measured 2026-09-30: 4 orders,
+ * $75.36 of real gateway refunds, invisible to the ledger and to the
+ * double-refund guard. The amounts live on the refund TRANSACTIONS, which the
+ * caller fetches by id and hands in here.
+ *
+ * `refundTxns` is a parameter rather than a gateway call inside this function so
+ * the mapping stays pure and unit-testable — the original defect shipped green
+ * because its verification was a grep for the symbol, which proves existence and
+ * not behaviour.
+ */
+export function extractBraintreeRefunds(
+  saleTxn: any,
+  refundTxns: any[] = [],
+): ParsedBraintreeRefund[] {
+  const braintreeTransactionId = String(saleTxn?.id ?? "");
   const list: ParsedBraintreeRefund[] = [];
-  const braintreeTransactionId = String(txn?.id ?? "");
-  const inline = Array.isArray(txn?.refunds) ? txn.refunds : [];
-  for (const r of inline) {
+  const seen = new Set<string>();
+  // Accept BOTH shapes: an inline array when an API version supplies one, and the
+  // fetched refund transactions resolved from `refundIds`.
+  const inline = Array.isArray(saleTxn?.refunds) ? saleTxn.refunds : [];
+  for (const r of [...inline, ...refundTxns]) {
     const id = r?.id != null ? String(r.id) : "";
-    if (!id) continue;
+    if (!id || seen.has(id)) continue;
     const raw = r?.amount;
     const asNumber = typeof raw === "number" ? raw : parseFloat(String(raw ?? "0"));
     if (!Number.isFinite(asNumber) || asNumber <= 0) continue;
+    seen.add(id);
     list.push({
       braintreeRefundId: id,
       braintreeTransactionId,
@@ -477,7 +501,15 @@ export async function reconcileBraintreeRefundsForOrder(
     const gateway = await getBraintreeGateway(workspaceId);
     const txn = await gateway.transaction.find(braintreeTxnId).catch(() => null);
     if (!txn) return { ok: false, reason: `Braintree transaction ${braintreeTxnId} not found` };
-    refunds = extractBraintreeRefunds(txn);
+    // `refundIds` is the only refund handle the SDK populates; resolve each to its
+    // transaction so the mapper can read the AMOUNT (see extractBraintreeRefunds).
+    const refundIds: string[] = Array.isArray((txn as { refundIds?: unknown[] }).refundIds)
+      ? ((txn as { refundIds: unknown[] }).refundIds).map((r) => String(r))
+      : [];
+    const refundTxns = (
+      await Promise.all(refundIds.map((rid) => gateway.transaction.find(rid).catch(() => null)))
+    ).filter((r): r is NonNullable<typeof r> => r != null);
+    refunds = extractBraintreeRefunds(txn, refundTxns);
   } catch (e) {
     return { ok: false, reason: `Braintree gateway error: ${errText(e)}` };
   }

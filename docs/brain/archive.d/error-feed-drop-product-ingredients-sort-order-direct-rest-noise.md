@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: product_ingredients.sort_order direct-REST ad-hoc lookup** · verified 2026-09-29 · → [[../libraries/control-tower]]

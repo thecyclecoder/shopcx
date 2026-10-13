@@ -18,6 +18,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   guardAppstleOrderNow,
   guardInternalOrderNow,
+  guardRecentOrderNow,
+  isOrderInProgressError,
+  ORDER_IN_PROGRESS,
+  ORDER_IN_PROGRESS_MESSAGE,
   pickInternalOrderNowBlock,
   INTERNAL_ORDER_NOW_RECENT_WINDOW_MS,
   type InternalOrderNowLedgerRow,
@@ -144,7 +148,9 @@ test("guardInternalOrderNow — no rows → proceed", async () => {
   const admin = fakeAdmin([]);
   const verdict = await guardInternalOrderNow(admin, {
     subscription_id: "sub-abc",
+    workspace_id: "ws-1",
     now: 1_800_000_000_000,
+    listRecentOrders: noOrders,
   });
   assert.deepEqual(verdict, { action: "proceed" });
 });
@@ -156,7 +162,9 @@ test("guardInternalOrderNow — in_flight row → block with rendered message", 
   ]);
   const verdict = await guardInternalOrderNow(admin, {
     subscription_id: "sub-abc",
+    workspace_id: "ws-1",
     now: NOW,
+    listRecentOrders: noOrders,
   });
   assert.equal(verdict.action, "block");
   if (verdict.action !== "block") return;
@@ -168,25 +176,20 @@ test("guardInternalOrderNow — DB error propagates (never silently proceed)", a
   const admin = fakeAdmin([], { message: "connection refused" });
   await assert.rejects(
     () =>
-      guardInternalOrderNow(admin, { subscription_id: "sub-abc", now: 1_800_000_000_000 }),
+      guardInternalOrderNow(admin, { subscription_id: "sub-abc", workspace_id: "ws-1", now: 1_800_000_000_000, listRecentOrders: noOrders }),
     /guard_internal_order_now_read_failed/,
   );
 });
 
-// Minimal PostgREST-shaped stub for the guard's DB reads: the guard only exercises
+// Minimal PostgREST-shaped stub for the guard's ledger read: the guard only exercises
 // admin.from(...).select(...).eq(...).or(...).order(...).limit(...) → Promise<{data,error}>.
-// The full PostgREST builder is far larger than we need for a unit test; the guard body
-// only touches these five chained calls, so we structurally satisfy that subset and cast
-// to `SupabaseClient` at the call site.
+// The orders read goes through the orders SDK, which tests replace via `listRecentOrders`.
 function fakeAdmin(
   rows: InternalOrderNowLedgerRow[],
   error: { message: string } | null = null,
 ): SupabaseClient {
   const terminal = {
-    limit: async (_n: number) => ({
-      data: error ? null : rows,
-      error,
-    }),
+    limit: async (_n: number) => ({ data: error ? null : rows, error }),
   };
   const stub = {
     from: (_table: string) => ({
@@ -201,3 +204,59 @@ function fakeAdmin(
   };
   return stub as unknown as SupabaseClient;
 }
+
+const noOrders = async () => [] as Array<{ created_at: string }>;
+
+// ─── Every-surface guard: the orders signal ──────────────────────────
+// The portal ShopCX branch bills Shopify directly and writes no ledger row, so after its
+// first charge advances the date a second press would bill the NEXT cycle. A recent order
+// for the sub is the engine-agnostic signal that catches it.
+
+test("guardRecentOrderNow — no ledger row but an order inside the window → block", async () => {
+  const NOW = 1_800_000_000_000;
+  const verdict = await guardRecentOrderNow(fakeAdmin([]), {
+    subscription_id: "sub-abc",
+    workspace_id: "ws-1",
+    now: NOW,
+    listRecentOrders: async () => [{ created_at: new Date(NOW - 90_000).toISOString() }],
+  });
+  assert.equal(verdict.action, "block");
+  if (verdict.action !== "block") return;
+  assert.equal(verdict.reason, ORDER_IN_PROGRESS);
+  assert.equal(verdict.message, ORDER_IN_PROGRESS_MESSAGE);
+});
+
+test("guardRecentOrderNow — newest order outside the window → proceed (deliberate re-order)", async () => {
+  const NOW = 1_800_000_000_000;
+  const verdict = await guardRecentOrderNow(fakeAdmin([]), {
+    subscription_id: "sub-abc",
+    workspace_id: "ws-1",
+    now: NOW,
+    listRecentOrders: async () => [{ created_at: new Date(NOW - 20 * 60 * 1000).toISOString() }],
+  });
+  assert.deepEqual(verdict, { action: "proceed" });
+});
+
+test("guardRecentOrderNow — orders read error propagates (never silently proceed)", async () => {
+  await assert.rejects(
+    () =>
+      guardRecentOrderNow(fakeAdmin([]), {
+        subscription_id: "sub-abc",
+        workspace_id: "ws-1",
+        now: 1_800_000_000_000,
+        listRecentOrders: async () => { throw new Error("timeout"); },
+      }),
+    /guard_internal_order_now_read_failed: timeout/,
+  );
+});
+
+test("guardInternalOrderNow is the same guard (back-compat name)", () => {
+  assert.equal(guardInternalOrderNow, guardRecentOrderNow);
+});
+
+test("isOrderInProgressError — matches the SDK's prefixed refusal, nothing else", () => {
+  assert.equal(isOrderInProgressError(`${ORDER_IN_PROGRESS}: an order was already placed`), true);
+  assert.equal(isOrderInProgressError(ORDER_IN_PROGRESS), true);
+  assert.equal(isOrderInProgressError("not_active (paused)"), false);
+  assert.equal(isOrderInProgressError(undefined), false);
+});

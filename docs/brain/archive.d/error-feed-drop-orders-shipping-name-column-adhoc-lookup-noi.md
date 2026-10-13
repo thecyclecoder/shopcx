@@ -1,0 +1,1 @@
+- **Drop foreign-app Postgres noise: ad-hoc PostgREST select on orders.shipping_name** · verified 2026-10-01 · → [[../inngest/supabase-log-poll]]

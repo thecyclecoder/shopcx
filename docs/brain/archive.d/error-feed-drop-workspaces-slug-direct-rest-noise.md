@@ -1,0 +1,1 @@
+- **Drop foreign-app `column workspaces.slug does not exist` PostgREST noise at capture** · verified 2026-09-27 · → [[../libraries/control-tower]] (`isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise`)

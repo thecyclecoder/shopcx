@@ -1,0 +1,1 @@
+- **Catch billing_forecasts pending unique-index race in createForecast** · verified 2026-09-30 · → [[../libraries/billing-forecast]]

@@ -201,7 +201,12 @@ function stage1Classify(input: DetectInflectionInput): Stage1Result {
   // A CHECKOUT-STUCK message flags Sol back in even mid-playbook — a customer stuck at the
   // Shopify checkout while the current playbook is still driving (or a Direction that never
   // covered the payment lane, per Latrina's aa0b6697 case) needs a fresh assisted-purchase
-  // Direction. We map it to `kind: 'drift'` (rather than a new kind) so the existing
+  // Direction. This ALSO covers the payment-journey-stage objections (ticket cd385c7f):
+  // a customer mid add-payment-method journey who objects to the link ("I don't trust this
+  // to add payment" / "is this safe") or asks for an alternative rail ("do you have PayPal?")
+  // now matches `classifyCheckoutStuck` and re-sessions Sol to ANSWER in-lane (the same
+  // secure link accepts PayPal Vault — [[assisted-purchase-direction]] concierge replies)
+  // instead of falling out of the lane onto the no-progress circuit → escalation. We map it to `kind: 'drift'` (rather than a new kind) so the existing
   // `reSessionSol` router fires unchanged: supersede the live Direction + enqueue a new
   // ticket-handle box session for Sol. The verdict lands via detectInflection → applyInflectionGate
   // → reSessionSol just like the multi-signal drift path, and the ledger row stamps
@@ -451,6 +456,74 @@ export interface ReSessionResult {
 }
 
 /**
+ * Phase 1 of [[../specs/inflection-resession-must-act-on-newest-ask]] — the triggering
+ * message the re-session carries into the Sol prompt. Shape mirrors what Sol needs to
+ * quote verbatim: the message `id`, the `created_at` so the prompt can tell Sol which
+ * turn she must address, and `text` preferring `body_clean` (the normalized form the
+ * detector itself read; the raw `body` is a fallback for the pre-body_clean legacy rows).
+ *
+ * The field is persisted on `agent_jobs.instructions` by `reSessionSol` and the worker
+ * (`runTicketHandleJob` in `scripts/builder-worker.ts`) injects it into the prompt so
+ * Sol's Direction can never again treat the inflection `kind` as the whole signal — the
+ * dc31bf31 scar (frustration label, no words, Sol re-answered the old question).
+ */
+export interface TriggerMessage {
+  id: string;
+  created_at: string;
+  text: string;
+}
+
+/**
+ * Loads the newest inbound customer `ticket_messages` row for this ticket. Prefers
+ * `body_clean` (same text the detector read), falls back to `body` for legacy rows
+ * written before the `body_clean` normalizer landed. Returns `null` when the ticket
+ * has no inbound customer messages yet (a race against the first inbound landing, or
+ * a ticket that only ever carried outbound/internal rows) — reSessionSol tolerates
+ * the null and simply omits the field.
+ *
+ * The row filter deliberately excludes `visibility='internal'` so an agent-note or
+ * triage stamp doesn't masquerade as the customer's newest ask.
+ */
+async function loadTriggerMessageForTicket(
+  admin: SupabaseClient,
+  workspace_id: string,
+  ticket_id: string,
+): Promise<TriggerMessage | null> {
+  // Cross-tenant guard — Phase 5 (security-review fix). `ticket_messages` has NO
+  // `workspace_id` column of its own (it hangs off the ticket), so a bare `.eq('ticket_id', …)`
+  // read would succeed for a ticket owned by ANY workspace — a foreign ticket_id could leak a
+  // message into the agent_jobs instructions this helper feeds. The caller's existing scope
+  // check (`getLiveDirection`) is a sibling, not an upstream guard: this helper runs BEFORE
+  // getLiveDirection in `reSessionSol`, so trusting it would be out-of-order.
+  //
+  // Fix: PostgREST inner-join on tickets with a workspace_id filter — the same pattern
+  // `src/lib/control-tower/monitor.ts:1488` already uses on this table. A ticket_id whose
+  // parent ticket row doesn't belong to `workspace_id` returns an empty set (not a privacy
+  // leak dressed up as a null). `maybeSingle()` keeps the two-row impossibility explicit.
+  const { data, error } = await admin
+    .from("ticket_messages")
+    .select("id, body, body_clean, created_at, tickets!inner(id)")
+    .eq("ticket_id", ticket_id)
+    .eq("tickets.workspace_id", workspace_id)
+    .eq("direction", "inbound")
+    .eq("author_type", "customer")
+    .neq("visibility", "internal")
+    .order("created_at", { ascending: false })
+    .limit(1);
+  if (error) return null;
+  const row = ((data as Array<{
+    id: string;
+    body: string | null;
+    body_clean: string | null;
+    created_at: string;
+  }> | null) ?? [])[0];
+  if (!row) return null;
+  const text = (row.body_clean ?? row.body ?? "").toString();
+  if (!text.trim()) return null;
+  return { id: row.id, created_at: row.created_at, text };
+}
+
+/**
  * Race guard for the `reSessionSol` no-live-Direction fallback: returns `true` iff an
  * `agent_jobs` row already exists for this ticket's `ticket-handle-<first8>` slug in a
  * non-terminal state. Sourced from the canonical `ACTIVE_STATUSES` set exported by
@@ -492,6 +565,14 @@ export async function reSessionSol(
     turn_index?: number;
   },
 ): Promise<ReSessionResult> {
+  // Phase 1 of [[../specs/inflection-resession-must-act-on-newest-ask]] — snapshot the
+  // triggering message (newest inbound customer `ticket_messages` row) BEFORE any mutation
+  // so both the no-live-Direction fallback enqueue and the normal below-cap enqueue carry
+  // the same `trigger_message` payload. runTicketHandleJob reads it to tell Sol which
+  // message her Direction must address. A null (very early race / legacy row) is tolerated —
+  // the field is simply omitted and the worker falls back to the brief's conversation block.
+  const triggerMessage = await loadTriggerMessageForTicket(admin, input.workspace_id, ticket_id);
+
   // (1) Load the live Direction (workspace-scoped) BEFORE any mutation so the cap-check can
   // read `resession_count` off the row. When no live row exists (already superseded / never
   // authored) the router bails cleanly — same behavior as the pre-Phase-2 supersede-null
@@ -538,6 +619,9 @@ export async function reSessionSol(
           kind: input.kind,
           evidence: input.evidence,
           superseded_direction_id: null,
+          // Phase 1 of inflection-resession-must-act-on-newest-ask — Sol must address the
+          // customer's newest ask, not just the inflection tone label.
+          trigger_message: triggerMessage,
         }),
       })
       .select("id")
@@ -547,16 +631,19 @@ export async function reSessionSol(
     // Best-effort observability ledger — mirrors the cap-hit branch's diagnostic stamp so a
     // failed ledger write cannot wedge the enqueue that keeps the customer promise.
     try {
-      await admin.from("ticket_resolution_events").insert({
-        workspace_id: input.workspace_id,
-        ticket_id,
-        turn_index: input.turn_index ?? null,
-        reasoning: "sol:resession-no-direction",
-        chosen: {
-          kind: input.kind,
-          fallback: "first_touch_no_live_direction",
-        } as Record<string, unknown>,
-      });
+      // ledger-skip-missing-turn-index: ticket_resolution_events.turn_index is NOT NULL per supabase/migrations/20260917120004_ticket_resolution_events.sql, so a stamp with no known turn is skipped rather than attempted-and-rejected.
+      if (typeof input.turn_index === "number") {
+        await admin.from("ticket_resolution_events").insert({
+          workspace_id: input.workspace_id,
+          ticket_id,
+          turn_index: input.turn_index,
+          reasoning: "sol:resession-no-direction",
+          chosen: {
+            kind: input.kind,
+            fallback: "first_touch_no_live_direction",
+          } as Record<string, unknown>,
+        });
+      }
     } catch {
       // Ledger is diagnostic — do not block the fallback enqueue.
     }
@@ -608,19 +695,22 @@ export async function reSessionSol(
 
     // Ledger stamp — best-effort like the inflection-event insert in `applyInflectionGate`
     // (a diagnostic write that must not wedge the escalate). turn_index is threaded from the
-    // caller (nullable — the ledger tolerates NULL turn_index for out-of-band stamps).
+    // caller.
     try {
-      await admin.from("ticket_resolution_events").insert({
-        workspace_id: input.workspace_id,
-        ticket_id,
-        turn_index: input.turn_index ?? null,
-        reasoning: "sol:cap-hit",
-        chosen: {
-          resession_count: live.resession_count,
-          sol_max_resessions: solMaxResessions,
-          kind: input.kind,
-        } as Record<string, unknown>,
-      });
+      // ledger-skip-missing-turn-index: ticket_resolution_events.turn_index is NOT NULL per supabase/migrations/20260917120004_ticket_resolution_events.sql, so a stamp with no known turn is skipped rather than attempted-and-rejected.
+      if (typeof input.turn_index === "number") {
+        await admin.from("ticket_resolution_events").insert({
+          workspace_id: input.workspace_id,
+          ticket_id,
+          turn_index: input.turn_index,
+          reasoning: "sol:cap-hit",
+          chosen: {
+            resession_count: live.resession_count,
+            sol_max_resessions: solMaxResessions,
+            kind: input.kind,
+          } as Record<string, unknown>,
+        });
+      }
     } catch {
       // Ledger is diagnostic — do not block the cap-hit escalate.
     }
@@ -691,6 +781,9 @@ export async function reSessionSol(
         kind: input.kind,
         evidence: input.evidence,
         superseded_direction_id: superseded.id,
+        // Phase 1 of inflection-resession-must-act-on-newest-ask — Sol must address the
+        // customer's newest ask, not just the inflection tone label.
+        trigger_message: triggerMessage,
       }),
     })
     .select("id")

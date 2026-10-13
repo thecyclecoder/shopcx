@@ -1,0 +1,1 @@
+- **Drop foreign PostgREST reads on tickets.assigned_agent from the Control Tower error feed** · verified 2026-09-29 · → [[../libraries/control-tower.md#isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise]]

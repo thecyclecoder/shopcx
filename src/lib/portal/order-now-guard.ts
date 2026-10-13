@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { errText } from "@/lib/error-text";
 
 /**
  * Portal order-now guard for Appstle bill_now — blocks the vendor call when
@@ -133,8 +134,33 @@ export function pickInternalOrderNowBlock(
 }
 
 /**
- * Async guard the internal branch of the portal order-now handler calls BEFORE
- * sending `internal-subscription/renewal-attempt`. Mirrors `guardAppstleOrderNow`'s
+ * The refusal an immediate-order surface returns when `guardRecentOrderNow` blocks. Every
+ * surface (portal, dashboard bill-now, agent bill_now / order_now / change_next_date) gets
+ * the SAME code so callers can tell "an order was just placed" apart from a real failure —
+ * a caller that treats it as a failure and "recovers" (bumping the date, retrying, a
+ * portal-action-failed ticket the agent then re-runs) re-creates the double charge.
+ */
+export const ORDER_IN_PROGRESS = "order_in_progress" as const;
+export const ORDER_IN_PROGRESS_MESSAGE = "Your order is already being placed.";
+
+/** True when an OpResult-style error string is the order-in-progress refusal. */
+export function isOrderInProgressError(error: string | null | undefined): boolean {
+  return !!error && error.startsWith(ORDER_IN_PROGRESS);
+}
+
+/**
+ * Async guard every immediate-order surface calls BEFORE charging, on any billing engine.
+ * The portal internal branch called this first (as `guardInternalOrderNow`); it now also
+ * guards the portal ShopCX branch and `subscriptionOrderNow` (dashboard bill-now + every
+ * agent order-now action), which previously had no recent-charge check at all.
+ *
+ * Two signals, either one blocks:
+ *   1. the per-cycle claim ledger (`subscription_cycle_charges`) — an unresolved claim, or
+ *      one claimed inside the window. Both renewal workers (internal + ShopCX) claim here.
+ *   2. an `orders` row for this subscription created inside the window. Engine-agnostic:
+ *      it also covers the portal ShopCX branch, which bills Shopify directly and never
+ *      writes a ledger row — after its first charge advances the date, a second press
+ *      would otherwise bill the NEXT cycle unopposed. Mirrors `guardAppstleOrderNow`'s
  * `OrderNowGuardVerdict` return shape — proceed on a clean subscription, block with
  * a distinct reason + rendered message when the ledger says a charge for this sub is
  * already being placed.
@@ -146,12 +172,15 @@ export function pickInternalOrderNowBlock(
  * Errors on the DB read propagate — a service failure while reading the ledger must
  * NOT silently degrade into "no blocker, proceed to charge".
  */
-export async function guardInternalOrderNow(
+export async function guardRecentOrderNow(
   admin: SupabaseClient,
   args: {
     subscription_id: string;
+    workspace_id: string;
     now?: number;
     windowMs?: number;
+    /** Newest orders for the sub (newest first). Defaults to the orders SDK; tests inject. */
+    listRecentOrders?: (workspaceId: string, subscriptionId: string) => Promise<Array<{ created_at: string }>>;
   },
 ): Promise<OrderNowGuardVerdict> {
   const now = args.now ?? Date.now();
@@ -178,11 +207,28 @@ export async function guardInternalOrderNow(
     windowMs,
   );
   if (blocker) {
-    return {
-      action: "block",
-      reason: "order_in_progress",
-      message: "Your order is already being placed.",
-    };
+    return { action: "block", reason: ORDER_IN_PROGRESS, message: ORDER_IN_PROGRESS_MESSAGE };
+  }
+
+  // Through the orders SDK (newest first, one row) — never a raw `.from("orders")` read.
+  const listRecentOrders = args.listRecentOrders ?? (async (workspaceId: string, subscriptionId: string) => {
+    const { listOrders } = await import("@/lib/commerce/order");
+    return listOrders(workspaceId, { subscription_id: subscriptionId, page_size: 1, max_rows: 1 });
+  });
+  let newest: Array<{ created_at: string }>;
+  try {
+    newest = await listRecentOrders(args.workspace_id, args.subscription_id);
+  } catch (e) {
+    throw new Error(
+      `guard_internal_order_now_read_failed: ${errText(e)} (sub=${args.subscription_id})`,
+    );
+  }
+  const newestMs = newest[0] ? new Date(newest[0].created_at).getTime() : NaN;
+  if (Number.isFinite(newestMs) && now - newestMs <= windowMs) {
+    return { action: "block", reason: ORDER_IN_PROGRESS, message: ORDER_IN_PROGRESS_MESSAGE };
   }
   return { action: "proceed" };
 }
+
+/** Back-compat name — the portal internal branch's original call site. */
+export const guardInternalOrderNow = guardRecentOrderNow;

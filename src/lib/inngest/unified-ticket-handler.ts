@@ -19,6 +19,7 @@
 import { NonRetriableError } from "inngest";
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { errText } from "@/lib/error-text";
 import { OUTAGE_SPANNING_RETRIES, throwForAnthropicStatus, throwForAnthropicNetworkError, isRetryableAnthropicStatus } from "@/lib/anthropic-retry";
 import { recordClaudeFailure } from "@/lib/claude-health";
 import { assembleTicketContext } from "@/lib/ai-context";
@@ -28,7 +29,7 @@ import { sendTicketReply } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { isAutomatedInbound } from "@/lib/automated-sender";
 import { decideOutreachRoute } from "@/lib/outreach-route";
-import { markFirstTouch } from "@/lib/first-touch";
+import { markFirstTouch, shouldDispatchSolFirstTouch } from "@/lib/first-touch";
 import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
 import { matchPlaybook, matchPlaybookScored, loadDeferThreshold, applyDeferThreshold, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
 import {
@@ -45,6 +46,7 @@ import { detectRepeatQuestion } from "@/lib/playbook-repeat-guard";
 import { logAiUsage } from "@/lib/ai-usage";
 import { SONNET_MODEL, HAIKU_MODEL } from "@/lib/ai-models";
 import { emitReactiveHeartbeat } from "@/lib/control-tower/heartbeat";
+import { dispatchSlackNotification } from "@/lib/slack-notify";
 import { clearDispatchIntent } from "./dispatch-inbound-message";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -1037,6 +1039,39 @@ export const unifiedTicketHandler = inngest.createFunction(
       }
     }
 
+    // ── 1a3. INHERITED ACTIVE PLAYBOOK VIA MERGE ──
+    // Phase 1 of docs/brain/specs/playbooks-survive-merge-guard-teasers-watchdog-catches-stalls.md.
+    // Auto-merge (§ 1a above) picks the newest ticket as the merge target and carries the
+    // source ticket's active playbook forward. But that newest ticket is the one the handler
+    // is running on with is_new_ticket=true, so WITHOUT this check the turn would be treated
+    // as a first touch — a full Sol session runs instead of the inherited playbook continuing
+    // (ticket ccb423fe, Angelica Devine, 2026-10-08: she replied to a shipping email mid-Refund,
+    // the new ticket inherited the running playbook via merge, yet Sol first-touched it and sent
+    // a self-contradicting stand-firm reply). Re-read active_playbook_id AFTER the merge: when it
+    // is set on a new ticket, flag `inheritedActivePlaybook` so (a) the § 3b continuation path
+    // runs even though isNew is true and (b) the § 3.95 first-touch predicate is skipped. The
+    // playbook-related vs new-topic classifier inside § 3b still decides whether to execute the
+    // step or fall through to the orchestrator — we never force a step, we just stop treating an
+    // inherited-playbook ticket as a fresh Sol first touch.
+    let inheritedActivePlaybook = false;
+    if (isNew) {
+      inheritedActivePlaybook = await step.run("check-inherited-playbook", async () => {
+        const { data: t } = await admin
+          .from("tickets")
+          .select("active_playbook_id")
+          .eq("id", tid)
+          .maybeSingle();
+        return !!t?.active_playbook_id;
+      });
+      if (inheritedActivePlaybook) {
+        await sysNote(
+          admin,
+          tid,
+          "[System] Inherited active playbook via merge — continuing playbook, Sol first-touch skipped.",
+        );
+      }
+    }
+
     const cfg = await step.run("config", () => channelCfg(admin, wsId, st.ch));
     if (!cfg.enabled) return { status: "skipped", reason: "ai_disabled" };
     const pers = await step.run("personality", () => loadPersonality(admin, cfg.personality_id));
@@ -1469,7 +1504,10 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
     // ── 3b. Active playbook — check if customer message is playbook-related
     // If playbook is active, use Haiku to determine if the message is about the playbook
     // or a completely new topic. Playbook-related → execute step. New topic → Sonnet handles.
-    if (!isNew) {
+    // `inheritedActivePlaybook` (Phase 1 of the playbooks-survive-merge spec) lets a brand-new
+    // ticket that absorbed a running playbook via auto-merge take this SAME continuation path
+    // instead of Sol's first touch.
+    if (!isNew || inheritedActivePlaybook) {
       const pbActive = await step.run("check-playbook", async () => {
         const { data: t } = await admin.from("tickets").select("active_playbook_id").eq("id", tid).single();
         if (!t?.active_playbook_id) return null;
@@ -1665,18 +1703,20 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
           }).eq("id", tid);
           // Send the customer the standard holding message so they don't sit in silence
           await sendWithDelay(admin, wsId, tid, st.ch, SILENT_TURN_HOLDING_MESSAGE, cfg.sandbox);
-          // Slack notification
+          // Slack notification — route through the rules-driven dispatcher so the ping lands
+          // on the workspace's configured 'escalation' channel (slack_notification_rules) with
+          // the real credentials (slack_bot_token_encrypted), instead of a raw webhook column
+          // that never existed on the workspaces table. slackHeader is retained on the
+          // signature for caller-site readability; the dispatcher builds a standard escalation
+          // card via buildEscalationMessage.
+          void slackHeader;
           try {
-            const { data: ws } = await admin.from("workspaces").select("slack_webhook_url").eq("id", wsId).single();
-            if (ws?.slack_webhook_url) {
-              const { data: pb } = await admin.from("playbooks").select("name").eq("id", pbActive).single();
-              const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", st.custId!).single();
-              await fetch(ws.slack_webhook_url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ text: `${slackHeader}\nPlaybook: ${pb?.name || "Unknown"}\nCustomer: ${cust?.first_name || ""} (${cust?.email || ""})\nError: ${reason}\nTicket: https://shopcx.ai/dashboard/tickets/${tid}` }),
-              });
-            }
+            const { data: cust } = await admin.from("customers").select("email, first_name").eq("id", st.custId!).single();
+            await dispatchSlackNotification(wsId, "escalation", {
+              ticketId: tid,
+              customer: { name: cust?.first_name ?? undefined, email: cust?.email ?? undefined },
+              reason,
+            });
           } catch {}
         };
 
@@ -2011,7 +2051,12 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     // for account/general — but pinning the classifier bucket into the dispatch predicate itself
     // means a future refactor that moves the short-circuit block can't silently leak an outreach
     // ticket into a Max-tier ticket-handle session.
-    if (isNew && cfg.sol_first_touch_enabled && !agentAssigned && msgType !== "outreach") {
+    // `!inheritedActivePlaybook` (Phase 1 of the playbooks-survive-merge spec) is the belt that
+    // stops a new ticket which absorbed a running playbook via auto-merge from being first-touched
+    // — those turns already ran the § 3b continuation path above (which returns when the playbook
+    // executes) OR fell through to the orchestrator on a genuine new-topic classification; either
+    // way a fresh Sol session is never the right move for an inherited-playbook ticket.
+    if (shouldDispatchSolFirstTouch({ isNew, solFirstTouchEnabled: cfg.sol_first_touch_enabled, agentAssigned, msgType, inheritedActivePlaybook })) {
       const isChatChannel = st.ch === "chat";
       const acked = await step.run("sol-first-touch-ack", async () => {
         if (await newerActivity(admin, tid, t0)) return false;
@@ -2358,6 +2403,41 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       const { pickOrchestratorModel } = await import("@/lib/model-picker");
       const { applyNoProgressCircuit } = await import("@/lib/no-progress-guard");
 
+      // ── Phase 2 of every-inbound-handled-within-30-min: deterministic intent→playbook router.
+      // Before paying for Sonnet, check whether the classified intent is in an active playbook's
+      // trigger_intents AND the ticket has no active playbook. If yes, start the playbook — the
+      // Refund playbook's tier ladder owns refund-intent messages, not a bare cancel journey
+      // chosen by Sonnet (ticket 09f7257a was the ground truth: `unwanted_charge` + `refund_request`
+      // matched Refund exactly, yet Sonnet ran a cancel journey).
+      const playbookRouted = await step.run("intent-playbook-route", async () => {
+        if (await newerActivity(admin, tid, t0)) return { routed: false as const };
+        try {
+          // Cheap Haiku-only intent classification over the newest message — matches the shape
+          // the old pipeline used, kept local so we don't move the orchestrator onto this cost.
+          const ctx = await assembleTicketContext(wsId, tid);
+          const custCtx = ctx.systemPrompt.split("CUSTOMER CONTEXT:")[1]?.split("CHANNEL")[0]?.trim() || "";
+          const hist = ctx.conversationHistory.map((m) => `${m.role}: ${m.content}`).join("\n");
+          const hNames = await handlerNames(admin, wsId, st.hasCust, st.ch);
+          const intent = await classifyIntent(msg, custCtx, hist, hNames);
+          const { routeIntentToPlaybook } = await import("@/lib/playbook-executor");
+          const r = await routeIntentToPlaybook(admin, wsId, tid, intent.intent);
+          if (r.routed) {
+            await sysNote(
+              admin,
+              tid,
+              `[System] Intent→playbook router: classified intent="${intent.intent}" matched Refund-tier playbook "${r.playbook_name}" (${r.playbook_id.slice(0, 8)}). Starting playbook deterministically — the Refund playbook's tier ladder owns refund-intent messages (not a bare cancel journey).`,
+            );
+            return { routed: true as const };
+          }
+          return { routed: false as const };
+        } catch {
+          return { routed: false as const };
+        }
+      });
+      if (playbookRouted.routed) {
+        return { status: "intent_playbook_routed" };
+      }
+
       // ── No-progress circuit (Phase 3 of ticket-merge-summary-and-context-cap) ──
       // Before paying for another Sonnet/Opus turn, check whether the
       // ticket is stuck in a loop: M consecutive inbound customer
@@ -2405,6 +2485,96 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         await sysNote(admin, tid, `[System] ${pick.model === "haiku" ? "Haiku" : "Sonnet"}: ${decision.action_type} — ${decision.reasoning}`);
         return decision;
       });
+
+      // ── Phase 2 of inflection-resession-must-act-on-newest-ask — date-change-ask gate ──
+      // Before the orchestrator decision ships, check that it actually addresses a detected
+      // date-change ask. The dc31bf31 scar: a 14:14 "Can we move order to Oct 30th as I
+      // ordered enough Aug n Sept???????" fired the frustration path; Sol re-answered the
+      // Sep 2 ship-date question and no move happened → customer billed four weeks early
+      // ($237.16 refund + cancelled subscriber). Phase 1 made the triggering message visible
+      // to Sol; this Phase closes the loop by refusing to ship a status-only reply when
+      // the orchestrator decision would otherwise skip the ask entirely.
+      //
+      // Guards: pure detector (no DB / no clock), fires only on BOTH a change-verb AND a date
+      // or order-subject anchor; a clarifying-question Direction (needs_clarification=true or
+      // a non-empty clarification_question) counts as "addresses the ask" because it defers
+      // to the customer rather than silently restating an older answer.
+      const dateChangeGateOutcome = await step.run("date-change-ask-gate", async () => {
+        if (await newerActivity(admin, tid, t0)) return { held: false as const };
+        const { detectDateChangeAsk, decisionAddressesDateChange, stripQuotedAndForwarded } = await import(
+          "@/lib/date-change-ask"
+        );
+        // Phase 4 of every-inbound-handled-within-30-min: strip quoted-reply + forwarded-
+        // email blocks before the detector reads the body. Ticket 09f7257a's forwarded
+        // order-confirmation email false-positived here because its "Skip delivery · Pause"
+        // links + date headers tripped BOTH a change-verb and an order-subject anchor.
+        const askBody = stripQuotedAndForwarded(msg);
+        const ask = detectDateChangeAsk(askBody);
+        if (!ask.isAsk) return { held: false as const };
+        if (decisionAddressesDateChange(sonnetDecision)) return { held: false as const };
+
+        // Draft would ship a reply that ignores the ask — hold it and re-session Sol.
+        await sysNote(
+          admin,
+          tid,
+          `[System] date-change-ask gate: holding reply — newest ask asks to move/skip/pause the next order${
+            ask.requestedDate ? ` (requested=${ask.requestedDate})` : " (date ambiguous — needs clarify)"
+          } but the orchestrator decision carries no change_next_date / skip_next_order / pause action and is not a clarifying question. Re-sessioning Sol with reason='unaddressed_date_ask'.`,
+        );
+        try {
+          const { reSessionSol } = await import("@/lib/inflection-detector");
+          await reSessionSol(admin, tid, {
+            workspace_id: wsId,
+            channel: st.ch,
+            kind: "drift",
+            evidence: {
+              stage: 1,
+              reason: "unaddressed_date_ask",
+              cues: ["date_change_ask_gate"],
+            },
+          });
+        } catch (reErr) {
+          await sysNote(
+            admin,
+            tid,
+            `[System] date-change-ask gate: reSessionSol threw ${errText(reErr)} — reply still held; routing to June (cs-director-call) so the ticket never strands.`,
+          );
+          // Phase 4 of every-inbound-handled-within-30-min: when the re-session fails, the
+          // held reply must not sit — enqueue a cs-director-call so June picks it up
+          // instead of waiting for the 30-min watchdog. Idempotent: a prior inflight
+          // cs-director-call on this ticket collapses this insert.
+          try {
+            const { data: inflight } = await admin
+              .from("agent_jobs")
+              .select("id")
+              .eq("workspace_id", wsId)
+              .eq("kind", "cs-director-call")
+              .eq("spec_slug", tid)
+              .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input"])
+              .limit(1);
+            if (!inflight || !inflight.length) {
+              await admin.from("agent_jobs").insert({
+                workspace_id: wsId,
+                spec_slug: tid,
+                kind: "cs-director-call",
+                status: "queued",
+                instructions: JSON.stringify({
+                  ticket_id: tid,
+                  source: "date-change-ask-gate-resession-failed",
+                  reason: errText(reErr),
+                }),
+                created_by: null,
+              });
+            }
+          } catch {
+            // best-effort — the 30-min watchdog will catch this on its next tick anyway.
+          }
+        }
+        return { held: true as const };
+      });
+      if (dateChangeGateOutcome.held) {
+        return { status: "date_change_ask_held" };
+      }
 
       // Actions execute immediately — message delay handled by sendWithDelay (pending_send_at)
       await step.run("sonnet-execute", async () => {

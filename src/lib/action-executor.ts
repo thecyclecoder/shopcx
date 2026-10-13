@@ -20,6 +20,7 @@ import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 import { LOYALTY_REMEDY_MAX_CENTS } from "@/lib/loyalty";
 import { attemptAllergenHold, isAllergyEscalation } from "@/lib/order-holds";
 import { linkGroupIds } from "@/lib/customer-links";
+import type { OneTimeChargeInput, OneTimeChargeResult } from "@/lib/one-time-charge";
 
 // ── Types ──
 
@@ -78,6 +79,13 @@ export interface ActionParams {
   shopify_order_id?: string;
   amount_cents?: number;
   base_price_cents?: number;
+  /** update_line_item_price on an INTERNAL sub — the agent's assertion of the current
+   *  per-unit price the renewal engine is charging. The handler recomputes the engine's
+   *  realized price via resolveSubscriptionPricing and REFUSES if the two disagree by more
+   *  than 1¢. Prevents an agent that mis-read `price_override_cents` (the pre-discount base)
+   *  as the realized price from "fixing" a correct sub (ticket 01f6a2e6 → 668bc5c8).
+   *  Required for internal subs; ignored on external engines. */
+  expected_current_realized_cents?: number;
   crisis_action_id?: string;
   order_number?: string;
   free_label?: boolean;
@@ -264,6 +272,12 @@ export interface ActionResult {
   carrier?: string;
   refundAmountCents?: number;
   couponCode?: string;
+  // Set by create_order (internal billing) so the assisted-purchase
+  // confirmation can quote the REAL order number and charged total rather
+  // than a generic "it's placed". See chargeOneTimeOrder + the concierge
+  // confirmation in interpretAssistedCreateResult.
+  order_number?: string;
+  amount_cents?: number;
   // Set by refund handlers when a refund is already in flight on the order
   // (a pending gateway refund, e.g. PayPal settling over a few business
   // days). success stays false — no new money moved — but this is a benign
@@ -1319,6 +1333,137 @@ async function deferCreateToAssistedPurchase(
   };
 }
 
+/** Signature of {@link chargeOneTimeOrder} — injectable so the idempotency +
+ *  amplifier-routing logic below is unit-testable without the real money path. */
+type ChargeOneTimeOrderFn = (input: OneTimeChargeInput) => Promise<OneTimeChargeResult>;
+
+/**
+ * The double-charge guard's key for an assisted one-time order.
+ *
+ * Stable over (ticketId, sorted line items) so a retried or re-sessioned ticket
+ * turn derives the IDENTICAL key — `chargeOneTimeOrder` stamps it into
+ * `transactions.metadata.request_key`, and `executeInternalOneTimeCreate` reads
+ * it back BEFORE a second sale. Pure + exported so the exact key semantics are
+ * pinned in a test (`action-executor.create-order-charges.test.ts`) rather than
+ * reconstructed inline, where a drift in ordering/format would silently defeat
+ * the guard and let a double-charge through. Phase 1 of
+ * assisted-one-time-orders-charge-and-ship.
+ */
+export function assistedOrderRequestKey(
+  ticketId: string,
+  lineItems: NonNullable<ActionParams["line_items"]>,
+): string {
+  const itemKey = lineItems
+    .map((li) => `${li.variant_id}:${li.quantity}:${li.unit_cents}`)
+    .sort()
+    .join("|");
+  return `shopcx-concierge:${ticketId}:${itemKey}`;
+}
+
+/**
+ * create_order on internal billing — charge the vaulted card + ship, idempotently.
+ *
+ * Phase 1 of assisted-one-time-orders-charge-and-ship. The old path handed
+ * vendor:'internal' to commerce/order.createOrder, whose internal branch only
+ * writes a bare mirror row — no Braintree sale, no Amplifier push — so the
+ * customer was told "it's placed" while nothing was paid or shipped. This routes
+ * the order through chargeOneTimeOrder (the primitive that bills the vaulted
+ * card, commits Avalara tax, inserts the order, pushes to Amplifier, and refunds
+ * on a post-charge insert failure) and returns the REAL order number + charged
+ * total for the confirmation.
+ *
+ * Idempotency: a retried or re-sessioned ticket turn must never double-charge.
+ * The request key is stable over (ticket, sorted items); chargeOneTimeOrder
+ * stamps it into `transactions.metadata.request_key`, so a prior charge for the
+ * same intent is discoverable here BEFORE a second sale. The lookup is scoped to
+ * this workspace + customer and treats both a succeeded AND an in-flight
+ * `pending` row as blocking — fail-closed, a customer re-told "try again" beats
+ * a second live charge.
+ *
+ * `charge` is injected only in tests; production always uses the dynamically
+ * imported {@link chargeOneTimeOrder} (kept dynamic so action-executor's import
+ * graph doesn't eagerly pull in Braintree / Amplifier / Avalara).
+ */
+export async function executeInternalOneTimeCreate(
+  ctx: ActionContext,
+  lineItems: NonNullable<ActionParams["line_items"]>,
+  paymentMethodId: string,
+  shippingAddress: Record<string, unknown> | null,
+  charge?: ChargeOneTimeOrderFn,
+): Promise<ActionResult> {
+  const requestKey = assistedOrderRequestKey(ctx.ticketId, lineItems);
+
+  const { data: priorRows } = await ctx.admin
+    .from("transactions")
+    .select("id, status, amount_cents, metadata")
+    .eq("workspace_id", ctx.workspaceId)
+    .eq("customer_id", ctx.customerId)
+    .eq("metadata->>request_key", requestKey)
+    .in("status", ["pending", "succeeded"]);
+  const prior = (priorRows || [])[0] as
+    | { status?: string; amount_cents?: number; metadata?: { order_number?: string } }
+    | undefined;
+  if (prior) {
+    // Already charged (or mid-charge) for this exact intent — return the
+    // existing order as an idempotent success rather than billing again.
+    const priorOrderNumber = prior.metadata?.order_number;
+    return {
+      success: true,
+      summary: priorOrderNumber
+        ? `Order ${priorOrderNumber} was already charged for this request — not charging again.`
+        : "A charge for this request is already in progress — not charging again.",
+      ...(priorOrderNumber ? { order_number: priorOrderNumber } : {}),
+      ...(typeof prior.amount_cents === "number" ? { amount_cents: prior.amount_cents } : {}),
+    };
+  }
+
+  const chargeFn = charge ?? (await import("@/lib/one-time-charge")).chargeOneTimeOrder;
+  const result = await chargeFn({
+    workspaceId: ctx.workspaceId,
+    customerId: ctx.customerId,
+    items: lineItems.map((li) => ({
+      variant_id: li.variant_id,
+      quantity: li.quantity,
+      unit_price_cents: li.unit_cents,
+    })),
+    paymentMethodId,
+    shippingAddress,
+    sourceName: "shopcx-concierge",
+    reason: `assisted one-time order (ticket ${ctx.ticketId})`,
+    requestKey,
+  });
+
+  if (!result.success) {
+    return {
+      success: false,
+      error: result.error,
+      summary: `Create order failed: ${result.error ?? "unknown error"}${result.details ? ` (${result.details})` : ""}`,
+    };
+  }
+  // Charge succeeded. If the warehouse push failed the customer paid but nothing
+  // ships — do NOT report a clean success. Surface amplifier_error and escalate
+  // to the CS routine (June) so a human finishes fulfilment.
+  if (result.amplifier_error) {
+    await escalateTicket(
+      ctx,
+      `one-time charge succeeded (order ${result.order_number}, $${((result.amount_cents ?? 0) / 100).toFixed(2)}) but Amplifier push failed: ${result.amplifier_error} — needs manual fulfilment`,
+    );
+    return {
+      success: false,
+      error: `amplifier_error: ${result.amplifier_error}`,
+      summary: `Charged order ${result.order_number} but the warehouse push failed — routed to the team to finish.`,
+      order_number: result.order_number,
+      amount_cents: result.amount_cents,
+    };
+  }
+  return {
+    success: true,
+    summary: `Charged and placed order ${result.order_number} for $${((result.amount_cents ?? 0) / 100).toFixed(2)}.`,
+    order_number: result.order_number,
+    amount_cents: result.amount_cents,
+  };
+}
+
 /**
  * Validate + normalize the optional `resolution_type` field on a `create_return`
  * ActionParams payload. The value that comes out is what the handler passes to
@@ -1489,7 +1634,6 @@ export const directActionHandlers: Record<
     // no shape mismatch can smuggle the create past the guard.
     const pm = await resolveVaultedPm(ctx.admin, ctx.workspaceId, ctx.customerId);
     if (!pm) return deferCreateToAssistedPurchase(ctx, "create_order");
-    const { createOrder } = await import("@/lib/commerce/order");
     if (!p.vendor) return { success: false, error: "create_order missing vendor" };
     if (!p.line_items?.length) return { success: false, error: "create_order missing line_items" };
     if (p.vendor !== "shopify" && p.vendor !== "internal") {
@@ -1527,6 +1671,16 @@ export const directActionHandlers: Record<
     if (!shippingAddress && p.address) {
       shippingAddress = p.address as unknown as Record<string, unknown>;
     }
+
+    // ── internal billing: charge the vaulted card + ship, idempotently. ──
+    // Routed through chargeOneTimeOrder instead of the bare mirror-row insert.
+    // See executeInternalOneTimeCreate for the full rationale + idempotency.
+    if (p.vendor === "internal") {
+      return executeInternalOneTimeCreate(ctx, p.line_items, pm.id, shippingAddress);
+    }
+
+    // ── shopify: a real Shopify order via the commerce dispatcher. ──
+    const { createOrder } = await import("@/lib/commerce/order");
     const r = await createOrder(ctx.workspaceId, {
       vendor: p.vendor,
       customer_id: ctx.customerId,
@@ -1609,6 +1763,10 @@ export const directActionHandlers: Record<
       if (billed.success) {
         return { success: true, summary: "Triggered order now (customer asked to ship today)" };
       }
+      // An order for this sub was JUST placed — the customer's "ship today" is already
+      // satisfied. Never fall through to the date bump: that schedules a second charge.
+      const { isOrderInProgressError } = await import("@/lib/portal/order-now-guard");
+      if (isOrderInProgressError(billed.error)) return { success: false, error: billed.error };
       // order-now failed → fall through to bumping date as a soft fallback
       console.warn(`[change_next_date] order-now fallback failed for ${p.contract_id}:`, billed.error);
       const tomorrow = new Date(centralToday);
@@ -1660,7 +1818,16 @@ export const directActionHandlers: Record<
       ticket_id: ctx.ticketId,
       customer_id: ctx.customerId,
     });
-    if (result.success && result.pending) ctx._resolutionOutcomePending = true;
+    // ⭐ ANY successful fire schedules the async verify (internal AND Appstle),
+    // so the async commerce-order-now-verify job owns the ledger verdict in
+    // every case — NOT just when the wrapper flags `pending`. The return-time
+    // 'confirmed' stamp must be skipped even for an internal sub: the renewal
+    // pipeline can resolve an order-now against an already-billed / not-yet-due
+    // cycle and NOT charge, and the async verify is the only place that NO-OP is
+    // observable as `nothing_due`. Stamping 'confirmed' synchronously here would
+    // win the idempotent compare-and-set and the truthful verdict could never
+    // land (spec: order-now verify 'nothing_due' verdict; ticket dd5e2ba0).
+    if (result.success) ctx._resolutionOutcomePending = true;
     return {
       success: result.success,
       error: result.error,
@@ -1697,9 +1864,25 @@ export const directActionHandlers: Record<
    * emission gets a confirm-first turn before the charge fires.
    */
   order_now: async (ctx, p) => {
-    const { subscriptionOrderNow } = await import("@/lib/commerce/subscription");
     if (!p.contract_id) return { success: false, error: "order_now missing contract_id" };
-    return subscriptionOrderNow(ctx.workspaceId, p.contract_id);
+    // Same verified path as bill_now — route through subscriptionOrderNowVerified
+    // so the async commerce-order-now-verify job owns the ledger verdict (incl. a
+    // `nothing_due` no-op on an already-billed / not-yet-due cycle) rather than
+    // the return-time 'confirmed' stamp (spec: order-now verify 'nothing_due'
+    // verdict; ticket dd5e2ba0 — the customer was told her order was placed when
+    // nothing happened).
+    const { subscriptionOrderNowVerified } = await import("@/lib/commerce/order-now-verify");
+    const result = await subscriptionOrderNowVerified(ctx.workspaceId, p.contract_id, {
+      resolution_event_id: ctx._resolutionEventId,
+      ticket_id: ctx.ticketId,
+      customer_id: ctx.customerId,
+    });
+    if (result.success) ctx._resolutionOutcomePending = true;
+    return {
+      success: result.success,
+      error: result.error,
+      summary: result.summary,
+    };
   },
 
   add_item: async (ctx, p) => {
@@ -2429,6 +2612,75 @@ export const directActionHandlers: Record<
     // ShopCX → a draft base-price pin with the discounts recomputed in the same commit.
     const { resolveBillingSource } = await import("@/lib/internal-subscription");
     const priceEngine = await resolveBillingSource(ctx.workspaceId, p.contract_id);
+
+    // ⭐ Phase 2 of cx-agents-read-engine-price-not-override-base:
+    // On an INTERNAL sub, require the agent to QUOTE the engine's current realized per-unit
+    // price before we accept a change. We recompute via resolveSubscriptionPricing and refuse
+    // on a mismatch > 1¢ — so an agent that mis-read `price_override_cents` (the pre-discount
+    // base) as the realized price cannot "fix" a correct sub. Only an agent that has read
+    // getCxSubscriptions post-Phase-1 (which reports `realized_cents` and `renewal_subtotal_cents`
+    // from the engine) can satisfy this gate. Ticket 01f6a2e6 → 668bc5c8 (Sanja Rojas): Sonnet,
+    // June ×2, Sol each wrote a wrong base in sequence; this gate stops that class entirely.
+    if (priceEngine === "internal" && subRow?.id) {
+      const assertedCents = p.expected_current_realized_cents;
+      if (assertedCents == null || !Number.isFinite(assertedCents)) {
+        return {
+          success: false,
+          error:
+            `Refusing update_line_item_price on internal contract ${p.contract_id}: payload is missing ` +
+            `expected_current_realized_cents. On an internal sub you MUST first read getCxSubscriptions ` +
+            `(items[].realized_cents / sub.renewal_subtotal_cents) and quote the engine's current realized ` +
+            `price in this field — otherwise a wrong pre-discount base can silently reach the engine.`,
+        };
+      }
+      // Determine the engine's current realized unit for the target variant. Prefer the agent's
+      // explicit variant_id; fall back to the sole non-shipping-protection line (matches the
+      // handler's own single-line inference below).
+      let assertVariantId = p.variant_id ? String(p.variant_id) : "";
+      if (!assertVariantId) {
+        const subItems = Array.isArray(subRow.items)
+          ? (subRow.items as Array<{ variant_id?: unknown; title?: unknown }>)
+          : [];
+        const real = subItems.filter(
+          (i) => !String(i.title ?? "").toLowerCase().includes("shipping protection"),
+        );
+        if (real.length === 1 && real[0]?.variant_id) assertVariantId = String(real[0].variant_id);
+      }
+      if (assertVariantId) {
+        const { resolveSubscriptionPricing } = await import("@/lib/pricing");
+        const priced = await resolveSubscriptionPricing(ctx.workspaceId, {
+          items: Array.isArray(subRow.items)
+            ? (subRow.items as Array<Record<string, unknown>>)
+            : [],
+          delivery_price_cents: (subRow.delivery_price_cents as number | null) ?? null,
+          pricing_offer_id: (subRow.pricing_offer_id as string | null) ?? null,
+        });
+        const engineLine = priced.lines.find(
+          (l) => String(l.variant_id) === String(assertVariantId),
+        );
+        const engineRealized = engineLine?.unit_cents;
+        if (engineRealized == null) {
+          return {
+            success: false,
+            error:
+              `Refusing update_line_item_price on internal contract ${p.contract_id}: cannot locate ` +
+              `variant ${assertVariantId} on the sub — re-read getCxSubscriptions and name a current line.`,
+          };
+        }
+        if (Math.abs(engineRealized - assertedCents) > 1) {
+          return {
+            success: false,
+            error:
+              `Refusing update_line_item_price on internal contract ${p.contract_id} variant ${assertVariantId}: ` +
+              `you believe the engine's current realized per-unit is $${(assertedCents / 100).toFixed(2)}, ` +
+              `but resolveSubscriptionPricing says $${(engineRealized / 100).toFixed(2)} — ` +
+              `re-read getCxSubscriptions (items[].realized_cents + sub.renewal_subtotal_cents) and try again. ` +
+              `price_override_cents is the PRE-DISCOUNT base, not realized.`,
+          };
+        }
+      }
+    }
+
     if (priceEngine !== "appstle") {
       // Prefer the agent-supplied variant_id, but fall back to the sole real (non
       // shipping-protection) line on the sub — a sub with one item has an unambiguous restore
@@ -2469,9 +2721,20 @@ export const directActionHandlers: Record<
       }
       const r = await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id, variantId, derived.base);
       if (r.success) await logPriceCorrection(variantId, derived);
-      return r.success
-        ? { ...r, summary: `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${variantId} (${priceEngine})${derived.note}` }
-        : r;
+      if (!r.success) return r;
+      // Phase 2 of cx-agents-read-engine-price-not-override-base: name the engine's
+      // realized price in the handler summary (not the raw base), so a reviewer can
+      // see what the renewal will actually charge before/after.
+      const prevRealized = derived.previousRealizedPerUnitCents;
+      const nextRealized = derived.projectedRealizedPerUnitCents;
+      const prevRealizedStr = prevRealized != null ? `$${(prevRealized / 100).toFixed(2)}` : "?";
+      const nextRealizedStr = nextRealized != null ? `$${(nextRealized / 100).toFixed(2)}` : "?";
+      return {
+        ...r,
+        summary:
+          `Restored base price to $${(derived.base / 100).toFixed(2)} on variant ${variantId} (${priceEngine}): ` +
+          `realized ${prevRealizedStr} → ${nextRealizedStr} per unit${derived.note}`,
+      };
     }
 
     // Build candidate variants in priority order:

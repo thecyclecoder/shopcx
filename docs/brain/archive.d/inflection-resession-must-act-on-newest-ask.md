@@ -1,0 +1,1 @@
+- **Inflection re-sessions must act on the customer's newest ask** · verified 2026-10-06 · → [[../lifecycles/ticket-lifecycle]]

@@ -20,9 +20,11 @@ Compiler-loop primitives that create fresh orders + subscriptions from scratch. 
 `src/lib/commerce/order.ts` — internal-aware dispatcher for creating a fresh order.
 
 - `input.vendor === 'shopify'` → creates a real Shopify order via `shopify-draft-orders.createShopifyOrder` (draft-order + complete, no discount), stamps `shopify_order_id` + `order_number` on the mirror `orders` row.
-- `input.vendor === 'internal'` → inserts the mirror `orders` row directly. `shopify_order_id` stays null.
+- `input.vendor === 'internal'` → inserts the mirror `orders` row directly. `shopify_order_id` stays null. **Refused unless `input.mirror_only === true`** (see below).
 
-Input shape (`CreateOrderInput`): `{ vendor, customer_id, email, line_items[], currency?, shipping_address?, billing_address?, subscription_id?, order_type?, tags?, source_name? }`. `line_items[i]` = `{ variant_id, product_id?, title, quantity, unit_cents }`.
+**`mirror_only` opt-in (Phase 2 of [[../specs/assisted-one-time-orders-charge-and-ship]]).** The internal branch writes a BARE mirror row — no Braintree sale, no Amplifier push — so it silently produces an order that looks real but was never paid or shipped. `createOrder({vendor:'internal'})` now returns `{ success:false, error:'createOrder(internal) requires mirror_only:true — use chargeOneTimeOrder to bill + ship' }` unless the caller passes `mirror_only:true`. That flag is for genuine bookkeeping mirrors only (an import of an already-paid upstream order; a replacement whose money + fulfilment happen in the replacement engine). Anything customer-facing that must actually bill + ship a one-time order uses [[one-time-charge]] `chargeOneTimeOrder` (the assisted-purchase concierge path does — [[action-executor]] `create_order` / `executeInternalOneTimeCreate`, Phase 1). Ground truth: ticket `ca008421` — the concierge path would have created an unpaid, unshipped order before Phase 1 rerouted it. The refusal is a pure input check and runs BEFORE the admin client is constructed; pinned in [[../../src/lib/commerce/order.create.test]]. Audit: the only runtime `createOrder` caller is `create_order`'s `vendor:'shopify'` branch — no internal caller remains (the former internal caller moved to `chargeOneTimeOrder`).
+
+Input shape (`CreateOrderInput`): `{ vendor, customer_id, email, line_items[], currency?, shipping_address?, billing_address?, subscription_id?, order_type?, tags?, source_name?, mirror_only? }`. `line_items[i]` = `{ variant_id, product_id?, title, quantity, unit_cents }`.
 
 Returns `{ success, order_id, shopify_order_id?, order_number?, error? }`.
 

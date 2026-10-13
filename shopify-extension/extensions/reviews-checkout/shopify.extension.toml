@@ -1,0 +1,29 @@
+api_version = "2025-10"
+
+[[extensions]]
+type = "ui_extension"
+name = "Customer Reviews"
+handle = "reviews-checkout"
+
+[[extensions.targeting]]
+module = "./src/Checkout.jsx"
+target = "purchase.checkout.block.render"
+
+# network_access only — it reads our reviews API and writes nothing. No api_access
+# (cart lines come from the checkout API, not the Storefront API) and no
+# block_progress (it must never be able to stop a checkout).
+[extensions.capabilities]
+network_access = true
+
+[settings]
+[[settings.fields]]
+key = "api_endpoint"
+type = "single_line_text_field"
+name = "API Endpoint"
+description = "Base URL for the reviews API (e.g. https://shopcx.ai)"
+
+[[settings.fields]]
+key = "workspace"
+type = "single_line_text_field"
+name = "Workspace slug"
+description = "Workspace slug used in the reviews path (e.g. superfoods)"

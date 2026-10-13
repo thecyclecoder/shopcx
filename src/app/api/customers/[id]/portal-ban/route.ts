@@ -55,7 +55,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   if (ticket) {
     await admin.from("ticket_messages").insert({
       ticket_id: ticket.id,
-      direction: "internal",
+      direction: "outbound",
       visibility: "internal",
       author_type: "system",
       body: noteBody,

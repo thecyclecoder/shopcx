@@ -46,7 +46,7 @@ export async function POST(
   // Look up order for shipping address
   const { data: order } = await admin
     .from("orders")
-    .select("id, fulfillments, line_items, total_price_cents, shipping_address")
+    .select("id, fulfillments, line_items, total_cents, shipping_address")
     .eq("id", order_id)
     .eq("workspace_id", workspaceId)
     .single();
@@ -122,7 +122,7 @@ export async function POST(
       );
     }
 
-    const orderTotalCents = ret.order_total_cents || order.total_price_cents || 0;
+    const orderTotalCents = ret.order_total_cents || order.total_cents || 0;
     const netRefundCents = deduct_label_cost
       ? Math.max(0, orderTotalCents - label.costCents)
       : orderTotalCents;

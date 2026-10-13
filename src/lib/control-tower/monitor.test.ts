@@ -17,13 +17,16 @@ import {
   countRenewalIntegrityOverdueSubs,
   countSegmentStaleTail,
   countStuckDunningCycles,
+  SCHEDULER_GAP_DETECT_MS,
   SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE,
   SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE,
   evalAgentKind,
   evalCron,
   evalInlineAgent,
   evalOutputAssertion,
+  evalOutputFreshness,
   evalWorker,
+  parseOutputFreshnessValueMs,
   extractCronExpr,
   extractSolHandleBypassTicketIds,
   SOL_HANDLE_BYPASS_REASONS,
@@ -1950,6 +1953,40 @@ test("evalCron STILL flips cron_freshness on the storefront peer when the watchd
   }
 });
 
+test("scheduler-gap flag arms inside the OLD 15–20 min dead zone (17-min monitor beat) so the storefront peer is suppressed to amber, not red", () => {
+  // The dead zone this spec closes: under the old 20-min liveness window the watchdog's own beat
+  // could sit up to 20 min stale with the suppression still OFF, so a peer with a 15-min window
+  // (storefront-experiments-refresh-cron) reds ~5 min before the shared-pause guard ever arms.
+  // Keying the threshold off two missed 5-min monitor ticks (SCHEDULER_GAP_DETECT_MS = ~10 min)
+  // arms the flag BELOW the shortest peer window, so a 17-min stale beat now holds the peer amber.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-17T12:00:00Z");
+  try {
+    // Monitor's own latest beat is 17 min stale — inside the old 15–20 min dead zone.
+    const monitorAgeMs = Date.now() - Date.parse("2026-07-17T11:43:00Z");
+    // Under the OLD threshold (the monitor's 20-min liveness window) this beat still read as
+    // "fresh enough", so monitorSchedulerGap stayed false and the peer false-paged red.
+    assert.ok(monitorAgeMs < (controlTowerMonitorLoop.livenessWindowMs ?? 20 * 60_000));
+    // Under the NEW missed-ticks threshold the flag arms before any 15-min peer can red.
+    const monitorSchedulerGap = monitorAgeMs > SCHEDULER_GAP_DETECT_MS;
+    assert.equal(monitorSchedulerGap, true);
+
+    const peerLatest: LoopHistoryRow = {
+      ran_at: "2026-07-17T11:30:00Z", // 30 min stale, past the peer's 15-min window
+      ok: true,
+      duration_ms: 500,
+      produced: null,
+      detail: null,
+    };
+    const result = evalCron(storefrontExperimentsRefreshCronLoop, peerLatest, null, 5, false, null, null, false, monitorSchedulerGap);
+    assert.equal(result.color, "amber");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /waiting on watchdog scheduler gap/);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
 test("evalCron leaves the control-tower-monitor loop itself RED during a scheduler gap (caller never sets the flag on the watchdog)", () => {
   // The suppression is scoped by the caller: buildControlTowerSnapshot passes monitorSchedulerGap
   // only to peer crons, never to the watchdog itself. This test asserts the direct call path:
@@ -2499,4 +2536,67 @@ test("evalOutputAssertion renewal-wedged-cycles: a positive count reds the tile 
     /wedged/i.test(verdict!.statusText),
     `statusText should surface the wedge count: ${verdict!.statusText}`,
   );
+});
+
+// ─── Output-freshness date-grain parser + evalOutputFreshness regression
+// (control-tower-output-freshness-date-grain-fix Phase 1) ───
+// The 2026-09-30 sync-qb-close-sources false red at 2026-10-03T00:00:30Z was caused by parsing a
+// bare 'YYYY-MM-DD' date column as UTC midnight (start-of-day), making the 72h lag threshold
+// trip ~30s past the day boundary. Fix: a DATE value represents an entire calendar day → anchor
+// its freshness at END-of-day UTC. Timestamp values keep exact-timestamp behaviour.
+
+test("parseOutputFreshnessValueMs: a bare 'YYYY-MM-DD' resolves to end-of-day UTC (last ms of that day)", () => {
+  const ms = parseOutputFreshnessValueMs("2026-09-30");
+  assert.ok(ms !== null, "parser must accept a bare 'YYYY-MM-DD' date");
+  assert.equal(new Date(ms!).toISOString(), "2026-09-30T23:59:59.999Z");
+});
+
+test("parseOutputFreshnessValueMs: a full ISO timestamp keeps its exact instant (no end-of-day coercion)", () => {
+  const ms = parseOutputFreshnessValueMs("2026-09-30T12:34:56Z");
+  assert.equal(ms, Date.parse("2026-09-30T12:34:56Z"));
+});
+
+test("parseOutputFreshnessValueMs: non-strings, empty strings, and garbage return null", () => {
+  assert.equal(parseOutputFreshnessValueMs(null), null);
+  assert.equal(parseOutputFreshnessValueMs(undefined), null);
+  assert.equal(parseOutputFreshnessValueMs(""), null);
+  assert.equal(parseOutputFreshnessValueMs(42), null);
+  assert.equal(parseOutputFreshnessValueMs("not-a-date"), null);
+});
+
+const SYNC_QB_CLOSE_SOURCES_LOOP = MONITORED_LOOPS.find(
+  (l) => l.id === "sync-qb-close-sources",
+)!;
+
+test("evalOutputFreshness: sync-qb-close-sources at 2026-10-03T00:00:30Z against newest sale_date=2026-09-30 stays GREEN (the originating false alarm)", () => {
+  // Reproduces the 2026-09-30 at 2026-10-03T00:00:30Z boundary that false-paged the tile. End-of-
+  // day parsing anchors 2026-09-30 at 2026-09-30T23:59:59.999Z, so the lag is ~2d + 30s — well
+  // under the 72h maxLag. Start-of-day parsing (the pre-fix behaviour) made the same case trip at
+  // ~72h0m30s and red the tile.
+  assert.ok(SYNC_QB_CLOSE_SOURCES_LOOP.outputFreshness, "sync-qb-close-sources must declare outputFreshness");
+  const newestAtMs = parseOutputFreshnessValueMs("2026-09-30");
+  assert.ok(newestAtMs !== null);
+  const nowMs = Date.parse("2026-10-03T00:00:30Z");
+  const verdict = evalOutputFreshness(
+    SYNC_QB_CLOSE_SOURCES_LOOP,
+    { newestAtMs, readOk: true },
+    nowMs,
+  );
+  assert.equal(verdict, null, "end-of-day DATE anchor must keep the tile green inside maxLag");
+});
+
+test("evalOutputFreshness: a sale_date older than maxLag STILL reds (end-of-day interpretation does not hide a real stall)", () => {
+  // Guards against over-correcting: an older date (2026-09-20 against the same 2026-10-03 now)
+  // is ~12d stale, well past the 72h maxLag — the alert must still fire. End-of-day parsing only
+  // widens the window by one day; a multi-day stall still trips cleanly.
+  const newestAtMs = parseOutputFreshnessValueMs("2026-09-20");
+  assert.ok(newestAtMs !== null);
+  const nowMs = Date.parse("2026-10-03T00:00:30Z");
+  const verdict = evalOutputFreshness(
+    SYNC_QB_CLOSE_SOURCES_LOOP,
+    { newestAtMs, readOk: true },
+    nowMs,
+  );
+  assert.ok(verdict, "a sale_date that is many days behind must still flip the tile red");
+  assert.equal(verdict!.violation.reason, "output_stale");
 });

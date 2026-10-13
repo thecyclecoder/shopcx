@@ -1,0 +1,1 @@
+- **Drop stale playbooks.title direct-REST lookup noise from Supabase logs** · verified 2026-09-28 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise`)

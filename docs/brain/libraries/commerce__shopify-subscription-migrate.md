@@ -335,6 +335,30 @@ wrong, not the price:
 A last-order baseline produces a steady stream of alarming, wrong numbers on exactly the customers
 whose subscriptions are most active. Run this before and after every wave.
 
+## Verify a fixed-amount code against its FACE VALUE
+
+The plan divides a fixed-amount code into `carriedCodeUnitCents` per unit and rounds. A $15 code
+across lines of qty 1/4/3 reconstructs as **$14.73** — 27 cents lost to rounding — while Shopify
+allocates the true $15.00.
+
+Measured 2026-09-30 on the codes wave: three contracts failed verify on 24, 29 and 3 cents, and
+**Shopify was the more accurate side every time.** The verifier was wrong, not the contract. It now
+compares against `structural total − code face value`, which is exact, with slack only for Shopify's
+own per-line cent rounding (3c × line count).
+
+All three re-migrated cleanly once the comparison was right.
+
+## Codes wave — 33 contracts, 2026-09-30
+
+28 migrated first pass, 3 after the face-value fix above, **31 of 33**. Two blocked correctly:
+`incomplete_address:lastName` and `no_lines_after_rules`.
+
+⚠️ **Appstle's contract-attached codes carry NO expiry field** — the objects have only `id, type,
+title, value, targetType, usageCount, rejectionReason, recurringCycleLimit`. So nothing time-based is
+lost on migration, and a contract-attached code cannot expire by date on either engine.
+**198 of 354 code instances are PERPETUAL** (no cycle limit) — already permanent on Appstle, and
+faithfully permanent here.
+
 ## Gotchas
 
 - **Not idempotent without the marker.** The first real run created TWO live contracts for one

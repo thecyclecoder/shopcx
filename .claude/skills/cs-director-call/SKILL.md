@@ -26,12 +26,28 @@ You MUST NOT mutate anything.
   object — a typed verdict. Phase 1's worker records it to `director_activity`; Phase 2's
   `applyBoxCsDirectorCall` (deterministic Node) applies it. This is the north-star supervisable
   autonomy pattern (CEO → role agent → bounded tool) — see [[../../../docs/brain/operational-rules]].
-- **Cite what you saw.** Every verdict's `reasoning` must reference a real ticket message / a real
-  `ticket_resolution_events` turn / a real prior action — not hand-waved intuition. That trail is
-  what the CEO audits when reviewing your calls (director_activity → the recap + the audit).
+- **Cite what you saw.** Every verdict's `reasoning` MUST **quote the NEWEST inbound customer
+  message verbatim** (via `body_clean` when present) BEFORE citing any analysis. Phase 3 of
+  [[../../../docs/brain/specs/inflection-resession-must-act-on-newest-ask.md]] pins this invariant.
+  Ground truth: ticket dc31bf31 (Aug 2026) — the 08-08 "Still do not Knw date?????" message was the
+  customer's actual last word, but June read an older thank-you ("Thank you So much!!!!!") as his
+  closing line and ruled `close_no_action`. The customer paused 30 days in the portal on 08-27,
+  auto-resumed 09-26, and renewed 10-02 — a $237.16 refund + cancelled subscriber (SHOPCX481). Your
+  reasoning should look like: `"Newest customer message (<created_at>): \"<verbatim quote>\". <then
+  your interpretation + prior-turn cite>"`. If you cannot find a newest message to quote, say so
+  explicitly instead of inferring from an older one.
 - **Doubt escalates.** When the right call is unclear, or the remedy is irreversible / out of leash /
   non-binary / storyline-shaped, verdict = `escalate_founder`. NEVER guess an `approve_remedy` —
   approving a bad remedy destroys customer trust, escalating a good one just costs a few CEO seconds.
+- **The close_no_action unsatisfied-request guard is machine-enforced.** The worker runs
+  `findUnsatisfiedCustomerRequests(messages, executedActions)` on your `close_no_action` verdict
+  BEFORE closing the ticket. Any explicit customer ask (date-change / refund / cancel / change /
+  move / skip) posted AFTER the last successful executed action downgrades the transition to
+  `needs_sol_resession_unsatisfied_ask` — the ticket stays open and Sol is re-sessioned with a
+  prompt that quotes the open ask. A `close_no_action` whose reasoning does NOT quote the newest
+  inbound message is EXACTLY the dc31bf31 miss; your reasoning MUST address every post-action
+  inbound explicitly (satisfied by prior action X at <timestamp>, or declined-by-policy, or truly
+  rhetorical). "Positive thank-you" is only a valid read of a message that actually IS a thank-you.
 
 ## What you're given
 
@@ -117,6 +133,18 @@ classified by `isRaiseAttempt` (`src/lib/subscription-overcharge.ts:503`) must s
 rather than execute — lowering toward a demonstrated rate is in-leash; anything that would raise
 a customer's price is not, and no amount of agent reasoning may cross that line.
 
+**⭐ Never change a subscription price without quoting `renewal_subtotal_cents`.** On an INTERNAL
+sub, the renewal engine (`resolveSubscriptionPricing`) is the authority for what the next charge
+will be — NOT `price_override_cents` (that's the PRE-DISCOUNT base; the quantity break and S&S
+apply ON TOP). Before you propose any price change, read `getCxSubscriptions` and SEE the
+engine's view: each item carries `realized_cents` (what the engine will charge per unit) and the
+subscription carries `renewal_subtotal_cents` (Σ realized × qty — what the next shipment will
+charge). The `update_line_item_price` handler now REFUSES on an internal sub unless the action's
+payload names `expected_current_realized_cents` and that figure matches the engine (±1¢). Ticket
+01f6a2e6 → 668bc5c8 (Sanja Rojas) is the ground-truth case: Sonnet, June ×2, and Sol each wrote a
+wrong base in a row — all because the SDK had labeled the pre-discount base as realized. Quote
+the engine's realized price in your reasoning AND in the action payload, every time.
+
 ```json
 "remedy": {
   "action_type": "restore_grandfathered_price",
@@ -130,6 +158,15 @@ a customer's price is not, and no amount of agent reasoning may cross that line.
 Return a `remedy` object shaped as a **RemedyPlan** — the Phase-2 executor will fire it through
 `executeSonnetDecision` (the same real executor prod uses; see the `run-orchestrator-action` skill
 for the pattern). Two shapes are accepted (both normalize to an ordered actions batch):
+
+> **PAYLOAD SHAPE RULE — put action params INSIDE `payload`, the customer message under `customer_message`.**
+> Every action's params (`amount_cents`, `order_number`, `shopify_order_id`, `contract_id`, `date`, …)
+> go inside that step's `payload` object; the reply the customer reads goes in the top-level
+> `customer_message` (NOT `response_message` and NOT inside `payload`). A FLAT remedy — params at the
+> top level with no `payload` wrapper — is normalized defensively, but authoring the wrapper is the
+> contract. Use the EXACT key each handler reads (e.g. `change_next_date` reads `date`, NOT
+> `next_billing_date`). On 2026-10-07 a $43.20 refund was authored flat with the message under
+> `response_message`; the apply was refused and the customer waited 6.5h (ticket 2acc8634).
 
 **Preferred — MULTI-ACTION `actions[]` (a real fix often needs several).** A real fix is often a
 combination — e.g. `partial_refund` + `change_next_date` + `redeem_points_as_refund`, or
@@ -150,7 +187,7 @@ makes the customer whole in one verdict; author more only when the fix genuinely
 "remedy": {
   "actions": [
     { "action_type": "partial_refund",            "payload": { "amount_cents": 3000, "order_number": "SC131156" } },
-    { "action_type": "change_next_date",          "payload": { "next_billing_date": "2026-10-06", "contract_id": "..." } },
+    { "action_type": "change_next_date",          "payload": { "date": "2026-10-06", "contract_id": "..." } },
     { "action_type": "redeem_points_as_refund",   "payload": { "amount_cents": 500 } }
   ],
   "summary": "one sentence — what you're doing across the batch + why the customer needs it",
@@ -166,7 +203,7 @@ one action, either shape works — the top-level `{action_type, payload}` is bac
 "remedy": {
   "action_type": "change_next_date",
   "summary":     "restore requested next-billing date",
-  "payload":     { "next_billing_date": "2026-10-06", "contract_id": "..." },
+  "payload":     { "date": "2026-10-06", "contract_id": "..." },
   "customer_message": "…",
   "confidence": 0.0
 }

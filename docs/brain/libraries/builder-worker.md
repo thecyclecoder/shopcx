@@ -124,6 +124,14 @@ The Growth-owned lane that scores each concluded Media Buyer action against real
 - **Idempotency guards** — the `.upsert(onConflict='director_activity_id')` + `.select('id')` write pattern collapses re-runs and compare-and-sets so a concurrent grader can't silently no-op. No active policy → grader is a no-op (grading a null-policy action is a category error).
 - **Write chokepoint** — [[media-buyer-grader]] `gradeMediaBuyerActions` is the ONLY writer to [[../tables/media_buyer_action_grades]]. The lane never touches the table directly.
 
+## Repeat-verdict breaker — `skippedByRepeatVerdictBreaker` (2026-10-08)
+
+`runJob` first asks [[repeat-verdict-breaker]] whether to run the job. A per-target job (`spec-test`, `security-review`, `repair`, `audit-spec-shipped-state`) gets skipped when its last 3 finished runs all ended with the identical verdict line inside the 6h cooldown and no build or pr-resolve touched the target since. A skipped job is completed without running and stamped `error='repeat-verdict-breaker'`. The first skip after a real run records `director_activity` `repeat_verdict_breaker_tripped`. Human-created runs are never skipped, and the check fails open.
+
+## Dirty-PR supersede pre-flight diffs from the branch's own merged PR (2026-10-08)
+
+`findSupersededExportedSymbolsOnMain(wt, alreadyMergedHeadSha)` diffs from the head of the branch's most recently merged PR (`latestMergedPrHeadShaForBranch`) when that head is an ancestor of HEAD. Without such a PR, it diffs from the merge-base. A spec whose Phase 1 squash-merged while Phase 2 kept building on the branch otherwise reads Phase 1's own exports as "already on main". PR #3193 was parked for a human on that false positive.
+
 ## Claim-RPC cooldown verification — pre-claim gate check
 
 Before opening the build/plan claim block each poll pass, the worker calls `ensureClaimAgentJobCooldownVerified()` to verify the live `public.claim_agent_job(text[])` RPC still honors the `(claimed_at is null or claimed_at <= now())` cooldown predicate (see [[claim-rpc-verify]]). The RPC is the mechanism gate-held builds back off without churning — a released build gets a future `claimed_at` that the RPC skips until the hold expires. If DDL drift removed the predicate, a released row is immediately re-claimable and the poll loop wedges on the same row forever without writing its heartbeat.
@@ -276,6 +284,14 @@ Layers with the surrounding protections in `runBuildJob`: the fresh + resume pat
 
 The ground-truth incidents this vocabulary exists to prevent: `cancelled-subs-stop-reporting-a-future-billing-date` (2026-08-21, 3 re-drives burned on a `(?i)` pattern `git grep` refused; nothing on main mentions `cancelled_at`) and `playbook-drift-classifier-sees-the-pending-question` (2026-08-24, same shape). Post-Phase-2, both would land on the broken-check escalation lane on the first defer — cap counter untouched, human paged with pattern + phase in the escalation summary.
 
+## Blank-result recovery in `runBoxSession` (box-blank-session-result)
+
+`runBoxSession` parses its stream with `parseSessionStream` / `chooseFinalText` from `scripts/builder-worker.session-result.ts`: a blank `result` on a successful run falls back to the last non-blank assistant text, else one Claude-only `--resume` nudge (`opts.blankResultNudge`, `BLANK_RESULT_NUDGE_PROMPT`) on the same session. `noteSessionResult` / `noteBlankNudgeOutcome` feed the heartbeat's `accounts.session_results`; `claudeCliVersion()` feeds `accounts.cli_version`. Runbook + transcript viewer (`scripts/box-show-session.sh`): [[../recipes/build-box-setup]] § Blank final results.
+
+## Per-account setup-token auth (box-setup-token-auth)
+
+Pure helpers in `scripts/builder-worker.oauth-token.ts` (tests: `scripts/builder-worker.oauth-token.test.ts`, `npm run test:box-oauth-token`): `readOauthToken(configDir)` reads `<configDir>/.oauth-token` (mtime = mint time), `applyOauthTokenEnv(env, token)` sets/clears `CLAUDE_CODE_OAUTH_TOKEN`, `decideTokenHoldRelease(...)` decides whether an installed token releases an auth hold, `tokenExpiryStatus(mintedAt, now)` drives the 30-day renewal card. In `builder-worker.ts`: `cachedOauthToken` (30s TTL) feeds `runBoxSession`'s env; `sweepExpiredCredentials` / `sweepUpcomingExpiries` take a token branch that never consults `.credentials.json`; `markAccountAuthExpired` stamps `AccountState.tokenMintedAtWhenHeld` and routes a rejected token to the setup-token variant of `emitCeoReauthCardBestEffort` (`tokenCtx`). Why + runbook: [[../recipes/build-box-setup]] § Long-lived setup-token auth. Installer: `scripts/box-install-oauth-token.sh`.
+
 ## Proactive credentials-expiry sweep at account selection ([[../specs/box-session-retry-on-oauth-token-expired-401-sol-never-drops-ticket]] Phase 1)
 
 Each pool config dir holds a `.credentials.json` whose `claudeAiOauth.expiresAt` is the authoritative local signal for its OAuth token's lifetime. When it's already ≤ now, the next `claude -p` on that account is guaranteed to 401 and drop whatever ticket lands there. So before picking an account, the box sweeps the pool and ejects any account whose stored token is already expired via the SAME `markAccountAuthExpired` machinery (long cap window + dedupe'd CEO card naming the exact `CLAUDE_CONFIG_DIR=<dir> claude auth login` command) as the Phase 2 reactive path — a dead account never receives a session in the first place. The Phase 2 backstop still catches the rarer case where the file looks fresh but the server rejects the token anyway.
@@ -324,6 +340,10 @@ Every job kind funnels its status/error/log_tail transitions through `update(id,
 2. **Bounded retry + typed failure surface on a transient Supabase 5xx** ([[../specs/agent-jobs-update-retry-and-error-surface]] Phase 1). The write goes through `writeAgentJobsUpdateWithRetry` ([[agent-jobs-update-retry]]): it inspects Supabase's `{ error, status }` response instead of firing-and-forgetting, retries the transient class (Cloudflare 521 / edge 5xx / thrown `fetch failed` / `ECONNRESET` / `ETIMEDOUT`) with bounded exponential backoff (default 4 attempts, 250 ms base), and on exhaustion throws `AgentJobsUpdateError` carrying the `jobId` + `attemptedStatus` + last Supabase error. A PostgREST `PGRST*` code or a bug-shaped throw (e.g. `TypeError`) fails fast — retrying a bug just delays the surface. Motivated by the Control Tower's Management-Logs signature `supabase-logs:68fda858b6ae7a63` (repeated `521 PATCH /rest/v1/agent_jobs`), which used to silently drop the transition so the build system's queue lied about what happened.
 
 After a successful write the `needs_attention` classifier fan-out (`stampNeedsAttentionClass`) still runs unchanged — the retry sits INSIDE the guard and BEFORE the classifier, so both existing behaviors are preserved.
+
+## The fold-eligibility probe — `scripts/_probe-spec-fold.ts` ([[../specs/probe-spec-fold-script-owner-column-name-fix]])
+
+Diagnostic CLI tool for operators to inspect a shipped spec's fold-readiness (stored status + phase-by-phase status via `spec_phases` rollup). Accepts a spec slug and returns the spec's title, owner, and each phase's status so an operator can verify fold prerequisites before dispatch. **Column contract:** reads the real schema columns from [[../tables/specs]] — `id`, `slug`, `status`, `title`, `owner` (the per-spec owner function, FK to [[../tables/owner_functions]]). Pre-fix (until 2026-10-02), the script selected the non-existent `owner_function` column, causing every invocation to error with `column specs.owner_function does not exist` on PostgREST. The 2026-10-02 fix corrected both the `.select()` list and the console-log reader to use `owner` (the real schema name from `supabase/migrations/20260713120001_specs_and_spec_phases.sql`), restoring the probe as a functional operator tool for fold auditing.
 
 ## Related
 

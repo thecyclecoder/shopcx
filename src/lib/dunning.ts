@@ -775,7 +775,7 @@ export async function postDunningNoteOnTicket(
   if (!ticket) return;
   await admin.from("ticket_messages").insert({
     ticket_id: ticket.id,
-    direction: "internal",
+    direction: "outbound",
     visibility: "internal",
     author_type: "system",
     body: note,
@@ -925,4 +925,27 @@ export function rollForwardToFutureBillingDate(
     );
   }
   return out;
+}
+
+/**
+ * The next billing date AFTER an Order Now charge, advancing by AT LEAST one cadence from
+ * `max(due, now)`.
+ *
+ * ⚠️ The bug this fixes: an EARLY Order Now (customer presses before their due date) used to roll
+ * forward from `due` with `rollForwardToFutureBillingDate`, which is a NO-OP when `due` is already
+ * in the future. So the date never moved, the next nightly run resolved the same cycle, and the
+ * sub was effectively stranded on one date (ground truth 2026-10-08, Ashley Denson).
+ *
+ * Anchoring to `max(due, now)` and forcing a full step (we pass `now = anchor`, which makes
+ * `rollForwardToFutureBillingDate` step exactly once even when the anchor is already in the future)
+ * guarantees an early press ALWAYS advances one cadence, while a late press rolls forward past now.
+ */
+export function nextDateAfterCharge(
+  due: Date,
+  now: Date,
+  interval: string,
+  count: number,
+): Date {
+  const anchor = due.getTime() > now.getTime() ? due : now;
+  return rollForwardToFutureBillingDate(anchor, interval, count, anchor);
 }

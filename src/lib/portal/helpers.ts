@@ -206,7 +206,7 @@ export async function logPortalAction(params: {
     if (ticket) {
       await admin.from("ticket_messages").insert({
         ticket_id: ticket.id,
-        direction: "internal",
+        direction: "outbound",
         visibility: "internal",
         author_type: "system",
         body: `[Portal] ${summary}`,

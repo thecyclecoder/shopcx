@@ -1,0 +1,29 @@
+api_version = "2025-10"
+
+[[extensions]]
+uid = "0c7925f3-2855-fe47-e02b-df0b51a2eabc7076e73d"
+type = "ui_extension"
+name = "Money-Back Guarantee Terms"
+handle = "mbg-checkout"
+
+[[extensions.targeting]]
+module = "./src/Checkout.jsx"
+target = "purchase.checkout.block.render"
+
+# network_access only: one read of our guarantee API (headline + published terms).
+# No block_progress — it must never be able to stop a checkout.
+[extensions.capabilities]
+network_access = true
+
+[settings]
+[[settings.fields]]
+key = "api_endpoint"
+type = "single_line_text_field"
+name = "API Endpoint"
+description = "Base URL for the guarantee API (e.g. https://shopcx.ai)"
+
+[[settings.fields]]
+key = "badge_url"
+type = "single_line_text_field"
+name = "Badge image URL"
+description = "Optional square badge beside the headline. Leave blank for the store's gold money-back seal."

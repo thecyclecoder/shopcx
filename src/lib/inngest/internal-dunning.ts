@@ -17,6 +17,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logCustomerEvent } from "@/lib/customer-events";
+import { stampCancelledAtIfUnset } from "@/lib/internal-subscription";
 import {
   getDunningSettings,
   getActiveDunningCycle,
@@ -262,6 +263,7 @@ async function exhaustInternalDunning(
   await admin.from("subscriptions")
     .update({ status: "cancelled", next_billing_date: null, updated_at: new Date().toISOString() })
     .eq("id", subscriptionId);
+  await stampCancelledAtIfUnset(admin, subscriptionId);
   await updateDunningCycle(cycleId, { status: "exhausted", paused_at: new Date().toISOString() });
   await tagOpenTickets(workspaceId, customerId, "dunning:cancelled");
   await logCustomerEvent({

@@ -40,6 +40,8 @@ import {
   buildRemedySonnetDecision,
   canOfferOneTapApproval,
   composeFounderEscalationAck,
+  csDirectorOutcomeLabel,
+  findUnsatisfiedCustomerRequests,
   extractRemedyCustomerMessage,
   extractRemedyOrderRefFromStep,
   planAuthorSpec,
@@ -833,6 +835,144 @@ test("planRemedyExecution — payload defaults to {} when absent", () => {
   if (result.ok) assert.deepEqual(result.plan.actionParams, {});
 });
 
+test("planRemedyExecution — FLAT remedy shape lifts top-level params into payload (Susan Knudson ticket 2acc8634 / director_activity ca0323d9)", () => {
+  // Ground truth: June approved a $43.20 refund as a flat object — params at the TOP level, no
+  // `payload` wrapper, and the customer message under `response_message`. The old executor read only
+  // `obj.payload`, so actionParams came out `{}`, the remedy-state guard refused it, and Susan was
+  // refunded 6.5h late. The normalizer must now produce {amount_cents:4320, order_number:'SC136413'}.
+  const result = planRemedyExecution({
+    action_type: "partial_refund",
+    amount_cents: 4320,
+    order_number: "SC136413",
+    response_message: "You've been refunded $43.20 for the duplicate charge. Sorry for the trouble.",
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.plan.actionType, "partial_refund");
+    assert.deepEqual(result.plan.actionParams, { amount_cents: 4320, order_number: "SC136413" });
+    assert.equal(result.plan.actions.length, 1);
+    assert.deepEqual(result.plan.actions[0].actionParams, {
+      amount_cents: 4320,
+      order_number: "SC136413",
+    });
+    // `response_message` is accepted as a `customer_message` alias so the flat remedy still delivers
+    // what June wanted the customer to hear.
+    assert.equal(
+      result.plan.customerMessage,
+      "You've been refunded $43.20 for the duplicate charge. Sorry for the trouble.",
+    );
+  }
+});
+
+test("planRemedyExecution — an explicit `payload` wins verbatim; flat top-level keys are NOT lifted into it", () => {
+  // When June DID emit a payload wrapper, the top-level is metadata, not params — never merge a stray
+  // top-level key into an authored payload.
+  const result = planRemedyExecution({
+    action_type: "partial_refund",
+    amount_cents: 9999, // stray top-level — ignored because payload is explicit
+    payload: { amount_cents: 4320, order_number: "SC136413" },
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.deepEqual(result.plan.actionParams, { amount_cents: 4320, order_number: "SC136413" });
+  }
+});
+
+test("planRemedyExecution — FLAT step inside a multi-action actions[] is normalized too", () => {
+  const result = planRemedyExecution({
+    actions: [
+      { action_type: "partial_refund", amount_cents: 4320, order_number: "SC136413" },
+      { action_type: "change_next_date", payload: { date: "2026-11-01", contract_id: "c-1" } },
+    ],
+    customer_message: "Done.",
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.plan.actions.length, 2);
+    assert.deepEqual(result.plan.actions[0].actionParams, {
+      amount_cents: 4320,
+      order_number: "SC136413",
+    });
+    assert.deepEqual(result.plan.actions[1].actionParams, { date: "2026-11-01", contract_id: "c-1" });
+  }
+});
+
+test("planRemedyExecution — a flat `type` top-level key is NEVER lifted into payload (no handler override)", () => {
+  // `type` is the executor's handler selector. A flat `type` must not become `payload.type` and
+  // silently override the action the founder gate summed on — it's kept out of the lift entirely.
+  const result = planRemedyExecution({
+    action_type: "change_next_date",
+    type: "partial_refund",
+    date: "2026-11-01",
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.plan.actionType, "change_next_date");
+    assert.deepEqual(result.plan.actionParams, { date: "2026-11-01" });
+  }
+});
+
+test("planRemedyExecution — an unknown flat shape with no action_type fails the plan with a distinct reason", () => {
+  // Params at the top level but no `action_type` — the executor has no signature to fire against.
+  const result = planRemedyExecution({ amount_cents: 4320, order_number: "SC136413" });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "remedy_missing_action_type");
+});
+
+test("planRemedyExecution — a `type`-keyed step (executor ActionParams shape) is normalized to action_type", () => {
+  // June sometimes authors a step using the executor's own `type` selector instead of `action_type`.
+  // normalizeTypeKeyedStep promotes top-level `type` → action_type and drops `type` from the params.
+  const result = planRemedyExecution({
+    type: "partial_refund",
+    amount_cents: 4320,
+    order_number: "SC136413",
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.plan.actionType, "partial_refund");
+    // `type` is the selector, NOT a param — it must not land in actionParams.
+    assert.deepEqual(result.plan.actionParams, { amount_cents: 4320, order_number: "SC136413" });
+  }
+});
+
+test("planRemedyExecution — a `type`-keyed step with an explicit payload keeps that payload (type stays the selector only)", () => {
+  const result = planRemedyExecution({
+    type: "partial_refund",
+    payload: { amount_cents: 4320, order_number: "SC136413" },
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.plan.actionType, "partial_refund");
+    assert.deepEqual(result.plan.actionParams, { amount_cents: 4320, order_number: "SC136413" });
+  }
+});
+
+test("planRemedyExecution — an explicit action_type ALWAYS wins over a stray top-level `type` (no selector override)", () => {
+  // Security invariant: when action_type is present, a top-level `type` can NEVER override it; it's
+  // dropped. Mirrors the payload.type reserved-override protection.
+  const result = planRemedyExecution({
+    action_type: "change_next_date",
+    type: "partial_refund",
+    date: "2026-11-01",
+    contract_id: "c-1",
+  });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.plan.actionType, "change_next_date");
+    assert.deepEqual(result.plan.actionParams, { date: "2026-11-01", contract_id: "c-1" });
+  }
+});
+
+test("planRemedyExecution — a `type`-keyed step STILL rejects a payload.type override (bypass class stays closed)", () => {
+  // Promoting the TOP-LEVEL selector must not reopen the payload.type bypass the 2026-07-10 fix closed.
+  const result = planRemedyExecution({
+    type: "partial_refund",
+    payload: { type: "full_order_refund", order_number: "SC136413" },
+  });
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, "remedy_payload_type_override");
+});
+
 test("extractRemedyCustomerMessage — checks canonical + fallback field names", () => {
   assert.equal(extractRemedyCustomerMessage({ customer_message: "A" }), "A");
   assert.equal(extractRemedyCustomerMessage({ response_message: "B" }), "B");
@@ -844,6 +984,81 @@ test("extractRemedyCustomerMessage — checks canonical + fallback field names",
   assert.equal(extractRemedyCustomerMessage({ customer_message: "   " }), null);
   // customer_message takes priority over response_message.
   assert.equal(extractRemedyCustomerMessage({ customer_message: "X", response_message: "Y" }), "X");
+});
+
+// ── june-remedy-shape-and-honest-apply-status Phase 2 — the session-complete outcome label ──
+test("csDirectorOutcomeLabel — a FAILED apply reads 'apply FAILED (<reason>) — ticket NOT handled', NEVER 'handled' (Susan Knudson ticket 2acc8634)", () => {
+  // Ground truth: the runner stamped 'handled — closed + de-escalated' while applyResult.ok was
+  // false (the $43.20 refund had been refused). The label must now name the failure + the reason.
+  const label = csDirectorOutcomeLabel({
+    decision: "approve_remedy",
+    ok: false,
+    needs_attention: true,
+    reason: "missing_order_reference",
+  });
+  assert.equal(label, "apply FAILED (missing_order_reference) — ticket NOT handled");
+});
+
+test("csDirectorOutcomeLabel — a needs_attention apply (ok:true but parked) still reads FAILED", () => {
+  const label = csDirectorOutcomeLabel({ decision: "approve_remedy", ok: true, needs_attention: true, reason: "executor_escalated" });
+  assert.equal(label, "apply FAILED (executor_escalated) — ticket NOT handled");
+});
+
+test("csDirectorOutcomeLabel — a FAILED apply with no reason falls back to 'unknown'", () => {
+  const label = csDirectorOutcomeLabel({ decision: "approve_remedy", ok: false });
+  assert.equal(label, "apply FAILED (unknown) — ticket NOT handled");
+});
+
+test("csDirectorOutcomeLabel — a clean approve_remedy reads 'handled — closed + de-escalated'", () => {
+  const label = csDirectorOutcomeLabel({ decision: "approve_remedy", ok: true, needs_attention: false });
+  assert.equal(label, "handled — closed + de-escalated");
+});
+
+test("csDirectorOutcomeLabel — a founder-approval hold is NOT a failure (checked before the ok/needs_attention branch)", () => {
+  // Money over threshold parks for Dylan's SMS approval — a legitimate hold, not a failed apply.
+  const label = csDirectorOutcomeLabel({ decision: "approve_remedy", ok: true, needs_attention: true, awaiting_founder_approval: true, reason: "over_threshold" });
+  assert.equal(label, "remedy parked for founder approval (via Eve's SMS) — stays escalated");
+});
+
+test("csDirectorOutcomeLabel — escalate_founder + author_spec keep their labels on a clean apply", () => {
+  assert.equal(
+    csDirectorOutcomeLabel({ decision: "escalate_founder", ok: true }),
+    "escalated to the founder (CEO inbox + Eve) for a ruling",
+  );
+  assert.equal(
+    csDirectorOutcomeLabel({ decision: "author_spec", ok: true }),
+    "closed + de-escalated (structural fix authored to the Roadmap)",
+  );
+});
+
+// ── Phase 2 — the ticket transition never de-escalates a FAILED approve_remedy apply ──
+test("decideCsDirectorTicketTransition — approveRemedyApplyFailed keeps the ticket escalated (NOT de-escalated), even if the remedy carried close_ticket:true", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "approve_remedy",
+    reasoning: "Refund $43.20 for the duplicate charge.",
+    remedy: { close_ticket: true },
+    remedyResolved: false,
+    approveRemedyApplyFailed: true,
+    ceoUserId: "owner-1",
+    now: "2026-10-07T20:00:00Z",
+  });
+  assert.equal(t.action_key, "keep_escalated_needs_attention");
+  // Honest state: no close, no de-escalate — stays escalated + owned by the CEO for re-ownership.
+  assert.equal((t.patch as Record<string, unknown>).status, undefined);
+  assert.equal((t.patch as Record<string, unknown>).escalated_to, "owner-1");
+  assert.match(String((t.patch as Record<string, unknown>).escalation_reason), /approve_remedy apply FAILED/);
+});
+
+test("decideCsDirectorTicketTransition — a RESOLVED approve_remedy still closes (the gate only fires on failure)", () => {
+  const t = decideCsDirectorTicketTransition({
+    decision: "approve_remedy",
+    reasoning: "Refunded.",
+    remedy: {},
+    remedyResolved: true,
+    approveRemedyApplyFailed: false,
+    now: "2026-10-07T20:00:00Z",
+  });
+  assert.equal(t.action_key, "close_and_deescalate");
 });
 
 test("buildRemedySonnetDecision — direct_action with actions[0], no response_message", () => {
@@ -2820,4 +3035,56 @@ test("every variant refuses an over-long subject, not just the first", () => {
 test("a subject that fits is still named, right up to the boundary", () => {
   const fits = "My subscription renewed twice this month";
   assert.ok(composeFounderEscalationAck({ subject: fits }).includes(fits));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// findUnsatisfiedCustomerRequests — notification / auto-reply exemption
+// ([[../../docs/brain/specs/close-no-action-guard-must-exempt-notification-and-auto-reply-emails.md]]).
+// Ticket f3977ec6: a GemX Terms/Privacy-update blast tripped the `change` cue on the word
+// "updated" and looped forever between June's close_no_action and Sol's re-session. A vendor
+// blast carries no actionable ask, so it must NOT count as an unsatisfied customer request.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const VENDOR_BLAST = {
+  id: "m-gemx",
+  direction: "inbound",
+  author_type: "customer",
+  visibility: "external" as const,
+  body: "We've updated our Terms of Service and Privacy Policy. Please review the changes.",
+  created_at: "2026-10-10T12:00:00.000Z",
+};
+
+test("vendor-notification blast is NOT an unsatisfied change request (ticket f3977ec6)", () => {
+  // Zero executed actions → floor is epoch, so the blast WOULD count under the old cue table.
+  const out = findUnsatisfiedCustomerRequests([VENDOR_BLAST], []);
+  assert.deepEqual(out, [], "a Terms/Privacy update blast must not block close_no_action");
+});
+
+test("out-of-office auto-reply is exempt even though it quotes a cue word", () => {
+  const ooo = {
+    ...VENDOR_BLAST,
+    id: "m-ooo",
+    body: "I am currently out of office until Monday. I will change my availability then.",
+  };
+  assert.deepEqual(findUnsatisfiedCustomerRequests([ooo], []), []);
+});
+
+test("no-reply sender is exempt via from_address even on a bare cue body", () => {
+  const noReply = {
+    ...VENDOR_BLAST,
+    id: "m-noreply",
+    from_address: "no-reply@vendor.com",
+    body: "Your account settings changed.",
+  };
+  assert.deepEqual(findUnsatisfiedCustomerRequests([noReply], []), []);
+});
+
+test("a REAL customer change ask is still flagged (exemption is scoped, not blanket)", () => {
+  const realAsk = {
+    ...VENDOR_BLAST,
+    id: "m-real",
+    body: "Please change my next delivery date to the 15th.",
+  };
+  const out = findUnsatisfiedCustomerRequests([realAsk], []);
+  assert.equal(out.length, 1, "a genuine customer ask must still block close_no_action");
 });

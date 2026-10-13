@@ -34,6 +34,48 @@ stubbed for now — the renewal scheduler lands in a future commit.
 async function isInternalSubscription(workspaceId: string, contractId: string) : Promise<boolean>
 ```
 
+### Old (pre-migration) contract ids — `resolveLiveContractId` / `pickContractRefRow`
+
+A migration renames `shopify_contract_id` (Appstle numeric → `internal-…`), but the old id lives on in places we don't control:
+- cancel-journey snapshots sent before the migration;
+- cached portal bundles;
+- ticket history the agent reads;
+- exhausted dunning cycles (only OPEN cycles are re-pointed).
+
+Looked up by `shopify_contract_id` alone, an old id matched nothing, and every engine router's "not found ⇒ Appstle" default sent the action to the cancelled Appstle contract. A cancel then "succeeded" there while Braintree kept billing, and a resume could try to reactivate the Appstle contract.
+
+The fix is one shared lookup, `findSubByContractRef`. It matches a contract id on its current `shopify_contract_id` OR `migrated_from_contract_id`; the raw `.or()` filter is gated to safe characters, the same gate as portal `resolveSub`. Precedence lives in the pure, tested `pickContractRefRow`:
+- **A row holding the id as its current contract wins**, except a dead shell (cancelled, not internal) when a migrated row also claims the id.
+- **Among migrated rows:** internal first, then live, then newest.
+- **A row mid-migration** (pre-marked, so both columns hold the id) counts as current.
+
+Who uses it:
+- `isInternalSubscription`, `resolveBillingSource` and `loadInternalSub` all read through it, so routing follows the migrated row's engine.
+- `resolveLiveContractId(workspaceId, contractId)` (exported) returns the live row's contract id, or the input when nothing claims it. It is called first by:
+  - every engine dispatcher in [[commerce__subscription]], including `subscriptionOrderNow`;
+  - [[dunning-charge]] `dunningChargeContract` and `dunningUnskip`;
+  - the four internal writers that address rows by contract id: `internalSubUpdateShippingAddress`, `internalSubGetUpcomingOrders`, `internalSubSwitchPaymentMethod`, `internalSubAddFreeProduct`.
+
+  Routing alone isn't enough: an old id passed through would match zero rows on an `.eq("shopify_contract_id", …)` write and report success while changing nothing.
+
+**Resume restores a next date.** `internalSubscriptionAction("resume")` on a sub with `next_billing_date = null` (every cancel nulls it) sets it to tomorrow, the same default the portal's reactivate uses. Without this, a resumed cancelled sub (agent resume, dunning new-card recovery reaching a migrated sub through its old id) went active but was never selected by the renewal cron, so nobody billed it.
+
+Tests: `test:internal-subscription-contract-ref`.
+
+### `stampCancelledAtIfUnset(admin, subscriptionId, nowIso?)` — cancel-truth on internal cancels
+
+The internal cancel writers set `status='cancelled'` and `next_billing_date = null`, but never stamped `cancelled_at`, unlike the Appstle and ShopCX paths. The three writers are:
+- `internalSubscriptionAction("cancel")`
+- `exhaustInternalDunning` in [[../inngest/internal-dunning]]
+- the [[../inngest/journey-outcomes]] cancel fallback
+
+Measured 2026-10-08: 353 internal cancelled subs had no date, so the CS director's cancellation timeline and the portal's live-row ordering missed them. Each writer now calls this helper. It sets `cancelled_at = now` only `WHERE status='cancelled' AND cancelled_at IS NULL`, so a re-cancel never rewrites the original date.
+
+Existing rows are handled by `scripts/_backfill-internal-cancelled-at.ts`, which writes **evidenced dates only** (`test:backfill-internal-cancelled-at`):
+- **Source 1:** the latest cancel event carrying the sub's id.
+- **Source 2:** for a sub migrated while already cancelled, the latest Appstle `subscription.cancelled` webhook event for its origin contract, dated no later than the migration.
+- **Anything else stays NULL.** 2026-10-08 run: 23 from cancel events and 72 from Appstle webhooks; 258 had no evidence and were left unknown.
+
 ### `resolveVariant` — function
 
 ```ts

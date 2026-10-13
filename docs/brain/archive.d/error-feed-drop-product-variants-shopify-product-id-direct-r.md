@@ -1,0 +1,1 @@
+- **Drop foreign PostgREST read of product_variants.shopify_product_id as capture-time noise** · verified 2026-10-06 · → [[../inngest/supabase-log-poll]]
