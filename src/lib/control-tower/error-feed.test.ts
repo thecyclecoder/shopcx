@@ -101,6 +101,7 @@ import {
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
+  isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
@@ -1763,6 +1764,117 @@ test("isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise KEEPS 
   assert.equal(isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise("", "select * from fraud_cases"), false);
   assert.equal(
     isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise("column fraud_cases.updated_at does not exist", ""),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise ──
+// A foreign / stale direct-REST client read `public.dashboard_notifications` expecting an
+// `updated_at` column the table never carried; Control Tower signature
+// `supabase-logs:22dc0aad50534e35`. Drop AT CAPTURE only when BOTH the exact `column
+// dashboard_notifications.updated_at does not exist` message AND the SELECT-lookup shape on
+// `dashboard_notifications` (bare or PostgREST CTE wrapper) are present. A real updated_at-
+// missing on another table, a `dashboard_notifications` column rename, a non-SELECT write, or
+// a FATAL still pages.
+
+test("isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise drops the PostgREST CTE wrapper + bare SELECT listing the non-existent updated_at column", () => {
+  // The captured incident shape: a stale direct-REST client lists dashboard_notifications
+  // ordered by updated_at, PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."dashboard_notifications" ... )` CTE, and Postgres rejects with the column-missing.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(
+      "column dashboard_notifications.updated_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."dashboard_notifications"."id", "public"."dashboard_notifications"."updated_at" FROM "public"."dashboard_notifications" ORDER BY "public"."dashboard_notifications"."updated_at" DESC LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(
+      "column public.dashboard_notifications.updated_at does not exist",
+      'with pgrst_source as ( select "public"."dashboard_notifications"."updated_at" from "public"."dashboard_notifications" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(
+      "ERROR: column dashboard_notifications.updated_at does not exist",
+      'WITH pgrst_source AS ( SELECT "updated_at" FROM "public"."dashboard_notifications" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper), qualified and unqualified FROM, drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(
+      "column dashboard_notifications.updated_at does not exist",
+      "select id, updated_at from public.dashboard_notifications order by updated_at desc limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(
+      "column dashboard_notifications.updated_at does not exist",
+      "select * from dashboard_notifications where updated_at is not null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise KEEPS real errors (other table, other column, non-SELECT, FATAL)", () => {
+  // Same updated_at-missing message on a DIFFERENT relation is a real product-schema
+  // regression and still pages — the pin names dashboard_notifications only.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(
+      "column tickets.updated_at does not exist",
+      "select id, updated_at from public.tickets order by updated_at desc",
+    ),
+    false,
+  );
+  // A DIFFERENT column on dashboard_notifications (the sibling dismissed_at drop / a real
+  // column rename) is handled by its own predicate and still pages here — the pin is
+  // updated_at only.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(
+      "column dashboard_notifications.dismissed_at does not exist",
+      "select id, dismissed_at from public.dashboard_notifications",
+    ),
+    false,
+  );
+  // A non-SELECT shape (PostgREST CTE write / bare write) is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(
+      "column dashboard_notifications.updated_at does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."dashboard_notifications"("id","updated_at") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(
+      "column dashboard_notifications.updated_at does not exist",
+      'update public.dashboard_notifications set updated_at = now() where id = $1',
+    ),
+    false,
+  );
+  // A FATAL / constraint-class error on the same shape is untouched (different message).
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select id, updated_at from public.dashboard_notifications",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise("", "select * from dashboard_notifications"),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(
+      "column dashboard_notifications.updated_at does not exist",
+      "",
+    ),
     false,
   );
 });

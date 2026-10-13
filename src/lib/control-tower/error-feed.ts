@@ -1458,6 +1458,72 @@ export function isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNo
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `updated_at` column for an ad hoc
+ * direct-REST read of `public.dashboard_notifications`. A foreign/stale PostgREST client
+ * read `dashboard_notifications` expecting an `updated_at` column the table never carried;
+ * grep confirms no ShopCX code path reads `dashboard_notifications.updated_at`. The resulting
+ * undefined_column ERROR is repair work for a query no ShopCX code owns
+ * ([[../specs/error-feed-drop-dashboard-notifications-updated-at-column-ad]], Control Tower
+ * signature `supabase-logs:22dc0aad50534e35`).
+ *
+ * Sibling of `isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise` /
+ * `isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise` — same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` message + SELECT-lookup
+ * shape that covers BOTH the bare SELECT and the PostgREST CTE wrapper), scoped to the
+ * `dashboard_notifications.updated_at` direct-REST shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for `updated_at` on
+ *      `dashboard_notifications` — trimmed equal to `column dashboard_notifications.updated_at
+ *      does not exist` (or the `public.`-qualified variant, with any leading `ERROR: ` prefix
+ *      Postgres includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.dashboard_notifications` —
+ *      either (a) the bare `select ... from (public.)?dashboard_notifications` shape, OR
+ *      (b) the PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."dashboard_notifications" ... )` CTE wrapper form with double-quoted
+ *      identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error on ANY OTHER table (a real schema regression) still pages,
+ *   - a column-missing error on `dashboard_notifications` for a DIFFERENT column (a real
+ *     column rename that broke a live query — e.g. the sibling `dismissed_at` drop) still
+ *     pages — the pin names `dashboard_notifications.updated_at` only,
+ *   - a `dashboard_notifications.updated_at` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is
+ *     the SELECT-lookup shape; the CTE branch likewise requires the wrapped op to be a SELECT,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column dashboard_notifications.updated_at does not exist" ||
+    stripped === "column public.dashboard_notifications.updated_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `dashboard_notifications` — any trailing WHERE/LIMIT/ORDER BY is
+  // fine; the pin is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement
+  // (real code-bug shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?dashboard_notifications\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."dashboard_notifications" ... )` with double-quoted identifiers. Same
+  // foreign-owned read, different rendering. Guarded so the CTE branch requires the wrapped
+  // op to be a SELECT.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."dashboard_notifications"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc lookup that
  * mistypes `error_events.first_seen` (our schema has `first_seen_at`, not `first_seen`).
  * The twin of `isForeignSupabasePostgresMissingControlTowerEventsLookupNoise`, aimed at
