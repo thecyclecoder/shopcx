@@ -36,6 +36,8 @@ import {
   GRADEABLE_ACTION_KINDS,
   REALIZED_WINDOW_MIN_DAYS,
 } from "@/lib/media-buyer/grader";
+import { ACTIVE_MEDIA_BUYER_JOB_STATUSES } from "@/lib/inngest/media-buyer-cadence";
+import { resolveEffectiveSwitch, type EffectiveSwitch } from "@/lib/control-tower/kill-switch-resolver";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -142,6 +144,19 @@ export const mediaBuyerGradeCron = inngest.createFunction(
   },
 );
 
+/** Injectable seams so unit tests can drive the kill-switch state without a live registry / DB. */
+export interface MediaBuyerGradeSweepDeps {
+  resolveSwitch?: (nodeId: string) => Promise<EffectiveSwitch>;
+}
+
+export interface MediaBuyerGradeSweepResult {
+  dispatched: number;
+  /** Set when the `media-buyer-grade` node (or an ancestor) is switched off — nothing was enqueued. */
+  killSwitchOff?: { offBy?: string; scope?: string; reason?: string | null };
+  /** Set when an unfinished grade job already covers this workspace — nothing was enqueued. */
+  alreadyQueued?: string;
+}
+
 /**
  * The PURE per-workspace sweep — inserts ONE workspace-scoped `agent_jobs` row
  * `kind='media-buyer-grade'` with a stable non-empty `spec_slug` and
@@ -151,12 +166,38 @@ export const mediaBuyerGradeCron = inngest.createFunction(
  * `null value in column "spec_slug" of relation "agent_jobs" violates not-null
  * constraint` and no grader row ever landed.
  *
+ * Two enqueue-side guards (2026-10-13: 39 rows piled up queued, one per day since the CEO
+ * switched the Media Buyer off on 2026-09-04 — the claim RPC correctly refused every one):
+ *   - Kill switch: a switched-off `media-buyer-grade` node (or ancestor) enqueues NOTHING, the
+ *     same freeze-produces-nothing contract as [[./ad-creative-cadence]]. The claim-RPC cascade
+ *     stays the downstream defence.
+ *   - One unfinished row per workspace: a pass grades every ungraded settled action (up to the
+ *     limit), so a second queued row adds nothing but a duplicate run.
+ *
  * Extracted from the Inngest handler so it's testable without `step.run`.
  */
 export async function dispatchMediaBuyerGradeSweep(
   admin: Admin,
   workspaceId: string,
-): Promise<{ dispatched: number }> {
+  deps: MediaBuyerGradeSweepDeps = {},
+): Promise<MediaBuyerGradeSweepResult> {
+  const resolveSwitch = deps.resolveSwitch ?? resolveEffectiveSwitch;
+  const effective = await resolveSwitch("media-buyer-grade");
+  if (effective.off) {
+    return { dispatched: 0, killSwitchOff: { offBy: effective.offBy, scope: effective.scope, reason: effective.reason } };
+  }
+
+  const { data: open, error: openErr } = await admin
+    .from("agent_jobs")
+    .select("id, status")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "media-buyer-grade")
+    .in("status", [...ACTIVE_MEDIA_BUYER_JOB_STATUSES])
+    .limit(1);
+  if (openErr) throw new Error(`agent_jobs open-row read failed: ${openErr.message}`);
+  const existing = ((open || []) as Array<{ id: string }>)[0];
+  if (existing) return { dispatched: 0, alreadyQueued: existing.id };
+
   const { error } = await admin.from("agent_jobs").insert({
     workspace_id: workspaceId,
     spec_slug: mediaBuyerGradeSpecSlug(),
@@ -185,7 +226,9 @@ export const mediaBuyerGradeSweep = inngest.createFunction(
       return dispatchMediaBuyerGradeSweep(admin, workspace_id);
     });
     console.log(
-      `[media-buyer-grade] ws=${workspace_id} dispatched=${result.dispatched}`,
+      `[media-buyer-grade] ws=${workspace_id} dispatched=${result.dispatched}` +
+        (result.killSwitchOff ? ` suppressed by kill_switch offBy=${result.killSwitchOff.offBy}` : "") +
+        (result.alreadyQueued ? ` already queued=${result.alreadyQueued}` : ""),
     );
     return { status: "complete", ...result };
   },
