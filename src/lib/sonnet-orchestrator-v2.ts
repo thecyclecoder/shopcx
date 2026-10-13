@@ -1934,7 +1934,7 @@ async function getFraudCases(admin: Admin, wsId: string, custId: string): Promis
   // any of the linked customer IDs. Project enough to tell the
   // orchestrator how serious the situation is.
   const { data: cases } = await admin.from("fraud_cases")
-    .select("id, rule_type, severity, status, title, first_detected_at, last_seen_at, evidence")
+    .select("id, rule_type, severity, status, title, confirmed_customer_ids, first_detected_at, last_seen_at, evidence")
     .eq("workspace_id", wsId)
     .overlaps("customer_ids", allCustIds)
     .order("first_detected_at", { ascending: false })
@@ -1942,7 +1942,14 @@ async function getFraudCases(admin: Admin, wsId: string, custId: string): Promis
 
   if (!cases?.length) return "No fraud cases for this customer.";
 
-  const confirmed = cases.filter(c => c.status === "confirmed_fraud");
+  // A confirmed_fraud case gates THIS customer only when they are individually
+  // confirmed (confirmed_customer_ids overlaps their linked ids) — Phase 3. A
+  // case that is confirmed for someone else but merely shares a BIN with this
+  // customer must NOT short-circuit the orchestrator for them.
+  const linkedSet = new Set(allCustIds);
+  const isConfirmedForCustomer = (c: { status: string | null; confirmed_customer_ids?: string[] | null }) =>
+    c.status === "confirmed_fraud" && (c.confirmed_customer_ids || []).some((id) => linkedSet.has(id));
+  const confirmed = cases.filter(isConfirmedForCustomer);
   const open = cases.filter(c => c.status === "open" || c.status === "reviewing");
 
   const parts: string[] = [];

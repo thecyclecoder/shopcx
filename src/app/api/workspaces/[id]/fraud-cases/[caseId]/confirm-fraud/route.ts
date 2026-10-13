@@ -4,19 +4,28 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { subscriptionAction } from "@/lib/commerce/subscription";
 import { cancelOrder } from "@/lib/shopify-order-actions";
 import { refundOrder } from "@/lib/refund";
-import { resolveFraudCaseLinkedCustomers } from "@/lib/fraud-linked-customers";
+import { validateConfirmCustomerId, appendConfirmedCustomerId } from "@/lib/fraud-confirm";
 
 /**
- * Confirmed Fraud — multi-step action series.
+ * Confirmed Fraud — multi-step action series, PER CUSTOMER.
  *
- * POST body: { step, amplifier_action?, proceed_with_cancel? }
+ * Confirming fraud acts on exactly ONE customer at a time (spec
+ * fraud-bin-velocity-requires-real-cross-account-link Phase 3). A case-wide
+ * confirm turned a single real fraudster into 8 innocent subscribers refunded,
+ * cancelled and banned in one click. EVERY step now requires a single
+ * `body.customer_id` that is a member of fraud_cases.customer_ids; a missing id,
+ * an array, or a `customer_ids` (plural) body is a 400. Each step is scoped to
+ * that one customer — only their subs are cancelled, only their orders refunded,
+ * only they are banned, and only they are appended to confirmed_customer_ids.
+ *
+ * POST body: { step, customer_id, amplifier_action?, proceed_with_cancel? }
  *
  * Steps:
- *   check_amplifier  — returns Amplifier status for each order
- *   cancel_subscriptions — cancels all active subs via Appstle
- *   cancel_refund_orders — cancels + refunds each order on Shopify
- *   ban_customer — sets portal_banned on the customer
- *   complete — marks fraud case as confirmed_fraud
+ *   check_amplifier  — Amplifier status for THIS customer's orders in the case
+ *   cancel_subscriptions — cancels THIS customer's active subs via Appstle
+ *   cancel_refund_orders — cancels + refunds THIS customer's case orders
+ *   ban_customer — sets portal_banned on exactly this one customer
+ *   complete — appends this customer to confirmed_customer_ids, flips status
  */
 export async function POST(
   request: Request,
@@ -55,16 +64,30 @@ export async function POST(
   const customerIds = (fraudCase.customer_ids || []) as string[];
   const orderIds = (fraudCase.order_ids || []) as string[];
 
+  // ── Per-customer contract (Phase 3) ──
+  // Every step acts on exactly one customer. The shared validator rejects the
+  // legacy case-wide shapes: a `customer_ids` (plural) body, a missing
+  // `customer_id`, an array, or a `customer_id` that isn't a member of this
+  // case. This is the guard that makes a grouping mistake impossible to turn
+  // into mass damage.
+  const validation = validateConfirmCustomerId(body as Record<string, unknown>, customerIds);
+  if (!validation.ok) {
+    return NextResponse.json({ error: validation.error }, { status: validation.status });
+  }
+  const customerId = validation.customerId;
+
   // ── Step: check_amplifier ──
   if (step === "check_amplifier") {
     // Load orders with amplifier data — order_ids may be Shopify IDs or internal UUIDs
     const orders: { id: string; order_number: string; shopify_order_id: string; amplifier_order_id: string | null; amplifier_status: string | null; amplifier_shipped_at: string | null }[] = [];
 
     if (orderIds.length > 0) {
+      // Scope to THIS customer's orders only (`.eq("customer_id", customerId)`).
       // Try as shopify_order_id first
       const { data: byShopify } = await admin.from("orders")
         .select("id, order_number, shopify_order_id, amplifier_order_id, amplifier_status, amplifier_shipped_at")
         .eq("workspace_id", workspaceId)
+        .eq("customer_id", customerId)
         .in("shopify_order_id", orderIds);
       if (byShopify?.length) orders.push(...byShopify);
 
@@ -75,6 +98,7 @@ export async function POST(
         const { data: byUuid } = await admin.from("orders")
           .select("id, order_number, shopify_order_id, amplifier_order_id, amplifier_status, amplifier_shipped_at")
           .eq("workspace_id", workspaceId)
+          .eq("customer_id", customerId)
           .in("id", missingIds);
         if (byUuid?.length) orders.push(...byUuid);
       }
@@ -109,42 +133,41 @@ export async function POST(
   if (step === "cancel_subscriptions") {
     const results: { subscription_id: string; shopify_contract_id: string; success: boolean; error?: string; skipped?: string }[] = [];
 
-    for (const custId of customerIds) {
-      const { data: subs } = await admin.from("subscriptions")
-        .select("id, shopify_contract_id, status")
-        .eq("workspace_id", workspaceId)
-        .eq("customer_id", custId)
-        .in("status", ["active", "paused"]);
+    // Only THIS customer's active subs — never every customer on the case.
+    const { data: subs } = await admin.from("subscriptions")
+      .select("id, shopify_contract_id, status")
+      .eq("workspace_id", workspaceId)
+      .eq("customer_id", customerId)
+      .in("status", ["active", "paused"]);
 
-      for (const sub of subs || []) {
-        // Idempotency precheck — customer_events lookup for a prior
-        // fraud-case cancel on the same sub. If found, skip and record
-        // "already cancelled by prior fraud attempt" so a retry is safe.
-        const { data: priorCancel } = await admin
-          .from("customer_events")
-          .select("id")
-          .eq("workspace_id", workspaceId)
-          .eq("event_type", "subscription.cancelled")
-          .contains("properties", { fraud_case_id: caseId, subscription_id: sub.id })
-          .limit(1)
-          .maybeSingle();
-        if (priorCancel) {
-          results.push({
-            subscription_id: sub.id,
-            shopify_contract_id: sub.shopify_contract_id,
-            success: true,
-            skipped: "already cancelled by prior fraud-case attempt (idempotent skip)",
-          });
-          continue;
-        }
-        const result = await subscriptionAction(workspaceId, sub.shopify_contract_id, "cancel", "fraud", "Fraud Detection");
+    for (const sub of subs || []) {
+      // Idempotency precheck — customer_events lookup for a prior
+      // fraud-case cancel on the same sub. If found, skip and record
+      // "already cancelled by prior fraud attempt" so a retry is safe.
+      const { data: priorCancel } = await admin
+        .from("customer_events")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("event_type", "subscription.cancelled")
+        .contains("properties", { fraud_case_id: caseId, subscription_id: sub.id })
+        .limit(1)
+        .maybeSingle();
+      if (priorCancel) {
         results.push({
           subscription_id: sub.id,
           shopify_contract_id: sub.shopify_contract_id,
-          success: result.success,
-          error: result.error,
+          success: true,
+          skipped: "already cancelled by prior fraud-case attempt (idempotent skip)",
         });
+        continue;
       }
+      const result = await subscriptionAction(workspaceId, sub.shopify_contract_id, "cancel", "fraud", "Fraud Detection");
+      results.push({
+        subscription_id: sub.id,
+        shopify_contract_id: sub.shopify_contract_id,
+        success: result.success,
+        error: result.error,
+      });
     }
 
     return NextResponse.json({ ok: true, step: "cancel_subscriptions", results });
@@ -165,10 +188,10 @@ export async function POST(
     for (const oid of orderIds) {
       // order_ids may contain Shopify order IDs (rule-based) or internal UUIDs (AI-detected).
       // Resolve to the internal orders row either way — refundOrder + cancelOrder both need it.
-      let dbOrder: { id: string; order_number: string | null; shopify_order_id: string | null; total_cents: number | null } | null = null;
+      let dbOrder: { id: string; order_number: string | null; shopify_order_id: string | null; total_cents: number | null; customer_id: string | null } | null = null;
 
       const { data: orderByShopify } = await admin.from("orders")
-        .select("id, order_number, shopify_order_id, total_cents")
+        .select("id, order_number, shopify_order_id, total_cents, customer_id")
         .eq("workspace_id", workspaceId)
         .eq("shopify_order_id", oid)
         .maybeSingle();
@@ -177,7 +200,7 @@ export async function POST(
         dbOrder = orderByShopify;
       } else {
         const { data: orderByUuid } = await admin.from("orders")
-          .select("id, order_number, shopify_order_id, total_cents")
+          .select("id, order_number, shopify_order_id, total_cents, customer_id")
           .eq("workspace_id", workspaceId)
           .eq("id", oid)
           .maybeSingle();
@@ -186,6 +209,13 @@ export async function POST(
 
       if (!dbOrder) {
         results.push({ order_id: oid, order_number: oid, success: false, error: "Order not found" });
+        continue;
+      }
+
+      // Per-customer scope: skip any case order that isn't THIS customer's.
+      // Another customer on the same case is refunded only when THEY are
+      // confirmed on their own.
+      if (dbOrder.customer_id !== customerId) {
         continue;
       }
 
@@ -259,43 +289,12 @@ export async function POST(
 
   // ── Step: ban_customer ──
   //
-  // Bans EVERY account the case has linked, not just the accounts on
-  // fraud_cases.customer_ids. The linked cluster is the set the
-  // investigate route already renders as "Customer Accounts" on the
-  // detail page (the list the operator read and confirmed against),
-  // so we call the exact same resolver here — no second heuristic.
-  // See docs/brain/libraries/fraud-linked-customers.md.
-  //
-  // The caller may pass `customer_ids` in the body to narrow the ban
-  // to the accounts still checked in the confirm dialog (the operator
-  // is allowed to exclude linked accounts that look unrelated — 26
-  // genuinely unrelated same-surname customers in the ground-truth
-  // cluster). We intersect that list with the resolved linked set;
-  // anything outside the linked set is ignored — the case defines
-  // the ceiling, the operator can only narrow within it.
+  // Bans EXACTLY this one customer. The old case-wide fan-out over the
+  // resolved linked cluster is gone (spec Phase 3): a confirm never bans
+  // several customers at once. Linked accounts are shown for information on
+  // the detail page and each needs its own confirm.
   if (step === "ban_customer") {
-    const { allCustomerIds: linkedIds } = await resolveFraudCaseLinkedCustomers(admin, fraudCase);
-
-    const requested = Array.isArray(body.customer_ids)
-      ? (body.customer_ids as string[]).filter((id): id is string => typeof id === "string")
-      : null;
-    const linkedSet = new Set(linkedIds);
-    const targets = requested
-      ? requested.filter(id => linkedSet.has(id))
-      : linkedIds;
-
-    // Pull existing ban state + emails so the response can distinguish
-    // banned-now vs already-banned and label each row for the operator.
-    const { data: existing } = await admin.from("customers")
-      .select("id, email, portal_banned")
-      .eq("workspace_id", workspaceId)
-      .in("id", targets.length > 0 ? targets : ["__none__"]);
-    const existingById = new Map((existing || []).map(c => [c.id, c] as const));
-
     const nowIso = new Date().toISOString();
-    // `success` is retained for the pre-Phase-2 wizard UI (checkmark
-    // per row) — Phase 2 replaces that display with an explicit
-    // banned / already-banned / failed breakdown and this field can go.
     const results: {
       customer_id: string;
       email: string | null;
@@ -305,87 +304,34 @@ export async function POST(
       error?: string;
     }[] = [];
 
-    for (const custId of targets) {
-      const row = existingById.get(custId);
-      const email = row?.email ?? null;
+    const { data: row } = await admin.from("customers")
+      .select("id, email, portal_banned")
+      .eq("workspace_id", workspaceId)
+      .eq("id", customerId)
+      .maybeSingle();
 
-      if (!row) {
-        results.push({
-          customer_id: custId,
-          email: null,
-          already_banned: false,
-          banned: false,
-          success: false,
-          error: "Customer not found in workspace",
-        });
-        continue;
-      }
-
-      if (row.portal_banned) {
-        results.push({
-          customer_id: custId,
-          email,
-          already_banned: true,
-          banned: false,
-          success: true,
-        });
-        continue;
-      }
-
-      // Compare-and-set: only flip a currently-unbanned row so a
-      // concurrent ban isn't overwritten (and to assert exactly one
-      // row transitioned — bail with an error otherwise).
+    if (!row) {
+      results.push({ customer_id: customerId, email: null, already_banned: false, banned: false, success: false, error: "Customer not found in workspace" });
+    } else if (row.portal_banned) {
+      results.push({ customer_id: customerId, email: row.email, already_banned: true, banned: false, success: true });
+    } else {
+      // Compare-and-set: only flip a currently-unbanned row so a concurrent
+      // ban isn't overwritten and exactly one row transitions.
       const { data: updated, error } = await admin.from("customers")
-        .update({
-          portal_banned: true,
-          portal_banned_at: nowIso,
-          portal_banned_by: member.id,
-        })
-        .eq("id", custId)
+        .update({ portal_banned: true, portal_banned_at: nowIso, portal_banned_by: member.id })
+        .eq("id", customerId)
         .eq("workspace_id", workspaceId)
         .eq("portal_banned", false)
         .select("id");
-
       if (error) {
-        results.push({
-          customer_id: custId,
-          email,
-          already_banned: false,
-          banned: false,
-          success: false,
-          error: error.message,
-        });
-        continue;
+        results.push({ customer_id: customerId, email: row.email, already_banned: false, banned: false, success: false, error: error.message });
+      } else if (!updated || updated.length === 0) {
+        results.push({ customer_id: customerId, email: row.email, already_banned: true, banned: false, success: true });
+      } else {
+        results.push({ customer_id: customerId, email: row.email, already_banned: false, banned: true, success: true });
       }
-
-      if (!updated || updated.length === 0) {
-        // Something else banned this row between the read and the
-        // update — surface as already-banned so the UI doesn't say
-        // it failed silently.
-        results.push({
-          customer_id: custId,
-          email,
-          already_banned: true,
-          banned: false,
-          success: true,
-        });
-        continue;
-      }
-
-      results.push({
-        customer_id: custId,
-        email,
-        already_banned: false,
-        banned: true,
-        success: true,
-      });
     }
 
-    // Report the FULL scope back: how many accounts the case links to,
-    // how many the request targeted (targets), how many banned now,
-    // how many were already banned, how many failed. The caller
-    // renders this instead of assuming — a silent partial success is
-    // the failure mode this whole feature exists to remove.
     const bannedCount = results.filter(r => r.banned).length;
     const alreadyBannedCount = results.filter(r => r.already_banned).length;
     const failedCount = results.filter(r => !r.banned && !r.already_banned).length;
@@ -395,8 +341,7 @@ export async function POST(
       step: "ban_customer",
       results,
       scope: {
-        linked_customer_ids: linkedIds,
-        targeted_customer_ids: targets,
+        targeted_customer_ids: [customerId],
         banned_count: bannedCount,
         already_banned_count: alreadyBannedCount,
         failed_count: failedCount,
@@ -405,16 +350,43 @@ export async function POST(
   }
 
   // ── Step: complete ──
+  //
+  // Append THIS customer to confirmed_customer_ids (compare-and-set against the
+  // freshest value, no duplicates) and flip the case to confirmed_fraud. The
+  // status is a convenience flag; confirmed_customer_ids is the authoritative
+  // per-customer record every reader keys on. The history row names the
+  // confirmed customer so the audit trail is one-customer-at-a-time.
   if (step === "complete") {
+    // Re-read the freshest confirmed_customer_ids so a sibling confirm on the
+    // same case (another customer) isn't clobbered, then dedupe-append.
+    const { data: fresh } = await admin.from("fraud_cases")
+      .select("confirmed_customer_ids")
+      .eq("id", caseId)
+      .eq("workspace_id", workspaceId)
+      .maybeSingle();
+    const prior = (fresh?.confirmed_customer_ids || []) as string[];
+    const nextConfirmed = appendConfirmedCustomerId(prior, customerId);
+
+    // Name the customer for the history note.
+    const { data: cust } = await admin.from("customers")
+      .select("email, first_name, last_name")
+      .eq("workspace_id", workspaceId)
+      .eq("id", customerId)
+      .maybeSingle();
+    const custName = cust
+      ? (`${cust.first_name || ""} ${cust.last_name || ""}`.trim() || cust.email || customerId)
+      : customerId;
+
     await admin.from("fraud_cases").update({
       status: "confirmed_fraud",
-      resolution: body.resolution || "Confirmed fraud — subscriptions cancelled, orders refunded, customer banned",
+      confirmed_customer_ids: nextConfirmed,
+      resolution: body.resolution || `Confirmed fraud for ${custName} — their subscriptions cancelled, orders refunded, account banned`,
       reviewed_by: member.id,
       reviewed_at: new Date().toISOString(),
-      review_notes: body.review_notes || "Fraud confirmed via action wizard",
-    }).eq("id", caseId);
+      review_notes: body.review_notes || `Fraud confirmed for ${custName} via action wizard`,
+    }).eq("id", caseId).eq("workspace_id", workspaceId);
 
-    // Record history
+    // Record history — names the ONE confirmed customer.
     await admin.from("fraud_case_history").insert({
       case_id: caseId,
       workspace_id: workspaceId,
@@ -422,10 +394,10 @@ export async function POST(
       action: "status_changed",
       old_value: fraudCase.status,
       new_value: "confirmed_fraud",
-      notes: "Fraud confirmed via action wizard",
+      notes: `Fraud confirmed for ${custName} (customer ${customerId}) via action wizard`,
     });
 
-    return NextResponse.json({ ok: true, step: "complete" });
+    return NextResponse.json({ ok: true, step: "complete", confirmed_customer_ids: nextConfirmed });
   }
 
   return NextResponse.json({ error: "Invalid step" }, { status: 400 });
