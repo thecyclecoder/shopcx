@@ -135,6 +135,94 @@ test("3dd271be fixture — Mixed Berry pre-purchase block — classifies checkou
   );
 });
 
+// ── Payment-journey objection cues (ticket cd385c7f) ─────────────────────
+
+test("cue: don't trust this to add payment", () => {
+  const r = classifyCheckoutStuck("I dont know if I can trust this to add payment");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "payment_link_trust_objection");
+});
+
+test("cue: I don't trust this link", () => {
+  const r = classifyCheckoutStuck("I don't trust this link, can we do it another way?");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "payment_link_trust_objection");
+});
+
+test("cue: is this safe", () => {
+  const r = classifyCheckoutStuck("Is this safe? I've never seen this payment page before.");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "payment_link_safety_doubt");
+});
+
+test("cue: this looks like a scam", () => {
+  const r = classifyCheckoutStuck("This looks like a scam to me honestly.");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "payment_link_safety_doubt");
+});
+
+test("cue: is this legit", () => {
+  const r = classifyCheckoutStuck("Is this legit? The link looks sketchy.");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "payment_link_safety_doubt");
+});
+
+test("cue: do you have PayPal", () => {
+  const r = classifyCheckoutStuck("Do you have pay pal ?");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "alt_rail_payment_question");
+});
+
+test("cue: can I use PayPal", () => {
+  const r = classifyCheckoutStuck("Can I use PayPal instead of a card?");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "alt_rail_payment_question");
+});
+
+test("cue: can I pay with PayPal", () => {
+  const r = classifyCheckoutStuck("Can I pay with PayPal for this order?");
+  assert.equal(r.matched, true);
+  assert.equal(r.cue, "alt_rail_payment_question");
+});
+
+// ── The cd385c7f fixture ──────────────────────────────────────────────────
+
+test("cd385c7f fixture — trust objection mid add-payment journey — classifies checkout-stuck, NOT new-topic", () => {
+  // Derived from the ticket: Elvira Lamping was blocked at check_vaulted_pm with
+  // no vaulted PM and sent "I dont know if I can trust this to add payment". It
+  // was logged "classified as new topic (not related to active playbook) →
+  // Routing to Sonnet" and hit the no-progress circuit → escalation. The fix:
+  // this predicate must catch the payment-link trust objection so the inflection
+  // re-session path (stage1_checkout_stuck) keeps her in the concierge lane.
+  const r = classifyCheckoutStuck("I dont know if I can trust this to add payment");
+  assert.equal(r.matched, true, "cd385c7f trust fixture must classify as checkout-stuck");
+  assert.equal(r.cue, "payment_link_trust_objection");
+});
+
+test("cd385c7f fixture — alt-rail PayPal question mid journey — classifies checkout-stuck, NOT new-topic", () => {
+  // The second lost message in the same ticket: "Do you have pay pal ?". The
+  // concierge must answer in-lane (the same secure link accepts PayPal Vault),
+  // not escalate.
+  const r = classifyCheckoutStuck("Do you have pay pal ?");
+  assert.equal(r.matched, true, "cd385c7f PayPal fixture must classify as checkout-stuck");
+  assert.equal(r.cue, "alt_rail_payment_question");
+});
+
+// ── Negatives: the new cues must not over-fire ───────────────────────────
+
+test("negative: generic 'can I trust you' with no payment context stays narrow", () => {
+  // "I don't trust this" about a product claim, not the payment link — still a
+  // trust objection phrasing, acceptable to route to concierge; but a plain
+  // "do you have oat milk creamer?" must NOT trip the alt-rail cue.
+  const r = classifyCheckoutStuck("Do you have an oat milk creamer flavor?");
+  assert.equal(r.matched, false);
+});
+
+test("negative: 'is this gluten free' does not trip the safety-doubt cue", () => {
+  const r = classifyCheckoutStuck("Is this gluten free and vegan?");
+  assert.equal(r.matched, false);
+});
+
 // ── The aa0b6697 fixture ──────────────────────────────────────────────────
 
 test("aa0b6697 fixture — Shop Pay OTP never arrived — classifies checkout-stuck, NOT account", () => {

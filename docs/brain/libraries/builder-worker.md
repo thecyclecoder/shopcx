@@ -124,6 +124,14 @@ The Growth-owned lane that scores each concluded Media Buyer action against real
 - **Idempotency guards** — the `.upsert(onConflict='director_activity_id')` + `.select('id')` write pattern collapses re-runs and compare-and-sets so a concurrent grader can't silently no-op. No active policy → grader is a no-op (grading a null-policy action is a category error).
 - **Write chokepoint** — [[media-buyer-grader]] `gradeMediaBuyerActions` is the ONLY writer to [[../tables/media_buyer_action_grades]]. The lane never touches the table directly.
 
+## Repeat-verdict breaker — `skippedByRepeatVerdictBreaker` (2026-10-08)
+
+`runJob` first asks [[repeat-verdict-breaker]] whether to run the job. A per-target job (`spec-test`, `security-review`, `repair`, `audit-spec-shipped-state`) gets skipped when its last 3 finished runs all ended with the identical verdict line inside the 6h cooldown and no build or pr-resolve touched the target since. A skipped job is completed without running and stamped `error='repeat-verdict-breaker'`. The first skip after a real run records `director_activity` `repeat_verdict_breaker_tripped`. Human-created runs are never skipped, and the check fails open.
+
+## Dirty-PR supersede pre-flight diffs from the branch's own merged PR (2026-10-08)
+
+`findSupersededExportedSymbolsOnMain(wt, alreadyMergedHeadSha)` diffs from the head of the branch's most recently merged PR (`latestMergedPrHeadShaForBranch`) when that head is an ancestor of HEAD. Without such a PR, it diffs from the merge-base. A spec whose Phase 1 squash-merged while Phase 2 kept building on the branch otherwise reads Phase 1's own exports as "already on main". PR #3193 was parked for a human on that false positive.
+
 ## Claim-RPC cooldown verification — pre-claim gate check
 
 Before opening the build/plan claim block each poll pass, the worker calls `ensureClaimAgentJobCooldownVerified()` to verify the live `public.claim_agent_job(text[])` RPC still honors the `(claimed_at is null or claimed_at <= now())` cooldown predicate (see [[claim-rpc-verify]]). The RPC is the mechanism gate-held builds back off without churning — a released build gets a future `claimed_at` that the RPC skips until the hold expires. If DDL drift removed the predicate, a released row is immediately re-claimable and the poll loop wedges on the same row forever without writing its heartbeat.

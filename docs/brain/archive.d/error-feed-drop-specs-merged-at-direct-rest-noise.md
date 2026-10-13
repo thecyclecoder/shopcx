@@ -1,0 +1,1 @@
+- **Scope out foreign direct-REST `column specs.merged_at does not exist` noise from the error feed** · verified 2026-10-08 · → [[../libraries/control-tower]]

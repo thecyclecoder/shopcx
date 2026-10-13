@@ -1,0 +1,1 @@
+- **Drop the foreign direct-REST uuid LIKE-on-migration_audits.id probe from the Supabase log feed** · verified 2026-10-10 · → [[../tables/migration_audits]] + [[../inngest/supabase-log-poll]] + [[../libraries/control-tower]]

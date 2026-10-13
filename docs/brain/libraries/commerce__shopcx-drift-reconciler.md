@@ -14,7 +14,7 @@ two disagree the failure is silent in both directions — nothing on the charge 
 | `date` — Shopify's `nextBillingDate` differs from ours | display only (we bill by our own date), but it is what the customer and every Shopify surface see |
 | `unreadable` | the contract is gone, or app ownership was lost |
 
-⭐ **`stranded` is RETIRED (Phase 2).** It used to flag a date landing in an already-`BILLED`/skipped
+⭐ **`stranded` is RETIRED (Phase 1, 2026-10-09).** It used to flag a date landing in an already-`BILLED`/skipped
 cycle, because the old renewal worker resolved the cycle BY DATE and skipped spent ones — so such a
 date meant the subscriber was never charged again. With charge-time resolution
 ([[commerce__shopify-subscription-client]] `resolveChargeableCycle`) the renewal worker and Order Now

@@ -1001,12 +1001,19 @@ export function pickPhasesBuiltInMerge(
 ): PhasesBuiltInMerge {
   const stamped: { position: number; reason: "build_sha" | "file-diff" }[] = [];
   const skipped: number[] = [];
+  // The file-diff fallback exists for code smuggled into a squash outside the box's build flow. When any
+  // candidate phase carries a `build_sha`, the box IS building this spec, so a phase without one simply
+  // hasn't built yet. Its declared files routinely overlap the built phase's (same subsystem), and a
+  // file-diff stamp there marks unbuilt work shipped: 2026-10-08, PR #3189 merged Phase 1 of
+  // shopcx-subscriptions-resolve-shopify-cycle-only-at-charge-time, P2 was stamped `file-diff` while its
+  // build was still running, the spec folded, and P2's real code was stranded on PR #3193.
+  const boxBuilt = phases.some((p) => !!p.build_sha);
   for (const p of phases) {
     if (p.build_sha) {
       stamped.push({ position: p.position, reason: "build_sha" });
       continue;
     }
-    if (mergedFiles) {
+    if (mergedFiles && !boxBuilt) {
       const paths = extractCodePaths(p.body);
       if (paths.some((path) => mergedFiles.has(path))) {
         stamped.push({ position: p.position, reason: "file-diff" });

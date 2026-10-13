@@ -17,6 +17,7 @@ import {
   countRenewalIntegrityOverdueSubs,
   countSegmentStaleTail,
   countStuckDunningCycles,
+  SCHEDULER_GAP_DETECT_MS,
   SEGMENT_COVERAGE_POST_CRON_UPDATE_GRACE,
   SEGMENT_COVERAGE_STALE_TAIL_RUN_GRACE,
   evalAgentKind,
@@ -1947,6 +1948,40 @@ test("evalCron STILL flips cron_freshness on the storefront peer when the watchd
     const result = evalCron(storefrontExperimentsRefreshCronLoop, latest, null, 5, false, null, null, false, false);
     assert.equal(result.color, "red");
     assert.equal(result.violation?.reason, "cron_freshness");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("scheduler-gap flag arms inside the OLD 15–20 min dead zone (17-min monitor beat) so the storefront peer is suppressed to amber, not red", () => {
+  // The dead zone this spec closes: under the old 20-min liveness window the watchdog's own beat
+  // could sit up to 20 min stale with the suppression still OFF, so a peer with a 15-min window
+  // (storefront-experiments-refresh-cron) reds ~5 min before the shared-pause guard ever arms.
+  // Keying the threshold off two missed 5-min monitor ticks (SCHEDULER_GAP_DETECT_MS = ~10 min)
+  // arms the flag BELOW the shortest peer window, so a 17-min stale beat now holds the peer amber.
+  const realNow = Date.now;
+  Date.now = () => Date.parse("2026-07-17T12:00:00Z");
+  try {
+    // Monitor's own latest beat is 17 min stale — inside the old 15–20 min dead zone.
+    const monitorAgeMs = Date.now() - Date.parse("2026-07-17T11:43:00Z");
+    // Under the OLD threshold (the monitor's 20-min liveness window) this beat still read as
+    // "fresh enough", so monitorSchedulerGap stayed false and the peer false-paged red.
+    assert.ok(monitorAgeMs < (controlTowerMonitorLoop.livenessWindowMs ?? 20 * 60_000));
+    // Under the NEW missed-ticks threshold the flag arms before any 15-min peer can red.
+    const monitorSchedulerGap = monitorAgeMs > SCHEDULER_GAP_DETECT_MS;
+    assert.equal(monitorSchedulerGap, true);
+
+    const peerLatest: LoopHistoryRow = {
+      ran_at: "2026-07-17T11:30:00Z", // 30 min stale, past the peer's 15-min window
+      ok: true,
+      duration_ms: 500,
+      produced: null,
+      detail: null,
+    };
+    const result = evalCron(storefrontExperimentsRefreshCronLoop, peerLatest, null, 5, false, null, null, false, monitorSchedulerGap);
+    assert.equal(result.color, "amber");
+    assert.equal(result.violation, null);
+    assert.match(result.statusText, /waiting on watchdog scheduler gap/);
   } finally {
     Date.now = realNow;
   }

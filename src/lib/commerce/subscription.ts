@@ -1092,11 +1092,17 @@ export async function subscriptionOrderNow(
       };
     }
     const { inngest } = await import("@/lib/inngest/client");
+    // `order_now: true` marks this as a customer-pressed order-now (vs the nightly
+    // renewal-cron fan-out, which omits it). When the pipeline resolves against an
+    // already-billed / not-yet-due cycle and skips without charging, that flag is
+    // what lets it emit the `subscription.order_now_nothing_due` marker the async
+    // order-now verify reads as its `nothing_due` verdict (spec: order-now verify
+    // needs a 'nothing_due' verdict for a skipped spent-cycle renewal).
     if (src === "shopcx") {
       const { RENEWAL_ATTEMPT_EVENT } = await import("@/lib/inngest/shopify-subscription-renewals");
       await inngest.send({
         name: RENEWAL_ATTEMPT_EVENT,
-        data: { subscription_id: sub.id, workspace_id: workspaceId, expected_next_billing_date: null },
+        data: { subscription_id: sub.id, workspace_id: workspaceId, expected_next_billing_date: null, order_now: true },
       });
       return { success: true, summary: "Triggered ShopCX renewal (order now)" };
     }
@@ -1106,6 +1112,7 @@ export async function subscriptionOrderNow(
         subscription_id: sub.id,
         workspace_id: workspaceId,
         expected_next_billing_date: (sub as { next_billing_date?: string | null }).next_billing_date ?? null,
+        order_now: true,
       },
     });
     return { success: true, internal: true, summary: "Triggered internal renewal (order now)" };

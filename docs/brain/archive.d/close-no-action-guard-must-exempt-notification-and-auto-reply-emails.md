@@ -1,0 +1,1 @@
+- **Close-no-action guard: exempt notification and auto-reply emails** · verified 2026-10-12 · → [[../libraries/cs-director]] · also [[../libraries/automated-sender]]

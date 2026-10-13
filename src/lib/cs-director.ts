@@ -62,6 +62,7 @@ import type { ActionContext, ActionParams, SonnetDecision } from "@/lib/action-e
 import type { AuthorSpecOpts, StructuredSpecInput } from "@/lib/author-spec";
 import type { CxOrderRemedyState, CxOrderRemedyStateRef } from "@/lib/cx-agent-sdk";
 import { detectDateChangeAsk } from "@/lib/date-change-ask";
+import { isAutoReplyOrNotificationInbound } from "@/lib/automated-sender";
 import { MONEY_ACTION_TYPES, isNonOrderScopedLoyaltyAction, isNonRefundReplacementAction } from "@/lib/june-remedy-approval";
 import { recordDirectorActivity, type DirectorActivityInput } from "@/lib/director-activity";
 import { getAgentPolicyPackage, formatAgentPolicyPackage } from "@/lib/policies";
@@ -292,6 +293,15 @@ export interface UnsatisfiedRequestMessage {
   body?: string | null;
   body_clean?: string | null;
   created_at: string; // ISO
+  /**
+   * Optional sender address. When supplied, a no-reply / mailer-daemon / known-automated-domain
+   * sender lets the notification exclusion fire on the sender alone (see
+   * `isAutoReplyOrNotificationInbound`). `ticket_messages` carries no sender column, so the
+   * shipped close-gate loader leaves this undefined and the exclusion runs on the body markers —
+   * which is the GemX / f3977ec6 vendor-blast case. Present so a future caller that CAN resolve
+   * the sender gets the stronger signal for free.
+   */
+  from_address?: string | null;
 }
 
 /** A SUCCESSFUL action's descriptor — only `type` + `executed_at` are consulted. */
@@ -369,6 +379,18 @@ export function findUnsatisfiedCustomerRequests(
     if (!Number.isFinite(ts) || ts <= floor) continue;
     const text = (m.body_clean ?? m.body ?? "").toString();
     if (!text.trim()) continue;
+
+    // 0) Exempt auto-reply / OOO / vendor-notification blasts
+    // ([[../../docs/brain/specs/close-no-action-guard-must-exempt-notification-and-auto-reply-emails.md]]).
+    // Ticket f3977ec6 (a GemX Terms/Privacy-update blast, no customer identity, no ask) tripped the
+    // `change` cue on the word "updated" and looped forever between June's `close_no_action` and
+    // Sol's re-session. A non-customer / auto-reply / OOO / vendor-notification inbound carries no
+    // actionable ask, so a cue word inside it must NOT count as an unsatisfied customer request —
+    // the same class the active 'Auto-close tickets from automatic replies' / 'Auto-replies/OOO
+    // bounces — close, don't respond' policy rules recognize. Scoped to the close gate only: a
+    // false-positive here merely honors a close June ALREADY chose (silent-close terminal), never
+    // force-closes over a real ask.
+    if (isAutoReplyOrNotificationInbound(m.from_address ?? null, text)) continue;
 
     // 1) Date-change ask wins when it fires — the dc31bf31-specific signal.
     const dateAsk = detectDateChangeAsk(text);

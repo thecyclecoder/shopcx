@@ -1,6 +1,6 @@
 # shopify-checkout-extensions
 
-The Shopify **checkout UI extensions** in `shopify-extension/extensions/` — blocks that render inside Shopify's hosted checkout (not the theme). Each is a `purchase.checkout.block.render` target the merchant places in the checkout editor, and each reads from a ShopCX API route.
+The Shopify **checkout UI extensions** (and two discount functions: § Free Cinnamon Roll Creamer discount function, § Quantity break discount function) in `shopify-extension/extensions/` — blocks that render inside Shopify's hosted checkout (not the theme). Each is a `purchase.checkout.block.render` target the merchant places in the checkout editor, and each reads from a ShopCX API route.
 
 | Extension | Handle | Shows | Calls |
 |---|---|---|---|
@@ -16,7 +16,7 @@ The Shopify **checkout UI extensions** in `shopify-extension/extensions/` — bl
 `protection-checkout` treats the cart as its state and reconciles it on every render toward one desired line:
 
 - **Exactly one protection line, quantity 1.** Lines of the live product (Shopify product `8356945952941`, handle `addons-first-101y98`) and of the two retired protection products (UpCart `7510145040557`, ShopWill `7634377900205`) all count, so an add from a cart drawer can't double it; extras are removed and quantity trimmed to 1.
-- **Subscription-aware.** If any other line has a `sellingPlan`, protection is the **subscription variant on that same selling plan**, so it joins the same Appstle subscription and renews with it; otherwise the **one-time variant**. Gaining or losing a subscription line swaps the version. Both bill **$4.95**: one-time variant $4.95; subscription variant $6.60 with the "Superfood Subscription" plans' 25% off. The **$9.95** is a visual anchor drawn by the block only; there is no compare-at price in Shopify.
+- **Subscription-aware.** If any other line has a `sellingPlan`, protection is the **subscription variant on that same selling plan**, so it joins the same Appstle subscription and renews with it; otherwise the **one-time variant**. Gaining or losing a subscription line swaps the version. Both bill **$4.95**: one-time variant $4.95; subscription variant $6.60 with 25% off (Appstle's "Superfood Subscription" plans carry it themselves; on ShopCX's plans it comes from the "Subscription Discount" function, § Quantity break discount function). The **$9.95** is a visual anchor drawn by the block only; there is no compare-at price in Shopify.
 - **On by default.** Added on first render when missing. Unchecking writes checkout attribute `_shipping_protection=declined` (re-checking writes `accepted`), so the opt-out survives reloads. A cart with nothing but protection gets no protection.
 - **Product setup (2026-10-06):** option `Type` on the live product: `Subscription` variant `45036181651629` at $6.60, `One-time` variant `67144482881709` at $4.95, both SKU `insure01`, inventory untracked. Re-pricing either one changes what the shopper pays; keep Subscription × 0.75 = One-time.
 - **Variant ids are block settings** (`one_time_variant_id`, `subscription_variant_id`, numeric) with those production defaults in the code; `badge_url` overrides the shield image (default: the product's own image on the Shopify CDN). If the variant for the current cart type is missing, the block renders nothing.
@@ -72,6 +72,43 @@ The logos are the Simple Icons (CC0) USPS and DHL marks in brand colour, rendere
 ## Fail-closed design
 
 Guarantee and reviews render **nothing** until data arrives and nothing on any error — no skeleton, no hardcoded fallback. A guarantee is a legal promise sourced from [[../tables/policies]] via `getPolicyCustomerFacing`; reviews come from `product_reviews`, the same corpus as the PDP. Neither declares `block_progress`, so neither can stop a checkout.
+
+## Free Cinnamon Roll Creamer discount function
+
+`creamer-gift-discount` is not a UI block: it is a **Shopify discount function** (`type = "function"`, target `cart.lines.discounts.generate.run`, JS compiled to wasm by the CLI). Shopify runs it on every cart and checkout once an automatic app discount points at it, so the $0 shows in the cart drawer, cart page and checkout alike. Promo started 2026-10-08 (founder's call: subscriptions or 2+ boxes).
+
+- **Rule.** The cart qualifies when any Amazing Coffee K-Cups line (product `7467749965997`) has a selling plan, or K-Cups quantities total 2+. Then **one unit** of the gift line is 100% off, message "Free Cinnamon Roll Creamer".
+- **Buy 2/3.** The gift line is excluded from the quantity break (§ Quantity break discount function), so it can't unlock Buy 2 or bump Buy 2 to Buy 3.
+- **Gift line.** The real Amazing Creamer Cinnamon Roll variant (`43512521523373`, SKU `SC-CREAMER-CINNAROLL`, $69.95), one-time, carrying line property `_free_gift=cinnamon-roll-creamer`. Only that tagged one-time line is ever discounted, so a creamer bought on purpose or on subscription stays paid. Being one-time, it never joins the subscription contract and never repeats on renewals.
+- **Who adds the line.** The function can only discount, never add. The theme cart script (`assets/cart-drawer-custom.js`, same pattern as the $140 mystery gift) adds and removes the tagged line as the cart starts or stops qualifying. Ship that only after the discount is live, or the creamer shows at full price.
+- **Config.** Production ids are defaults in `src/cart_lines_discounts_generate_run.js`; the discount's `$app:function-configuration` JSON metafield overrides `qualifyingProductIds`, `giftVariantId`, `giftTag`, `minQuantity`, `message` with no redeploy.
+- **Turning it on.** After `shopify app deploy`, create it with Admin `discountAutomaticAppCreate` (`functionHandle: "creamer-gift-discount"`, `discountClasses: [PRODUCT]`, `combinesWith` product/order/shipping all true so it stacks with Buy 2 and free shipping). End the promo by setting the discount's end date or deleting it.
+- **Tests.** `cd shopify-extension/extensions/creamer-gift-discount && npm test` (plain `node --test`, no build); `npx shopify app function run` runs the compiled wasm on a JSON input.
+
+## Quantity break discount function (Buy 2 / Buy 3)
+
+`quantity-break-discount` replaces the native Shopify automatic discounts "Buy 2 Discount" (8%) and "Buy 3 Discount" (12%), same rule: when eligible products in the cart total `minQuantity`+ units (subscription and one-time both count), every eligible line gets `percentage` off. Moved into the app 2026-10-08 (founder's call) so free gift lines (line property `_free_gift`) neither count toward the quantity nor get discounted. Before, the free creamer unlocked Buy 2 on a one-box order and bumped two boxes into Buy 3.
+
+- **One automatic app discount per tier**, both on this function, each with an `$app:function-configuration` JSON metafield `{ "minQuantity": 2, "percentage": 8 }` / `{ "minQuantity": 3, "percentage": 12 }`. Where both tiers match a line, Shopify keeps the larger, as with the native pair. `productIds` (default: the native product list, 9 products) can be overridden the same way.
+- **Titles stay "Buy 2 Discount" / "Buy 3 Discount"** (discount title and line message). ShopCX code reads those titles off orders and Appstle contracts (`appstle-discount.ts`, `shopify-subscription-migrate.ts`, `coupons.ts`, ticket analyzer).
+- **Combines with** product, order and shipping discounts, like the native pair.
+- The native discounts (`DiscountAutomaticNode/1071780561069`, `/1072031400109`) are deactivated, not deleted, so switching back is one `discountAutomaticActivate` each.
+- **Subscribe & Save (live 2026-10-10).** Our selling plan group 3141009581 (`gid://shopify/SellingPlan/4086988973` 2w, `/4087021741` 4w, `/4087054509` 8w) carries NO pricing policy; the 25% comes only from this function, so checkout shows the full price ($79.95) with discount lines under it (founder's call). Live setup:
+  - **"Subscription Discount"** (`DiscountAutomaticNode/1491491881133`): `{ "minQuantity": 1, "percentage": 0, "subscriptionPercentage": 25, "sellingPlanIds": [the 3 plans], "excludeProductIds": [] }`. 25% on every line on our plans, Shipping Protection included (subscription variant $6.60 → $4.95; founder: the function must not skip protection). Lines on Appstle's plans (which keep their own 25%) get nothing from it.
+  - **Buy 2 / Buy 3** metafields are tier-only (`{ "minQuantity": 2, "percentage": 8 }` / `{ 3, 12 }`, `subscriptionPercentage` 0). Protection stays in the default `excludeProductIds`, so it never counts toward or gets a tier.
+  - **Two lines on one cart line (Plus tag stacking).** By default Shopify keeps only ONE product discount per line (the largest; verified 2026-10-08: a 3-box line got Buy 3 only). On Plus, `combinesWith.productDiscountsWithTagsOnSameCartLine` + discount `tags` let tagged discounts stack when each allows a tag of the other: Subscription Discount is tagged `SNS` and allows `TIER`; Buy 2/3 are tagged `TIER` and allow `SNS` (so Buy 2 and Buy 3 still never stack with each other). Shopify applies the stacked tier **sequentially on the post-S&S price**: 2 boxes K-Cups = $159.90 − $39.96 − $9.59 = $110.35. Per-line rounding leaves checkout 1 to 2 cents off ShopCX renewals ($110.34 / $158.31), well inside the renewal price check's $1 / 2% tolerance.
+  - **Every cycle.** All three have `recurringCycleLimit: 0` and `appliesOnSubscription: true`, so checkout shows the discounted recurring price. Shopify copies them onto the contract as LINE_ITEM automatic discounts; ShopCX's create-ingest normalizer (#3219, #3237) strips those copies and writes its own "Subscribe & Save" + "Volume discount", so renewals are priced once and quantity edits move the tier.
+  - The combined-percentage mode (`subscriptionPercentage` on a tier discount: `1 - (1 - sns) × (1 - tier)`, one line) still exists in the code but is unused. Avoid the titles "Subscribe & Save", "Volume discount", "Legacy rate": contract ingest uses those for ShopCX's own manual discounts.
+- ShopCX's own renewals don't use this: internal subs price breaks from `pricing_rules.quantity_breaks` ([[../libraries/pricing]]).
+
+## Subscription free shipping function (Economy only)
+
+`subscription-free-shipping` is a **shipping discount function** (target `cart.delivery-options.discounts.generate.run`). When any cart line has a selling plan, the delivery option titled **Economy** in every delivery group is 100% off, message "Free shipping with your subscription". Standard and Express stay paid. Founder's rule (2026-10-10): a subscription item anywhere in the cart means free Economy shipping.
+
+- **Why not the native discount.** The native automatic free-shipping discounts ("Free Shipping on Subscriptions" `DiscountAutomaticNode/1226102997165`, max $9.95, US; "Free Shipping With Subscriptions" `/1490612650157`, max $20, all countries) set to subscriptions only (a) stop applying entirely once the cart also holds a one-time line, and the free creamer gift is one, and (b) can only cap by rate price, so they freed Standard and Express too. Measured 2026-10-10 with Storefront API carts: sub-only cart → all three rates free; sub box + one-time creamer → no shipping discount at all.
+- **Config.** `$app:function-configuration` JSON overrides `optionTitles` (default `["Economy"]`, case-insensitive match on the option title) and `message`.
+- **Turning it on.** After `shopify app deploy`: `discountAutomaticAppCreate` with `functionHandle: "subscription-free-shipping"`, `discountClasses: [SHIPPING]`, `combinesWith` product + order true (shipping false). Then deactivate (don't delete) both native discounts above, so switching back is one `discountAutomaticActivate` each.
+- **Tests.** `cd shopify-extension/extensions/subscription-free-shipping && npm test`.
 
 ## Deploy
 

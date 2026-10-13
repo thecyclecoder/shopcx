@@ -69,6 +69,14 @@ Braintree card on the INTERNAL rail. A Shopify `CustomerPaymentMethod` gid is a 
 the write is rejected by the type (it was, first run). The contract's payment method stays on
 Shopify, where `subscriptionBillingAttemptCreate` reads it.
 
+## Pricing normalization happens one step later
+
+`ingestShopifyContract` mirrors the contract exactly as it was created. A checkout contract has the
+plan's 25% baked into `currentPrice` and no quantity break. Rebasing it into our shape (MSRP +
+"Subscribe & Save" + "Volume discount") is a separate step in the Inngest function,
+`shopcxNormalizeNewContract` in [[commerce__shopcx-line-ops]], which runs right after a successful
+create-ingest. See [[../inngest/shopcx-contract-ingest]].
+
 ## `syncShopifyContract` is deliberately narrower
 
 The `update` topic fires for every edit **we** make too, so the sync must not undo what ShopCX owns:

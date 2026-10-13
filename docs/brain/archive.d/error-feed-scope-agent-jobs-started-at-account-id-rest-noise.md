@@ -1,0 +1,1 @@
+- **Scope out the agent_jobs.started_at browse-rows REST noise (account_id projection variant)** · verified 2026-10-08 · → [[../libraries/control-tower]]
