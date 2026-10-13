@@ -1,0 +1,1 @@
+- **Security reviews must always produce a real verdict** · verified 2026-10-13 · → [[../libraries/security-agent]]
