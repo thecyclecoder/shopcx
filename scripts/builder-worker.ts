@@ -29,6 +29,7 @@ import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the dir
 // Sol's session dfa7d984 on ticket dfa77b28 died `writeDirection failed: [object Object]` at line
 // ~11538 of this file, so the real cause was unrecoverable. See src/lib/error-text.ts.
 import { errText } from "../src/lib/error-text";
+import { citesUnverifiedFix, isLoopRecoveredSince, loopIdFromSignature } from "../src/lib/repair-verdict-guard"; // repair-transient-park-verifies-itself — Phase 1 cited-unverified-fix guard + Phase 2 loop-heartbeat auto-verify
 import { RERUNNABLE_JOB_KINDS } from "../src/lib/agents/park-retry"; // shared with the needs-attention re-drive rung — one list, no drift
 import {
   classifyPredeployViolationScopeIfSafe,
@@ -22151,8 +22152,36 @@ async function runRepairJob(job: Job) {
       // the same line so a slipped verdict cannot silently phantom-close the loop before the deploy
       // lands + the metric recovers. Park needs_attention with an actionable "pending verification"
       // note; leave the error row OPEN so the reconcile keeps observing it until a human closes.
-      const unverifiedFixRe = /(pending\s+deploy|pending\s+verification|already[-\s]?fixed|resolved[-\s]?by|auto[-\s]?queued|in[-\s]?flight|queued\s+build|\[\[[a-z0-9-]+\]\])/i;
-      if (unverifiedFixRe.test(reason)) {
+      // repair-transient-park-verifies-itself Phase 1: the cited-unverified-fix test lives in the
+      // shared pure helper citesUnverifiedFix (src/lib/repair-verdict-guard.ts, unit-tested). Its
+      // in-flight clause is NARROWED to a fix-attached form ('fix in-flight', 'in-flight build|
+      // spec|PR|deploy|fix') so a correct deploy-storm transient whose reason says "a deploy reaped
+      // in-flight Inngest runs" no longer mis-parks (the three Sep 18 crons that sat 25 days).
+      if (citesUnverifiedFix(reason)) {
+        // repair-transient-park-verifies-itself Phase 2: a LOOP-ALERT repair has a machine-checkable
+        // recovery signal — fresh healthy heartbeats after the alert opened. Before parking pending
+        // HUMAN verification, check it: if the loop has recovered (≥2 ok beats since the alert, none
+        // red after the latest ok), this "transient" IS verified in production → close it instead of
+        // sending a human a card that will sit for weeks (the three Sep 18 parks). Only a still-red
+        // loop stays parked.
+        if (instr.source === "loop-alert") {
+          const loopId = loopIdFromSignature(signature);
+          let sinceIso: string | null = null;
+          if (instr.loop_alert_id) {
+            const { data: alertRow } = await db.from("loop_alerts").select("opened_at").eq("id", instr.loop_alert_id).maybeSingle();
+            sinceIso = (alertRow as { opened_at?: string } | null)?.opened_at ?? null;
+          }
+          if (loopId && sinceIso && (await isLoopRecoveredSince(db, loopId, sinceIso))) {
+            await resolveRepairErrorRow(instr, `transient → verified recovered via heartbeats (${reason.slice(0, 200)})`);
+            await update(job.id, {
+              status: "completed",
+              error: null,
+              log_tail: `transient → verified recovered via heartbeats — loop ${loopId} has fresh ok beats since the alert opened (${sinceIso}); ${reason}`.slice(-2000),
+            });
+            console.log(`${tag} transient (loop-alert) → verified recovered via heartbeats, completed (NOT parked)`);
+            return;
+          }
+        }
         const note = `pending verification — the "transient" reason references an unverified fix (${reason.slice(0, 400)}); a human should confirm the deploy landed + the target metric/error recovered before closing.`;
         await update(job.id, { status: "needs_attention", error: "pending verification — unverified fix cited", log_tail: note.slice(-2000) });
         console.log(`${tag} transient with unverified-fix reason → parked needs_attention (pending verification), NOT completed`);
