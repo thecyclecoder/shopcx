@@ -66,7 +66,7 @@ test("post-order + repeat: leans on the 'ordered again' warrant", () => {
     window: "repeat",
     tenureDays: 400,
   });
-  assert.match(body, /ordered .* again/i);
+  assert.match(body, /ordering .* again/i);
   assert.match(body, /Creatine Prime\+/);
 });
 
@@ -83,6 +83,8 @@ test("post-order + first-time: leans on the 'tried for the first time' warrant",
   });
   assert.match(body, /tried .* for the first time/i);
   assert.match(body, /Sleep Gummies/);
+  // A first-time ask never pairs with a tenure claim (read as a contradiction).
+  assert.doesNotMatch(body, /with us/i);
 });
 
 test("ticket trigger: keeps the thread warmth phrasing", () => {
@@ -168,10 +170,10 @@ test("both triggers respect the SAME angle set (defend / fence-sitter) — the v
     window: "repeat",
     tenureDays: 400,
   });
-  // Both `defend` bodies carry the "worried about whether it actually
+  // Both `defend` bodies carry the "wonder whether it really
   // works" antagonist claim — the angle branch is trigger-agnostic.
-  assert.match(ticket.body, /worried about whether/i);
-  assert.match(post.body, /worried about whether/i);
+  assert.match(ticket.body, /wonder whether/i);
+  assert.match(post.body, /wonder whether/i);
 });
 
 // 4. **The review link must point at a route that exists.** The post-order
@@ -237,4 +239,18 @@ test("the review insert populates reviewer_name from the customer", () => {
     /\$\{firstName\} \$\{lastInitial\.toUpperCase\(\)\}\./,
     "reviewer_name must be built as First + last initial + period",
   );
+});
+
+test("composed copy carries no em-dashes (plain text, GSM-7-safe SMS)", () => {
+  for (const window of ["first-time", "repeat", null] as const) {
+    for (const channel of ["sms", "email"] as const) {
+      for (const angle of ["defend", "fence-sitter"] as const) {
+        const { body } = composeReviewRequestFirstTouchBody({
+          trigger: "post-order", channel, angle, productName: "Amazing Coffee",
+          customerFirstName: "Sam", reviewUrl: "https://x/review/xyz", window, tenureDays: 200,
+        });
+        assert.doesNotMatch(body, /\u2014/, `${window}/${channel}/${angle}`);
+      }
+    }
+  }
 });

@@ -116,8 +116,8 @@ export function composeReviewRequestFirstTouchBody(
   // set at validate-time.
   const askLine =
     input.angle === "defend"
-      ? `We hear from a few folks worried about whether it actually works — would you be up for saying what it's been like for you?`
-      : `A note from someone who's actually used it moves more people than anything we could say — would you share yours?`;
+      ? `Some people wonder whether it really works. Would you share what it's been like for you?`
+      : `Would you leave a quick review? A note from a real customer helps people decide more than anything we could say.`;
 
   if (input.channel === "sms") {
     // House SMS shape: block layout with the CTA link isolated on its own
@@ -175,19 +175,22 @@ function composePostOrderOpening(input: {
 }): string {
   const p = input.product;
   const t = input.tenureDays;
+  // Plain text, no em-dashes (they force UCS-2 SMS encoding), and tenure only
+  // on a repeat order. "First time with this product" + "with us 6 months"
+  // read as a contradiction on ~1,000 asks (CEO 2026-10-13).
   const tenurePhrase =
     typeof t === "number" && t >= 30 && t < 365
-      ? ` — you've been with us about ${Math.round(t / 30)} months`
+      ? `, and for being with us about ${Math.round(t / 30)} months`
       : typeof t === "number" && t >= 365
-        ? ` — you've been with us over a year`
+        ? `, and for being with us over a year`
         : "";
   if (input.window === "repeat") {
-    return `You ordered ${p} again${tenurePhrase}, so it must be doing its job.`;
+    return `Thanks for ordering ${p} again${tenurePhrase}.`;
   }
   if (input.window === "first-time") {
-    return `You tried ${p} for the first time${tenurePhrase} — a real read from someone new to it is the most valuable kind.`;
+    return `You recently tried ${p} for the first time. We hope you're enjoying it.`;
   }
-  return `Hoping to hear how ${p} has been for you${tenurePhrase}.`;
+  return `We'd love to hear how ${p} has been for you.`;
 }
 
 /**
@@ -198,5 +201,5 @@ function composePostOrderOpening(input: {
  * a hidden convention in a downstream call site.
  */
 function composeTicketOpening(input: { product: string }): string {
-  return `Thanks again for reaching out — glad we got you sorted. If you have a minute, hearing how ${input.product} has been for you would mean a lot.`;
+  return `Thanks again for reaching out, and glad we got you sorted. If you have a minute, hearing how ${input.product} has been for you would mean a lot.`;
 }
