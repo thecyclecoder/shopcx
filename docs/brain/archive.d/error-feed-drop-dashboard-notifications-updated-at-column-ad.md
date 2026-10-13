@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc SELECT on non-existent dashboard_notifications.updated_at from the error feed** · verified 2026-10-13 · → [[lifecycles/control-tower]]
