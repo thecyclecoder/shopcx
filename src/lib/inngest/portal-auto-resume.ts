@@ -34,16 +34,14 @@ async function appstleResume(workspaceId: string, contractId: string) {
  *
  * ⭐ Resuming only flips `status` back to active — nothing sets a new date. After a 30/60/90-day
  * pause the row still carries the date it had when it was paused, which is now in the PAST. On the
- * internal engine that means an immediate surprise charge; on ShopCX it is worse, because the
- * renewal worker resolves which Shopify cycle to bill BY DATE and skips a cycle already marked
- * BILLED — so a stale date can land in a spent cycle and the subscription is never charged again,
- * silently.
+ * internal engine that means an immediate surprise charge; on ShopCX a stale past date just means
+ * the next renewal fires immediately, which is why we roll it forward.
  *
  * Rolls forward from their ORIGINAL date by their own cadence, so a customer who billed on the 12th
  * still bills on the 12th after a pause — the day is theirs, the pause just skips some of them.
  *
- * On ShopCX the Shopify cycle calendar is re-anchored to match, because setting the date alone
- * moves only a display field (see `shopifyRetimeContract`).
+ * On ShopCX we set only Shopify's DISPLAY date (`shopifySetNextBillingDate`) — the charge resolves
+ * the first unbilled cycle by index at charge time, so we never re-pin the cycle calendar (Phase 2).
  */
 async function retimeAfterResume(
   workspaceId: string,
@@ -65,14 +63,14 @@ async function retimeAfterResume(
 
   const { resolveBillingSource } = await import("@/lib/internal-subscription");
   if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
-    const { shopifyRetimeContract } = await import("@/lib/commerce/shopify-subscription-client");
-    const r = await shopifyRetimeContract(workspaceId, contractId, next.toISOString());
-    if (r.stranded) {
-      console.error(
-        `[Auto-Resume] ${contractId}: resumed but its new date lands in a spent cycle — it will NOT be charged. Needs manual re-timing.`,
-      );
-    } else if (!r.success) {
-      console.error(`[Auto-Resume] ${contractId}: retime failed (${r.error}) — date written locally only`);
+    // ⭐ Phase 2: move Shopify's DISPLAY date only — never re-pin the cycle calendar. The charge
+    // resolves the first unbilled cycle by index at charge time (`resolveChargeableCycle`), so the
+    // old `shopifyRetimeContract` pin (which could drag a spent cycle forward and strand the sub) is
+    // no longer needed; a display date in a BILLED cycle is cosmetic drift, not a missed renewal.
+    const { shopifySetNextBillingDate } = await import("@/lib/commerce/shopify-subscription-client");
+    const r = await shopifySetNextBillingDate(workspaceId, contractId, next.toISOString());
+    if (!r.success) {
+      console.error(`[Auto-Resume] ${contractId}: display date set failed (${r.error}) — date written locally only`);
     }
   }
   return next.toISOString();
