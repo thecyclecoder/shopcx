@@ -38,6 +38,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
@@ -312,6 +313,15 @@ const LOG_QUERIES: LogQuery[] = [
       // `created_at`-missing on another table, a `worker_heartbeats` column rename, a
       // non-SELECT write, or a FATAL/PANIC/constraint violation still surfaces / pages.
       if (isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.fraud_cases` expecting an `updated_at` column that lives only on the sibling
+      // `fraud_rules` table. The resulting undefined_column ERROR is repair work for a query
+      // we don't own ([[../specs/error-feed-drop-fraud-cases-updated-at-column-adhoc-noise]],
+      // Control Tower signature `supabase-logs:59dae748662ce6c8`). Narrowly gated to require
+      // BOTH the exact `column fraud_cases.updated_at does not exist` message AND the SELECT-
+      // lookup shape on `fraud_cases` (bare or PostgREST CTE wrapper) — a different missing
+      // column, a non-SELECT write, or a FATAL/PANIC/constraint violation still surfaces / pages.
+      if (isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale external/REST client SELECTs a
       // `dismissed_at` column from `dashboard_notifications` that the table never owned.
       // The resulting undefined_column ERROR is repair work for a query we don't own
