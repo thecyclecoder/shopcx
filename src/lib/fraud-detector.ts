@@ -629,6 +629,10 @@ async function checkOrderForFraudInner(
             card_company: card.company || null,
             card_name: card.name || null,
             card_exp: `${card.expirationMonth || ""}/${card.expirationYear || ""}`,
+            // Persist AVS/CVV results so the BIN-velocity order-level suspicion
+            // check (evaluateBinCluster) can read them without a new API call.
+            avs_result_code: card.avsResultCode || null,
+            cvv_result_code: card.cvvResultCode || null,
           };
           updates.payment_details = merged;
           order.payment_details = merged;
@@ -767,19 +771,27 @@ Respond with EXACTLY "FRAUD" or "OK".`;
     try {
       const { data: confirmedCases } = await admin
         .from("fraud_cases")
-        .select("id, title, order_ids, customer_ids, evidence")
+        .select("id, title, order_ids, customer_ids, confirmed_customer_ids, evidence")
         .eq("workspace_id", workspaceId)
         .eq("status", "confirmed_fraud");
 
       if (confirmedCases?.length) {
+        // Per-customer confirmation (Phase 3): only compare against orders that
+        // belong to an INDIVIDUALLY-CONFIRMED customer (orders.customer_id in a
+        // case's confirmed_customer_ids), not every order in the case. An order
+        // that merely shares a case (e.g. a shared bank BIN) with a confirmed
+        // fraudster must not seed a repeat-offender match.
+        const confirmedCustomerSet = new Set<string>(
+          confirmedCases.flatMap(c => (c.confirmed_customer_ids || []) as string[]).filter(Boolean),
+        );
         // Gather order IDs from confirmed cases. Guard: filter to valid UUIDs so
         // a stray legacy Shopify numeric id (from before all writers were fixed
         // to store `orders.id`) can never crash the `uuid` column with Postgres
         // 22P02 and silently drop the whole batch. See [[../tables/fraud_cases]].
         const fraudOrderIds = orderUuids(confirmedCases.flatMap(c => c.order_ids || []));
         // Fetch fraud orders in batches of 100
-        const fraudOrders: Array<{
-          id: string; order_number: string; email: string | null;
+        const fraudOrdersRaw: Array<{
+          id: string; order_number: string; email: string | null; customer_id: string | null;
           shipping_address: Record<string, string> | null;
           billing_address: Record<string, string> | null;
           normalized_shipping_address: string | null;
@@ -788,10 +800,12 @@ Respond with EXACTLY "FRAUD" or "OK".`;
           const batch = fraudOrderIds.slice(i, i + 100);
           const { data: batchOrders } = await admin
             .from("orders")
-            .select("id, order_number, email, shipping_address, billing_address, normalized_shipping_address")
+            .select("id, order_number, email, customer_id, shipping_address, billing_address, normalized_shipping_address")
             .in("id", batch);
-          if (batchOrders) fraudOrders.push(...batchOrders);
+          if (batchOrders) fraudOrdersRaw.push(...batchOrders);
         }
+        // Keep only orders whose customer was individually confirmed.
+        const fraudOrders = fraudOrdersRaw.filter(o => o.customer_id && confirmedCustomerSet.has(o.customer_id));
 
         if (fraudOrders.length) {
           const matches: Array<{ type: string; this_value: string; fraud_value: string; fraud_order: string; fraud_case_id: string }> = [];
@@ -968,16 +982,25 @@ Respond with EXACTLY "FRAUD" or "OK".`;
 // Each fires an OPEN case (Dylan confirms in the UI — that path cancels subs +
 // refunds to head off chargebacks) and tags the ring's orders "suspicious".
 const VELOCITY_WINDOW_DAYS = 30;
-const BIN_MIN_ORDERS = 4; // ≥4 orders on one BIN in the window…
-const BIN_MIN_CUSTOMERS = 2; // …across ≥2 distinct accounts…
-// …AND a concentration corroborator. A shared BIN alone is NOT fraud — popular
-// consumer banks (e.g. Visa 414720) issue to millions, so many unrelated legit
-// customers share one BIN with fully diverse names/addresses/cards. Real card-
-// testing rings collapse on at least one axis: one card swiped repeatedly, or
-// the cluster narrowing to a couple of surnames or shipping zips.
-const BIN_MIN_CARD_REUSE = 3; // one card (BIN+last4) on ≥3 orders, OR…
-const BIN_MAX_SURNAMES = 2; // ≤2 distinct cardholder surnames, OR…
-const BIN_MAX_ZIPS = 2; // ≤2 distinct shipping zips
+// A shared BIN alone is NEVER fraud — a card BIN only identifies the issuing
+// bank, and popular consumer banks (e.g. Visa 414740 = a common Chase range)
+// issue to millions, so thousands of unrelated legit customers share one BIN
+// with fully diverse names/addresses/cards. The Sep-2026 false-positive case
+// (bin:414740) proved an account-blind corroborator sweeps in innocents: one
+// fraudster reusing HER OWN card on HER OWN account satisfied the old "one card
+// reused 4–5 times" test and pulled 8 unrelated subscribers into the case. The
+// BIN branch now opens a case ONLY on a genuine CROSS-ACCOUNT link (the same
+// card / shipping address / phone / browser IP used by ≥2 DISTINCT accounts, or
+// a tiny set of surnames across ≥3 accounts) or an order-level independent
+// suspicion signal — and scopes the case to ONLY the linked accounts.
+const CROSS_ACCOUNT_MIN_ACCOUNTS = 2; // a cross-account link must touch ≥2 distinct accounts
+const BIN_SURNAME_MIN_ACCOUNTS = 3; // the surname corroborator requires ≥3 distinct accounts…
+const BIN_MAX_SURNAMES = 2; // …narrowing to ≤2 distinct cardholder surnames
+const ESTABLISHED_MIN_PRIOR_ORDERS = 3; // ≥3 prior paid orders = an established customer
+// Phase 2 — a dismissal on a velocity key suppresses re-flagging the SAME
+// customers on that key for this many days (the bin:414740 case re-opened 6×
+// in Sep-2026 because openCase ignored dismissed cases).
+const BIN_DISMISS_SUPPRESS_DAYS = VELOCITY_WINDOW_DAYS;
 const DOMAIN_MIN_CUSTOMERS = 4; // ≥4 distinct accounts on one custom domain
 const SURNAME_MIN_CUSTOMERS = 4; // ≥4 new accounts sharing a surname…
 const SURNAME_MIN_CUSTOM_DOMAIN = 2; // …with ≥2 on non-freemail domains
@@ -986,6 +1009,291 @@ function emailDomain(email: string | null | undefined): string {
   const e = (email || "").toLowerCase().trim();
   const at = e.lastIndexOf("@");
   return at >= 0 ? e.slice(at + 1) : "";
+}
+
+// ── BIN-velocity cluster evaluation (pure, unit-tested) ─────────────────────
+// Factored out of checkVelocitySignals so the concentration logic is testable
+// without a DB. A BIN cluster (all window orders sharing one card BIN) only
+// opens a case on genuine CROSS-ACCOUNT evidence or order-level suspicion, and
+// the case is scoped to ONLY the linked accounts.
+export type BinClusterRow = {
+  orderId: string; // internal orders.id (uuid) → fraud_cases.order_ids
+  shopOrderId: string | null; // numeric Shopify id for the tagsAdd call
+  customerId: string | null;
+  email: string | null;
+  cardLast4: string;
+  cardExp: string;
+  cardName: string;
+  billingName: string;
+  shipAddress1: string;
+  shipZip5: string;
+  phone: string; // digits only
+  browserIp: string;
+  avsResultCode: string;
+  cvvResultCode: string;
+  riskRecommendation: string; // Shopify risk: 'cancel' | 'investigate' | …
+};
+
+// Per-customer PRIOR (pre-cluster) history for the established-customer exclusion.
+export type BinCustomerHistory = {
+  priorPaidOrders: number;
+  hasChargeback: boolean;
+  priorCardKeys: Set<string>; // card keys (last4|exp) from this customer's prior orders
+};
+
+export type BinClusterResult = {
+  fired: boolean;
+  corroborator: string | null; // primary corroborator label
+  corroborators: string[]; // every corroborator that fired
+  reason: string; // human phrase for the title/summary
+  crossAccountCardReuse: number; // max distinct accounts sharing a single card
+  distinctSurnames: number;
+  linkedCustomerIds: string[];
+  linkedOrderIds: string[]; // internal uuids
+  linkedShopOrderIds: string[];
+  excludedEstablishedCustomerCount: number;
+  title: string;
+  summary: string;
+};
+
+// A linked member of a velocity case: one order and the account that placed it.
+export type VelocityCaseMember = { customerId: string | null; orderId: string; shopOrderId: string | null };
+
+// Phase 2 — drop members whose account was on a previously-dismissed case for
+// this same velocity key, so a dismissal stays dismissed for those customers.
+// Pure + unit-tested; `openCase` passes the most-recent dismissed case's
+// customer_ids. `suppressedPresent` is the subset of dismissed customers that
+// actually reappeared (recorded as evidence.suppressed_dismissed_customer_ids).
+export function applyDismissalSuppression<T extends { customerId: string | null }>(
+  members: T[],
+  dismissedCustomerIds: string[],
+): { kept: T[]; suppressedPresent: string[] } {
+  const dismissed = new Set(dismissedCustomerIds.filter(Boolean));
+  const kept = members.filter((m) => !(m.customerId && dismissed.has(m.customerId)));
+  const suppressedPresent = [
+    ...new Set(members.map((m) => m.customerId).filter((c): c is string => !!c && dismissed.has(c))),
+  ];
+  return { kept, suppressedPresent };
+}
+
+function normalizeNameTokens(s: string): string[] {
+  return (s || "")
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, " ") // drop punctuation + apostrophes
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+// First + last token agree (case, punctuation, apostrophes, middle names ignored).
+// Missing data on either side is NOT treated as a mismatch.
+function cardBillingNamesAgree(cardName: string, billingName: string): boolean {
+  const a = normalizeNameTokens(cardName);
+  const b = normalizeNameTokens(billingName);
+  if (!a.length || !b.length) return true;
+  return a[0] === b[0] && a[a.length - 1] === b[b.length - 1];
+}
+
+function surnameOf(cardName: string): string {
+  const t = normalizeNameTokens(cardName);
+  return t.length ? t[t.length - 1] : "";
+}
+
+// Shopify returns single-letter AVS/CVV codes; 'N' = no match / failure. Only an
+// explicit 'N' counts so unknown/unsupported codes never false-positive.
+function isAvsOrCvvFailure(avs: string, cvv: string): boolean {
+  return avs.trim().toUpperCase() === "N" || cvv.trim().toUpperCase() === "N";
+}
+
+const BIN_CORROBORATOR_PRIORITY = [
+  "cross_account_card",
+  "shared_shipping_address",
+  "shared_phone",
+  "shared_ip",
+  "few_surnames",
+  "order_level_suspicion",
+] as const;
+
+export function evaluateBinCluster(
+  bin: string,
+  rows: BinClusterRow[],
+  history: Map<string, BinCustomerHistory>,
+): BinClusterResult {
+  const cardKey = (r: BinClusterRow) => (r.cardLast4 && r.cardExp ? `${r.cardLast4}|${r.cardExp}` : "");
+  const addrKey = (r: BinClusterRow) =>
+    r.shipAddress1 && r.shipZip5 ? `${r.shipAddress1.toLowerCase().trim()}|${r.shipZip5}` : "";
+
+  // Group DISTINCT accounts per linkable key. One account repeating on its own
+  // card/address never inflates a count — the value is a Set of customer_ids.
+  const accountsByCard = new Map<string, Set<string>>();
+  const accountsByAddress = new Map<string, Set<string>>();
+  const accountsByPhone = new Map<string, Set<string>>();
+  const accountsByIp = new Map<string, Set<string>>();
+  const surnameAccounts = new Map<string, Set<string>>();
+
+  const add = (m: Map<string, Set<string>>, k: string, cust: string) => {
+    if (!k) return;
+    if (!m.has(k)) m.set(k, new Set());
+    m.get(k)!.add(cust);
+  };
+
+  for (const r of rows) {
+    const cust = r.customerId;
+    if (!cust) continue;
+    add(accountsByCard, cardKey(r), cust);
+    add(accountsByAddress, addrKey(r), cust);
+    add(accountsByPhone, r.phone, cust);
+    add(accountsByIp, r.browserIp, cust);
+    add(surnameAccounts, surnameOf(r.cardName), cust);
+  }
+
+  const hardLinkedCustomers = new Set<string>(); // (a)–(d) + order-level — resist the exclusion
+  const linkedCustomers = new Set<string>();
+  const linkedOrders = new Set<string>();
+  const linkedShopOrders = new Set<string>();
+  const corroborators = new Set<string>();
+
+  const linkOrder = (r: BinClusterRow) => {
+    linkedOrders.add(r.orderId);
+    if (r.shopOrderId) linkedShopOrders.add(r.shopOrderId);
+    if (r.customerId) linkedCustomers.add(r.customerId);
+  };
+
+  const sharedKeys = (m: Map<string, Set<string>>) =>
+    new Set([...m].filter(([, a]) => a.size >= CROSS_ACCOUNT_MIN_ACCOUNTS).map(([k]) => k));
+
+  // crossAccountCardReuse: the max number of DISTINCT accounts on any single
+  // card. ≥2 is the stolen-card-batch fingerprint; 1 (an account reusing its own
+  // card) never corroborates. This REPLACES the account-blind maxCardReuse.
+  let crossAccountCardReuse = 0;
+  for (const a of accountsByCard.values()) crossAccountCardReuse = Math.max(crossAccountCardReuse, a.size);
+
+  // (a) same card on ≥2 accounts.
+  const sharedCards = sharedKeys(accountsByCard);
+  if (sharedCards.size) {
+    corroborators.add("cross_account_card");
+    for (const r of rows)
+      if (r.customerId && sharedCards.has(cardKey(r))) {
+        hardLinkedCustomers.add(r.customerId);
+        linkOrder(r);
+      }
+  }
+  // (b) same shipping address on ≥2 accounts.
+  const sharedAddresses = sharedKeys(accountsByAddress);
+  if (sharedAddresses.size) {
+    corroborators.add("shared_shipping_address");
+    for (const r of rows)
+      if (r.customerId && sharedAddresses.has(addrKey(r))) {
+        hardLinkedCustomers.add(r.customerId);
+        linkOrder(r);
+      }
+  }
+  // (c) same phone on ≥2 accounts.
+  const sharedPhones = sharedKeys(accountsByPhone);
+  if (sharedPhones.size) {
+    corroborators.add("shared_phone");
+    for (const r of rows)
+      if (r.customerId && r.phone && sharedPhones.has(r.phone)) {
+        hardLinkedCustomers.add(r.customerId);
+        linkOrder(r);
+      }
+  }
+  // (d) same browser IP on ≥2 accounts.
+  const sharedIps = sharedKeys(accountsByIp);
+  if (sharedIps.size) {
+    corroborators.add("shared_ip");
+    for (const r of rows)
+      if (r.customerId && r.browserIp && sharedIps.has(r.browserIp)) {
+        hardLinkedCustomers.add(r.customerId);
+        linkOrder(r);
+      }
+  }
+
+  // Order-level independent suspicion qualifies THAT one order + its account.
+  for (const r of rows) {
+    if (!r.customerId) continue;
+    const nameMismatch = !!r.cardName && !!r.billingName && !cardBillingNamesAgree(r.cardName, r.billingName);
+    const avsCvvFail = isAvsOrCvvFailure(r.avsResultCode, r.cvvResultCode);
+    const risky = ["cancel", "investigate"].includes(r.riskRecommendation.trim().toLowerCase());
+    if (nameMismatch || avsCvvFail || risky) {
+      corroborators.add("order_level_suspicion");
+      hardLinkedCustomers.add(r.customerId);
+      linkOrder(r);
+    }
+  }
+
+  // (e) ≤2 distinct cardholder surnames across ≥3 distinct accounts. This is a
+  // soft signal, so an established clean customer swept in by it alone is excluded.
+  const distinctSurnames = surnameAccounts.size;
+  const surnameAccountSet = new Set<string>();
+  for (const accts of surnameAccounts.values()) for (const c of accts) surnameAccountSet.add(c);
+  const surnameLinkedCustomers = new Set<string>();
+  if (distinctSurnames > 0 && distinctSurnames <= BIN_MAX_SURNAMES && surnameAccountSet.size >= BIN_SURNAME_MIN_ACCOUNTS) {
+    corroborators.add("few_surnames");
+    for (const c of surnameAccountSet) surnameLinkedCustomers.add(c);
+  }
+
+  // Established-customer exclusion: a customer with ≥3 prior paid orders, no
+  // chargebacks, and the same card as their prior orders is NEVER added to a BIN
+  // case on BIN (surname) grounds alone. A hard cross-account link keeps them in.
+  const isEstablishedClean = (cust: string): boolean => {
+    const h = history.get(cust);
+    if (!h || h.priorPaidOrders < ESTABLISHED_MIN_PRIOR_ORDERS || h.hasChargeback) return false;
+    return rows.some((r) => r.customerId === cust && cardKey(r) && h.priorCardKeys.has(cardKey(r)));
+  };
+
+  let excludedEstablishedCustomerCount = 0;
+  for (const cust of surnameLinkedCustomers) {
+    if (hardLinkedCustomers.has(cust)) {
+      linkedCustomers.add(cust);
+      continue;
+    }
+    if (isEstablishedClean(cust)) {
+      excludedEstablishedCustomerCount++;
+      continue;
+    }
+    linkedCustomers.add(cust);
+  }
+  if (corroborators.has("few_surnames")) {
+    for (const r of rows) if (r.customerId && linkedCustomers.has(r.customerId) && surnameOf(r.cardName)) linkOrder(r);
+  }
+
+  const linkedCustomerIds = [...linkedCustomers];
+  const linkedOrderIds = [...linkedOrders];
+  const linkedShopOrderIds = [...linkedShopOrders];
+  const fired = corroborators.size > 0 && linkedCustomerIds.length > 0;
+  const primary = BIN_CORROBORATOR_PRIORITY.find((c) => corroborators.has(c)) || null;
+
+  const reasonMap: Record<string, string> = {
+    cross_account_card: `the same card used across ${crossAccountCardReuse} distinct accounts`,
+    shared_shipping_address: "the same shipping address shared across ≥2 accounts",
+    shared_phone: "the same phone shared across ≥2 accounts",
+    shared_ip: "the same browser IP shared across ≥2 accounts",
+    few_surnames: `only ${distinctSurnames} distinct cardholder surname(s) across ≥${BIN_SURNAME_MIN_ACCOUNTS} accounts`,
+    order_level_suspicion: "an order with an independent suspicion signal (card/billing name mismatch, AVS/CVV failure, or a Shopify cancel/investigate risk)",
+  };
+  const reason = primary ? reasonMap[primary] : "";
+
+  // Only claim the "stolen-card batch" fingerprint when corroborator (a) fired.
+  const title = `Card BIN ${bin} — ${linkedCustomerIds.length} linked account(s): ${reason} (30d)`;
+  const summary =
+    primary === "cross_account_card"
+      ? `${linkedOrderIds.length} orders across ${linkedCustomerIds.length} distinct accounts share card BIN ${bin} and ${reason} — the fingerprint of a stolen-card batch being run through different identities.`
+      : `${linkedOrderIds.length} order(s) across ${linkedCustomerIds.length} account(s) on card BIN ${bin} were linked by ${reason}. Only the linked accounts are held; other customers who merely share this BIN are not implicated.`;
+
+  return {
+    fired,
+    corroborator: primary,
+    corroborators: [...corroborators],
+    reason,
+    crossAccountCardReuse,
+    distinctSurnames,
+    linkedCustomerIds,
+    linkedOrderIds,
+    linkedShopOrderIds,
+    excludedEstablishedCustomerCount,
+    title,
+    summary,
+  };
 }
 
 async function checkVelocitySignals(
@@ -998,20 +1306,50 @@ async function checkVelocitySignals(
   const since = new Date(Date.now() - VELOCITY_WINDOW_DAYS * 86_400_000).toISOString();
   let fired = false;
 
-  // Open (or refresh) one case per distinct velocity key, hold every order in the ring.
-  // `orderIds` are internal UUIDs (persisted to fraud_cases.order_ids); `shopOrderIdsForTag`
-  // are the numeric Shopify ids the Shopify tagsAdd API needs.
+  // Open (or refresh) one case per distinct velocity key, hold every linked order.
+  // `members` carry the internal order UUID (persisted to fraud_cases.order_ids),
+  // the numeric Shopify id the tagsAdd API needs, and the owning account.
   const openCase = async (
     ruleType: string,
     velocityKey: string,
     title: string,
     summary: string,
     evidence: Record<string, unknown>,
-    customerIds: string[],
-    orderIds: string[],
-    shopOrderIdsForTag: string[],
+    members: VelocityCaseMember[],
   ): Promise<void> => {
-    const fullEvidence = { ...evidence, velocity_key: velocityKey };
+    // Phase 2 — a dismissal on this velocity key stays dismissed for the SAME
+    // customers. Load the most recent dismissed case for this key within the
+    // window, drop its customers from the linked set, and only open a case for
+    // genuinely-new customers. If nothing new remains, do nothing (no hold/tag).
+    const dismissSince = new Date(Date.now() - BIN_DISMISS_SUPPRESS_DAYS * 86_400_000).toISOString();
+    const { data: lastDismissed } = await admin
+      .from("fraud_cases")
+      .select("customer_ids")
+      .eq("workspace_id", workspaceId)
+      .eq("rule_type", ruleType)
+      .eq("status", "dismissed")
+      .gte("last_seen_at", dismissSince)
+      .filter("evidence->>velocity_key", "eq", velocityKey)
+      .order("last_seen_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const { kept, suppressedPresent } = applyDismissalSuppression(
+      members,
+      (lastDismissed?.customer_ids || []) as string[],
+    );
+    const customerIds = [...new Set(kept.map((m) => m.customerId).filter((c): c is string => !!c))];
+    const orderIds = [...new Set(kept.map((m) => m.orderId).filter(Boolean))];
+    const shopOrderIdsForTag = [...new Set(kept.map((m) => m.shopOrderId).filter((s): s is string => !!s))];
+    // Every linked customer was previously dismissed on this key → re-flag nothing.
+    if (!customerIds.length) return;
+
+    const fullEvidence = {
+      ...evidence,
+      velocity_key: velocityKey,
+      linked_customer_ids: customerIds,
+      linked_order_ids: orderIds,
+      ...(suppressedPresent.length ? { suppressed_dismissed_customer_ids: suppressedPresent } : {}),
+    };
     const { data: existing } = await admin
       .from("fraud_cases")
       .select("id")
@@ -1052,60 +1390,112 @@ async function checkVelocitySignals(
     fired = true;
   };
 
-  // 1) BIN velocity — same card issuer-batch run through different identities.
-  // A shared BIN alone is a popular-bank false positive; require a concentration
-  // corroborator (card reuse, or few surnames / zips) to separate a ring from a
-  // crowd of unrelated customers who simply bank with the same issuer.
+  // 1) BIN velocity — a stolen-card batch run through different identities.
+  // A shared BIN alone identifies only the issuing bank and is NEVER enough; the
+  // BIN case opens ONLY on a genuine CROSS-ACCOUNT link or an order-level
+  // independent suspicion signal, and is scoped to ONLY the linked accounts.
+  // See evaluateBinCluster for the (account-aware) corroborator logic.
   const pd = (order.payment_details && typeof order.payment_details === "object") ? (order.payment_details as Record<string, unknown>) : null;
   const bin = pd?.card_bin ? String(pd.card_bin) : "";
   if (/^\d{6,}$/.test(bin)) {
     const { data: binOrders } = await admin
       .from("orders")
-      .select("id, shopify_order_id, customer_id, email, shipping_address, payment_details")
+      .select("id, shopify_order_id, customer_id, email, shipping_address, billing_address, payment_details")
       .eq("workspace_id", workspaceId)
       .gte("created_at", since)
       .filter("payment_details->>card_bin", "eq", bin)
       .limit(200);
     const rows = binOrders || [];
-    const custs = new Set(rows.map((r) => r.customer_id).filter(Boolean) as string[]);
-    const uuids = rows.map((r) => r.id);
-    const shopIds = rows.map((r) => r.shopify_order_id).filter(Boolean) as string[];
+    const custIds = [...new Set(rows.map((r) => r.customer_id).filter(Boolean) as string[])];
 
-    // Concentration metrics over the BIN cluster.
-    const cardCounts = new Map<string, number>();
-    const surnames = new Set<string>();
-    const zips = new Set<string>();
-    for (const r of rows) {
-      const rpd = (r.payment_details && typeof r.payment_details === "object") ? (r.payment_details as Record<string, unknown>) : null;
-      const last4 = rpd?.card_last4 ? String(rpd.card_last4) : "";
-      if (last4) cardCounts.set(last4, (cardCounts.get(last4) || 0) + 1);
-      const name = rpd?.card_name ? String(rpd.card_name) : "";
-      const surname = name.trim().toLowerCase().split(/\s+/).pop()?.replace(/[^a-z]/g, "") || "";
-      if (surname) surnames.add(surname);
-      const sa = (r.shipping_address && typeof r.shipping_address === "object") ? (r.shipping_address as Record<string, unknown>) : null;
-      const zip = sa?.zip ? String(sa.zip).slice(0, 5) : "";
-      if (zip) zips.add(zip);
+    const str = (v: unknown) => (v == null ? "" : String(v));
+    const asObj = (v: unknown) => (v && typeof v === "object" ? (v as Record<string, unknown>) : null);
+    const clusterRows: BinClusterRow[] = rows.map((r) => {
+      const rpd = asObj(r.payment_details);
+      const sa = asObj(r.shipping_address);
+      const ba = asObj(r.billing_address);
+      const billingName = ba
+        ? `${str(ba.firstName ?? ba.first_name)} ${str(ba.lastName ?? ba.last_name)}`.trim()
+        : "";
+      return {
+        orderId: r.id,
+        shopOrderId: r.shopify_order_id,
+        customerId: r.customer_id,
+        email: r.email,
+        cardLast4: str(rpd?.card_last4),
+        cardExp: str(rpd?.card_exp),
+        cardName: str(rpd?.card_name),
+        billingName,
+        shipAddress1: str(sa?.address1),
+        shipZip5: str(sa?.zip).slice(0, 5),
+        phone: str(sa?.phone).replace(/\D/g, ""),
+        browserIp: str(rpd?.browser_ip),
+        avsResultCode: str(rpd?.avs_result_code),
+        cvvResultCode: str(rpd?.cvv_result_code),
+        riskRecommendation: str(rpd?.risk_recommendation),
+      };
+    });
+
+    // Per-customer PRIOR history (orders OUTSIDE this cluster) for the
+    // established-customer exclusion: ≥3 prior paid orders, no active chargeback,
+    // same card as before → never swept in on BIN (surname) grounds alone.
+    const history = new Map<string, BinCustomerHistory>();
+    if (custIds.length) {
+      const clusterOrderIds = new Set(rows.map((r) => r.id));
+      const [{ data: priorOrders }, { data: cbRows }] = await Promise.all([
+        admin
+          .from("orders")
+          .select("id, customer_id, financial_status, payment_details")
+          .eq("workspace_id", workspaceId)
+          .in("customer_id", custIds)
+          .limit(2000),
+        admin
+          .from("chargeback_events")
+          .select("customer_id")
+          .eq("workspace_id", workspaceId)
+          .in("customer_id", custIds)
+          .in("status", ["open", "under_review", "lost", "pending"]),
+      ]);
+      const cbSet = new Set((cbRows || []).map((c) => c.customer_id).filter(Boolean) as string[]);
+      for (const c of custIds) history.set(c, { priorPaidOrders: 0, hasChargeback: cbSet.has(c), priorCardKeys: new Set() });
+      for (const po of priorOrders || []) {
+        const c = po.customer_id as string | null;
+        if (!c || clusterOrderIds.has(po.id)) continue; // PRIOR orders only
+        const h = history.get(c);
+        if (!h) continue;
+        if (["paid", "partially_refunded", "refunded"].includes(String(po.financial_status || "").toLowerCase())) h.priorPaidOrders++;
+        const rpd = asObj(po.payment_details);
+        const last4 = str(rpd?.card_last4);
+        const exp = str(rpd?.card_exp);
+        if (last4 && exp) h.priorCardKeys.add(`${last4}|${exp}`);
+      }
     }
-    const maxCardReuse = Math.max(0, ...cardCounts.values());
-    const concentrated =
-      maxCardReuse >= BIN_MIN_CARD_REUSE ||
-      (surnames.size > 0 && surnames.size <= BIN_MAX_SURNAMES) ||
-      (zips.size > 0 && zips.size <= BIN_MAX_ZIPS);
 
-    if (rows.length >= BIN_MIN_ORDERS && custs.size >= BIN_MIN_CUSTOMERS && concentrated) {
-      const reason =
-        maxCardReuse >= BIN_MIN_CARD_REUSE ? `one card reused on ${maxCardReuse} orders`
-        : surnames.size <= BIN_MAX_SURNAMES ? `only ${surnames.size} distinct cardholder surname(s)`
-        : `only ${zips.size} distinct shipping zip(s)`;
+    const result = evaluateBinCluster(bin, clusterRows, history);
+    if (result.fired) {
+      const linkedSet = new Set(result.linkedCustomerIds);
+      const linkedOrderSet = new Set(result.linkedOrderIds);
+      const members: VelocityCaseMember[] = clusterRows
+        .filter((r) => linkedOrderSet.has(r.orderId))
+        .map((r) => ({ customerId: r.customerId, orderId: r.orderId, shopOrderId: r.shopOrderId }));
       await openCase(
         "bin_velocity",
         `bin:${bin}`,
-        `Card BIN ${bin} on ${rows.length} orders across ${custs.size} accounts — ${reason} (30d)`,
-        `${rows.length} orders in the last 30 days share card BIN ${bin} across ${custs.size} distinct customers, and the cluster is concentrated (${reason}) — the fingerprint of a stolen-card batch being run through different identities rather than unrelated customers who happen to bank with the same issuer.`,
-        { card_bin: bin, order_count: rows.length, customer_count: custs.size, distinct_cards: cardCounts.size, max_card_reuse: maxCardReuse, distinct_surnames: surnames.size, distinct_zips: zips.size, concentration_reason: reason, window_days: VELOCITY_WINDOW_DAYS, emails: rows.map((r) => r.email).filter(Boolean).slice(0, 40) },
-        [...custs],
-        uuids,
-        shopIds,
+        result.title,
+        result.summary,
+        {
+          card_bin: bin,
+          corroborator: result.corroborator,
+          corroborators: result.corroborators,
+          cross_account_card_reuse: result.crossAccountCardReuse,
+          distinct_surnames: result.distinctSurnames,
+          excluded_established_customer_count: result.excludedEstablishedCustomerCount,
+          bin_cluster_order_count: rows.length,
+          bin_cluster_customer_count: custIds.length,
+          window_days: VELOCITY_WINDOW_DAYS,
+          emails: rows.filter((r) => r.customer_id && linkedSet.has(r.customer_id)).map((r) => r.email).filter(Boolean).slice(0, 40),
+        },
+        members,
       );
     }
   }
@@ -1123,18 +1513,15 @@ async function checkVelocitySignals(
     const rows = domOrders || [];
     const custs = new Set(rows.map((r) => r.customer_id).filter(Boolean) as string[]);
     const emails = new Set(rows.map((r) => (r.email || "").toLowerCase()).filter(Boolean));
-    const uuids = rows.map((r) => r.id);
-    const shopIds = rows.map((r) => r.shopify_order_id).filter(Boolean) as string[];
     if (custs.size >= DOMAIN_MIN_CUSTOMERS && emails.size >= DOMAIN_MIN_CUSTOMERS) {
+      const members: VelocityCaseMember[] = rows.map((r) => ({ customerId: r.customer_id, orderId: r.id, shopOrderId: r.shopify_order_id }));
       await openCase(
         "email_domain_velocity",
         `domain:${domain}`,
         `${custs.size} accounts on @${domain} ordered in 30d`,
         `${custs.size} distinct customers on the custom domain @${domain} placed orders in the last 30 days (${emails.size} distinct addresses) — characteristic of a ring spinning up throwaway accounts on one domain it controls.`,
         { email_domain: domain, customer_count: custs.size, email_count: emails.size, window_days: VELOCITY_WINDOW_DAYS, emails: [...emails].slice(0, 40) },
-        [...custs],
-        uuids,
-        shopIds,
+        members,
       );
     }
   }
@@ -1155,22 +1542,23 @@ async function checkVelocitySignals(
       const custIds = rows.map((r) => r.id);
       const { data: kinOrders } = await admin
         .from("orders")
-        .select("id, shopify_order_id")
+        .select("id, shopify_order_id, customer_id")
         .eq("workspace_id", workspaceId)
         .in("customer_id", custIds)
         .gte("created_at", since)
         .limit(200);
-      const uuids = (kinOrders || []).map((o) => o.id);
-      const shopIds = (kinOrders || []).map((o) => o.shopify_order_id).filter(Boolean) as string[];
+      // One member per order, plus a customer-only member for any surname account
+      // with no window orders (keeps it in customer_ids so the ring stays complete).
+      const members: VelocityCaseMember[] = (kinOrders || []).map((o) => ({ customerId: o.customer_id, orderId: o.id, shopOrderId: o.shopify_order_id }));
+      const withOrders = new Set((kinOrders || []).map((o) => o.customer_id).filter(Boolean) as string[]);
+      for (const id of custIds) if (!withOrders.has(id)) members.push({ customerId: id, orderId: "", shopOrderId: null });
       await openCase(
         "surname_velocity",
         `surname:${lastName.toLowerCase()}`,
         `${rows.length} new "${lastName}" accounts (${nonFree.length} on custom domains, 30d)`,
         `${rows.length} new accounts share the surname "${lastName}" in the last 30 days, ${nonFree.length} on custom (non-freemail) domains — characteristic of a ring reusing one identity across throwaway emails.`,
         { surname: lastName, customer_count: rows.length, non_freemail_count: nonFree.length, window_days: VELOCITY_WINDOW_DAYS, emails: rows.map((r) => r.email).filter(Boolean).slice(0, 40) },
-        custIds,
-        uuids,
-        shopIds,
+        members,
       );
     }
   }

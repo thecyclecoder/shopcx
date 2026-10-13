@@ -11,12 +11,13 @@
  * any surface migrates.
  */
 import { createAdminClient } from "@/lib/supabase/admin";
+import { isCustomerConfirmedFraud } from "@/lib/fraud-confirm";
 import type { FraudView, FraudPostureView } from "./types";
 
 export type { FraudView, FraudPostureView } from "./types";
 
 const FRAUD_COLUMNS =
-  "id, workspace_id, rule_id, rule_type, status, severity, title, summary, evidence, customer_ids, order_ids, orders_held, resolution, first_detected_at, last_seen_at, reviewed_at, created_at";
+  "id, workspace_id, rule_id, rule_type, status, severity, title, summary, evidence, customer_ids, confirmed_customer_ids, order_ids, orders_held, resolution, first_detected_at, last_seen_at, reviewed_at, created_at";
 
 interface RawFraudRow {
   id: string;
@@ -29,6 +30,7 @@ interface RawFraudRow {
   summary: string | null;
   evidence: Record<string, unknown> | null;
   customer_ids: string[] | null;
+  confirmed_customer_ids: string[] | null;
   order_ids: string[] | null;
   orders_held: boolean | null;
   resolution: string | null;
@@ -85,7 +87,11 @@ export async function getFraudPosture(
   const rows = (data ?? []) as RawFraudRow[];
   const cases = rows.map(buildFraudView);
 
-  const is_confirmed_fraud = cases.some((c) => c.status === "confirmed_fraud");
+  // A confirmed_fraud case counts for THIS customer only when the case's
+  // confirmed_customer_ids includes them (Phase 3 — per-customer confirmation).
+  const is_confirmed_fraud = rows.some(
+    (r) => r.status === "confirmed_fraud" && isCustomerConfirmedFraud(r.confirmed_customer_ids, [customerId]),
+  );
   const is_amazon_reseller = cases.some((c) => c.rule_type === "amazon_reseller");
   const should_block = is_confirmed_fraud || is_amazon_reseller;
   const block_reason = is_confirmed_fraud

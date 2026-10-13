@@ -115,19 +115,16 @@ export default function FraudCaseDetailPage() {
   // explicitly (Phase 2 of the ban-the-linked-cluster spec — no silent
   // partial-success rollup).
   const [wizardBanResults, setWizardBanResults] = useState<{ customer_id: string; email: string | null; banned: boolean; already_banned: boolean; error?: string }[]>([]);
-  // Blast-radius preview — the full linked cluster the ban WILL cover
-  // (sourced from the same investigate endpoint that populates the
-  // "Customer Accounts (N)" panel on this page, so the number the
-  // operator sees before confirming matches the number that gets banned).
-  // Loaded once when the wizard opens.
-  const [wizardLinkedAccounts, setWizardLinkedAccounts] = useState<{ id: string; email: string; first_name: string | null; last_name: string | null; is_case_customer: boolean; is_linked: boolean }[]>([]);
-  // Customer ids the operator has excluded from the ban via the
-  // pre-confirm checkbox list. Excluding narrows the ban within the
-  // linked set — never silently drops the account from the case (Phase
-  // 2 spec: 26 unrelated same-surname customers had to be kept out by
-  // hand; the case still records them as linked).
-  const [wizardExcludedIds, setWizardExcludedIds] = useState<Set<string>>(new Set());
   const [wizardComplete, setWizardComplete] = useState(false);
+  // Phase 3 — confirming fraud is a PER-CUSTOMER action. `confirmCustomer` is
+  // the single customer the open wizard is confirming; every wizard step POSTs
+  // this customer_id and only this customer's subs/orders/ban are touched.
+  const [confirmCustomer, setConfirmCustomer] = useState<{ id: string; name: string } | null>(null);
+  // The case's own customers (id + display name), loaded from the investigate
+  // endpoint, so each gets its own "Confirm fraud for <name>" button. Linked
+  // (non-case) accounts are shown for information only and each needs its own
+  // confirm — there is no case-wide / multi-customer confirm control.
+  const [caseCustomers, setCaseCustomers] = useState<{ id: string; name: string; email: string | null }[]>([]);
 
   const applyData = (data: { case: FraudCaseDetail; history: HistoryEntry[]; members: Member[] }) => {
     setFraudCase(data.case);
@@ -161,14 +158,16 @@ export default function FraudCaseDetailPage() {
     }
   }, [fraudCase?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Wizard step handlers
+  // Wizard step handlers. Every step carries the single customer_id being
+  // confirmed (Phase 3 one-customer contract) — the route rejects any call
+  // without it.
   const wizardCallStep = async (stepName: string, body?: Record<string, unknown>) => {
     setWizardLoading(true);
     try {
       const res = await fetch(`/api/workspaces/${workspace.id}/fraud-cases/${caseId}/confirm-fraud`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ step: stepName, ...body }),
+        body: JSON.stringify({ step: stepName, customer_id: confirmCustomer?.id, ...body }),
       });
       return res.ok ? await res.json() : null;
     } finally {
@@ -176,33 +175,24 @@ export default function FraudCaseDetailPage() {
     }
   };
 
-  const startWizard = async () => {
+  // Open the wizard scoped to ONE customer. There is no case-wide confirm.
+  const startWizard = async (customer: { id: string; name: string }) => {
+    setConfirmCustomer(customer);
     setWizardOpen(true);
     setWizardStep(0);
     setWizardComplete(false);
     setWizardSubResults([]);
     setWizardOrderResults([]);
     setWizardBanResults([]);
-    setWizardLinkedAccounts([]);
-    setWizardExcludedIds(new Set());
-    // Kick off the blast-radius preview fetch in parallel — reuses the
-    // investigate endpoint that also feeds the "Customer Accounts"
-    // panel, so the count the operator sees on the confirm screen
-    // matches what the panel shows. Same shared resolver on the server.
-    void fetch(`/api/workspaces/${workspace.id}/fraud-cases/${caseId}/investigate`)
-      .then(r => (r.ok ? r.json() : null))
-      .then(data => {
-        if (data?.customers) {
-          setWizardLinkedAccounts(
-            (data.customers as { id: string; email: string; first_name: string | null; last_name: string | null; is_case_customer: boolean; is_linked: boolean }[])
-              .map(c => ({ id: c.id, email: c.email, first_name: c.first_name, last_name: c.last_name, is_case_customer: !!c.is_case_customer, is_linked: !!c.is_linked }))
-          );
-        }
-      })
-      .catch(() => {});
-    // Step 0: check amplifier
+    setWizardAmplifierOrders([]);
+    // Step 0: check amplifier for THIS customer's orders
     setWizardLoading(true);
-    const data = await wizardCallStep("check_amplifier");
+    const res = await fetch(`/api/workspaces/${workspace.id}/fraud-cases/${caseId}/confirm-fraud`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ step: "check_amplifier", customer_id: customer.id }),
+    });
+    const data = res.ok ? await res.json() : null;
     if (data) setWizardAmplifierOrders(data.orders || []);
     setWizardLoading(false);
   };
@@ -220,19 +210,9 @@ export default function FraudCaseDetailPage() {
   };
 
   const wizardBanCustomer = async () => {
-    // Pass an explicit customer_ids list so the ban covers exactly what
-    // the operator confirmed in the pre-confirm dialog (linked set
-    // minus anything they checked off). If the preview never loaded
-    // (network hiccup) we fall through with null — the server then
-    // falls back to the full resolved linked set, matching the spec's
-    // "the case defines the ceiling" invariant.
-    const explicit = wizardLinkedAccounts.length > 0
-      ? wizardLinkedAccounts.filter(a => !wizardExcludedIds.has(a.id)).map(a => a.id)
-      : null;
-    const data = await wizardCallStep(
-      "ban_customer",
-      explicit ? { customer_ids: explicit } : undefined
-    );
+    // Bans exactly the one customer this wizard is confirming — the route
+    // takes the customer_id wizardCallStep always sends. No multi-account ban.
+    const data = await wizardCallStep("ban_customer");
     if (data) setWizardBanResults(data.results || []);
     setWizardStep(4);
   };
@@ -256,6 +236,18 @@ export default function FraudCaseDetailPage() {
       if (cancelled) return;
       if (!res.ok) { router.push("/dashboard/fraud"); return; }
       applyData(await res.json());
+    })();
+    // Load the case's own customers for the per-customer confirm buttons.
+    (async () => {
+      const r = await fetch(`/api/workspaces/${workspace.id}/fraud-cases/${caseId}/investigate`);
+      if (cancelled || !r.ok) return;
+      const data = await r.json();
+      const rows = (data?.customers as { id: string; email: string | null; first_name: string | null; last_name: string | null; is_case_customer: boolean }[] | undefined) || [];
+      setCaseCustomers(
+        rows
+          .filter((c) => c.is_case_customer)
+          .map((c) => ({ id: c.id, email: c.email, name: `${c.first_name || ""} ${c.last_name || ""}`.trim() || c.email || c.id })),
+      );
     })();
     return () => { cancelled = true; };
   }, [caseId, workspace.id, router]);
@@ -506,13 +498,34 @@ export default function FraudCaseDetailPage() {
             {/* Action buttons */}
             {!isTerminal && (
               <div className="space-y-2">
-                <button
-                  onClick={() => startWizard()}
-                  disabled={saving}
-                  className="w-full rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
-                >
-                  Confirmed Fraud
-                </button>
+                {/* Per-customer confirm (Phase 3). Confirming fraud acts on ONE
+                    customer at a time — each case customer has its own button so
+                    a grouping mistake can never refund/cancel/ban several
+                    customers at once. No case-wide / select-all control exists. */}
+                <div className="rounded-md border border-red-200 p-3 dark:border-red-900">
+                  <label className="mb-2 block text-xs font-medium text-red-600 dark:text-red-400">
+                    Confirm fraud — one customer at a time
+                  </label>
+                  {caseCustomers.length === 0 ? (
+                    <p className="text-xs text-zinc-500">Loading case customers…</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {caseCustomers.map((c) => (
+                        <button
+                          key={c.id}
+                          onClick={() => startWizard({ id: c.id, name: c.name })}
+                          disabled={saving}
+                          className="w-full rounded-md bg-red-600 px-3 py-2 text-left text-sm font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+                        >
+                          Confirm fraud for {c.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <p className="mt-2 text-[11px] text-zinc-400">
+                    Only the chosen customer&apos;s subscriptions, orders and ban are affected. Other accounts on this case — and linked accounts — each need their own confirm.
+                  </p>
+                </div>
 
                 {/* Mark as reseller — pushes the case's addresses into
                     known_resellers so any future order to those
@@ -630,7 +643,7 @@ export default function FraudCaseDetailPage() {
             {/* Progress bar */}
             <div className="border-b border-zinc-100 px-6 pt-5 pb-4 dark:border-zinc-800">
               <h2 className="text-lg font-bold text-zinc-900 dark:text-zinc-100">
-                {wizardComplete ? "Case Resolved" : "Confirmed Fraud Actions"}
+                {wizardComplete ? "Customer Resolved" : `Confirm fraud for ${confirmCustomer?.name || "customer"}`}
               </h2>
               {!wizardComplete && (
                 <div className="mt-3 flex gap-1.5">
@@ -739,83 +752,40 @@ export default function FraudCaseDetailPage() {
                 </div>
               )}
 
-              {/* Step 3: Ban Customer — pre-confirm blast radius */}
-              {wizardStep === 3 && !wizardComplete && (() => {
-                const includedIds = wizardLinkedAccounts.filter(a => !wizardExcludedIds.has(a.id)).map(a => a.id);
-                const includedCount = includedIds.length;
-                const excludedCount = wizardExcludedIds.size;
-                const totalCount = wizardLinkedAccounts.length;
-                return (
-                  <div className="space-y-3">
-                    <p className="mb-1 text-xs font-semibold uppercase text-green-500">Orders Cancelled & Refunded</p>
-                    {wizardOrderResults.length === 0 ? (
-                      <p className="text-sm text-zinc-400">No orders to cancel.</p>
-                    ) : (
-                      <div className="space-y-1">
-                        {wizardOrderResults.map(r => (
-                          <div key={r.order_id} className="flex items-center gap-2 text-sm">
-                            <span className={r.success ? "text-green-600" : "text-red-500"}>{r.success ? "✓" : "✗"}</span>
-                            <span className="text-zinc-700 dark:text-zinc-300">Order #{r.order_number}</span>
-                            {r.error && <span className="text-xs text-red-400">({r.error})</span>}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    <div className="mt-4 rounded-md border border-red-200 bg-red-50/50 p-3 dark:border-red-900 dark:bg-red-950/20">
-                      <p className="text-xs font-semibold uppercase text-red-600 dark:text-red-400">Ban Blast Radius</p>
-                      {totalCount === 0 ? (
-                        <p className="mt-1 text-sm text-zinc-500">Loading linked accounts…</p>
-                      ) : (
-                        <>
-                          <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">
-                            This will block <span className="font-semibold">{includedCount}</span> {includedCount === 1 ? "account" : "accounts"}
-                            {excludedCount > 0 && <> ({excludedCount} excluded)</>}. Uncheck any account that looks unrelated — it stays on the case as a linked account but won&apos;t be banned.
-                          </p>
-                          <div className="mt-2 max-h-56 space-y-1 overflow-y-auto rounded border border-red-100 bg-white p-2 dark:border-red-900/40 dark:bg-zinc-900">
-                            {wizardLinkedAccounts.map(a => {
-                              const included = !wizardExcludedIds.has(a.id);
-                              return (
-                                <label key={a.id} className="flex items-center gap-2 text-xs">
-                                  <input
-                                    type="checkbox"
-                                    checked={included}
-                                    onChange={() => {
-                                      setWizardExcludedIds(prev => {
-                                        const next = new Set(prev);
-                                        if (next.has(a.id)) next.delete(a.id); else next.add(a.id);
-                                        return next;
-                                      });
-                                    }}
-                                    className="h-3.5 w-3.5"
-                                  />
-                                  <span className={included ? "text-zinc-700 dark:text-zinc-300" : "text-zinc-400 line-through dark:text-zinc-500"}>
-                                    {a.email || "(no email)"}
-                                  </span>
-                                  {a.is_case_customer && (
-                                    <span className="rounded bg-red-100 px-1.5 py-0.5 text-[9px] font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400">on case</span>
-                                  )}
-                                  {a.is_linked && (
-                                    <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[9px] font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">linked</span>
-                                  )}
-                                </label>
-                              );
-                            })}
-                          </div>
-                        </>
-                      )}
+              {/* Step 3: Ban the one confirmed customer */}
+              {wizardStep === 3 && !wizardComplete && (
+                <div className="space-y-3">
+                  <p className="mb-1 text-xs font-semibold uppercase text-green-500">Orders Cancelled & Refunded</p>
+                  {wizardOrderResults.length === 0 ? (
+                    <p className="text-sm text-zinc-400">No orders to cancel.</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {wizardOrderResults.map(r => (
+                        <div key={r.order_id} className="flex items-center gap-2 text-sm">
+                          <span className={r.success ? "text-green-600" : "text-red-500"}>{r.success ? "✓" : "✗"}</span>
+                          <span className="text-zinc-700 dark:text-zinc-300">Order #{r.order_number}</span>
+                          {r.error && <span className="text-xs text-red-400">({r.error})</span>}
+                        </div>
+                      ))}
                     </div>
+                  )}
 
-                    <button
-                      onClick={wizardBanCustomer}
-                      disabled={wizardLoading || includedCount === 0}
-                      className="mt-2 w-full rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
-                    >
-                      {wizardLoading ? "Banning accounts…" : (includedCount === 0 ? "No accounts selected" : `Ban ${includedCount} ${includedCount === 1 ? "Account" : "Accounts"}`)}
-                    </button>
+                  <div className="mt-4 rounded-md border border-red-200 bg-red-50/50 p-3 dark:border-red-900 dark:bg-red-950/20">
+                    <p className="text-xs font-semibold uppercase text-red-600 dark:text-red-400">Ban Customer</p>
+                    <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-300">
+                      This blocks <span className="font-semibold">{confirmCustomer?.name || "this customer"}</span> from the portal. Only this one account is banned — any other account on this case must be confirmed on its own.
+                    </p>
                   </div>
-                );
-              })()}
+
+                  <button
+                    onClick={wizardBanCustomer}
+                    disabled={wizardLoading}
+                    className="mt-2 w-full rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                  >
+                    {wizardLoading ? "Banning…" : `Ban ${confirmCustomer?.name || "Customer"}`}
+                  </button>
+                </div>
+              )}
 
               {/* Step 4: Complete — per-account ban results */}
               {wizardStep === 4 && !wizardComplete && (() => {

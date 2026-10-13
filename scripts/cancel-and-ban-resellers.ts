@@ -143,13 +143,21 @@ async function main() {
     if (entry.customer_ids.length && !dryRun) {
       const { data: cases } = await admin
         .from("fraud_cases")
-        .select("id")
+        .select("id, customer_ids, confirmed_customer_ids")
         .eq("workspace_id", entry.workspace_id)
         .overlaps("customer_ids", entry.customer_ids)
         .in("status", ["open", "reviewing"]);
+      // Per-customer confirmation (Phase 3): confirm ONLY the reseller customers
+      // this script is actioning — append them to confirmed_customer_ids rather
+      // than confirming every member of the case.
+      const entryCustSet = new Set(entry.customer_ids as string[]);
       for (const c of cases || []) {
+        const prior = (c.confirmed_customer_ids || []) as string[];
+        const newlyConfirmed = ((c.customer_ids || []) as string[]).filter((id) => entryCustSet.has(id));
+        const nextConfirmed = [...new Set([...prior, ...newlyConfirmed])];
         await admin.from("fraud_cases").update({
           status: "confirmed_fraud",
+          confirmed_customer_ids: nextConfirmed,
           updated_at: new Date().toISOString(),
         }).eq("id", c.id);
         casesConfirmed++;

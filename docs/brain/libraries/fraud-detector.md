@@ -45,6 +45,31 @@ Several signals (`email_domain_velocity`, `surname_velocity`, the repeat-offende
 - **Disposable domains (mailinator, guerrillamail, …) are intentionally in the set.** This is an *exclusion* list — strangers share these too, so velocity on them is noisy. If we ever want to *flag* disposable mail, that's a separate signal, not a removal from here.
 - **Refreshing:** re-download `domains.json` from the upstream repo, rebuild the JSON (sorted, deduped, lowercased), add any gaps to the inline supplement (`netscape.com` is one). No runtime dependency — the list is a checked-in JSON import (`resolveJsonModule`).
 
+## Velocity signals — `checkVelocitySignals`
+
+Real-time, rule-independent signals run per paid web order (subscription renewals are skipped — the card never rotates). Each fires an OPEN `fraud_cases` row (Dylan confirms in the UI; that path cancels subs + refunds to head off chargebacks) and tags the ring's orders `suspicious`. Three keys: `bin_velocity`, `email_domain_velocity`, `surname_velocity`, all opened through the shared `openCase(ruleType, velocityKey, …)` closure.
+
+### BIN velocity — a real cross-account link, never a shared BIN alone
+
+A card **BIN only identifies the issuing bank**. Popular consumer banks (e.g. Visa `414740`, a common Chase range) issue to millions, so thousands of unrelated legit customers share one BIN with fully diverse names/addresses/cards. **A shared BIN is NEVER enough to flag anyone.** (Ground truth: the Sep-2026 `bin:414740` false-positive case — an account-blind "one card reused 4–5 times" corroborator was a single fraudster reusing HER OWN card on HER OWN account, yet it swept in 8 unrelated subscribers, auto-cancelled ~17 subscriptions, refunded $1,017, and banned them.)
+
+The concentration logic is factored into the **pure, unit-tested** export `evaluateBinCluster(bin, rows, history)` (covered by `src/lib/fraud-detector.bin-velocity.test.ts`, registered as `npm run test:fraud-bin-velocity`). A BIN case opens ONLY when the cluster carries a genuine cross-account link or an order-level suspicion signal, and is **scoped to only the linked accounts**:
+
+- **`crossAccountCardReuse`** replaces the old account-blind `maxCardReuse`: for each card key (`card_last4` + `card_exp`) it counts **DISTINCT `customer_id`s**. A card only corroborates when used by **≥2 distinct accounts** — one account reusing its own card never counts.
+- Corroborators (any one; each computed across distinct accounts): (a) same card on ≥2 accounts [earns the "stolen-card batch" summary]; (b) same normalized shipping address (`address1`+zip5) on ≥2 accounts; (c) same phone on ≥2 accounts; (d) same browser IP on ≥2 accounts (read from `payment_details.browser_ip` if already captured — no new per-order API call); (e) ≤2 distinct cardholder surnames across **≥3** accounts.
+- **Order-level independent suspicion** qualifies that ONE order + its account: card name ≠ billing name after normalization (case/punctuation/apostrophes/middle names ignored), an AVS/CVV failure (`avs_result_code`/`cvv_result_code` — now persisted from the GraphQL `transactions` query into `payment_details`), or a Shopify risk recommendation of `cancel`/`investigate`.
+- **Established-customer exclusion:** a customer with ≥3 prior paid orders, no active chargeback, and the same card as their prior orders is never added on BIN (surname) grounds alone — but a hard cross-account link (a)–(d) keeps them in.
+- Evidence JSON records `corroborator`, `corroborators`, `cross_account_card_reuse`, `linked_customer_ids`, `linked_order_ids`, `excluded_established_customer_count`. The boilerplate "stolen-card batch" claim only appears when corroborator (a) fired.
+
+### A dismissed velocity case stays dismissed (Phase 2)
+
+`openCase` takes a `members: VelocityCaseMember[]` list (each `{ customerId, orderId, shopOrderId }`) rather than three parallel arrays, and before opening a case it applies the pure, unit-tested `applyDismissalSuppression(members, dismissedCustomerIds)`:
+
+- It loads the **most recent `dismissed` case** for the same `workspace_id` + `rule_type` + `evidence.velocity_key` within `BIN_DISMISS_SUPPRESS_DAYS` (= the 30-day window) and subtracts those customers from the linked set.
+- If **nothing new remains**, no case is opened, no orders are held, nothing is tagged — a dismissal on a key stays dismissed for those same customers. (Before this, `openCase` only excluded `confirmed_fraud`/`dismissed` from the *dedupe* lookup, so the Sep-2026 `bin:414740` case re-opened 6× after Zach dismissed it twice, until one was confirmed and innocent subscribers were cancelled + banned.)
+- If **new customers remain**, a case opens for only them, and the reappearing dismissed customers are recorded as `evidence.suppressed_dismissed_customer_ids`.
+- This suppression is shared by all three velocity keys (`bin_velocity`, `email_domain_velocity`, `surname_velocity`) because they all route through `openCase`.
+
 ## Gotchas
 
 - **Don't re-introduce a hand-maintained domain list.** A short inline `Set` will silently miss providers and flag real customers as a ring. Edit the vendored JSON / supplement instead.
