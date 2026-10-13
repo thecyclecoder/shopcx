@@ -1,0 +1,1 @@
+- **Scope out the foreign specs.merge_sha direct-REST read from the Control Tower error feed** · verified 2026-10-13 · → [[../inngest/supabase-log-poll]]
