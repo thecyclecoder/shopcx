@@ -40,6 +40,7 @@ import {
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
+  isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
@@ -332,6 +333,15 @@ const LOG_QUERIES: LogQuery[] = [
       // the SELECT-lookup shape (bare or PostgREST CTE wrapper) — a different missing
       // column on the table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale external/REST client SELECTs an
+      // `updated_at` column from `dashboard_notifications` that the table never owned.
+      // The resulting undefined_column ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-dashboard-notifications-updated-at-column-ad]], Control
+      // Tower signature `supabase-logs:22dc0aad50534e35`). Narrowly gated to require BOTH
+      // the exact `column dashboard_notifications.updated_at does not exist` message AND
+      // the SELECT-lookup shape (bare or PostgREST CTE wrapper) — a different missing
+      // column on the table, or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an operator typo — a manual SQL client did a
       // `select ... from error_events` naming the wrong column (`first_seen` instead of
       // our real `first_seen_at`). The resulting undefined_column ERROR is repair work
