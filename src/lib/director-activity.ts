@@ -21,6 +21,7 @@ type Admin = ReturnType<typeof createAdminClient>;
 export type DirectorActionKind =
   | "detected_regression" // a regression entered the queue (the detector enqueued a review).
   | "dismissed_regression" // reviewed → transient/foreign/false/already-fixed, recorded reasoning, no spec.
+  | "retired_obsolete_approval" // Ada retired an approval with nothing left to decide (detector re-fire on a shipped fix, broken checks on a shipped spec) instead of escalating it.
   | "authored_fix" // reviewed → real regression, authored the fix spec directly + routed to the inbox.
   | "escalated" // loop-guard: a regression fix that didn't hold after N attempts → escalated to CEO.
   // regression-backlog-reconciliation Phase 1 — the standing re-verification sweep (close the coverage gap).
