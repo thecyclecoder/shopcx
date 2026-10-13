@@ -69,3 +69,21 @@ test("the worker resolves the cycle at charge time, never by date", () => {
   assert.doesNotMatch(SRC, /const selectorDate =/);
   assert.doesNotMatch(SRC, /cycle_already_billed/);
 });
+
+// ⭐ A charge on the due day, before the row's time of day, must still advance one cadence.
+// The cron runs at 10:00 UTC; a row due at 15:01 is still "in the future" when it is charged.
+test("an on-the-day charge before the due time advances one full cadence", () => {
+  const due = new Date("2026-10-09T15:01:01Z");
+  const chargedAt = new Date("2026-10-09T10:00:22Z");
+  const noop = rollForwardToFutureBillingDate(due, "week", 2, chargedAt);
+  assert.equal(noop.toISOString(), due.toISOString(), "the plain roll-forward is a no-op here — that is the bug");
+  const fixed = rollForwardToFutureBillingDate(due, "week", 2, new Date(Math.max(chargedAt.getTime(), due.getTime())));
+  assert.equal(fixed.toISOString(), "2026-10-23T15:01:01.000Z");
+  // A late charge keeps the due anchor (rhythm preserved), not the charge time.
+  const late = rollForwardToFutureBillingDate(due, "week", 2, new Date(Math.max(new Date("2026-10-12T10:00:00Z").getTime(), due.getTime())));
+  assert.equal(late.toISOString(), "2026-10-23T15:01:01.000Z");
+});
+
+test("the worker forces at least one step from the due anchor", () => {
+  assert.match(SRC, /new Date\(Math\.max\(Date\.now\(\), anchor\.getTime\(\)\)\)/);
+});
