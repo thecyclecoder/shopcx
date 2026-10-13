@@ -15,6 +15,8 @@ The Phase-2 rubric + validator + drafts persistence sits upstream of the custome
 | `ReviewRequestOutcome` | type | Union of the 5 pinned outcomes. |
 | `REVIEW_REQUEST_OUTCOMES` | const | `['sent','clicked','submitted','routed_to_cs','expired']` |
 | `REVIEW_REQUEST_NUDGE_DELAY_MS` | const | `3 * 24h` — spec: 3-4 days after the first-touch. |
+| `REVIEW_REQUEST_CUSTOMER_COOLDOWN_MS` | const | `60 * 24h` — one ask (plus its one nudge) per customer per 60 days, across all products (CEO 2026-10-13). Read by [[review-request-sender]] step 2b and [[../inngest/review-request-nudge-cron]]. |
+| `reviewRequestCustomerCooldownStart(now)` | fn | Pure — ISO lower bound for "inside the customer cooldown" reads. |
 | `REVIEW_REQUEST_CANARY_HOLD_MS` | const | `18h` — inside the spec's 12-24h range. |
 | `mintReviewRequestToken()` | function | PURE — 24-hex per-ask token; shared across channels. |
 | `pickReviewRequestChannel(input)` | function | PURE — SMS if opted-in, else email if not unsubscribed, else null (skip). |

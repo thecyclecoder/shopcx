@@ -44,6 +44,18 @@ export type ReviewRequestOutcome = (typeof REVIEW_REQUEST_OUTCOMES)[number];
  * at 3 days sharp and let the cron sweep any candidate whose window opened. */
 export const REVIEW_REQUEST_NUDGE_DELAY_MS = 3 * 24 * 60 * 60 * 1000;
 
+/** Per-CUSTOMER frequency cap (CEO 2026-10-13): at most ONE review ask per
+ * customer per 60 days, plus that ask's one nudge — so nobody receives more
+ * than 2 review-request messages in any 60-day window, however many
+ * reviewable products they bought. The (customer, product) ladder dedup alone
+ * let one customer get 5 asks + 5 nudges on the same day. */
+export const REVIEW_REQUEST_CUSTOMER_COOLDOWN_MS = 60 * 24 * 60 * 60 * 1000;
+
+/** ISO lower bound for "inside the customer cooldown" reads. Pure. */
+export function reviewRequestCustomerCooldownStart(now: number): string {
+  return new Date(now - REVIEW_REQUEST_CUSTOMER_COOLDOWN_MS).toISOString();
+}
+
 /** Canary hold — the spec pins a LONG pending_send_at (12-24h) so the CEO
  * inbox digest has time to raise. We schedule at 18h — well inside the range
  * and past overnight batching. */

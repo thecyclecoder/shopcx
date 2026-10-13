@@ -60,7 +60,11 @@ export const postOrderReviewAskSend = inngest.createFunction(
     id: "post-order-review-ask-send",
     name: "Post-order review-ask send — reactive handler for review/post-order.ask-due",
     retries: 2,
-    concurrency: [{ limit: 3 }],
+    // Per-customer serialization: the detector fires one event per
+    // (customer, product), so a multi-product order lands several events at
+    // once. Without this key they ran in parallel and all passed the
+    // customer-cooldown read before any wrote its review_requests row.
+    concurrency: [{ limit: 3 }, { limit: 1, key: "event.data.customer_id" }],
     triggers: [{ event: POST_ORDER_REVIEW_ASK_EVENT }],
   },
   async ({ event, step }: { event: { data?: Record<string, unknown> }; step: { run: <T>(id: string, fn: () => Promise<T>) => Promise<T> } }) => {

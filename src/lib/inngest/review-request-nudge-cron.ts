@@ -30,6 +30,7 @@ import {
   isReviewRequestReadyForNudge,
   markReviewRequestNudgeFired,
   queueReviewRequestAsPendingTicketMessage,
+  reviewRequestCustomerCooldownStart,
   shouldSuppressReviewRequestNudge,
 } from "@/lib/review-request-delivery";
 
@@ -100,7 +101,17 @@ export const reviewRequestNudgeCron = inngest.createFunction(
 
       let nudged = 0;
       let suppressed = 0;
-      for (const r of rows.slice(0, BATCH_SIZE)) {
+      // One nudge per customer per 60-day cooldown (CEO 2026-10-13: ask +
+      // nudge = 2 messages max). Tracks this tick's nudges; the read below
+      // covers earlier ticks. Walks every fetched row (capped at BATCH_SIZE
+      // NUDGES, not rows) so suppressed siblings can't starve the batch.
+      const nudgedCustomers = new Set<string>();
+      for (const r of rows) {
+        if (nudged >= BATCH_SIZE) break;
+        if (nudgedCustomers.has(r.customer_id)) {
+          suppressed++;
+          continue;
+        }
         // Belt-and-braces on the pure predicate — the SQL prefilter already
         // narrowed to the sent-only outcome + no-nudge state, but the
         // predicate is the source of truth for a future outcome addition.
@@ -113,6 +124,18 @@ export const reviewRequestNudgeCron = inngest.createFunction(
             customerUnsubscribed: false,
           }).suppress
         ) {
+          suppressed++;
+          continue;
+        }
+
+        const { data: recentNudge } = await admin
+          .from("review_requests")
+          .select("id")
+          .eq("workspace_id", r.workspace_id)
+          .eq("customer_id", r.customer_id)
+          .gte("nudged_at", reviewRequestCustomerCooldownStart(now))
+          .limit(1);
+        if ((recentNudge || []).length > 0) {
           suppressed++;
           continue;
         }
@@ -183,6 +206,7 @@ export const reviewRequestNudgeCron = inngest.createFunction(
             holdMs: 0,
           });
           nudged++;
+          nudgedCustomers.add(r.customer_id);
         } catch (e) {
           console.warn(
             `[review-request-nudge] queue failed for request ${r.id}: ${errText(e)}`,

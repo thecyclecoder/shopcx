@@ -10,7 +10,7 @@ Reactive Inngest handler that consumes `review/post-order.ask-due` events fired 
 
 ### `post-order-review-ask-send`
 - **Trigger:** event `review/post-order.ask-due` — NOT a cron
-- **Retries:** 2 · **Concurrency:** 3
+- **Retries:** 2 · **Concurrency:** 3 overall, **1 per `event.data.customer_id`** — the detector fires one event per (customer, product), and parallel same-customer runs all passed the customer-cooldown read before any wrote its row (one customer got 5 asks on 2026-10-09).
 
 Two passes per event:
 
@@ -26,7 +26,7 @@ Two passes per event:
    9. `insertReviewRequestRow` — writes the SHARED ladder with `angle: 'post-order:<angle>'` so a later analyze can split repeat/first-time asks against ticket asks without a schema change (the validator's `unapproved_pretext` rail reads `draft.angle`, not the ladder-row's trigger-prefixed label — safe).
    10. `queueReviewRequestAsPendingTicketMessage` on a per-ask portal-channel synthetic ticket (`createPostOrderAnchorTicket`) — the deliver-pending-sends outbox drains it after the shared 18h canary hold, and [[review-request-canary-digest-cron]] surfaces every held draft to the CEO inbox before send.
 
-2. **`emit-heartbeat`** — `emitReactiveHeartbeat("post-order-review-ask-send", { ok: true, produced: { apply: <outcome> } })` — every event handler run so the CT watchdog can see the reactive lane beating. The `apply` field carries the exact discriminated outcome (`skipped_journey_inactive`, `skipped_ladder_dedup`, `skipped_customer_missing`, `skipped_product_missing`, `skipped_unreachable`, `skipped_no_rubric`, `blocked_by_validator`, or `queued`).
+2. **`emit-heartbeat`** — `emitReactiveHeartbeat("post-order-review-ask-send", { ok: true, produced: { apply: <outcome> } })` — every event handler run so the CT watchdog can see the reactive lane beating. The `apply` field carries the exact discriminated outcome (`skipped_journey_inactive`, `skipped_ladder_dedup`, `skipped_customer_cooldown`, `skipped_customer_missing`, `skipped_product_missing`, `skipped_unreachable`, `skipped_no_rubric`, `blocked_by_validator`, or `queued`).
 
 **Kill switch (CLAUDE.md hard rule — supervisable autonomy):** `enforceSwitch("post-order-review-ask-send")` is the **first body statement**. A blocked cascade writes a `blocked_off` heartbeat via the resolver and returns immediately.
 
