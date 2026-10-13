@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Close-no-action guard: exempt notification and auto-reply emails** · verified 2026-10-12 · → [[../libraries/cs-director]] · also [[../libraries/automated-sender]]
 - **Error feed: drop foreign ad-hoc journey_sessions.trigger_intent column-missing noise at capture** · verified 2026-10-12 · → [[libraries/control-tower]]
 - **Subscription renewal orders must honor free-shipping guarantee** · verified 2026-10-12 · → [[../lifecycles/subscription-billing]] · [[../libraries/pricing]]
 - **Fix Control Tower scheduler-gap suppression dead zone: arm it off the monitor's missed ticks, below the shortest peer cron window** · verified 2026-10-11 · → [[../libraries/control-tower]]
