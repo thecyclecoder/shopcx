@@ -13,6 +13,7 @@ Cron that fires exactly ONE nudge per review-request ask, 3-4 days after the fir
 Two passes per tick:
 
 1. **`enqueue-nudges`** — sweep `review_requests` where `nudged_at IS NULL`, `outcome='sent'`, and `sent_at` is between 14 days ago (ceiling) and 3 days ago (ready). For each candidate:
+   - **One nudge per customer per 60 days** (CEO 2026-10-13 — ask + nudge = 2 messages max per window). Skip a row whose customer was already nudged this tick, or has any `review_requests.nudged_at` inside `REVIEW_REQUEST_CUSTOMER_COOLDOWN_MS` ([[../libraries/review-request-delivery]]). The loop walks every fetched row and caps at 50 *nudges* (not rows), so suppressed siblings of a multi-ask customer don't starve the batch.
    - Re-run the pure predicate `isReviewRequestReadyForNudge` (belt-and-braces on the SQL prefilter).
    - Re-run the pure predicate `shouldSuppressReviewRequestNudge` — suppression reasons include `already_nudged` / `outcome_submitted` / `outcome_routed_to_cs` / `outcome_expired` / `outcome_clicked` / `customer_replied` / `customer_unsubscribed`.
    - Resolve the anchoring ticket (most-recent per customer). A row without a matching ticket is a suppress (the nudge shape requires a thread to reply into).

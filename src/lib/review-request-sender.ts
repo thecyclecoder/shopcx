@@ -70,6 +70,7 @@ import {
   mintReviewRequestToken,
   pickReviewRequestChannel,
   queueReviewRequestAsPendingTicketMessage,
+  reviewRequestCustomerCooldownStart,
 } from "@/lib/review-request-delivery";
 import { validateReviewRequest } from "@/lib/review-request-validator";
 
@@ -112,6 +113,7 @@ export interface ApplyReviewRequestInput {
 export type ApplyReviewRequestResult =
   | { outcome: "skipped_journey_inactive"; reason: string }
   | { outcome: "skipped_ladder_dedup" }
+  | { outcome: "skipped_customer_cooldown" }
   | { outcome: "skipped_customer_missing" }
   | { outcome: "skipped_product_missing" }
   | { outcome: "skipped_unreachable" }
@@ -170,6 +172,21 @@ export async function applyReviewRequest(
     .limit(1);
   if ((existingLadder ?? []).length > 0) {
     return { outcome: "skipped_ladder_dedup" };
+  }
+
+  // Step 2b — CUSTOMER COOLDOWN. One ask per customer per 60 days across ALL
+  // products (CEO 2026-10-13: max 2 review messages — ask + nudge — per
+  // customer per window). Callers serialize per customer (the post-order
+  // handler's concurrency key) so two products can't both pass this read.
+  const { data: recentAsk } = await admin
+    .from("review_requests")
+    .select("id")
+    .eq("workspace_id", input.workspaceId)
+    .eq("customer_id", input.customerId)
+    .gte("sent_at", reviewRequestCustomerCooldownStart(Date.now()))
+    .limit(1);
+  if ((recentAsk ?? []).length > 0) {
+    return { outcome: "skipped_customer_cooldown" };
   }
 
   // Step 3 — LOAD customer + product. Both are workspace-scoped reads so
