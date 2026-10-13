@@ -99,6 +99,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
@@ -1658,6 +1659,109 @@ test("isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise KEEPS 
   assert.equal(isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise("", "select * from worker_heartbeats"), false);
   assert.equal(
     isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise("column worker_heartbeats.created_at does not exist", ""),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise ──
+// A foreign / stale direct-REST client read `public.fraud_cases` expecting an `updated_at`
+// column that lives only on the sibling `fraud_rules` table; Control Tower signature
+// `supabase-logs:59dae748662ce6c8`. Drop AT CAPTURE only when BOTH the exact `column
+// fraud_cases.updated_at does not exist` message AND the SELECT-lookup shape on `fraud_cases`
+// (bare or PostgREST CTE wrapper) are present. A real `updated_at`-missing on another table,
+// a `fraud_cases` column rename, a non-SELECT write, or a FATAL still pages.
+
+test("isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise drops the PostgREST CTE wrapper + bare SELECT listing the non-existent updated_at column", () => {
+  // The captured incident shape: a stale direct-REST client lists fraud_cases ordered by
+  // updated_at, PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."fraud_cases" ... )` CTE, and Postgres rejects with the column-missing.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column fraud_cases.updated_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."fraud_cases"."id", "public"."fraud_cases"."updated_at" FROM "public"."fraud_cases" ORDER BY "public"."fraud_cases"."updated_at" DESC LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column public.fraud_cases.updated_at does not exist",
+      'with pgrst_source as ( select "public"."fraud_cases"."updated_at" from "public"."fraud_cases" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "ERROR: column fraud_cases.updated_at does not exist",
+      'WITH pgrst_source AS ( SELECT "updated_at" FROM "public"."fraud_cases" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper), qualified and unqualified FROM, drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column fraud_cases.updated_at does not exist",
+      "select id, updated_at from public.fraud_cases order by updated_at desc limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column fraud_cases.updated_at does not exist",
+      "select * from fraud_cases where updated_at is not null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise KEEPS real errors (other table, other column, non-SELECT, FATAL)", () => {
+  // Same updated_at-missing message on a DIFFERENT relation is a real product-schema
+  // regression and still pages — the pin names fraud_cases only.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column tickets.updated_at does not exist",
+      "select id, updated_at from public.tickets order by updated_at desc",
+    ),
+    false,
+  );
+  // A DIFFERENT column on fraud_cases (a real column rename / schema regression) still pages —
+  // the pin is updated_at only.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column fraud_cases.status does not exist",
+      "select id, status from public.fraud_cases",
+    ),
+    false,
+  );
+  // A non-SELECT shape (PostgREST CTE write / bare write) is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column fraud_cases.updated_at does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."fraud_cases"("id","updated_at") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column fraud_cases.updated_at does not exist",
+      'update public.fraud_cases set updated_at = now() where id = $1',
+    ),
+    false,
+  );
+  // A FATAL / constraint-class error on the same shape is untouched (different message).
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select id, updated_at from public.fraud_cases",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise("", "select * from fraud_cases"), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise("column fraud_cases.updated_at does not exist", ""),
     false,
   );
 });
