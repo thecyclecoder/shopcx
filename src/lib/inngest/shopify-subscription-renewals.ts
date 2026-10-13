@@ -412,11 +412,20 @@ export const shopifySubscriptionRenewalAttempt = inngest.createFunction(
         // selector finds whichever cycle contains whatever date we set.
         // ⭐ Anchor to what the customer was DUE, never to the clamped selector — see the two-dates
         // note where `plan` is built. `scheduledFor` is the un-clamped `next_billing_date`.
+        //
+        // ⚠️ Step AT LEAST one cadence. The cron charges at 10:00 UTC, but most rows carry a later
+        // time of day (the checkout or Appstle time), so on the due day the anchor is still in the
+        // future and a plain roll-forward is a no-op. The date then never moves, the cycle key
+        // collides every morning, and the sub is never charged again. Ground truth 2026-10-09:
+        // 36064133293 + 36063969453 charged at 10:00, both still dated 10-09 15:01 four days later.
+        // Same defect order-now fixed on 2026-10-08 (`nextDateAfterCharge`); here we keep the DUE
+        // anchor so a late charge still keeps the customer's rhythm.
         const anchor = new Date(plan.scheduledFor);
         const advanceTo = rollForwardToFutureBillingDate(
           anchor,
           sub.billing_interval ?? "month",
           sub.billing_interval_count ?? 1,
+          new Date(Math.max(Date.now(), anchor.getTime())),
         );
         await admin
           .from("subscriptions")

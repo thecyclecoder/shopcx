@@ -37,6 +37,7 @@ So:
 | decide what is DUE | **Shopify** — the cycle CONTAINING our date (`selector: { date }`), which must be `UNBILLED` and unskipped |
 | charge | Shopify, targeting that cycle index explicitly |
 | advance | **the customer's own cadence from the date they were DUE** — never Shopify's cycle calendar |
+| advance, on the due day | **at least one full cadence**, even when the charge runs before the row's time of day (cron 10:00 UTC; most rows are due later in the day). Without the forced step the date never moved and the cycle key collided every morning, so the sub was charged once and then never again (2026-10-09: 36064133293, 36063969453; 2026-10-13: 36020289709, 36020093101) |
 
 A wrong local date therefore makes a charge **late** (which the migration audit catches) but never
 **wrong**.
