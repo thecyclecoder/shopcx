@@ -27,7 +27,7 @@ Two passes per tick:
 
 **Cadence + liveness** — `expectedCadence: "every 30 min (*/30 * * * *)"`, `livenessWindowMs: 45 min` (≥ 1.2× the 30m cadence per `assertRegistryInvariants`). `registeredAt: "2026-08-28T00:00:00Z"` graces the first-tick window.
 
-**Nudge channel** — always email (a second modality; no second TCPA-exposed SMS per the spec). The composed body is a REPLY in the same thread (`Re:` subject via the deliver-pending-sends outbox's existing plumbing), 3 lines, re-raising the SAME question with the time cost stated.
+**Nudge channel** — always email (a second modality; no second TCPA-exposed SMS per the spec). The composed body is a REPLY in the same thread (`Re:` subject via the deliver-pending-sends outbox's existing plumbing), re-raising the SAME question with the time cost stated (*"Just floating this back up." / "Would you share a quick line about X? It takes about a minute."* + link; no em-dashes).
 
 ## Downstream events sent
 
