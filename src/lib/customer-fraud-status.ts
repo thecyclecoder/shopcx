@@ -13,6 +13,7 @@
  * See feedback_orchestrator_fraud_gate.md.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { isCustomerConfirmedFraud } from "./fraud-confirm";
 
 export interface FraudStatus {
   isConfirmedFraud: boolean;
@@ -119,7 +120,7 @@ export async function getCustomerFraudStatus(
   // 1 + 2. fraud_cases — confirmed cases AND any amazon_reseller flags
   const { data: cases, error: casesErr } = await admin
     .from("fraud_cases")
-    .select("id, rule_type, title, severity, status, first_detected_at, last_seen_at")
+    .select("id, rule_type, title, severity, status, confirmed_customer_ids, first_detected_at, last_seen_at")
     .eq("workspace_id", workspaceId)
     .overlaps("customer_ids", ids);
   if (casesErr) {
@@ -131,7 +132,11 @@ export async function getCustomerFraudStatus(
   let isResellerFlagged = false;
   for (const c of cases || []) {
     if (c.rule_type === "amazon_reseller") isResellerFlagged = true;
-    if (c.status === "confirmed_fraud") {
+    // A confirmed_fraud case counts for THIS customer only when the case's
+    // confirmed_customer_ids overlaps the customer's linked ids (Phase 3).
+    // A customer who merely shares a case (e.g. a shared bank BIN) with a
+    // confirmed fraudster is NOT treated as confirmed fraud.
+    if (c.status === "confirmed_fraud" && isCustomerConfirmedFraud(c.confirmed_customer_ids as string[] | null, ids)) {
       confirmedCases.push({
         id: c.id, rule_type: c.rule_type, title: c.title, severity: c.severity,
         confirmed_at: c.last_seen_at as string,

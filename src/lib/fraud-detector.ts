@@ -771,19 +771,27 @@ Respond with EXACTLY "FRAUD" or "OK".`;
     try {
       const { data: confirmedCases } = await admin
         .from("fraud_cases")
-        .select("id, title, order_ids, customer_ids, evidence")
+        .select("id, title, order_ids, customer_ids, confirmed_customer_ids, evidence")
         .eq("workspace_id", workspaceId)
         .eq("status", "confirmed_fraud");
 
       if (confirmedCases?.length) {
+        // Per-customer confirmation (Phase 3): only compare against orders that
+        // belong to an INDIVIDUALLY-CONFIRMED customer (orders.customer_id in a
+        // case's confirmed_customer_ids), not every order in the case. An order
+        // that merely shares a case (e.g. a shared bank BIN) with a confirmed
+        // fraudster must not seed a repeat-offender match.
+        const confirmedCustomerSet = new Set<string>(
+          confirmedCases.flatMap(c => (c.confirmed_customer_ids || []) as string[]).filter(Boolean),
+        );
         // Gather order IDs from confirmed cases. Guard: filter to valid UUIDs so
         // a stray legacy Shopify numeric id (from before all writers were fixed
         // to store `orders.id`) can never crash the `uuid` column with Postgres
         // 22P02 and silently drop the whole batch. See [[../tables/fraud_cases]].
         const fraudOrderIds = orderUuids(confirmedCases.flatMap(c => c.order_ids || []));
         // Fetch fraud orders in batches of 100
-        const fraudOrders: Array<{
-          id: string; order_number: string; email: string | null;
+        const fraudOrdersRaw: Array<{
+          id: string; order_number: string; email: string | null; customer_id: string | null;
           shipping_address: Record<string, string> | null;
           billing_address: Record<string, string> | null;
           normalized_shipping_address: string | null;
@@ -792,10 +800,12 @@ Respond with EXACTLY "FRAUD" or "OK".`;
           const batch = fraudOrderIds.slice(i, i + 100);
           const { data: batchOrders } = await admin
             .from("orders")
-            .select("id, order_number, email, shipping_address, billing_address, normalized_shipping_address")
+            .select("id, order_number, email, customer_id, shipping_address, billing_address, normalized_shipping_address")
             .in("id", batch);
-          if (batchOrders) fraudOrders.push(...batchOrders);
+          if (batchOrders) fraudOrdersRaw.push(...batchOrders);
         }
+        // Keep only orders whose customer was individually confirmed.
+        const fraudOrders = fraudOrdersRaw.filter(o => o.customer_id && confirmedCustomerSet.has(o.customer_id));
 
         if (fraudOrders.length) {
           const matches: Array<{ type: string; this_value: string; fraud_value: string; fraud_order: string; fraud_case_id: string }> = [];

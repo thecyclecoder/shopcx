@@ -4,6 +4,7 @@ import { subscriptionAction } from "@/lib/commerce/subscription";
 import { unsubscribeFromAllMarketing } from "@/lib/shopify-marketing";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
 import { emitReactiveHeartbeat, emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
+import { appendConfirmedCustomerId } from "@/lib/fraud-confirm";
 
 // ── chargeback/received — main processing pipeline ──
 
@@ -481,11 +482,23 @@ export const chargebackLost = inngest.createFunction(
         });
       }
 
-      // Update fraud case
+      // Update fraud case. A lost "fraudulent" chargeback confirms fraud for
+      // exactly the customer who charged back — append only them to
+      // confirmed_customer_ids (Phase 3 one-customer contract), never the whole
+      // case. Other members of the case stay unconfirmed until confirmed on
+      // their own.
       if (cb.fraud_case_id && cb.reason === "fraudulent") {
+        const { data: fc } = await admin
+          .from("fraud_cases")
+          .select("confirmed_customer_ids")
+          .eq("id", cb.fraud_case_id)
+          .maybeSingle();
+        const nextConfirmed = cb.customer_id
+          ? appendConfirmedCustomerId((fc?.confirmed_customer_ids || []) as string[], cb.customer_id as string)
+          : ((fc?.confirmed_customer_ids || []) as string[]);
         await admin
           .from("fraud_cases")
-          .update({ status: "confirmed_fraud", resolution: "chargeback_lost" })
+          .update({ status: "confirmed_fraud", resolution: "chargeback_lost", confirmed_customer_ids: nextConfirmed })
           .eq("id", cb.fraud_case_id);
       }
 
