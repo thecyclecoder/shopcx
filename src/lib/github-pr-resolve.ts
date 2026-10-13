@@ -1836,6 +1836,20 @@ export interface AutoMergeRunOptions {
 }
 
 /**
+ * Is this build-gate refusal a STALE PARK that a re-resolve clears once the PR is clean? True for a
+ * `needs_attention` pr-resolve (conflict / advisory-supersede / push race) other than an authorization
+ * refusal, and for a `needs_attention` build parked on a merge conflict with main. False for anything
+ * else, above all a build that failed its own checks. Only called for a PR that is already GitHub-clean.
+ */
+export function isStaleParkOnCleanPr(gate: { ok: boolean; status: string | null; ownerKind?: string | null; ownerError?: string | null }): boolean {
+  if (gate.ok || gate.status !== "needs_attention") return false;
+  const err = gate.ownerError ?? "";
+  if (gate.ownerKind === "pr-resolve") return !/^authorization:/.test(err);
+  if (gate.ownerKind === "build") return /conflict/i.test(err);
+  return false;
+}
+
+/**
  * Gate A: list open claude/* PRs, find the READY ones, squash-merge ONE (serialized) + delete its branch.
  *
  * Guardrails (supervisable autonomy):
@@ -1965,6 +1979,26 @@ export async function autoMergeReadyPrs(
           if (!gate.ok) {
             result.buildGateBlocked++;
             console.warn(`[auto-merge] PR #${prNumber} (${branch}) is GitHub-clean but the build success gate refused it: ${gate.reason} — left for the owner`);
+            // ⭐ SELF-HEAL a stale park. A conflict / advisory park leaves the branch's newest owning job at
+            // `needs_attention`, and nothing re-runs it once the PR turns clean (main moved, or someone merged
+            // main in by hand) — `detectAndEnqueueDirtyPrs` only looks at DIRTY PRs. So a clean, tests-green
+            // PR sat refused here forever: #3193, #2931 and #3256 for 5–17 days (2026-10-13). Re-enqueue one
+            // pr-resolve; on a mergeable PR it completes immediately, and the next pass clears this gate. The
+            // (head, base) fingerprint dedup in `enqueuePrResolveJob` makes it one attempt per input, never a
+            // loop. A failed BUILD is not a park and is never re-resolved — that would paper over its checks.
+            if (isStaleParkOnCleanPr(gate) && gate.workspaceId) {
+              try {
+                const head = (pr.head as { sha?: string } | undefined)?.sha ?? null;
+                const base = (pr.base as { sha?: string } | undefined)?.sha ?? null;
+                const enq = await enqueuePrResolveJob(db, {
+                  workspaceId: gate.workspaceId, prNumber, branch, headSha: head, baseSha: base,
+                  reason: `auto-merge: PR is clean but its owning ${gate.ownerKind} job is parked (${(gate.ownerError ?? "").slice(0, 120)}) — re-resolving so the build gate can clear`,
+                });
+                if (enq.enqueued) console.log(`[auto-merge] PR #${prNumber} (${branch}) stale park → re-enqueued pr-resolve`);
+              } catch (e) {
+                console.warn(`[auto-merge] PR #${prNumber} stale-park re-resolve enqueue failed (continuing):`, e instanceof Error ? e.message : e);
+              }
+            }
             result.prs.push({ number: prNumber, branch, mergeableState, ready, buildGateOk, merged });
             continue;
           }
