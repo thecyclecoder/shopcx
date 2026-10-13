@@ -93,6 +93,7 @@ import {
   isForeignSupabasePostgresMissingSpecsCurrentPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsPhaseAdhocNoise,
   isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecsFlagsAdhocNoise,
   isForeignSupabasePostgresMissingSpecsOwnerFunctionAdhocNoise,
@@ -1058,6 +1059,14 @@ const LOG_QUERIES: LogQuery[] = [
       // through `spec_phases`, or on `specs` via a non-SELECT statement (real code-bug
       // shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs.merge_sha`. The `specs` table exists but has NEVER had a
+      // `merge_sha` column — the shipped-with merge SHA is modeled per-phase on
+      // `spec_phases.build_sha` (phase-pr-provenance), not on the `specs` row. Pinned to
+      // the exact column-missing message AND a SELECT-on-specs shape (bare OR PostgREST
+      // CTE wrapper) — a column-missing on any other table, a different column on
+      // `specs`, a JOIN through `spec_phases`, or a non-SELECT write still pages.
+      if (isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.specs.review_status`. The `specs` table exists but has NEVER
       // had a `review_status` column — review state lives in the Vale / Ada review
