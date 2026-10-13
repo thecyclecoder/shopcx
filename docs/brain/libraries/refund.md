@@ -32,15 +32,62 @@ Every post-success write is best-effort: money already moved, so a bookkeeping f
 
 ### `resolveRefundMethod` — function
 
-Read-only branch preview — same rule as `refundOrder`, no external API calls. Used by `scripts/_probe-refund-order.ts` and audit tools that ask "which gateway would this order refund through?" without moving money.
+```ts
+async function resolveRefundMethod(
+  workspaceId: string,
+  orderId: string,
+): Promise<RefundMethodProbe>
+```
+
+Read-only branch preview — same rule as `refundOrder`, no external API calls. Returns which gateway would handle a refund (`braintree` or `shopify`) without moving money. Used by `scripts/_probe-refund-order.ts` and audit tools.
+
+### `decideRefundStatusFromLedger` — function
+
+```ts
+function decideRefundStatusFromLedger(input: {
+  refundedCents: number,
+  totalCents: number,
+  currentStatus: string | null | undefined,
+}): "refunded" | "partially_refunded" | null
+```
+
+Pure predicate that decides what `orders.financial_status` should be, given the ledger sum and the order total. Used by `deriveAndSetOrderRefundStatus` and the [[ship-time-backfill-detector]] backfill scripts. Returns the next state or `null` if the current stored state already covers it (never regresses a stronger state; `refunded` > `partially_refunded`). Case-insensitive on input, returns lowercase.
+
+### `deriveAndSetOrderRefundStatus` — function
+
+```ts
+async function deriveAndSetOrderRefundStatus(
+  workspaceId: string,
+  orderId: string,
+): Promise<DeriveOrderRefundStatusResult>
+```
+
+The ONE writer of `orders.financial_status` from the refund ledger (see § Writer contract below). Reads the `order_refunds` ledger for this order, sums all `succeeded`/`settled` rows, calls `decideRefundStatusFromLedger`, and stamfs the column if needed — or returns `updated: false` if no change is warranted. Used by `refundOrder` on success, [[vendor-refund-mirror]] `reconcileBraintreeRefundsForOrder`, and the Phase-1 ship-time backfill `scripts/_backfill-order-refund-status-from-ledger.ts`. Returns the old and new states + the ledger sum for auditing.
 
 ### `hashRefundRequestKey` / `hashActionRefundKey` — functions
 
-Stable idempotency-key helpers over `(order_id, amount, reason)` and `(actor_scope, actor_id, order_id, amount, reason)` respectively. Callers that carry an action-side request id thread it via `opts.requestKey` so Inngest step retries and self-heal re-drives short-circuit against the same key; `hashActionRefundKey` scopes to the ACTION (ticket / returns row / replacement) so two legitimate refunds of the same amount + reason on the same order get distinct keys.
+```ts
+function hashRefundRequestKey(
+  orderId: string,
+  amountCents: number,
+  _reason?: string,
+  attempt?: number | string,
+): string
+
+function hashActionRefundKey(
+  actorScope: string,
+  actorId: string,
+  orderId: string,
+  amountCents: number,
+  _reason?: string,
+): string
+```
+
+Stable idempotency-key helpers. The reason parameter is intentionally NOT part of the key identity (Phase 3 fix): a re-worded retry of the same refund must be short-circuited as the same refund, not accepted as a new one. `hashRefundRequestKey` defaults when no explicit request id; `hashActionRefundKey` scopes to the ACTION (ticket / returns row / replacement) so two legitimate refunds of the same amount on the same order get distinct keys. Callers that need a second identical refund MUST thread an explicit `attempt` ordinal or action-side `requestKey`.
 
 ## Writer contract for `orders.financial_status`
 
-**`refundOrder` writes `orders.financial_status` on success — engine-independent.** Before this write existed, only the Shopify sync ([[shopify-sync]] / [[shopify-webhooks]] `handleOrderEvent`) touched the column, so every in-house internal order that was refunded still read as paid on the order row while its refund ledger and money movement were fine. See [[../specs/a-refunded-order-must-say-it-was-refunded]].
+**The ONE writer is `deriveAndSetOrderRefundStatus` — called by `refundOrder` on success and by `[[vendor-refund-mirror]]` reconciles.** Before Phase 1, `refundOrder` inlined the logic and no other path could ask for the current refund state. This caused 15 internal orders to carry correct ledgers but incorrect order statuses — their refunds happened through `[[vendor-refund-mirror]]` (Shopify admin, Appstle) or from Braintree side, missing the status update entirely. Phase 1 extracts the derive-and-set into a callable routine so both paths use the same rules.
 
 The value is derived from the ledger, not the amount just refunded:
 
@@ -48,11 +95,11 @@ The value is derived from the ledger, not the amount just refunded:
 - Compare against `orders.total_cents`: reaching total ⇒ `refunded`; any positive lesser sum ⇒ `partially_refunded`.
 - Two partials that together clear the total therefore end up fully refunded — never inferred from the single amount.
 
-**Who wins on a Shopify order — the vendor.** For a Shopify order the sync is authoritative and re-writes this column from every webhook/sync landing. `refundOrder`'s write is a BACKSTOP that never regresses a stronger vendor-stamped state (weight: `refunded` > `partially_refunded` > everything else), so a later vendor value at or above the local write is preserved. If the local ledger has already reached full and the vendor still reads partial, the backstop advances it — that is the intended safety net.
+**Who wins on a Shopify order — the vendor.** For a Shopify order the sync is authoritative and re-writes this column from every webhook/sync landing. `deriveAndSetOrderRefundStatus`'s write is a BACKSTOP that never regresses a stronger vendor-stamped state (weight: `refunded` > `partially_refunded` > everything else), so a later vendor value at or above the local write is preserved. If the local ledger has already reached full and the vendor still reads partial, the backstop advances it — that is the intended safety net.
 
 **Case handling.** The column carries both `PAID`/`paid` and `REFUNDED`/`refunded` and `PARTIALLY_REFUNDED`/`partially_refunded` in prod ([[../tables/orders]] § `financial_status` gotcha) — a case-sensitive comparison already mismeasured this exact problem while it was being investigated. The comparison is case-insensitive; the write is lowercase.
 
-**Historical correction.** Fixing the write path forward left the wall in place: measured 2026-09-18, 15 internal orders and 33 store orders under-reported on the column. `scripts/_backfill-order-financial-status.ts` closes that gap — idempotent, dry-run by default, `--apply` to write; drives off the ledger, never claims more refunded than the ledger shows, and re-runs as a no-op. Auto-ledgered in [[../tables/data_op_runs]] via [[ship-time-backfill-detector]]'s `_backfill-*.ts` convention.
+**Historical correction.** Phase 1 shipped `scripts/_backfill-order-refund-status-from-ledger.ts` — idempotent backfill that calls `deriveAndSetOrderRefundStatus` per order whose stored status disagrees with its ledger. Measured 2026-09-24: 15 orders ($1,524.59) had correct ledgers but wrong statuses, all now repaired and reconciled. Auto-ledgered in [[../tables/data_op_runs]] via [[ship-time-backfill-detector]]'s `_backfill-*.ts` convention.
 
 ## Contract highlights
 
