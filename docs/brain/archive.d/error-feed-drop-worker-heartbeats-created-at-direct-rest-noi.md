@@ -1,0 +1,1 @@
+- **Scope out the foreign direct-REST `worker_heartbeats.created_at` column-missing noise from the Control Tower error feed** · verified 2026-10-13 · → [[../tables/worker_heartbeats]]
