@@ -58,7 +58,7 @@ Braintree posts webhooks for disputes, recurring billing events, etc. Verified v
 
 ## Related
 
-[[../tables/transactions]] · [[../tables/customer_payment_methods]] · [[../tables/orders]] · [[../tables/subscriptions]] · [[../tables/dunning_cycles]] · [[../tables/payment_failures]] · [[../tables/dunning_error_codes]] · [[../tables/chargeback_events]] · [[../inngest/dunning]] · [[../inngest/internal-subscription-renewals]]
+[[../libraries/refund]] · [[../libraries/vendor-refund-mirror]] · [[../tables/order_refunds]] · [[../tables/transactions]] · [[../tables/customer_payment_methods]] · [[../tables/orders]] · [[../tables/subscriptions]] · [[../tables/dunning_cycles]] · [[../tables/payment_failures]] · [[../tables/dunning_error_codes]] · [[../tables/chargeback_events]] · [[../inngest/dunning]] · [[../inngest/internal-subscription-renewals]]
 
 ## Idempotent renewal sales — `findChargedSaleByOrderId` / `pickChargedSale`
 
@@ -67,4 +67,10 @@ Internal renewal sales carry the order number as the Braintree `orderId`.
 - **`pickChargedSale`** is the pure filter (credits, declines and voids never count).
 
 Used by [[../inngest/internal-subscription-renewals]] on charge-step retries. The storefront checkout and `one-time-charge` sales are synchronous, not Inngest-retried, and don't use it.
+
+## Refund mirroring — Phase 2 of a-braintree-side-refund-must-reach-our-books
+
+A refund issued at the Braintree gateway writes nothing to our `order_refunds` ledger unless [[libraries/refund]] `refundOrder` dispatched it. The double-refund guard reads that ledger, so an incomplete ledger is not a guard. Measured 2026-09-24: 4 internal orders ($532.90) had Braintree refunds with zero ledger entries — invisible to the guard.
+
+Refunds are read via `transaction.find(braintree_transaction_id)` which returns `refundIds` (a list of ids only; the amounts are on the refund TRANSACTIONS themselves). [[../libraries/vendor-refund-mirror]] `reconcileBraintreeRefundsForOrder` fetches each refund transaction and maps them into mirror rows via `extractBraintreeRefunds` and `insertBraintreeRefundMirror`. Called on order reconciliation and explicit backfill.
 
