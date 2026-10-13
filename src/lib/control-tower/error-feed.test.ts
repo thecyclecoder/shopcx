@@ -43,6 +43,7 @@ import {
   isForeignSupabasePostgresMissingSpecPhasesShippedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecsBodyMdAdhocNoise,
   isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise,
   isForeignSupabasePostgresMissingSpecsReviewStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecsFlagsAdhocNoise,
   isForeignSupabasePostgresMissingSpecsOwnerFunctionAdhocNoise,
@@ -19058,6 +19059,113 @@ test("isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise returns false on e
     isForeignSupabasePostgresMissingSpecsMergedAtAdhocNoise(
       "",
       "select merged_at from public.specs",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/specs?select=slug,status,merge_sha,...` against our `public.specs` table.
+// The table exists but carries no `merge_sha` column — the shipped-with merge SHA is
+// modeled per-phase on `spec_phases.build_sha` (phase-pr-provenance) per
+// [[../tables/specs]]. Foreign-owned surface, no lever from us — drop AT CAPTURE only
+// when BOTH the exact column-missing message on `specs.merge_sha` AND a SELECT-lookup
+// shape on `specs` (bare OR PostgREST CTE wrapper) are present. A column-missing on any
+// other table, a different column on `specs`, a JOIN through `spec_phases`, or a
+// non-SELECT statement still pages. Control Tower signature
+// `supabase-logs:5a010e9a59a425c0`.
+
+test("isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise drops the real pgrst_source CTE lookup selecting specs.merge_sha filtered by slug", () => {
+  // The captured production sample: the PostgREST direct-REST wire shape that triggered
+  // signature `supabase-logs:5a010e9a59a425c0` — a SELECT on `specs` including the
+  // phantom `merge_sha` column, wrapped in the pgrst_source CTE and filtered by slug.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise(
+      "column specs.merge_sha does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."specs"."slug", "public"."specs"."status", "public"."specs"."merge_sha" FROM "public"."specs" WHERE "public"."specs"."slug" = $1 LIMIT $2 )',
+    ),
+    true,
+  );
+  // The bare SELECT form (unqualified and public.-qualified) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise(
+      "column specs.merge_sha does not exist",
+      "select slug, status, merge_sha from public.specs where slug = 'x'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise(
+      "column public.specs.merge_sha does not exist",
+      "select merge_sha from specs limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check; whitespace tol.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise(
+      "  ERROR: column specs.merge_sha does not exist  ",
+      "   select merge_sha from public.specs   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise KEEPS a column-missing error on a DIFFERENT specs column (a real column rename still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise(
+      "column specs.status does not exist",
+      "select status from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  // Same phantom-column name on a DIFFERENT table still pages — the pin is `specs` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise(
+      "column spec_phases.merge_sha does not exist",
+      "select merge_sha from public.spec_phases where spec_id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise KEEPS a non-SELECT wrapper on specs.merge_sha (a real code-write still pages)", () => {
+  // An INSERT / UPDATE against specs referencing a bogus `merge_sha` column is real code
+  // trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise(
+      "column specs.merge_sha does not exist",
+      "update public.specs set merge_sha = $1 where slug = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise(
+      "column specs.merge_sha does not exist",
+      "insert into public.specs (slug, merge_sha) values ($1, $2)",
+    ),
+    false,
+  );
+  // The PostgREST CTE branch also requires the wrapped op to be a SELECT — a wrapped
+  // INSERT inside pgrst_source stays paged.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise(
+      "column specs.merge_sha does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."specs"("merge_sha") VALUES ($1) RETURNING * )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise returns false on empty / nullish inputs", () => {
+  assert.equal(isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise(null, null), false);
+  assert.equal(isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise(undefined, undefined), false);
+  assert.equal(isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise("", ""), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsMergeShaDirectRestLookupNoise(
+      "column specs.merge_sha does not exist",
+      "",
     ),
     false,
   );
