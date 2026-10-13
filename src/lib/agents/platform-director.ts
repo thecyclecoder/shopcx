@@ -5146,22 +5146,51 @@ export function initKey(slug: string): string {
  * the spec is still unstarted + unblocked, so without this ledger dedup it would be re-investigated (a
  * wasted `claude -p`) and re-decided every pass. A successful INITIATE doesn't need this — its queued build
  * flips the spec in-flight, which findInitCandidates already excludes. Best-effort.
+ *
+ * ⚠️ An ESCALATION (`init-unsure:` / `initguard:`) holds the spec only while its CEO card is still open.
+ * It used to hold forever: dismissing the card re-armed nothing, so close-snapshot-coverage-guard sat
+ * `planned` and unbuilt from 2026-09-08 to 2026-10-13 after one loop-guard escalation, with its card
+ * already dismissed. Now a dismissed (or missing) card re-arms the spec. The loop guard still bounds the
+ * retry: `failedCount` is windowed, so a re-armed spec gets at most the cap's attempts before it
+ * escalates again with a fresh card. `init_dismissed` / `init_authored_spec` stay terminal (they are the
+ * director's own decision, not a question to the CEO).
  */
-export async function alreadyInitiated(admin: Admin, slug: string): Promise<boolean> {
-  const { data } = await admin
+export async function alreadyInitiated(admin: Admin, slug: string, workspaceId?: string): Promise<boolean> {
+  let q = admin
     .from("director_activity")
     .select("action_kind, metadata")
     .eq("director_function", PLATFORM)
-    .in("action_kind", ["escalated", "init_dismissed", "init_authored_spec"])
-    .order("created_at", { ascending: false })
-    .limit(1000);
+    .in("action_kind", ["escalated", "init_dismissed", "init_authored_spec"]);
+  if (workspaceId) q = q.eq("workspace_id", workspaceId);
+  const { data } = await q.order("created_at", { ascending: false }).limit(1000);
   const escalationKeys = new Set(initEscalationKeys(slug));
   const ledgerKey = initKey(slug);
-  return (data ?? []).some((r) => {
+  const escalatedKeys = new Set<string>();
+  for (const r of data ?? []) {
     const meta = (r.metadata as Record<string, unknown> | null) ?? {};
-    if (r.action_kind === "escalated") return escalationKeys.has(String(meta["dedupe_key"] ?? ""));
-    return meta["init_key"] === ledgerKey;
-  });
+    if (r.action_kind === "escalated") {
+      const key = String(meta["dedupe_key"] ?? "");
+      if (escalationKeys.has(key)) escalatedKeys.add(key);
+    } else if (meta["init_key"] === ledgerKey) {
+      return true;
+    }
+  }
+  if (!escalatedKeys.size) return false;
+  return initEscalationStillOpen(admin, [...escalatedKeys], workspaceId);
+}
+
+/** Is any CEO card for these init-escalation dedupe keys still undismissed? Fail-closed (true) on a read
+ *  error, so a transient fault never re-arms a spec the CEO is still deciding on. */
+async function initEscalationStillOpen(admin: Admin, dedupeKeys: string[], workspaceId?: string): Promise<boolean> {
+  let q = admin
+    .from("dashboard_notifications")
+    .select("id")
+    .eq("dismissed", false)
+    .in("metadata->>dedupe_key", dedupeKeys);
+  if (workspaceId) q = q.eq("workspace_id", workspaceId);
+  const { data, error } = await q.limit(1);
+  if (error) return true;
+  return (data ?? []).length > 0;
 }
 
 /**
@@ -5224,7 +5253,7 @@ export async function findInitCandidates(admin: Admin): Promise<InitCandidate[]>
     if (out.length >= target) break;
     const state = await specBuildState(admin, workspaceId, s.slug);
     if (state.inFlight) continue; // a build is already carrying it — not "unstarted with no build"
-    if (await alreadyInitiated(admin, s.slug)) continue; // already terminally escalated — don't re-investigate
+    if (await alreadyInitiated(admin, s.slug, workspaceId)) continue; // already terminally escalated — don't re-investigate
     const got = await getSpec(s.slug);
     if (!got) continue;
     out.push({

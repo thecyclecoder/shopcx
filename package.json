@@ -239,6 +239,8 @@
     "test:pre-merge-fix": "tsx --test src/lib/pre-merge-fix.test.ts",
     "test:premerge-fix-force": "tsx --test src/lib/agent-jobs.premerge-fix-force.test.ts",
     "test:repeat-verdict-breaker": "tsx --test src/lib/repeat-verdict-breaker.test.ts",
+    "test:init-rearm": "tsx --test src/lib/agents/platform-director.init-rearm.test.ts",
+    "test:auto-merge-stale-park": "tsx --test src/lib/github-pr-resolve.stale-park.test.ts",
     "test:approval-router": "tsx --test src/lib/agents/approval-router.test.ts",
     "test:growth-director": "tsx --test src/lib/agents/growth-director.test.ts",
     "test:cs-director": "tsx --test src/lib/agents/cs-director.test.ts",
