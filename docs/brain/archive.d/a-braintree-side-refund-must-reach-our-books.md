@@ -1,0 +1,1 @@
+- **A Braintree-side refund must reach our books** · verified 2026-10-13 · → [[../lifecycles/return-pipeline]]
