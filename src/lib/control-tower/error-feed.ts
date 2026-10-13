@@ -3443,6 +3443,79 @@ export function isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting an UNQUALIFIED missing-column error (`column
+ * "<name>" does not exist`, no table alias) for ANY ad hoc read-only lookup against
+ * `error_events`. `error_events` DOES exist as a product table, but a bare
+ * `select … from error_events` that names a column with no table alias and that we don't
+ * own (`occurrence_count`, …) only comes from an external / manual SQL tool or a stale
+ * exploratory query guessing at our error-feed schema. There is no lever from ShopCX to
+ * make that query resolve, so paging Platform on it (Control Tower signature
+ * `supabase-logs:0e3379f172768a91`) is repair work for a query we don't own.
+ *
+ * The generalization of `isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise`:
+ * that sibling pinned the two guessed columns `label`/`message` AND required the
+ * `coalesce(label|message` free-text-search marker, so a bare `select … from error_events`
+ * naming any OTHER unqualified column (e.g. `occurrence_count`) leaked through and paged
+ * Platform. This predicate drops the whole class — any unqualified `column "<name>" does
+ * not exist` attached to the SAME read-only lookup shape the relation-qualified sibling
+ * `isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise` uses — while a non-SELECT
+ * write, a different table, or a modifying PostgREST CTE stays captured and keeps paging.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message (with any leading Postgres `ERROR: ` prefix stripped) is EXACTLY the
+ *      unqualified missing-column shape — trimmed matching `^column "<name>" does not
+ *      exist$` with `<name>` a plain unquoted identifier (a-z / 0-9 / _). A relation-
+ *      qualified message (`column error_events.<name> …`), a FATAL / PANIC, or any other
+ *      Postgres error falls through and still pages, AND
+ *   2. the lowercased query is the SAME read-only lookup shape the relation-qualified
+ *      sibling accepts — a bare `select … from (public.)?error_events`, PostgREST's
+ *      `with pgrst_source as ( select … from "public"."error_events" … )` CTE wrapper, or
+ *      any other quoted PostgREST read whose outer statement is a SELECT
+ *      (`isQuotedPostgrestErrorEventsLookup`). A non-SELECT write and a modifying CTE whose
+ *      outer statement is INSERT/UPDATE/DELETE stay captured — the pin is the read shape.
+ *
+ * Narrowly gated so:
+ *   - an unqualified column-missing error attached to a non-SELECT write on `error_events`
+ *     (a real write-path code bug) still pages — the pin is the SELECT-lookup shape only,
+ *   - an unqualified column-missing error whose query reads a DIFFERENT table still pages —
+ *     the pin is `error_events` only,
+ *   - a relation-qualified `column error_events.<name> does not exist` is handled by the
+ *     sibling, not here (different message shape),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. This signature is the UNQUALIFIED
+  // missing-column shape (`column "<name>" does not exist`, no table alias) for any guessed
+  // column, not just the `label`/`message` pair the coalesce-search sibling pinned.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (!/^column "[a-z_][a-z0-9_]*" does not exist$/.test(stripped)) {
+    return false;
+  }
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // SAME read-only lookup shape the relation-qualified sibling
+  // `isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise` accepts — the bare
+  // `select ... from public.error_events` shape, PostgREST's `WITH pgrst_source AS
+  // ( SELECT ... FROM "public"."error_events" ... )` CTE wrapper, or any other quoted
+  // PostgREST read whose outer statement is a SELECT. A non-SELECT write (or a modifying
+  // CTE) is a real code-write and stays captured/paged.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?error_events\b/.test(q)) return true;
+  if (/^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?error_events\b/.test(q)) return true;
+  return isQuotedPostgrestErrorEventsLookup(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column reference "oid" is ambiguous` on a
  * catalog-introspection query that joins two `pg_catalog` tables (each carrying its own
  * `oid` column) without qualifying the `oid` reference. None of our own SQL emits this

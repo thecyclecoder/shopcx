@@ -66,6 +66,7 @@ import {
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise,
+  isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isForeignSupabasePostgresAmbiguousOidIntrospectionNoise,
   isForeignSupabasePostgresOrdersNameLookupNoise,
@@ -697,6 +698,16 @@ const LOG_QUERIES: LogQuery[] = [
       // unqualified column-missing message AND the bare-SELECT coalesce-search shape — a
       // relation-qualified column bug, a different table, or a non-SELECT write still pages.
       if (isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the generalization of the coalesce-search drop
+      // above — ANY unqualified `column "<name>" does not exist` (e.g. `occurrence_count`)
+      // attached to a bare read-only `select … from error_events` lookup, not just the
+      // `label`/`message` pair with the coalesce marker
+      // ([[../specs/error-feed-drop-error-events-unqualified-column-adhoc-lookup]], Control
+      // Tower signature `supabase-logs:0e3379f172768a91`). A foreign SQL tool guessing at a
+      // column we don't own has no lever from us; narrowly gated to the SAME SELECT-lookup
+      // shape the relation-qualified sibling uses — a non-SELECT write, a different table,
+      // or a modifying PostgREST CTE still pages.
+      if (isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: Postgres reporting the built-in aggregate
       // `array_agg` classification when a catalog/introspection query resolves it as a
       // regular function ([[../specs/error-feed-drop-supabase-array-agg-aggregate-introspection-n]],
