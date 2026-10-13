@@ -21,16 +21,22 @@ import {
   analyzeSlowQuery,
   buildFixSpecMarkdown,
   classifyExplainPlan,
+  rateFromSnapshotDelta,
   enqueueDbHealthProposal,
   getDbHealthPanel,
   GROWTH_LEGITIMATE_TABLES,
   isForeignQuery,
   isInfrastructuralQuery,
   isMaintenanceCommand,
+  pickPriorSnapshot,
+  priorPerQueryFromSnapshot,
+  seqScanRelationRowEstimate,
+  _setSpecLookupForTests,
   type InstanceHealthInput,
   type DbHealthFinding,
   type RequestVolumeInput,
   type SlowQueryRow,
+  type StatStatementSnapshot,
   type TableSizeRow,
 } from "./db-health";
 import type { createAdminClient } from "@/lib/supabase/admin";
@@ -298,12 +304,14 @@ function fakeAdmin(seed: {
   workspaces?: FakeWorkspace[];
   loop_heartbeats?: FakeHeartbeat[];
   db_table_size_history?: FakeTableSizeRow[];
+  director_activity?: Array<Record<string, unknown>>;
 }): ReturnType<typeof createAdminClient> {
   const state = {
     agent_jobs: [...(seed.agent_jobs ?? [])],
     workspaces: [...(seed.workspaces ?? [])],
     loop_heartbeats: [...(seed.loop_heartbeats ?? [])],
     db_table_size_history: [...(seed.db_table_size_history ?? [])],
+    director_activity: [...(seed.director_activity ?? [])],
   };
   let nextId = 1;
 
@@ -812,6 +820,10 @@ test("Phase 2 already-shipped — proposal targeting a shipped/folded spec surfa
       specSlug: foldedRow.slug,
       specTitle: "Reduce calls to q -1756037457588317045",
       evidence: "pg_stat_statements: 10,822 calls/hr @ 1,600 ms/hr",
+      // The breach was measured over a snapshot delta window starting AFTER the 2026-08-03 fold, so the
+      // problem is still happening post-fix ⇒ the detector-review card is re-proposed (not suppressed).
+      // db-health-detector-measures-current-rate Phase 2 only suppresses a PRE-fold / un-attributable breach.
+      windowStartMs: Date.parse("2026-08-28T00:00:00.000Z"),
     } as DbHealthFinding;
 
     const admin = seedAdmin();
@@ -875,6 +887,136 @@ test("Phase 2 already-shipped — lookup failure degrades to the normal fresh-bu
   } finally {
     _setSpecLookupForTests(null);
   }
+});
+
+// ── db-health-detector-measures-current-rate Phase 2 — folded-fix post-fix suppression ──
+
+function foldedSpecRow(slug: string, foldedAt: string) {
+  return {
+    id: "s1", workspace_id: WORKSPACE_ID, slug, title: slug, summary: null, owner: "platform",
+    parent: "platform", blocked_by: [], priority: null, deferred: false, intended_status: null,
+    status: "folded" as const, intended_status_set_by: null, repair_signature: null,
+    regression_of_slug: null, regression_signature: null, related_spec: null, auto_build: false,
+    vale_pass: null, vale_review_passed_at: null, ada_disposition: null, vale_disposition: null,
+    vale_disposition_reason: null, milestone_id: null, merged_pr: 2600, last_merge_sha: "abcd1234",
+    goal_branch_sha: null, why: null, what: null, parent_kind: null, parent_ref: null, human_review: null,
+    created_at: "2026-08-01T00:00:00.000Z", updated_at: foldedAt,
+    phases: [{
+      id: "p1", spec_id: "s1", position: 1, title: "Phase 1", body: "…", status: "shipped" as const,
+      pr: 2600, merge_sha: "abcd", build_sha: null, verification: null, why: null, what: null,
+      kind: "phase", origin_check_keys: [], metadata: {},
+      created_at: "2026-08-01T00:00:00.000Z", updated_at: foldedAt,
+    }],
+  };
+}
+
+function rvFinding(overrides: Partial<DbHealthFinding>): DbHealthFinding {
+  return {
+    signature: "dbhealth:request-volume:instance",
+    category: "slow_query",
+    cause: "request_volume_pressure",
+    fixKind: "reduce_calls",
+    table: "(instance)",
+    title: "Request-volume firehose",
+    impact: "120,000 req/hr over the last 24.0h",
+    score: 120_000,
+    evidence: "…",
+    specSlug: "db-reduce-calls-request-volume",
+    specTitle: "Cut the request-volume firehose",
+    windowSource: "delta",
+    ...overrides,
+  } as DbHealthFinding;
+}
+
+test("Phase 2 suppression — folded target + breach window STARTS BEFORE the fold ⇒ suppressed + logged, no card", async () => {
+  const foldedAt = "2026-10-01T00:00:00.000Z";
+  _setSpecLookupForTests(async (_ws, slug) => (slug === "db-reduce-calls-request-volume" ? (foldedSpecRow(slug, foldedAt) as never) : null));
+  try {
+    // The delta window started 2026-09-20 — BEFORE the 2026-10-01 fold — so the still-breaching rate is
+    // stale pre-fix history, not a sign the problem is back. The detector must NOT re-escalate.
+    const finding = rvFinding({ windowStartMs: Date.parse("2026-09-20T00:00:00.000Z") });
+    const admin = seedAdmin();
+    const res = await enqueueDbHealthProposal(admin, finding);
+    assert.equal(res.enqueued, false, `a pre-fold breach against a folded fix must be suppressed; got ${JSON.stringify(res)}`);
+    // No agent_jobs card was written.
+    const { data: jobs } = await admin.from("agent_jobs").select("id").eq("kind", "db_health").eq("spec_slug", finding.signature);
+    assert.equal((jobs as unknown[]).length, 0, "suppressed finding must not enqueue a card");
+    // The suppression is logged to director_activity (auditable, never a silent drop).
+    const { data: acts } = await admin.from("director_activity").select("action_kind, spec_slug, reason").eq("action_kind", "db_health_suppressed_post_fix");
+    const rows = acts as Array<Record<string, unknown>>;
+    assert.equal(rows.length, 1, "exactly one suppression row must be recorded");
+    assert.equal(rows[0].spec_slug, "db-reduce-calls-request-volume");
+    assert.match(String(rows[0].reason), /folded|before the fold|stale/i);
+  } finally {
+    _setSpecLookupForTests(null);
+  }
+});
+
+test("Phase 2 suppression — folded target + NO delta window (reset-window fallback) ⇒ suppressed (breach not attributable)", async () => {
+  _setSpecLookupForTests(async (_ws, slug) => (slug === "db-reduce-calls-request-volume" ? (foldedSpecRow(slug, "2026-10-01T00:00:00.000Z") as never) : null));
+  try {
+    const finding = rvFinding({ windowSource: "reset_window", windowStartMs: undefined });
+    const admin = seedAdmin();
+    const res = await enqueueDbHealthProposal(admin, finding);
+    assert.equal(res.enqueued, false, "a cumulative reset-window breach can't be attributed post-fold ⇒ suppress");
+    const { data: acts } = await admin.from("director_activity").select("action_kind").eq("action_kind", "db_health_suppressed_post_fix");
+    assert.equal((acts as unknown[]).length, 1, "the reset-window suppression is logged too");
+  } finally {
+    _setSpecLookupForTests(null);
+  }
+});
+
+test("Phase 2 suppression — folded target + breach window STARTS AFTER the fold ⇒ re-proposed (problem still happening)", async () => {
+  const foldedAt = "2026-10-01T00:00:00.000Z";
+  _setSpecLookupForTests(async (_ws, slug) => (slug === "db-reduce-calls-request-volume" ? (foldedSpecRow(slug, foldedAt) as never) : null));
+  try {
+    const finding = rvFinding({ windowStartMs: Date.parse("2026-10-10T00:00:00.000Z") }); // after the fold
+    const admin = seedAdmin();
+    const res = await enqueueDbHealthProposal(admin, finding);
+    assert.equal(res.enqueued, true, "a post-fold breach still re-proposes (as a detector-review card)");
+    const { data: acts } = await admin.from("director_activity").select("action_kind").eq("action_kind", "db_health_suppressed_post_fix");
+    assert.equal((acts as unknown[]).length, 0, "a genuinely-recurring problem is NOT suppressed");
+  } finally {
+    _setSpecLookupForTests(null);
+  }
+});
+
+// ── db-health-detector-measures-current-rate Phase 2 — small-table seq scan is row_volume, not an index ──
+
+test("analyzeSlowQuery — a Seq Scan on a SMALL table shipping many rows/call ⇒ row_volume / reduce_calls (NOT seq_scan/add_index)", () => {
+  const plan = [
+    "Seq Scan on specs  (cost=0.00..18.70 rows=700 width=320)",
+  ].join("\n");
+  // 700 rows/call off a ~700-row table (list_specs_with_phases) — an index is never used here.
+  const finding = analyzeSlowQuery(
+    { queryid: "list-specs", query: "select * from specs where workspace_id = $1", calls: 1000, total_exec_time: 60_000, mean_exec_time: 60, stddev_exec_time: 10, rows: 700_000 },
+    plan,
+  );
+  assert.ok(finding, "a 60ms × 1000-call seq scan over the floor should still produce a finding");
+  assert.equal(finding!.cause, "row_volume", "a small-table seq scan is row volume, not a missing index");
+  assert.equal(finding!.fixKind, "reduce_calls", "the fix is to cut the egress, never add_index");
+  assert.match(finding!.evidence, /ROW VOLUME|rows\/call/i);
+  assert.doesNotMatch(finding!.evidence, /add an index on the WHERE\/JOIN predicate/i);
+});
+
+test("analyzeSlowQuery — a Seq Scan on a BIG table stays seq_scan / add_index (the small-table rule doesn't over-rotate)", () => {
+  const plan = [
+    "Seq Scan on orders  (cost=0.00..999999.00 rows=5000000 width=320)",
+    "  Rows Removed by Filter: 4999900",
+  ].join("\n");
+  const finding = analyzeSlowQuery(
+    { queryid: "big-scan", query: "select * from orders where status = $1", calls: 1000, total_exec_time: 120_000, mean_exec_time: 120, stddev_exec_time: 10, rows: 100_000 },
+    plan,
+  );
+  assert.ok(finding);
+  assert.equal(finding!.cause, "seq_scan", "a 5M-row table with a selective filter is a genuine missing-index case");
+  assert.equal(finding!.fixKind, "add_index");
+});
+
+test("seqScanRelationRowEstimate parses the planner's rows= for the named relation", () => {
+  const plan = "Seq Scan on specs  (cost=0.00..18.70 rows=742 width=320)";
+  assert.equal(seqScanRelationRowEstimate(plan, "specs"), 742);
+  assert.equal(seqScanRelationRowEstimate(plan, "orders"), null); // not in the plan
 });
 
 // ── db-health-request-volume + temp-spill-attribution (2026-07-08 Devi re-tool) ──
@@ -980,6 +1122,123 @@ test("the request_volume_pressure spec renders escalation guidance (aggregate, n
   const md = buildFixSpecMarkdown(f!);
   assert.match(md, /aggregate request-volume/i);
   assert.match(md, /aggregate RPC/); // the durable lever is called out
+});
+
+// ── db-health-detector-measures-current-rate (Phase 1): rate from snapshot deltas ──
+
+const HOUR_MS = 60 * 60 * 1000;
+const NOW = Date.parse("2026-10-13T00:00:00.000Z");
+
+test("rateFromSnapshotDelta — delta against a ~24h snapshot (NOT the months-wide reset window)", () => {
+  // Cumulative since reset: 18,000,000 calls over a 1,720h window ⇒ ~10,465/hr (looks fixed-forever).
+  // But in the last 24h only 240,000 calls fired ⇒ 10,000/hr — the rate HAPPENING NOW.
+  const prior: StatStatementSnapshot = {
+    capturedAt: new Date(NOW - 24 * HOUR_MS).toISOString(),
+    totalCalls: 17_760_000,
+    totalRows: 17_280_000,
+  };
+  const w = rateFromSnapshotDelta({
+    nowMs: NOW,
+    currentTotalCalls: 18_000_000,
+    currentTotalRows: 18_000_000,
+    resetWindowHours: 1_720,
+    prior,
+  });
+  assert.equal(w.source, "delta");
+  assert.equal(w.resetDetected, false);
+  assert.equal(Math.round(w.windowHours), 24);
+  assert.equal(w.totalCalls, 240_000); // delta, not the 18M cumulative
+  assert.equal(w.totalRows, 720_000);
+});
+
+test("rateFromSnapshotDelta — no prior snapshot ⇒ labelled reset-window fallback", () => {
+  const w = rateFromSnapshotDelta({
+    nowMs: NOW,
+    currentTotalCalls: 18_000_000,
+    currentTotalRows: 18_000_000,
+    resetWindowHours: 1_720,
+    prior: null,
+  });
+  assert.equal(w.source, "reset_window");
+  assert.equal(w.resetDetected, false);
+  assert.equal(w.windowHours, 1_720);
+  assert.equal(w.totalCalls, 18_000_000); // cumulative — the honest best we can do on the first sweep
+});
+
+test("rateFromSnapshotDelta — stats reset between snapshots (negative delta) ⇒ post-reset totals over the reset window", () => {
+  // The prior snapshot saw 18M calls; now the cumulative counter reads 500K ⇒ it was reset. The current
+  // totals ARE the post-reset totals, measured over the (short) reset window — not a nonsense negative rate.
+  const prior: StatStatementSnapshot = {
+    capturedAt: new Date(NOW - 24 * HOUR_MS).toISOString(),
+    totalCalls: 18_000_000,
+    totalRows: 18_000_000,
+  };
+  const w = rateFromSnapshotDelta({
+    nowMs: NOW,
+    currentTotalCalls: 500_000,
+    currentTotalRows: 400_000,
+    resetWindowHours: 5,
+    prior,
+  });
+  assert.equal(w.source, "reset_window");
+  assert.equal(w.resetDetected, true);
+  assert.equal(w.windowHours, 5);
+  assert.equal(w.totalCalls, 500_000);
+  assert.equal(w.totalRows, 400_000);
+});
+
+test("pickPriorSnapshot — chooses the snapshot closest to 24h ago, ignoring future rows", () => {
+  const snapshots: StatStatementSnapshot[] = [
+    { capturedAt: new Date(NOW - 2 * HOUR_MS).toISOString(), totalCalls: 1, totalRows: 1 }, // too recent
+    { capturedAt: new Date(NOW - 23 * HOUR_MS).toISOString(), totalCalls: 2, totalRows: 2 }, // closest to 24h
+    { capturedAt: new Date(NOW - 50 * HOUR_MS).toISOString(), totalCalls: 3, totalRows: 3 }, // too old
+    { capturedAt: new Date(NOW + HOUR_MS).toISOString(), totalCalls: 4, totalRows: 4 }, // future — ignored
+  ];
+  const picked = pickPriorSnapshot(snapshots, NOW);
+  assert.ok(picked);
+  assert.equal(picked!.totalCalls, 2);
+  assert.equal(pickPriorSnapshot([], NOW), null); // no snapshots ⇒ null (first sweep)
+});
+
+test("analyzeRequestVolume — a delta window labels the card 'the last Nh', a reset window labels it cumulative", () => {
+  const base = {
+    totalCalls: 2_400_000, // 100K/hr over 24h ⇒ at the flag
+    totalRows: 2_400_000,
+    topByCalls: [{ queryid: "q", query: SET_CONFIG_PREAMBLE, calls: 1_000_000, rows: 1_000_000 }],
+    topByRows: [{ queryid: "q", query: SET_CONFIG_PREAMBLE, calls: 1_000_000, rows: 1_000_000 }],
+  };
+  const delta = analyzeRequestVolume({ ...base, windowHours: 24, windowSource: "delta" });
+  assert.ok(delta);
+  assert.match(delta!.evidence, /delta between two pg_stat_statements snapshots/);
+  assert.match(delta!.impact, /over the last 24\.0h/);
+
+  const reset = analyzeRequestVolume({
+    ...base,
+    windowHours: 1_720,
+    totalCalls: 180_000_000, // ~104K/hr over the months-wide window ⇒ still over the flag
+    totalRows: 180_000_000,
+    windowSource: "reset_window",
+  });
+  assert.ok(reset);
+  assert.match(reset!.evidence, /cumulative since the last pg_stat_statements reset/);
+  assert.match(reset!.impact, /cumulative 1720\.0h window/);
+});
+
+test("priorPerQueryFromSnapshot — builds the per-queryid prior map + reading age for the Δ/hr self-clear", () => {
+  const snapshot: StatStatementSnapshot = {
+    capturedAt: new Date(NOW - 24 * HOUR_MS).toISOString(),
+    totalCalls: 100,
+    totalRows: 100,
+    perQuery: [{ queryid: "abc", calls: 500, totalExecTime: 2_000, rows: 10 }],
+  };
+  const { priorByQueryid, readingAgeHours } = priorPerQueryFromSnapshot(snapshot, NOW);
+  assert.equal(priorByQueryid.get("abc")?.calls, 500);
+  assert.equal(priorByQueryid.get("abc")?.total_exec_time, 2_000);
+  assert.equal(Math.round(readingAgeHours ?? 0), 24);
+  // No snapshot ⇒ empty map, undefined age (the slow-query pass falls back to the prior beat).
+  const none = priorPerQueryFromSnapshot(null, NOW);
+  assert.equal(none.priorByQueryid.size, 0);
+  assert.equal(none.readingAgeHours, undefined);
 });
 
 // ── db-health-temp-spill-rate (2026-07-08): self-clearing temp detection ──
