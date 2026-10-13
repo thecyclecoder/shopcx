@@ -5391,16 +5391,45 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
       return;
     }
 
+    // db-health-detector-measures-current-rate Phase 1 — load the stored pg_stat_statements snapshots
+    // and pick the one closest to ~24h ago. The per-query DELTA self-clear and the request-volume rate
+    // both measure against THIS snapshot (the rate happening now), not the months-wide cumulative reset
+    // window. Best-effort — a lookup failure falls through to the prior-beat / cumulative fallback below.
+    let priorSnapshot: import("../src/lib/control-tower/db-health").StatStatementSnapshot | null = null;
+    try {
+      const { data: snapRows } = await db
+        .from("db_stat_statement_snapshots")
+        .select("captured_at, total_calls, total_rows, per_query")
+        .order("captured_at", { ascending: false })
+        .limit(50);
+      const snapshots = ((snapRows ?? []) as Array<Record<string, unknown>>).map((r) => ({
+        capturedAt: String(r.captured_at ?? ""),
+        totalCalls: Number(r.total_calls ?? 0),
+        totalRows: Number(r.total_rows ?? 0),
+        perQuery: Array.isArray(r.per_query)
+          ? (r.per_query as Array<Record<string, unknown>>).map((q) => ({
+              queryid: String(q.queryid ?? ""),
+              calls: Number(q.calls ?? 0),
+              totalExecTime: Number(q.totalExecTime ?? 0),
+              rows: Number(q.rows ?? 0),
+            }))
+          : undefined,
+      }));
+      priorSnapshot = mod.pickPriorSnapshot(snapshots, Date.now());
+    } catch (e) {
+      console.warn("[db-health] snapshot store lookup failed (prior-beat fallback):", errText(e));
+    }
+
     // db-reduce-calls-q-1756037457588317045 Fix 1 — RATE self-clearing input. pg_stat_statements is
     // CUMULATIVE and Supabase's postgres role can't `pg_stat_reset()`, so a cache/batch fix would never
-    // clear a `high_call_volume` finding on the cumulative flag alone. Load the prior slow-query beat's
-    // rowset (compact `{queryid, calls, total_exec_time}` snapshot; the same shape recorded below) so
-    // `analyzeSlowQuery` can prefer Δ/hr over the cumulative flag — a self-clear the instant the rate
-    // drops, mirroring the `tempBytesPrev` / `tempReadingAgeHours` pattern already in analyzeInstanceHealth.
-    // Best-effort — a lookup failure falls through to the cumulative flag (correctness-equivalent).
-    const priorByQueryid = new Map<string, import("../src/lib/control-tower/db-health").SlowQueryRow>();
-    let priorReadingAgeHours: number | undefined;
-    try {
+    // clear a `high_call_volume` finding on the cumulative flag alone. Prefer the ~24h snapshot's
+    // per-queryid counters (db-health-detector-measures-current-rate Phase 1); fall back to the prior
+    // slow-query beat's rowset (compact `{queryid, calls, total_exec_time}` snapshot; the same shape
+    // recorded below) so `analyzeSlowQuery` can prefer Δ/hr over the cumulative flag — a self-clear the
+    // instant the rate drops, mirroring the `tempBytesPrev` / `tempReadingAgeHours` pattern in
+    // analyzeInstanceHealth. Best-effort — a lookup failure falls through to the cumulative flag.
+    let { priorByQueryid, readingAgeHours: priorReadingAgeHours } = mod.priorPerQueryFromSnapshot(priorSnapshot, Date.now());
+    if (priorByQueryid.size === 0) try {
       const { data: priorBeatData } = await db
         .from("loop_heartbeats")
         .select("ran_at, produced")
@@ -5449,20 +5478,51 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
     try {
       const infoRes = await c.query(`select stats_reset from pg_stat_statements_info`);
       const statsReset = (infoRes.rows[0] as { stats_reset?: string } | undefined)?.stats_reset;
-      const windowHours = statsReset ? Math.max(0, (Date.now() - new Date(statsReset).getTime()) / 3_600_000) : 0;
+      const resetWindowHours = statsReset ? Math.max(0, (Date.now() - new Date(statsReset).getTime()) / 3_600_000) : 0;
       const totalsRes = await c.query(`select coalesce(sum(calls),0)::bigint as calls, coalesce(sum(rows),0)::bigint as rows from pg_stat_statements`);
       const totals = (totalsRes.rows[0] ?? {}) as Record<string, unknown>;
       const topCallsRes = await c.query(`select queryid::text as queryid, query, calls, rows from pg_stat_statements order by calls desc limit 8`);
       const topRowsRes = await c.query(`select queryid::text as queryid, query, calls, rows from pg_stat_statements order by rows desc limit 8`);
       const mapTop = (rs: Array<Record<string, unknown>>) => rs.map((r) => ({ queryid: String(r.queryid ?? ""), query: String(r.query ?? ""), calls: Number(r.calls ?? 0), rows: Number(r.rows ?? 0) }));
+      const curCalls = Number(totals.calls ?? 0);
+      const curRows = Number(totals.rows ?? 0);
+      // db-health-detector-measures-current-rate Phase 1 — rate from the DELTA to the ~24h snapshot, not
+      // the months-wide cumulative reset window. The reset window is the labelled fallback (first sweep /
+      // reset detected). `windowSource` drives the honest card wording.
+      const window = mod.rateFromSnapshotDelta({
+        nowMs: Date.now(),
+        currentTotalCalls: curCalls,
+        currentTotalRows: curRows,
+        resetWindowHours,
+        prior: priorSnapshot,
+      });
       const rvFinding = mod.analyzeRequestVolume({
-        windowHours,
-        totalCalls: Number(totals.calls ?? 0),
-        totalRows: Number(totals.rows ?? 0),
+        windowHours: window.windowHours,
+        totalCalls: window.totalCalls,
+        totalRows: window.totalRows,
+        windowSource: window.source,
+        // The delta window starts at the prior snapshot's capture instant — carried so the enqueue path
+        // can suppress a re-proposal whose breach predates a folded fix (Phase 2 post-fix suppression).
+        windowStartMs: window.source === "delta" && priorSnapshot ? Date.parse(priorSnapshot.capturedAt) : undefined,
         topByCalls: mapTop(topCallsRes.rows as Array<Record<string, unknown>>),
         topByRows: mapTop(topRowsRes.rows as Array<Record<string, unknown>>),
       });
       if (rvFinding) findings.push(rvFinding);
+
+      // Store THIS sweep's snapshot so the next sweep can delta against it. Per-query counters cover the
+      // rows we scanned this pass (bounded) — enough for the per-query Δ/hr self-clear. Best-effort.
+      try {
+        const perQuery = rows.map((r) => ({ queryid: r.queryid, calls: r.calls, totalExecTime: r.total_exec_time, rows: r.rows }));
+        const { error: snapErr } = await db.from("db_stat_statement_snapshots").insert({
+          total_calls: curCalls,
+          total_rows: curRows,
+          stats_reset: statsReset ?? null,
+          per_query: perQuery,
+        });
+        if (snapErr) console.warn("[db-health] snapshot insert failed:", snapErr.message);
+      } catch (e) {
+        console.warn("[db-health] snapshot insert threw:", errText(e));
+      }
     } catch (e) {
       console.warn("[db-health] request-volume escalation failed:", errText(e));
     }

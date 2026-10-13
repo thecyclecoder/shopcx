@@ -39,6 +39,7 @@ export type DbHealthCause =
   | "full_aggregate" // a full-table aggregate / DISTINCT scan (the control_tower_loop_beats class).
   | "missing_limit" // an unbounded result set with no LIMIT.
   | "high_call_volume" // fast PER CALL but hammered — a hot endpoint dominating total time by VOLUME, not per-call cost → reduce calls / cache / a hot-predicate (or GIN) index. Never a vacuum.
+  | "row_volume" // a Seq Scan on a SMALL table (planner is right to scan it) that ships many rows PER CALL — the cost is the row egress of the RPC, not a missing index → reduce_calls (page/limit/aggregate/cache), never add_index. (db-health-detector-measures-current-rate Phase 2.)
   | "bloat_stale_stats" // the plan is bad because stats are stale / the table is bloated → vacuum/analyze.
   // size/index/bloat causes (from the daily sweep):
   | "unbounded_growth" // a table growing fast with no apparent retention (the loop_heartbeats case).
@@ -80,6 +81,7 @@ const FIX_KIND_BY_CAUSE: Record<DbHealthCause, DbHealthFixKind> = {
   full_aggregate: "query_rewrite",
   missing_limit: "query_rewrite",
   high_call_volume: "reduce_calls",
+  row_volume: "reduce_calls",
   bloat_stale_stats: "vacuum_tuning",
   unbounded_growth: "retention_cron",
   missing_index: "add_index",
@@ -321,6 +323,17 @@ export const REQUEST_VOLUME_ROWS_PER_HR_FLAG = 100_000;
 /** Ignore windows shorter than this — a just-reset pg_stat_statements gives a noisy rate. */
 export const REQUEST_VOLUME_MIN_WINDOW_HOURS = 1;
 
+// ── Small-table seq-scan → row_volume (db-health-detector-measures-current-rate Phase 2) ──
+// A Seq Scan on a SMALL relation is NOT a missing index — the planner is right to scan a tiny table, and
+// an index on it would never be used, so an add_index spec just churns. When the seq-scanned relation's
+// row estimate is below this AND the query ships many rows PER CALL, the cost is row VOLUME (the RPC's
+// egress), reclassified as `row_volume` → `reduce_calls` naming the RPC (the list_specs_with_phases
+// ~700-rows/call case), never `seq_scan`/`add_index`.
+/** A seq-scanned relation estimated below this many rows is "small" — an index on it is never worth it. */
+export const SMALL_TABLE_ROW_ESTIMATE_MAX = 10_000;
+/** Rows shipped PER CALL at or above this, from a small table, ⇒ `row_volume` (reduce the egress, not an index). */
+export const ROW_VOLUME_ROWS_PER_CALL_MIN = 100;
+
 // ── Phase 2 trend thresholds (project the size-history forward, not just day-over-day) ──
 /** Need at least this many snapshots in the window to fit a trend (fewer ⇒ no projection — honest). */
 export const TREND_MIN_POINTS = 3;
@@ -469,6 +482,14 @@ export interface DbHealthFinding {
   /** the proposed fix spec's slug + title (authored to docs/brain/specs on owner Build). */
   specSlug: string;
   specTitle: string;
+  /** How the rate behind this finding was measured — a DELTA between two snapshots (the rate happening
+   *  now) or the cumulative reset window. Absent for findings with no rate window (size/bloat/index).
+   *  (db-health-detector-measures-current-rate.) */
+  windowSource?: RateWindowSource;
+  /** Epoch ms of the START of the rate window (the prior snapshot's capture instant) when
+   *  `windowSource === 'delta'`. Lets the enqueue path tell whether a still-breaching rate was measured
+   *  AFTER a folded fix's ship date (Phase 2 post-fix suppression). Absent for a reset-window fallback. */
+  windowStartMs?: number;
 }
 
 // ── Slow-query classification (the EXPLAIN root-cause brain) ──────────────────
@@ -504,6 +525,18 @@ export interface ExplainClassification {
 }
 
 const SEQ_SCAN_RE = /Seq Scan on (?:"?public"?\.)?"?([a-z_][a-z0-9_]*)"?/gi;
+
+/**
+ * Parse the planner's row estimate for the Seq Scan node on `table` out of an EXPLAIN plan (the `rows=N`
+ * inside that node's `(cost=… rows=N …)`). Returns null when the node/estimate isn't found. Used to tell
+ * a small-table seq scan (an index would never be used — `row_volume`) from a big-table one (a genuine
+ * missing-index `seq_scan`). db-health-detector-measures-current-rate Phase 2.
+ */
+export function seqScanRelationRowEstimate(planText: string, table: string): number | null {
+  const re = new RegExp(`Seq Scan on (?:"?public"?\\.)?"?${table}"?[^\\n(]*\\(cost=[^)]*\\brows=(\\d+)`, "i");
+  const m = re.exec(planText || "");
+  return m ? Number(m[1]) : null;
+}
 /** Any index-driven node in an EXPLAIN plan — a Bitmap Index Scan / Index Scan / Index Only Scan on
  *  a table, plus a Bitmap Heap Scan (the fetch node that pairs with a Bitmap Index Scan). If the plan
  *  is index-driven, a VACUUM never fixes it — the agent-mandate-hardening-dbhealth guardrail keys off
@@ -691,6 +724,22 @@ export function analyzeSlowQuery(
         : "slow query without an EXPLAIN plan (parameterized statement, plan blocked) — treat as call-volume pressure (reduce calls / cache / widen the poll interval). A vacuum is only correct with a real dead-tuple signal, which this path never measures.";
     }
     planBlock = "(EXPLAIN unavailable — pg_stat_statements normalized text could not be planned)";
+  }
+
+  // db-health-detector-measures-current-rate Phase 2 — a Seq Scan on a SMALL table is NOT a missing
+  // index: the planner is RIGHT to seq-scan a tiny relation (an index on it would never be used), so an
+  // add_index spec just churns. When the seq-scanned relation's row estimate is below
+  // SMALL_TABLE_ROW_ESTIMATE_MAX AND the query ships ≥ ROW_VOLUME_ROWS_PER_CALL_MIN rows PER CALL, the
+  // cost is row VOLUME — the RPC's egress (the `list_specs_with_phases` ~700-rows/call case) — so
+  // reclassify as `row_volume` → `reduce_calls` naming the RPC, never `seq_scan`/`add_index`.
+  if (cause === "seq_scan" && cls && cls.seqScanTables.length > 0 && planText) {
+    const relTable = cls.seqScanTables[0];
+    const relRows = seqScanRelationRowEstimate(planText, relTable);
+    const rowsPerCall = row.calls > 0 ? row.rows / row.calls : 0;
+    if (relRows !== null && relRows < SMALL_TABLE_ROW_ESTIMATE_MAX && rowsPerCall >= ROW_VOLUME_ROWS_PER_CALL_MIN) {
+      cause = "row_volume";
+      hint = `the planner is RIGHT to Seq Scan ${relTable} (≈${relRows.toLocaleString()} rows — an index on a table this small is never used, so an add-index spec would just churn). The cost is ROW VOLUME: this RPC ships ~${Math.round(rowsPerCall).toLocaleString()} rows/call. Reduce the egress — page/LIMIT the result set, return an aggregate, or cache it — do NOT add an index.`;
+    }
   }
 
   // agent-mandate-hardening-dbhealth guardrail: from the slow-query path, ROUTE no_index_match →
@@ -1124,22 +1173,167 @@ export interface RequestVolumeTopQuery {
  * Everything is over the SAME window (since the last stats reset).
  */
 export interface RequestVolumeInput {
-  /** Hours since the stats window reset (pg_stat_statements_info.stats_reset → now). */
+  /** Hours the totals below are measured over — the DELTA window (prior snapshot → now) when a prior
+   *  snapshot exists, else the reset window (pg_stat_statements_info.stats_reset → now). */
   windowHours: number;
-  /** sum(calls) over pg_stat_statements — total statements in the window. */
+  /** calls over the window — the per-sweep DELTA when `windowSource === 'delta'`, else the cumulative
+   *  sum(calls) since the last stats reset. */
   totalCalls: number;
-  /** sum(rows) over pg_stat_statements — total rows shipped to clients (egress proxy). */
+  /** rows shipped to clients over the window (egress proxy) — DELTA or cumulative, same as totalCalls. */
   totalRows: number;
   /** Top statements by call count (the request firehose). */
   topByCalls: RequestVolumeTopQuery[];
   /** Top statements by rows returned (the egress firehose). */
   topByRows: RequestVolumeTopQuery[];
+  /** Where `windowHours`/`totalCalls`/`totalRows` came from — a DELTA between two snapshots (~24h, the
+   *  honest "happening now" rate) or the cumulative RESET window (fallback when no prior snapshot /
+   *  a reset was detected). Drives the evidence wording so a months-wide reset window is labelled, not
+   *  passed off as a current rate. Defaults to 'reset_window' for back-compat with callers that don't
+   *  yet thread a snapshot delta. (db-health-detector-measures-current-rate Phase 1.) */
+  windowSource?: RateWindowSource;
+  /** Epoch ms of the start of the delta window (the prior snapshot's capture instant) — carried onto the
+   *  finding so the enqueue path can tell a post-fold-breach from a pre-fold one. Only meaningful when
+   *  `windowSource === 'delta'`. (db-health-detector-measures-current-rate Phase 2.) */
+  windowStartMs?: number;
 }
 
 export interface RequestVolumeThresholds {
   callsPerHrFlag?: number;
   rowsPerHrFlag?: number;
   minWindowHours?: number;
+}
+
+// ── Snapshot-delta rates (db-health-detector-measures-current-rate, Phase 1) ──
+//
+// pg_stat_statements counters are CUMULATIVE since the last stats reset, and Supabase's postgres role
+// can't call pg_stat_reset(). On a long-lived instance that window is MONTHS (1,720h on 2026-10-13),
+// so a cumulative-total / windowHours rate averages a shipped fix across months of pre-fix history and
+// never looks fixed — the detector re-escalates solved problems forever. The fix: each sweep STORES a
+// snapshot of the instance totals (+ per-queryid counters) into db_stat_statement_snapshots, and the
+// rate is the DELTA to the snapshot closest to ~24h ago, divided by the elapsed hours — the rate that
+// is actually happening now. The reset window is the labelled fallback only when no prior snapshot
+// exists (first sweep) or a reset was detected between snapshots.
+
+/** Where a rate's window + totals came from — see RequestVolumeInput.windowSource. */
+export type RateWindowSource = "delta" | "reset_window";
+
+/** Per-queryid counters captured in a snapshot (feeds the per-query DELTA self-clear). */
+export interface StatStatementPerQuery {
+  queryid: string;
+  calls: number;
+  /** total_exec_time in ms (cumulative at snapshot time). */
+  totalExecTime: number;
+  rows: number;
+}
+
+/** One stored pg_stat_statements snapshot row (instance totals at `capturedAt` + optional per-query). */
+export interface StatStatementSnapshot {
+  /** ISO timestamp the snapshot was captured (db_stat_statement_snapshots.captured_at). */
+  capturedAt: string;
+  /** sum(calls) over pg_stat_statements at capture time (cumulative since the last reset). */
+  totalCalls: number;
+  /** sum(rows) over pg_stat_statements at capture time (cumulative since the last reset). */
+  totalRows: number;
+  /** Per-queryid counters at capture time, for per-query delta rates. */
+  perQuery?: StatStatementPerQuery[];
+}
+
+/** The window + totals to rate over, plus provenance for honest labelling. */
+export interface DeltaRateWindow {
+  windowHours: number;
+  totalCalls: number;
+  totalRows: number;
+  source: RateWindowSource;
+  /** True when a stats reset was detected between the prior snapshot and now (a negative delta). */
+  resetDetected: boolean;
+}
+
+/**
+ * From stored snapshots (any order), pick the one STRICTLY older than `nowMs` whose age is closest to
+ * `targetAgoMs` (default 24h) — the snapshot the delta-rate measures against. Returns null when none
+ * qualifies (first sweep). Pure.
+ */
+export function pickPriorSnapshot(
+  snapshots: StatStatementSnapshot[],
+  nowMs: number,
+  targetAgoMs: number = 24 * 60 * 60 * 1000,
+): StatStatementSnapshot | null {
+  const targetMs = nowMs - targetAgoMs;
+  let best: StatStatementSnapshot | null = null;
+  let bestDist = Infinity;
+  for (const s of snapshots) {
+    const t = Date.parse(s.capturedAt);
+    if (!Number.isFinite(t) || t >= nowMs) continue; // must be in the past
+    const dist = Math.abs(t - targetMs);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = s;
+    }
+  }
+  return best;
+}
+
+/**
+ * Compute the window + totals to rate over. Prefers the DELTA between the current cumulative totals and
+ * a prior snapshot (~24h ago); falls back to the reset window (cumulative totals since stats_reset)
+ * when there is no prior snapshot OR a stats reset happened between them. A negative delta can only mean
+ * the cumulative counter went backwards ⇒ pg_stat_statements was reset between the two snapshots, so the
+ * post-reset totals ARE the current cumulative totals measured over the reset window — use that (labelled
+ * resetDetected) rather than report a nonsense negative rate. Pure + deterministic.
+ */
+export function rateFromSnapshotDelta(args: {
+  nowMs: number;
+  currentTotalCalls: number;
+  currentTotalRows: number;
+  resetWindowHours: number;
+  prior: StatStatementSnapshot | null;
+}): DeltaRateWindow {
+  const { nowMs, currentTotalCalls, currentTotalRows, resetWindowHours, prior } = args;
+  const resetWindow: DeltaRateWindow = {
+    windowHours: Math.max(0, resetWindowHours),
+    totalCalls: Math.max(0, currentTotalCalls),
+    totalRows: Math.max(0, currentTotalRows),
+    source: "reset_window",
+    resetDetected: false,
+  };
+  if (!prior) return resetWindow;
+  const priorMs = Date.parse(prior.capturedAt);
+  if (!Number.isFinite(priorMs) || priorMs >= nowMs) return resetWindow;
+  const windowHours = (nowMs - priorMs) / 3_600_000;
+  if (!(windowHours > 0)) return resetWindow;
+  const dCalls = currentTotalCalls - prior.totalCalls;
+  const dRows = currentTotalRows - prior.totalRows;
+  if (dCalls < 0 || dRows < 0) return { ...resetWindow, resetDetected: true };
+  return { windowHours, totalCalls: dCalls, totalRows: dRows, source: "delta", resetDetected: false };
+}
+
+/**
+ * Build the per-queryid prior map `analyzeSlowQuery` reads (DELTA self-clear) from a stored snapshot,
+ * plus the reading age in hours. Mirrors the loop-heartbeat prior-beat shape so the slow-query pass can
+ * prefer the ~24h snapshot delta over the most-recent beat. Pure. Returns an empty map when the snapshot
+ * carries no per-query counters.
+ */
+export function priorPerQueryFromSnapshot(
+  snapshot: StatStatementSnapshot | null,
+  nowMs: number,
+): { priorByQueryid: Map<string, SlowQueryRow>; readingAgeHours?: number } {
+  const priorByQueryid = new Map<string, SlowQueryRow>();
+  if (!snapshot || !Array.isArray(snapshot.perQuery)) return { priorByQueryid };
+  for (const q of snapshot.perQuery) {
+    if (!q.queryid) continue;
+    priorByQueryid.set(q.queryid, {
+      queryid: q.queryid,
+      query: "", // the prior snapshot only carries delta counters; the current row supplies the text
+      calls: q.calls,
+      total_exec_time: q.totalExecTime,
+      mean_exec_time: 0,
+      stddev_exec_time: 0,
+      rows: q.rows,
+    });
+  }
+  const capturedMs = Date.parse(snapshot.capturedAt);
+  const readingAgeHours = Number.isFinite(capturedMs) && capturedMs < nowMs ? (nowMs - capturedMs) / 3_600_000 : undefined;
+  return { priorByQueryid, readingAgeHours };
 }
 
 /**
@@ -1173,13 +1367,21 @@ export function analyzeRequestVolume(
   // the volume; an app caller in the top list IS the actionable lever.
   const label = (q: RequestVolumeTopQuery) => isInfrastructuralQuery(q.query) ? " [infrastructural]" : "";
 
+  // db-health-detector-measures-current-rate Phase 1 — the window is a snapshot DELTA (~24h, the rate
+  // happening now) when a prior snapshot exists, else the cumulative reset window (labelled so a
+  // months-wide average is never passed off as a current rate).
+  const isDelta = input.windowSource === "delta";
+  const windowLine = isDelta
+    ? `Window: ${input.windowHours.toFixed(1)}h (delta between two pg_stat_statements snapshots — the rate happening now).`
+    : `Window: ${input.windowHours.toFixed(1)}h cumulative since the last pg_stat_statements reset (no prior snapshot yet — this averages the whole reset window, not the current rate).`;
+
   const impact =
     `${fmtRate(callsPerHr)} req/hr` + (callsOver ? ` (≥ ${callsFlag.toLocaleString()} flag)` : "") +
     ` · ${fmtRate(rowsPerHr)} rows/hr shipped` + (rowsOver ? ` (≥ ${rowsFlag.toLocaleString()} flag)` : "") +
-    ` over a ${input.windowHours.toFixed(1)}h window`;
+    ` over ${isDelta ? "the last" : "a cumulative"} ${input.windowHours.toFixed(1)}h${isDelta ? "" : " window"}`;
 
   const evidence = [
-    `Window: ${input.windowHours.toFixed(1)}h (since the last pg_stat_statements reset).`,
+    windowLine,
     `Totals: ${input.totalCalls.toLocaleString()} statements (${fmtRate(callsPerHr)}/hr${callsOver ? ` — ≥ ${callsFlag.toLocaleString()}/hr flag` : ""}), ${input.totalRows.toLocaleString()} rows shipped (${fmtRate(rowsPerHr)}/hr${rowsOver ? ` — ≥ ${rowsFlag.toLocaleString()}/hr flag` : ""}).`,
     `Rows shipped to clients is the egress proxy — most PostgREST/Supabase billing is metered on it.`,
     ``,
@@ -1206,6 +1408,10 @@ export function analyzeRequestVolume(
     evidence,
     specSlug: slugFor("reduce_calls", "request-volume"),
     specTitle: specTitleFor("request_volume_pressure", "the instance", impact),
+    // Carry the rate window's provenance so the enqueue path can suppress a re-proposal whose breach
+    // was measured BEFORE a folded fix shipped (db-health-detector-measures-current-rate Phase 2).
+    windowSource: input.windowSource ?? "reset_window",
+    ...(isDelta && input.windowStartMs !== undefined ? { windowStartMs: input.windowStartMs } : {}),
   };
 }
 
@@ -1633,6 +1839,46 @@ export async function enqueueDbHealthProposal(admin: Admin, finding: DbHealthFin
       ? await lookupTargetSpecShippingState(workspaceId, finding.specSlug)
       : null;
 
+    // db-health-detector-measures-current-rate Phase 2 — post-fix suppression. When the target fix spec
+    // is FOLDED, the fix already ran; now that rates come from a ~24h snapshot DELTA (Phase 1) we can ask
+    // the sharper question: is the problem STILL happening AFTER the fold? Only re-propose when the
+    // finding's delta window STARTS after the fold timestamp and still breaches (the finding existing
+    // means it breaches over its window). Otherwise the breach is stale pre-fix history (or an
+    // un-attributable reset-window fallback) — SKIP the proposal entirely and log the suppression to
+    // director_activity so the decision is auditable, never a silent drop.
+    if (targetSpecState?.status === "folded") {
+      const foldMs = targetSpecState.shippedAt ? Date.parse(targetSpecState.shippedAt) : NaN;
+      const windowStartMs = finding.windowStartMs;
+      const postFoldBreach =
+        windowStartMs !== undefined && Number.isFinite(foldMs) && windowStartMs >= foldMs;
+      if (!postFoldBreach) {
+        const reason = windowStartMs === undefined
+          ? `target fix '${finding.specSlug}' folded; rate measured over the cumulative reset window (no ~24h snapshot delta), so the breach can't be attributed to post-fix behavior — suppressed to stop re-escalating a shipped fix`
+          : `target fix '${finding.specSlug}' folded${Number.isFinite(foldMs) ? ` on ${targetSpecState.shippedAt!.slice(0, 10)}` : ""}; the still-breaching rate window started ${new Date(windowStartMs).toISOString().slice(0, 10)} — BEFORE the fold — so the breach is stale pre-fix history, suppressed`;
+        try {
+          await admin.from("director_activity").insert({
+            workspace_id: workspaceId,
+            director_function: "platform",
+            action_kind: "db_health_suppressed_post_fix",
+            spec_slug: finding.specSlug,
+            reason,
+            metadata: {
+              signature: finding.signature,
+              cause: finding.cause,
+              impact: finding.impact,
+              target_spec_status: targetSpecState.status,
+              fold_at: targetSpecState.shippedAt,
+              window_source: finding.windowSource ?? null,
+              window_start: windowStartMs !== undefined ? new Date(windowStartMs).toISOString() : null,
+            },
+          });
+        } catch (err) {
+          console.warn("[db-health] director_activity suppression log failed:", err instanceof Error ? err.message : err);
+        }
+        return { enqueued: false, reason };
+      }
+    }
+
     const actionId = `dbh-${finding.signature.replace(/[^a-z0-9]+/gi, "-")}`.slice(0, 80);
     const alreadyShipped = targetSpecState !== null;
     const specBody = alreadyShipped
@@ -1874,6 +2120,7 @@ function specTitleFor(cause: DbHealthCause, target: string, hint: string): strin
     full_aggregate: `Bound the full-table scan on ${target}`,
     missing_limit: `Bound the unbounded query on ${target}`,
     high_call_volume: `Reduce call volume / cache the hot query on ${target}`,
+    row_volume: `Reduce the rows shipped per call from ${target} (small table — not an index)`,
     bloat_stale_stats: `Refresh stats / vacuum ${target}`,
     unbounded_growth: `Add a retention cron for ${target}`,
     missing_index: `Add an index to ${target}`,
