@@ -2046,6 +2046,98 @@ export async function specBuildState(admin: Admin, workspaceId: string, specSlug
 }
 
 /**
+ * Obsolete-approval retirement (CEO-authorized 2026-10-13). Some requests reach Ada's leash gate with
+ * nothing left to decide, and escalating them only parks a dead card in the CEO inbox. On 2026-10-13,
+ * five of six CEO approval cards were this shape, aged 19 to 40 days:
+ *   - `db_health_detector_review`: the DB Health detector re-fired on a signature whose fix spec already
+ *     shipped. The card offers no build (only Dismiss) and holds the signature's live slot, so the
+ *     detector can't raise a fresh proposal either.
+ *   - `broken_check` on a build whose spec has fully shipped with merge provenance. The unevaluable checks
+ *     are advisory (`isFoldBlockingLiveJob` already ignores them) and nothing is running.
+ * Ada retires these herself and records why. The rail is bounded: a detector signature she has already
+ * retired `OBSOLETE_DETECTOR_RETIRE_MAX` times escalates as before, so a detector that keeps firing
+ * reaches the CEO instead of being silently re-dismissed.
+ */
+export const OBSOLETE_DETECTOR_RETIRE_MAX = 2;
+export const RETIRED_OBSOLETE_APPROVAL_KIND = "retired_obsolete_approval";
+
+export type ObsoleteApprovalVerdict = { obsolete: false } | { obsolete: true; reason: string };
+
+/** PURE: is this request obsolete? `specFullyShipped` and `priorRetirements` are read by the caller. */
+export function classifyObsoleteApproval(
+  job: DirectorTargetJob,
+  ctx: { specFullyShipped: boolean; priorRetirements: number },
+): ObsoleteApprovalVerdict {
+  const pending = (job.pending_actions ?? []).filter((a) => (a?.status ?? "pending") === "pending");
+  if (!pending.length) return { obsolete: false };
+  const types = new Set(pending.map((a) => a?.type));
+  if (types.size !== 1) return { obsolete: false };
+  const type = [...types][0];
+  if (job.kind === "db_health" && type === "db_health_detector_review") {
+    const allShipped = pending.every((a) => (a as Record<string, unknown>).already_shipped === true);
+    if (!allShipped) return { obsolete: false };
+    if (ctx.priorRetirements >= OBSOLETE_DETECTOR_RETIRE_MAX) return { obsolete: false };
+    return { obsolete: true, reason: `the detector re-fired on ${job.spec_slug ?? "this signature"} after its fix spec already shipped, so there is no build to approve` };
+  }
+  if (job.kind === "build" && type === "broken_check" && ctx.specFullyShipped) {
+    return { obsolete: true, reason: `every phase of ${job.spec_slug ?? "the spec"} already shipped with merge provenance, so the unevaluable checks are advisory and nothing is running` };
+  }
+  return { obsolete: false };
+}
+
+/**
+ * Read the context `classifyObsoleteApproval` needs and, when the request is obsolete, retire it:
+ * compare-and-set needs_approval → completed with each pending action declined. The approval-inbox
+ * reconciler dismisses the card once the job leaves needs_approval. Returns null when not obsolete.
+ * Best-effort: any read failure returns null, so the caller escalates as before.
+ */
+export async function retireObsoleteApproval(admin: Admin, job: DirectorTargetJob): Promise<string | null> {
+  try {
+    let specFullyShipped = false;
+    let priorRetirements = 0;
+    if (job.kind === "build" && job.spec_slug) {
+      const { specs } = await getRoadmap(job.workspace_id);
+      const card = specs.find((c) => c.slug === job.spec_slug);
+      specFullyShipped = !!card && isCardFullyShippedWithProvenance(card);
+    }
+    if (job.kind === "db_health" && job.spec_slug) {
+      const { data, error } = await admin
+        .from("director_activity")
+        .select("id")
+        .eq("workspace_id", job.workspace_id)
+        .eq("director_function", PLATFORM)
+        .eq("action_kind", RETIRED_OBSOLETE_APPROVAL_KIND)
+        .eq("spec_slug", job.spec_slug)
+        .limit(OBSOLETE_DETECTOR_RETIRE_MAX);
+      if (error) return null;
+      priorRetirements = (data ?? []).length;
+    }
+    const verdict = classifyObsoleteApproval(job, { specFullyShipped, priorRetirements });
+    if (!verdict.obsolete) return null;
+    const next = (job.pending_actions ?? []).map((a) => ((a?.status ?? "pending") === "pending" ? { ...a, status: "declined" } : a));
+    const { data: flipped, error: upErr } = await admin
+      .from("agent_jobs")
+      .update({ status: "completed", pending_actions: next, error: `retired by platform director: ${verdict.reason}`, updated_at: new Date().toISOString() })
+      .eq("id", job.id)
+      .eq("status", "needs_approval")
+      .select("id");
+    if (upErr || !flipped?.length) return null;
+    await recordDirectorActivity(admin, {
+      workspaceId: job.workspace_id,
+      directorFunction: PLATFORM,
+      actionKind: RETIRED_OBSOLETE_APPROVAL_KIND,
+      specSlug: job.spec_slug,
+      reason: `Retired an obsolete approval instead of escalating it: ${verdict.reason}.`,
+      metadata: { job_id: job.id, target_kind: job.kind, autonomous: true },
+    });
+    return verdict.reason;
+  } catch (e) {
+    console.warn(`[platform-director] retireObsoleteApproval(${job.id}) failed, escalating as before:`, errText(e));
+    return null;
+  }
+}
+
+/**
  * Escalate a routed Approval Request to the CEO — the director declined to auto-approve (out of leash,
  * destructive/irreversible, or unconfirmable), so it routes UP carrying its written diagnosis INLINE.
  * Reuses the M2 notification (it just flips `routed_to_function` to the CEO + prepends the diagnosis), so

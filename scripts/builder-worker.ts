@@ -8650,6 +8650,15 @@ async function runPlatformDirectorJob(job: Job) {
   // out-of-leash action — a multi-CHOICE, a non-leash type, a destructive op — escalates the WHOLE request.
   const { actions: leashActions, verdict: leashVerdict } = lib.directorLeashCandidates(t);
   if (leashVerdict === "none") {
+    // Obsolete-approval retirement (CEO-authorized 2026-10-13): a request with nothing left to decide (a
+    // detector re-fire on an already-shipped fix, broken checks on a fully shipped spec) is retired here,
+    // not parked on the CEO. Bounded by OBSOLETE_DETECTOR_RETIRE_MAX per detector signature.
+    const retired = await lib.retireObsoleteApproval(db, t);
+    if (retired) {
+      await update(job.id, { status: "completed", log_tail: `retired obsolete approval → ${retired}`.slice(-2000) });
+      console.log(`${tag} retired obsolete approval → ${retired}`);
+      return;
+    }
     const reason = "outside the auto-approve leash (multi-choice / non-leash / a destructive action) — needs the CEO";
     await recordDirectorActivity(db, { workspaceId: t.workspace_id, directorFunction: "platform", actionKind: "escalated", specSlug: t.spec_slug, reason, metadata: { job_id: t.id, target_kind: t.kind } });
     await lib.escalateApprovalRequestToCeo(db, t, reason); // Phase 3: route the request UP to the CEO inbox.
