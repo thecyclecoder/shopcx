@@ -49,7 +49,9 @@ export function composeReviewRequestNudgeBody(input: {
   const product = String(input.productName || "the product").trim();
   const url = String(input.reviewUrl || "").trim();
   const lines: string[] = [
-    `Floating this back up — would you be able to share a line about ${product}? It takes about a minute.`,
+    "Just floating this back up.",
+    "",
+    `Would you share a quick line about ${product}? It takes about a minute.`,
     "",
     `Here's the link: ${url}`,
   ];

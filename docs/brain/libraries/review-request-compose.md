@@ -25,11 +25,13 @@ Compose a first-touch review-request. The `trigger` field is the branch key — 
 
 ## Two-trigger contract
 
-- **Ticket trigger** — a conversation just happened, so the warmth of the message comes from that thread; the opening line references it (`Thanks again for reaching out — glad we got you sorted…`).
+- **Ticket trigger** — a conversation just happened, so the warmth of the message comes from that thread; the opening line references it (`Thanks again for reaching out, and glad we got you sorted…`).
 - **Post-order trigger** — there is no thread. A message that gestures at a support interaction that never occurred reads worse than a plain one, so the copy leans entirely on the product itself and the hand-picked window fact:
-  - `window='repeat'` ⇒ *"You ordered X again — it must be doing its job."*
-  - `window='first-time'` ⇒ *"You tried X for the first time — a real read from someone new to it is the most valuable kind."*
-  - null / unknown ⇒ *"Hoping to hear how X has been for you."*
+  - `window='repeat'` ⇒ *"Thanks for ordering X again, and for being with us over a year."* (tenure clause only when `tenureDays ≥ 30`)
+  - `window='first-time'` ⇒ *"You recently tried X for the first time. We hope you're enjoying it."* (never a tenure clause)
+  - null / unknown ⇒ *"We'd love to hear how X has been for you."*
+- **Ask line** — fence-sitter: *"Would you leave a quick review? A note from a real customer helps people decide more than anything we could say."* · defend: *"Some people wonder whether it really works. Would you share what it's been like for you?"*
+- **Copy rules (CEO 2026-10-13):** plain text, no em-dashes (they also force UCS-2 SMS encoding, roughly tripling segments), max 2 sentences per paragraph, and no tenure on a first-time ask. The old first-time line paired "first time" with "you've been with us about 6 months" and read as a contradiction on ~1,000 sent asks. A test pins the no-em-dash rule across every window × channel × angle.
 
 The post-order `window` + `tenureDays` are NOT the raw detector's flags — they are derived from the customer's merged order + subscription surface across linked identities by [[review-request-cx-surface]] `deriveCxSurfacePersonalization`. The composer's null-fallthrough branch is the shape that renders when the derivation withholds a claim (blind history, no observable activity, or a surface contradiction), so a caller that cannot verify the fact automatically gets a truthful message.
 
