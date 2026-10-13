@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc error_events reads that name an unqualified missing column** · verified 2026-10-13 · → [[../libraries/control-tower]]
