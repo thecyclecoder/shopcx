@@ -112,6 +112,7 @@ import {
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise,
+  isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise,
@@ -3663,6 +3664,87 @@ test("isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise returns fal
   // Message matches but query is empty — both markers are required.
   assert.equal(
     isForeignSupabasePostgresMissingErrorEventsCoalesceSearchNoise('column "label" does not exist', ""),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise ──
+// The generalization of the coalesce-search drop: ANY unqualified `column "<name>" does not
+// exist` (e.g. `occurrence_count`) attached to a bare read-only `select … from error_events`
+// lookup, not just the `label`/`message` pair with the coalesce marker. A foreign SQL tool
+// guessing at a column we don't own — no lever from ShopCX. Drop AT CAPTURE only when BOTH
+// the exact unqualified column-missing message AND the SAME read-only lookup shape the
+// relation-qualified sibling uses are present; a relation-qualified bug, a different table, or
+// a non-SELECT write still pages (Control Tower signature `supabase-logs:0e3379f172768a91`).
+
+test("isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise drops the ad hoc occurrence_count read", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise(
+      'column "occurrence_count" does not exist',
+      "select id, occurrence_count from error_events order by occurrence_count desc limit 50",
+    ),
+    true,
+  );
+  // The `public.`-qualified FROM and Postgres's `ERROR: ` prefix are both tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise(
+      'ERROR: column "occurrence_count" does not exist',
+      "select occurrence_count from public.error_events where id = 1",
+    ),
+    true,
+  );
+  // PostgREST's CTE wrapper form (double-quoted identifiers) is the same ad hoc read class.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise(
+      'column "occurrence_count" does not exist',
+      'with pgrst_source as (select "occurrence_count" from "public"."error_events") select * from pgrst_source',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise KEEPS a non-SELECT write (real write-path bug still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise(
+      'column "occurrence_count" does not exist',
+      "update error_events set occurrence_count = 1 where id = 1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise KEEPS a column-missing on another table", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise(
+      'column "occurrence_count" does not exist',
+      "select occurrence_count from tickets order by occurrence_count desc",
+    ),
+    false,
+  );
+  // A relation-qualified message is the sibling drop's domain, not this one.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise(
+      "column error_events.occurrence_count does not exist",
+      "select occurrence_count from error_events",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise(null, null), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise("", ""), false);
+  // Message matches but query is empty — both markers are required.
+  assert.equal(
+    isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise(
+      'column "occurrence_count" does not exist',
+      "",
+    ),
     false,
   );
 });
