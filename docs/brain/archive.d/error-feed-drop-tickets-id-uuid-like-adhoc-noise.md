@@ -1,0 +1,1 @@
+- **Scope out the Supabase Studio uuid-LIKE-on-tickets.id probe from the Control Tower error feed** · verified 2026-10-13 · → [[../libraries/control-tower]]
