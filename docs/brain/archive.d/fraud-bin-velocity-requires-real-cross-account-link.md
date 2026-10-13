@@ -1,0 +1,1 @@
+- **Fraud BIN-velocity rule: never flag customers for sharing a bank's card prefix alone** · verified 2026-10-13 · → [[../libraries/fraud-detector]], [[../libraries/fraud-confirm]], [[../tables/fraud_cases]], [[../lifecycles/fraud-detection]]
