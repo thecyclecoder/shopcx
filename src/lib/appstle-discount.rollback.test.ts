@@ -98,10 +98,13 @@ const stubAdmin = { from: makeFrom };
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const moduleAny = Module as unknown as { _cache: Record<string, { exports: unknown }> };
 moduleAny._cache[require.resolve("@/lib/supabase/admin")] = {
-  exports: { createAdminClient: () => stubAdmin },
+  exports: { __esModule: true, createAdminClient: () => stubAdmin },
 };
+// `__esModule: true`: the SUT `await import()`s this module, and tsx 4.23 only exposes named
+// exports of a cache stub to a dynamic import when the stub is marked as an ES module.
 moduleAny._cache[require.resolve("@/lib/appstle-call-log")] = {
   exports: {
+    __esModule: true,
     logAppstleCall: async (row: { endpoint: string; status: number; success: boolean; body: unknown }) => {
       loggedAppstleCalls.push({ endpoint: row.endpoint, status: row.status, success: row.success, body: row.body });
     },

@@ -66,7 +66,10 @@ const REFUND_KEY_CANDIDATES = [
   require.resolve("@/lib/refund"),
 ];
 for (const key of REFUND_KEY_CANDIDATES) {
-  moduleAny._cache[key] = { exports: { refundOrder: stubRefundOrder } };
+  // `__esModule: true` — the SUT `await import()`s this module; tsx 4.23 only
+  // exposes a cache stub's named exports to a dynamic import with this flag
+  // (without it the SUT sees `{ default }` only → "X is not a function").
+  moduleAny._cache[key] = { exports: { __esModule: true, refundOrder: stubRefundOrder } };
 }
 
 function resetStub(): void {
