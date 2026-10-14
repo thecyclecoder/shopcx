@@ -459,6 +459,13 @@ test("isInCoachLowGradeWindow: a reconciled blameless row (grade=NULL) is EXCLUD
   // Verifies the spec's "coach window count excludes blameless jobs" invariant.
 });
 
+// Reconcile fixtures must sit INSIDE reconcileBlamelessGradePoison's default 30-day
+// `created_at >= now - windowDays` window. A fixed calendar date (the original
+// 2026-07-08 outage day) rots out of the window once wall-clock passes it, and
+// the query then silently matches 0 rows. Anchor fixtures to "1 day ago".
+const RECENT_GRADE_AT = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+const RECENT_GRADE_AT_LATER = new Date(Date.now() - 24 * 60 * 60 * 1000 + 5 * 60 * 1000).toISOString();
+
 /** Reconcile fake admin — captures reads + writes over agent_action_grades + agent_jobs, so the
  *  reconcile's plan-then-apply flow is exercised end-to-end without a real Supabase. */
 type ReconcileWrite = { table: string; op: "update"; payload: Record<string, unknown>; matchedId?: string };
@@ -582,8 +589,8 @@ test("reconcileBlamelessGradePoison: dry-run identifies blameless grades WITHOUT
   const { admin, writes } = makeReconcileAdmin({
     workspaceId: "ws-1",
     grades: [
-      { id: "g1", workspace_id: "ws-1", agent_job_id: "j1", agent_kind: "build", grade: 2, reasoning: "build failed", graded_by: "agent", created_at: "2026-07-08T12:00:00Z" },
-      { id: "g2", workspace_id: "ws-1", agent_job_id: "j2", agent_kind: "build", grade: 4, reasoning: "tsc failed", graded_by: "agent", created_at: "2026-07-08T12:05:00Z" },
+      { id: "g1", workspace_id: "ws-1", agent_job_id: "j1", agent_kind: "build", grade: 2, reasoning: "build failed", graded_by: "agent", created_at: RECENT_GRADE_AT },
+      { id: "g2", workspace_id: "ws-1", agent_job_id: "j2", agent_kind: "build", grade: 4, reasoning: "tsc failed", graded_by: "agent", created_at: RECENT_GRADE_AT_LATER },
     ],
     jobs: [
       { id: "j1", error: "authentication_failed — credentials evicted", log_tail: null },
@@ -605,8 +612,8 @@ test("reconcileBlamelessGradePoison: apply neutralizes matched rows AND leaves t
   const { admin, writes, getGrades } = makeReconcileAdmin({
     workspaceId: "ws-1",
     grades: [
-      { id: "g1", workspace_id: "ws-1", agent_job_id: "j1", agent_kind: "build", grade: 2, reasoning: "build failed", graded_by: "agent", created_at: "2026-07-08T12:00:00Z" },
-      { id: "g2", workspace_id: "ws-1", agent_job_id: "j2", agent_kind: "build", grade: 4, reasoning: "tsc failed", graded_by: "agent", created_at: "2026-07-08T12:05:00Z" },
+      { id: "g1", workspace_id: "ws-1", agent_job_id: "j1", agent_kind: "build", grade: 2, reasoning: "build failed", graded_by: "agent", created_at: RECENT_GRADE_AT },
+      { id: "g2", workspace_id: "ws-1", agent_job_id: "j2", agent_kind: "build", grade: 4, reasoning: "tsc failed", graded_by: "agent", created_at: RECENT_GRADE_AT_LATER },
     ],
     jobs: [
       { id: "j1", error: "authentication_failed — credentials evicted", log_tail: null },
@@ -634,7 +641,7 @@ test("reconcileBlamelessGradePoison: never touches a HUMAN-overridden grade", as
     workspaceId: "ws-1",
     grades: [
       // A blameless-infra shaped row that a HUMAN already overrode — must be left alone.
-      { id: "g-human", workspace_id: "ws-1", agent_job_id: "j-human", agent_kind: "build", grade: 2, reasoning: "CEO override", graded_by: "human", created_at: "2026-07-08T12:00:00Z" },
+      { id: "g-human", workspace_id: "ws-1", agent_job_id: "j-human", agent_kind: "build", grade: 2, reasoning: "CEO override", graded_by: "human", created_at: RECENT_GRADE_AT },
     ],
     jobs: [{ id: "j-human", error: "authentication_failed", log_tail: null }],
   });
@@ -658,7 +665,7 @@ test("reconcileBlamelessGradePoison: a re-run over the same window is IDEMPOTENT
         grade: null,
         reasoning: `${BLAMELESS_INFRA_RECONCILE_MARKER}[cli_auth_failed] originally graded 2/10 — build failed`,
         graded_by: "agent",
-        created_at: "2026-07-08T12:00:00Z",
+        created_at: RECENT_GRADE_AT,
       },
     ],
     jobs: [{ id: "j1", error: "authentication_failed", log_tail: null }],

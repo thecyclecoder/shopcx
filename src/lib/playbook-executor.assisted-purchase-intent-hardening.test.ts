@@ -87,7 +87,10 @@ async function stubFindVariant(
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const moduleAny = Module as unknown as { _cache: Record<string, { exports: unknown }> };
 moduleAny._cache[require.resolve("@/lib/product-variants")] = {
-  exports: { findVariant: stubFindVariant },
+  // `__esModule: true` — the SUT `await import()`s this module; tsx 4.23 only
+  // exposes a cache stub's named exports to a dynamic import with this flag
+  // (without it the SUT sees `{ default }` only → "X is not a function").
+  exports: { __esModule: true, findVariant: stubFindVariant },
 };
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports

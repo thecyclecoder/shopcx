@@ -279,14 +279,24 @@ test("phase 2: predeploy chain includes check:table-refs-have-migrations", () =>
   const pkg = JSON.parse(require("fs").readFileSync(pkgPath, "utf8")) as {
     scripts: Record<string, string>;
   };
+  // `predeploy` delegates to sub-chains (e.g. `npm run predeploy:static && …`),
+  // so follow every `npm run predeploy…` hop and pin against the expanded chain.
+  const expand = (name: string, seen = new Set<string>()): string => {
+    if (seen.has(name)) return "";
+    seen.add(name);
+    const body = pkg.scripts[name] ?? "";
+    const subs = [...body.matchAll(/npm run (predeploy[\w:-]*)/g)].map((m) => m[1]);
+    return [body, ...subs.map((s) => expand(s, seen))].join(" && ");
+  };
+  const chain = expand("predeploy");
   assert.match(
-    pkg.scripts.predeploy,
+    chain,
     /npm run check:table-refs-have-migrations\b/,
     "predeploy chain must invoke check:table-refs-have-migrations",
   );
   // Verify it sits alongside the two sibling rails the spec cites.
-  assert.match(pkg.scripts.predeploy, /check:rls-on-new-tables/);
-  assert.match(pkg.scripts.predeploy, /check:no-hard-destructive-migrations/);
+  assert.match(chain, /check:rls-on-new-tables/);
+  assert.match(chain, /check:no-hard-destructive-migrations/);
 });
 
 test("phase 2: box build lane invokes the check after tsc, before the commit path", () => {

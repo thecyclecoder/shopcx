@@ -2,8 +2,9 @@
  * check-npm-audit-actionable — the machine-runnable verifier for the dep-upgrade fix spec.
  *
  * Runs `npm audit --json` on the tree and exits NON-ZERO while any ACTIONABLE advisory remains —
- * where "actionable" is the same predicate the dep-watch cron uses to file findings: severity
- * ≥ moderate AND `fixAvailable` is truthy. Passes (exit 0) when the tree is clean of those.
+ * where "actionable" is the same predicate the dep-watch cron uses to file findings
+ * ([[npm-audit-actionable]] `isActionableAdvisory`: severity ≥ moderate AND a fix exists that is
+ * not a downgrade). Passes (exit 0) when the tree is clean of those.
  *
  * Called by the dep-upgrade spec's `unit_test` verification check
  * (security-dep-watch-authors-structured-and-never-ages-out Phase 1). The spec-check runner passes
@@ -18,17 +19,13 @@
  *       npx tsx scripts/_check-npm-audit-actionable.ts
  */
 import { execSync } from "child_process";
+import { join } from "path";
+import { isActionableAdvisory, nodeModulesVersionReader, type NpmAuditVulnLike } from "../src/lib/npm-audit-actionable";
 
-interface NpmAuditVuln {
-  severity?: string;
-  fixAvailable?: boolean | { name?: string; version?: string; isSemVerMajor?: boolean };
-}
 interface NpmAuditReport {
-  vulnerabilities?: Record<string, NpmAuditVuln>;
+  vulnerabilities?: Record<string, NpmAuditVulnLike>;
   metadata?: { vulnerabilities?: Record<string, number> };
 }
-
-const ACTIONABLE_SEVERITIES: ReadonlySet<string> = new Set(["moderate", "high", "critical"]);
 
 function runNpmAuditJson(): string {
   try {
@@ -59,13 +56,12 @@ function main(): void {
     console.error("check-npm-audit-actionable: could not parse npm audit --json output");
     process.exit(2);
   }
+  const installedVersionOf = nodeModulesVersionReader(join(__dirname, ".."));
   const actionable: { name: string; severity: string; fix: string }[] = [];
   for (const [name, v] of Object.entries(report.vulnerabilities || {})) {
+    if (!isActionableAdvisory(v, installedVersionOf)) continue;
     const severity = String(v.severity || "").toLowerCase();
-    if (!ACTIONABLE_SEVERITIES.has(severity)) continue;
     const fix = v.fixAvailable;
-    const hasFix = fix === true || (fix && typeof fix === "object");
-    if (!hasFix) continue;
     const fixLabel =
       fix && typeof fix === "object"
         ? `${fix.name || name}@${fix.version || "?"}${fix.isSemVerMajor ? " (semver-major)" : ""}`
@@ -74,7 +70,7 @@ function main(): void {
   }
   if (actionable.length) {
     console.error(
-      `\n❌ check-npm-audit-actionable — ${actionable.length} actionable (≥ moderate + fixAvailable) advisory(ies) remain:\n`,
+      `\n❌ check-npm-audit-actionable — ${actionable.length} actionable (≥ moderate + non-downgrade fix) advisory(ies) remain:\n`,
     );
     for (const a of actionable) {
       console.error(`  • ${a.name} (${a.severity}) → upgrade ${a.fix}`);
@@ -86,7 +82,7 @@ function main(): void {
   }
   const total = report.metadata?.vulnerabilities?.total ?? 0;
   console.log(
-    `✓ check-npm-audit-actionable — 0 actionable (≥ moderate + fixAvailable) advisories (total tree count: ${total}).`,
+    `✓ check-npm-audit-actionable — 0 actionable (≥ moderate + non-downgrade fix) advisories (total tree count: ${total}).`,
   );
 }
 

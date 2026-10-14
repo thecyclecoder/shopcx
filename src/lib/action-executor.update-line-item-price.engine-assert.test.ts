@@ -23,7 +23,10 @@ import Module from "node:module";
 const moduleAny = Module as unknown as { _cache: Record<string, { exports: unknown }> };
 
 function stubModule(spec: string, exports: Record<string, unknown>) {
-  moduleAny._cache[require.resolve(spec)] = { exports };
+  // `__esModule: true` — the SUT `await import()`s this module; tsx 4.23 only
+  // exposes a cache stub's named exports to a dynamic import with this flag
+  // (without it the SUT sees `{ default }` only → "X is not a function").
+  moduleAny._cache[require.resolve(spec)] = { exports: { __esModule: true, ...exports } };
 }
 
 const WORKSPACE_ID = "11111111-1111-1111-1111-111111111111";

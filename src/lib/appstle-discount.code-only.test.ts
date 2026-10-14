@@ -83,10 +83,13 @@ const stubAdmin = { from: makeFrom };
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const moduleAny = Module as unknown as { _cache: Record<string, { exports: unknown }> };
 moduleAny._cache[require.resolve("@/lib/supabase/admin")] = {
-  exports: { createAdminClient: () => stubAdmin },
+  exports: { __esModule: true, createAdminClient: () => stubAdmin },
 };
+// `__esModule: true` — the SUT `await import()`s this module; tsx 4.23 only
+// exposes a cache stub's named exports to a dynamic import with this flag
+// (without it the SUT sees `{ default }` only → "X is not a function").
 moduleAny._cache[require.resolve("@/lib/appstle-call-log")] = {
-  exports: { logAppstleCall: async () => undefined },
+  exports: { __esModule: true, logAppstleCall: async () => undefined },
 };
 
 const originalFetch = globalThis.fetch;

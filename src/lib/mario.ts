@@ -2450,6 +2450,16 @@ const MARIO_FIX_MANDATE_SLUG = "infra-devops-reliability"; // platform.md § "In
  *  `buildStructuredSpecInputFromMarkdown` (author-spec.ts) and by [[repair-agent]]'s
  *  `derivedDefaultRepairChecks` — the prose verification stays on the `verification` column verbatim
  *  for humans; the tsc check gives the deterministic runner something to actually execute. */
+/** Mario's LLM verdict routinely cites `src/foo.ts:123` in its intent prose, which
+ *  [[author-spec]] `assertIntentIsPlainLanguage` rejects. Every rejected write dropped the durable fix
+ *  on the floor (2026-10-13: `build-self-verify-unit-test-base-poison-guard` and
+ *  `mario-init-loop-guard-dedupe-hoist-to-shared-survivor-filter` were both lost this way). Strip the
+ *  `:line` suffix from file refs in the intent fields so the file name survives and the write
+ *  lands; the line-precise refs stay in the phase body, where they belong. */
+export function stripFileLineRefsFromIntent(value: string): string {
+  return value.replace(/\b([\w./-]+\.(?:ts|tsx|js|jsx|sql|md|json|yml|yaml)):\d+(?:[-–]\d+)?/g, "$1");
+}
+
 async function authorMarioFixSpec(
   workspaceId: string,
   fixSpec: MarioDurableFixSpec,
@@ -2463,16 +2473,16 @@ async function authorMarioFixSpec(
       summary: null,
       owner: MARIO_DIRECTOR_FUNCTION,
       parent: `[[../functions/platform]] — "Infra & DevOps / reliability" mandate: Mario's durable pipeline-reliability fix so this stall class cannot recur.`,
-      why: fixSpec.why,
-      what: fixSpec.what,
+      why: stripFileLineRefsFromIntent(fixSpec.why),
+      what: stripFileLineRefsFromIntent(fixSpec.what),
       critical: true,
       autoBuild: true,
       phases: fixSpec.phases.map((p) => ({
         title: p.title,
         body: p.body,
         verification: p.verification,
-        why: p.why,
-        what: p.what,
+        why: stripFileLineRefsFromIntent(p.why),
+        what: stripFileLineRefsFromIntent(p.what),
         checks: defaultMarioFixPhaseChecks(),
       })),
     },

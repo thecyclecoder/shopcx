@@ -26875,9 +26875,14 @@ async function runNpmAudit(): Promise<{ ok: boolean; findings: DepFinding[]; tot
   }
   const vulns = report.vulnerabilities || {};
   const findings: DepFinding[] = [];
+  // Same predicate as the spec's verifier (check:npm-audit-actionable): a no-fix or downgrade-only
+  // advisory can't be cleared by an upgrade, so filing it parks a build whose check never passes.
+  const { isActionableAdvisory, nodeModulesVersionReader } = await import("../src/lib/npm-audit-actionable");
+  const installedVersionOf = nodeModulesVersionReader(REPO_DIR);
   for (const [name, v] of Object.entries(vulns)) {
     const severity = String(v.severity || "").toLowerCase();
     if (!DEP_WATCH_SEVERITIES.has(severity)) continue;
+    if (!isActionableAdvisory(v, installedVersionOf)) continue;
     const viaTitled = (v.via || []).find((x) => typeof x === "object" && x && "title" in x) as { title?: string } | undefined;
     const fix = v.fixAvailable;
     const fixTo = fix && typeof fix === "object" ? `${fix.name || name}@${fix.version || "?"}` : fix === true ? "available" : null;
