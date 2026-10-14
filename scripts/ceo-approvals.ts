@@ -24,6 +24,7 @@ loadEnv();
 import { createAdminClient } from "../src/lib/supabase/admin";
 import { buildApprovalsFeed } from "../src/lib/agents/approvals-feed";
 import { approveRoadmapAction } from "../src/lib/roadmap-actions";
+import { settleParkedJobOnDismiss } from "../src/lib/agents/approval-inbox";
 
 const WS = process.env.SHOPCX_WORKSPACE_ID || "fdc11e10-b89f-4989-8b73-ed6526c4d906";
 
@@ -108,6 +109,18 @@ async function dismiss(notificationId: string, reason?: string) {
     // dismissed_reason may not exist on the table — retry with just the flag.
     const { error: e2 } = await admin.from("dashboard_notifications").update({ dismissed: true }).eq("workspace_id", WS).eq("id", notificationId);
     if (e2) throw e2;
+  }
+  // A dismiss means "handled" — settle the parked job behind the card so the backstop never re-mints
+  // it (dismissing-a-park-card-closes-its-job Phase 1). Load the row's metadata, then settle.
+  const { data: row } = await admin
+    .from("dashboard_notifications")
+    .select("workspace_id, metadata")
+    .eq("workspace_id", WS)
+    .eq("id", notificationId)
+    .maybeSingle();
+  if (row) {
+    const res = await settleParkedJobOnDismiss(admin, { workspace_id: row.workspace_id, metadata: row.metadata });
+    if (res.settled) console.log(`  → settled parked job ${res.jobId} (completed, 'dismissed by owner')`);
   }
   console.log(`dismissed notification ${notificationId}`);
 }

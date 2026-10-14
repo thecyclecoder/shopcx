@@ -124,6 +124,8 @@ interface ParkedRow {
   log_tail: string | null;
   needs_attention_class: NeedsAttentionClass | null;
   created_at: string;
+  /** last mutation of the job row — the anchor the Phase 2 owner-dismissal guard compares against. */
+  updated_at: string | null;
   /**
    * The JSON payload the enqueue path wrote (per-kind params). Phase 3 of
    * [[../specs/account-linking-address-aware-confidence-graded-and-cs-searchable]] reads
@@ -563,6 +565,51 @@ async function autoVerifyParkedLoopRepair(admin: Admin, row: ParkedRow): Promise
   return true;
 }
 
+/**
+ * Phase 2 decision (dismissing-a-park-card-closes-its-job) — given the job's `updated_at` and the
+ * NEWEST dismissed `parkbackstop:<jobId>` card's timestamp, should the backstop SKIP re-minting?
+ *
+ * Pure so the exact boundary is unit-testable. The owner's dismissal still stands — and the emitter
+ * must suppress — unless the job was genuinely re-touched AFTER that dismissal:
+ *   - no dismissed card              → nothing to suppress (false)
+ *   - dismissed card, job not newer  → the owner's "handled" holds → suppress (true)
+ *   - dismissed card, job IS newer   → a real change since (a re-park by its own lane) → re-surface (false)
+ *
+ * `dashboard_notifications` carries no `dismissed_at`, so the card's `created_at` is the dismissal
+ * anchor: a card minted-and-dismissed with the job untouched since has `jobUpdatedAt <= dismissedCardAt`.
+ */
+export function parkDismissalSuppresses(input: { jobUpdatedAt: string | null; dismissedCardAt: string | null }): boolean {
+  if (!input.dismissedCardAt) return false;
+  if (!input.jobUpdatedAt) return true;
+  return new Date(input.jobUpdatedAt).getTime() <= new Date(input.dismissedCardAt).getTime();
+}
+
+/**
+ * Phase 2 — did the owner already DISMISS the backstop card for this parked job, with the job
+ * untouched since? Phase 1's `settleParkedJobOnDismiss` normally settles the job on dismiss so the
+ * backstop never sees it again; this is the belt-and-suspenders for the two cases Phase 1 can't cover
+ * — a race (the settle lost to a concurrent re-read) or a job re-parked by its OWN lane after the
+ * dismissal. Looks up the newest dismissed `parkbackstop:<jobId>` card and defers to
+ * `parkDismissalSuppresses`. FAIL-OPEN: a read blip returns false (never suppress a real escalation).
+ */
+async function ownerDismissedPark(admin: Admin, row: ParkedRow): Promise<boolean> {
+  try {
+    const { data } = await admin
+      .from("dashboard_notifications")
+      .select("created_at")
+      .eq("workspace_id", row.workspace_id)
+      .eq("metadata->>dedupe_key", `parkbackstop:${row.id}`)
+      .eq("dismissed", true)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    const card = (data ?? [])[0] as { created_at: string } | undefined;
+    return parkDismissalSuppresses({ jobUpdatedAt: row.updated_at, dismissedCardAt: card?.created_at ?? null });
+  } catch (e) {
+    console.warn(`[needs-attention-route] ownerDismissedPark check failed for ${row.id.slice(0, 8)}:`, e instanceof Error ? e.message : e);
+    return false; // fail-open: a rare duplicate beats a suppressed real escalation
+  }
+}
+
 async function routeBackstop(admin: Admin, row: ParkedRow): Promise<{ backstopped: boolean; alarmed: boolean }> {
   const ageMs = Date.now() - new Date(row.created_at).getTime();
   let backstopped = false;
@@ -681,6 +728,12 @@ async function routeBackstop(admin: Admin, row: ParkedRow): Promise<{ backstoppe
         // Lane declined (no spec row, or the fix phase couldn't spawn) → fall through to the CEO
         // fail-safe below, exactly as before this rung existed.
       }
+      // Phase 2 (dismissing-a-park-card-closes-its-job): the owner already dismissed this job's park
+      // card and nothing changed since — a dismissed park stays dismissed. Suppress rather than re-mint.
+      if (fresh.klass === "unknown" && (await ownerDismissedPark(admin, row))) {
+        console.log(`[needs-attention-route] suppressed backstop re-mint for ${row.id.slice(0, 8)} — owner dismissed its park card and the job hasn't changed since`);
+        return { backstopped: false, alarmed: false };
+      }
       if (
         fresh.klass === "unknown" &&
         !(await activeParkCardExistsForJob(admin, row.workspace_id, row.id)) &&
@@ -718,6 +771,12 @@ async function routeBackstop(admin: Admin, row: ParkedRow): Promise<{ backstoppe
   // still satisfied (an active card IS the surfacing). Only when NOTHING else surfaced the park does the
   // alarm fire as the backstop-of-last-resort.
   if (ageMs >= NEEDS_ATTENTION_ALARM_MS && !(await activeParkCardExistsForJob(admin, row.workspace_id, row.id))) {
+    // Phase 2: same owner-dismissal guard for the >70-min age alarm — never re-raise a surface the
+    // owner dismissed on an unchanged job.
+    if (await ownerDismissedPark(admin, row)) {
+      console.log(`[needs-attention-route] suppressed park alarm for ${row.id.slice(0, 8)} — owner dismissed its park card and the job hasn't changed since`);
+      return { backstopped, alarmed };
+    }
     try {
       const { data: existing } = await admin
         .from("dashboard_notifications")
@@ -966,7 +1025,7 @@ export async function routeNeedsAttention(admin: Admin): Promise<RouteResult> {
 
   const { data: parked } = await admin
     .from("agent_jobs")
-    .select("id, workspace_id, kind, spec_slug, error, log_tail, needs_attention_class, created_at, instructions")
+    .select("id, workspace_id, kind, spec_slug, error, log_tail, needs_attention_class, created_at, updated_at, instructions")
     .eq("status", "needs_attention")
     .order("created_at", { ascending: false })
     .limit(500);

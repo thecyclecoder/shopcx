@@ -12,6 +12,7 @@ import { cookies } from "next/headers";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { AGENT_INBOX_TYPES } from "@/lib/agents/inbox";
+import { settleParkedJobOnDismiss } from "@/lib/agents/approval-inbox";
 
 
 export async function POST(req: Request) {
@@ -37,12 +38,18 @@ export async function POST(req: Request) {
   const id = typeof body.id === "string" ? body.id : null;
   if (!id) return NextResponse.json({ error: "id required" }, { status: 400 });
 
-  const { error } = await admin
+  const { data: dismissed, error } = await admin
     .from("dashboard_notifications")
     .update({ dismissed: true })
     .eq("id", id)
     .eq("workspace_id", workspaceId)
-    .in("type", AGENT_INBOX_TYPES);
+    .in("type", AGENT_INBOX_TYPES)
+    .select("workspace_id, metadata");
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+
+  // A dismiss means "this is handled" — settle the parked job behind the card so the backstop sweep
+  // never re-mints it (dismissing-a-park-card-closes-its-job Phase 1). Best-effort; the card is cleared.
+  const row = (dismissed ?? [])[0];
+  if (row) await settleParkedJobOnDismiss(admin, { workspace_id: row.workspace_id, metadata: row.metadata });
   return NextResponse.json({ ok: true });
 }

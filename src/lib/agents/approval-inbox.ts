@@ -36,6 +36,7 @@ import { getSlackToken, postAsAda, updateMessage } from "@/lib/slack";
 import { buildInboxApprovalCard, type InboxCardAction } from "@/lib/slack-ada";
 import { createChatModeInvitationThread } from "@/lib/agents/director-coach-threads";
 import { getPr } from "@/lib/github-pr-resolve";
+import { recordDirectorActivity } from "@/lib/director-activity";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -652,6 +653,98 @@ export async function activeParkCardExistsForJob(admin: Admin, workspaceId: stri
     if ((data ?? []).length > 0) return true;
   }
   return false;
+}
+
+/** The dashboard_notifications fields `settleParkedJobOnDismiss` reads off a just-dismissed card. */
+export interface DismissedParkNotification {
+  workspace_id: string;
+  metadata: Record<string, unknown> | null;
+}
+
+/**
+ * settleParkedJobOnDismiss — the shared "a dismiss settles the job behind the card" helper
+ * (dismissing-a-park-card-closes-its-job Phase 1).
+ *
+ * The CEO dismisses a park card meaning "this is handled", but a dismiss historically only flipped
+ * `dashboard_notifications.dismissed`, leaving the parked `agent_jobs` row in needs_attention — so the
+ * needs-attention-route backstop sweep re-minted a fresh "Park Backstop" card for it within the hour
+ * (21 re-minted on 2026-10-13 after CEO triage). Every dismiss surface must SETTLE the job, with a
+ * recorded reason, so a dismissed park stays dismissed.
+ *
+ * Given a just-dismissed `dashboard_notifications` row whose metadata carries a job id (park_backstop,
+ * parked-kind triage cards, routed approvals — read via `notifJobId`: `agent_job_id` OR `job_id`): if
+ * that `agent_jobs` row is still needs_attention / needs_approval, decline its pending actions, set it
+ * `completed` + `error` 'dismissed by owner', and for kind='repair' resolve the matching `error_events`
+ * signature (same semantics as the Control Tower `repair/route.ts` dismiss). Records a
+ * `director_activity` `owner_dismissed_park` row for the audit / recap feed.
+ *
+ * Compare-and-set (operational guard-before-mutation): the UPDATE re-asserts the workspace + the
+ * needs_attention|needs_approval precondition and `.select("id")`s, so a job that already LEFT the
+ * parked state (a race, an approve that landed first) is left untouched — the dismiss never overwrites
+ * a live decision. Best-effort + never throws: a settle that crashes the dismiss it rides on is worse
+ * than the gap, so a failure returns `{ settled:false, reason }` and the caller still clears the card.
+ */
+export async function settleParkedJobOnDismiss(
+  admin: Admin,
+  notification: DismissedParkNotification,
+): Promise<{ settled: boolean; reason?: string; jobId?: string }> {
+  try {
+    const jobId = notifJobId(notification.metadata);
+    if (!jobId) return { settled: false, reason: "no_job_id" };
+    const workspaceId = notification.workspace_id;
+    if (!workspaceId) return { settled: false, reason: "no_workspace" };
+
+    const { data: job, error: jobErr } = await admin
+      .from("agent_jobs")
+      .select("id, kind, status, spec_slug, pending_actions")
+      .eq("id", jobId)
+      .eq("workspace_id", workspaceId)
+      .maybeSingle();
+    if (jobErr) return { settled: false, reason: jobErr.message, jobId };
+    if (!job) return { settled: false, reason: "job_not_found", jobId };
+    if (job.status !== "needs_attention" && job.status !== "needs_approval") {
+      return { settled: false, reason: `job_not_parked:${job.status}`, jobId };
+    }
+
+    const actions = Array.isArray(job.pending_actions) ? (job.pending_actions as PendingActionLike[]) : [];
+    const next = actions.map((a) => ((a.status ?? "pending") === "pending" ? { ...a, status: "declined" } : a));
+
+    // Compare-and-set: only transition a row STILL parked in this workspace. `.select("id")` asserts a
+    // row actually flipped; zero rows ⇒ the job already moved on, so leave error_events + the activity
+    // log untouched (never record a settle that didn't happen).
+    const { data: updated, error: upErr } = await admin
+      .from("agent_jobs")
+      .update({ status: "completed", pending_actions: next, error: "dismissed by owner", updated_at: new Date().toISOString() })
+      .eq("id", jobId)
+      .eq("workspace_id", workspaceId)
+      .in("status", ["needs_attention", "needs_approval"])
+      .select("id");
+    if (upErr) return { settled: false, reason: upErr.message, jobId };
+    if (!updated || updated.length === 0) return { settled: false, reason: "job_moved_on", jobId };
+
+    // kind='repair': the job's spec_slug IS the error signature (e.g. "vercel:…") — resolve it with a
+    // recorded reason so the reconcile never re-churns it (same semantics as repair/route.ts dismiss).
+    if (job.kind === "repair" && job.spec_slug) {
+      await admin
+        .from("error_events")
+        .update({ status: "resolved", resolved_at: new Date().toISOString(), resolution_reason: "dismissed by owner" })
+        .eq("signature", job.spec_slug);
+    }
+
+    await recordDirectorActivity(admin, {
+      workspaceId,
+      directorFunction: "platform",
+      actionKind: "owner_dismissed_park",
+      specSlug: job.spec_slug ?? null,
+      reason: "Owner dismissed the park card — settled the linked job to completed ('dismissed by owner') so the backstop never re-mints it.",
+      metadata: { job_id: jobId, kind: job.kind, declined_actions: next.filter((a) => a.status === "declined").length, autonomous: false },
+    });
+
+    return { settled: true, jobId };
+  } catch (err) {
+    console.warn("[approval-inbox] settleParkedJobOnDismiss threw:", err instanceof Error ? err.message : err);
+    return { settled: false, reason: "threw" };
+  }
 }
 
 /**
