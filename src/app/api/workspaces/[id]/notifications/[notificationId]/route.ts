@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { settleParkedJobOnDismiss } from "@/lib/agents/approval-inbox";
 
 // GET: Single notification detail
 export async function GET(
@@ -46,11 +47,19 @@ export async function PATCH(
     return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
   }
 
-  await admin
+  const { data: patched } = await admin
     .from("dashboard_notifications")
     .update(updates)
     .eq("id", notificationId)
-    .eq("workspace_id", workspaceId);
+    .eq("workspace_id", workspaceId)
+    .select("workspace_id, metadata");
+
+  // When this PATCH dismisses the card, settle the parked job behind it so the backstop sweep never
+  // re-mints it (dismissing-a-park-card-closes-its-job Phase 1). Best-effort; the dismiss still lands.
+  if (updates.dismissed === true) {
+    const row = (patched ?? [])[0];
+    if (row) await settleParkedJobOnDismiss(admin, { workspace_id: row.workspace_id, metadata: row.metadata });
+  }
 
   return NextResponse.json({ ok: true });
 }

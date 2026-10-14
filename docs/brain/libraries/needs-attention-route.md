@@ -45,6 +45,10 @@ Per row, in order (bounded by `PLATFORM_DIRECTOR_ROUTE_CAP`, ledger-deduped per 
 
 **(b) Age alarm at `NEEDS_ATTENTION_ALARM_MS` (70 min)** — the "zero rows >70 min" invariant, and only when no other card already covers the job.
 
+### A dismissed park stays dismissed — the owner-dismissal guard (`ownerDismissedPark`)
+
+[[../specs/dismissing-a-park-card-closes-its-job]] Phase 2. [[approval-inbox]] `settleParkedJobOnDismiss` (Phase 1) normally settles a job the moment the owner dismisses its card, so the backstop never sees it again. `ownerDismissedPark` is the belt-and-suspenders for the two cases Phase 1 can't cover — a **race** (the settle lost to a concurrent re-read) or a job **re-parked by its own lane** after the dismissal. Both the CEO fail-safe escalation in (a) and the age alarm in (b) call it **before** surfacing: it reads the newest dismissed `parkbackstop:<jobId>` card and defers to the pure predicate **`parkDismissalSuppresses({ jobUpdatedAt, dismissedCardAt })`** — `dashboard_notifications` has no `dismissed_at`, so the card's `created_at` is the dismissal anchor. The owner's "handled" holds (the emitter logs + skips, counted as suppressed) **unless** the job's `updated_at` is strictly newer than that card (a genuine re-touch deserves a fresh card). FAIL-OPEN: a read blip returns `false` — a rare duplicate beats a suppressed real escalation. Pinned by `needs-attention-route.park-dismissal.test.ts`. This is what stopped the 21 re-minted cards on 2026-10-13 from coming back after CEO triage.
+
 ### Why the rung is bounded, and why it still always ends at a human
 
 Routing work away from the founder is only correct if something else acts on it **and** the lane's own failure still pages. Every path terminates:
