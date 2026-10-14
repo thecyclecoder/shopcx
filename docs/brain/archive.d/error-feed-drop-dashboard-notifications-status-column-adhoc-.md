@@ -1,0 +1,1 @@
+- **Scope out foreign-app noise: drop dashboard_notifications.status column SELECT errors** · verified 2026-10-14 · → [[../libraries/control-tower]]
