@@ -187,6 +187,24 @@ export interface LateSub {
    * would train everyone to ignore the alert, and the one that mattered would go with it.
    */
   inheritedFromAppstle: boolean;
+  /**
+   * The owning customer (or the sub itself) is an INTERNAL test account — the founder's own
+   * manually-manipulated test harness, not a real customer money path. Its lateness is benign by
+   * construction, so it is counted and shown in the heartbeat but never paged on. Mirrors how
+   * open/terminal-dunning (`inDunning`) and inherited-from-Appstle (`inheritedFromAppstle`) lateness
+   * are already suppressed.
+   */
+  internalAccount: boolean;
+}
+
+/**
+ * The single source of truth for "should this late sub PAGE anyone". A late sub escalates only when
+ * its lateness is unexplained: not held by a dunning cycle, not inherited behind from Appstle, and
+ * not an internal test account. Every benign category is suppressed here so the alert stays
+ * readable and fires only on real-customer scheduling drift WE caused.
+ */
+export function isEscalatableLate(l: LateSub): boolean {
+  return !l.inDunning && !l.inheritedFromAppstle && !l.internalAccount;
 }
 
 function cadenceDays(interval: string | null, count: number | null): number {
@@ -242,7 +260,7 @@ export async function findLateSubscriptions(
   for (;;) {
     let q = admin
       .from("subscriptions")
-      .select("id, shopify_contract_id, next_billing_date, billing_interval, billing_interval_count")
+      .select("id, shopify_contract_id, next_billing_date, billing_interval, billing_interval_count, customer_id, is_internal")
       .eq("workspace_id", workspaceId).eq("billing_source", "shopcx").eq("status", "active")
       .order("id").limit(200);
     if (after) q = q.gt("id", after);
@@ -278,11 +296,21 @@ export async function findLateSubscriptions(
         const at = (snap as { migration_completed_at?: string } | null)?.migration_completed_at;
         if (at && new Date(last[0].created_at as string) < new Date(at)) inherited = true;
       }
+      // An internal test account's lateness is benign — resolve the owning customer's is_internal
+      // (falling back to the sub's own flag) so it is counted but never paged.
+      let customerIsInternal = false;
+      const customerId = (s as { customer_id?: string | null }).customer_id;
+      if (customerId) {
+        const { data: cust } = await admin.from("customers")
+          .select("is_internal").eq("id", customerId).maybeSingle();
+        customerIsInternal = Boolean((cust as { is_internal?: boolean | null } | null)?.is_internal);
+      }
       out.push({
         contractId: s.shopify_contract_id, cadenceDays: cad, extraDays: extra,
         lastChargedAt: String(last[0].created_at), nextBillingDate: s.next_billing_date,
         inDunning: (count ?? 0) > 0,
         inheritedFromAppstle: inherited,
+        internalAccount: Boolean(customerIsInternal || (s as { is_internal?: boolean | null }).is_internal),
       });
     }
     if (page.length < 200) break;

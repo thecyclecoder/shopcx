@@ -57,6 +57,33 @@ Drift went 4 → 1 in one pass, and the remaining one is correct to leave.
 - **No more per-row `getBillingCycleForDate` probe.** Retiring the strand check removed the only
   expensive Shopify read per row; the reconciler now reads each contract once (status + display date).
 
+## Cadence-lateness escalation — `findLateSubscriptions` + `isEscalatableLate`
+
+`findLateSubscriptions(ws)` catches what the row-vs-contract check structurally cannot: a sub sitting
+in a correct unbilled cycle but pinned a full cadence past its last charge. It compares each active
+sub's `next_billing_date` to one cadence after its most recent order and returns a `LateSub` for
+anything materially later.
+
+Not every late sub is a defect, so each `LateSub` carries a reason flag, and the pure predicate
+**`isEscalatableLate(l)`** is the single source of truth for "should this PAGE anyone". It pages only
+when lateness is unexplained — `!inDunning && !inheritedFromAppstle && !internalAccount`. The cron
+([[../inngest/shopcx-drift-reconcile]]) filters on that same logic before opening a
+`shopcx-subscription-health:late` repair job, and every suppressed category is still counted in the
+heartbeat for visibility.
+
+| Flag | Why it is late (benign) | Heartbeat key |
+|---|---|---|
+| `inDunning` | an OPEN or terminal dunning cycle holds the date on purpose | `lateInDunning` |
+| `inheritedFromAppstle` | last charge predates migration — it arrived already behind | `lateInherited` |
+| `internalAccount` | the owning customer (or the sub) is an **internal test account** — the founder's manually-manipulated test harness, not a real customer money path | `lateInternal` |
+
+**Internal-account exclusion (2026-10-14).** `findLateSubscriptions` selects `customer_id, is_internal`
+and resolves the owning [[../tables/customers]]`.is_internal` per candidate, setting
+`internalAccount = customerIsInternal || sub.is_internal`. Internal test subs were the one benign
+category still paging — two of the founder's test subs looked late beyond cadence and opened a repair
+job daily. They are now counted (`lateInternal`) but never escalated, mirroring the dunning/inherited
+suppressions.
+
 ## Related
 
 [[../inngest/shopcx-drift-reconcile]] · [[commerce__shopify-subscription-client]] ·
