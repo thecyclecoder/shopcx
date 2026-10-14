@@ -1,0 +1,1 @@
+- **Stop the subscription drift monitor from paging on the founder's internal test subscriptions** · verified 2026-10-14 · → [[../inngest/shopcx-drift-reconcile]]
