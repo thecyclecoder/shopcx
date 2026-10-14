@@ -317,7 +317,13 @@ export type DirectorActionKind =
   // director_function='cs', spec_slug=null. metadata:
   // { via, remedy_kind, remedy_action_type, was_promoted, ticket_id, triage_run_id,
   //   approval_id, autonomous:true }.
-  | "founder_remedy_outcome";
+  | "founder_remedy_outcome"
+  // dismissing-a-park-card-closes-its-job Phase 1 — the owner dismissed a park card, and the shared
+  // `settleParkedJobOnDismiss` helper settled the parked agent_jobs row (needs_attention|needs_approval
+  // → completed, error 'dismissed by owner', pending actions declined, a kind='repair' error_events
+  // signature resolved) so the backstop sweep never re-mints the card. One row per settled park;
+  // metadata: { job_id, kind, declined_actions, autonomous:false }.
+  | "owner_dismissed_park";
 
 export interface DirectorActivityInput {
   workspaceId: string;

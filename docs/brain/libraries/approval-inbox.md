@@ -106,6 +106,8 @@ Slack-tap callers pass `source: 'slack-inbox'` to skip the mirror (their own `up
 - **`dedupeNamespace(key)`** → `string` — the `<ns>` half of a `<ns>:<id>` dedupe key.
 - **`BUILD_STUCK_ESCALATION_NAMESPACES`** → `ReadonlySet<string>` — the six namespaces that all mean "this spec's build is stuck".
 - **`notifJobId(metadata)`** → `string | null` — the job id off `metadata.agent_job_id` ?? `metadata.job_id`.
+- **`settleParkedJobOnDismiss(admin, notification)`** → `Promise<{ settled, reason?, jobId? }>` — the shared **"a dismiss settles the job behind the card"** helper ([[../specs/dismissing-a-park-card-closes-its-job]] Phase 1). Given a just-dismissed `dashboard_notifications` row (`{ workspace_id, metadata }`), resolves its job id via `notifJobId`; if that `agent_jobs` row is still **needs_attention / needs_approval**, it declines the pending actions, sets it `completed` + `error`='dismissed by owner' via a **compare-and-set** (re-asserts workspace + the parked precondition + `.select("id")`, so a job that already moved on is left untouched → `job_moved_on`), and for **kind='repair'** resolves the matching `error_events` signature (`resolution_reason`='dismissed by owner', same semantics as the Control Tower `repair/route.ts` dismiss). Records a `director_activity` **`owner_dismissed_park`** row. Best-effort + never throws. Called by all three dismiss surfaces (see Callers) so a dismissed park stays dismissed — the [[needs-attention-route]] backstop sweep never re-mints its card.
+- Type **`DismissedParkNotification`** — the `{ workspace_id, metadata }` shape `settleParkedJobOnDismiss` reads off a dismissed card.
 - **`ownerFunctionForKind(kind)`** → `string | null` — kind → owning function (null ⇒ unknown ⇒ CEO).
 - **`routingOwnerForJob(job)`** → `string | null` — sync routing owner (model-tier target kind; else the job's kind).
 - **`routingOwnerForJobAsync(admin, job)`** → `Promise<string | null>` — async routing owner; a `plan` job resolves to its **goal's** owner (`goals.owner` keyed by `job.spec_slug`), else delegates to `routingOwnerForJob`.
@@ -129,11 +131,13 @@ Slack-tap callers pass `source: 'slack-inbox'` to skip the mirror (their own `up
 - **Every escalation kind has an owner family, or it falls to the universal backstop** — a kind in no specific family is caught by **Family 1e** only once its spec folds/disappears, which can be a long wait (204h in the measured case). A kind with a real reason-gone condition deserves its OWN family, with the test that matches ITS trigger (see the ⭐ note above); reusing a sibling family's test is how you clear a live decision. `npx tsx scripts/_diag-escalation-kind-coverage.ts` prints which kinds are currently relying on the backstop.
 - **Auto-clear is reason-true only** — `reconcileStaleParkCards` dismisses a park ONLY when its reason is genuinely gone (job left needs_attention / spec folded / build landed after the card / ticket closed / Reva clean); a still-valid escalation is never silently dropped.
 - **Execution path unchanged** — emit only surfaces the request; `POST /api/roadmap/approve` → `queued_resume` is untouched.
+- **A dismiss settles the job behind the card** ([[../specs/dismissing-a-park-card-closes-its-job]] Phase 1) — every dismiss surface calls `settleParkedJobOnDismiss`, so dismissing a park card doesn't just flip `dashboard_notifications.dismissed`: it settles the linked parked `agent_jobs` row (completed + 'dismissed by owner', actions declined, a repair's `error_events` resolved) so the [[needs-attention-route]] backstop never re-mints a fresh "Park Backstop" card for a job the owner already dismissed (21 re-minted on 2026-10-13 before this). Guard-before-mutation: the settle is a compare-and-set, so a race / a live decision that landed first is never overwritten.
 
 ## Callers
 
 - `scripts/builder-worker.ts` (poll loop) — runs `reconcileApprovalInbox(db)` ~every 20s.
 - `src/app/api/developer/agents/inbox/route.ts` — consumes the `metadata.routed_to_function` / `approve_action_id` / `deep_link` the emitter stamps.
+- **`settleParkedJobOnDismiss` dismiss surfaces** (Phase 1) — `src/app/api/developer/agents/inbox/dismiss/route.ts` (owner inbox dismiss), `src/app/api/workspaces/[id]/notifications/[notificationId]/route.ts` PATCH (when `dismissed=true`), and `scripts/ceo-approvals.ts` `dismiss` (CEO CLI). Each selects the dismissed row's `{ workspace_id, metadata }` and calls the helper so the dismiss settles the job.
 
 ## CEO bounce-back affordance — `POST /api/developer/agents/inbox/bounce-back`
 
