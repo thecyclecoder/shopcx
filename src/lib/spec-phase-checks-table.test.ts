@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import {
   validateExecutableCheck,
   validateGrepPatternIsPosixEre,
+  validateGrepPatternIsNotMisreadLiteral,
   isPlainReadonlySql,
   detectBuilderChosenNameInGrep,
   collectSpecPinnedGrepLiterals,
@@ -574,4 +575,37 @@ test("isPlainReadonlySql accepts SELECT + WITH; rejects chained + mutating state
   assert.equal(isPlainReadonlySql("UPDATE specs SET slug='x'"), false);
   assert.equal(isPlainReadonlySql("truncate specs"), false);
   assert.equal(isPlainReadonlySql(""), false);
+});
+
+// 2026-10-13 ground truth: fraud-name-mismatch-needs-second-signal and
+// error-feed-drop-specs-critical-column-adhoc-lookup-noise each burned two builds on a grep check
+// written as a code snippet that the regex engine reads differently.
+test("validateGrepPatternIsNotMisreadLiteral rejects empty alternation (matches every line)", () => {
+  for (const p of ["nameMismatch || avsCvvFail || risky", "|lead", "trail|", "(|x)", "(x|)"]) {
+    const r = validateGrepPatternIsNotMisreadLiteral(p);
+    assert.equal(r.valid, false, p);
+    assert.match((r as { reason: string }).reason, /matches every line/);
+  }
+  const r = validateGrepPatternIsNotMisreadLiteral("nameMismatch || avsCvvFail || risky");
+  assert.match((r as { reason: string }).reason, /nameMismatch \\\|\\\| avsCvvFail \\\|\\\| risky/);
+});
+
+test("validateGrepPatternIsNotMisreadLiteral rejects a call-site group that can never match the literal", () => {
+  for (const p of ["isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(message, query)", "foo()"]) {
+    const r = validateGrepPatternIsNotMisreadLiteral(p);
+    assert.equal(r.valid, false, p);
+    assert.match((r as { reason: string }).reason, /regex group/);
+  }
+});
+
+test("validateGrepPatternIsNotMisreadLiteral accepts real regexes and escaped literals", () => {
+  for (const p of ["a|b", "(foo|bar)", "get(Spec|Specs)", "foo\\(a, b\\)", "[|]x", "x\\|\\|y", "^export function", "foo.*bar"]) {
+    assert.equal(validateGrepPatternIsNotMisreadLiteral(p).valid, true, p);
+  }
+});
+
+test("the misread-literal gate fires at authoring (specText given), never retroactively at run time", () => {
+  const check = { exec_kind: "grep" as const, params: { pattern: "a || b", expect: "absent" } };
+  assert.equal(validateExecutableCheck(check).valid, true);
+  assert.equal(validateExecutableCheck(check, { specText: "spec body" }).valid, false);
 });
