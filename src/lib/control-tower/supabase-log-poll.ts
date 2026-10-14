@@ -105,6 +105,7 @@ import {
   isForeignSupabasePostgresMissingSpecsTargetAdhocNoise,
   isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise,
   isForeignSupabasePostgresMissingSpecsIntentAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
@@ -1237,6 +1238,14 @@ const LOG_QUERIES: LogQuery[] = [
       // `specs`, a JOIN through `spec_phases`, or on `specs` via a non-SELECT statement
       // (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.specs` that asks for a phantom `critical` column. The `specs`
+      // table has NEVER had a top-level `critical` column — board priority lives in
+      // `priority` and the critical flag inside `flags.critical`. The drop is gated on
+      // the exact `column specs.critical does not exist` column-missing message AND a
+      // SELECT-on-specs shape (bare OR PostgREST CTE wrapper) — a genuine specs write or
+      // schema regression on a different column still surfaces / pages.
+      if (isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.agent_jobs` that asks for BOTH `slug` and the real `spec_slug`
       // column. The `agent_jobs` table exists but has NEVER had a `slug` column — the
