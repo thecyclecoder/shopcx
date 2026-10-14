@@ -93,6 +93,15 @@ Message shape names the offending pattern, the specific `(?` construct, and poin
 
 Before this gate a broken pattern was reported as an infrastructure fault at build time and then charged to the code being verified — `BUILDER_DEFERRED_REDRIVE_MAX=3` re-drives, then dismissal-as-unverified — so a one-character mistake in a check silently destroyed the whole build. Author-time is the cheapest place to close that class: the broken check never reaches a build at all.
 
+### Grep misread-literal reject: validateGrepPatternIsNotMisreadLiteral
+
+`validateExecutableCheck` rejects a `grep` pattern that is a code snippet the regex engine reads differently. This runs only at authoring, when `specText` is passed. The runner never fails an already-authored check on this basis; such checks get repaired through `upsertPhaseChecks`. It catches two shapes:
+
+- **Empty alternation.** `||`, a leading or trailing `|`, `(|` or `|)` adds an empty alternative, so the pattern matches every line. An `expect:'absent'` check can then never pass. Ground truth: `nameMismatch || avsCvvFail || risky` on `fraud-name-mismatch-needs-second-signal` (2026-10-13), where `rg` found 2032 matches and `rg -F` found 1.
+- **Call-site group.** An unescaped `(` right after an identifier, wrapping either nothing or a `, `-separated list, is a regex group. The pattern then never matches the literal call. Ground truth: `isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(message, query)` on `error-feed-drop-specs-critical-column-adhoc-lookup-noise` (2026-10-13).
+
+Real regexes still pass, for example `a|b`, `(foo|bar)`, `get(Spec|Specs)`, `[|]` and escaped `\(`. The rejection reason carries the escaped literal as the suggested pattern.
+
 ## Author chokepoint gate
 
 Two gates fire in order BEFORE the DB write; both throw with the offending phase named so the author sees exactly what's un-testable:

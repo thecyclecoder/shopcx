@@ -472,6 +472,68 @@ export function validateGrepPatternIsPosixEre(pattern: string): ExecutableCheckV
 }
 
 /**
+ * Reject a grep pattern that is a code snippet the regex engine will misread. Both checks are
+ * ground-truth cases from 2026-10-13, where two builds each burned their full repair cap on a
+ * check that could never pass:
+ *
+ *   - EMPTY ALTERNATION. `nameMismatch || avsCvvFail || risky` (expect absent) is the alternation
+ *     `nameMismatch | <empty> | avsCvvFail | <empty> | risky`, so it matches EVERY line. An
+ *     expect:'absent' check can never pass, and an expect:'present' one always passes.
+ *   - CALL-SITE GROUP. `isFoo(message, query)` (expect present) treats the parens as a regex group,
+ *     so it looks for `isFoomessage, query`, which no correct implementation contains. The same
+ *     holds for an empty `foo()`, which matches bare `foo`.
+ *
+ * Both get the escaped literal back as the suggestion. Author-time only (see validateExecutableCheck):
+ * already-authored checks are repaired through the SDK, never failed retroactively by the runner.
+ */
+export function validateGrepPatternIsNotMisreadLiteral(pattern: string): ExecutableCheckValidation {
+  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Walk unescaped characters, tracking character classes so `[|]` and `[(]` stay literal.
+  let inClass = false;
+  const unescaped: { c: string; i: number }[] = [];
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === "\\") { i++; continue; }
+    if (inClass) { if (c === "]") inClass = false; continue; }
+    if (c === "[") { inClass = true; continue; }
+    unescaped.push({ c, i });
+  }
+  for (let k = 0; k < unescaped.length; k++) {
+    const { c, i } = unescaped[k];
+    if (c !== "|") continue;
+    const prev = unescaped[k - 1];
+    const next = unescaped[k + 1];
+    const emptyLeft = i === 0 || (prev && prev.i === i - 1 && (prev.c === "|" || prev.c === "("));
+    const emptyRight = i === pattern.length - 1 || (next && next.i === i + 1 && next.c === ")");
+    if (emptyLeft || emptyRight) {
+      return {
+        valid: false,
+        reason:
+          `grep.pattern "${pattern}" has an empty alternative around "|", so it matches every line ` +
+          `(expect:'absent' can never pass; expect:'present' always passes). If you meant the literal ` +
+          `code, escape it. Try grep.pattern: ${escaped}`,
+      };
+    }
+  }
+  for (let k = 0; k < unescaped.length; k++) {
+    const { c, i } = unescaped[k];
+    if (c !== "(" || i === 0 || !/[A-Za-z0-9_$]/.test(pattern[i - 1])) continue;
+    const close = unescaped.slice(k + 1).find((u) => u.c === ")");
+    if (!close) continue;
+    const inner = pattern.slice(i + 1, close.i);
+    if (inner === "" || inner.includes(", ")) {
+      return {
+        valid: false,
+        reason:
+          `grep.pattern "${pattern}" reads like a call site, but "(${inner})" is a regex group, so ` +
+          `the pattern can never match the literal code. Escape the parens. Try grep.pattern: ${escaped}`,
+      };
+    }
+  }
+  return { valid: true };
+}
+
+/**
  * verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 1 — reject a `grep` whose
  * `pattern` pins an EXACT LITERAL for a name the implementation gets to invent (an npm script name, a
  * `*.test.ts` filename, a kebab-case slug, a camelCase symbol) when the spec body does NOT itself pin
@@ -716,6 +778,8 @@ export function validateExecutableCheck(
       // therefore never retroactively fails an already-authored check on this basis (defense-in-depth
       // lives at authoring, where a rejection is actionable).
       if (typeof ctx?.specText === "string") {
+        const misread = validateGrepPatternIsNotMisreadLiteral(pattern);
+        if (!misread.valid) return misread;
         const guess = detectBuilderChosenNameInGrep(pattern, ctx.specText);
         if (guess) {
           return { valid: false, reason: `${guess.reason}. Try grep.pattern: ${guess.suggested}` };
