@@ -4137,6 +4137,61 @@ export function isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeA
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column dunning_cycles.cycle_key does not exist` for an
+ * ad hoc SELECT lookup / PostgREST direct-REST call against `public.dunning_cycles.cycle_key`. The
+ * `dunning_cycles` table exists as a first-class billing-retry ledger (see
+ * [[../tables/dunning_cycles]]), but it has never had a `cycle_key` column — no ShopCX code reads
+ * it. The error only reaches Supabase's `postgres_logs` feed when an external / stale PostgREST
+ * client (a foreign app assuming a generic `cycle_key` shape, a stale SQL Editor session, a
+ * deprecated integration) issues a `select=...cycle_key...` against `/rest/v1/dunning_cycles`.
+ * There is no lever from ShopCX to make that query resolve — paging Platform on it (Control Tower
+ * signature `supabase-logs:e848ee2371263d01`) is repair work for a query we do not own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise` — the
+ * same narrow-gating: drop ONLY when
+ *   1. the `message` (Postgres error) once trimmed equals
+ *      `column dunning_cycles.cycle_key does not exist` (or the `public.` qualified variant, with
+ *      any leading `ERROR: ` prefix stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.dunning_cycles` lookup shape
+ *      (any WHERE / LIMIT / ORDER BY tail is fine), or PostgREST's
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."dunning_cycles" ... )` direct-REST
+ *      wrapper (double-quoted identifiers).
+ *
+ * Narrowly gated so a column-missing error for ANY OTHER table, a DIFFERENT column on
+ * `dunning_cycles`, or a non-SELECT statement against the table still pages — the wrapped op must
+ * itself be a SELECT, so a PostgREST INSERT/UPDATE/DELETE naming the bogus `cycle_key` column is a
+ * real code bug we keep paging on.
+ * Empty / nullish message OR query returns `false` — we need both markers. Consumed by the
+ * `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]]: returning null drops the row
+ * (no error_event, no loop_alert, no signature). A capture-time drop, not a transient flag.
+ */
+export function isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column dunning_cycles.cycle_key does not exist" ||
+    stripped === "column public.dunning_cycles.cycle_key does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `dunning_cycles` (with or
+  // without the `public.` schema qualifier). A non-SELECT statement (a real code bug writing the
+  // bogus column) stays captured.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?dunning_cycles\b/.test(q)) return true;
+  // PostgREST direct-REST reads arrive wrapped as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."dunning_cycles" ... )` (double-quoted identifiers) — same foreign read.
+  // The wrapped op must be a SELECT, so a PostgREST write still pages.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?dunning_cycles\b/.test(
+    q,
+  );
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column subscriptions.paused_until does not exist`
  * for an ad hoc SELECT lookup / PostgREST direct-REST call against
  * `public.subscriptions.paused_until`. The `subscriptions` table exists as a first-class

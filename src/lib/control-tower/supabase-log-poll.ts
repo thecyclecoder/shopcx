@@ -76,6 +76,7 @@ import {
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise,
+  isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
@@ -834,6 +835,14 @@ const LOG_QUERIES: LogQuery[] = [
       // signature `supabase-logs:c1d1e7efd5a0bfe6`) is repair work for a query we don't own.
       // Narrowly gated: a different table, a different column, or a non-SELECT statement still pages.
       if (isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.dunning_cycles.cycle_key`. The billing-retry ledger exists but has never
+      // had a `cycle_key` column — no ShopCX code reads it. The column-missing ERROR only reaches
+      // this feed when a foreign app / stale PostgREST client reads `cycle_key` off the table.
+      // There is no lever from ShopCX to resolve it — paging Platform (Control Tower signature
+      // `supabase-logs:e848ee2371263d01`) is repair work for a query we don't own. Narrowly
+      // gated: a different table, a different column, or a non-SELECT statement still pages.
+      if (isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.subscriptions.paused_until`. The `subscriptions` table exists but
       // has no `paused_until` column — the canonical pause timestamp is `pause_resume_at`

@@ -29,6 +29,7 @@ import {
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise,
+  isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
@@ -5395,6 +5396,191 @@ test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNois
   assert.equal(
     isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
       "column subscription_cycle_charges.created_at does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/dunning_cycles?select=...cycle_key...` against our `public.dunning_cycles`
+// billing-retry ledger. The table exists but has never had a `cycle_key` column — no ShopCX
+// code reads it. Foreign-owned surface, no lever from us (Control Tower signature
+// `supabase-logs:e848ee2371263d01`) — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `dunning_cycles.cycle_key` AND the bare SELECT-lookup shape on `dunning_cycles`
+// are present. A column-missing on any other table, a different column on `dunning_cycles`, or
+// a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise drops the ad hoc SELECT lookup on the exact dunning_cycles.cycle_key column-missing shape", () => {
+  // The real captured sample — unqualified and public.-qualified message variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
+      "select id, cycle_key from public.dunning_cycles order by created_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column public.dunning_cycles.cycle_key does not exist",
+      "select id, cycle_key from public.dunning_cycles order by created_at desc limit 100",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
+      "select cycle_key from dunning_cycles limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
+      "select id, cycle_key from public.dunning_cycles where status = 'failed' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
+      "SELECT ID, CYCLE_KEY FROM PUBLIC.DUNNING_CYCLES",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "ERROR: column dunning_cycles.cycle_key does not exist",
+      "select cycle_key from public.dunning_cycles",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise drops the PostgREST direct-REST WITH pgrst_source wrapper shape (signature e848ee2371263d01)", () => {
+  // The real recurring query shape for signature `supabase-logs:e848ee2371263d01` —
+  // PostgREST wraps the direct-REST read in a `WITH pgrst_source AS ( SELECT ... )` CTE with
+  // double-quoted identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."dunning_cycles".* FROM "public"."dunning_cycles" ORDER BY "public"."dunning_cycles"."cycle_key" DESC LIMIT 100 ) SELECT * FROM "pgrst_source"',
+    ),
+    true,
+  );
+  // Unqualified double-quoted table name inside the wrapper is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column public.dunning_cycles.cycle_key does not exist",
+      'with pgrst_source as ( select "dunning_cycles".* from "dunning_cycles" order by cycle_key desc limit 10 )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise KEEPS a PostgREST INSERT/UPDATE wrapper writing cycle_key (a real code-bug still pages)", () => {
+  // A PostgREST write (INSERT/UPDATE) wrapped in the same CTE still targets a bogus column —
+  // that is a code bug we DO want to surface, so the pgrst_source branch must gate on SELECT.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
+      'with pgrst_source as ( insert into "public"."dunning_cycles" ("cycle_key") values (\'x\') returning * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
+      'with pgrst_source as ( update "public"."dunning_cycles" set "cycle_key" = \'x\' returning * )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise KEEPS a column-missing error on any OTHER table (a different table's cycle_key still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column subscription_cycle_charges.cycle_key does not exist",
+      "select cycle_key from public.subscription_cycle_charges where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column orders.cycle_key does not exist",
+      "select cycle_key from public.orders limit 10",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise KEEPS a DIFFERENT column-missing on dunning_cycles (a real column regression still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.attempt_count does not exist",
+      "select attempt_count from public.dunning_cycles where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.status does not exist",
+      "select status from public.dunning_cycles where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing dunning_cycles.cycle_key still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
+      "insert into public.dunning_cycles (cycle_key) values ('x')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
+      "update public.dunning_cycles set cycle_key = 'x' where id = 'y'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
+      "delete from public.dunning_cycles where cycle_key = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise("", ""), false);
+  // Exact message but empty / null query — cannot confirm the shape, stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
       null,
     ),
     false,
