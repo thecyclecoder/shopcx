@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc 'column specs.critical does not exist' REST noise from the error feed** · verified 2026-10-14 · → [[../libraries/control-tower]]
