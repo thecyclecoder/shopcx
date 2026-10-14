@@ -1320,6 +1320,66 @@ export function isForeignSupabasePostgresMissingDashboardNotificationsDismissedA
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `agent_jobs.finished_at` column for an
+ * ad hoc direct-REST lookup on a table ShopCX does not read that way. A stale external/REST
+ * client SELECTs `finished_at` from `public.agent_jobs`, Supabase's `postgres_logs` feed
+ * captures the resulting undefined_column ERROR, and log-poll mints a Control Tower incident
+ * for a query we don't own ([[../specs/error-feed-drop-agent-jobs-finished-at-column-adhoc-noise]],
+ * Control Tower signature `supabase-logs:54a5614ee9dc1e20`). The `agent_jobs` lifecycle has
+ * never owned a `finished_at` column (grep confirms no ShopCX code reads it), so there is no
+ * lever from ShopCX to make that query resolve — paging Platform on it is repair work for a
+ * query no code owns. The direct twin of
+ * `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise` /
+ * `isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise` above.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column agent_jobs.finished_at does not exist` (with or without the
+ *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.agent_jobs` — either (a)
+ *      the bare `select ... from public.agent_jobs` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."agent_jobs" ... )` CTE wrapper form
+ *      with double-quoted identifiers.
+ *
+ * Intentionally narrow — any genuine schema regression still pages:
+ *   - a DIFFERENT missing column on `agent_jobs` (e.g. `slug`, `completed_at`,
+ *     `workspace_id`) still pages — the pin covers `finished_at` only,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL, a JOIN, a non-SELECT wrapped op inside the CTE) still pages,
+ *   - a FATAL / PANIC / constraint violation / relation-missing on the table is untouched
+ *     (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — returning null fully suppresses the row (no error_event, no
+ * loop_alert, no signature). A capture-time drop, not a `transient` flag.
+ */
+export function isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column agent_jobs.finished_at does not exist" ||
+    stripped === "column public.agent_jobs.finished_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `agent_jobs` — any trailing WHERE/LIMIT/ORDER BY is fine; the pin
+  // is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real code-bug
+  // shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?agent_jobs\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."agent_jobs" ... )` with double-quoted identifiers. Guarded so the CTE branch
+  // requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper
+  // is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."agent_jobs"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing `created_at` COLUMN on
  * `public.worker_heartbeats` for an ad hoc / stale direct-REST SELECT. The
  * `worker_heartbeats` singleton liveness table (`supabase/migrations/20260619140001_worker_heartbeats.sql`)
