@@ -274,6 +274,15 @@ export type DirectorActionKind =
   // rollup (caught / repaired-in-session / escaped-to-fix-phase) reads this kind — see the brain
   // note next to the Phase-1 build-lane page.
   | "build_self_verify_caught"
+  // autobuild-circuit-break-on-repeated-pre-commit-self-verify-failure Phase 1 — the self-verify
+  // circuit breaker in [[../lib/agent-jobs]] `enqueueBuildIfDue`. When a spec's last N (default 3)
+  // consecutive build jobs all FAILED with the SAME pre-commit self-verify signature, a live rebuild
+  // can never close the class (it re-fails identically and re-fires Mario every tick), so the breaker
+  // parks the spec (auto_build off + a human_review note) and raises THIS row ONCE per (slug,
+  // signature) so the owner + Ada see the stall instead of it looping silently. Owned by the spec's
+  // owner function (falls back to Platform). metadata: { signature, consecutive_failures, threshold,
+  // parked:true, autonomous:true }.
+  | "build_self_verify_circuit_open"
   // build-verify-self-heals-stale-grep-checks-before-deferring Phase 2 — one row PER auto-corrected
   // spec_phase_checks pattern by the phase-verify reconciler ([[../libraries/check-reconciliation]])
   // so a self-healing check can't mask a genuinely-wrong spec: the CEO sees WHAT was auto-corrected
