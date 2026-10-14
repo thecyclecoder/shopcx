@@ -12,6 +12,19 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Stop the subscription drift monitor from paging on the founder's internal test subscriptions** · verified 2026-10-14 · → [[../inngest/shopcx-drift-reconcile]]
+- **Stop paging on the foreign 'dunning_cycles.cycle_key does not exist' PostgREST read** · verified 2026-10-14 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise`)
+- **A Braintree-side refund must reach our books** · verified 2026-10-13 · → [[../lifecycles/return-pipeline]]
+- **Stop grader sessions querying nonexistent spec phase_number** · verified 2026-10-13 · → [[../libraries/agent-grader.md]]
+- **Drop foreign ad-hoc SELECT on non-existent dashboard_notifications.updated_at from the error feed** · verified 2026-10-13 · → [[lifecycles/control-tower]]
+- **Drop foreign ad-hoc error_events reads that name an unqualified missing column** · verified 2026-10-13 · → [[../libraries/control-tower]]
+- **Scope out the foreign specs.merge_sha direct-REST read from the Control Tower error feed** · verified 2026-10-13 · → [[../inngest/supabase-log-poll]]
+- **Scope out the Supabase Studio uuid-LIKE-on-tickets.id probe from the Control Tower error feed** · verified 2026-10-13 · → [[../libraries/control-tower]]
+- **Scope out the foreign direct-REST `worker_heartbeats.created_at` column-missing noise from the Control Tower error feed** · verified 2026-10-13 · → [[../tables/worker_heartbeats]]
+- **Fraud BIN-velocity rule: never flag customers for sharing a bank's card prefix alone** · verified 2026-10-13 · → [[../libraries/fraud-detector]], [[../libraries/fraud-confirm]], [[../tables/fraud_cases]], [[../lifecycles/fraud-detection]]
+- **Repair transient park verifies itself instead of waiting on a human** · verified 2026-10-13 · → [[../libraries/repair-verdict-guard]]
+- **Security dependency upgrades** · verified 2026-10-13 · → [[../libraries/security-agent]]
+- **Security reviews must always produce a real verdict** · verified 2026-10-13 · → [[../libraries/security-agent]]
 - **Close-no-action guard: exempt notification and auto-reply emails** · verified 2026-10-12 · → [[../libraries/cs-director]] · also [[../libraries/automated-sender]]
 - **Error feed: drop foreign ad-hoc journey_sessions.trigger_intent column-missing noise at capture** · verified 2026-10-12 · → [[libraries/control-tower]]
 - **Subscription renewal orders must honor free-shipping guarantee** · verified 2026-10-12 · → [[../lifecycles/subscription-billing]] · [[../libraries/pricing]]
