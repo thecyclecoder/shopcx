@@ -103,6 +103,7 @@ import {
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
@@ -1874,6 +1875,117 @@ test("isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhoc
   assert.equal(
     isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise(
       "column dashboard_notifications.updated_at does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise ──
+// A foreign / stale direct-REST client read `public.dashboard_notifications` expecting a
+// `status` column the table never carried; Control Tower signature
+// `supabase-logs:b36bbd3fdf6dbe3f`. Drop AT CAPTURE only when BOTH the exact `column
+// dashboard_notifications.status does not exist` message AND the SELECT-lookup shape on
+// `dashboard_notifications` (bare or PostgREST CTE wrapper) are present. A real status-
+// missing on another table, a `dashboard_notifications` column rename, a non-SELECT write, or
+// a FATAL still pages.
+
+test("isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise drops the PostgREST CTE wrapper + bare SELECT listing the non-existent status column", () => {
+  // The captured incident shape: a stale direct-REST client lists dashboard_notifications
+  // filtered by status, PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."dashboard_notifications" ... )` CTE, and Postgres rejects with the column-missing.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise(
+      "column dashboard_notifications.status does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."dashboard_notifications"."id", "public"."dashboard_notifications"."status" FROM "public"."dashboard_notifications" WHERE "public"."dashboard_notifications"."status" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise(
+      "column public.dashboard_notifications.status does not exist",
+      'with pgrst_source as ( select "public"."dashboard_notifications"."status" from "public"."dashboard_notifications" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise(
+      "ERROR: column dashboard_notifications.status does not exist",
+      'WITH pgrst_source AS ( SELECT "status" FROM "public"."dashboard_notifications" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper), qualified and unqualified FROM, drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise(
+      "column dashboard_notifications.status does not exist",
+      "select id, status from public.dashboard_notifications where status = 'open' limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise(
+      "column dashboard_notifications.status does not exist",
+      "select * from dashboard_notifications where status is not null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise KEEPS real errors (other table, other column, non-SELECT, FATAL)", () => {
+  // Same status-missing message on a DIFFERENT relation is a real product-schema regression
+  // and still pages — the pin names dashboard_notifications only.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise(
+      "column tickets.status does not exist",
+      "select id, status from public.tickets where status = 'open'",
+    ),
+    false,
+  );
+  // A DIFFERENT column on dashboard_notifications (the sibling dismissed_at / updated_at drops
+  // / a real column rename) is handled by its own predicate and still pages here — the pin is
+  // status only.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise(
+      "column dashboard_notifications.dismissed_at does not exist",
+      "select id, dismissed_at from public.dashboard_notifications",
+    ),
+    false,
+  );
+  // A non-SELECT shape (PostgREST CTE write / bare write) is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise(
+      "column dashboard_notifications.status does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."dashboard_notifications"("id","status") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise(
+      "column dashboard_notifications.status does not exist",
+      "update public.dashboard_notifications set status = 'read' where id = $1",
+    ),
+    false,
+  );
+  // A FATAL / constraint-class error on the same shape is untouched (different message).
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select id, status from public.dashboard_notifications",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise("", "select * from dashboard_notifications"),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise(
+      "column dashboard_notifications.status does not exist",
       "",
     ),
     false,
