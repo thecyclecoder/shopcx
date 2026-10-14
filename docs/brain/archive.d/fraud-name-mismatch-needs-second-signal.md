@@ -1,0 +1,1 @@
+- **Fraud BIN check: a card-name vs billing-name mismatch alone never holds an order** · verified 2026-10-14 · → [[lifecycles/fraud-detection]]
