@@ -31,6 +31,36 @@ import {
   resolveContractOwnerShopifyCustomerId,
   verifyLoyaltyCouponAppliedToContract,
 } from "./action-executor";
+import Module from "node:module";
+import type { ResolvedCoupon } from "./coupons";
+
+// ── Stub the live coupon re-resolve ──────────────────────────────────
+// `verifyLoyaltyCouponAppliedToContract` now also requires the matched
+// entry to carry REAL value (spec: loyalty-coupon-reissue-must-be-
+// internal-sub-native-and-verify-real-value) — a bare-string / `{title}`
+// entry only counts as landed when a live `resolveCoupon` (dynamic
+// `await import("@/lib/coupons")`) re-resolves it to `value > 0`. Stub that
+// re-resolve so these tests stay pure (no Supabase / Shopify). Seeded AFTER
+// the static import above so transitive importers keep the real module;
+// `__esModule: true` lets tsx surface named exports to the dynamic import.
+let liveCoupon: ResolvedCoupon | null = {
+  code: "LOYALTY-15-NEWABC",
+  type: "fixed_amount",
+  value: 1500,
+  recurring_cycle_limit: 1,
+  source: "internal",
+};
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const realCoupons = require("./coupons") as Record<string, unknown>;
+(Module as unknown as { _cache: Record<string, { exports: unknown }> })._cache[
+  require.resolve("@/lib/coupons")
+] = {
+  exports: {
+    __esModule: true,
+    ...realCoupons,
+    resolveCoupon: async () => liveCoupon,
+  },
+};
 
 type Row = Record<string, unknown>;
 type Tables = Record<string, Row[]>;
@@ -173,6 +203,24 @@ test("verifyLoyaltyCouponAppliedToContract: case-insensitive match (Shopify may 
   };
   const got = await verifyLoyaltyCouponAppliedToContract(makeAdmin(tables), "ws-1", "gid://shopify/SubscriptionContract/999", "LOYALTY-15-NEWABC");
   assert.equal(got, true);
+});
+
+test("verifyLoyaltyCouponAppliedToContract: code-only entry whose live re-resolve is dead → false (real-value check)", async () => {
+  const tables: Tables = {
+    subscriptions: [{
+      workspace_id: "ws-1",
+      shopify_contract_id: "gid://shopify/SubscriptionContract/999",
+      applied_discounts: ["LOYALTY-15-NEWABC"],
+    }],
+  };
+  const saved = liveCoupon;
+  liveCoupon = null;
+  try {
+    const got = await verifyLoyaltyCouponAppliedToContract(makeAdmin(tables), "ws-1", "gid://shopify/SubscriptionContract/999", "LOYALTY-15-NEWABC");
+    assert.equal(got, false, "a {title}/bare-string stub for a dead code discounts $0 at renewal — not landed");
+  } finally {
+    liveCoupon = saved;
+  }
 });
 
 test("verifyLoyaltyCouponAppliedToContract: an OTHER coupon on the sub does not falsely match this code", async () => {
