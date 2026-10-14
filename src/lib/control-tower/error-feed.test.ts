@@ -102,6 +102,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise,
@@ -1767,6 +1768,125 @@ test("isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise KEEPS 
   assert.equal(isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise("", "select * from fraud_cases"), false);
   assert.equal(
     isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise("column fraud_cases.updated_at does not exist", ""),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise ──
+// A foreign / stale direct-REST client read `public.loyalty_redemptions` expecting a
+// `customer_id` column that lives only on the sibling `loyalty_members` table; Control Tower
+// signature `supabase-logs:1eb5b8663e370ab7`. Drop AT CAPTURE only when BOTH the exact `column
+// loyalty_redemptions.customer_id does not exist` message AND the SELECT-lookup shape on
+// `loyalty_redemptions` (bare or PostgREST CTE wrapper) are present. A real customer_id-missing
+// on another table, a `loyalty_redemptions` column rename, customer_id on loyalty_members, a
+// non-SELECT write, or a FATAL still pages.
+
+test("isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise drops the PostgREST CTE wrapper + bare SELECT listing the non-existent customer_id column", () => {
+  // The captured incident shape: a stale direct-REST client lists loyalty_redemptions filtered
+  // by customer_id, PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."loyalty_redemptions" ... )` CTE, and Postgres rejects with the column-missing.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.customer_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loyalty_redemptions"."id", "public"."loyalty_redemptions"."customer_id" FROM "public"."loyalty_redemptions" WHERE "public"."loyalty_redemptions"."customer_id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column public.loyalty_redemptions.customer_id does not exist",
+      'with pgrst_source as ( select "public"."loyalty_redemptions"."customer_id" from "public"."loyalty_redemptions" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "ERROR: column loyalty_redemptions.customer_id does not exist",
+      'WITH pgrst_source AS ( SELECT "customer_id" FROM "public"."loyalty_redemptions" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper), qualified and unqualified FROM, drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.customer_id does not exist",
+      "select id, customer_id from public.loyalty_redemptions where customer_id = $1 limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.customer_id does not exist",
+      "select * from loyalty_redemptions where customer_id is not null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise KEEPS real errors (other table, other column, customer_id on loyalty_members, non-SELECT, FATAL)", () => {
+  // Same customer_id-missing message on a DIFFERENT relation is a real product-schema
+  // regression and still pages — the pin names loyalty_redemptions only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column tickets.customer_id does not exist",
+      "select id, customer_id from public.tickets",
+    ),
+    false,
+  );
+  // A DIFFERENT column on loyalty_redemptions (a real column rename / schema regression) still
+  // pages — the pin is customer_id only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.member_id does not exist",
+      "select id, member_id from public.loyalty_redemptions",
+    ),
+    false,
+  );
+  // customer_id on the sibling loyalty_members table (where the column legitimately lives) is a
+  // real regression and still pages — the pin names loyalty_redemptions only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_members.customer_id does not exist",
+      "select id, customer_id from public.loyalty_members",
+    ),
+    false,
+  );
+  // A non-SELECT shape (PostgREST CTE write / bare write) is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.customer_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."loyalty_redemptions"("id","customer_id") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.customer_id does not exist",
+      "update public.loyalty_redemptions set customer_id = $1 where id = $2",
+    ),
+    false,
+  );
+  // A FATAL / constraint-class error on the same shape is untouched (different message).
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select id, customer_id from public.loyalty_redemptions",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise("", "select * from loyalty_redemptions"),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.customer_id does not exist",
+      "",
+    ),
     false,
   );
 });
