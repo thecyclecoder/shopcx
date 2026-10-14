@@ -21,7 +21,7 @@ makes that visible. See [[../operational-rules]] § North star.
 - **Steps:** kill-switch → list workspaces → one `reconcileShopcxDrift(ws, {apply:true})` step per
   workspace → cadence-check (`findLateSubscriptions`) → escalate-if-needed → heartbeat
 - **Heartbeat:** `emitCronHeartbeat` on every run including the switched-off path, carrying
-  `{checked, repaired, date, status, late, lateInDunning, lateInherited}` so the counts are visible in Control Tower without
+  `{checked, repaired, date, status, late, lateInDunning, lateInherited, lateInternal}` so the counts are visible in Control Tower without
   reading logs
 
 ## ⭐ It ESCALATES now — a monitor that only logs is not a monitor
@@ -53,9 +53,14 @@ UNBILLED cycle by **index**, so a spent cycle no longer blocks a charge. There i
 per-row `getBillingCycleForDate` probe, and the stranded escalation path (which was finding nothing
 meaningful and training operators to ignore alerts) is retired.
 
+**Internal-account exclusion (2026-10-14).** The monitor was firing daily on the founder's internal
+test subscriptions because they are manually-manipulated and frequently late by design. They are now
+flagged via the owning customer's `is_internal` column and counted in `lateInternal` for visibility but
+never escalated, matching the dunning/inherited suppressions. See [[../libraries/commerce__shopcx-drift-reconciler]] § Cadence-lateness escalation.
+
 ### ⚠️ Only OUR lateness pages anyone
 
-`late` is split three ways, and just one of them escalates:
+`late` is split four ways, and just one of them escalates:
 
 - **explained by dunning** — the current cycle went through dunning, so the late date is dunning-owned,
   not scheduling drift; expected, never escalated. This covers both the *open* states
@@ -64,9 +69,12 @@ meaningful and training operators to ignore alerts) is retired.
   terminal states were originally missing, so an exhausted-dunning failed-card sub was mis-paged as drift.
 - **inherited** — the last charge predates `migration_completed_at`, so the sub arrived already
   behind. 7 of 13 on 2026-09-30, last charged April–August, before we ever billed them.
+- **internal test accounts** — the owning customer (or the sub) is flagged `is_internal`, meaning it
+  is the founder's manually-manipulated test harness, not a real customer money path; counted for visibility
+  but never escalated.
 - **caused by us** — everything else. This is the only group that opens a repair job.
 
-Escalating the first two would fire daily forever and train everyone to ignore the alert — and the
+Escalating the first three would fire daily forever and train everyone to ignore the alert — and the
 one that mattered would go with it. That split is what makes the alert worth reading.
 
 ## Verified 2026-10-01 — and the heartbeat proved the point
