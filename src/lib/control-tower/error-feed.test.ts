@@ -51,6 +51,7 @@ import {
   isForeignSupabasePostgresMissingSpecsTargetAdhocNoise,
   isForeignSupabasePostgresMissingSpecsProblemProposedChangeAdhocNoise,
   isForeignSupabasePostgresMissingSpecsIntentAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsSlugLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise,
@@ -9472,6 +9473,244 @@ test("isForeignSupabasePostgresMissingSpecsIntentAdhocNoise returns false on emp
   assert.equal(
     isForeignSupabasePostgresMissingSpecsIntentAdhocNoise(
       "column specs.intent does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads `public.specs` with a phantom
+// `critical` scalar column. The table exists but by design carries NO top-level
+// `critical` column — board priority lives in `specs.priority` and the "critical" board
+// flag inside `specs.flags` (`flags.critical`). Foreign-owned surface, no lever from us —
+// drop AT CAPTURE only when BOTH the exact column-missing message on `specs.critical` AND
+// a SELECT-lookup shape on `specs` (bare OR PostgREST CTE wrapper) are present. A
+// column-missing on any other table, a different column on `specs`, or a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise drops the ad hoc SELECT lookup on the exact specs.critical column-missing shape", () => {
+  // The captured production sample: unqualified and public.-qualified message shapes.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.critical does not exist",
+      "select slug, title, critical from public.specs where slug = 'x' limit 1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column public.specs.critical does not exist",
+      "select slug, title, critical from public.specs where slug = 'x' limit 1",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.critical does not exist",
+      "select critical from specs limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.critical does not exist",
+      "select slug, critical from public.specs where slug = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.critical does not exist",
+      "SELECT SLUG, CRITICAL FROM PUBLIC.SPECS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "ERROR: column specs.critical does not exist",
+      "select critical from public.specs",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "  column specs.critical does not exist  ",
+      "   select critical from public.specs   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"specs\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in
+  // the pgrst_source CTE with double-quoted `"public"."specs"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.critical does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."specs"."slug", "public"."specs"."critical" FROM "public"."specs" WHERE "public"."specs"."slug" = $1 LIMIT $2 )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column public.specs.critical does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."critical" FROM "public"."specs")',
+    ),
+    true,
+  );
+  // The `ERROR: ` prefix on the CTE form is stripped too.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "ERROR: column specs.critical does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."critical" FROM "public"."specs")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a critical column still pages)", () => {
+  // If any other table ever carries a real `critical` column and regresses, we absolutely
+  // want to see it — the pin is `specs.critical` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column incidents.critical does not exist",
+      "select critical from public.incidents where id = 'x'",
+    ),
+    false,
+  );
+  // Sibling `spec_phases` is a DIFFERENT table — the pin here is `specs` only, so this
+  // stays paged rather than silently swallowed by the specs classifier.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column spec_phases.critical does not exist",
+      "select critical from public.spec_phases where spec_id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise KEEPS a DIFFERENT column-missing on specs (a real column rename still pages)", () => {
+  // Real `specs` columns — if any of these regress we absolutely want the page.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.priority does not exist",
+      "select priority from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.status does not exist",
+      "select status from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.slug does not exist",
+      "select slug from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.workspace_id does not exist",
+      "select workspace_id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing specs.critical still pages)", () => {
+  // INSERT / UPDATE / DELETE against specs referencing a bogus column is real code
+  // trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.critical does not exist",
+      "insert into public.specs (slug, critical) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.critical does not exist",
+      "update public.specs set critical = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.critical does not exist",
+      "delete from public.specs where critical is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.critical does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."specs"("slug", "critical") VALUES ($1, $2) RETURNING "public"."specs"."id" )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.critical does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."specs" SET "critical" = $1 WHERE "public"."specs"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise KEEPS a FATAL / constraint / other Postgres ERROR on specs (different message class still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "database is shutting down",
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      'relation "public.specs" does not exist',
+      "select id from public.specs where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.critical does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsCriticalAdhocNoise(
+      "column specs.critical does not exist",
       null,
     ),
     false,
