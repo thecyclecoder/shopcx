@@ -3,6 +3,27 @@ import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { settleParkedJobOnDismiss } from "@/lib/agents/approval-inbox";
 
+/**
+ * Tenant-isolation guard. These handlers use the service-role admin client (RLS bypassed), so they
+ * MUST verify the caller belongs to the `[id]` workspace themselves — otherwise a user authenticated
+ * to workspace A could read/dismiss workspace B's notifications and (via the dismiss → settle path)
+ * cancel B's pending agent approvals and settle B's parked jobs. Matches the sibling-route convention
+ * under src/app/api/workspaces/[id]/ (e.g. fraud-rules/[ruleId]/route.ts).
+ */
+async function isWorkspaceMember(
+  admin: ReturnType<typeof createAdminClient>,
+  workspaceId: string,
+  userId: string,
+): Promise<boolean> {
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("user_id")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", userId)
+    .maybeSingle();
+  return !!member;
+}
+
 // GET: Single notification detail
 export async function GET(
   request: Request,
@@ -15,6 +36,9 @@ export async function GET(
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const admin = createAdminClient();
+  if (!(await isWorkspaceMember(admin, workspaceId, user.id))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
   const { data } = await admin
     .from("dashboard_notifications")
     .select("*")
@@ -38,6 +62,9 @@ export async function PATCH(
 
   const body = await request.json();
   const admin = createAdminClient();
+  if (!(await isWorkspaceMember(admin, workspaceId, user.id))) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
 
   const updates: Record<string, boolean> = {};
   if (body.read !== undefined) updates.read = !!body.read;
