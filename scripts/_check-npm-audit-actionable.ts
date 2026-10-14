@@ -20,7 +20,7 @@
  */
 import { execSync } from "child_process";
 import { join } from "path";
-import { isActionableAdvisory, nodeModulesVersionReader, type NpmAuditVulnLike } from "../src/lib/npm-audit-actionable";
+import { isActionableAdvisory, installedVersionReader, type NpmAuditVulnLike } from "../src/lib/npm-audit-actionable";
 
 interface NpmAuditReport {
   vulnerabilities?: Record<string, NpmAuditVulnLike>;
@@ -56,7 +56,9 @@ function main(): void {
     console.error("check-npm-audit-actionable: could not parse npm audit --json output");
     process.exit(2);
   }
-  const installedVersionOf = nodeModulesVersionReader(join(__dirname, ".."));
+  // node_modules version first, else the declared package.json range — so the downgrade filter
+  // still fires when the spec-test preview deploy has pruned devDependencies from node_modules.
+  const installedVersionOf = installedVersionReader(join(__dirname, ".."));
   const actionable: { name: string; severity: string; fix: string }[] = [];
   for (const [name, v] of Object.entries(report.vulnerabilities || {})) {
     if (!isActionableAdvisory(v, installedVersionOf)) continue;
