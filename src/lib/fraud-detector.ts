@@ -1209,15 +1209,23 @@ export function evaluateBinCluster(
   }
 
   // Order-level independent suspicion qualifies THAT one order + its account.
+  // A card/billing name mismatch alone is NEVER enough: a different first name on
+  // the card is a nickname (Pamela M Boswell vs Pam Boswell) or a family member's
+  // card (Michael Maurizi vs Tina Maurizi) far more often than fraud. Suspicion
+  // fires only on a failed AVS/CVV check or a Shopify cancel/investigate risk; a
+  // co-occurring name mismatch is recorded as supporting evidence only. A customer
+  // with a real cross-account link above is already hardLinked regardless of name.
+  let orderLevelNameMismatchSeen = false;
   for (const r of rows) {
     if (!r.customerId) continue;
     const nameMismatch = !!r.cardName && !!r.billingName && !cardBillingNamesAgree(r.cardName, r.billingName);
     const avsCvvFail = isAvsOrCvvFailure(r.avsResultCode, r.cvvResultCode);
     const risky = ["cancel", "investigate"].includes(r.riskRecommendation.trim().toLowerCase());
-    if (nameMismatch || avsCvvFail || risky) {
+    if (avsCvvFail || risky) {
       corroborators.add("order_level_suspicion");
       hardLinkedCustomers.add(r.customerId);
       linkOrder(r);
+      if (nameMismatch) orderLevelNameMismatchSeen = true;
     }
   }
 
@@ -1269,7 +1277,7 @@ export function evaluateBinCluster(
     shared_phone: "the same phone shared across ≥2 accounts",
     shared_ip: "the same browser IP shared across ≥2 accounts",
     few_surnames: `only ${distinctSurnames} distinct cardholder surname(s) across ≥${BIN_SURNAME_MIN_ACCOUNTS} accounts`,
-    order_level_suspicion: "an order with an independent suspicion signal (card/billing name mismatch, AVS/CVV failure, or a Shopify cancel/investigate risk)",
+    order_level_suspicion: `an order with an independent suspicion signal (AVS/CVV failure or a Shopify cancel/investigate risk)${orderLevelNameMismatchSeen ? ", with a card/billing name mismatch as supporting evidence" : ""}`,
   };
   const reason = primary ? reasonMap[primary] : "";
 

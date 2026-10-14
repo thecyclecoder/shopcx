@@ -118,6 +118,50 @@ test("(i-variant) the self-reusing account independently qualifies (AVS failure)
   assert.equal(res.corroborator, "order_level_suspicion");
 });
 
+// ── A card/billing name mismatch alone never flags an order ──────────────────
+// A different first name on the card is usually a nickname or a family member's
+// card, not fraud. It only counts when a SECOND signal (failed AVS/CVV or a
+// Shopify cancel/investigate risk) co-occurs on the same order.
+
+test("(a) name mismatch alone (Pamela M Boswell / Pam Boswell), no other signal → NO case", () => {
+  const rows: BinClusterRow[] = [
+    row({ orderId: "nm1", customerId: "boswell", cardLast4: "1111", cardExp: "12/2027", cardName: "Pamela M Boswell", billingName: "Pam Boswell" }),
+  ];
+  const res = evaluateBinCluster(BIN, rows, noHistory);
+  assert.equal(res.fired, false, "a nickname mismatch with no second signal never opens a case");
+  assert.deepEqual(res.linkedCustomerIds, []);
+});
+
+test("(b) name mismatch (Michael Maurizi / Tina Maurizi) with AVS 'Y' CVV 'M' → NO case", () => {
+  const rows: BinClusterRow[] = [
+    row({ orderId: "nm2", customerId: "maurizi", cardLast4: "2222", cardExp: "11/2027", cardName: "Michael Maurizi", billingName: "Tina Maurizi", avsResultCode: "Y", cvvResultCode: "M" }),
+  ];
+  const res = evaluateBinCluster(BIN, rows, noHistory);
+  assert.equal(res.fired, false, "a family-card mismatch with a PASSING card check never opens a case");
+  assert.deepEqual(res.linkedCustomerIds, []);
+});
+
+test("(c) name mismatch + AVS 'N' → case fires with that order", () => {
+  const rows: BinClusterRow[] = [
+    row({ orderId: "nm3", customerId: "susp", cardLast4: "3333", cardExp: "10/2027", cardName: "John Doe", billingName: "Jane Roe", avsResultCode: "N" }),
+  ];
+  const res = evaluateBinCluster(BIN, rows, noHistory);
+  assert.equal(res.fired, true, "a failed AVS check is the second signal that makes the order suspicious");
+  assert.equal(res.corroborator, "order_level_suspicion");
+  assert.deepEqual(res.linkedCustomerIds, ["susp"]);
+  assert.deepEqual(res.linkedOrderIds, ["nm3"]);
+});
+
+test("(d) name mismatch + Shopify risk 'cancel' → case fires with that order", () => {
+  const rows: BinClusterRow[] = [
+    row({ orderId: "nm4", customerId: "susp2", cardLast4: "4444", cardExp: "09/2027", cardName: "John Doe", billingName: "Jane Roe", riskRecommendation: "cancel" }),
+  ];
+  const res = evaluateBinCluster(BIN, rows, noHistory);
+  assert.equal(res.fired, true, "a Shopify cancel risk is the second signal that makes the order suspicious");
+  assert.equal(res.corroborator, "order_level_suspicion");
+  assert.deepEqual(res.linkedCustomerIds, ["susp2"]);
+});
+
 test("(ii) one card on 3 different accounts → case with ONLY those 3 accounts", () => {
   const rows: BinClusterRow[] = [
     row({ orderId: "a1", customerId: "A", cardLast4: "9999", cardExp: "05/2028" }),
