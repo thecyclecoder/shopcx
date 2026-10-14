@@ -1,0 +1,1 @@
+- **Dismissing a park card closes the stuck job behind it** · verified 2026-10-14 · → [[../libraries/approval-inbox]]
