@@ -1,0 +1,1 @@
+- **Scope out foreign-app noise: loyalty_redemptions.customer_id direct-REST lookups** · verified 2026-10-14 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise`)

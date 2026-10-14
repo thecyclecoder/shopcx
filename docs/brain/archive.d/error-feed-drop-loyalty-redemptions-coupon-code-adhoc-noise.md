@@ -1,0 +1,1 @@
+- **Scope out foreign PostgREST noise: loyalty_redemptions.coupon_code column-missing errors** · verified 2026-10-14 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise`)
