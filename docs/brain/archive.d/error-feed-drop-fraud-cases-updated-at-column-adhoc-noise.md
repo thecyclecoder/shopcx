@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST fraud_cases.updated_at missing-column noise at capture** · verified 2026-10-15 · → [[../libraries/control-tower]]
