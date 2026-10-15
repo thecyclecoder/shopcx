@@ -99,6 +99,7 @@ import {
   isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isExpectedBillingForecastsPendingUniqViolation,
+  isExpectedSubscriptionCycleChargesCycleUniqViolation,
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
@@ -18267,6 +18268,90 @@ test("isExpectedBillingForecastsPendingUniqViolation returns false on empty / nu
     isExpectedBillingForecastsPendingUniqViolation(
       'duplicate key value violates unique constraint "idx_billing_forecasts_pending"',
       null,
+    ),
+    false,
+  );
+});
+
+// ── isExpectedSubscriptionCycleChargesCycleUniqViolation ──
+// The `subscription_cycle_charges_sub_cycle_uidx` unique index records one charge row per
+// (subscription, cycle) pair — a concurrent second insert (a benign dunning/webhook race)
+// rejects at 23505 and the app catch converges on the winning row instead of double-charging.
+// Drop AT CAPTURE only when BOTH the exact unique-violation message on THIS constraint AND an
+// INSERT INTO "public"."subscription_cycle_charges" shape are present. A 23505 on any other
+// constraint, or on this constraint via a non-INSERT shape, still pages.
+
+test("isExpectedSubscriptionCycleChargesCycleUniqViolation drops the expected 23505 on our own INSERT INTO subscription_cycle_charges", () => {
+  // The captured production sample: canonical 23505 (ERROR: prefix stripped) + the bare
+  // INSERT INTO "public"."subscription_cycle_charges".
+  assert.equal(
+    isExpectedSubscriptionCycleChargesCycleUniqViolation(
+      'duplicate key value violates unique constraint "subscription_cycle_charges_sub_cycle_uidx"',
+      'insert into "public"."subscription_cycle_charges" ("subscription_id", "cycle_index", "amount") values ($1, $2, $3)',
+    ),
+    true,
+  );
+  // The PostgREST `WITH pgrst_source AS (INSERT INTO ...` CTE wrapper from the signature sample.
+  assert.equal(
+    isExpectedSubscriptionCycleChargesCycleUniqViolation(
+      'ERROR: duplicate key value violates unique constraint "subscription_cycle_charges_sub_cycle_uidx"',
+      'WITH pgrst_source AS (INSERT INTO "public"."subscription_cycle_charges" ("subscription_id", "cycle_index") VALUES ($1, $2) RETURNING *) SELECT * FROM pgrst_source',
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on both is tolerated.
+  assert.equal(
+    isExpectedSubscriptionCycleChargesCycleUniqViolation(
+      '  duplicate key value violates unique constraint "subscription_cycle_charges_sub_cycle_uidx"  ',
+      '   insert into "public"."subscription_cycle_charges" ("subscription_id") values ($1)   ',
+    ),
+    true,
+  );
+});
+
+test("isExpectedSubscriptionCycleChargesCycleUniqViolation KEEPS a 23505 on any OTHER unique constraint (a real schema regression still pages)", () => {
+  assert.equal(
+    isExpectedSubscriptionCycleChargesCycleUniqViolation(
+      'duplicate key value violates unique constraint "subscription_cycle_charges_pkey"',
+      'insert into "public"."subscription_cycle_charges" ("id", "subscription_id") values ($1, $2)',
+    ),
+    false,
+  );
+  assert.equal(
+    isExpectedSubscriptionCycleChargesCycleUniqViolation(
+      'duplicate key value violates unique constraint "idx_billing_forecasts_pending"',
+      'insert into "public"."billing_forecasts" ("workspace_id") values ($1)',
+    ),
+    false,
+  );
+});
+
+test("isExpectedSubscriptionCycleChargesCycleUniqViolation KEEPS a 23505 on this constraint via a non-INSERT shape (COPY replay / UPDATE ... on conflict still pages)", () => {
+  assert.equal(
+    isExpectedSubscriptionCycleChargesCycleUniqViolation(
+      'duplicate key value violates unique constraint "subscription_cycle_charges_sub_cycle_uidx"',
+      'copy public.subscription_cycle_charges from stdin',
+    ),
+    false,
+  );
+  assert.equal(
+    isExpectedSubscriptionCycleChargesCycleUniqViolation(
+      'duplicate key value violates unique constraint "subscription_cycle_charges_sub_cycle_uidx"',
+      'update "public"."subscription_cycle_charges" set "amount" = $1 where "id" = $2',
+    ),
+    false,
+  );
+});
+
+test("isExpectedSubscriptionCycleChargesCycleUniqViolation returns false on empty / nullish input", () => {
+  assert.equal(isExpectedSubscriptionCycleChargesCycleUniqViolation(null, null), false);
+  assert.equal(isExpectedSubscriptionCycleChargesCycleUniqViolation(undefined, undefined), false);
+  assert.equal(isExpectedSubscriptionCycleChargesCycleUniqViolation("", ""), false);
+  // Empty query — even with the exact message we cannot confirm the mint shape.
+  assert.equal(
+    isExpectedSubscriptionCycleChargesCycleUniqViolation(
+      'duplicate key value violates unique constraint "subscription_cycle_charges_sub_cycle_uidx"',
+      "",
     ),
     false,
   );

@@ -147,6 +147,7 @@ import {
   isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isExpectedBillingForecastsPendingUniqViolation,
+  isExpectedSubscriptionCycleChargesCycleUniqViolation,
 } from "@/lib/control-tower/error-feed";
 
 type Admin = ReturnType<typeof createAdminClient>;
@@ -1958,6 +1959,15 @@ const LOG_QUERIES: LogQuery[] = [
       // shape (COPY replay, pg_dump load, an UPDATE... on conflict) still surfaces / pages
       // on first sighting.
       if (isExpectedBillingForecastsPendingUniqViolation(message, query)) return null;
+      // Drop the by-design idempotency-race 23505 on
+      // `subscription_cycle_charges_sub_cycle_uidx`: the subscription-cycle billing path
+      // records one charge row per (subscription, cycle), and a concurrent second insert is
+      // INTENTIONALLY rejected at 23505 with the app catch converging on the winner. Paging
+      // Platform on it trains owners to ignore the feed. Narrowly gated to require BOTH the
+      // exact unique-violation message on THIS constraint AND the INSERT-INTO shape — a 23505
+      // on any other constraint (real schema regression), or on this constraint via a
+      // non-INSERT shape (COPY replay, pg_dump load, an UPDATE... on conflict), still pages.
+      if (isExpectedSubscriptionCycleChargesCycleUniqViolation(message, query)) return null;
       return {
         keyParts: ["postgres", severity, message],
         title: `postgres ${severity}: ${message}`,
