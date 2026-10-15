@@ -2331,6 +2331,7 @@ function baselineAssertionInputs(overrides: Partial<AssertionInputs>): Assertion
     escalatedWaiting: 0,
     oldestEscalatedAt: null,
     latestTriageJobAt: null,
+    oldestEscalatedHandled: false,
     latestSpecTestJobAt: null,
     overdueInternalSubs: 0,
     renewalCurrent: {
@@ -2365,6 +2366,44 @@ function baselineAssertionInputs(overrides: Partial<AssertionInputs>): Assertion
     ...overrides,
   };
 }
+
+const ESCALATION_IDLE_LOOP = MONITORED_LOOPS.find((l) => l.id === "triage-escalations-cron")!;
+
+test("evalOutputAssertion escalation-idle: oldest escalation already handled (covering review / parked job) stays GREEN even past the grace", () => {
+  // A ticket re-escalated long ago but the cron legitimately would NOT re-enqueue — a triage_runs
+  // row covers its current escalation OR a cs-director-call job is inflight/parked awaiting a human.
+  // The tile must mirror that dedup and stay green (mirror-cron-dedup Phase 1).
+  const escalatedAt = new Date(Date.now() - 5 * ONE_HOUR_MS).toISOString();
+  const verdict = evalOutputAssertion(
+    "escalation-idle",
+    ESCALATION_IDLE_LOOP,
+    null,
+    baselineAssertionInputs({
+      escalatedWaiting: 1,
+      oldestEscalatedAt: escalatedAt,
+      oldestEscalatedHandled: true,
+    }),
+  );
+  assert.equal(verdict, null);
+});
+
+test("evalOutputAssertion escalation-idle: genuinely un-picked-up escalation past the grace still REDS", () => {
+  // Same aged escalation, but nothing covers it — no triage_runs row and no inflight/parked job.
+  // This is real idle-while-work and the tile must go red.
+  const escalatedAt = new Date(Date.now() - 5 * ONE_HOUR_MS).toISOString();
+  const verdict = evalOutputAssertion(
+    "escalation-idle",
+    ESCALATION_IDLE_LOOP,
+    null,
+    baselineAssertionInputs({
+      escalatedWaiting: 1,
+      oldestEscalatedAt: escalatedAt,
+      oldestEscalatedHandled: false,
+    }),
+  );
+  assert.ok(verdict, "expected a red verdict for an un-picked-up aged escalation");
+  assert.equal(verdict?.violation.reason, "idle_while_work");
+});
 
 function segmentCoverageLatest(ranAtIso: string): LoopHistoryRow {
   return { ran_at: ranAtIso, ok: true, produced: null, detail: null, duration_ms: null };

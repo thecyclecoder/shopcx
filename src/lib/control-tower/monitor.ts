@@ -1650,6 +1650,15 @@ export interface AssertionInputs {
   oldestEscalatedAt: string | null;
   /** most-recent triage-escalations agent_jobs.created_at (any status), or null. */
   latestTriageJobAt: string | null;
+  /**
+   * The oldest waiting escalated ticket has ALREADY been handled for its CURRENT escalation,
+   * mirroring triage-escalations-cron's own dedup: either a `triage_runs` row covers the current
+   * escalation (created_at >= its escalated_at, per {@link priorReviewCoversCurrentEscalation}) OR
+   * an inflight/parked `cs-director-call` job (spec_slug = ticket id) is awaiting pickup/a human.
+   * When true the cron legitimately would NOT enqueue, so the escalation-idle tile must stay green.
+   * (control-tower-escalation-idle-mirror-cron-dedup Phase 1.)
+   */
+  oldestEscalatedHandled: boolean;
   /** most-recent spec-test agent_jobs.created_at (any status), or null. */
   latestSpecTestJobAt: string | null;
   /**
@@ -1831,11 +1840,13 @@ export function evalOutputAssertion(
       const windowMs = loop.livenessWindowMs ?? 2 * 60 * 60_000;
       const waitedMs = ageMs(inputs.oldestEscalatedAt);
       if (waitedMs <= windowMs) return null;
-      // A triage job created AT/AFTER the ticket escalated means the work was picked up — not idle.
-      const handledSinceEscalation =
-        inputs.latestTriageJobAt != null &&
-        new Date(inputs.latestTriageJobAt).getTime() >= new Date(inputs.oldestEscalatedAt).getTime();
-      if (handledSinceEscalation) return null;
+      // Mirror the cron's actual 'should I enqueue?' decision instead of the created_at proxy: the
+      // oldest escalation is HANDLED (so the cron would skip it) when a triage_runs row covers its
+      // current escalation OR a cs-director-call job is inflight/parked awaiting a human. Reading
+      // the same guards the cron reads stops the tile reding when a June remedy-apply failure
+      // re-escalates a ticket in the same instant its review is recorded
+      // (control-tower-escalation-idle-mirror-cron-dedup Phase 1).
+      if (inputs.oldestEscalatedHandled) return null;
       const n = inputs.escalatedWaiting;
       return {
         statusText: `idle while ${n} ticket${n === 1 ? "" : "s"} wait${n === 1 ? "s" : ""} (oldest ${elapsed(inputs.oldestEscalatedAt)})`,
@@ -2339,10 +2350,11 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
       .not("escalated_at", "is", null)
       .is("escalated_to", null)
       .not("status", "in", '("archived","closed")'),
-    // The OLDEST waiting ticket's escalated_at — how long real escalated work has actually been waiting.
+    // The OLDEST waiting ticket's id + escalated_at — how long real escalated work has actually
+    // been waiting, and which ticket to probe for a covering review / parked job below.
     admin
       .from("tickets")
-      .select("escalated_at")
+      .select("id, escalated_at")
       .not("escalated_at", "is", null)
       .is("escalated_to", null)
       .not("status", "in", '("archived","closed")')
@@ -2404,6 +2416,32 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     countRenewalWedgedCycles(admin),
   ]);
 
+  // Mirror triage-escalations-cron's dedup for the OLDEST waiting ticket: the tile must stay green
+  // when the cron legitimately would NOT re-enqueue because that escalation is already handled —
+  // either a triage_runs row COVERS the current escalation (created_at >= escalated_at, exactly
+  // priorReviewCoversCurrentEscalation) OR a cs-director-call job is inflight/parked (spec_slug =
+  // ticket id). The parked set extends the cron's inflight set with `needs_attention` so a review
+  // sitting in the CEO inbox awaiting a human isn't mistaken for un-picked-up work
+  // (control-tower-escalation-idle-mirror-cron-dedup Phase 1).
+  const oldestEscalatedRow = oldestEscalated.data as { id: string; escalated_at: string } | null;
+  let oldestEscalatedHandled = false;
+  if (oldestEscalatedRow?.id && oldestEscalatedRow.escalated_at) {
+    const [coveringReview, parkedJob] = await Promise.all([
+      admin
+        .from("triage_runs")
+        .select("id", { count: "exact", head: true })
+        .eq("ticket_id", oldestEscalatedRow.id)
+        .gte("created_at", oldestEscalatedRow.escalated_at),
+      admin
+        .from("agent_jobs")
+        .select("id", { count: "exact", head: true })
+        .eq("kind", "cs-director-call")
+        .eq("spec_slug", oldestEscalatedRow.id)
+        .in("status", ["queued", "queued_resume", "claimed", "building", "needs_input", "needs_attention"]),
+    ]);
+    oldestEscalatedHandled = (coveringReview.count ?? 0) > 0 || (parkedJob.count ?? 0) > 0;
+  }
+
   // Renewal outcome distribution: current cycle (since the last cron beat, or a 26h fallback) vs a
   // rolling baseline (the prior cycles before it). Aggregated from the per-sub outcome beats.
   const cycleStartIso = latestRenewalCronBeatIso ?? new Date(Date.now() - 26 * 60 * 60_000).toISOString();
@@ -2415,8 +2453,9 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
 
   return {
     escalatedWaiting: escalated.count ?? 0,
-    oldestEscalatedAt: (oldestEscalated.data as { escalated_at: string } | null)?.escalated_at ?? null,
+    oldestEscalatedAt: oldestEscalatedRow?.escalated_at ?? null,
     latestTriageJobAt: (triageJob.data as { created_at: string } | null)?.created_at ?? null,
+    oldestEscalatedHandled,
     latestSpecTestJobAt: (specTestJob.data as { created_at: string } | null)?.created_at ?? null,
     overdueInternalSubs: overdueInternalSubsUncovered,
     renewalCurrent,
