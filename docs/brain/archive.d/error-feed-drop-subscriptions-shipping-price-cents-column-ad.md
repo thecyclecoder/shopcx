@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: subscriptions.shipping_price_cents direct-REST column lookup** · verified 2026-10-15 · → [[../libraries/control-tower]]
