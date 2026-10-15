@@ -1,0 +1,1 @@
+- **Fix spec_phases probe scripts to use `position`, not the non-existent `phase_number` column** · verified 2026-10-15 · → [[../tables/spec_phases]], [[../libraries/specs-table]]
