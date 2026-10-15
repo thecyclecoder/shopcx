@@ -2997,6 +2997,70 @@ export function isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCent
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `subscriptions.shipping_price_cents`. Our `subscriptions` table does NOT carry a
+ * `shipping_price_cents` column — that is a Shopify-subscription-app (Appstle / native
+ * Shopify subscription-contract) column shape, not ours. No ShopCX code path (src/,
+ * scripts/, shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT that
+ * names `subscriptions.shipping_price_cents`. The message appears on Supabase's
+ * `postgres_logs` feed only when an external / stale direct-REST client (a foreign
+ * subscription-app integration, a stale exploratory query, a third-party tool) does a raw
+ * `select ... shipping_price_cents ... from public.subscriptions` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions" ... )` CTE wrapper the
+ * same client emits over the REST endpoint. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it
+ * ([[../specs/error-feed-drop-subscriptions-shipping-price-cents-column-adhoc-noise]],
+ * Control Tower signature `supabase-logs:1a3d38ae2b1a85e5`) is repair work for a query we
+ * don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise` —
+ * same narrow-gating shape, scoped to the `subscriptions.shipping_price_cents` lookup
+ * instead of the `subscriptions.line_items` one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column subscriptions.shipping_price_cents does not exist` (with or
+ *      without the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on
+ *      the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.subscriptions` —
+ *      either (a) the bare `select ... from public.subscriptions` shape, OR (b) the
+ *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."subscriptions" ... )` CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `subscriptions` (a real product-
+ *     schema regression on a live column like `items`) still pages,
+ *   - a column-missing error for `shipping_price_cents` on ANY OTHER table (orders, …)
+ *     still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE /
+ *     DELETE / DDL on `subscriptions`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null here fully suppresses the row (no error_event, no
+ * loop_alert, no signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column subscriptions.shipping_price_cents does not exist" ||
+    stripped === "column public.subscriptions.shipping_price_cents does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?subscriptions\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?subscriptions\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `customers.address`. Our `customers` table has NO bare `address` column — the live
  * address-related columns are `default_address` (JSONB) and `addresses` (JSONB array);
  * no ShopCX code path (src/, scripts/, shopify-extension/, supabase/migrations/,
