@@ -4732,6 +4732,86 @@ export function isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column spec_phases.phase_index does not exist` for
+ * an ad hoc / stale PostgREST direct-REST SELECT against `public.spec_phases.phase_index`. The
+ * `spec_phases` table exists (see
+ * `supabase/migrations/20260713120001_specs_and_spec_phases.sql`) but its ordering column is
+ * `position`, not `phase_index` — every ShopCX code path orders phases by `position` (see the
+ * `spec_phases_spec_position` unique index and the `get_spec_with_phases` /
+ * `list_specs_with_phases` RPCs, and the [[../libraries/specs-table]] SDK). The error only
+ * reaches Supabase's `postgres_logs` feed when an external / stale PostgREST client (a foreign
+ * app, a deprecated integration, a stale SQL Editor session) queries
+ * `/rest/v1/spec_phases?select=...phase_index...` or `?order=phase_index.asc`. There is no
+ * lever from ShopCX to make that query resolve, and adding a fake `phase_index` column would
+ * corrupt the data model (ordering is already `position`) — paging Platform on it (Control
+ * Tower signature `supabase-logs:e4bfc575805f2c27`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise` — the same narrow-gating
+ * shape (exact `column <table>.<name> does not exist` + SELECT-on-table shape), aimed at a
+ * different phantom column on the same table. Covers BOTH the bare direct-REST SELECT and the
+ * PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."spec_phases" ... )` CTE wrapper.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column spec_phases.phase_index does not exist` (or the `public.`
+ *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface stripped), AND
+ *   2. the `parsed.query` attribute is either a bare `select ... from public.spec_phases`
+ *      lookup OR the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."spec_phases"
+ *      ... )` CTE wrapper (any WHERE / LIMIT / ORDER BY tail is fine).
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
+ *     table that DOES have a `phase_index` column) still pages — the pin is
+ *     `spec_phases.phase_index` only,
+ *   - a column-missing error on `spec_phases` for a DIFFERENT column still pages — the pin
+ *     covers `phase_index` only,
+ *   - a `spec_phases.phase_index` error attached to a DIFFERENT statement shape (INSERT /
+ *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the bare
+ *     SELECT-lookup / PostgREST-CTE-SELECT shape, matching the ad hoc direct-REST read,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `spec_phases` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column spec_phases.phase_index does not exist" ||
+    stripped === "column public.spec_phases.phase_index does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `spec_phases` (with
+  // or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to spec_phases with a bogus `phase_index`
+  // column is a code bug we DO want to page on, not the ad hoc direct-REST read this drop
+  // targets.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?spec_phases\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."spec_phases" ... )` with double-quoted identifiers. Same foreign-owned
+  // read, different rendering — the plain SELECT regex above misses it because the
+  // statement starts with `with` and the FROM clause carries the quoted
+  // `"public"."spec_phases"` shape. Guarded so the CTE branch requires the wrapped op to
+  // be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper is a real code-write and
+  // stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?spec_phases\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column agent_jobs.payload does not exist` (or its
  * sibling `agent_jobs.branch_name`) for a stale approval-history read that LEFT-JOINs
  * `public.approval_decisions` to `public.agent_jobs` and SELECTs legacy `aj.*` columns that
