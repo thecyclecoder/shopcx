@@ -169,7 +169,6 @@ export interface OrderRow {
   shopify_order_id: string | null;
   braintree_transaction_id: string | null;
   amplifier_order_id: string | null;
-  amazon_order_id: string | null;
   created_at: string;
   classification: ClassifyOrderResult;
 }
@@ -181,7 +180,7 @@ export interface QueryOrdersDeps {
 
 /** Columns queryOrders selects. Everything classifyOrder + the recency lookup need. */
 const QUERY_ORDERS_COLUMNS =
-  "id, workspace_id, customer_id, subscription_id, order_number, email, total_cents, source_name, tags, shopify_order_id, braintree_transaction_id, amplifier_order_id, amazon_order_id, created_at";
+  "id, workspace_id, customer_id, subscription_id, order_number, email, total_cents, source_name, tags, shopify_order_id, braintree_transaction_id, amplifier_order_id, created_at";
 
 interface RawQueryOrderRow {
   id: string;
@@ -196,7 +195,6 @@ interface RawQueryOrderRow {
   shopify_order_id: string | null;
   braintree_transaction_id: string | null;
   amplifier_order_id: string | null;
-  amazon_order_id: string | null;
   created_at: string;
 }
 
@@ -350,7 +348,6 @@ export async function queryOrders(
         shopify_order_id: r.shopify_order_id,
         braintree_transaction_id: r.braintree_transaction_id,
         amplifier_order_id: r.amplifier_order_id,
-        amazon_order_id: r.amazon_order_id,
         created_at: r.created_at,
         classification: cls,
       });
