@@ -19941,8 +19941,10 @@ function renderCoachTranscript(messages: CoachThreadRow["messages"]): string {
  */
 async function runCeoAuthorizedOutOfLeashJob(job: Job) {
   const tag = `[out-of-leash:${job.id.slice(0, 8)}]`;
-  if (job.status !== "queued_resume") {
-    console.log(`${tag} skip — status=${job.status} (only runs on CEO decision → queued_resume)`);
+  // claim_agent_job hands us the row already flipped queued_resume → building; accept that.
+  const { isOutOfLeashExecutableClaimStatus } = await import("../src/lib/control-tower/gated-migration-approval");
+  if (!isOutOfLeashExecutableClaimStatus(job.status)) {
+    console.log(`${tag} skip — status=${job.status} (only runs on CEO decision → queued_resume → claimed)`);
     return;
   }
 
