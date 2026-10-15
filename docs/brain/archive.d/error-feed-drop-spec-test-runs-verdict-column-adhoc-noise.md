@@ -1,0 +1,1 @@
+- **Scope out the ad-hoc spec_test_runs.verdict missing-column REST noise from the Control Tower feed** · verified 2026-10-15 · → [[../libraries/control-tower]]
