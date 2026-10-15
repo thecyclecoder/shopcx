@@ -1249,6 +1249,41 @@ export const dunningPaydayRetryCron = inngest.createFunction(
             await subscriptionSwitchPaymentMethod(cycle.workspace_id, cycle.shopify_contract_id, card.id);
 
             const paydayRes = await dunningChargeContract(cycle.workspace_id, cycle.shopify_contract_id, (cycle.payday_retry_count ?? 0) + 1);
+
+            // ⭐ A SETTLED success is a real recovery — act on it HERE, exactly as the card-rotation
+            // path does. A ShopCX charge settles inline and no webhook will ever flip the cycle
+            // (`dunning/billing-success` comes only from Appstle), so without this the loop went on
+            // to the next card and the cycle stayed `retrying`: every later payday charged the
+            // customer AGAIN. Ground truth 36063707309: recovered on the 10-09 payday, charged
+            // again on 10-15, and queued for a third charge on 10-16.
+            if (paydayRes.pending) {
+              console.log(`[Dunning Payday] ${cycle.shopify_contract_id}: attempt unresolved (3DS) — leaving the cycle open, no further cards`);
+              break;
+            }
+            if (paydayRes.settled && paydayRes.success) {
+              await logPaymentFailure({
+                workspaceId: cycle.workspace_id,
+                customerId: cycle.customer_id,
+                subscriptionId: cycle.subscription_id,
+                shopifyContractId: cycle.shopify_contract_id,
+                billingAttemptId: paydayRes.attemptId ?? null,
+                paymentMethodLast4: card.last4,
+                paymentMethodId: card.id,
+                attemptNumber: paydayRetriesSoFar + 1,
+                attemptType: "payday_retry",
+                succeeded: true,
+              });
+              await updateDunningCycle(cycle.id, {
+                status: "recovered",
+                recovered_at: new Date().toISOString(),
+                billing_attempt_id: paydayRes.attemptId ?? null,
+                last_attempted_last4: card.last4,
+                next_retry_at: null,
+              });
+              recovered = true;
+              console.log(`[Dunning Payday] ${cycle.shopify_contract_id} RECOVERED on card ${card.last4} (settled charge)`);
+              break;
+            }
             // See above: lookup-success, not charge-success — a decline must still record the attempt.
             const ordersRes = { success: !!paydayRes.attemptId, orders: paydayRes.attemptId ? [{ id: paydayRes.attemptId }] : [], error: paydayRes.error } as { success: boolean; orders?: { id: string }[]; error?: string };
             if (!ordersRes.success || !ordersRes.orders?.length) continue;
