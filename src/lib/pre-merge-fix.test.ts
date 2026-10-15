@@ -81,6 +81,18 @@ test("spawnPreMergeFix drops harness fails but STILL authors a fix phase for a r
       },
     ],
   });
+  // Hermetic: getSpec builds its own admin client from env. On the box (and anywhere the Supabase
+  // env is set) it would read PROD and return "origin spec … not found" instead of throwing, which
+  // made test:all red only on the box and failed every build whose check runs the whole suite
+  // (close-snapshot-coverage-guard, 2026-10-14). Strip the env for this call so it always throws.
+  const saved: Record<string, string | undefined> = {};
+  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  }
+  t.after(() => {
+    for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v;
+  });
   const out = await spawnPreMergeFix(throwOnUse, input);
   // spawnPreMergeFix's outer try/catch converts a downstream throw into
   // `{ spawned:false, escalated:false, reason: "spawn threw: ..." }`. The key signal for this test
