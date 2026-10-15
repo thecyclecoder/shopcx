@@ -102,6 +102,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
@@ -1667,6 +1668,110 @@ test("isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise KEEPS 
   assert.equal(isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise("", "select * from worker_heartbeats"), false);
   assert.equal(
     isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise("column worker_heartbeats.created_at does not exist", ""),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise ──
+// A foreign / stale direct-REST client read `spec_test_runs?select=...&verdict=...` against a
+// column the table never owned (the real column is `agent_verdict`); Control Tower signature
+// `supabase-logs:fe080e317b09c9b6`. Drop AT CAPTURE only when BOTH the exact `column
+// spec_test_runs.verdict does not exist` message AND the SELECT-lookup shape on
+// `spec_test_runs` (bare or PostgREST CTE wrapper) are present. A real column-missing on
+// another table, a different column on spec_test_runs (e.g. an `agent_verdict` regression), a
+// non-SELECT write, or a FATAL/PANIC/constraint violation still pages.
+
+test("isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise drops the PostgREST CTE wrapper + bare SELECT naming the non-existent verdict column", () => {
+  // The captured incident shape: a stale direct-REST client lists spec_test_runs selecting
+  // verdict, PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."spec_test_runs" ... )` CTE, and Postgres rejects with the column-missing.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise(
+      "column spec_test_runs.verdict does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."spec_test_runs"."id", "public"."spec_test_runs"."verdict" FROM "public"."spec_test_runs" ORDER BY "public"."spec_test_runs"."verdict" DESC LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise(
+      "column public.spec_test_runs.verdict does not exist",
+      'with pgrst_source as ( select "public"."spec_test_runs"."verdict" from "public"."spec_test_runs" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise(
+      "ERROR: column spec_test_runs.verdict does not exist",
+      'WITH pgrst_source AS ( SELECT "verdict" FROM "public"."spec_test_runs" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper), qualified and unqualified FROM, drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise(
+      "column spec_test_runs.verdict does not exist",
+      "select id, verdict from public.spec_test_runs order by verdict desc limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise(
+      "column spec_test_runs.verdict does not exist",
+      "select * from spec_test_runs where verdict is not null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise KEEPS real errors (other table, other column, non-SELECT, FATAL)", () => {
+  // Same verdict-missing message on a DIFFERENT relation is a real product-schema regression
+  // and still pages — the pin names spec_test_runs only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise(
+      "column triage_runs.verdict does not exist",
+      "select id, verdict from public.triage_runs order by verdict desc",
+    ),
+    false,
+  );
+  // A DIFFERENT column on spec_test_runs (a real column rename that broke a live query — the
+  // real column is `agent_verdict`) still pages — the pin is verdict only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise(
+      "column spec_test_runs.agent_verdict does not exist",
+      "select id, agent_verdict from public.spec_test_runs",
+    ),
+    false,
+  );
+  // A non-SELECT shape (PostgREST CTE write / bare write) is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise(
+      "column spec_test_runs.verdict does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."spec_test_runs"("id","verdict") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise(
+      "column spec_test_runs.verdict does not exist",
+      'update public.spec_test_runs set verdict = $1 where id = $2',
+    ),
+    false,
+  );
+  // A FATAL / constraint-class error on the same shape is untouched (different message).
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select id, verdict from public.spec_test_runs",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise("", "select * from spec_test_runs"), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise("column spec_test_runs.verdict does not exist", ""),
     false,
   );
 });
