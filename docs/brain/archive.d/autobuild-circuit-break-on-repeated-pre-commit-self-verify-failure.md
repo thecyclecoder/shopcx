@@ -1,0 +1,1 @@
+- **AutoBuild must circuit-break after N identical pre-commit self-verify failures instead of looping forever** · verified 2026-10-15 · → [[../lifecycles/build-flow]]
