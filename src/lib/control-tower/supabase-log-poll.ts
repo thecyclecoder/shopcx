@@ -137,6 +137,8 @@ import {
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise,
+  isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise,
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsDateAdhocNoise,
@@ -1924,6 +1926,18 @@ const LOG_QUERIES: LogQuery[] = [
       // (bare OR PostgREST CTE wrapper) — a different column, a non-SELECT, or a JOIN
       // path still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise(message, query)) return null;
+      // Same foreign direct-REST shape, different boolean column: a stale/foreign client
+      // reading `tickets.escalated` (escalation state actually lives on the `escalated_at`
+      // timestamp). Narrowly gated to the exact column-missing message AND a
+      // SELECT-on-tickets shape (bare OR PostgREST CTE wrapper) — a different column, a
+      // non-SELECT, or a JOIN path still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(message, query)) return null;
+      // Same foreign direct-REST shape on a different table: a stale/foreign client reading
+      // `specs.spec_slug` (the real column is the bare `slug`). Narrowly gated to the exact
+      // column-missing message AND a SELECT-on-specs shape (bare OR PostgREST CTE wrapper)
+      // — a different column, a non-SELECT, or a JOIN path still surfaces / pages on first
+      // sighting.
+      if (isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(message, query)) return null;
       // Drop expected-by-design noise at capture: Postgres reporting the 23505
       // unique-violation raised by our own `dashboard_notifications_dedupe_key_open_uniq`
       // partial index on an INSERT INTO `public.dashboard_notifications`. That index
