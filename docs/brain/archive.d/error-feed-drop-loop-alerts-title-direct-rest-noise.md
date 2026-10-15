@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST loop_alerts.title column-missing noise at capture** · verified 2026-10-15 · → [[../libraries/control-tower]]
