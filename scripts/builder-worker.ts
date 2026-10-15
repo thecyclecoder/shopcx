@@ -30617,6 +30617,73 @@ async function dispatchJob(job: Job) {
           } catch (e) {
             console.warn(`${tag} preCommitSelfVerify director-activity emit (unresolved) failed:`, e instanceof Error ? e.message : e);
           }
+          // ⭐ autobuild-circuit-break-on-repeated-pre-commit-self-verify-failure Phase 2 — the
+          // "escaped to fix-phase self-heal" claim must ACTUALLY materialize fix phases or report why it
+          // could not. Pre-fix this branch set the job `failed` and did nothing else: `spec_phases` stayed
+          // at the original planned phases (fixPhases empty), so the next build restarted from scratch and
+          // re-failed identically (close-snapshot-coverage-guard looped >1 month). Now: APPEND one concrete
+          // fix phase per per-anchor (`grep`) failing check so the next build addresses it specifically —
+          // OR record a structured `self_heal_noop` reason (every failing check is whole-artifact, e.g. a
+          // full registered unit_test suite, that can't decompose into a per-file fix phase) so the Phase-1
+          // re-enqueue circuit breaker is the explicit stop. Best-effort: a self-heal failure never changes
+          // the job's `failed` outcome below (the worktree genuinely fails its own checks either way).
+          try {
+            const { getSpec: getSpecRowForHeal, appendFixPhases } = await import("../src/lib/specs-table");
+            const { decideSelfVerifySelfHeal } = await import("../src/lib/self-verify-fix-phase");
+            const { recordDirectorActivity } = await import("../src/lib/director-activity");
+            const originForHeal = await getSpecRowForHeal(job.workspace_id, slug);
+            const existingFixPhases = (originForHeal?.phases || [])
+              .filter((p) => p.kind === "fix")
+              .map((p) => ({ status: p.status as string, build_sha: p.build_sha ?? null, origin_check_keys: p.origin_check_keys ?? [] }));
+            const healDecision = decideSelfVerifySelfHeal({
+              failing: sv.failing.map((f) => ({ text: f.text, exec_kind: f.exec_kind, evidence: f.evidence })),
+              existingFixPhases,
+            });
+            if (healDecision.action === "append") {
+              const appended = await appendFixPhases(job.workspace_id, slug, healDecision.fixes);
+              await recordDirectorActivity(db, {
+                workspaceId: job.workspace_id,
+                directorFunction: "platform",
+                actionKind: "build_self_verify_self_heal",
+                specSlug: slug,
+                reason:
+                  `self-heal appended ${appended.appended} fix phase(s) (position(s) ${appended.positions.join(",") || "none"}) ` +
+                  `for ${healDecision.fixes.length} per-anchor self-verify failure(s); the next build addresses them specifically`,
+                metadata: {
+                  job_id: job.id,
+                  spec_slug: slug,
+                  outcome: "fix_phases_appended",
+                  appended_positions: appended.positions,
+                  signature: healDecision.signature,
+                  origin_check_keys: healDecision.decomposableKeys,
+                  repair_passes: repairsExecuted,
+                  autonomous: true,
+                },
+              });
+              console.log(`${tag} preCommitSelfVerify self-heal APPENDED fix phase(s) ${appended.positions.join(",")} for ${slug}`);
+            } else {
+              await recordDirectorActivity(db, {
+                workspaceId: job.workspace_id,
+                directorFunction: "platform",
+                actionKind: "build_self_verify_self_heal",
+                specSlug: slug,
+                reason: `self_heal_noop (${healDecision.reason}): ${healDecision.detail}`,
+                metadata: {
+                  job_id: job.id,
+                  spec_slug: slug,
+                  outcome: "self_heal_noop",
+                  noop_reason: healDecision.reason,
+                  detail: healDecision.detail,
+                  failing_checks: sv.failing.map((f) => ({ description: f.text, exec_kind: f.exec_kind })),
+                  repair_passes: repairsExecuted,
+                  autonomous: true,
+                },
+              });
+              console.log(`${tag} preCommitSelfVerify self-heal NOOP (${healDecision.reason}) for ${slug}: ${healDecision.detail}`);
+            }
+          } catch (e) {
+            console.warn(`${tag} preCommitSelfVerify self-heal decision failed (non-fatal):`, e instanceof Error ? e.message : e);
+          }
           await update(job.id, {
             status: "failed",
             error: `pre-commit self-verify unresolved after ${SELF_VERIFY_REPAIR_MAX} repair passes: ${failingTexts}`,
