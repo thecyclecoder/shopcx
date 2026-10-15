@@ -10599,6 +10599,49 @@ test("isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise ALSO
   );
 });
 
+test("isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise drops the production JSON-path payload-filter shape (to_jsonb(payload)->> ilike, no kind) — signature supabase-logs:d9d2cd616c5d93b4", () => {
+  // The real foreign read reaching production: a PostgREST `?payload->>field=ilike.*`
+  // filter rendered as `to_jsonb("public"."agent_jobs"."payload") ->> $1 ilike $2` inside
+  // the pgrst_source CTE, SELECT *, ORDER BY created_at DESC, LIMIT/OFFSET — and NO `kind`
+  // token, so Fingerprint A (the kind co-mention branch) misses it. Fingerprint B drops it.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise(
+      "column agent_jobs.payload does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs".* FROM "public"."agent_jobs" WHERE to_jsonb("public"."agent_jobs"."payload") ->> $1 ILIKE $2 ORDER BY "public"."agent_jobs"."created_at" DESC LIMIT $3 OFFSET $4 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified column-missing message variant drops too.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise(
+      "column public.agent_jobs.payload does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs".* FROM "public"."agent_jobs" WHERE to_jsonb(payload) ->> $1 ilike $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4 )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise KEEPS a bare SELECT payload with no kind AND no JSON-path filter (the safety case)", () => {
+  // The spec's negative case: a bare `select payload from agent_jobs` with neither the
+  // `kind` co-mention (Fingerprint A) nor a `to_jsonb(payload)->> ilike` JSON-path filter
+  // (Fingerprint B) is NOT recognized noise and stays paged.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise(
+      "column agent_jobs.payload does not exist",
+      "select payload from agent_jobs",
+    ),
+    false,
+  );
+  // A JSON-path-looking expression WITHOUT ilike also stays paged — Fingerprint B needs both.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise(
+      "column agent_jobs.payload does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs".* FROM "public"."agent_jobs" WHERE to_jsonb("public"."agent_jobs"."payload") ->> $1 = $2 )',
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise KEEPS a non-SELECT statement shape (a real code-bug writing agent_jobs.payload still pages)", () => {
   // INSERT / UPDATE / DELETE against agent_jobs referencing a bogus column is real code
   // trying to write the table — a bug we WANT to see, not the ad hoc read.

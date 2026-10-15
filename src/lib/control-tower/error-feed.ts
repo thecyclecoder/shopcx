@@ -6487,7 +6487,9 @@ export function isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise(
  * `?select=id,status,created_at,kind,payload` with a `WHERE "kind" = $1` branch, so
  * `kind` is the stable fingerprint of the confused foreign read.
  *
- * `true` ONLY when ALL THREE markers are present:
+ * TWO fingerprints drop this error (after the message pin, below):
+ *
+ * Fingerprint A (the original confused-column pairing) — `true` when ALL THREE markers:
  *   1. the message is Postgres's canonical column-missing shape for THIS column —
  *      trimmed equal to `column agent_jobs.payload does not exist` (or the `public.`
  *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
@@ -6500,6 +6502,19 @@ export function isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise(
  *      alongside the bogus `payload` in the same select list / where branch. A bare
  *      `select payload from agent_jobs` without `kind` (hypothetical real code after a
  *      schema regression) stays paged.
+ *
+ * Fingerprint B (the real production shape — Control Tower signature
+ * `supabase-logs:d9d2cd616c5d93b4`,
+ * [[../specs/error-feed-drop-agent-jobs-payload-json-path-filter-noise]]) — the foreign
+ * read that reached production carries NO `kind` token, so Fingerprint A missed it and it
+ * re-paged Platform. Its shape is a PostgREST JSON-path filter: a
+ * `to_jsonb(payload) ->> $1 ilike $2` predicate inside the
+ * `WITH pgrst_source AS ( SELECT * FROM "public"."agent_jobs" ... )` wrapper (SELECT *,
+ * ORDER BY created_at DESC, LIMIT/OFFSET). `true` (drop) — even with `kind` absent — when
+ * the message pin (1) holds AND the query is the PostgREST CTE-wrapped SELECT on
+ * `agent_jobs` AND it contains a `to_jsonb( ... payload ... ) ->>` JSON-path expression
+ * AND an `ilike` operator (the `hasPayloadJsonPathFilter` boolean). A bare
+ * `select payload from agent_jobs` with no `kind` AND no JSON-path filter stays paged.
  *
  * Narrowly gated so:
  *   - a column-missing error for ANY OTHER table (a real product-schema regression on
@@ -6541,6 +6556,24 @@ export function isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookup
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
+  // Second fingerprint (Control Tower signature `supabase-logs:d9d2cd616c5d93b4`,
+  // [[../specs/error-feed-drop-agent-jobs-payload-json-path-filter-noise]]) — the real
+  // production foreign read does NOT carry the `kind` token the branch below keys on, so
+  // it evaded this drop and re-paged Platform. Its shape is a PostgREST JSON-path filter
+  // on `payload`: a `to_jsonb(payload) ->> $1 ilike $2` predicate inside the
+  // `WITH pgrst_source AS ( SELECT * FROM "public"."agent_jobs" ... )` wrapper (SELECT *,
+  // ORDER BY created_at DESC, LIMIT/OFFSET, no `kind`). `payload` is not a real column, so
+  // `to_jsonb(payload)` itself is what Postgres rejects with the column-missing error —
+  // there is no ShopCX lever to make it resolve. Detect it explicitly and drop even when
+  // `kind` is absent: require the PostgREST CTE-wrapped SELECT on agent_jobs AND a
+  // `to_jsonb( ... payload ... ) ->>` JSON-path expression AND an `ilike` operator.
+  const inPgrstAgentJobsSelectWrapper =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?agent_jobs\b/.test(q);
+  const hasPayloadJsonPathFilter =
+    inPgrstAgentJobsSelectWrapper &&
+    /to_jsonb\(\s*[^)]*\bpayload\b[^)]*\)\s*->>/.test(q) &&
+    /\bilike\b/.test(q);
+  if (hasPayloadJsonPathFilter) return true;
   // Fingerprint of the confused foreign read: the query MUST also mention `kind`, the
   // real column the caller included alongside the bogus `payload` (the sample query's
   // `WHERE "kind" = $1` branch). A bare `select payload from agent_jobs` without `kind`
