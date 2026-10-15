@@ -12,8 +12,17 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **AutoBuild must circuit-break after N identical pre-commit self-verify failures instead of looping forever** · verified 2026-10-15 · → [[../lifecycles/build-flow]]
+- **Drop the foreign ad-hoc REST read of the non-existent agent_jobs.finished_at column from the Control Tower error feed** · verified 2026-10-15 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise`)
+- **Extend the agent_jobs.payload noise classifier with a second fingerprint for JSON-path-filter foreign reads** · verified 2026-10-15 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise` + [[../specs/error-feed-drop-agent-jobs-payload-direct-rest-lookup-noise]])
+- **Dismissing a park card closes the stuck job behind it** · verified 2026-10-14 · → [[../libraries/approval-inbox]]
 - **Stop the subscription drift monitor from paging on the founder's internal test subscriptions** · verified 2026-10-14 · → [[../inngest/shopcx-drift-reconcile]]
+- **Scope out foreign-app noise: drop dashboard_notifications.status column SELECT errors** · verified 2026-10-14 · → [[../libraries/control-tower]]
 - **Stop paging on the foreign 'dunning_cycles.cycle_key does not exist' PostgREST read** · verified 2026-10-14 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise`)
+- **Scope out foreign PostgREST noise: loyalty_redemptions.coupon_code column-missing errors** · verified 2026-10-14 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise`)
+- **Scope out foreign-app noise: loyalty_redemptions.customer_id direct-REST lookups** · verified 2026-10-14 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise`)
+- **Drop foreign ad-hoc 'column specs.critical does not exist' REST noise from the error feed** · verified 2026-10-14 · → [[../libraries/control-tower]]
+- **Fraud BIN check: a card-name vs billing-name mismatch alone never holds an order** · verified 2026-10-14 · → [[lifecycles/fraud-detection]]
 - **A Braintree-side refund must reach our books** · verified 2026-10-13 · → [[../lifecycles/return-pipeline]]
 - **Stop grader sessions querying nonexistent spec phase_number** · verified 2026-10-13 · → [[../libraries/agent-grader.md]]
 - **Drop foreign ad-hoc SELECT on non-existent dashboard_notifications.updated_at from the error feed** · verified 2026-10-13 · → [[lifecycles/control-tower]]
