@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST noise: column spec_phases.phase_index does not exist** · verified 2026-10-15 · → [[../inngest/supabase-log-poll]]
