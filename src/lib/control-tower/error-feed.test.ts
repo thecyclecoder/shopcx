@@ -1238,6 +1238,70 @@ test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS a FA
   );
 });
 
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise drops the PostgREST CTE wrapper lookup projecting the non-existent title column while a genuine loop_alerts column rename still pages", () => {
+  // The captured incident shape (Control Tower `supabase-logs:e66d6020e9db8399`): a stale
+  // Supabase Studio / direct-REST client reads `loop_alerts?select=...title...` (`title` is
+  // an `error_events`-style concept, never a `loop_alerts` column), PostgREST wraps it as a
+  // `WITH pgrst_source AS ( SELECT ... FROM "public"."loop_alerts" ... )` CTE, and Postgres
+  // rejects with `column loop_alerts.title does not exist`.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.title does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."id", "public"."loop_alerts"."title" FROM "public"."loop_alerts" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified title variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column public.loop_alerts.title does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."title" FROM "public"."loop_alerts" LIMIT 1 )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.title does not exist",
+      "select id, title from loop_alerts where title ilike '%x%' limit 10",
+    ),
+    true,
+  );
+  // A genuine loop_alerts column rename (e.g. `resolved_at`) going missing on the same CTE
+  // read shape is a real schema regression — the pin covers the foreign-noise columns only,
+  // so it still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.resolved_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."resolved_at" FROM "public"."loop_alerts" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS a PostgREST CTE INSERT/UPDATE on loop_alerts naming title (a real code-bug write still pages)", () => {
+  // A PostgREST write wrapped in the same `WITH pgrst_source AS (...)` envelope is a real
+  // code-bug shape (someone trying to write a bogus `title` column), not the ad hoc read
+  // this drop targets — the CTE branch requires the wrapped op to be a SELECT.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.title does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."loop_alerts"("id","title") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  // A real column-missing on another table that carries a `title` column
+  // (e.g. `error_events.title`) is a genuine regression — the pin names
+  // `loop_alerts.title` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column error_events.title does not exist",
+      "select * from public.error_events where title ilike '%x%'",
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS the closed_at column-missing message on a DIFFERENT relation (a real product-schema regression still pages)", () => {
   // A real column-missing on another table that DOES carry a `closed_at` column
   // (e.g. `tickets.closed_at`) is a genuine regression we want to see — the pin names
