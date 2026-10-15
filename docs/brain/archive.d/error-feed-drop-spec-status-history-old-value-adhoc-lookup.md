@@ -1,0 +1,1 @@
+- **Scope out foreign PostgREST noise on spec_status_history.old_value** · verified 2026-10-15 · → [[../libraries/control-tower]]
