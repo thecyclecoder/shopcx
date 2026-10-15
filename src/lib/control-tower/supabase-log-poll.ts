@@ -80,6 +80,7 @@ import {
   isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise,
+  isForeignSupabasePostgresMissingSpecStatusHistoryOldValueAdhocNoise,
   isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
@@ -866,6 +867,12 @@ const LOG_QUERIES: LogQuery[] = [
       // pin above never fires. Drop the `column spec_status_history.from_status does not
       // exist` bare-SELECT shape too; a different column / table / non-SELECT still pages.
       if (isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise(message, query)) return null;
+      // Same foreign caller, `old_value` column: Postgres reports only the first unresolved
+      // column, so when the ad hoc read is evaluated `old_value` first neither the
+      // `created_at` nor the `from_status` pin above fires. Drop the `column
+      // spec_status_history.old_value does not exist` bare-SELECT and PostgREST `WITH
+      // pgrst_source` wrapper shapes too; a different column / table / non-SELECT still pages.
+      if (isForeignSupabasePostgresMissingSpecStatusHistoryOldValueAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.subscription_cycle_charges.created_at`. The ledger exists but has no
       // `created_at` column (timestamps are `claimed_at` / `resolved_at`, and no ShopCX code
