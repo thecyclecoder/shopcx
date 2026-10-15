@@ -1,0 +1,1 @@
+- **Reactivate handler resolves subscription UUID before crisis price lookup** · verified 2026-10-15 · → [[../libraries/action-executor]], [[../tables/crisis_customer_actions]]
