@@ -2502,6 +2502,30 @@ export async function setSpecAutoBuild(
 }
 
 /**
+ * Write the spec's `human_review` note — the free-text "a human must look at this before it builds/promotes
+ * again" marker (sibling to `setSpecAutoBuild`). Pass `null` to CLEAR it. Used by the autobuild self-verify
+ * circuit breaker ([[agent-jobs]] `enqueueBuildIfDue`): when a spec's last N consecutive builds all failed
+ * with the SAME pre-commit self-verify signature, the breaker parks it (auto_build off) and records WHY here
+ * so the owner sees a concrete reason on the card, not a silently-stalled spec. The ONLY sanctioned writer
+ * for `specs.human_review` outside a full `upsertSpec` re-author — a slug-resolved single UPDATE, no raw PM
+ * SQL (the `_check-pm-sdk-compliance` guard).
+ */
+export async function setSpecHumanReview(
+  workspaceId: string,
+  slug: string,
+  note: string | null,
+): Promise<void> {
+  const admin = createAdminClient();
+  const { error } = await admin
+    .from("specs")
+    .update({ human_review: note, updated_at: new Date().toISOString() })
+    .eq("workspace_id", workspaceId)
+    .eq("slug", slug);
+  if (error) throw error;
+  invalidateSpecCache(workspaceId, slug);
+}
+
+/**
  * Stamp a ONE-SHOT spec's card-level merge provenance on `specs.merged_pr` + `specs.last_merge_sha` — the
  * spec-status-phase-pr-provenance Phase 1 chain for a zero-phase spec (the single merge ships the whole
  * spec, and there's no `spec_phases` slot to carry the PR/SHA, so it lands on the parent row). For a

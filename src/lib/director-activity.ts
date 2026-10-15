@@ -274,6 +274,29 @@ export type DirectorActionKind =
   // rollup (caught / repaired-in-session / escaped-to-fix-phase) reads this kind — see the brain
   // note next to the Phase-1 build-lane page.
   | "build_self_verify_caught"
+  // autobuild-circuit-break-on-repeated-pre-commit-self-verify-failure Phase 1 — the self-verify
+  // circuit breaker in [[../lib/agent-jobs]] `enqueueBuildIfDue`. When a spec's last N (default 3)
+  // consecutive build jobs all FAILED with the SAME pre-commit self-verify signature, a live rebuild
+  // can never close the class (it re-fails identically and re-fires Mario every tick), so the breaker
+  // parks the spec (auto_build off + a human_review note) and raises THIS row ONCE per (slug,
+  // signature) so the owner + Ada see the stall instead of it looping silently. Owned by the spec's
+  // owner function (falls back to Platform). metadata: { signature, consecutive_failures, threshold,
+  // parked:true, autonomous:true }.
+  | "build_self_verify_circuit_open"
+  // autobuild-circuit-break-on-repeated-pre-commit-self-verify-failure Phase 2 — the OUTCOME of the
+  // build lane's "escaped to fix-phase self-heal" branch (scripts/builder-worker.ts `runBuildJob`),
+  // which pre-fix was a silent no-op (it set the job `failed` and materialized NO fix phases). ONE row
+  // per cap-exhausted self-verify failure, discriminated by `metadata.outcome`:
+  //   - `fix_phases_appended` — one concrete fix phase per per-anchor (`grep`) failing check was
+  //     appended via `appendFixPhases`, so the next build addresses them specifically. metadata:
+  //     { outcome, appended_positions, signature, origin_check_keys, repair_passes }.
+  //   - `self_heal_noop` — no per-file fix phase can decompose the failure (every failing check is
+  //     whole-artifact, e.g. a full registered unit_test suite), OR a pending fix phase already covers
+  //     the anchors, OR the fix-cycle loop-guard is hit; `metadata.noop_reason` names which. The spec's
+  //     Phase-1 circuit breaker ([[../lib/agent-jobs]] `selfVerifyCircuitDecision`) is then the stop.
+  //     metadata: { outcome, noop_reason, detail, failing_checks, repair_passes }.
+  // Owned by Platform (director_function='platform'). See [[../lib/self-verify-fix-phase]].
+  | "build_self_verify_self_heal"
   // build-verify-self-heals-stale-grep-checks-before-deferring Phase 2 — one row PER auto-corrected
   // spec_phase_checks pattern by the phase-verify reconciler ([[../libraries/check-reconciliation]])
   // so a self-healing check can't mask a genuinely-wrong spec: the CEO sees WHAT was auto-corrected

@@ -792,6 +792,62 @@ export async function enqueueSpecTestIfDue(
   return { enqueued: true };
 }
 
+// ─── autobuild-circuit-break-on-repeated-pre-commit-self-verify-failure Phase 1 ─────────────────────
+// `enqueueBuildIfDue`'s one-in-flight guard only stops a DUPLICATE live build; a SETTLED failed build
+// is not in-flight, so an unbuildable autoBuild spec re-queues the identical failing build every tick
+// (close-snapshot-coverage-guard looped >1 month, re-firing Mario endlessly). A live fix can never
+// close this class — the build genuinely re-fails — so a breaker is the only stop: once the last N
+// consecutive builds all failed with the SAME pre-commit self-verify signature, park the spec instead
+// of re-queuing it. A LATER differing signature (someone edited the spec) resets the counter.
+
+/** Consecutive-identical-failure threshold at which the self-verify circuit opens. */
+export const SELF_VERIFY_CIRCUIT_N = 3;
+/** How many of the most-recent build jobs to inspect for the consecutive-failure streak. */
+export const SELF_VERIFY_CIRCUIT_LOOKBACK = 6;
+
+/**
+ * Derive a STABLE signature for a pre-commit self-verify failure from an `agent_jobs.error` string.
+ * The runner writes `pre-commit self-verify unresolved after <N> repair passes: <failing checks>`
+ * (scripts/builder-worker.ts). The distinguishing part is the failing-check list AFTER the colon — the
+ * repair-pass count is a constant and must NOT vary the signature. Returns the normalized tail, or null
+ * when the error is not a self-verify-unresolved failure (a tsc regression, an insert error, a success —
+ * none of which should feed the breaker; they reset the streak).
+ */
+export function deriveSelfVerifySignature(error: string | null | undefined): string | null {
+  if (!error) return null;
+  // No dotall flag (tsc target predates es2018) — the runner's `failingTexts` is a single `; `-joined
+  // line with no newlines, so `.+` matches it fully; `[^]` would be the dotall-free escape hatch if not.
+  const m = /pre-commit self-verify unresolved after \d+ repair passes:\s*([^]+)$/i.exec(error);
+  if (!m) return null;
+  const tail = m[1].trim().replace(/\s+/g, " ").toLowerCase();
+  return tail ? tail.slice(0, 500) : null;
+}
+
+/**
+ * Pure decision: given the most-recent build jobs (ordered created_at DESC), is the self-verify circuit
+ * open? The circuit opens only when the TOP `threshold` consecutive rows are all `status='failed'` AND
+ * share the SAME self-verify signature. The streak breaks on the first row that is not failed, has no
+ * self-verify signature, or carries a DIFFERING signature — so a success, a different failure mode, or an
+ * edited spec (new failing checks ⇒ new signature) resets the counter and lets the spec build again.
+ */
+export function selfVerifyCircuitDecision(
+  recentBuilds: Array<{ status: string | null; error: string | null }>,
+  opts?: { threshold?: number },
+): { open: boolean; signature: string | null; count: number } {
+  const threshold = opts?.threshold ?? SELF_VERIFY_CIRCUIT_N;
+  const top = recentBuilds[0];
+  if (!top || top.status !== "failed") return { open: false, signature: null, count: 0 };
+  const signature = deriveSelfVerifySignature(top.error);
+  if (!signature) return { open: false, signature: null, count: 0 };
+  let count = 0;
+  for (const b of recentBuilds) {
+    if (b.status !== "failed") break;
+    if (deriveSelfVerifySignature(b.error) !== signature) break;
+    count++;
+  }
+  return { open: count >= threshold, signature, count };
+}
+
 /**
  * bo-reactive-gated-build-enqueue Phase 1 — the SINGLE chokepoint for enqueueing a `kind='build'`
  * agent_jobs row for a spec. (Vale's parallel `enqueueSpecReviewIfDue` is retired + deleted.)
@@ -871,6 +927,74 @@ export async function enqueueBuildIfDue(
     .in("status", ["queued", "queued_resume", "building", "claimed"])
     .limit(1);
   if (inflight && inflight.length) return { enqueued: false, reason: "in-flight" };
+
+  // autobuild-circuit-break-on-repeated-pre-commit-self-verify-failure Phase 1 — a settled failed build
+  // is NOT in-flight, so the guard above lets an unbuildable autoBuild spec re-queue the identical
+  // failing build every tick (re-firing Mario forever). Count the most-recent build jobs for this
+  // (workspace, slug): if the top N consecutive are `failed` with the SAME pre-commit self-verify
+  // signature, the live fix can't ever close it — refuse, park the spec (auto_build off + human_review
+  // note), and raise ONE idempotent owner/Ada escalation keyed on slug+signature. A LATER differing
+  // signature (someone edited the spec) resets the streak and lets it build again. Fail-open on a read
+  // error — a transient probe failure must not wedge a legitimate build.
+  const { data: recentBuildRows, error: recentErr } = await admin
+    .from("agent_jobs")
+    .select("status, error, created_at")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "build")
+    .order("created_at", { ascending: false })
+    .limit(SELF_VERIFY_CIRCUIT_LOOKBACK);
+  if (!recentErr && Array.isArray(recentBuildRows) && recentBuildRows.length) {
+    const breaker = selfVerifyCircuitDecision(
+      recentBuildRows.map((r) => ({ status: (r as { status: string | null }).status, error: (r as { error: string | null }).error })),
+    );
+    if (breaker.open && breaker.signature) {
+      const reasonText =
+        `self-verify circuit breaker: the last ${breaker.count} consecutive builds all failed with the same ` +
+        `pre-commit self-verify signature — a live rebuild re-fails identically, so auto-build is parked for ` +
+        `human review. Signature: ${breaker.signature.slice(0, 300)}`;
+      try {
+        const { setSpecAutoBuild, setSpecHumanReview } = await import("@/lib/specs-table");
+        await setSpecAutoBuild(workspaceId, slug, false);
+        await setSpecHumanReview(workspaceId, slug, reasonText);
+      } catch (e) {
+        console.warn(`[enqueueBuildIfDue] self-verify-circuit-open park failed for ${slug}:`, e instanceof Error ? e.message : e);
+      }
+      // ONE escalation per (slug, signature) — idempotent. auto_build is now off, so a later tick
+      // short-circuits at the `auto-build-off` gate above and never re-reaches here; the dedupe is a
+      // belt-and-suspenders guard against a concurrent enqueue racing the park write.
+      try {
+        const { recordDirectorActivity } = await import("@/lib/director-activity");
+        const { data: already } = await admin
+          .from("director_activity")
+          .select("id")
+          .eq("workspace_id", workspaceId)
+          .eq("spec_slug", slug)
+          .eq("action_kind", "build_self_verify_circuit_open")
+          .contains("metadata", { signature: breaker.signature })
+          .limit(1);
+        if (!Array.isArray(already) || already.length === 0) {
+          await recordDirectorActivity(admin, {
+            workspaceId,
+            directorFunction: card.owner || "platform",
+            actionKind: "build_self_verify_circuit_open",
+            specSlug: slug,
+            reason: reasonText,
+            metadata: {
+              signature: breaker.signature,
+              consecutive_failures: breaker.count,
+              threshold: SELF_VERIFY_CIRCUIT_N,
+              parked: true,
+              autonomous: true,
+            },
+          });
+        }
+      } catch (e) {
+        console.warn(`[enqueueBuildIfDue] self-verify-circuit-open escalation failed for ${slug}:`, e instanceof Error ? e.message : e);
+      }
+      return { enqueued: false, reason: "self-verify-circuit-open" };
+    }
+  }
 
   // goal-member-builds-gate-at-enqueue-not-at-claim Phase 1 — enqueue-time admission gate. Before
   // this the same-spec in-flight guard above only stopped a duplicate for THIS spec; a
