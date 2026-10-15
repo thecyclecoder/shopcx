@@ -1,0 +1,1 @@
+- **Close-snapshot coverage guard** · verified 2026-10-15 · → [[../lifecycles/shoptics-migration]]
