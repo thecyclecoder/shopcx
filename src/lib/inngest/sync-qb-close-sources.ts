@@ -25,7 +25,9 @@ import {
   syncFbaInventoryForClose,
   syncTplInventoryForClose,
   syncInboundShipmentsForClose,
+  assertSameDayCoverage,
   type SyncResult,
+  type SameDayCoverageResult,
 } from "@/lib/qb-close/sync-sources";
 import { syncProcessorSummaries } from "@/lib/qb-close/sync-processors";
 import { syncAmazonSalesForClose } from "@/lib/qb-close/sync-amazon-sales";
@@ -33,6 +35,20 @@ import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
 /** Re-sync this many trailing days of sales so late refunds/edits are picked up. */
 const SALES_LOOKBACK_DAYS = 35;
+
+/**
+ * Sub-sync names whose data is POINT-IN-TIME and cannot be rebuilt after the fact — the three
+ * physical buckets the close rests on. A zero-row result from one of these is a silent, permanent
+ * gap, so it must flip the heartbeat not-ok rather than pass as "nothing to do". The sales syncs
+ * are deliberately EXCLUDED: they re-sync over a trailing 35-day window and a legitimately-zero day
+ * is possible (no sales, or a fully-refunded day). See the 2026-09 Amazon-sales 30-day silent hole
+ * (docs/brain/inngest/sync-qb-close-sources.md).
+ */
+export const UNRECONSTRUCTIBLE_SYNCS = [
+  "fba-inventory",
+  "tpl-inventory",
+  "inbound-shipments",
+] as const;
 
 function priorMonthOf(month: string): string {
   const d = new Date(`${month}-01T00:00:00Z`);
@@ -76,7 +92,7 @@ export const syncQbCloseSources = inngest.createFunction(
       return [...new Set((data ?? []).map((r) => r.workspace_id as string))];
     });
 
-    const results: (SyncResult & { workspace_id: string })[] = [];
+    const results: (SyncResult & { workspace_id: string; sync: string })[] = [];
     const failures: { workspace_id: string; sync: string; error: string }[] = [];
 
     for (const ws of workspaces) {
@@ -111,17 +127,42 @@ export const syncQbCloseSources = inngest.createFunction(
             return { ok: false as const, error: (e as Error).message.slice(0, 300) };
           }
         });
-        if (outcome.ok) results.push({ ...outcome.result, workspace_id: ws });
+        if (outcome.ok) results.push({ ...outcome.result, workspace_id: ws, sync: name });
         else failures.push({ workspace_id: ws, sync: name, error: outcome.error });
       }
     }
 
+    // Same-day coverage guard: while the data is STILL collectable, assert today's row landed in
+    // each of the three unreconstructible tables, retry the specific sync once inline, and escalate
+    // a CEO card if a table still has nothing. Runs after the sync loop and before the heartbeat so
+    // the retry's writes are reflected in the counts. A missing snapshot is only recoverable on the
+    // day it is missing — the next morning the position is gone forever.
+    const coverage: Record<string, SameDayCoverageResult[]> = {};
+    for (const ws of workspaces) {
+      coverage[ws] = await step.run(`coverage-${ws}`, () =>
+        assertSameDayCoverage(admin, ws, today),
+      );
+    }
+
+    // Per-sub-sync row counts, summed across workspaces. A single summed `rows` hid the 2026-09
+    // Amazon-sales sync writing nothing for ~30 days while every heartbeat read green, because the
+    // healthy total from the other six syncs masked it. The breakdown lets a zero on one sync be
+    // seen on its own.
+    const perSync: Record<string, number> = {};
+    for (const r of results) perSync[r.sync] = (perSync[r.sync] ?? 0) + r.rows;
+
+    // An unreconstructible sync that RAN and collected zero rows is a silent permanent gap, not a
+    // quiet success — flip the beat not-ok so the monitor surfaces it. (A sync absent from perSync
+    // because no workspace ran it is left alone; failures.length already covers throws.)
+    const zeroUnreconstructible = UNRECONSTRUCTIBLE_SYNCS.filter((s) => perSync[s] === 0);
+
     await step.run("heartbeat", async () =>
       emitCronHeartbeat("sync-qb-close-sources", {
-        ok: failures.length === 0,
+        ok: failures.length === 0 && zeroUnreconstructible.length === 0,
         produced: {
           workspaces: workspaces.length,
           rows: results.reduce((a, r) => a + r.rows, 0),
+          perSync,
           failures: failures.length,
         },
         // Fan-out convention (docs/brain/libraries/control-tower.md § heartbeat): a not-ok beat
@@ -129,12 +170,18 @@ export const syncQbCloseSources = inngest.createFunction(
         // reading function logs. A count alone leaves three consecutive not-ok mornings
         // indistinguishable — the 2026-09 close-driver 23-day stall was invisible for that
         // reason. Distinct + bounded so a wide outage cannot write an unbounded blob.
-        detail: failures.length
-          ? Array.from(new Set(failures.map((f) => f.sync))).sort().join(",").slice(0, 300)
-          : undefined,
+        detail: (() => {
+          const causes = [
+            ...new Set(failures.map((f) => f.sync)),
+            // A zero-row unreconstructible sync is a not-ok cause even though nothing threw, so
+            // name it too — otherwise the morning reads not-ok with no reason.
+            ...zeroUnreconstructible.map((s) => `${s}:zero-rows`),
+          ];
+          return causes.length ? causes.sort().join(",").slice(0, 300) : undefined;
+        })(),
       }),
     );
 
-    return { window: { start, end }, snapshot_date: today, results, failures };
+    return { window: { start, end }, snapshot_date: today, results, failures, coverage };
   },
 );
