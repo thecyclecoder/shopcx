@@ -763,13 +763,17 @@ export interface ApplyMergedOpts {
   ) => Promise<void | { alreadyApplied?: boolean }>;
   /**
    * Called for each destructive migration BEFORE marking it approval-needed. The tile alert already
-   * names the version (Phase 1); this hook lets the caller add an extra surfacing (dashboard notice,
-   * log line, PagerDuty). Best-effort: a throw is swallowed with a console.error — the routing
-   * decision (do NOT auto-apply) is independent of the hook's success.
+   * names the version (Phase 1); the box binds this to `fileGatedMigrationApproval`, which files ONE
+   * deduped (version + content hash), routed Approval Request whose approval applies the file via
+   * applyMigrationAndRecord (see gated-migration-approval.ts). Best-effort: a throw is swallowed
+   * with a console.error — the routing decision (do NOT auto-apply) is independent of the hook's
+   * success.
    */
   onApprovalNeeded?: (input: {
     version: string;
     file: string;
+    /** The exact SQL body the classifier read — the approval card previews (and hashes) these bytes. */
+    sql: string;
     severity: MigrationSeverity;
     matches: string[];
   }) => Promise<void> | void;
@@ -848,6 +852,7 @@ export async function applyMergedMigrations(
         await opts.onApprovalNeeded({
           version: m.version,
           file: m.file,
+          sql,
           severity: cls.severity,
           matches: cls.matches,
         });

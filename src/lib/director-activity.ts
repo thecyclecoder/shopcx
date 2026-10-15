@@ -146,6 +146,14 @@ export type DirectorActionKind =
   // { thread_id, target_job_id, action_type, action_id, cmd, reversibility, irreversible,
   // authorized_by:'ceo', autonomous:false }.
   | "ceo_declined_out_of_leash_request"
+  // gated-migration-approval-card — the migration-drift reconciler found a merged-but-unapplied migration
+  // that classifyMigrationSql flagged destructive and FILED a routed Approval Request (agent_jobs
+  // kind='ceo-authorized-out-of-leash', one `apply_migration` action with a `migration_drift` marker)
+  // instead of auto-applying it. Deduped on version + content hash. Written by `fileGatedMigrationApproval`
+  // in scripts/builder-worker.ts. metadata: { target_job_id, migration_version, migration_file, severity,
+  // matches, dedupe_key, routed_to_function, base_routed_to_function, platform_dormant_fallback,
+  // route_reason, superseded_job_ids, autonomous:false }.
+  | "raised_gated_migration_approval"
   // playbook-compiler-loop § Phase 2 — existing-playbook audit surface. Written by
   // POST /api/workspaces/[id]/playbooks/retire when the Retire button on
   // /dashboard/settings/playbooks/audit flips `playbooks.is_active=false`.
