@@ -3607,14 +3607,24 @@ export const directActionHandlers: Record<
       await addTicketTag(ctx.ticketId, "wb");
       await addTicketTag(ctx.ticketId, "wb:success");
 
-      // Apply preserved base price if one exists (from crisis price fix)
-      const { data: crisisAction } = await ctx.admin.from("crisis_customer_actions")
-        .select("preserved_base_price_cents")
-        .eq("subscription_id", p.contract_id!)
-        .not("preserved_base_price_cents", "is", null)
-        .order("created_at", { ascending: false })
-        .limit(1)
+      // Apply preserved base price if one exists (from crisis price fix).
+      // crisis_customer_actions.subscription_id is the internal subscription UUID, so
+      // resolve internal subscription UUID from shopify_contract_id before the crisis lookup —
+      // passing the Shopify numeric contract id straight into the uuid column throws a Postgres type error.
+      const { data: subRow } = await ctx.admin.from("subscriptions")
+        .select("id")
+        .eq("workspace_id", ctx.workspaceId)
+        .eq("shopify_contract_id", p.contract_id!)
         .maybeSingle();
+      const { data: crisisAction } = subRow?.id
+        ? await ctx.admin.from("crisis_customer_actions")
+            .select("preserved_base_price_cents")
+            .eq("subscription_id", subRow.id)
+            .not("preserved_base_price_cents", "is", null)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle()
+        : { data: null };
       if (crisisAction?.preserved_base_price_cents && p.variant_id) {
         const { subUpdateLineItemPrice } = await import("@/lib/subscription-items");
         await subUpdateLineItemPrice(ctx.workspaceId, p.contract_id!, p.variant_id, crisisAction.preserved_base_price_cents);
