@@ -11,9 +11,22 @@ Keeps the month-end close's `qb_*` source tables fed from **ShopCX's own integra
 | `syncFbaInventoryForClose` | [[../tables/qb_amazon_inventory_snapshots]] | Amazon SP-API `fetchFbaInventoryByAsin` |
 | `syncTplInventoryForClose` | [[../tables/qb_tpl_inventory_snapshots]] | Amplifier `fetchAmplifierInventory` |
 | `syncInboundShipmentsForClose` | [[../tables/qb_inbound_shipment_snapshots]] | Amazon SP-API `fetchOpenInboundShipments` |
+| `assertSameDayCoverage(admin, workspaceId, snapshotDate, coverage?)` | [[../tables/dashboard_notifications]] (on a gap) | the three unreconstructible snapshot tables |
+| `UNRECONSTRUCTIBLE_COVERAGE` | — | `{ table, sync }` list — the three point-in-time tables + the sync that recollects each |
 | `storeLocalDate(utcIso, tz)` | — | UTC → store-local calendar date |
 
 All idempotent (upsert on the natural key), safe to re-run for a range, read-only upstream.
+
+## ⭐ Same-day coverage guard — `assertSameDayCoverage`
+
+A missing point-in-time snapshot is **only recoverable on the day it is missing**: Amplifier and Amazon both report NOW, so by the next morning the position is gone forever. `assertSameDayCoverage` runs at the END of the daily [[../inngest/sync-qb-close-sources]] run (after the sync loop, before the heartbeat) while the data is still collectable. For each of `qb_tpl_inventory_snapshots`, `qb_amazon_inventory_snapshots`, `qb_inbound_shipment_snapshots`:
+
+1. Count today's rows for `(workspace_id, snapshot_date)`.
+2. If zero, re-run that table's specific sync (`syncTplInventoryForClose` / `syncFbaInventoryForClose` / `syncInboundShipmentsForClose`) **once inline**, then re-count. A thrown retry is handled the same as one that collected nothing — the recount is the source of truth.
+3. If STILL zero, insert a `dashboard_notifications` card: `type:'system'`, `link:'/dashboard/agents/cfo'`, `metadata.type:'close_snapshot_gap'` plus `metadata.table` / `metadata.date` / `metadata.month_end`, body stating plainly the day cannot be recovered later. **At most one card per (workspace, table, date)** — the same read-then-insert existence check as [[../inngest/daily-order-snapshot]]'s `order_sync_mismatch`, so re-running the cron never spams.
+4. When `snapshotDate` is the **last day of its month**, the card shouts MONTH-END in the title and names the block — that is the case [[qb-close-guard]] blocks the close on via `no_physical_snapshot` / `stale_physical_snapshot`.
+
+Returns a `SameDayCoverageResult[]` (`{ table, present, retried, cardRaised, isMonthEnd }`). The `coverage` arg is injectable for tests; production callers pass only the three args and get `UNRECONSTRUCTIBLE_COVERAGE`. Regression test: `test:close-snapshot-coverage` (`sync-sources.coverage.test.ts`).
 
 ## ⭐ Reads the RAW integrations, not `public.inventory_snapshots`
 
