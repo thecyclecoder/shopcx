@@ -38,6 +38,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
@@ -321,6 +322,17 @@ const LOG_QUERIES: LogQuery[] = [
       // `created_at`-missing on another table, a `worker_heartbeats` column rename, a
       // non-SELECT write, or a FATAL/PANIC/constraint violation still surfaces / pages.
       if (isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.spec_test_runs` expecting a `verdict` column that the table never carried —
+      // the real column is `agent_verdict` (the spec-test agent's stamp). The resulting
+      // undefined_column ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-spec-test-runs-verdict-column-adhoc-noise]], Control Tower
+      // signature `supabase-logs:fe080e317b09c9b6`). Narrowly gated to require BOTH the exact
+      // `column spec_test_runs.verdict does not exist` message AND the SELECT-lookup shape on
+      // `spec_test_runs` (bare or PostgREST CTE wrapper) — a different missing column (e.g. a
+      // real `agent_verdict` regression), a non-SELECT write, or a FATAL/PANIC/constraint
+      // violation still surfaces / pages.
+      if (isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
       // `public.fraud_cases` expecting an `updated_at` column that lives only on the sibling
       // `fraud_rules` table. The resulting undefined_column ERROR is repair work for a query
