@@ -46,6 +46,17 @@ Per `exec_kind` the runner delegates to one method of the injected `CheckExecuto
 | `unit_test` | reads `package.json.scripts`, spawns `npm run <script>` (emits a harness-classifier-matching signature when `script` is absent — the same rail the app-layer validator uses at authoring) |
 | `build` | `npx next build` in `repoRoot` — with a **Turbopack node_modules preflight** (see below) |
 
+## Failure evidence for `unit_test` and `build`: `summarizeCommandFailure`
+
+A failed `unit_test` or `build` check uses `summarizeCommandFailure(stdout + stderr)` as its evidence, capped at `COMMAND_EVIDENCE_MAX` (4000) characters:
+
+- Output that fits within the cap is returned whole. This keeps the [[spec-test-harness-classifier]] signatures, such as `Missing script` and ENOENT, intact.
+- Longer output becomes every failing-test block (each `not ok` or `✖` line plus the 13 lines after it), followed by the summary tail.
+
+The old evidence was the first 4000 characters of stderr, or of stdout when stderr was empty. For a whole-suite check like `test:all`, that is always a run of passing `✔` lines. Neither the pre-commit repair session nor Mario could see which test failed. close-snapshot-coverage-guard burned three builds this way between 2026-10-14 and 2026-10-15. Pinned by `test:spec-check-command-evidence`.
+
+Because this evidence now includes real failing-test text, `isHarnessCommandFailure` returns false whenever it sees a TAP `not ok` line or a non-zero `# fail` / `ℹ fail` count. Without that guard, a real assertion failure whose message mentions ENOENT or "Cannot find module" would be reclassified as a harness wart and waved through.
+
 ## Turbopack node_modules preflight — `ensureRealTopLevelNodeModulesForBuild`
 
 **Why:** The spec-test worktree is created via `git worktree add --detach` with a symlinked `node_modules` pointing to a shared cache outside `repoRoot`. Turbopack's resolver panics when a top-level `node_modules` symlink points OUTSIDE the project root (`"Symlink [project]/node_modules is invalid, it points out of the filesystem root"`). This was blocking deterministic `next build` checks on any pre-merge branch worktree.
