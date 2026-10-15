@@ -231,3 +231,12 @@ test("reclassifying twice is idempotent (the note is not double-prefixed)", () =
   assert.equal(twice.reclassified, 0, "already-needs_human check is not re-touched");
   assert.equal(twice.checks[0].evidence, once.checks[0].evidence);
 });
+
+// 2026-10-15: unit_test evidence now carries the failing-test blocks. A real assertion failure whose
+// message mentions ENOENT must stay a real fail, never be waved through as a harness wart.
+test("isHarnessCommandFailure: a TAP failing-test block is a real failure even if it mentions ENOENT", () => {
+  assert.equal(isHarnessCommandFailure("not ok 3 - reads the fixture\n  error: ENOENT: no such file or directory\n# fail 1"), false);
+  assert.equal(isHarnessCommandFailure("ℹ fail 2\nCannot find module './x'"), false);
+  assert.equal(isHarnessCommandFailure(`npm error Missing script: "test"`), true);
+  assert.equal(isHarnessCommandFailure("Could not find 'src/lib/x.test.ts'\nError: ENOENT\n# fail 0"), true);
+});

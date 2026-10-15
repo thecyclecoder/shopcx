@@ -47,6 +47,11 @@ const HARNESS_SIGNATURES: readonly RegExp[] = [
 // exercising code — so a `fail` verdict is a MISCLASSIFICATION.
 export function isHarnessCommandFailure(evidence: string | null | undefined): boolean {
   if (!evidence) return false;
+  // A test reporter's failing-test line means assertions RAN, so this is a real failure even when a
+  // failing test's own error text says ENOENT / "Cannot find module". The unit_test evidence now
+  // carries those blocks ([[spec-check-runner]] `summarizeCommandFailure`), so this guard keeps a red
+  // test from being waved through as a harness wart.
+  if (/^\s*not ok\b|^(?:#|ℹ) fail [1-9]/m.test(evidence)) return false;
   return HARNESS_SIGNATURES.some((rx) => rx.test(evidence));
 }
 
