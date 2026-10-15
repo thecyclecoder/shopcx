@@ -54,7 +54,10 @@ dek ← `meta_primary_text`; chapterHeading ← `hook_one_liner`). Stamps ONE
 [[../tables/director_activity]] row of `action_kind='paired_winner_lander'` carrying
 `{ direction:'ad_to_lander', source_meta_ad_id, lander_type, experiment_id, patch, ... }`.
 Skips with `{ok:false, reason}` for non-advertorial-family variants (PDP / unknown), a missing
-source product, or an optimizer surface that already has an active campaign.
+source product, a non-UUID product/workspace id (refused by the materializer's UUID guard), or an
+optimizer surface that already has an active campaign. The caller's `admin` is passed through to
+the materializer. Tests MUST inject `deps.materializeOptimizerCampaign` — the default is the real
+optimizer write (an un-stubbed amplify test sent its `"P-1"` fixture to production 252 times).
 
 The REVERSE direction (a promoted lander variant → fresh static via
 [[optimizer-agent#pairPromotedLanderWithAd|pairPromotedLanderWithAd]]) lives in

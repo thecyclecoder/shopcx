@@ -834,6 +834,7 @@ export async function pairAmplifiedWinnerWithLander(
       `LF8 slot ${opts.winner.angle?.lf8_slot ?? "?"}).`;
 
     const materialize = await deps.materializeOptimizerCampaign({
+      admin,
       workspaceId: opts.workspaceId,
       productId: campaign.product_id,
       proposal: {

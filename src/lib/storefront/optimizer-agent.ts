@@ -172,6 +172,27 @@ export function surfaceKey(s: { product_id: string; lander_type: string; audienc
   return `${s.product_id}:${s.lander_type}:${s.audience}`;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Pre-insert id guard for a `storefront_experiments` write. `workspace_id`, `product_id` and
+ * `created_by` are uuid columns — a non-UUID (a test fixture like "P-1", a Shopify id, a
+ * list label) fails in Postgres with `invalid input syntax for type uuid` on every attempt.
+ * Returns null when every id is a UUID (`createdBy` may be null/undefined), else a skip
+ * reason. Callers return `{ ok:false, detail }` BEFORE touching the DB.
+ */
+export function invalidExperimentIdsReason(ids: {
+  workspaceId: string;
+  productId: string;
+  createdBy?: string | null;
+}): string | null {
+  const bad: string[] = [];
+  if (!UUID_RE.test(String(ids.workspaceId ?? ""))) bad.push(`workspace_id=${JSON.stringify(ids.workspaceId)}`);
+  if (!UUID_RE.test(String(ids.productId ?? ""))) bad.push(`product_id=${JSON.stringify(ids.productId)}`);
+  if (ids.createdBy != null && !UUID_RE.test(String(ids.createdBy))) bad.push(`created_by=${JSON.stringify(ids.createdBy)}`);
+  return bad.length ? `non-UUID id(s) for storefront_experiments: ${bad.join(", ")} — skipped, not sent to Postgres` : null;
+}
+
 /** The variant the box session proposes — a reversible content patch, a hero the
  *  worker generates from a prompt (the box never calls the image API itself), or a
  *  persist-to-renewal pricing OFFER (storefront-renewal-offer-lever). The offer kind
@@ -673,6 +694,11 @@ export async function materializeCampaign(opts: {
    *  matched-lander experiment from an amplified winner is owner-approved before serving. */
   initialStatus?: "draft" | "running";
 }): Promise<MaterializeResult> {
+  const badIds = invalidExperimentIdsReason(opts);
+  if (badIds) {
+    console.warn(`[storefront-optimizer] materializeCampaign ${badIds}`);
+    return { ok: false, detail: badIds };
+  }
   const admin = opts.admin ?? createAdminClient();
   const now = opts.now ?? new Date();
   const p = opts.proposal;
@@ -1082,6 +1108,11 @@ export async function proposeRenewalOfferCampaign(opts: {
   now?: Date;
   admin?: Admin;
 }): Promise<RenewalOfferProposalResult> {
+  const badIds = invalidExperimentIdsReason(opts);
+  if (badIds) {
+    console.warn(`[storefront-optimizer] proposeRenewalOfferCampaign ${badIds}`);
+    return { ok: false, margin: null, detail: badIds };
+  }
   const admin = opts.admin ?? createAdminClient();
   const now = opts.now ?? new Date();
   const p = opts.proposal;

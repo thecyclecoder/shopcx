@@ -29,6 +29,7 @@ One row per hypothesis under test on the storefront: a `(product × lander_type 
 - Only `running` + `promoted` experiments are served at render; every other status renders the unpatched (control) lander — so promote/kill/rollback is a pure status flip, never a content deploy.
 
 ## Gotchas
+- **`workspace_id` / `product_id` / `created_by` are uuid — validated before insert.** The optimizer writers refuse a non-UUID id up front via `invalidExperimentIdsReason` ([[../libraries/storefront-optimizer-agent]] § Gotchas) instead of letting Postgres reject it. The 2026-09/10 `invalid input syntax for type uuid: "P-1"` stream was a unit-test fixture leaking into prod through an un-stubbed materializer.
 - **Holdout is sacred.** Every experiment carries exactly one `is_control` arm ([[storefront_experiment_variants]] partial unique index); the bandit may starve a losing arm but never the control.
 - **Reversible levers only.** A variant payload is a content/config patch (copy/hero/chapter) — never a code deploy, never an offer/pricing change.
 - **`pdp` lander_type is data-model only in M1.** The bare PDP is statically generated (ISR, reads no cookies) for sub-100ms edge TTFB; applying a per-visitor patch there would force it dynamic. Render-time patching is wired for the advertorial-family landers (advertorial/beforeafter/listicle) — the route that already runs dynamically via `?variant=&angle=`. A `pdp` experiment can still hold variants + accrue attribution; serving its patch needs a dynamic PDP (out of scope).
