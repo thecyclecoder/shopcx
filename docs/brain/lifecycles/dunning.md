@@ -52,6 +52,7 @@ If cards are exhausted, the payday-retry path takes over (only if `dunning_payda
 3. **Schedule via `step.sleepUntil`** until that date.
 4. **At wake-up**: call `appstleAttemptBilling`. Log to [[../tables/payment_failures]] with `attempt_type='payday_retry'`.
 5. **On success** → `dunning/billing-success` fires (see Phase 5).
+   **ShopCX contracts settle inline and get no such webhook**, so the payday cron closes the cycle itself on a settled success (`status='recovered'`, `next_retry_at=null`, a `succeeded: true` payment_failures row) and stops trying cards; an unresolved 3DS attempt also stops the loop. Before 2026-10-15 it ignored the result and left the cycle `retrying`, so a recovered ShopCX customer was charged again on every later payday (36063707309: paid 10-09, charged again 10-15). Card rotation already did this. Test: `dunning.payday-settled-success.test.ts`.
 6. **On failure** → loop back to step 2 with the next payday date.
 
 Up to `MAX_PAYDAY_RETRIES = 4` per cycle, counted on [[../tables/dunning_cycles]] `payday_retry_count`. After exhaustion, fall through to cycle action.
