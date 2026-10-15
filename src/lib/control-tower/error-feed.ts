@@ -1320,6 +1320,66 @@ export function isForeignSupabasePostgresMissingDashboardNotificationsDismissedA
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `agent_jobs.finished_at` column for an
+ * ad hoc direct-REST lookup on a table ShopCX does not read that way. A stale external/REST
+ * client SELECTs `finished_at` from `public.agent_jobs`, Supabase's `postgres_logs` feed
+ * captures the resulting undefined_column ERROR, and log-poll mints a Control Tower incident
+ * for a query we don't own ([[../specs/error-feed-drop-agent-jobs-finished-at-column-adhoc-noise]],
+ * Control Tower signature `supabase-logs:54a5614ee9dc1e20`). The `agent_jobs` lifecycle has
+ * never owned a `finished_at` column (grep confirms no ShopCX code reads it), so there is no
+ * lever from ShopCX to make that query resolve — paging Platform on it is repair work for a
+ * query no code owns. The direct twin of
+ * `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise` /
+ * `isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise` above.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column agent_jobs.finished_at does not exist` (with or without the
+ *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.agent_jobs` — either (a)
+ *      the bare `select ... from public.agent_jobs` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."agent_jobs" ... )` CTE wrapper form
+ *      with double-quoted identifiers.
+ *
+ * Intentionally narrow — any genuine schema regression still pages:
+ *   - a DIFFERENT missing column on `agent_jobs` (e.g. `slug`, `completed_at`,
+ *     `workspace_id`) still pages — the pin covers `finished_at` only,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL, a JOIN, a non-SELECT wrapped op inside the CTE) still pages,
+ *   - a FATAL / PANIC / constraint violation / relation-missing on the table is untouched
+ *     (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — returning null fully suppresses the row (no error_event, no
+ * loop_alert, no signature). A capture-time drop, not a `transient` flag.
+ */
+export function isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column agent_jobs.finished_at does not exist" ||
+    stripped === "column public.agent_jobs.finished_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `agent_jobs` — any trailing WHERE/LIMIT/ORDER BY is fine; the pin
+  // is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real code-bug
+  // shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?agent_jobs\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."agent_jobs" ... )` with double-quoted identifiers. Guarded so the CTE branch
+  // requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper
+  // is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."agent_jobs"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing `created_at` COLUMN on
  * `public.worker_heartbeats` for an ad hoc / stale direct-REST SELECT. The
  * `worker_heartbeats` singleton liveness table (`supabase/migrations/20260619140001_worker_heartbeats.sql`)
@@ -1455,6 +1515,71 @@ export function isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNo
   // "public"."fraud_cases" ... )` with double-quoted identifiers. Same foreign-owned read,
   // different rendering. Guarded so the CTE branch requires the wrapped op to be a SELECT.
   return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."fraud_cases"/.test(q);
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing `customer_id` column for an ad hoc
+ * direct-REST read of `public.loyalty_redemptions`. A foreign/stale PostgREST client read
+ * `loyalty_redemptions` expecting a `customer_id` column that lives only on the sibling
+ * `loyalty_members` table; `loyalty_redemptions` never carried it and no in-tree code path
+ * reads `loyalty_redemptions` by `customer_id`. The resulting undefined_column ERROR is
+ * repair work for a query no ShopCX code owns (Control Tower signature
+ * `supabase-logs:1eb5b8663e370ab7`).
+ *
+ * Sibling of `isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise` — same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` message + SELECT-lookup
+ * shape that covers BOTH the bare SELECT and the PostgREST CTE wrapper), scoped to the
+ * `loyalty_redemptions.customer_id` direct-REST shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for `customer_id` on
+ *      `loyalty_redemptions` — trimmed equal to `column loyalty_redemptions.customer_id does
+ *      not exist` (or the `public.`-qualified variant, with any leading `ERROR: ` prefix
+ *      Postgres includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.loyalty_redemptions` —
+ *      either (a) the bare `select ... from (public.)?loyalty_redemptions` shape, OR (b) the
+ *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."loyalty_redemptions" ... )` CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error on ANY OTHER table (a real schema regression) still pages,
+ *   - a column-missing error on `loyalty_redemptions` for a DIFFERENT column (a real column
+ *     rename that broke a live query) still pages — the pin names
+ *     `loyalty_redemptions.customer_id` only,
+ *   - a `customer_id` error on the sibling `loyalty_members` table (where the column legitimately
+ *     lives) still pages — the pin names `loyalty_redemptions` only,
+ *   - a `loyalty_redemptions.customer_id` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is
+ *     the SELECT-lookup shape; the CTE branch likewise requires the wrapped op to be a SELECT,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column loyalty_redemptions.customer_id does not exist" ||
+    stripped === "column public.loyalty_redemptions.customer_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `loyalty_redemptions` — any trailing WHERE/LIMIT/ORDER BY is fine;
+  // the pin is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real
+  // code-bug shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?loyalty_redemptions\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."loyalty_redemptions" ... )` with double-quoted identifiers. Same foreign-owned
+  // read, different rendering. Guarded so the CTE branch requires the wrapped op to be a SELECT.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."loyalty_redemptions"/.test(q);
 }
 
 /**
@@ -6422,7 +6547,9 @@ export function isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise(
  * `?select=id,status,created_at,kind,payload` with a `WHERE "kind" = $1` branch, so
  * `kind` is the stable fingerprint of the confused foreign read.
  *
- * `true` ONLY when ALL THREE markers are present:
+ * TWO fingerprints drop this error (after the message pin, below):
+ *
+ * Fingerprint A (the original confused-column pairing) — `true` when ALL THREE markers:
  *   1. the message is Postgres's canonical column-missing shape for THIS column —
  *      trimmed equal to `column agent_jobs.payload does not exist` (or the `public.`
  *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
@@ -6435,6 +6562,19 @@ export function isForeignSupabasePostgresMissingAgentJobsTitleLookupNoise(
  *      alongside the bogus `payload` in the same select list / where branch. A bare
  *      `select payload from agent_jobs` without `kind` (hypothetical real code after a
  *      schema regression) stays paged.
+ *
+ * Fingerprint B (the real production shape — Control Tower signature
+ * `supabase-logs:d9d2cd616c5d93b4`,
+ * [[../specs/error-feed-drop-agent-jobs-payload-json-path-filter-noise]]) — the foreign
+ * read that reached production carries NO `kind` token, so Fingerprint A missed it and it
+ * re-paged Platform. Its shape is a PostgREST JSON-path filter: a
+ * `to_jsonb(payload) ->> $1 ilike $2` predicate inside the
+ * `WITH pgrst_source AS ( SELECT * FROM "public"."agent_jobs" ... )` wrapper (SELECT *,
+ * ORDER BY created_at DESC, LIMIT/OFFSET). `true` (drop) — even with `kind` absent — when
+ * the message pin (1) holds AND the query is the PostgREST CTE-wrapped SELECT on
+ * `agent_jobs` AND it contains a `to_jsonb( ... payload ... ) ->>` JSON-path expression
+ * AND an `ilike` operator (the `hasPayloadJsonPathFilter` boolean). A bare
+ * `select payload from agent_jobs` with no `kind` AND no JSON-path filter stays paged.
  *
  * Narrowly gated so:
  *   - a column-missing error for ANY OTHER table (a real product-schema regression on
@@ -6476,6 +6616,24 @@ export function isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookup
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
+  // Second fingerprint (Control Tower signature `supabase-logs:d9d2cd616c5d93b4`,
+  // [[../specs/error-feed-drop-agent-jobs-payload-json-path-filter-noise]]) — the real
+  // production foreign read does NOT carry the `kind` token the branch below keys on, so
+  // it evaded this drop and re-paged Platform. Its shape is a PostgREST JSON-path filter
+  // on `payload`: a `to_jsonb(payload) ->> $1 ilike $2` predicate inside the
+  // `WITH pgrst_source AS ( SELECT * FROM "public"."agent_jobs" ... )` wrapper (SELECT *,
+  // ORDER BY created_at DESC, LIMIT/OFFSET, no `kind`). `payload` is not a real column, so
+  // `to_jsonb(payload)` itself is what Postgres rejects with the column-missing error —
+  // there is no ShopCX lever to make it resolve. Detect it explicitly and drop even when
+  // `kind` is absent: require the PostgREST CTE-wrapped SELECT on agent_jobs AND a
+  // `to_jsonb( ... payload ... ) ->>` JSON-path expression AND an `ilike` operator.
+  const inPgrstAgentJobsSelectWrapper =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?agent_jobs\b/.test(q);
+  const hasPayloadJsonPathFilter =
+    inPgrstAgentJobsSelectWrapper &&
+    /to_jsonb\(\s*[^)]*\bpayload\b[^)]*\)\s*->>/.test(q) &&
+    /\bilike\b/.test(q);
+  if (hasPayloadJsonPathFilter) return true;
   // Fingerprint of the confused foreign read: the query MUST also mention `kind`, the
   // real column the caller included alongside the bogus `payload` (the sample query's
   // `WHERE "kind" = $1` branch). A bare `select payload from agent_jobs` without `kind`
@@ -8436,6 +8594,93 @@ export function isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdho
   // `WITH pgrst_source AS (INSERT INTO "public"."loyalty_members"("lifetime_points") ...)`
   // — is a real code-write and stays captured/paged).
   return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?loyalty_members\b/.test(q);
+}
+
+/**
+ * Foreign-app noise — Postgres reporting `column loyalty_redemptions.coupon_code does not
+ * exist` for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.loyalty_redemptions.coupon_code`. The `loyalty_redemptions` table exists but by
+ * design carries NO `coupon_code` column — the real column is `discount_code` (the Shopify
+ * discount code minted for a redeemed reward), and every ShopCX caller reads / filters on
+ * that. The column-missing ERROR only reaches this feed when a foreign app / stale SQL
+ * Editor session / deprecated integration queries
+ * `/rest/v1/loyalty_redemptions?select=coupon_code&...` (or the equivalent SELECT-lookup
+ * shape) — a natural mistake because many loyalty schemas call the minted code
+ * `coupon_code` but ours uses `discount_code`. There is no lever from ShopCX to make that
+ * query resolve — paging Platform on it is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise` — the
+ * same narrow-gating shape (exact `column <table>.<name> does not exist` + SELECT-lookup
+ * shape covering BOTH bare and PostgREST CTE wrapper forms), aimed at a different foreign
+ * caller on a different table+column.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column loyalty_redemptions.coupon_code does not exist` (or the
+ *      `public.` qualified variant, with any leading `ERROR: ` prefix Postgres includes on
+ *      the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.loyalty_redemptions` —
+ *      either (a) the bare `select ... from public.loyalty_redemptions` shape (with no
+ *      JOIN — a JOIN across other tables is a real code path we own), OR (b) the
+ *      PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."loyalty_redemptions" ... )`
+ *      CTE wrapper form with double-quoted identifiers. Both forms are the same
+ *      foreign-owned read.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table still pages — the pin is
+ *     `loyalty_redemptions.` only,
+ *   - a column-missing error on `loyalty_redemptions` for a DIFFERENT column (e.g. the real
+ *     `discount_code`, `customer_id`, `workspace_id`) still pages — the pin covers
+ *     `coupon_code` only,
+ *   - a `loyalty_redemptions.coupon_code` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, JOIN across other tables) still pages — the pin is
+ *     the SELECT-lookup shape; the CTE branch likewise requires the wrapped op to be a
+ *     SELECT (a PostgREST INSERT/UPDATE inside the same wrapper stays paged),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to
+  // `loyalty_redemptions.coupon_code` (with or without the `public.` qualifier).
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column loyalty_redemptions.coupon_code does not exist" ||
+    stripped === "column public.loyalty_redemptions.coupon_code does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select`, its FROM clause MUST name `loyalty_redemptions`
+  // (with or without the `public.` schema qualifier), AND the statement MUST NOT carry a
+  // `join` clause. A JOIN across other tables is a real code path we own (not the ad hoc
+  // direct-REST read this drop targets); a caller that actually writes to
+  // loyalty_redemptions with a bogus `coupon_code` column is a code bug we DO want to page
+  // on.
+  if (
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?loyalty_redemptions\b/.test(q) &&
+    !/\bjoin\b/.test(q)
+  ) {
+    return true;
+  }
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."loyalty_redemptions" ... )` with double-quoted identifiers. Same foreign-owned
+  // read, different rendering — the plain SELECT regex above misses it because the
+  // statement starts with `with`. Guarded so the CTE branch requires the wrapped op to be
+  // a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper is a real code-write and
+  // stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?loyalty_redemptions\b/.test(q);
 }
 
 /**

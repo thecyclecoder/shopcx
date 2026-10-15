@@ -93,6 +93,7 @@ import {
   isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise,
   isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
+  isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
@@ -102,7 +103,9 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
+  isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -1767,6 +1770,125 @@ test("isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise KEEPS 
   assert.equal(isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise("", "select * from fraud_cases"), false);
   assert.equal(
     isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise("column fraud_cases.updated_at does not exist", ""),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise ──
+// A foreign / stale direct-REST client read `public.loyalty_redemptions` expecting a
+// `customer_id` column that lives only on the sibling `loyalty_members` table; Control Tower
+// signature `supabase-logs:1eb5b8663e370ab7`. Drop AT CAPTURE only when BOTH the exact `column
+// loyalty_redemptions.customer_id does not exist` message AND the SELECT-lookup shape on
+// `loyalty_redemptions` (bare or PostgREST CTE wrapper) are present. A real customer_id-missing
+// on another table, a `loyalty_redemptions` column rename, customer_id on loyalty_members, a
+// non-SELECT write, or a FATAL still pages.
+
+test("isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise drops the PostgREST CTE wrapper + bare SELECT listing the non-existent customer_id column", () => {
+  // The captured incident shape: a stale direct-REST client lists loyalty_redemptions filtered
+  // by customer_id, PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."loyalty_redemptions" ... )` CTE, and Postgres rejects with the column-missing.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.customer_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loyalty_redemptions"."id", "public"."loyalty_redemptions"."customer_id" FROM "public"."loyalty_redemptions" WHERE "public"."loyalty_redemptions"."customer_id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column public.loyalty_redemptions.customer_id does not exist",
+      'with pgrst_source as ( select "public"."loyalty_redemptions"."customer_id" from "public"."loyalty_redemptions" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "ERROR: column loyalty_redemptions.customer_id does not exist",
+      'WITH pgrst_source AS ( SELECT "customer_id" FROM "public"."loyalty_redemptions" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper), qualified and unqualified FROM, drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.customer_id does not exist",
+      "select id, customer_id from public.loyalty_redemptions where customer_id = $1 limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.customer_id does not exist",
+      "select * from loyalty_redemptions where customer_id is not null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise KEEPS real errors (other table, other column, customer_id on loyalty_members, non-SELECT, FATAL)", () => {
+  // Same customer_id-missing message on a DIFFERENT relation is a real product-schema
+  // regression and still pages — the pin names loyalty_redemptions only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column tickets.customer_id does not exist",
+      "select id, customer_id from public.tickets",
+    ),
+    false,
+  );
+  // A DIFFERENT column on loyalty_redemptions (a real column rename / schema regression) still
+  // pages — the pin is customer_id only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.member_id does not exist",
+      "select id, member_id from public.loyalty_redemptions",
+    ),
+    false,
+  );
+  // customer_id on the sibling loyalty_members table (where the column legitimately lives) is a
+  // real regression and still pages — the pin names loyalty_redemptions only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_members.customer_id does not exist",
+      "select id, customer_id from public.loyalty_members",
+    ),
+    false,
+  );
+  // A non-SELECT shape (PostgREST CTE write / bare write) is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.customer_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."loyalty_redemptions"("id","customer_id") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.customer_id does not exist",
+      "update public.loyalty_redemptions set customer_id = $1 where id = $2",
+    ),
+    false,
+  );
+  // A FATAL / constraint-class error on the same shape is untouched (different message).
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select id, customer_id from public.loyalty_redemptions",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise("", "select * from loyalty_redemptions"),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
+      "column loyalty_redemptions.customer_id does not exist",
+      "",
+    ),
     false,
   );
 });
@@ -10478,6 +10600,49 @@ test("isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise ALSO
   );
 });
 
+test("isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise drops the production JSON-path payload-filter shape (to_jsonb(payload)->> ilike, no kind) — signature supabase-logs:d9d2cd616c5d93b4", () => {
+  // The real foreign read reaching production: a PostgREST `?payload->>field=ilike.*`
+  // filter rendered as `to_jsonb("public"."agent_jobs"."payload") ->> $1 ilike $2` inside
+  // the pgrst_source CTE, SELECT *, ORDER BY created_at DESC, LIMIT/OFFSET — and NO `kind`
+  // token, so Fingerprint A (the kind co-mention branch) misses it. Fingerprint B drops it.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise(
+      "column agent_jobs.payload does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs".* FROM "public"."agent_jobs" WHERE to_jsonb("public"."agent_jobs"."payload") ->> $1 ILIKE $2 ORDER BY "public"."agent_jobs"."created_at" DESC LIMIT $3 OFFSET $4 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified column-missing message variant drops too.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise(
+      "column public.agent_jobs.payload does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs".* FROM "public"."agent_jobs" WHERE to_jsonb(payload) ->> $1 ilike $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4 )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise KEEPS a bare SELECT payload with no kind AND no JSON-path filter (the safety case)", () => {
+  // The spec's negative case: a bare `select payload from agent_jobs` with neither the
+  // `kind` co-mention (Fingerprint A) nor a `to_jsonb(payload)->> ilike` JSON-path filter
+  // (Fingerprint B) is NOT recognized noise and stays paged.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise(
+      "column agent_jobs.payload does not exist",
+      "select payload from agent_jobs",
+    ),
+    false,
+  );
+  // A JSON-path-looking expression WITHOUT ilike also stays paged — Fingerprint B needs both.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise(
+      "column agent_jobs.payload does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs".* FROM "public"."agent_jobs" WHERE to_jsonb("public"."agent_jobs"."payload") ->> $1 = $2 )',
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise KEEPS a non-SELECT statement shape (a real code-bug writing agent_jobs.payload still pages)", () => {
   // INSERT / UPDATE / DELETE against agent_jobs referencing a bogus column is real code
   // trying to write the table — a bug we WANT to see, not the ad hoc read.
@@ -17014,6 +17179,173 @@ test("isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise ret
   );
 });
 
+// ── isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/loyalty_redemptions?select=coupon_code&...` against our
+// `public.loyalty_redemptions` table. The table exists but by design carries NO
+// `coupon_code` column — the real column is `discount_code` (the Shopify discount code
+// minted for a redeemed reward), and every ShopCX caller reads that. Foreign-owned
+// surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `loyalty_redemptions.coupon_code` AND a SELECT-lookup shape on
+// `loyalty_redemptions` (bare OR PostgREST CTE wrapper) are present. A column-missing on
+// any other table, a different column on `loyalty_redemptions` (including the real
+// `discount_code`), or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise drops the captured message+query pair (positive drop — bare SELECT shape with the exact message)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "column loyalty_redemptions.coupon_code does not exist",
+      "select coupon_code from public.loyalty_redemptions where workspace_id = $1 and customer_id = $2",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "column public.loyalty_redemptions.coupon_code does not exist",
+      "select coupon_code from public.loyalty_redemptions",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "column loyalty_redemptions.coupon_code does not exist",
+      "select coupon_code from loyalty_redemptions limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "ERROR: column loyalty_redemptions.coupon_code does not exist",
+      "select coupon_code from public.loyalty_redemptions",
+    ),
+    true,
+  );
+  // Case-insensitive on the query; trailing WHERE / ORDER BY / LIMIT stays the ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "column loyalty_redemptions.coupon_code does not exist",
+      "SELECT COUPON_CODE FROM PUBLIC.LOYALTY_REDEMPTIONS ORDER BY CREATED_AT DESC LIMIT 50",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on the message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "  column loyalty_redemptions.coupon_code does not exist  ",
+      "   select coupon_code from public.loyalty_redemptions   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"loyalty_redemptions\" ...)` CTE wrapper form (positive drop — CTE wrapper shape)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "column loyalty_redemptions.coupon_code does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loyalty_redemptions"."coupon_code", "public"."loyalty_redemptions"."customer_id" FROM "public"."loyalty_redemptions" ORDER BY "public"."loyalty_redemptions"."created_at" DESC )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "column public.loyalty_redemptions.coupon_code does not exist",
+      'WITH pgrst_source AS (SELECT "public"."loyalty_redemptions"."coupon_code" FROM "public"."loyalty_redemptions")',
+    ),
+    true,
+  );
+  // The ERROR: prefix on the message is stripped as usual before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "ERROR: column loyalty_redemptions.coupon_code does not exist",
+      'WITH pgrst_source AS (SELECT "public"."loyalty_redemptions"."coupon_code" FROM "public"."loyalty_redemptions")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise KEEPS a column-missing on `loyalty_redemptions.discount_code` (the REAL column — a rename regression still pages)", () => {
+  // `discount_code` IS the real minted-code column on `loyalty_redemptions`. If it
+  // regressed we absolutely want the page. The pin is `coupon_code` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "column loyalty_redemptions.discount_code does not exist",
+      "select discount_code from public.loyalty_redemptions",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise KEEPS a column-missing on a DIFFERENT table (`coupons.coupon_code` — pin is loyalty_redemptions only)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "column coupons.coupon_code does not exist",
+      "select coupon_code from public.coupons",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise KEEPS a non-SELECT statement shape on loyalty_redemptions (an INSERT / UPDATE / DELETE with the same message is a real code-bug and still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "column loyalty_redemptions.coupon_code does not exist",
+      "insert into public.loyalty_redemptions (workspace_id, customer_id, coupon_code) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "column loyalty_redemptions.coupon_code does not exist",
+      "update public.loyalty_redemptions set coupon_code = $1 where customer_id = $2",
+    ),
+    false,
+  );
+  // The PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "column loyalty_redemptions.coupon_code does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."loyalty_redemptions"("workspace_id", "customer_id", "coupon_code") VALUES ($1, $2, $3) RETURNING "public"."loyalty_redemptions"."id" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise KEEPS the same message on a JOIN with another table (a real code path joining loyalty_redemptions still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "column loyalty_redemptions.coupon_code does not exist",
+      "select r.coupon_code, c.email from public.loyalty_redemptions r join public.customers c on c.id = r.customer_id where c.workspace_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(
+      "column loyalty_redemptions.coupon_code does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
 // ── isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise ──
 // A foreign / stale PostgREST direct-REST client reads
 // `/rest/v1/tickets?select=...&assigned_agent=eq.<name>` against our `public.tickets`
@@ -22432,6 +22764,99 @@ test("isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise KEEPS a PostgR
     isForeignSupabasePostgresMissingErrorEventsColumnAdhocNoise(
       "column error_events.first_seen does not exist",
       'with pgrst_source as (update "public"."error_events" set "first_seen" = $1 from "public"."error_events" e2 returning *) select * from "pgrst_source"',
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise ──
+test("isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise drops the PostgREST CTE wrapper lookup projecting the non-existent finished_at column", () => {
+  // The captured incident shape (Control Tower `supabase-logs:54a5614ee9dc1e20`): a stale
+  // direct-REST client reads `agent_jobs?select=...finished_at...`, PostgREST wraps it as a
+  // `WITH pgrst_source AS ( SELECT ... FROM "public"."agent_jobs" ... )` CTE, and Postgres
+  // rejects with `column agent_jobs.finished_at does not exist`.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
+      "column agent_jobs.finished_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs"."id", "public"."agent_jobs"."finished_at" FROM "public"."agent_jobs" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
+      "column public.agent_jobs.finished_at does not exist",
+      'with pgrst_source as ( select "public"."agent_jobs"."finished_at" from "public"."agent_jobs" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
+      "ERROR: column agent_jobs.finished_at does not exist",
+      'WITH pgrst_source AS ( SELECT "finished_at" FROM "public"."agent_jobs" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
+      "column agent_jobs.finished_at does not exist",
+      "select id, finished_at from public.agent_jobs order by finished_at desc limit 10",
+    ),
+    true,
+  );
+  // The unqualified-FROM (no `public.`) variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
+      "column agent_jobs.finished_at does not exist",
+      "select * from agent_jobs where finished_at is null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise KEEPS a different agent_jobs column error and a non-SELECT statement (real regressions still page)", () => {
+  // A DIFFERENT missing column on `agent_jobs` (e.g. `slug`) is a real column rename /
+  // regression and must still page — the pin covers `finished_at` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
+      "column agent_jobs.slug does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs"."slug" FROM "public"."agent_jobs" LIMIT 1 )',
+    ),
+    false,
+  );
+  // The same `finished_at` message attached to a non-SELECT statement shape is a real
+  // code-write trying to persist a bogus column — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
+      "column agent_jobs.finished_at does not exist",
+      "update public.agent_jobs set finished_at = now() where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
+      "column agent_jobs.finished_at does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."agent_jobs"("id","finished_at") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  // The `finished_at` message on a DIFFERENT relation (a real product-schema regression)
+  // still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
+      "column jobs.finished_at does not exist",
+      "select finished_at from public.jobs limit 1",
+    ),
+    false,
+  );
+  // Empty / nullish input returns false — both markers required.
+  assert.equal(isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(null, null), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
+      "column agent_jobs.finished_at does not exist",
+      "",
     ),
     false,
   );

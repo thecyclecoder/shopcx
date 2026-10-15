@@ -39,7 +39,9 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
+  isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -131,6 +133,7 @@ import {
   isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise,
   isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
+  isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
@@ -328,6 +331,15 @@ const LOG_QUERIES: LogQuery[] = [
       // column, a non-SELECT write, or a FATAL/PANIC/constraint violation still surfaces / pages.
       if (isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale external/REST client SELECTs a
+      // `customer_id` column from `loyalty_redemptions` that the table never owned (it lives on
+      // the sibling `loyalty_members` table). The resulting undefined_column ERROR is repair
+      // work for a query no ShopCX code owns (Control Tower signature
+      // `supabase-logs:1eb5b8663e370ab7`). Narrowly gated to require BOTH the exact
+      // `column loyalty_redemptions.customer_id does not exist` message AND the SELECT-lookup
+      // shape on `loyalty_redemptions` (bare or PostgREST CTE wrapper) — a different missing
+      // column, `customer_id` on `loyalty_members`, a non-SELECT write, or a FATAL still pages.
+      if (isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale external/REST client SELECTs a
       // `dismissed_at` column from `dashboard_notifications` that the table never owned.
       // The resulting undefined_column ERROR is repair work for a query we don't own
       // ([[../specs/error-feed-drop-dashboard-notifications-dismissed-at-direct-]], Control
@@ -336,6 +348,15 @@ const LOG_QUERIES: LogQuery[] = [
       // the SELECT-lookup shape (bare or PostgREST CTE wrapper) — a different missing
       // column on the table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale external/REST client SELECTs a
+      // `finished_at` column from `agent_jobs` that the table never owned. The resulting
+      // undefined_column ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-agent-jobs-finished-at-column-adhoc-noise]], Control
+      // Tower signature `supabase-logs:54a5614ee9dc1e20`). Narrowly gated to require BOTH
+      // the exact `column agent_jobs.finished_at does not exist` message AND the SELECT-
+      // lookup shape on `agent_jobs` (bare or PostgREST CTE wrapper) — a different missing
+      // column on the table, or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale external/REST client SELECTs an
       // `updated_at` column from `dashboard_notifications` that the table never owned.
       // The resulting undefined_column ERROR is repair work for a query we don't own
@@ -1862,6 +1883,13 @@ const LOG_QUERIES: LogQuery[] = [
       // `loyalty_members` via a non-SELECT statement (real code-bug shape) still
       // surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.loyalty_redemptions.coupon_code`. The `loyalty_redemptions` table
+      // exists but has NO `coupon_code` column — the real column is `discount_code`. Same
+      // narrow gating (exact column-missing message AND a SELECT-on-loyalty_redemptions
+      // shape, bare OR PostgREST CTE wrapper); any other column / table / non-SELECT still
+      // pages on first sighting.
+      if (isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.tickets.assigned_agent`. The `tickets` table exists but has NO
       // `assigned_agent` column — the actual assignee column is

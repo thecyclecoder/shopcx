@@ -1,0 +1,1 @@
+- **Extend the agent_jobs.payload noise classifier with a second fingerprint for JSON-path-filter foreign reads** · verified 2026-10-15 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise` + [[../specs/error-feed-drop-agent-jobs-payload-direct-rest-lookup-noise]])
