@@ -91,6 +91,7 @@ import {
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
+  isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise,
   isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise,
   isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise,
@@ -979,6 +980,11 @@ const LOG_QUERIES: LogQuery[] = [
       // `spec_phases` via a non-SELECT statement (real code-bug shape) still surfaces /
       // pages on first sighting.
       if (isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale direct-REST SELECT against the
+      // phantom `spec_phases.phase_index` column (ordering is `position`, not `phase_index`;
+      // adding a fake column would corrupt the model). A real write / JOIN / other-column
+      // regression on `spec_phases` still surfaces / pages.
+      if (isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale approval-history SELECT that
       // LEFT-JOINs `public.approval_decisions` to `public.agent_jobs` and asks for legacy
       // `aj.payload` / `aj.branch_name` columns that do not exist on the current schema.

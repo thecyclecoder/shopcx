@@ -37,6 +37,7 @@ import {
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
+  isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsLegacyApprovalJoinNoise,
   isForeignSupabasePostgresMissingSpecsIsActiveAdhocNoise,
   isForeignSupabasePostgresMissingSpecsArchivedAdhocNoise,
@@ -6919,6 +6920,135 @@ test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise returns false on e
     isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
       "column spec_phases.idx does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/spec_phases?select=...phase_index...` against our `public.spec_phases` table.
+// The table exists but its ordering column is `position`, not `phase_index`. Foreign-owned
+// surface, no lever from us (a fake column would corrupt the model) — drop AT CAPTURE only
+// when BOTH the exact column-missing message on `spec_phases.phase_index` AND either the
+// bare SELECT-lookup OR the PostgREST `WITH pgrst_source AS ( SELECT ... )` CTE shape on
+// `spec_phases` are present. A column-missing on any other table, a different column on
+// `spec_phases`, a JOIN, or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise drops the ad hoc SELECT lookup on the exact spec_phases.phase_index column-missing shape", () => {
+  // The captured PostgREST direct-REST shape — unqualified and public.-qualified variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(
+      "column spec_phases.phase_index does not exist",
+      "select id, phase_index from public.spec_phases order by phase_index asc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(
+      "column public.spec_phases.phase_index does not exist",
+      "select id, phase_index from public.spec_phases order by phase_index asc limit 100",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(
+      "column spec_phases.phase_index does not exist",
+      "select phase_index from spec_phases limit 10",
+    ),
+    true,
+  );
+  // The PostgREST direct-REST CTE wrapper form (`WITH pgrst_source AS ( SELECT ... )`).
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(
+      "column spec_phases.phase_index does not exist",
+      'with pgrst_source as ( select "public"."spec_phases"."id", "public"."spec_phases"."phase_index" from "public"."spec_phases" order by "public"."spec_phases"."phase_index" asc ) select * from pgrst_source',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(
+      "ERROR: column spec_phases.phase_index does not exist",
+      "select phase_index from public.spec_phases",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a phase_index column still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(
+      "column migrations.phase_index does not exist",
+      "select phase_index from public.migrations where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise KEEPS a DIFFERENT column-missing on spec_phases (the real `position` column renamed still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(
+      "column spec_phases.position does not exist",
+      "select position from public.spec_phases where spec_id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise KEEPS a JOIN across other tables (a real code shape referencing spec_phases still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(
+      "column spec_phases.phase_index does not exist",
+      "select s.slug, p.phase_index from public.specs s join public.spec_phases p on p.spec_id = s.id",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing spec_phases.phase_index still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(
+      "column spec_phases.phase_index does not exist",
+      "insert into public.spec_phases (spec_id, phase_index, title) values ($1, 1, 'x')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(
+      "column spec_phases.phase_index does not exist",
+      "update public.spec_phases set phase_index = 2 where id = $1",
+    ),
+    false,
+  );
+  // A PostgREST INSERT wrapped in the same CTE shape is a real write — still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(
+      "column spec_phases.phase_index does not exist",
+      'with pgrst_source as ( insert into "public"."spec_phases"("phase_index") values (1) returning * ) select * from pgrst_source',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise("", ""),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise(
+      "column spec_phases.phase_index does not exist",
+      "",
     ),
     false,
   );
