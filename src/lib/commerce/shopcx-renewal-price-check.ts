@@ -24,6 +24,7 @@ import { getSubscriptionContract } from "@/lib/commerce/shopify-subscription-cli
 import { loadPricingContext, breakPctForQty, shopifyLineMath } from "@/lib/commerce/shopify-subscription-migrate";
 import { activePricingRuleId } from "@/lib/commerce/shopcx-line-ops";
 import { errText } from "@/lib/error-text";
+import type { DashboardNotificationType } from "@/lib/dashboard-notification-types";
 
 /** $1 and 2% — below this a difference is rounding noise, the same bar subscription-overcharge uses. */
 const MATERIAL_CENTS = 100;
@@ -113,7 +114,7 @@ export async function surfaceRenewalPriceMismatch(
     const lineList = v.lines.map((x) => `${x.title} ×${x.quantity}: charging ${usd(x.actualCents)}, rules say ${usd(x.expectedCents)}`).join("; ");
     const { error } = await admin.from("dashboard_notifications").insert({
       workspace_id: input.workspaceId,
-      type: "billing_alert",
+      type: "billing_alert" satisfies DashboardNotificationType,
       title: `ShopCX renewal ${v.status} — subscription ${input.subscriptionId.slice(0, 8)} ${usd(v.actualCents)} vs ${usd(v.expectedCents)}`,
       body:
         `The renewal for contract ${input.contractId} was charged as the contract says (this check never blocks). ` +
