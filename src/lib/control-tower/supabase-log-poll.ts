@@ -61,6 +61,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
@@ -626,6 +627,16 @@ const LOG_QUERIES: LogQuery[] = [
       // `renewal_subtotal_cents` from any other table, or on `subscriptions` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise(message, query)) return null;
+      // Same foreign-app-noise drop for an ad hoc probe of the non-existent
+      // `subscriptions.shipping_price_cents` column (a Shopify-subscription-app column
+      // shape our `subscriptions` table never owned) — repair work for a query we don't own
+      // ([[../specs/error-feed-drop-subscriptions-shipping-price-cents-column-adhoc-noise]],
+      // Control Tower signature `supabase-logs:1a3d38ae2b1a85e5`). Narrowly gated to require
+      // BOTH the exact column-missing message AND the SELECT-lookup shape — a column-missing
+      // error on any other column of `subscriptions` (including the real `items`), or on
+      // `shipping_price_cents` from any other table, or on `subscriptions` via a non-SELECT
+      // statement (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... address ... from
       // public.customers` lookup by an external tool (Supabase Studio Table Editor /
       // API Docs, foreign SQL client, stale exploratory session, third-party

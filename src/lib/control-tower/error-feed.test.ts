@@ -82,6 +82,7 @@ import {
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
@@ -15937,6 +15938,96 @@ test("isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdh
     isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise(
       "column subscriptions.renewal_subtotal_cents does not exist",
       "update public.subscriptions set renewal_subtotal_cents = 0 where id = 1",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/subscriptions?select=...shipping_price_cents...` against our
+// `public.subscriptions` table. The table exists but has NO `shipping_price_cents`
+// column — that is a Shopify-subscription-app (Appstle / native Shopify subscription-
+// contract) column shape, not ours. Foreign-owned surface, no lever from us — drop AT
+// CAPTURE only when BOTH the exact column-missing message on
+// `subscriptions.shipping_price_cents` AND a SELECT-lookup shape on `subscriptions`
+// (bare OR PostgREST CTE wrapper) are present. A column-missing on a live `subscriptions`
+// column (`items`), on `shipping_price_cents` from any other table, or via a non-SELECT
+// statement still pages. Control Tower signature `supabase-logs:1a3d38ae2b1a85e5`.
+
+test("isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise drops the captured supabase-logs:1a3d38ae2b1a85e5 message+query pair (PostgREST CTE SELECT on subscriptions.shipping_price_cents)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `subscriptions.shipping_price_cents` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise(
+      "column subscriptions.shipping_price_cents does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."id", "public"."subscriptions"."shipping_price_cents" FROM "public"."subscriptions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise(
+      "column public.subscriptions.shipping_price_cents does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."shipping_price_cents" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise(
+      "column subscriptions.shipping_price_cents does not exist",
+      "select id, shipping_price_cents from public.subscriptions",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise(
+      "column subscriptions.shipping_price_cents does not exist",
+      "select shipping_price_cents from subscriptions limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise(
+      "ERROR: column subscriptions.shipping_price_cents does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."shipping_price_cents" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise(
+      "column subscriptions.shipping_price_cents does not exist",
+      "SELECT ID, SHIPPING_PRICE_CENTS FROM PUBLIC.SUBSCRIPTIONS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise KEEPS other columns / tables / non-SELECT shapes (real regressions still page)", () => {
+  // A DIFFERENT subscriptions column — `items` IS a live column; if it regresses we WANT
+  // the page. The pin is `shipping_price_cents` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise(
+      "column subscriptions.items does not exist",
+      "select items from public.subscriptions",
+    ),
+    false,
+  );
+  // `shipping_price_cents` on ANOTHER table — not our pinned signature, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise(
+      "column orders.shipping_price_cents does not exist",
+      "select shipping_price_cents from public.orders",
+    ),
+    false,
+  );
+  // A NON-SELECT statement on subscriptions — real code-bug shape, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise(
+      "column subscriptions.shipping_price_cents does not exist",
+      "update public.subscriptions set shipping_price_cents = 0 where id = 1",
     ),
     false,
   );
