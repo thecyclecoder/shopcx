@@ -293,6 +293,7 @@
     "test:meta-ad-library": "tsx --test src/lib/meta-ad-library.test.ts",
     "test:winning-creative-detect": "tsx --test src/lib/ads/winning-creative-detect.test.ts",
     "test:pair-promoted-lander": "tsx --test src/lib/storefront/pair-promoted-lander.test.ts",
+    "test:storefront-experiment-id-guard": "tsx --test src/lib/storefront/experiment-id-guard.test.ts",
     "test:customer-voice-mining": "tsx --test src/lib/ads/customer-voice-mining.test.ts",
     "test:voice-angle-approve": "tsx --test src/lib/ads/voice-angle-approve.test.ts",
     "test:blended-cac-ltv": "tsx --test src/lib/blended-cac-ltv.test.ts",
