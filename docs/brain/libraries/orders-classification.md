@@ -72,6 +72,10 @@ Resolution: `queryOrders` does a self-contained cap-free ASC scan of `orders.cre
 
 `queryOrders` walks `orders` with a `(created_at DESC, id DESC)` cursor and re-issues the same filtered query on each page — no `.limit(1000)` truncation, no missed rows. Same pattern as [[commerce__order]] `listOrders`. A `>1000-row` test fixture in `src/lib/orders-classification.test.ts` pins that guarantee.
 
+## Gotchas
+
+- **Amazon source detection:** `queryOrders` no longer selects the `amazon_order_id` column from the orders table (it does not exist on the schema). Amazon orders are detected from `source_name='amazon'` only. The `classifyOrder` function still accepts `amazon_order_id` as an optional input for direct-pass use cases (e.g., testing), but `queryOrders` relies entirely on `source_name` for Amazon discrimination.
+
 ## Callers
 
 - `scripts/_measure-test-purchaser-overlap.ts` — the analytical measurement that Phase 3 refactored onto the SDK. Was the driver for building the SDK in the first place (hand-rolled `bucketOrder` + earliest-order-per-customer before). Now consumes `queryOrders` / `classifyOrder` directly; the UTM → campaign attribution join stays in the script (out of this SDK's scope).
