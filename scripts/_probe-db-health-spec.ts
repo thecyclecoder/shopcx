@@ -1,26 +1,20 @@
+import "./_bootstrap";
+import { getSpec } from "../src/lib/specs-table";
+
+const WS = process.env.WORKSPACE_ID ?? "fdc11e10-b89f-4989-8b73-ed6526c4d906";
+const SLUG = "db-health-detector-measures-current-rate";
+
 (async () => {
-  const { createAdminClient } = await import("../src/lib/supabase/admin");
-  const admin = createAdminClient();
+  // Read the spec + its phases through the specs-table SDK. `spec.phases` is
+  // already ordered by the real `position` column.
+  const spec = await getSpec(WS, SLUG);
 
-  // Check spec status
-  const { data: specs } = await admin
-    .from("specs")
-    .select("id, slug, status")
-    .eq("slug", "db-health-detector-measures-current-rate");
+  console.log("Spec:", spec ? { id: spec.id, slug: spec.slug, status: spec.status } : null);
 
-  console.log("Spec:", specs?.[0]);
-
-  // Check phases
-  if (specs?.[0]) {
-    const { data: phases } = await admin
-      .from("spec_phases")
-      .select("spec_id, phase_number, title, status")
-      .eq("spec_id", specs[0].id)
-      .order("phase_number");
-
+  if (spec) {
     console.log("Phases:");
-    phases?.forEach((p) => {
-      console.log(`  Phase ${p.phase_number} (${p.title}): ${p.status}`);
-    });
+    for (const p of spec.phases ?? []) {
+      console.log(`  Phase ${p.position} (${p.title}): ${p.status}`);
+    }
   }
 })();
