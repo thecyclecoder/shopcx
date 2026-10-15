@@ -16,6 +16,21 @@ import { spawnSync } from "child_process";
 
 const REPO_ROOT = join(__dirname, "..");
 
+/**
+ * Supabase env vars stripped from the suite's environment. Unit tests must never reach the real
+ * database: a test that forgets to stub a writer otherwise inserts fixture rows into PRODUCTION
+ * whenever the suite runs on a box that has these set (2026-10-15: winning-creative-detect.test.ts
+ * inserted storefront_experiments rows with product_id "P-1" 252 times). With them unset,
+ * createAdminClient() fails fast instead, and the suite is hermetic (it passes fully without them).
+ */
+export const STRIPPED_TEST_ENV_VARS = ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_URL"] as const;
+
+export function hermeticTestEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  for (const k of STRIPPED_TEST_ENV_VARS) delete out[k];
+  return out;
+}
+
 function extractTestPathFromValue(value: string): string | null {
   const m = value.trim().match(/^tsx\s+--test\s+(\S+)/);
   return m ? m[1] : null;
@@ -41,6 +56,7 @@ function main(): void {
   const result = spawnSync("npx", ["tsx", "--test", ...paths], {
     stdio: "inherit",
     cwd: REPO_ROOT,
+    env: hermeticTestEnv(),
   });
   if (result.error) {
     console.error(`test:all — failed to spawn tsx: ${result.error.message}`);
