@@ -19,6 +19,7 @@ import { randomUUID } from "crypto";
 // Type-only (erased at compile — never loads the module at startup): the solver/skeptic JSON contracts.
 import type { SolverProposal, SkepticVerdict } from "../src/lib/agent-todos/triage";
 import type { TeardownRecipe } from "../src/lib/research-urls";
+import type { DashboardNotificationType } from "../src/lib/dashboard-notification-types";
 import type { SpecPhaseCheckInput } from "../src/lib/spec-phase-checks-table"; // security-fix-autoauthor-machine-check — typed check payload for authorSecurityFixSpec
 import type { SpecAccumulationVerdict } from "../src/lib/specs-table"; // a-broken-verification-check-cannot-kill-a-build Phase 2 — carries the `unevaluablePhases` third-state list the defer path branches on
 import { getPersona } from "../src/lib/agents/personas"; // agent-voice: the director's in-character voice for chat
@@ -1714,7 +1715,9 @@ function markAccountAuthExpired(dir: string, now: number, detail: string, explic
   }
 }
 
-const AUTH_EXPIRED_ALERT_TYPE = "box_account_auth_expired";
+// Typed so a value the dashboard_notifications_type_check CHECK doesn't list fails tsc (this one
+// 23514-rejected until migration 20270109120000 added it — the card was silently lost).
+const AUTH_EXPIRED_ALERT_TYPE: DashboardNotificationType = "box_account_auth_expired";
 // Insert a CEO dashboard_notifications card naming the pool account (config dir) whose OAuth token
 // was rejected as expired, plus the exact re-login command. Deduped by config-dir so a persistently-
 // expired account (repeated re-probes) doesn't spam the inbox — one open card per account at a time.

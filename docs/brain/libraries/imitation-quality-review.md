@@ -29,6 +29,7 @@ and KEEPS anything with a real hook / benefit callouts / dynamic composition. Re
 - `applyBoxImitationQualityReview` re-asserts `requestedSkeletonIds` at write time (Coaching #11/#12): a verdict whose `skeleton_id` isn't in the requested batch is skipped, not silently accepted. The compare-and-set on `(workspace_id, id)` lives inside [[creative-skeleton]] `setSkeletonDoNotUse` — a stale/cross-workspace row cannot be flipped from here.
 - The applier NEVER touches `do_not_use` directly — it always goes through `setSkeletonDoNotUse`. Same rule as the Phase-2 PATCH handler: one chokepoint on the audit columns.
 - The CEO review card is deduped per `job_id` (`metadata.dedupe_key = 'imitation_quality_review:<jobId>'`) so a worker retry doesn't spam the inbox. No card is inserted when Max flagged nothing (nothing to review).
+- The card is `type='agent_approval_request'` (`APPROVAL_REQUEST_TYPE`) with `routed_to_function='ceo'` + `escalation_kind='imitation_quality_review'`, so it lands in the CEO approvals feed and `reconcileApprovalInbox` skips it (no `agent_job_id`-keyed auto-dismiss). Before 2026-10-15 it used `type='agent_review_request'`, which the [[../tables/dashboard_notifications]] type CHECK never allowed — every card 23514-rejected and was lost.
 
 ## Node-completeness trio (CLAUDE.md hard rule)
 

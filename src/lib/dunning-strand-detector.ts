@@ -31,6 +31,7 @@
  */
 
 import type { createAdminClient } from "@/lib/supabase/admin";
+import type { DashboardNotificationType } from "@/lib/dashboard-notification-types";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -192,7 +193,7 @@ export async function surfaceStrandedDunningAlerts(
     if (existing) continue;
     const { error } = await admin.from("dashboard_notifications").insert({
       workspace_id: f.workspace_id,
-      type: "billing_alert",
+      type: "billing_alert" satisfies DashboardNotificationType,
       title: `Stranded dunning cycle — contract drift on subscription ${f.subscription_id.slice(0, 8)}`,
       body:
         `Dunning cycle ${f.cycle_id} (cycle #${f.cycle_number}, status ${f.cycle_status}) points at contract ` +
@@ -228,7 +229,7 @@ export async function surfaceStrandedDunningAlerts(
     if (existing) continue;
     const { error } = await admin.from("dashboard_notifications").insert({
       workspace_id: f.workspace_id,
-      type: "billing_alert",
+      type: "billing_alert" satisfies DashboardNotificationType,
       title: `Stranded subscription — active + internal, ${f.days_overdue} days past billing date`,
       body:
         `Subscription ${f.subscription_id} (contract ${f.contract_id}) is status='active', is_internal=true, and ` +

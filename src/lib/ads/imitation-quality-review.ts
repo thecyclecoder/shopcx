@@ -34,6 +34,7 @@
  */
 import { createAdminClient } from "@/lib/supabase/admin";
 import { setSkeletonDoNotUse } from "@/lib/creative-skeleton";
+import { APPROVAL_REQUEST_TYPE } from "@/lib/agents/inbox";
 
 export type ImitationQualityVerdict = "usable" | "not_usable";
 
@@ -189,7 +190,12 @@ async function insertCeoReviewCard(input: {
     `Kept: ${input.keptCount} · Flagged: ${input.flaggedIds.length} of ${input.reviewedCount}.`;
   const { error } = await admin.from("dashboard_notifications").insert({
     workspace_id: input.workspaceId,
-    type: "agent_review_request",
+    // Was "agent_review_request" — a type the dashboard_notifications_type_check CHECK never
+    // listed, so this insert 23514-rejected and the CEO review card was silently lost. A CEO
+    // review card is a routed Approval Request (routed_to_function=ceo + escalation_kind), the
+    // same shape as the cs-director escalation cards, so it lands in the CEO approvals feed.
+    // `escalation_kind` keeps reconcileApprovalInbox from auto-dismissing it.
+    type: APPROVAL_REQUEST_TYPE,
     title: `Max flagged ${input.flaggedIds.length} weak competitor ad${input.flaggedIds.length === 1 ? "" : "s"}`,
     body: body.slice(0, 4000),
     link: "/dashboard/research/ads",

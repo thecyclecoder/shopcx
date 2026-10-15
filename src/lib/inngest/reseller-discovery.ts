@@ -31,11 +31,13 @@ export const resellerDiscoveryManual = inngest.createFunction(
         const admin = createAdminClient();
         await admin.from("dashboard_notifications").insert({
           workspace_id: workspaceId,
-          kind: "fraud_alert",
+          // `type`, not `kind` — dashboard_notifications has no `kind`/`severity` columns, so the
+          // old payload PGRST204-rejected and the heads-up was silently lost.
+          type: "fraud_alert",
           title: `${result.sellersDiscovered} new Amazon reseller${result.sellersDiscovered === 1 ? "" : "s"} added to fraud list`,
           body: `Discovery run complete. View at /dashboard/resellers.`,
           link: "/dashboard/resellers",
-          severity: "info",
+          metadata: { severity: "info", source: "reseller_discovery" },
         });
       });
     }
@@ -88,11 +90,13 @@ export const resellerDiscoveryWeeklyCron = inngest.createFunction(
         await step.run(`notify-${ws.id.slice(0, 8)}`, async () => {
           await admin.from("dashboard_notifications").insert({
             workspace_id: ws.id,
-            kind: "fraud_alert",
+            // `type`, not `kind` — dashboard_notifications has no `kind`/`severity` columns, so the
+            // old payload PGRST204-rejected and the heads-up was silently lost.
+            type: "fraud_alert",
             title: `${result.sellersDiscovered} new Amazon reseller${result.sellersDiscovered === 1 ? "" : "s"} added to fraud list`,
             body: `Their addresses are now blocked by the amazon_reseller fraud rule. View at /dashboard/settings/fraud-detection/resellers.`,
             link: "/dashboard/settings/fraud-detection/resellers",
-            severity: "info",
+            metadata: { severity: "info", source: "reseller_discovery" },
           });
         });
       }

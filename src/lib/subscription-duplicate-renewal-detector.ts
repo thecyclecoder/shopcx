@@ -20,6 +20,7 @@
  * `dedupe_key = duplicate-renewal:<subscription_id>:<yyyy-mm-dd>`.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { DashboardNotificationType } from "@/lib/dashboard-notification-types";
 
 type Admin = SupabaseClient;
 
@@ -171,7 +172,7 @@ export async function surfaceDuplicateRenewalAlert(
 
   const { error } = await admin.from("dashboard_notifications").insert({
     workspace_id: group.workspace_id,
-    type: "billing_alert",
+    type: "billing_alert" satisfies DashboardNotificationType,
     title: `Duplicate renewal detected — subscription ${group.subscription_id.slice(0, 8)} charged ${group.orders.length}x on ${group.cycle_day}`,
     body:
       `Subscription ${group.subscription_id} has ${group.orders.length} internal_subscription_renewal orders ` +
