@@ -29,6 +29,25 @@ await commitThemeFiles(target, [{ path: "sections/main-product.liquid", content:
 - **Reversible:** every change is a normal commit — `git revert` on the repo undoes it, Shopify redeploys.
 - **JSON files are JSONC** — Shopify serves locales/templates/`settings_data.json` with a leading `/* auto-generated */` comment header; that's expected, not a diff (the reconcile script strips it before comparing).
 
+## Colour schemes — assign an existing one, never mint a new one
+
+Dawn exposes a **fixed set of 21 colour schemes** defined in `config/settings_data.json` under `current.color_schemes`. Sections and blocks reference one by its scheme id (`"color_scheme": "scheme-5a3d8548-…"`), and the customizer's colour picker offers exactly that list.
+
+**Adding a new key to `color_schemes` does not create a usable scheme.** The theme surfaces the pre-defined set; a hand-minted id (e.g. `scheme-cream-ground`) is an orphan that nothing renders, so a section pointed at it silently falls back and the change appears to do nothing. Symptom: you set the scheme, commit, and the page keeps its old background.
+
+The fix is to **assign one of the existing schemes**, or edit that scheme's `background` to the colour you want — accepting that every element already on it changes too, so check what else uses it first:
+
+```bash
+grep -o '"color_scheme": *"[^"]*"' templates/*.json sections/*.json | sort | uniq -c | sort -rn
+```
+
+Two notes that follow from this:
+
+- **Setting a scheme is one of the few legitimate reasons to use the customizer.** It is easier than hand-editing scheme ids across a JSON template, and Shopify's GitHub integration pushes the resulting `settings_data.json` back to the repo, so the repo stays authoritative afterwards. Confirm with `git fetch && git log origin/master -1 -- config/settings_data.json` rather than assuming.
+- **A customizer round-trip prunes orphan schemes.** A hand-added scheme key disappears from `settings_data.json` the next time the customizer writes it — so an orphan is self-cleaning, but anything referencing it breaks first.
+
+Learned 2026-09-28 on the Superfood Tabs PDP: a hand-added `scheme-cream-ground` never rendered; the working fix was assigning an existing scheme whose background was set to `#FBF1E9`.
+
 ## Reconciliation
 
 `scripts/reconcile-shopify-theme.ts` exports the live theme and commits any files whose content genuinely differs from the repo (semantic JSON compare; byte compare for liquid/css/js/binary). Dry-run by default; `--commit` to push. Run it whenever live and GitHub may have drifted (e.g. after manual editor edits). It only adds/updates — never deletes repo files missing from live.
