@@ -356,3 +356,151 @@ export async function syncTplInventoryForClose(
   }
   return { table: "qb_tpl_inventory_snapshots", rows: rows.length };
 }
+
+// ────────────────────────────────────────────────────────────────────────────────────────────
+// Same-day coverage guard
+// ────────────────────────────────────────────────────────────────────────────────────────────
+
+type CloseSyncFn = (
+  admin: SupabaseClient,
+  workspaceId: string,
+  snapshotDate: string,
+) => Promise<SyncResult>;
+
+/**
+ * The three POINT-IN-TIME tables the close rests on + the sync that (re)collects each. Their data
+ * reports NOW — neither Amplifier nor Amazon offers a historical endpoint — so a day missed here is
+ * permanently lost. Kept in lockstep with `UNRECONSTRUCTIBLE_SYNCS` in the cron (same three buckets,
+ * named by table here and by sync there).
+ */
+export const UNRECONSTRUCTIBLE_COVERAGE: { table: string; sync: CloseSyncFn }[] = [
+  { table: "qb_tpl_inventory_snapshots", sync: syncTplInventoryForClose },
+  { table: "qb_amazon_inventory_snapshots", sync: syncFbaInventoryForClose },
+  { table: "qb_inbound_shipment_snapshots", sync: syncInboundShipmentsForClose },
+];
+
+export interface SameDayCoverageResult {
+  table: string;
+  /** A row for `snapshotDate` exists at the end of the check (after any inline retry). */
+  present: boolean;
+  /** The sync was re-run once inline because the first count was zero. */
+  retried: boolean;
+  /** A fresh `close_snapshot_gap` card was inserted this run (false if one already existed). */
+  cardRaised: boolean;
+  /** `snapshotDate` is the last calendar day of its month — the case that blocks the close. */
+  isMonthEnd: boolean;
+}
+
+/** True when `date` ("YYYY-MM-DD") is the last calendar day of its month (UTC). */
+function isLastDayOfMonth(date: string): boolean {
+  const d = new Date(`${date}T00:00:00Z`);
+  const next = new Date(d);
+  next.setUTCDate(d.getUTCDate() + 1);
+  return next.getUTCMonth() !== d.getUTCMonth();
+}
+
+/** Count rows for `(workspace_id, snapshot_date)` in `table` — a HEAD/count query, no rows fetched. */
+async function countForDay(
+  admin: SupabaseClient,
+  table: string,
+  workspaceId: string,
+  snapshotDate: string,
+): Promise<number> {
+  const { count, error } = await admin
+    .from(table)
+    .select("workspace_id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId)
+    .eq("snapshot_date", snapshotDate);
+  if (error) throw new Error(`${table} coverage count: ${error.message}`);
+  return count ?? 0;
+}
+
+/**
+ * Raise AT MOST ONE `close_snapshot_gap` card per (workspace, table, date) — re-running the cron on
+ * a still-broken day must not spam. Same read-then-insert existence-check pattern as
+ * `daily-order-snapshot`'s `order_sync_mismatch` card. Returns true only when a NEW card was written.
+ */
+async function raiseGapCardOnce(
+  admin: SupabaseClient,
+  workspaceId: string,
+  table: string,
+  snapshotDate: string,
+  monthEnd: boolean,
+): Promise<boolean> {
+  const { data: existing } = await admin
+    .from("dashboard_notifications")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("metadata->>type", "close_snapshot_gap")
+    .eq("metadata->>table", table)
+    .eq("metadata->>date", snapshotDate)
+    .maybeSingle();
+  if (existing) return false;
+
+  // `type` is CHECK-constrained; `system` is a valid value. The close-specific routing lives on
+  // `metadata.type`, not the column. Body is `body` (not `message`) — see the table brain page.
+  const title = monthEnd
+    ? `MONTH-END close snapshot MISSING — ${table} on ${snapshotDate}`
+    : `Close snapshot missing — ${table} on ${snapshotDate}`;
+  const body = monthEnd
+    ? `The ${table} point-in-time snapshot for ${snapshotDate} could not be collected even after one inline retry. ${snapshotDate} is the LAST DAY OF THE MONTH, so this blocks the close outright: inventory APIs report only NOW, this exact day cannot be recovered later, and qb-close-guard will block on no_physical_snapshot / stale_physical_snapshot.`
+    : `The ${table} point-in-time snapshot for ${snapshotDate} could not be collected even after one inline retry. Inventory APIs report only NOW, so this exact day cannot be recovered later.`;
+
+  const { error } = await admin.from("dashboard_notifications").insert({
+    workspace_id: workspaceId,
+    type: "system",
+    title,
+    body,
+    link: "/dashboard/agents/cfo",
+    metadata: { type: "close_snapshot_gap", table, date: snapshotDate, month_end: monthEnd },
+  });
+  if (error) throw new Error(`close_snapshot_gap card insert: ${error.message}`);
+  return true;
+}
+
+/**
+ * Same-day coverage assertion for the three unreconstructible snapshot tables, run at the END of
+ * the close-source sync while the data is still collectable.
+ *
+ * For each table: count today's rows; if zero, re-run its specific sync ONCE inline and re-count; if
+ * STILL zero, escalate a CEO `close_snapshot_gap` card (exactly one per workspace/table/date). The
+ * card shouts when `snapshotDate` is a month-end, because that is the case `qb-close-guard` blocks
+ * the close on. This is the whole point of the daily cron: a missing snapshot is only recoverable on
+ * the day it is missing.
+ *
+ * `coverage` is injectable for tests; production callers pass the three args and get the real syncs.
+ */
+export async function assertSameDayCoverage(
+  admin: SupabaseClient,
+  workspaceId: string,
+  snapshotDate: string,
+  coverage: { table: string; sync: CloseSyncFn }[] = UNRECONSTRUCTIBLE_COVERAGE,
+): Promise<SameDayCoverageResult[]> {
+  const monthEnd = isLastDayOfMonth(snapshotDate);
+  const out: SameDayCoverageResult[] = [];
+
+  for (const { table, sync } of coverage) {
+    let present = (await countForDay(admin, table, workspaceId, snapshotDate)) > 0;
+    let retried = false;
+
+    if (!present) {
+      // The only moment this is recoverable is right now. Retry the specific sync once inline; a
+      // throw is handled identically to a retry that collected nothing — the recount decides.
+      retried = true;
+      try {
+        await sync(admin, workspaceId, snapshotDate);
+      } catch {
+        /* swallow — the recount below is the source of truth */
+      }
+      present = (await countForDay(admin, table, workspaceId, snapshotDate)) > 0;
+    }
+
+    const cardRaised = present
+      ? false
+      : await raiseGapCardOnce(admin, workspaceId, table, snapshotDate, monthEnd);
+
+    out.push({ table, present, retried, cardRaised, isMonthEnd: monthEnd });
+  }
+
+  return out;
+}

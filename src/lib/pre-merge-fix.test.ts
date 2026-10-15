@@ -81,10 +81,16 @@ test("spawnPreMergeFix drops harness fails but STILL authors a fix phase for a r
       },
     ],
   });
-  // Hermetic: getSpec builds its own admin client from env. On the box (and anywhere the Supabase
-  // env is set) it would read PROD and return "origin spec … not found" instead of throwing, which
-  // made test:all red only on the box and failed every build whose check runs the whole suite
-  // (close-snapshot-coverage-guard, 2026-10-14). Strip the env for this call so it always throws.
+  // Make the DB layer unreachable so getSpec cannot succeed: strip the Supabase env so
+  // createAdminClient throws. This forces the deterministic "spawn threw" outcome in a hermetic env.
+  // NOTE: node:test runs test FILES concurrently and this mutates GLOBAL process.env, so the strip
+  // is best-effort — a sibling file running at the same instant can leave the real URL visible, in
+  // which case getSpec reaches PROD and returns "origin spec … not found" instead of throwing. That
+  // raced false-red made test:all flap only on the box and failed every build whose check runs the
+  // whole suite (close-snapshot-coverage-guard, 2026-10-14). The assertion below therefore accepts
+  // BOTH DB-layer outcomes — a thrown client-construction error OR a "spec not found" read — because
+  // EITHER proves the real fail survived the harness filter and reached the DB layer, which is the
+  // actual invariant under test. What it must NEVER be is the empty-failing-set short-circuit.
   const saved: Record<string, string | undefined> = {};
   for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
     saved[k] = process.env[k];
@@ -94,18 +100,13 @@ test("spawnPreMergeFix drops harness fails but STILL authors a fix phase for a r
     for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v;
   });
   const out = await spawnPreMergeFix(throwOnUse, input);
-  // spawnPreMergeFix's outer try/catch converts a downstream throw into
-  // `{ spawned:false, escalated:false, reason: "spawn threw: ..." }`. The key signal for this test
-  // is that the reason is NOT the harness empty-guard — that would mean the real fail got filtered
-  // too. Any downstream throw (proxy trap OR supabase client construction) proves the real fail
-  // survived the filter and reached the DB layer.
   assert.equal(out.spawned, false);
   assert.equal(out.escalated, false);
   if (!out.spawned && !out.escalated) {
     assert.match(
       out.reason,
-      /^spawn threw:/,
-      "the real code fail must survive the harness filter and reach the DB layer (throws in test env)",
+      /^spawn threw:|not found — cannot append fix phase/,
+      "the real code fail must survive the harness filter and reach the DB layer (throws, or reads 'spec not found' when the env leaks)",
     );
     assert.doesNotMatch(
       out.reason,
