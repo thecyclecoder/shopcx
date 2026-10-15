@@ -1,0 +1,1 @@
+- **Drop foreign uuid-LIKE-on-agent_jobs.id Studio/direct-REST probe at error-feed capture** · verified 2026-10-15 · → [[../libraries/control-tower]] · [[../inngest/supabase-log-poll]]
