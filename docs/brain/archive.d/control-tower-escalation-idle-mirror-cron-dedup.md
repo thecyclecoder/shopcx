@@ -1,0 +1,1 @@
+- **Escalation-idle tile: honor a covering triage_run / parked review instead of raw job created_at** · verified 2026-10-15 · → [[../libraries/control-tower]]
