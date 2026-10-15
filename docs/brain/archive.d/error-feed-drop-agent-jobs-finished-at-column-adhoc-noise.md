@@ -1,0 +1,1 @@
+- **Drop the foreign ad-hoc REST read of the non-existent agent_jobs.finished_at column from the Control Tower error feed** · verified 2026-10-15 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise`)
