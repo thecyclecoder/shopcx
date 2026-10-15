@@ -41,6 +41,7 @@ import {
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
+  isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -347,6 +348,15 @@ const LOG_QUERIES: LogQuery[] = [
       // the SELECT-lookup shape (bare or PostgREST CTE wrapper) — a different missing
       // column on the table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale external/REST client SELECTs a
+      // `finished_at` column from `agent_jobs` that the table never owned. The resulting
+      // undefined_column ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-agent-jobs-finished-at-column-adhoc-noise]], Control
+      // Tower signature `supabase-logs:54a5614ee9dc1e20`). Narrowly gated to require BOTH
+      // the exact `column agent_jobs.finished_at does not exist` message AND the SELECT-
+      // lookup shape on `agent_jobs` (bare or PostgREST CTE wrapper) — a different missing
+      // column on the table, or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale external/REST client SELECTs an
       // `updated_at` column from `dashboard_notifications` that the table never owned.
       // The resulting undefined_column ERROR is repair work for a query we don't own
