@@ -4214,6 +4214,69 @@ export function isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhoc
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column spec_status_history.old_value does not
+ * exist` for an ad hoc / stale PostgREST direct-REST SELECT against
+ * `public.spec_status_history`. Same foreign caller family as the `created_at` / `from_status`
+ * siblings on this exact table: the `spec_status_history` audit table exists but has no
+ * `old_value` column — its status fields are `old_status` / `new_status`, and no ShopCX code
+ * path reads a generic `old_value` audit column off this table. Postgres reports only the
+ * FIRST unresolved column in a failing query, so when the same ad hoc client's
+ * `select=...old_value...` read is evaluated `old_value` first, neither the `created_at` nor
+ * the `from_status` pin ever sees it — this dedicated `old_value` pin closes that gap without
+ * widening the drop beyond this one foreign query. There is no lever from ShopCX to make that
+ * query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:eabc230bebbd74a0`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise` — the
+ * same narrow-gating shape (exact `column <table>.<name> does not exist` + SELECT-on-table
+ * shape), aimed at the same foreign caller's `old_value` column.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column spec_status_history.old_value does not exist` (or the
+ *      `public.` qualified variant, with any leading `ERROR: ` prefix stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.spec_status_history`
+ *      lookup shape (any WHERE / LIMIT / ORDER BY tail is fine), or PostgREST's
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."spec_status_history" ... )`
+ *      direct-REST wrapper (double-quoted identifiers) — the shape actually recurring in the
+ *      feed for signature `supabase-logs:eabc230bebbd74a0`.
+ *
+ * Narrowly gated so a column-missing error for ANY OTHER table, a DIFFERENT column on
+ * `spec_status_history`, or a non-SELECT statement against the table still pages — the
+ * wrapped op must itself be a SELECT, so a PostgREST INSERT/UPDATE/DELETE naming the bogus
+ * `old_value` column is a real code bug we keep paging on. Empty / nullish message OR query
+ * returns `false` — we need both markers. Consumed by the `postgres` LogQuery's `mapRow` in
+ * [[./supabase-log-poll]]: returning null drops the row (no error_event, no loop_alert, no
+ * signature). A capture-time drop, not a transient flag.
+ */
+export function isForeignSupabasePostgresMissingSpecStatusHistoryOldValueAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column spec_status_history.old_value does not exist" ||
+    stripped === "column public.spec_status_history.old_value does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `spec_status_history`
+  // (with or without the `public.` schema qualifier). A non-SELECT statement (a real code
+  // bug writing the bogus column) stays captured.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?spec_status_history\b/.test(q)) return true;
+  // PostgREST direct-REST reads arrive wrapped as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."spec_status_history" ... )` (double-quoted identifiers) — same foreign read,
+  // the shape recurring in this signature. The wrapped op must be a SELECT, so a PostgREST
+  // write still pages.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?spec_status_history\b/.test(
+    q,
+  );
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column subscription_cycle_charges.created_at does
  * not exist` for an ad hoc SELECT lookup / PostgREST direct-REST call against
  * `public.subscription_cycle_charges`. The `subscription_cycle_charges` ledger exists as a
