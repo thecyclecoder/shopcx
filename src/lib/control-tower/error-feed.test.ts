@@ -97,6 +97,8 @@ import {
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise,
+  isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isExpectedBillingForecastsPendingUniqViolation,
   isExpectedSubscriptionCycleChargesCycleUniqViolation,
@@ -17847,6 +17849,332 @@ test("isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise retur
     isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise(
       "column tickets.assigned_agent does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/tickets?select=...&escalated=eq.true` against our `public.tickets` table. The
+// table exists but by design carries NO boolean `escalated` column — escalation state
+// lives on the `escalated_at` timestamp. Foreign-owned surface, no lever from us — drop AT
+// CAPTURE only when BOTH the exact column-missing message on `tickets.escalated` AND a
+// SELECT-lookup shape on `tickets` (bare OR PostgREST CTE wrapper) are present. A
+// column-missing on any other table, a different column on `tickets` (including the real
+// `escalated_at` column), a non-SELECT write, or a JOIN path still pages.
+
+test("isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise drops the captured message+query pair (positive drop — bare SELECT shape with the exact message)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column tickets.escalated does not exist",
+      "select id, escalated from public.tickets where workspace_id = $1 and escalated = $2",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column public.tickets.escalated does not exist",
+      "select escalated from public.tickets",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column tickets.escalated does not exist",
+      "select escalated from tickets limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "ERROR: column tickets.escalated does not exist",
+      "select escalated from public.tickets",
+    ),
+    true,
+  );
+  // Case-insensitive on the query; trailing WHERE / ORDER BY / LIMIT stays the ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column tickets.escalated does not exist",
+      "SELECT ID, ESCALATED FROM PUBLIC.TICKETS ORDER BY CREATED_AT DESC LIMIT 50",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"tickets\" ...)` CTE wrapper form (positive drop — CTE wrapper shape)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column tickets.escalated does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."tickets"."id", "public"."tickets"."escalated" FROM "public"."tickets" ORDER BY "public"."tickets"."created_at" DESC )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column public.tickets.escalated does not exist",
+      'WITH pgrst_source AS (SELECT "public"."tickets"."escalated" FROM "public"."tickets")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise KEEPS a column-missing on `tickets.escalated_at` (the REAL escalation column — a rename regression still pages)", () => {
+  // `tickets.escalated_at` IS the real escalation column. If it regressed we absolutely
+  // want the page. The pin is `escalated` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column tickets.escalated_at does not exist",
+      "select escalated_at from public.tickets order by created_at desc",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column public.tickets.escalated_at does not exist",
+      "select escalated_at from public.tickets",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise KEEPS a column-missing on a DIFFERENT table (`orders.escalated` — pin is tickets only)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column orders.escalated does not exist",
+      "select id, escalated from public.orders",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise KEEPS a non-SELECT statement shape on tickets (an INSERT / UPDATE / DELETE with the same message is a real code-bug and still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column tickets.escalated does not exist",
+      "insert into public.tickets (workspace_id, escalated) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column tickets.escalated does not exist",
+      "update public.tickets set escalated = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column tickets.escalated does not exist",
+      "delete from public.tickets where escalated = $1",
+    ),
+    false,
+  );
+  // The PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column tickets.escalated does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."tickets"("workspace_id", "escalated") VALUES ($1, $2) RETURNING "public"."tickets"."id" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise KEEPS the same message on a JOIN with another table (a real code path joining tickets still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column tickets.escalated does not exist",
+      "select t.id, t.escalated, w.slug from public.tickets t join public.workspaces w on w.id = t.workspace_id where w.slug = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row stays
+  // captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
+      "column tickets.escalated does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/specs?select=...&spec_slug=eq.<slug>` against our `public.specs` table. The
+// table exists but by design carries NO `spec_slug` column — the stable identifier lives on
+// the bare `slug` column. Foreign-owned surface, no lever from us — drop AT CAPTURE only
+// when BOTH the exact column-missing message on `specs.spec_slug` AND a SELECT-lookup shape
+// on `specs` (bare OR PostgREST CTE wrapper) are present. A column-missing on any other
+// table, a different column on `specs` (including the real `slug` column), a non-SELECT
+// write, or a JOIN path still pages.
+
+test("isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise drops the captured message+query pair (positive drop — bare SELECT shape with the exact message)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column specs.spec_slug does not exist",
+      "select id, spec_slug from public.specs where spec_slug = $1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column public.specs.spec_slug does not exist",
+      "select spec_slug from public.specs",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column specs.spec_slug does not exist",
+      "select spec_slug from specs limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "ERROR: column specs.spec_slug does not exist",
+      "select spec_slug from public.specs",
+    ),
+    true,
+  );
+  // Case-insensitive on the query; trailing WHERE / ORDER BY / LIMIT stays the ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column specs.spec_slug does not exist",
+      "SELECT ID, SPEC_SLUG FROM PUBLIC.SPECS ORDER BY CREATED_AT DESC LIMIT 50",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"specs\" ...)` CTE wrapper form (positive drop — CTE wrapper shape)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column specs.spec_slug does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."specs"."id", "public"."specs"."spec_slug" FROM "public"."specs" ORDER BY "public"."specs"."created_at" DESC )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column public.specs.spec_slug does not exist",
+      'WITH pgrst_source AS (SELECT "public"."specs"."spec_slug" FROM "public"."specs")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise KEEPS a column-missing on `specs.slug` (the REAL slug column — a rename regression still pages)", () => {
+  // `specs.slug` IS the real identifier column. If it regressed we absolutely want the
+  // page. The pin is `spec_slug` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column specs.slug does not exist",
+      "select slug from public.specs order by created_at desc",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column public.specs.slug does not exist",
+      "select slug from public.specs",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise KEEPS a column-missing on a DIFFERENT table (`spec_phases.spec_slug` — pin is specs only)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column spec_phases.spec_slug does not exist",
+      "select id, spec_slug from public.spec_phases",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise KEEPS a non-SELECT statement shape on specs (an INSERT / UPDATE / DELETE with the same message is a real code-bug and still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column specs.spec_slug does not exist",
+      "insert into public.specs (slug, spec_slug) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column specs.spec_slug does not exist",
+      "update public.specs set spec_slug = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column specs.spec_slug does not exist",
+      "delete from public.specs where spec_slug = $1",
+    ),
+    false,
+  );
+  // The PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column specs.spec_slug does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."specs"("slug", "spec_slug") VALUES ($1, $2) RETURNING "public"."specs"."id" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise KEEPS the same message on a JOIN with another table (a real code path joining specs still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column specs.spec_slug does not exist",
+      "select s.id, s.spec_slug, p.phase_index from public.specs s join public.spec_phases p on p.spec_id = s.id where s.slug = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row stays
+  // captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise(
+      "column specs.spec_slug does not exist",
+      "",
     ),
     false,
   );
