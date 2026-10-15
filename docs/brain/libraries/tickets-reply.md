@@ -14,6 +14,10 @@
 
 `deliverTicketMessage` sends to the ticket's `customer_id` email — NOT the inbound from-address (`email_message_id` is threading only). Account-linking that reassigns identity must update `ticket.customer_id` (or `update_customer_info`) before replying, or the reply routes to the wrong address. See [[../lifecycles/customer-portal]] / account-linking.
 
+## `message` is PLAIN TEXT, not HTML
+
+Pass paragraphs separated by blank lines (`\n\n`) — [[ticket-delivery]]'s `toHtml` splits on `\n\n+` and wraps each block in `<p>` itself (single `\n` → `<br>`). Handing it pre-wrapped `<p>…</p>` HTML has no `\n\n`, so the whole string is treated as ONE paragraph and wrapped a second time, storing `<p><p>a</p><p>b</p></p>`. It still renders (the parser auto-closes the outer `<p>`) but leaves a stray empty paragraph — and a caller that "fixes" it by re-sending just duplicates the message to the customer. Ticket b28e7744 (Juana, 2026-09-04) is the ground-truth case.
+
 ## Callers
 
 Hand-fixes · one-off reply tooling. (Sol's first-touch reply ships through [[../../scripts/builder-worker]]'s send path, not this wrapper.)
