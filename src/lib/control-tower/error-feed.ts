@@ -9677,6 +9677,59 @@ export function isExpectedBillingForecastsPendingUniqViolation(
 }
 
 /**
+ * By-design idempotency-race 23505 on `subscription_cycle_charges_sub_cycle_uidx`.
+ *
+ * The subscription-cycle billing path records exactly one charge row per (subscription,
+ * cycle) pair. A concurrent second insert for the same pair — a benign dunning/webhook race
+ * — is INTENTIONALLY rejected by the unique index at 23505, and the app catch converges on
+ * the winning row instead of double-charging. Capturing that 23505 as a Control Tower
+ * error-feed incident pages Platform on a race the DB is intentionally rejecting — a healthy
+ * loop noisily surfacing as an ERROR.
+ *
+ * Sibling of `isExpectedBillingForecastsPendingUniqViolation` /
+ * `isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation` — same by-design class: the
+ * ERROR is from our own code and the code is designed to handle it. Not `foreign`, not
+ * `transient` — `expected`.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the trimmed `event_message` — with an optional leading `ERROR: ` prefix stripped —
+ *      EQUALS the exact unique-violation shape for this constraint:
+ *      `duplicate key value violates unique constraint "subscription_cycle_charges_sub_cycle_uidx"`,
+ *      AND
+ *   2. the lowercased `parsed.query` contains an
+ *      `insert into "public"."subscription_cycle_charges"` shape — matches both the bare
+ *      INSERT and the PostgREST `WITH pgrst_source AS (INSERT INTO ...` CTE wrapper.
+ *
+ * Narrowly gated so a 23505 on any OTHER constraint (a real schema regression), or a 23505
+ * on this constraint via a NON-INSERT shape (COPY replay, pg_dump load, an UPDATE ... on
+ * conflict), still surfaces / pages. Capture-time drop: returns null in the `postgres`
+ * mapRow, fully suppressing the row (no error_event, no loop_alert, no signature).
+ */
+export function isExpectedSubscriptionCycleChargesCycleUniqViolation(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (
+    stripped !==
+    'duplicate key value violates unique constraint "subscription_cycle_charges_sub_cycle_uidx"'
+  ) {
+    return false;
+  }
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // INSERT INTO "public"."subscription_cycle_charges" — the subscription-cycle billing path
+  // we intentionally own (matches the PostgREST `WITH pgrst_source AS (INSERT INTO ...` CTE
+  // wrapper too). A non-INSERT statement that hits the same index is a different caller class
+  // and stays captured/paged.
+  return q.includes('insert into "public"."subscription_cycle_charges"');
+}
+
+/**
  * Transient Supabase-EDGE SSL-handshake noise — the app-layer sibling of
  * `isTransientSupabaseLogNoise` / `isTransientInngestTransportError`, factored here so any
  * feed can reuse it ([[../specs/error-feed-drop-supabase-edge-ssl-handshake-noise]]).
