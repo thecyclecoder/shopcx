@@ -336,6 +336,10 @@ function makeAmplifySpyDeps(): {
     deps: {
       sendInngest: async (event) => { sentInngest.push(event); return { ids: ["stub"] }; },
       recordActivity: async (_admin, row) => { recordedActivity.push(row as unknown as Record<string, unknown>); return undefined; },
+      // Always stub the matched-lander materializer: the default is the REAL optimizer write,
+      // which (via createAdminClient) sent this file's "P-1" fixture to production as a
+      // storefront_experiments INSERT on every test run. A refusal makes the pair a no-op here.
+      materializeOptimizerCampaign: async () => ({ ok: false, detail: "stubbed in amplify tests" }),
     },
     sentInngest,
     recordedActivity,
