@@ -83,7 +83,7 @@ const { count } = await admin.from("crisis_customer_actions")
 
 ## Gotchas
 
-- `subscription_id` is the **internal UUID**, not `shopify_contract_id`. See feedback_crisis_action_subscription_id.
+- `subscription_id` is the **internal UUID**, not `shopify_contract_id`. **Critical:** Every query against this column must resolve the internal UUID first. The reactivate action handler (see [[../libraries/action-executor]] § `reactivate`) originally passed the Shopify numeric contract id straight into this UUID column, causing type errors and silently dropping preserved crisis prices — always use internal subscription UUID from the [[subscriptions]] table.
 - Tier progression is monotonic: 0 → 1 → 2 → 3. Tier 3 outcomes diverge by segment (`berry_only` pauses, `berry_plus` removes item).
 
 ---
