@@ -5127,6 +5127,171 @@ async function applyMigrationAndRecord(
   }
 }
 
+// gated-migration-approval-card — the migration-drift reconciler's `onApprovalNeeded` hook. A merged-but-
+// unapplied migration that classifyMigrationSql flagged reversible/irreversible_destructive used to get only
+// a console.warn (no card, no agent_jobs row) and sat unapplied forever — e.g. the `billing_alert` CHECK
+// widening (DROP CONSTRAINT IF EXISTS + ADD CONSTRAINT) that left every billing alert rejected in prod.
+// Now it files ONE routed Approval Request on the EXISTING supervised out-of-leash rail: an agent_jobs row
+// kind='ceo-authorized-out-of-leash' (status needs_approval) carrying one `apply_migration` pending action
+// with a `migration_drift` {version,file,content_hash} marker. reconcileApprovalInbox surfaces it;
+// /api/roadmap/approve flips it to queued_resume; runCeoAuthorizedOutOfLeashJob applies THAT file via
+// applyMigrationAndRecord (ledger row written) and the next drift tick clears.
+// Deduped on version + content hash (gatedMigrationDedupeKey): ≤1 approval per (version, content) in ANY
+// status — re-ticks never fan out, a decline is not re-filed until the file changes, and an edited file
+// supersedes its stale open card. Routing: routeDestructiveAction, then Platform-routed ⇒ CEO when
+// Platform/Ada is not live+autonomous (resolveGatedMigrationRoute). Never throws into the drift loop
+// (applyMergedMigrations also swallows a hook throw).
+async function fileGatedMigrationApproval(input: {
+  version: string;
+  file: string;
+  sql: string;
+  severity: import("../src/lib/migration-safety").MigrationSeverity;
+  matches: string[];
+}): Promise<void> {
+  const tag = `[migration-drift:gated:${input.version}]`;
+  const lib = await import("../src/lib/control-tower/gated-migration-approval");
+  const workspaceId = await resolveOwnerWorkspaceId();
+  if (!workspaceId) {
+    console.warn(`${tag} no owner workspace resolvable — cannot file approval for ${input.file}`);
+    return;
+  }
+  const dedupeKey = lib.gatedMigrationDedupeKey(input.version, input.sql);
+  const { data: priorRows, error: priorErr } = await db
+    .from("agent_jobs")
+    .select("id, status, instructions, pending_actions")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", lib.GATED_MIGRATION_JOB_KIND)
+    .eq("spec_slug", lib.gatedMigrationSpecSlug(input.version))
+    .limit(50);
+  if (priorErr) {
+    // Never file on a FAILED read — that is exactly how a re-tick would fan out duplicates.
+    console.warn(`${tag} prior-approval read failed — skipping this tick: ${priorErr.message}`);
+    return;
+  }
+  type PriorRow = { id: string; status: string; instructions: string | null; pending_actions: PendingAction[] | null };
+  const priorList = (priorRows ?? []) as PriorRow[];
+  const existing = priorList.map((r) => lib.parseExistingGatedMigrationRow(r));
+  const decision = lib.decideGatedMigrationFiling(existing, { version: input.version, dedupeKey });
+  if (decision.action === "skip") {
+    console.log(`${tag} ${input.file}: ${decision.reason} (job ${decision.existingId.slice(0, 8)})`);
+    return;
+  }
+
+  const { computeBlastRadius } = await import("../src/lib/migration-safety");
+  // NO pg client — static severity + matches only; never dry-run unapproved SQL against prod.
+  const blastRadius = await computeBlastRadius(input.sql);
+  let platformAutoApprover = false;
+  try {
+    const { loadAutonomyMap } = await import("../src/lib/agents/approval-router");
+    const { platformIsAutoApprover } = await import("../src/lib/agents/platform-director");
+    platformAutoApprover = platformIsAutoApprover(await loadAutonomyMap());
+  } catch { /* unreadable flags ⇒ treat Platform as dormant ⇒ CEO */ }
+  const route = lib.resolveGatedMigrationRoute({ sql: input.sql, blastRadius, platformAutoApprover });
+  const row = lib.buildGatedMigrationApprovalJob({
+    workspaceId,
+    version: input.version,
+    file: input.file,
+    sql: input.sql,
+    severity: input.severity,
+    matches: input.matches,
+    blastRadius,
+    route,
+  });
+
+  // Supersede stale open cards for this version (file edited since filing) BEFORE filing the new one, so
+  // the inbox shows exactly one. Compare-and-set on needs_approval; the inbox reconciler then dismisses it.
+  for (const staleId of decision.supersedeIds) {
+    const stale = priorList.find((r) => r.id === staleId);
+    const acts = (stale?.pending_actions ?? []).map((a) =>
+      a.status === "pending"
+        ? { ...a, status: "declined" as const, result: "superseded — migration file changed; a fresh request was filed" }
+        : a,
+    );
+    await db
+      .from("agent_jobs")
+      .update({
+        status: "completed",
+        pending_actions: acts,
+        log_tail: `${tag} superseded — ${input.file} changed after this request was filed; a fresh request carries the new content.`.slice(-2000),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", staleId)
+      .eq("status", "needs_approval");
+  }
+
+  const { data: inserted, error } = await db.from("agent_jobs").insert(row).select("id").single();
+  if (error || !inserted) {
+    console.error(`${tag} filing approval for ${input.file} failed: ${error?.message ?? "no row"}`);
+    return;
+  }
+  const jobId = (inserted as { id: string }).id;
+  console.warn(
+    `${tag} APPROVAL FILED: ${input.file} (${input.severity}${input.matches.length ? `: ${input.matches.join(", ")}` : ""}) → ${route.routedToFunction} (job ${jobId.slice(0, 8)}). ${route.reason}`,
+  );
+  try {
+    const { recordDirectorActivity } = await import("../src/lib/director-activity");
+    await recordDirectorActivity(db, {
+      workspaceId,
+      directorFunction: "platform",
+      actionKind: "raised_gated_migration_approval",
+      specSlug: null,
+      reason: `${input.file} merged-but-unapplied; classifier flagged ${input.severity} — filed for approval instead of auto-applying`,
+      metadata: {
+        target_job_id: jobId,
+        migration_version: input.version,
+        migration_file: input.file,
+        severity: input.severity,
+        matches: input.matches,
+        dedupe_key: dedupeKey,
+        routed_to_function: route.routedToFunction,
+        base_routed_to_function: route.baseRoutedToFunction,
+        platform_dormant_fallback: route.platformDormantFallback,
+        route_reason: route.reason,
+        superseded_job_ids: decision.supersedeIds,
+        autonomous: false,
+      },
+    });
+  } catch { /* audit best-effort */ }
+}
+
+// gated-migration-approval-card — the EXECUTION half, called by runCeoAuthorizedOutOfLeashJob for an
+// APPROVED drift-filed `apply_migration` action. Re-reads the file on main, refuses unless its bytes still
+// hash to what the approver saw (validateGatedMigrationExecution), short-circuits if the ledger already
+// has the version, else applies via applyMigrationAndRecord (statement-level, ledger row recorded) and
+// pulls the next drift tick forward so the tile clears promptly.
+async function executeGatedMigrationApproval(
+  marker: import("../src/lib/control-tower/gated-migration-approval").GatedMigrationMarker,
+): Promise<{ ok: boolean; text: string }> {
+  const { validateGatedMigrationExecution } = await import("../src/lib/control-tower/gated-migration-approval");
+  let onDiskSql: string | null = null;
+  try {
+    onDiskSql = readFileSync(resolve(REPO_DIR, "supabase/migrations", marker.file), "utf8");
+  } catch {
+    onDiskSql = null;
+  }
+  let appliedVersions: Set<string> | null = null;
+  try {
+    const v = await fetchAppliedMigrationVersions();
+    appliedVersions = v ? new Set(v) : null;
+  } catch {
+    appliedVersions = null; // unreadable ledger ⇒ proceed; applyMigrationAndRecord records conflict-safely
+  }
+  const check = validateGatedMigrationExecution({ marker, onDiskSql, appliedVersions });
+  if (!check.ok) {
+    // Already in the ledger = the desired end state (a concurrent apply landed it) — not a failure.
+    if (check.outcome === "already-applied") return { ok: true, text: check.reason };
+    return { ok: false, text: check.reason };
+  }
+  const r = await applyMigrationAndRecord({ version: marker.version, file: marker.file, sql: onDiskSql as string });
+  lastMigrationDriftCheck = 0; // re-run the drift check on the next poll so the tile clears
+  return {
+    ok: true,
+    text: r && r.alreadyApplied
+      ? `applied ${marker.file} (some objects already present — reconciled) + recorded version ${marker.version}`
+      : `applied ${marker.file} + recorded version ${marker.version} in supabase_migrations.schema_migrations`,
+  };
+}
+
 // The periodic migration-drift job: runs BOTH drift axes (table-presence + applied-set reconcile)
 // and rides both on the same migration-drift-check loop heartbeat. The Control Tower monitor's
 // migration-drift output assertion reads produced.missing + produced.mergedButUnapplied and flips
@@ -5134,8 +5299,9 @@ async function applyMigrationAndRecord(
 // failure must not break the poll loop.
 // Phase 2 closes the loop: on merged-but-unapplied migrations, classify each via
 // classifyMigrationSql; additive → auto-apply on the pooler + record schema_migrations; destructive
-// → gate for approval (NEVER auto-apply — the tile alert names the version and stays until a human
-// runs the sanctioned apply script). Re-run the reconciler after any auto-apply so a resolved drift
+// → gate for approval (NEVER auto-apply — fileGatedMigrationApproval files ONE deduped, routed
+// Approval Request whose approval applies the file via applyMigrationAndRecord; the tile alert names
+// the version until it lands). Re-run the reconciler after any auto-apply so a resolved drift
 // clears the tile.
 // ci-guard-migrations-applied-not-just-merged spec Phase 1 added the second axis; Phase 2 the loop.
 async function runMigrationDriftJob(): Promise<void> {
@@ -5166,12 +5332,11 @@ async function runMigrationDriftJob(): Promise<void> {
       const processed = await applyMergedMigrations(result.mergedButUnapplied, {
         readSql: (file) => readFileSync(resolve(migrationsDir, file), "utf8"),
         applyMigration: applyMigrationAndRecord,
-        onApprovalNeeded: ({ version, file, severity, matches }) => {
-          // The tile alert (below) names the version; log for oncall visibility.
-          console.warn(
-            `[migration-drift] APPROVAL NEEDED: ${file} (version ${version}) is merged-but-unapplied and classifyMigrationSql flagged ${severity}${matches.length ? ` (${matches.join(", ")})` : ""}; NOT auto-applied — run the sanctioned apply script.`,
-          );
-        },
+        // gated-migration-approval-card: file ONE deduped, routed Approval Request (tappable in the
+        // Approvals inbox) whose approval applies THIS file via applyMigrationAndRecord. The tile alert
+        // (below) still names the version until it lands.
+        onApprovalNeeded: ({ version, file, sql, severity, matches }) =>
+          fileGatedMigrationApproval({ version, file, sql, severity, matches }),
       });
       for (const p of processed) {
         if (p.outcome === "applied") {
@@ -19823,7 +19988,11 @@ async function runCeoAuthorizedOutOfLeashJob(job: Job) {
   // + ceo_declined_out_of_leash_request) read this so the ledger says who really approved.
   const authorizedByStamp = destructiveRouteMeta?.routedToFunction === "platform" ? "platform" : "ceo";
   const isDestructiveDecision = !!blastRadiusMeta && blastRadiusMeta.severity !== undefined && blastRadiusMeta.severity !== "additive";
-  if (isDestructiveDecision) {
+  // gated-migration-approval-card — a request the migration-drift reconciler filed (not one Ada raised).
+  // Its decision grade is only Ada's to carry when the route put the call in Platform's lane; a CEO
+  // decision on a deterministic tool's filing isn't a director call to grade.
+  const isMigrationDriftOrigin = instr.origin === "migration-drift";
+  if (isDestructiveDecision && (!isMigrationDriftOrigin || authorizedByStamp === "platform")) {
     try {
       // Cast: writeDestructiveActionDecisionGrade takes a locally-declared MinimalAdmin
       // (Promise<...> return on chained builder). The real supabase-js client resolves to
@@ -19908,12 +20077,28 @@ async function runCeoAuthorizedOutOfLeashJob(job: Job) {
     let ok = false;
     let resultText = "";
     try {
-      // apply_migration cmds emitted as `supabase db push --db-url "$SUPABASE_POOLER_URL"` cannot
-      // connect on the builder (no SUPABASE_POOLER_URL in the systemd env); runApprovedAction routes
-      // them through the pgClient apply-script pattern so the migration actually lands.
-      const r = await runApprovedAction(a, REPO_DIR, 10 * 60 * 1000);
-      ok = r.code === 0;
-      resultText = (r.out + r.err).slice(-500);
+      if (isMigrationDriftOrigin) {
+        // gated-migration-approval-card — a drift-filed request applies THAT file in-process via the
+        // same applyMigrationAndRecord the additive auto-apply uses (ledger row written), after
+        // re-checking the bytes still match what the approver saw. Its `cmd` is a display label, never
+        // shell-run; a missing/malformed marker fails closed.
+        const { readGatedMigrationMarker } = await import("../src/lib/control-tower/gated-migration-approval");
+        const marker = a.type === "apply_migration" ? readGatedMigrationMarker(meta) : null;
+        if (!marker) {
+          resultText = "migration-drift request has no valid migration_drift marker — refusing to execute";
+        } else {
+          const r = await executeGatedMigrationApproval(marker);
+          ok = r.ok;
+          resultText = r.text;
+        }
+      } else {
+        // apply_migration cmds emitted as `supabase db push --db-url "$SUPABASE_POOLER_URL"` cannot
+        // connect on the builder (no SUPABASE_POOLER_URL in the systemd env); runApprovedAction routes
+        // them through the pgClient apply-script pattern so the migration actually lands.
+        const r = await runApprovedAction(a, REPO_DIR, 10 * 60 * 1000);
+        ok = r.code === 0;
+        resultText = (r.out + r.err).slice(-500);
+      }
     } catch (e) {
       resultText = errText(e);
     }

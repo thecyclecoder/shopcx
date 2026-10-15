@@ -283,6 +283,7 @@
     "test:agent-jobs-update-retry": "tsx --test src/lib/agents/agent-jobs-update-retry.test.ts",
     "test:goal-proposals": "tsx --test src/lib/agents/goal-proposals.test.ts",
     "test:migration-drift": "tsx --test src/lib/control-tower/migration-drift.test.ts",
+    "test:gated-migration-approval": "tsx --test src/lib/control-tower/gated-migration-approval.test.ts",
     "test:error-feed": "tsx --test src/lib/control-tower/error-feed.test.ts",
     "test:portal-remediation": "tsx --test src/lib/portal/remediation.test.ts",
     "test:experiment-delivery-audit": "tsx --test src/lib/storefront/experiment-delivery-audit.test.ts",
