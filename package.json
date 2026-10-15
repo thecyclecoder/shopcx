@@ -92,6 +92,7 @@
     "test:review-request-cx-surface": "tsx --test src/lib/review-request-cx-surface.test.ts",
     "test:grep-smart-case": "tsx --test src/lib/spec-check-runner.smart-case.test.ts",
     "test:spec-check-tsc-config": "tsx --test src/lib/spec-check-runner.tsc-config.test.ts",
+    "test:spec-check-command-evidence": "tsx --test src/lib/spec-check-runner.command-evidence.test.ts",
     "test:broken-check-escalate": "tsx --test src/lib/roadmap-actions.broken-check-escalate.test.ts",
     "test:specs-table-resolve-branch-ref": "tsx --test src/lib/specs-table.resolve-branch-ref.test.ts",
     "test:specs-table-merge-contains-phase-build": "tsx --test src/lib/specs-table.merge-contains-phase-build.test.ts",

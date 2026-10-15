@@ -328,6 +328,32 @@ async function runCmd(
 }
 
 /**
+ * Evidence for a failed test/build command. The old evidence was the FIRST 4000 chars of output,
+ * and for a whole-suite `unit_test` (`test:all`) that is always passing `✔` lines. So the repair
+ * session and Mario never saw which test failed. On 2026-10-14/15, close-snapshot-coverage-guard
+ * burned three builds blind this way. Short output is returned whole, which keeps the harness
+ * classifier's signatures (`Missing script`, ENOENT) intact. Long output becomes every failing-test
+ * block plus the summary tail.
+ */
+export const COMMAND_EVIDENCE_MAX = 4000;
+export function summarizeCommandFailure(out: string, max = COMMAND_EVIDENCE_MAX): string {
+  if (out.length <= max) return out;
+  const lines = out.split("\n");
+  const blocks: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*(not ok\b|✖)/.test(lines[i])) continue;
+    blocks.push(lines.slice(i, i + 14).join("\n"));
+  }
+  // The summary tail (`# tests / # pass / # fail`), capped so one huge final line can't eat the budget.
+  const tail = lines.slice(-12).join("\n").slice(-Math.floor(max / 3));
+  const budget = max - tail.length - 3;
+  const head = blocks.length
+    ? `failing tests (${blocks.length}):\n${blocks.join("\n---\n")}`.slice(0, budget)
+    : out.slice(0, out.length - tail.length).slice(-budget);
+  return `${head}\n…\n${tail}`;
+}
+
+/**
  * Build the ripgrep argv used by the grep executor. The pattern is passed via `-e` so a pattern
  * starting with `-` cannot be re-parsed as an option, and the user-controlled path is placed after
  * an argv separator `--` so even a validated path cannot be interpreted by ripgrep as a flag or a
@@ -568,7 +594,7 @@ export const defaultExecutors: CheckExecutors = {
       ok: r.code === 0,
       evidence: r.code === 0
         ? `npm run ${params.script} — exit 0`
-        : (r.stderr || r.stdout || `npm run ${params.script} — exit ${r.code}`).slice(0, 4000),
+        : summarizeCommandFailure([r.stdout, r.stderr].filter(Boolean).join("\n") || `npm run ${params.script} — exit ${r.code}`),
     };
   },
   build: async ({ repoRoot }) => {
@@ -582,7 +608,7 @@ export const defaultExecutors: CheckExecutors = {
       ok: r.code === 0,
       evidence: r.code === 0
         ? "next build — exit 0"
-        : (r.stderr || r.stdout || `next build — exit ${r.code}`).slice(0, 4000),
+        : summarizeCommandFailure([r.stdout, r.stderr].filter(Boolean).join("\n") || `next build — exit ${r.code}`),
     };
   },
 };
