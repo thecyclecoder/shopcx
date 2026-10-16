@@ -111,6 +111,7 @@ import {
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
+  isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
@@ -2063,6 +2064,115 @@ test("isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise KE
   assert.equal(
     isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
       "column loyalty_redemptions.customer_id does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise ──
+// A foreign / stale direct-REST client read `public.loyalty_redemptions` expecting redemption-
+// lineage columns (`parent_redemption_id` / `source_redemption_id`) our schema has never
+// carried; Control Tower signature `supabase-logs:b63e412e75ea5e87`. Drop AT CAPTURE only when
+// BOTH an exact `column loyalty_redemptions.<lineage> does not exist` message AND the SELECT-
+// lookup shape on `loyalty_redemptions` (bare or PostgREST CTE wrapper) are present. A real
+// different-column-missing, a non-SELECT write, or a FATAL still pages.
+
+test("isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise drops the exact signature (both lineage columns, CTE + bare SELECT)", () => {
+  // The captured incident shape: a stale direct-REST client lists loyalty_redemptions selecting
+  // parent_redemption_id, PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."loyalty_redemptions" ... )` CTE, and Postgres rejects with the column-missing.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(
+      "column loyalty_redemptions.parent_redemption_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loyalty_redemptions"."id", "public"."loyalty_redemptions"."parent_redemption_id" FROM "public"."loyalty_redemptions" WHERE "public"."loyalty_redemptions"."parent_redemption_id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // The sibling source_redemption_id column + `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(
+      "column public.loyalty_redemptions.source_redemption_id does not exist",
+      'with pgrst_source as ( select "public"."loyalty_redemptions"."source_redemption_id" from "public"."loyalty_redemptions" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(
+      "ERROR: column loyalty_redemptions.source_redemption_id does not exist",
+      'WITH pgrst_source AS ( SELECT "source_redemption_id" FROM "public"."loyalty_redemptions" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper), qualified and unqualified FROM, drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(
+      "column loyalty_redemptions.parent_redemption_id does not exist",
+      "select id, parent_redemption_id from public.loyalty_redemptions where parent_redemption_id = $1 limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(
+      "column loyalty_redemptions.source_redemption_id does not exist",
+      "select * from loyalty_redemptions where source_redemption_id is not null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise KEEPS real errors (other table, other column, non-SELECT, FATAL, empty)", () => {
+  // Same column-missing message on a DIFFERENT relation is a real product-schema regression and
+  // still pages — the pin names loyalty_redemptions only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(
+      "column order_refunds.parent_redemption_id does not exist",
+      "select id, parent_redemption_id from public.order_refunds",
+    ),
+    false,
+  );
+  // A DIFFERENT column on loyalty_redemptions (a real column rename / schema regression) still
+  // pages — the pin is parent_redemption_id / source_redemption_id only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(
+      "column loyalty_redemptions.customer_id does not exist",
+      "select id, customer_id from public.loyalty_redemptions",
+    ),
+    false,
+  );
+  // A non-SELECT shape (PostgREST CTE write / bare write) is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(
+      "column loyalty_redemptions.parent_redemption_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."loyalty_redemptions"("id","parent_redemption_id") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(
+      "column loyalty_redemptions.source_redemption_id does not exist",
+      "update public.loyalty_redemptions set source_redemption_id = $1 where id = $2",
+    ),
+    false,
+  );
+  // A FATAL / constraint-class error on the same shape is untouched (different message).
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select id, parent_redemption_id from public.loyalty_redemptions",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise("", "select * from loyalty_redemptions"),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(
+      "column loyalty_redemptions.parent_redemption_id does not exist",
       "",
     ),
     false,
