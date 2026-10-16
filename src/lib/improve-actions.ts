@@ -15,6 +15,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import type { ActionContext, ActionParams, ActionResult } from "@/lib/action-executor";
 import { proposePrompt } from "@/lib/sonnet-prompts-table";
+import { isSubscriptionUuid } from "@/lib/internal-subscription";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -56,7 +57,7 @@ async function dispatchDirectAction(
   };
   const action = { type, ...params } as ActionParams;
   // Resolve internal subscription UUID → Shopify contract id (mirrors handleDirectAction).
-  if (action.contract_id && action.contract_id.includes("-")) {
+  if (action.contract_id && isSubscriptionUuid(action.contract_id)) {
     const { data: sub } = await admin.from("subscriptions")
       .select("shopify_contract_id").eq("id", action.contract_id).maybeSingle();
     if (sub?.shopify_contract_id) action.contract_id = sub.shopify_contract_id;

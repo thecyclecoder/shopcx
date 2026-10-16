@@ -42,6 +42,22 @@ interface SubRow {
  *  against PostgREST filter injection (same gate as portal `resolveSub`). */
 const SAFE_CONTRACT_ID = /^[A-Za-z0-9_-]+$/;
 
+/** Canonical subscription-UUID shape (same pattern as migration-audit.ts / appstle.ts). */
+const SUBSCRIPTION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * True only when `v` is a genuine subscriptions.id UUID.
+ *
+ * Action-dispatch sites resolve a contract_id to its `shopify_contract_id` by casting it against
+ * the uuid-typed `subscriptions.id` column. A bare `includes("-")` check cannot tell a UUID from an
+ * already-resolved internal contract id (`internal-<hex>`), so an internal id used to flow into the
+ * cast and spam the Postgres error feed with invalid-uuid errors. Gate the lookup on this helper so
+ * internal-* and numeric Shopify contract ids pass straight through untouched.
+ */
+export function isSubscriptionUuid(v: string): boolean {
+  return SUBSCRIPTION_UUID_RE.test(v);
+}
+
 type ContractRefRow = Record<string, unknown> & {
   id: string;
   shopify_contract_id: string | null;

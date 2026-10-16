@@ -20,6 +20,7 @@ import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 import { LOYALTY_REMEDY_MAX_CENTS } from "@/lib/loyalty";
 import { attemptAllergenHold, isAllergyEscalation } from "@/lib/order-holds";
 import { linkGroupIds } from "@/lib/customer-links";
+import { isSubscriptionUuid } from "@/lib/internal-subscription";
 import type { OneTimeChargeInput, OneTimeChargeResult } from "@/lib/one-time-charge";
 
 // ── Types ──
@@ -1068,7 +1069,7 @@ async function executeActionsInline(
   // contract IDs (mirrors handleDirectAction's resolution step).
   const actions = [...rawActions];
   for (const action of actions) {
-    if (action.contract_id && action.contract_id.includes("-")) {
+    if (action.contract_id && isSubscriptionUuid(action.contract_id)) {
       const { data: sub } = await ctx.admin.from("subscriptions")
         .select("shopify_contract_id")
         .eq("id", action.contract_id)
@@ -4929,7 +4930,7 @@ async function handleDirectAction(
 
   // Resolve contract IDs — Sonnet might return UUIDs instead of Shopify contract IDs
   for (const action of actions) {
-    if (action.contract_id && action.contract_id.includes("-")) {
+    if (action.contract_id && isSubscriptionUuid(action.contract_id)) {
       // Looks like a UUID — resolve to Shopify contract ID
       const { data: sub } = await ctx.admin.from("subscriptions")
         .select("shopify_contract_id")

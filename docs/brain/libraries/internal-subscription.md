@@ -28,6 +28,14 @@ stubbed for now — the renewal scheduler lands in a future commit.
 
 ## Exports
 
+### `isSubscriptionUuid(v: string): boolean` — pure UUID guard
+
+```ts
+export function isSubscriptionUuid(v: string): boolean
+```
+
+True only when `v` matches the canonical UUID shape `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$` (same pattern as `migration-audit.ts` / `appstle.ts`). The three action-dispatch sites — `executeActionsInline` + `handleDirectAction` in [[action-executor]] and `dispatchDirectAction` in [[improve-actions]] — gate the `contract_id → shopify_contract_id` lookup on this instead of a bare `contract_id.includes("-")`. The old dash-only check could not tell a subscription UUID from an already-resolved internal contract id (`internal-<hex>`), so an internal id used to be cast against the uuid-typed `subscriptions.id` column and spam the Postgres error feed with invalid-uuid errors (284 hits over three weeks). Internal-* and numeric Shopify contract ids now pass straight through untouched; genuine UUIDs still resolve to their `shopify_contract_id`.
+
 ### `isInternalSubscription` — function
 
 ```ts
