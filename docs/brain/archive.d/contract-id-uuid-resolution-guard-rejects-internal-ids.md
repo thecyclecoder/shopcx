@@ -1,0 +1,1 @@
+- **Stop treating internal-* contract ids as subscription UUIDs in the action-executor resolution guard** · verified 2026-10-16 · → [[../libraries/internal-subscription]]
