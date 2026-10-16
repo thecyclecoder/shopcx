@@ -13,8 +13,23 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **AutoBuild must circuit-break after N identical pre-commit self-verify failures instead of looping forever** · verified 2026-10-15 · → [[../lifecycles/build-flow]]
+- **Close-snapshot coverage guard** · verified 2026-10-15 · → [[../lifecycles/shoptics-migration]]
+- **Escalation-idle tile: honor a covering triage_run / parked review instead of raw job created_at** · verified 2026-10-15 · → [[../libraries/control-tower]]
 - **Drop the foreign ad-hoc REST read of the non-existent agent_jobs.finished_at column from the Control Tower error feed** · verified 2026-10-15 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise`)
+- **Drop foreign uuid-LIKE-on-agent_jobs.id Studio/direct-REST probe at error-feed capture** · verified 2026-10-15 · → [[../libraries/control-tower]] · [[../inngest/supabase-log-poll]]
 - **Extend the agent_jobs.payload noise classifier with a second fingerprint for JSON-path-filter foreign reads** · verified 2026-10-15 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingAgentJobsPayloadDirectRestLookupNoise` + [[../specs/error-feed-drop-agent-jobs-payload-direct-rest-lookup-noise]])
+- **Drop foreign direct-REST fraud_cases.updated_at missing-column noise at capture** · verified 2026-10-15 · → [[../libraries/control-tower]]
+- **Drop foreign direct-REST loop_alerts.title column-missing noise at capture** · verified 2026-10-15 · → [[../libraries/control-tower]]
+- **Drop foreign direct-REST noise: column spec_phases.phase_index does not exist** · verified 2026-10-15 · → [[../inngest/supabase-log-poll]]
+- **Scope out foreign PostgREST noise on spec_status_history.old_value** · verified 2026-10-15 · → [[../libraries/control-tower]]
+- **Scope out the ad-hoc spec_test_runs.verdict missing-column REST noise from the Control Tower feed** · verified 2026-10-15 · → [[../libraries/control-tower]]
+- **Stop paging on the by-design subscription_cycle_charges idempotency 23505** · verified 2026-10-15 · → [[../inngest/supabase-log-poll]]
+- **Drop foreign-app noise: subscriptions.shipping_price_cents direct-REST column lookup** · verified 2026-10-15 · → [[../libraries/control-tower]]
+- **Scope out two foreign ad-hoc column-missing errors (tickets.escalated, specs.spec_slug) from the Supabase-logs feed** · verified 2026-10-15 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise` + `isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise`; cross-links in [[../tables/tickets]] + [[../tables/specs]])
+- **Stop orders-classification SDK from selecting the nonexistent orders.amazon_order_id column** · verified 2026-10-15 · → [[../libraries/orders-classification]]
+- **Fix spec_phases probe scripts to use `position`, not the non-existent `phase_number` column** · verified 2026-10-15 · → [[../tables/spec_phases]], [[../libraries/specs-table]]
+- **Reactivate handler resolves subscription UUID before crisis price lookup** · verified 2026-10-15 · → [[../libraries/action-executor]], [[../tables/crisis_customer_actions]]
+- **Security dependency upgrades** · verified 2026-10-15 · → [[../libraries/security-agent]]
 - **Dismissing a park card closes the stuck job behind it** · verified 2026-10-14 · → [[../libraries/approval-inbox]]
 - **Stop the subscription drift monitor from paging on the founder's internal test subscriptions** · verified 2026-10-14 · → [[../inngest/shopcx-drift-reconcile]]
 - **Scope out foreign-app noise: drop dashboard_notifications.status column SELECT errors** · verified 2026-10-14 · → [[../libraries/control-tower]]
