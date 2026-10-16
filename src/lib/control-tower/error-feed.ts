@@ -1587,6 +1587,59 @@ export function isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColu
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing lineage column (`parent_redemption_id` or
+ * `source_redemption_id`) for an ad hoc direct-REST read of `public.loyalty_redemptions`. A
+ * foreign/stale PostgREST client read `loyalty_redemptions` expecting redemption-lineage
+ * columns our schema has never carried; no in-tree code path reads
+ * `loyalty_redemptions.parent_redemption_id` / `source_redemption_id`. The resulting
+ * undefined_column ERROR is repair work for a query no ShopCX code owns (Control Tower
+ * signature `supabase-logs:b63e412e75ea5e87`).
+ *
+ * Sibling of `isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise` — same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` message + SELECT-lookup
+ * shape that covers BOTH the bare SELECT and the PostgREST CTE wrapper), scoped to the two
+ * `loyalty_redemptions` lineage columns' direct-REST shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for `parent_redemption_id` or
+ *      `source_redemption_id` on `loyalty_redemptions` — trimmed equal to one of the four
+ *      exact strings (bare or `public.`-qualified, with any leading `ERROR: ` prefix Postgres
+ *      includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.loyalty_redemptions` —
+ *      either (a) the bare `select ... from (public.)?loyalty_redemptions` shape, OR (b) the
+ *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."loyalty_redemptions" ... )` CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so a different missing column (a real schema regression), a non-SELECT write,
+ * a JOIN across other tables, or a FATAL / PANIC / constraint violation all stay captured and
+ * page. Empty / nullish message OR query returns `false` — we need both markers.
+ */
+export function isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column loyalty_redemptions.parent_redemption_id does not exist" ||
+    stripped === "column public.loyalty_redemptions.parent_redemption_id does not exist" ||
+    stripped === "column loyalty_redemptions.source_redemption_id does not exist" ||
+    stripped === "column public.loyalty_redemptions.source_redemption_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `loyalty_redemptions` — any trailing WHERE/LIMIT/ORDER BY is fine;
+  // the pin is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real
+  // code-bug shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?loyalty_redemptions\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."loyalty_redemptions" ... )` with double-quoted identifiers. Same foreign-owned
+  // read, different rendering. Guarded so the CTE branch requires the wrapped op to be a SELECT.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."loyalty_redemptions"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing `updated_at` column for an ad hoc
  * direct-REST read of `public.dashboard_notifications`. A foreign/stale PostgREST client
  * read `dashboard_notifications` expecting an `updated_at` column the table never carried;

@@ -41,6 +41,7 @@ import {
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
+  isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
@@ -358,6 +359,14 @@ const LOG_QUERIES: LogQuery[] = [
       // shape on `loyalty_redemptions` (bare or PostgREST CTE wrapper) — a different missing
       // column, `customer_id` on `loyalty_members`, a non-SELECT write, or a FATAL still pages.
       if (isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale external/REST client SELECTs redemption-lineage
+      // columns (`parent_redemption_id` / `source_redemption_id`) from `loyalty_redemptions` that
+      // our schema has never carried. The resulting undefined_column ERROR is repair work for a
+      // query no ShopCX code owns (Control Tower signature `supabase-logs:b63e412e75ea5e87`).
+      // Narrowly gated to require BOTH an exact `column loyalty_redemptions.<lineage> does not
+      // exist` message AND the SELECT-lookup shape on `loyalty_redemptions` (bare or PostgREST CTE
+      // wrapper) — a different missing column, a non-SELECT write, or a FATAL still pages.
+      if (isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale external/REST client SELECTs a
       // `dismissed_at` column from `dashboard_notifications` that the table never owned.
       // The resulting undefined_column ERROR is repair work for a query we don't own
