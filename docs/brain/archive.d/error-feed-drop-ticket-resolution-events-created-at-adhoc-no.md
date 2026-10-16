@@ -1,0 +1,1 @@
+- **Drop ticket_resolution_events.created_at foreign-app noise: column-missing error from stale/direct-REST lookups** · verified 2026-10-16 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise`)
