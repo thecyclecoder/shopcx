@@ -33,6 +33,7 @@ import {
   isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
+  isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
@@ -6389,6 +6390,63 @@ test("isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise 
   );
   assert.equal(isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise(null, null), false);
   assert.equal(isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise("", ""), false);
+});
+
+// ── isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise ──
+test("isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise drops the exact created_at signature message + pgrst_source SELECT query (signature fab812d87a4e2618)", () => {
+  // Bare SELECT lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise(
+      "column ticket_resolution_events.created_at does not exist",
+      "select event_type, detail, created_at from public.ticket_resolution_events order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // PostgREST direct-REST WITH pgrst_source wrapper with double-quoted identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise(
+      "ERROR: column public.ticket_resolution_events.created_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."ticket_resolution_events"."event_type", "public"."ticket_resolution_events"."created_at" FROM "public"."ticket_resolution_events" ORDER BY "public"."ticket_resolution_events"."created_at" DESC LIMIT 100 ) SELECT * FROM "pgrst_source"',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise KEEPS a non-SELECT (write) against the same column (a real code-bug still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise(
+      "column ticket_resolution_events.created_at does not exist",
+      'insert into public.ticket_resolution_events ("created_at") values (now())',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise(
+      "column ticket_resolution_events.created_at does not exist",
+      'with pgrst_source as ( update "public"."ticket_resolution_events" set "created_at" = now() returning * )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise KEEPS other tables/columns and returns false on empty input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise(
+      "column other_table.created_at does not exist",
+      "select created_at from public.other_table",
+    ),
+    false,
+  );
+  // The sibling event_type column must still page through THIS matcher (narrowly gated to created_at).
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise(
+      "column ticket_resolution_events.event_type does not exist",
+      "select event_type from public.ticket_resolution_events",
+    ),
+    false,
+  );
+  assert.equal(isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise(null, null), false);
+  assert.equal(isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise("", ""), false);
 });
 
 // -- isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise --
