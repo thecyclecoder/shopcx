@@ -85,6 +85,7 @@ import {
   isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
+  isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnSubscriptionsIdAdhocNoise,
@@ -902,6 +903,13 @@ const LOG_QUERIES: LogQuery[] = [
       // signature `supabase-logs:c1d1e7efd5a0bfe6`) is repair work for a query we don't own.
       // Narrowly gated: a different table, a different column, or a non-SELECT statement still pages.
       if (isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise(message, query)) return null;
+      // Sibling of the event_type guard above: Postgres reports only the FIRST unresolved column,
+      // so the same foreign / stale PostgREST read against `public.ticket_resolution_events`
+      // surfaces as a distinct `created_at`-missing signature (Control Tower signature
+      // `supabase-logs:fab812d87a4e2618`). The event_type matcher is intentionally narrow and does
+      // not cover it. Same narrow gating: a different table, a different column, or a non-SELECT
+      // statement against the table still pages.
+      if (isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.dunning_cycles.cycle_key`. The billing-retry ledger exists but has never
       // had a `cycle_key` column — no ShopCX code reads it. The column-missing ERROR only reaches
