@@ -58,6 +58,10 @@ Keep it short. The founder does not want the investigation, only what's true and
 
 Then execute the choice, verify it landed, and move to the next ticket.
 
+### 5. Record the founder's ruling so June never re-asks it
+
+After each executed choice, write the founder's decision as a structured ruling note on the ticket via `recordFounderRuling(admin, { workspaceId, ticketId, ruling })` ([[../../../src/lib/tickets-mutate]]). Capture the ruling in the founder's own words and in general terms where it applies beyond this one customer — e.g. "lowest realized subscription rate is $39.95 as an owner override" or "loyalty remedies capped at $15". This writes a `[Founder ruling]` internal note that June's `get_founder_rulings` box tool surfaces to cs-director-call BEFORE `escalate_founder`, so the same question is never paged to the founder twice. When the ruling is a general policy (not customer-specific), also offer to codify it into [[../../../docs/brain/libraries/policies]] via the policies SDK so every lane obeys it, not just June.
+
 ## Guardrails
 
 - **Read-only until the founder chooses.** `list` and `show` mutate nothing. No reply, refund, cancel, or close before an explicit decision.
