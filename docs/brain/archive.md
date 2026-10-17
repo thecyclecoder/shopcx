@@ -12,6 +12,9 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Stop treating internal-* contract ids as subscription UUIDs in the action-executor resolution guard** · verified 2026-10-16 · → [[../libraries/internal-subscription]]
+- **Drop foreign PostgREST noise: loyalty_redemptions parent/source redemption lineage column-missing errors** · verified 2026-10-16 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise`)
+- **Drop ticket_resolution_events.created_at foreign-app noise: column-missing error from stale/direct-REST lookups** · verified 2026-10-16 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise`)
 - **AutoBuild must circuit-break after N identical pre-commit self-verify failures instead of looping forever** · verified 2026-10-15 · → [[../lifecycles/build-flow]]
 - **Close-snapshot coverage guard** · verified 2026-10-15 · → [[../lifecycles/shoptics-migration]]
 - **Escalation-idle tile: honor a covering triage_run / parked review instead of raw job created_at** · verified 2026-10-15 · → [[../libraries/control-tower]]
