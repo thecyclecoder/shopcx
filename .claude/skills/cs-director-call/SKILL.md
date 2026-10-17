@@ -73,7 +73,10 @@ less than Sol saw. Run any of these via `npx tsx scripts/improve-box-tools.ts <t
 `get_customer_account` · `get_returns` · `get_chargebacks` · `get_email_history` · `get_crisis_status` ·
 `get_dunning_status` · `get_product_knowledge` (json `{"query":"…"}`) · `get_product_nutrition`
 (json `{"query":"…"}`) · `get_ticket_analysis` · `get_policies` (argless = all active, or `{"slug":"<slug>"}`) ·
-`get_link_candidates` · `search_orders` (json `{"amount":…,"date_from":"…","date_to":"…","email":"…"}`).
+`get_link_candidates` · `search_orders` (json `{"amount":…,"date_from":"…","date_to":"…","email":"…"}`) ·
+`get_founder_rulings` (no json — the founder rulings for this ticket's customer: workspace-level
+founder approval decisions + `[Founder ruling]` internal notes across the customer's tickets, last 365
+days, newest first).
 All READ-ONLY. **`get_policies` is mandatory before any `approve_remedy`** — a remedy MUST be evaluated
 against the active policy set (returns / refunds / consumable-returnability / exception ceilings), the same
 rulebook Sol and the analyzer read; never approve a remedy a policy disallows. Read/Grep the brain + `src/`.
@@ -329,6 +332,14 @@ remediation flipped the flag without reconciling state it had already lost, and 
 was paused while she was active.
 
 ### 3. `escalate_founder` — a real judgment the CEO must make
+
+**⭐ `get_founder_rulings` is MANDATORY before every `escalate_founder`.** Run
+`npx tsx scripts/improve-box-tools.ts get_founder_rulings <ticket_id>` first — it returns the founder
+rulings that apply to this customer (workspace-level founder approval decisions + `[Founder ruling]`
+internal notes across the customer's tickets, last 365 days, newest first). If a ruling already
+settles the question you were about to escalate, you MUST apply or cite it — do NOT page the founder a
+second time on something they already ruled on (e.g. a realized-subscription floor or a loyalty-remedy
+ceiling they set). Only escalate the genuine residue no existing ruling covers.
 
 Return this when:
 - The action is destructive / irreversible / out of leash (full refund past the CS ceiling, canceling

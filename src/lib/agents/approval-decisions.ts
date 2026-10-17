@@ -117,3 +117,32 @@ export async function listApprovalDecisions(
   if (error || !data) return [];
   return data as ApprovalDecisionRow[];
 }
+
+/**
+ * Founder rulings — the decisions the founder seat made (`decided_by` 'ceo' or 'human'),
+ * workspace-wide, newest-first, within the last `sinceDays` (default 365). These are the general
+ * rulings June (cs-director-call) must read BEFORE `escalate_founder` so she never re-asks a question
+ * the founder already settled (e.g. an owner override on the realized subscription floor, a
+ * loyalty-remedy ceiling). `approval_decisions` carries no `customer_id` — a founder ruling applies
+ * to the whole workspace — so this read is workspace-scoped by design (the customer-specific half of
+ * `get_founder_rulings` comes from the ticket's `[Founder ruling]` internal notes, see
+ * [[tickets-read]] `getFounderRulingNotes`). Excludes `decided_by='director'` (those are autonomous
+ * proxy auto-approvals, not a founder's own ruling).
+ */
+export async function listFounderRulings(
+  admin: Admin,
+  workspaceId: string,
+  sinceDays: number = 365,
+): Promise<ApprovalDecisionRow[]> {
+  const sinceIso = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await admin
+    .from("approval_decisions")
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .in("decided_by", ["ceo", "human"])
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: false })
+    .limit(200);
+  if (error || !data) return [];
+  return data as ApprovalDecisionRow[];
+}

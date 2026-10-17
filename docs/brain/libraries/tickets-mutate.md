@@ -6,7 +6,11 @@
 
 Mutate the `tickets` row itself. Used by deterministic flows (outreach auto-close, sol-closes-on-resolving-reply) and hand-fixes.
 
-`closeTicket` · `reopenTicket` · `setTicketStatus` · `escalateTicket` · `assignTicket` · `addTag` / `removeTag` · `armPlaybook` / `advancePlaybookStep` / `clearPlaybook` · `setDoNotReply`. `TicketStatus = 'open'|'pending'|'closed'|'archived'`.
+`closeTicket` · `reopenTicket` · `setTicketStatus` · `escalateTicket` · `assignTicket` · `addTag` / `removeTag` · `armPlaybook` / `advancePlaybookStep` / `clearPlaybook` · `setDoNotReply` · `recordFounderRuling`. `TicketStatus = 'open'|'pending'|'closed'|'archived'`.
+
+### `recordFounderRuling(admin, {workspaceId, ticketId, ruling})` — the founder-ruling note
+
+Writes the founder's decision as a structured INTERNAL note (`visibility='internal'`, `author_type='system'`, body prefixed `[Founder ruling] `). The /open-tickets founder loop calls it after each executed choice; throws on empty `ruling`. `ticket_messages` has no `workspace_id` column (it scopes through `ticket_id`), so `workspaceId` is part of the arg contract but not a stored column. Read back by [[tickets-read]] `getFounderRulingNotes` (matches the `[Founder ruling]` prefix) and surfaced to June via the `get_founder_rulings` box tool ([[improve-tools]]) BEFORE `escalate_founder`, so the founder is never paged the same question twice. See [[../specs/june-reads-founder-rulings-before-escalating]] Phase 2.
 
 ### `closeTicket` — preserves the escalation triple by default
 

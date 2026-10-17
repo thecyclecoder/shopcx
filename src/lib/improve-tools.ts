@@ -97,6 +97,40 @@ export default async function executeToolCallImprove(
     return formatOrderRemedyState(state);
   }
 
+  // Founder rulings for the ticket's customer (Phase 1 of
+  // june-reads-founder-rulings-before-escalating). Two halves, merged newest-first: (1) workspace-level
+  // approval_decisions the FOUNDER seat made (decided_by ceo/human) via the approval-decisions SDK's
+  // `listFounderRulings` — the general rules the founder already settled (e.g. a realized-subscription
+  // floor, a loyalty-remedy ceiling); (2) `[Founder ruling]`-prefixed internal notes across the
+  // customer's whole link group via tickets-read `getFounderRulingNotes`. June (cs-director-call) MUST
+  // read this before escalate_founder so she never re-asks a question the founder already ruled on.
+  // 365-day window, read-only. Doesn't fail-closed on a missing customer — workspace rulings still apply.
+  if (name === "get_founder_rulings") {
+    const admin = createAdminClient();
+    const cid = await resolveCustomerId(workspaceId, ticket);
+    const { getFounderRulingNotes } = await import("@/lib/tickets-read");
+    const { listFounderRulings } = await import("@/lib/agents/approval-decisions");
+    const [decisions, notes] = await Promise.all([
+      listFounderRulings(admin, workspaceId),
+      cid ? getFounderRulingNotes(admin, workspaceId, cid) : Promise.resolve([]),
+    ]);
+    const entries: Array<{ created_at: string | null; text: string }> = [];
+    for (const d of decisions) {
+      entries.push({
+        created_at: d.created_at,
+        text: `[approval ${d.decision} by ${d.decided_by}] ${d.reasoning?.trim() || "(no reasoning recorded)"}`,
+      });
+    }
+    for (const n of notes) {
+      entries.push({ created_at: n.created_at, text: n.body });
+    }
+    if (!entries.length) {
+      return "No founder rulings on record for this customer (or workspace) in the last 365 days.";
+    }
+    entries.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+    return entries.map((e) => `${e.created_at ?? "—"} · ${e.text}`).join("\n\n");
+  }
+
   // Admin-side tool: latest ticket analysis. Doesn't need a customer
   // resolved (some analyses run on tickets without customers).
   if (name === "get_ticket_analysis") {
