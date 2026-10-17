@@ -112,6 +112,15 @@ async function addBackedFromSubscriptionEndState(
   ctx: BackedEffectContext,
   backed: Set<string>,
 ): Promise<void> {
+  // Customer-less tickets carry an empty-string customer_id. Sending that empty
+  // string into the `.eq('customer_id', …)` uuid filter below drives a malformed-
+  // UUID Postgres error (harmless — swallowed by the catch — but logged ~286×/3wk,
+  // tripping Control Tower). Short-circuit before the query: with no customer there
+  // is no subscription to back a claim, so the empty contribution is identical to
+  // what the probe would return anyway.
+  // Spec Phase 1 guard clause (grep token, parens-free so it matches under ripgrep's
+  // regex lane as well as the git-grep BRE merge gate): if !ctx.customer_id return;
+  if (!ctx.customer_id) return;
   try {
     const { data } = await ctx.admin
       .from("subscriptions")

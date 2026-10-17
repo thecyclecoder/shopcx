@@ -197,3 +197,41 @@ test("subscriptions probe error → empty set (fail-safe)", async () => {
   });
   assert.equal(backed.size, 0);
 });
+
+// Empty customer_id (customer-less ticket) must SKIP the subscriptions probe entirely —
+// sending '' into the uuid `.eq('customer_id', …)` filter is the sole trigger of the
+// logged malformed-UUID Postgres error. The guard short-circuits before any query.
+test("empty customer_id skips the subscriptions probe (no malformed UUID query)", async () => {
+  const queriedTables: string[] = [];
+  const admin = {
+    from(table: string) {
+      queriedTables.push(table);
+      const b = {
+        select(_cols: string) {
+          return b;
+        },
+        eq(_col: string, _val: unknown) {
+          return b;
+        },
+        then(resolve: (v: { data: Row[]; error: null }) => unknown) {
+          return Promise.resolve({ data: [] as Row[], error: null }).then(resolve);
+        },
+      };
+      return b;
+    },
+  } as unknown as import("@supabase/supabase-js").SupabaseClient;
+
+  const backed = await backedEffectsForCompletedEffects({
+    admin,
+    workspace_id: WS,
+    ticket_id: TID,
+    customer_id: "",
+  });
+
+  assert.ok(
+    !queriedTables.includes("subscriptions"),
+    "empty customer_id must NOT query the subscriptions table",
+  );
+  // No subscription-derived family leaks in — the backed contribution stays empty.
+  assert.equal(backed.size, 0, "customer-less ticket → empty backed contribution");
+});
