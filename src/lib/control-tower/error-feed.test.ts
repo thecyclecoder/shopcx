@@ -85,6 +85,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
@@ -16425,6 +16426,96 @@ test("isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhoc
     isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise(
       "column subscriptions.shipping_price_cents does not exist",
       "update public.subscriptions set shipping_price_cents = 0 where id = 1",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/subscriptions?select=...free_shipping...` against our
+// `public.subscriptions` table. The table exists but has NO `free_shipping` column —
+// that is a Shopify-subscription-app (Appstle / native Shopify subscription-contract)
+// column shape, not ours. Foreign-owned surface, no lever from us — drop AT CAPTURE only
+// when BOTH the exact column-missing message on `subscriptions.free_shipping` AND a
+// SELECT-lookup shape on `subscriptions` (bare OR PostgREST CTE wrapper) are present. A
+// column-missing on a live `subscriptions` column (`items`), on `free_shipping` from any
+// other table, or via a non-SELECT statement still pages. Control Tower signature
+// `supabase-logs:660b1af29e9bcaec`.
+
+test("isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise drops the captured supabase-logs:660b1af29e9bcaec message+query pair (PostgREST CTE SELECT on subscriptions.free_shipping)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `subscriptions.free_shipping` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise(
+      "column subscriptions.free_shipping does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."id", "public"."subscriptions"."free_shipping" FROM "public"."subscriptions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise(
+      "column public.subscriptions.free_shipping does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."free_shipping" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise(
+      "column subscriptions.free_shipping does not exist",
+      "select id, free_shipping from public.subscriptions",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise(
+      "column subscriptions.free_shipping does not exist",
+      "select free_shipping from subscriptions limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise(
+      "ERROR: column subscriptions.free_shipping does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."free_shipping" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise(
+      "column subscriptions.free_shipping does not exist",
+      "SELECT ID, FREE_SHIPPING FROM PUBLIC.SUBSCRIPTIONS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise KEEPS other columns / tables / non-SELECT shapes (real regressions still page)", () => {
+  // A DIFFERENT subscriptions column — `items` IS a live column; if it regresses we WANT
+  // the page. The pin is `free_shipping` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise(
+      "column subscriptions.items does not exist",
+      "select items from public.subscriptions",
+    ),
+    false,
+  );
+  // `free_shipping` on ANOTHER table (pricing_rules) — not our pinned signature, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise(
+      "column pricing_rules.free_shipping does not exist",
+      "select free_shipping from public.pricing_rules",
+    ),
+    false,
+  );
+  // A NON-SELECT statement on subscriptions — real code-bug shape, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise(
+      "column subscriptions.free_shipping does not exist",
+      "update public.subscriptions set free_shipping = true where id = 1",
     ),
     false,
   );
