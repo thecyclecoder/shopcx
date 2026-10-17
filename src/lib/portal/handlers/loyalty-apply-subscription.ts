@@ -1,5 +1,5 @@
 import type { RouteHandler } from "@/lib/portal/types";
-import { jsonOk, jsonErr, clampInt, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch } from "@/lib/portal/helpers";
+import { jsonOk, jsonErr, findCustomer, logPortalAction, handleAppstleError, checkPortalBan, resolveSub, portalFetch } from "@/lib/portal/helpers";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 
@@ -29,6 +29,10 @@ const DISCOUNT_CREATE_MUTATION = `
   }
 `;
 
+// apply-before-spend — points are only deducted and the redemption only flips to
+// 'applied' AFTER the code actually lands on the subscription. A failed apply leaves
+// the redemption 'active' (unspent) with its Shopify code intact so a retry reuses it
+// instead of minting a fresh code and burning more points. See docs/brain/libraries/loyalty.md.
 export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, req }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
   const banCheck = await checkPortalBan(auth.workspaceId, auth.loggedInCustomerId);
@@ -52,26 +56,36 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
   const settings = await getLoyaltySettings(auth.workspaceId);
   if (!settings.enabled) return jsonErr({ error: "loyalty_disabled" }, 400);
 
+  const now = new Date();
+
+  // The code we will apply + the bookkeeping needed to finalize ONLY on a successful apply.
   let code: string;
   let discountValue: number;
+  let member: Awaited<ReturnType<typeof getMember>> | null = null;
+  let redemptionRowId: string | null = null; // the loyalty_redemptions row we finalize on success
+  let shopifyDiscountId: string | null = null;
+  let pointsToSpend = 0; // > 0 only when we still owe a spend (fresh mint / reused-but-unspent row)
+  let spendDescription = "";
 
   if (redemptionId) {
-    // Use existing unused coupon
+    // Use an existing unused (active) coupon — points were already spent at redeem time.
     const { data: redemption } = await admin.from("loyalty_redemptions")
-      .select("id, discount_code, discount_value, status, expires_at")
+      .select("id, discount_code, discount_value, status, expires_at, shopify_discount_id")
       .eq("id", redemptionId)
       .eq("workspace_id", auth.workspaceId)
       .single();
 
     if (!redemption) return jsonErr({ error: "redemption_not_found" }, 404);
     if (redemption.status !== "active") return jsonErr({ error: "coupon_not_available" }, 400);
-    if (new Date(redemption.expires_at) < new Date()) return jsonErr({ error: "coupon_expired" }, 400);
+    if (new Date(redemption.expires_at) < now) return jsonErr({ error: "coupon_expired" }, 400);
 
     code = redemption.discount_code;
     discountValue = Number(redemption.discount_value);
+    redemptionRowId = redemption.id;
+    shopifyDiscountId = redemption.shopify_discount_id ?? null;
+    // pointsToSpend stays 0 — the atomic redeem→apply contract already spent them.
   } else {
-    // Redeem first, then apply
-    const member = await getMember(auth.workspaceId, auth.loggedInCustomerId);
+    member = await getMember(auth.workspaceId, auth.loggedInCustomerId);
     if (!member) return jsonErr({ error: "member_not_found" }, 404);
 
     const tiers = getRedemptionTiers(settings);
@@ -81,93 +95,106 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
     const validation = validateRedemption(member, tier);
     if (!validation.valid) return jsonErr({ error: validation.error || "insufficient_points" }, 400);
 
-    const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
-    const firstName = customer?.first_name || "Customer";
-    const lastInitial = customer?.last_name ? customer.last_name[0] : "";
-    code = generateCode(tier.discount_value);
-    discountValue = tier.discount_value;
-    const title = `Loyalty $${tier.discount_value} - ${firstName} ${lastInitial} (${code})`.trim();
+    spendDescription = `Redeemed ${tier.label} + applied`;
 
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + settings.coupon_expiry_days);
+    // Reuse an existing active, unexpired redemption of the SAME tier before minting a new
+    // code — a prior failed apply leaves exactly such a row, so a retry never re-mints.
+    const { data: reusable } = await admin.from("loyalty_redemptions")
+      .select("id, discount_code, discount_value, shopify_discount_id, points_spent")
+      .eq("workspace_id", auth.workspaceId)
+      .eq("member_id", member.id)
+      .eq("reward_tier", tier.label)
+      .eq("status", "active")
+      .gt("expires_at", now.toISOString())
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
 
-    try {
-      const { shop, accessToken } = await getShopifyCredentials(auth.workspaceId);
-      const res = await portalFetch(
-        `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-        {
-          method: "POST",
-          headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            query: DISCOUNT_CREATE_MUTATION,
-            variables: {
-              basicCodeDiscount: {
-                title, code,
-                startsAt: new Date().toISOString(),
-                endsAt: expiresAt.toISOString(),
-                usageLimit: 1,
-                appliesOncePerCustomer: true,
-                customerSelection: {
-                  customers: { add: [`gid://shopify/Customer/${member.shopify_customer_id}`] },
-                },
-                combinesWith: {
-                  productDiscounts: settings.coupon_combines_product,
-                  shippingDiscounts: settings.coupon_combines_shipping,
-                  orderDiscounts: settings.coupon_combines_order,
-                },
-                customerGets: {
-                  appliesOnOneTimePurchase: settings.coupon_applies_to !== "subscription",
-                  appliesOnSubscription: settings.coupon_applies_to !== "one_time",
-                  items: { all: true },
-                  value: { discountAmount: { amount: tier.discount_value, appliesOnEachItem: false } },
+    if (reusable) {
+      code = reusable.discount_code;
+      discountValue = Number(reusable.discount_value);
+      redemptionRowId = reusable.id;
+      shopifyDiscountId = reusable.shopify_discount_id ?? null;
+      // If the reused row never had points deducted, we still owe the spend on success.
+      pointsToSpend = Number(reusable.points_spent) > 0 ? 0 : tier.points_cost;
+    } else {
+      // Mint a fresh Shopify discount code — but do NOT spend points or mark applied yet.
+      const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
+      const firstName = customer?.first_name || "Customer";
+      const lastInitial = customer?.last_name ? customer.last_name[0] : "";
+      code = generateCode(tier.discount_value);
+      discountValue = tier.discount_value;
+      const title = `Loyalty $${tier.discount_value} - ${firstName} ${lastInitial} (${code})`.trim();
+
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + settings.coupon_expiry_days);
+
+      try {
+        const { shop, accessToken } = await getShopifyCredentials(auth.workspaceId);
+        const res = await portalFetch(
+          `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+          {
+            method: "POST",
+            headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              query: DISCOUNT_CREATE_MUTATION,
+              variables: {
+                basicCodeDiscount: {
+                  title, code,
+                  startsAt: new Date().toISOString(),
+                  endsAt: expiresAt.toISOString(),
+                  usageLimit: 1,
+                  appliesOncePerCustomer: true,
+                  customerSelection: {
+                    customers: { add: [`gid://shopify/Customer/${member.shopify_customer_id}`] },
+                  },
+                  combinesWith: {
+                    productDiscounts: settings.coupon_combines_product,
+                    shippingDiscounts: settings.coupon_combines_shipping,
+                    orderDiscounts: settings.coupon_combines_order,
+                  },
+                  customerGets: {
+                    appliesOnOneTimePurchase: settings.coupon_applies_to !== "subscription",
+                    appliesOnSubscription: settings.coupon_applies_to !== "one_time",
+                    items: { all: true },
+                    value: { discountAmount: { amount: tier.discount_value, appliesOnEachItem: false } },
+                  },
                 },
               },
-            },
-          }),
-        },
-      );
-      if (!res.ok) throw new Error(`Shopify API error: ${res.status}`);
+            }),
+          },
+        );
+        if (!res.ok) throw new Error(`Shopify API error: ${res.status}`);
 
-      const gqlResult = await res.json();
-      const userErrors = gqlResult?.data?.discountCodeBasicCreate?.userErrors;
-      if (userErrors?.length > 0) {
-        return jsonErr({ error: userErrors.map((e: { message: string }) => e.message).join(", ") }, 400);
+        const gqlResult = await res.json();
+        const userErrors = gqlResult?.data?.discountCodeBasicCreate?.userErrors;
+        if (userErrors?.length > 0) {
+          return jsonErr({ error: userErrors.map((e: { message: string }) => e.message).join(", ") }, 400);
+        }
+
+        shopifyDiscountId = gqlResult?.data?.discountCodeBasicCreate?.codeDiscountNode?.id || null;
+      } catch (err) {
+        return jsonErr({ error: err instanceof Error ? err.message : "Redemption failed" }, 500);
       }
 
-      const discountNodeId = gqlResult?.data?.discountCodeBasicCreate?.codeDiscountNode?.id || null;
-      await spendPoints(member, tier.points_cost, `Redeemed ${tier.label} + applied`, discountNodeId);
-
-      // Insert redemption as 'applied' directly (skipping 'active' since we're applying immediately)
-      await admin.from("loyalty_redemptions").insert({
-        workspace_id: auth.workspaceId,
-        member_id: member.id,
-        reward_tier: tier.label,
-        points_spent: tier.points_cost,
-        discount_code: code,
-        shopify_discount_id: discountNodeId,
-        discount_value: tier.discount_value,
-        status: "applied",
-        expires_at: expiresAt.toISOString(),
-      });
-    } catch (err) {
-      return jsonErr({ error: err instanceof Error ? err.message : "Redemption failed" }, 500);
-    }
-  }
-
-  // Release any previously applied loyalty coupons back to 'active'
-  const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
-  if (customer) {
-    const { data: member } = await admin.from("loyalty_members")
-      .select("id")
-      .eq("workspace_id", auth.workspaceId)
-      .eq("shopify_customer_id", auth.loggedInCustomerId)
-      .single();
-    if (member) {
-      await admin.from("loyalty_redemptions")
-        .update({ status: "active" })
-        .eq("workspace_id", auth.workspaceId)
-        .eq("member_id", member.id)
-        .eq("status", "applied");
+      // Record the minted code as an 'active' (unspent) redemption BEFORE applying, so a
+      // failed apply below leaves a reusable row (no re-mint on retry) and zero points spent.
+      const { data: inserted } = await admin.from("loyalty_redemptions")
+        .insert({
+          workspace_id: auth.workspaceId,
+          member_id: member.id,
+          reward_tier: tier.label,
+          points_spent: 0,
+          discount_code: code,
+          shopify_discount_id: shopifyDiscountId,
+          discount_value: tier.discount_value,
+          status: "active",
+          expires_at: expiresAt.toISOString(),
+        })
+        .select("id")
+        .single();
+      redemptionRowId = inserted?.id ?? null;
+      pointsToSpend = tier.points_cost;
     }
   }
 
@@ -182,6 +209,7 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
     const { applyCouponToSub } = await import("@/lib/coupons");
     const r = await applyCouponToSub(auth.workspaceId, String(contractId), code, auth.loggedInCustomerId);
     if (!r.success) {
+      // Apply failed: redemption stays 'active' (unspent), code untouched for a retry.
       return jsonErr({ error: "coupon_apply_failed", message: r.error, request_payload: { contractId, code } }, 502);
     }
   } else {
@@ -263,9 +291,10 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
             result = await applyDiscountWithReplace(auth.workspaceId, apiKey, String(contractId), newCode);
             if (result.success) {
               code = newCode;
-              // Update redemption if it exists
-              if (redemptionId) {
-                await admin.from("loyalty_redemptions").update({ discount_code: newCode, shopify_discount_id: newNodeId }).eq("id", redemptionId);
+              shopifyDiscountId = newNodeId;
+              // Point the tracked redemption row at the regenerated code.
+              if (redemptionRowId) {
+                await admin.from("loyalty_redemptions").update({ discount_code: newCode, shopify_discount_id: newNodeId }).eq("id", redemptionRowId);
               }
               console.log(`[loyalty] Self-healed: regenerated ${code} → ${newCode} for contract ${contractId}`);
             }
@@ -277,6 +306,7 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
     }
 
     if (!result.success) {
+      // Apply failed: redemption stays 'active' (unspent), code untouched for a retry.
       return jsonErr({ error: "coupon_apply_failed", message: result.error, request_payload: { contractId, code } }, 502);
     }
   } catch (e) {
@@ -284,11 +314,45 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
   }
   }
 
-  // Mark redemption as 'applied' (if it was from an existing coupon)
-  if (redemptionId) {
+  // ---- Apply succeeded — only now spend points and mark the redemption applied. ----
+
+  // Resolve the member id for the release sweep below.
+  const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
+  let memberId = member?.id ?? null;
+  if (!memberId) {
+    const { data: m } = await admin.from("loyalty_members")
+      .select("id")
+      .eq("workspace_id", auth.workspaceId)
+      .eq("shopify_customer_id", auth.loggedInCustomerId)
+      .single();
+    memberId = m?.id ?? null;
+  }
+
+  // Release any PREVIOUSLY applied loyalty coupons back to 'active' — but EXCLUDE the code we
+  // just applied, and run this before flipping the current row to 'applied' so we never flip
+  // the just-applied redemption straight back to active.
+  if (memberId) {
     await admin.from("loyalty_redemptions")
-      .update({ status: "applied" })
-      .eq("id", redemptionId);
+      .update({ status: "active" })
+      .eq("workspace_id", auth.workspaceId)
+      .eq("member_id", memberId)
+      .eq("status", "applied")
+      .neq("discount_code", code);
+  }
+
+  // Spend points only now that the code is actually on the subscription.
+  if (pointsToSpend > 0 && member) {
+    await spendPoints(member, pointsToSpend, spendDescription, shopifyDiscountId);
+  }
+
+  // Mark the redemption applied (and persist the spend on the row when we just spent).
+  if (redemptionRowId) {
+    const update: Record<string, unknown> = { status: "applied" };
+    if (pointsToSpend > 0) update.points_spent = pointsToSpend;
+    await admin.from("loyalty_redemptions")
+      .update(update)
+      .eq("id", redemptionRowId)
+      .eq("workspace_id", auth.workspaceId);
   }
 
   if (customer) {
