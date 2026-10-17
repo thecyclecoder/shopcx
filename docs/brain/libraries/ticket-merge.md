@@ -124,7 +124,7 @@ Merges 2+ tickets. Picks target = ticket with most recent customer activity. Rej
 Reusable FK-repointer used by both the live merge and the backfill.
 
 ### `resolveMergedTarget(admin, ticketId) → Promise<string>`
-Follow the `merged_into` chain to the terminal id (max 10 hops). Used by the email-inbound router.
+Follow the `merged_into` chain to the terminal id (max 10 hops). Used by the email-inbound router and the CSAT route (`src/app/api/csat/[ticketId]/route.ts`) so a CSAT reopen/rating lands on the live ticket, not the archived stub.
 
 ### `shouldRegenerateMergeSummary(priorSummary, newlyMovedCount) → boolean`
 Pure predicate. Returns `true` on a first merge (no prior summary) or a repeat merge that moved new content in. Returns `false` when a prior summary exists AND this event moved zero messages — that's the "don't re-cost unchanged history" case. Unit-tested in `src/lib/ticket-merge.test.ts`.
@@ -140,6 +140,7 @@ Pure builder for the Sonnet summarizer prompt. Two shapes — first-merge vs. re
 - `src/app/api/tickets/merge/route.ts` — bulk action from the agent UI
 - `src/lib/inngest/unified-ticket-handler.ts` — auto-merge on new inbound ticket
 - `src/app/api/webhooks/email/route.ts` — calls `resolveMergedTarget` only
+- `src/app/api/csat/[ticketId]/route.ts` — calls `resolveMergedTarget` so a CSAT reopen/rating follows the merge chain to the live ticket instead of reopening the archived stub
 - `src/lib/ticket-analyzer.ts` — checks `merged_into` to skip stubs
 - `scripts/backfill-merge-stubs.ts` — one-time reconciliation
 
