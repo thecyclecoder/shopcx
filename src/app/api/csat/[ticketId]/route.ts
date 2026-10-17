@@ -13,6 +13,8 @@
  */
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { resolveMergedTarget } from "@/lib/ticket-merge";
+import { setTicketStatus } from "@/lib/tickets-mutate";
 import { createHmac } from "crypto";
 
 const CSAT_POINTS = 500;
@@ -42,10 +44,14 @@ export async function GET(
     return NextResponse.json({ error: "Invalid token" }, { status: 401 });
   }
   const admin = createAdminClient();
+  // The rating is recorded against the terminal ticket (POST follows the merge
+  // chain), so read it from there too — otherwise a post-merge refresh shows
+  // the rating form again instead of the "you already rated this" view.
+  const targetId = await resolveMergedTarget(admin, ticketId);
   const { data } = await admin
     .from("ticket_csat")
     .select("rating, comment, submitted_at, points_awarded")
-    .eq("ticket_id", ticketId)
+    .eq("ticket_id", targetId)
     .maybeSingle();
   return NextResponse.json({ existing: data || null });
 }
@@ -62,10 +68,19 @@ export async function POST(
   }
 
   const admin = createAdminClient();
+
+  // Follow the merge chain before touching anything. The CSAT survey is keyed
+  // to the ticket that was surveyed, but that thread may since have been merged
+  // into — and archived behind — a terminal ticket. Writing the note/rating
+  // onto the stub reopens a dead row the queue never sees and the live ticket
+  // never learns the customer is unhappy (Michelle 14d7eb88, 2026-10-15). The
+  // email webhook and portal support handler already follow the chain; the CSAT
+  // route is the remaining entry point that didn't.
+  const targetId = await resolveMergedTarget(admin, ticketId);
   const { data: ticket } = await admin
     .from("tickets")
-    .select("id, workspace_id, customer_id, subject, status")
-    .eq("id", ticketId)
+    .select("id, workspace_id, customer_id, subject, status, merged_into")
+    .eq("id", targetId)
     .maybeSingle();
   if (!ticket) return NextResponse.json({ error: "Ticket not found" }, { status: 404 });
 
@@ -77,24 +92,32 @@ export async function POST(
     if (!reason) {
       return NextResponse.json({ error: "reason required" }, { status: 400 });
     }
-    // Insert the customer's note as an inbound external message and
-    // reopen the ticket so an agent picks it up. Tag for analytics.
+    // `ticket` is the terminal ticket resolved through the merge chain, so by
+    // construction it has no merged_into. Guard anyway: never reopen a stub —
+    // a reply onto a merged row is lost from the queue.
+    if (ticket.merged_into) {
+      return NextResponse.json({ error: "Ticket is merged" }, { status: 409 });
+    }
+    // Insert the customer's note as an inbound external message onto the live
+    // ticket and reopen it so an agent picks it up. Tag for analytics.
     await admin.from("ticket_messages").insert({
-      ticket_id: ticketId,
+      ticket_id: ticket.id,
       direction: "inbound",
       visibility: "external",
       author_type: "customer",
       body: `<p>${reason.replace(/</g, "&lt;").replace(/\n/g, "<br>")}</p>`,
       created_at: now,
     });
+    // Reopen via the tickets-mutate SDK (stamps status + clears closed_at); it
+    // handles the archived terminal case too. Stamp last_customer_reply_at
+    // separately so the queue surfaces the fresh reply.
+    await setTicketStatus(admin, ticket.id, "open");
     await admin.from("tickets").update({
-      status: "open",
-      closed_at: null,
       last_customer_reply_at: now,
       updated_at: now,
-    }).eq("id", ticketId);
+    }).eq("id", ticket.id);
     const { addTicketTag } = await import("@/lib/ticket-tags");
-    await addTicketTag(ticketId, "csat:reopened");
+    await addTicketTag(ticket.id, "csat:reopened");
     return NextResponse.json({ ok: true, action: "reopened" });
   }
 
@@ -108,7 +131,7 @@ export async function POST(
     const { data: existing } = await admin
       .from("ticket_csat")
       .select("id, points_awarded")
-      .eq("ticket_id", ticketId)
+      .eq("ticket_id", ticket.id)
       .maybeSingle();
 
     let csatId: string;
@@ -123,7 +146,7 @@ export async function POST(
     } else {
       const { data: ins, error } = await admin.from("ticket_csat").insert({
         workspace_id: ticket.workspace_id,
-        ticket_id: ticketId,
+        ticket_id: ticket.id,
         customer_id: ticket.customer_id,
         rating, comment,
         resolution_category: "resolved",
@@ -140,7 +163,7 @@ export async function POST(
         const { getMemberByCustomerId, earnPoints } = await import("@/lib/loyalty");
         const member = await getMemberByCustomerId(ticket.customer_id, ticket.workspace_id);
         if (member) {
-          await earnPoints(member, CSAT_POINTS, null, `Completed CSAT survey for ticket ${ticketId.slice(0, 8)}`);
+          await earnPoints(member, CSAT_POINTS, null, `Completed CSAT survey for ticket ${ticket.id.slice(0, 8)}`);
           await admin.from("ticket_csat").update({
             points_awarded: CSAT_POINTS, points_awarded_at: now,
           }).eq("id", csatId);
@@ -159,7 +182,7 @@ export async function POST(
     if (rating <= 3) {
       try {
         const { analyzeTicket } = await import("@/lib/ticket-analyzer");
-        await analyzeTicket(ticketId, "low_csat");
+        await analyzeTicket(ticket.id, "low_csat");
       } catch (err) {
         console.warn("[csat] low-CSAT Cora enqueue failed:", err);
       }
