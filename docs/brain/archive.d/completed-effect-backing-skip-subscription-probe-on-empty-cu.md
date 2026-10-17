@@ -1,0 +1,1 @@
+- **Skip subscription-status backing probe when the ticket has no customer (stop empty-UUID Postgres errors)** · verified 2026-10-17 · → [[../libraries/completed-effect-backing]]
