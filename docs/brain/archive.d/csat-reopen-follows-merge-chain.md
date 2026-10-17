@@ -1,0 +1,1 @@
+- **CSAT reopen on a merged ticket lands on the live ticket, not the stub** · verified 2026-10-17 · → [[../libraries/ticket-merge]]
