@@ -1,0 +1,1 @@
+- **June reads the founder's past rulings before escalating** · verified 2026-10-17 · → [[../lifecycles/escalation-ladder]]
