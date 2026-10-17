@@ -1,0 +1,1 @@
+- **Scope out foreign-app noise: subscriptions.free_shipping missing-column PostgREST probe** · verified 2026-10-17 · → [[../libraries/control-tower]]
