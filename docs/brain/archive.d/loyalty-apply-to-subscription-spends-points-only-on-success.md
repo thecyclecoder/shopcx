@@ -1,0 +1,1 @@
+- **Loyalty apply-to-subscription spends points only when the code actually applies** · verified 2026-10-17 · → [[../libraries/loyalty]]
