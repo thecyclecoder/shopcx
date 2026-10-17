@@ -198,16 +198,22 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
     }
   }
 
-  // ShopCX joins the internal arm — `applyCouponToSub` dispatches by engine and writes the
-  // discount to the Shopify contract. The Appstle arm below is vendor-specific.
+  // ShopCX joins the internal arm. The Appstle arm below is vendor-specific.
   const { resolveBillingSource } = await import("@/lib/internal-subscription");
   const isInternalLoyalty = (await resolveBillingSource(auth.workspaceId, String(contractId))) !== "appstle";
   if (isInternalLoyalty) {
-    // Internal sub — apply the loyalty code (a real Shopify discount code) via
-    // the coupon engine (resolves through the Shopify lookup, writes
-    // subscriptions.applied_discounts for the renewal scheduler).
-    const { applyCouponToSub } = await import("@/lib/coupons");
-    const r = await applyCouponToSub(auth.workspaceId, String(contractId), code, auth.loggedInCustomerId);
+    // Internal / shopcx sub — apply the loyalty code via the canonical
+    // `subscriptionApplyCoupon` path (the same one the Sonnet apply_loyalty_coupon
+    // handler uses). It materializes the LOYALTY-* redemption as an internal `coupons`
+    // row scoped to the contract-owning customer UUID (ensureInternalLoyaltyCouponRow)
+    // and resolves it via resolveCoupon step 1 (internal wins) with that SAME internal
+    // customer id — so a freshly minted loyalty code no longer depends on the
+    // customer-scoped Shopify lookup that returned coupon_not_found for Michelle (the
+    // portal's `auth.loggedInCustomerId` is a Shopify id, which never matched the
+    // Shopify customerSelection on an internally-billed sub). It also does NOT burn the
+    // code at apply, so the discount survives to the renewal charge. Phase 2.
+    const { subscriptionApplyCoupon } = await import("@/lib/subscription-items");
+    const r = await subscriptionApplyCoupon(auth.workspaceId, String(contractId), code);
     if (!r.success) {
       // Apply failed: redemption stays 'active' (unspent), code untouched for a retry.
       return jsonErr({ error: "coupon_apply_failed", message: r.error, request_payload: { contractId, code } }, 502);
