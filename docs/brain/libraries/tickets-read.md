@@ -18,6 +18,7 @@
 | `getLinkedSubscriptions(admin, workspaceId, customerId)` | subscriptions across the ticket customer's entire link group |
 | `getLinkedOrders(admin, workspaceId, customerId, limit?)` | recent orders across the link group (newest first, default 6 items) |
 | `getLinkedReturns(admin, workspaceId, customerId, limit?)` | returns across the link group (newest first, capped) |
+| `FounderRulingNote` · `getFounderRulingNotes(admin, workspaceId, customerId, sinceDays?)` | the founder's structured `[Founder ruling]` internal notes across the ticket customer's whole link group, newest-first, last 365 days (default). Written by [[tickets-mutate]] `recordFounderRuling` (Phase 2); read by [[approval-decisions]] `listFounderRulings` + the `get_founder_rulings` box tool ([[improve-tools]]) to surface to June ([[../../../.claude/skills/cs-director-call/SKILL.md|cs-director-call]]) BEFORE `escalate_founder` so she never re-asks a question the founder already settled. Matches the literal `[Founder ruling]` body prefix across the customer's link group. |
 | `TicketInvestigation` · `investigateTicket(admin, idOrUrl)` | one call → the full merged picture (ticket + customer + messages + directions + jobs + merges) |
 | `DeliveryState` · `TurnDiagnosis` · `buildTurnTimeline(inv)` | per-turn delivery diagnosis — did each turn's reply actually SEND? (surfaces the Sofia-class silent-turn) |
 
