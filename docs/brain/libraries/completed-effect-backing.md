@@ -21,6 +21,10 @@ Any lookup error or ambiguity → **empty set**. That reproduces today's blockin
 
 Pure DB reads + a small deterministic mapping table — no model call. Mirrors the sibling guard style ([[sol-cta-reference-guard]] `hasLaunchedJourneyThisTurn`).
 
+### Empty-customer short-circuit
+
+Customer-less tickets carry an empty-string `customer_id`. `addBackedFromSubscriptionEndState` short-circuits with `if (!ctx.customer_id) return;` **before** building the `subscriptions` query — feeding `''` into the `.eq('customer_id', …)` uuid filter drove a malformed-UUID Postgres error logged ~286× over three weeks (harmless — swallowed by the fail-safe catch — but it flooded the error log and tripped Control Tower). With no customer there is no subscription to back a claim, so the empty contribution is identical to what the probe would have returned. Pinned by the `empty customer_id skips the subscriptions probe` test (asserts `.from('subscriptions')` is never called).
+
 ## Coverage
 
 | `journey_type` (completed) | Backed families | Effect it excuses |
