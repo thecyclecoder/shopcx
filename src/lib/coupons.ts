@@ -56,8 +56,9 @@ export async function resolveCoupon(
   workspaceId: string,
   code: string,
   customerId?: string | null,
+  adminOverride?: Admin,
 ): Promise<ResolvedCoupon | null> {
-  return (await resolveCouponDetailed(workspaceId, code, customerId)).coupon;
+  return (await resolveCouponDetailed(workspaceId, code, customerId, adminOverride)).coupon;
 }
 
 /**
@@ -74,8 +75,11 @@ export async function resolveCouponDetailed(
   workspaceId: string,
   code: string,
   customerId?: string | null,
+  adminOverride?: Admin,
 ): Promise<{ coupon: ResolvedCoupon | null; unavailable: boolean }> {
-  const admin = createAdminClient();
+  // `adminOverride` is a test-only DI seam (in-memory fake admin for
+  // coupons.loyalty-resolve.test.ts); production callers pass nothing.
+  const admin = adminOverride ?? createAdminClient();
 
   // 1. Internal table exact match (internal wins). A MASTER row is never
   //    directly usable on its own — it's only redeemed via a derived
