@@ -9,7 +9,8 @@
  *   npx tsx scripts/improve-box-tools.ts <tool> <ticket_id> [json_input]
  *
  * Tools: get_customer_account · get_product_knowledge · get_product_nutrition · get_returns ·
- *        get_chargebacks · get_email_history · get_crisis_status · get_dunning_status · get_ticket_analysis
+ *        get_chargebacks · get_email_history · get_crisis_status · get_dunning_status · get_ticket_analysis ·
+ *        get_founder_rulings
  *
  * Prints the tool's text result to stdout. See docs/brain/specs/box-ticket-improve.md.
  */
@@ -57,6 +58,12 @@ const READ_TOOLS = new Set([
   // across EVERY customer (it may live on an unlinked sibling). Both read-only. Ticket db8b3d66.
   "get_link_candidates",
   "search_orders",
+  // Phase 1 of june-reads-founder-rulings-before-escalating — the founder rulings for this ticket's
+  // customer: workspace-level approval_decisions the founder seat made (decided_by ceo/human) PLUS
+  // `[Founder ruling]`-prefixed internal notes across the customer's tickets, last 365 days, newest
+  // first. MANDATORY for June (cs-director-call) before escalate_founder — she must not re-ask a
+  // question the founder already ruled on. Read-only; no json_input.
+  "get_founder_rulings",
 ]);
 
 async function main() {

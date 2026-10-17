@@ -290,6 +290,49 @@ export async function getLinkedReturns(
   return (data as LinkedReturnRow[]) ?? [];
 }
 
+export interface FounderRulingNote {
+  ticket_id: string;
+  body: string;
+  created_at: string | null;
+}
+
+/**
+ * Internal `[Founder ruling]`-prefixed notes across the ticket customer's whole link group
+ * ([[customer-links]] `linkGroupIds`), newest-first, within the last `sinceDays` (default 365).
+ * These are the structured record of a ruling the founder gave on a prior ticket (written by the
+ * /open-tickets founder loop via [[tickets-mutate]] `recordFounderRuling`, Phase 2). June
+ * (cs-director-call) reads them — alongside the workspace-level [[agents/approval-decisions]]
+ * `listFounderRulings` — before re-escalating a question the founder already settled for this
+ * customer. Matched by the literal `[Founder ruling]` body prefix (`[` is a literal in SQL LIKE).
+ */
+export async function getFounderRulingNotes(
+  admin: Admin,
+  workspaceId: string,
+  customerId: string,
+  sinceDays: number = 365,
+): Promise<FounderRulingNote[]> {
+  const ids = await linkGroupIds(admin, workspaceId, customerId);
+  const { data: tickets } = await admin
+    .from("tickets")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .in("customer_id", ids);
+  const ticketIds = ((tickets as Array<{ id: string }> | null) ?? []).map((t) => t.id);
+  if (!ticketIds.length) return [];
+  const sinceIso = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+  const { data } = await admin
+    .from("ticket_messages")
+    .select("ticket_id, body, body_clean, created_at")
+    .in("ticket_id", ticketIds)
+    .eq("visibility", "internal")
+    .ilike("body", "[Founder ruling]%")
+    .gte("created_at", sinceIso)
+    .order("created_at", { ascending: false });
+  return ((data as Array<{ ticket_id: string; body: string | null; body_clean: string | null; created_at: string | null }>) ?? [])
+    .map((m) => ({ ticket_id: m.ticket_id, body: (m.body ?? m.body_clean ?? "").trim(), created_at: m.created_at }))
+    .filter((n) => n.body.length > 0);
+}
+
 /** Tickets that were merged INTO this one (reply-duplicates / prior threads absorbed here). */
 export async function getMergedFromTickets(
   admin: Admin,

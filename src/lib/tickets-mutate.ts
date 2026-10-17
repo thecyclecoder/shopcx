@@ -206,6 +206,37 @@ export async function setDoNotReply(admin: Admin, ticketId: string, value: boole
   await admin.from("tickets").update({ do_not_reply: value, updated_at: nowIso() }).eq("id", ticketId);
 }
 
+/**
+ * Record a founder ruling as a structured internal note on the ticket (Phase 2 of
+ * june-reads-founder-rulings-before-escalating). The /open-tickets founder loop calls this after each
+ * executed choice so the ruling the founder just made is written somewhere June can read it back:
+ * [[tickets-read]] `getFounderRulingNotes` matches on the literal `[Founder ruling]` body prefix, and
+ * the `get_founder_rulings` box tool surfaces it for cs-director-call BEFORE `escalate_founder`, so
+ * June never re-asks a question the founder already settled for this customer.
+ *
+ * Writes an INTERNAL note (`visibility='internal'`, `author_type='system'`, `direction='outbound'`) —
+ * never customer-facing. The `ruling` text is the founder's decision in their own words (e.g. "lowest
+ * realized subscription rate is $39.95 as an owner override"). Idempotency is not enforced — each
+ * executed choice is a distinct ruling event; the reader de-duplicates by recency.
+ */
+export async function recordFounderRuling(
+  admin: Admin,
+  args: { workspaceId: string; ticketId: string; ruling: string },
+): Promise<void> {
+  const ruling = (args.ruling ?? "").trim();
+  if (!ruling) throw new Error("recordFounderRuling: ruling text is required");
+  // ticket_messages has no workspace_id column (it scopes through ticket_id → tickets); `workspaceId`
+  // stays in the arg contract for caller symmetry + future scope checks, but is not a stored column.
+  void args.workspaceId;
+  await admin.from("ticket_messages").insert({
+    ticket_id: args.ticketId,
+    direction: "outbound",
+    visibility: "internal",
+    author_type: "system",
+    body: `[Founder ruling] ${ruling}`,
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // (B) COMMERCE / JOURNEYS / WORKFLOWS — the ONE executor front door
 // ─────────────────────────────────────────────────────────────────────────────

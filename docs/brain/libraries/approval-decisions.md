@@ -14,6 +14,7 @@ The flag ([[../tables/function_autonomy]]) enables *who decides*; this module gu
 
 - **`recordApprovalDecision(admin, input)`** → `Promise<ApprovalDecisionRow | null>` — insert one row. **Best-effort**: returns `null` on failure and never throws into the caller (recording the ledger must not break the decision it records). Forces `autonomous=true` **only** when `decided_by==='director'` (a ceo/human seat is never autonomous — fail-safe).
 - **`listApprovalDecisions(admin, workspaceId, role, filters)`** → `Promise<ApprovalDecisionRow[]>` — the history read. The **CEO** (`role==='ceo'`) sees **every** decision in the workspace; a director sees only the decisions routed to it. Newest-first, bounded (≤500). Filters: `routedToFunction` (CEO only) · `decision` · `autonomous`.
+- **`listFounderRulings(admin, workspaceId, sinceDays = 365)`** → `Promise<ApprovalDecisionRow[]>` — the **founder rulings** read ([[../specs/june-reads-founder-rulings-before-escalating]] Phase 1). Only decisions the **founder seat** made (`decided_by` ∈ `ceo｜human`, never `director`), workspace-wide, newest-first, within the last `sinceDays`. `approval_decisions` carries no `customer_id` — a founder ruling applies to the whole workspace — so this half is workspace-scoped by design; the customer-specific half comes from [[../libraries/tickets-read]] `getFounderRulingNotes` (`[Founder ruling]` internal notes across the customer's link group). Both back the `get_founder_rulings` box tool ([[improve-tools]]), which June ([[../../../.claude/skills/cs-director-call/SKILL.md|cs-director-call]]) reads before `escalate_founder` so she never re-asks a question the founder already settled.
 - Types **`ApprovalDecisionRow`**, **`RecordDecisionInput`**, **`DecisionHistoryFilters`**, **`DecidedBy`** (`ceo｜director｜human`), **`DecisionOutcome`** (`approved｜declined｜escalated`).
 
 ## How a decision gets recorded
@@ -31,6 +32,7 @@ The flag ([[../tables/function_autonomy]]) enables *who decides*; this module gu
 
 - `src/lib/roadmap-actions.ts` — `approveRoadmapAction` records each terminal human decision.
 - `src/app/api/developer/agents/decisions/route.ts` — `GET /api/developer/agents/decisions` (owner-gated) backs the **Decision history** tab on the [[../dashboard/agents|Agents hub]].
+- `src/lib/improve-tools.ts` — the `get_founder_rulings` box tool calls `listFounderRulings` (workspace founder decisions) + [[tickets-read]] `getFounderRulingNotes` (customer `[Founder ruling]` notes), merged newest-first, for June's cs-director-call session.
 
 ## Related
 
