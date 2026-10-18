@@ -12,6 +12,11 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Skip subscription-status backing probe when the ticket has no customer (stop empty-UUID Postgres errors)** · verified 2026-10-17 · → [[../libraries/completed-effect-backing]]
+- **CSAT reopen on a merged ticket lands on the live ticket, not the stub** · verified 2026-10-17 · → [[../libraries/ticket-merge]]
+- **Scope out foreign-app noise: subscriptions.free_shipping missing-column PostgREST probe** · verified 2026-10-17 · → [[../libraries/control-tower]]
+- **June reads the founder's past rulings before escalating** · verified 2026-10-17 · → [[../lifecycles/escalation-ladder]]
+- **Loyalty apply-to-subscription spends points only when the code actually applies** · verified 2026-10-17 · → [[../libraries/loyalty]]
 - **Stop treating internal-* contract ids as subscription UUIDs in the action-executor resolution guard** · verified 2026-10-16 · → [[../libraries/internal-subscription]]
 - **Drop foreign PostgREST noise: loyalty_redemptions parent/source redemption lineage column-missing errors** · verified 2026-10-16 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise`)
 - **Drop ticket_resolution_events.created_at foreign-app noise: column-missing error from stale/direct-REST lookups** · verified 2026-10-16 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise`)
