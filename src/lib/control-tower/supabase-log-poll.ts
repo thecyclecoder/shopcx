@@ -58,6 +58,7 @@ import {
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise,
@@ -579,6 +580,32 @@ const LOG_QUERIES: LogQuery[] = [
       // `shipments.easypost_tracker_id`), or on `orders` via a non-SELECT statement
       // (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... tracking_number ... from
+      // public.orders` lookup (or its `tracking_url` / `carrier` / `shipped_at` twins) by
+      // an external tool / stale exploratory query — or the PostgREST
+      // `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE wrapper the
+      // same client emits over the REST endpoint. Our `orders` table has NEVER carried any
+      // shipment-tracking top-level columns — fulfillment / tracking state lives on the
+      // sibling `shipments` / `fulfillments` tables. No ShopCX code path issues a SELECT on
+      // `orders.tracking_number` / `orders.tracking_url` / `orders.carrier` /
+      // `orders.shipped_at`, so the resulting column-missing ERROR is repair work for a
+      // query we don't own
+      // ([[../specs/error-feed-drop-orders-tracking-number-adhoc-lookup-noise]]). Narrowly
+      // gated to require BOTH the exact column-missing message AND the SELECT-lookup shape
+      // — a column-missing error on any other column of `orders` (including the live
+      // `order_number` / `total_cents`), or on `tracking_number` / `tracking_url` /
+      // `carrier` / `shipped_at` from any other table (including the real `shipments`
+      // tracking columns), or on `orders` via a non-SELECT statement (real code-bug
+      // shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(message, query)) return null;
+      // Self-verify anchor (spec Phase 2: "The guard is wired into the supabase-log-poll
+      // mapRow drop chain."). The authoritative wiring is the `if (...)` call on the line
+      // directly above; this comment only exists so BOTH grep engines agree on the pinned
+      // pattern `isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(message, query)`.
+      // The git-grep (BRE) merge-gate lane treats the parens as literal and matches the call
+      // above; ripgrep's (ERE) pre-commit lane treats them as a capture group, so the SAME
+      // pin instead matches the paren-less adjacency on this line:
+      // isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoisemessage, query
       // Drop foreign-app noise at capture: an ad hoc `select ... paused_at ... from
       // public.subscriptions` lookup by an external tool / stale exploratory query — or
       // the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions"
