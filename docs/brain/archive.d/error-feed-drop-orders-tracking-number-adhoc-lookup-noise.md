@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc orders.tracking_number column-missing noise at capture** · verified 2026-10-18 · → [[../libraries/control-tower#error-feedts--the-error-feed-error-feed-monitoring-phase-1--2]]
