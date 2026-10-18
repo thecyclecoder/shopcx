@@ -82,6 +82,7 @@ import {
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsLineItemsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise,
@@ -15986,6 +15987,155 @@ test("isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise returns fa
     isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
       "column orders.easypost_tracker_id does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/orders?select=...tracking_number...` against our `public.orders` table. The
+// table exists but has NEVER carried any shipment-tracking top-level columns
+// (`tracking_number` / `tracking_url` / `carrier` / `shipped_at`) — fulfillment /
+// tracking state lives on the sibling `shipments` / `fulfillments` tables. Foreign-owned
+// surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
+// message on one of the four `orders` columns AND a SELECT-lookup shape on `orders` (bare
+// OR PostgREST CTE wrapper) are present. A column-missing on a live `orders` column
+// (`order_number`), on `tracking_number` / `tracking_url` / `carrier` / `shipped_at` from
+// any other table, or via a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise drops the captured message+query pair (ad hoc SELECT on orders.tracking_number + tracking_url/carrier/shipped_at twins)", () => {
+  // Unqualified and public.-qualified message variants over the bare-SELECT shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.tracking_number does not exist",
+      "select id, tracking_number from public.orders",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column public.orders.tracking_number does not exist",
+      "select tracking_number from public.orders",
+    ),
+    true,
+  );
+  // The `tracking_url` twin.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.tracking_url does not exist",
+      "select id, tracking_url from public.orders",
+    ),
+    true,
+  );
+  // The `carrier` twin.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column public.orders.carrier does not exist",
+      "select carrier from public.orders",
+    ),
+    true,
+  );
+  // The `shipped_at` twin.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.shipped_at does not exist",
+      "select id, shipped_at from public.orders",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.tracking_number does not exist",
+      "select tracking_number from orders limit 10",
+    ),
+    true,
+  );
+  // Trailing WHERE / ORDER BY / LIMIT still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.tracking_number does not exist",
+      "select id, tracking_number from public.orders where workspace_id = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.tracking_number does not exist",
+      "SELECT ID, TRACKING_NUMBER FROM PUBLIC.ORDERS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "ERROR: column orders.tracking_number does not exist",
+      "select tracking_number from public.orders",
+    ),
+    true,
+  );
+  // The PostgREST `WITH pgrst_source AS (SELECT ... FROM "public"."orders" ...)` wrapper.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.tracking_number does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."orders"."id", "public"."orders"."tracking_number" FROM "public"."orders" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise KEEPS a genuine orders.order_number column-miss (a real product-schema regression on a live orders column still pages)", () => {
+  // The spec's negative case: a real column-missing on the live `order_number` column
+  // must NOT be dropped — the pin is the four tracking columns only.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.order_number does not exist",
+      "select order_number from public.orders",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column public.orders.total_cents does not exist",
+      "select total_cents from public.orders",
+    ),
+    false,
+  );
+  // A tracking_number miss on a DIFFERENT table (the real shipments column) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column shipments.tracking_number does not exist",
+      "select tracking_number from public.shipments",
+    ),
+    false,
+  );
+  // A non-SELECT statement shape on orders (a real code-bug write) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.tracking_number does not exist",
+      "update public.orders set tracking_number = $1 where id = $2",
+    ),
+    false,
+  );
+  // A FATAL / constraint message (different shape) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "FATAL: database is shutting down",
+      "select tracking_number from public.orders",
+    ),
+    false,
+  );
+  // Empty / nullish input.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.tracking_number does not exist",
+      "",
     ),
     false,
   );
