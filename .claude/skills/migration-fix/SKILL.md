@@ -73,6 +73,17 @@ For every failing check, decide the safe fix:
     dragged across that shouldn't carry over, e.g. a $0 "ACV Gummies") → propose a **`remove_line`**
     that **deletes** the line from `items[]` (leaving every other line + its `price_override_cents`
     untouched). We don't want to keep it, so backfill is wrong; nothing else deletes a line.
+  - an **unflagged $0 line that DOES resolve to a real catalog variant** (e.g. the Handheld Drink
+    Mixer `ASC-MIX-1`) — it was $0 on Appstle but carries NO `_appstle-free-product` /
+    `_appstle-one-time-product` attribute → it is a **one-time gift**, not a subscription item.
+    Propose a **`remove_line`** by `shopify_variant_id`. A `price_override_cents` of **0** is
+    **NEVER** a valid fix for this shape: zero-locking it ships a free product every renewal, and
+    leaving it unpriced bills it at catalog price every cycle. The CEO declined exactly this
+    `price_override_cents=0` proposal on **audit `cd3bd0e1` (2026-10-19)** and removed the mixer line
+    by hand. If the worker's `remove_line` rejects lines that resolve to a catalog variant, that guard
+    is relaxed only for lines whose Appstle snapshot price was $0. (Migration now also excludes this
+    shape up-front via `zero_price_line` — see [[../../../docs/brain/libraries/migrate-to-internal]] —
+    so you only see it on subs migrated before that landed.)
   - **unsure which** (could be a real product, could be a promo) → don't guess: pause on
     **`needs_input`** (Step 2) and name the line + ask keep-or-drop.
 - **`pricing_preserved` overage equals an Appstle protection line** (`engine N¢ vs pre M¢` where

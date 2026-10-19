@@ -190,7 +190,7 @@ export interface ExcludedLine {
   variantId: string;
   priceCents: number;
   quantity: number;
-  reason: "excluded_product" | "one_time_promo";
+  reason: "excluded_product" | "one_time_promo" | "zero_price_line";
 }
 
 /**
@@ -345,7 +345,7 @@ async function readShopcxContractAsLine(
   };
 }
 
-async function appstleLinesToInternalItems(
+export async function appstleLinesToInternalItems(
   admin: Admin,
   workspaceId: string,
   lines: Array<Record<string, unknown>>,
@@ -386,6 +386,29 @@ async function appstleLinesToInternalItems(
         priceCents: currentPriceCents,
         quantity,
         reason: "one_time_promo",
+      });
+      continue;
+    }
+
+    // Unflagged $0 line → a one-time gift the store never meant to recur (ground truth:
+    // the Handheld Drink Mixer ASC-MIX-1 on sub ed9b0771, Appstle contract 27818131629).
+    // It carries NO _appstle-free-product / _appstle-one-time-product attribute, so it
+    // falls through both promo paths; left in, the internal engine prices it off the
+    // catalog every cycle ($14.96) or, if zero-locked, ships a free mixer every renewal.
+    // Neither is intended, so exclude it at migration (CEO 2026-10-19). Keyed on BOTH the
+    // currentPrice and the actually-paid lineDiscountedPrice being $0 so a discounted-to-$0
+    // promo line is caught too; a recurring free gift (freeProduct flag) still lands is_gift.
+    const lineDiscountedPriceCents = Math.round(
+      parseFloat(String((l.lineDiscountedPrice as Record<string, unknown> | undefined)?.amount ?? "0")) * 100,
+    );
+    if (currentPriceCents === 0 && lineDiscountedPriceCents === 0 && !promo.freeProduct) {
+      excludedLines.push({
+        title: title || variantTitle || shopifyVid,
+        productId: "",
+        variantId: "",
+        priceCents: currentPriceCents,
+        quantity,
+        reason: "zero_price_line",
       });
       continue;
     }

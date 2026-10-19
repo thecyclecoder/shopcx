@@ -46,7 +46,7 @@ export interface RecordAuditInput {
    * in migrate-to-internal — e.g. ACV Gummies, no stock) or an Appstle one-time promo line.
    * Logged once into `notes`; no page.
    */
-  excludedLines?: Array<{ title: string; productId: string; variantId: string; priceCents: number; quantity: number; reason: "excluded_product" | "one_time_promo" }>;
+  excludedLines?: Array<{ title: string; productId: string; variantId: string; priceCents: number; quantity: number; reason: "excluded_product" | "one_time_promo" | "zero_price_line" }>;
 }
 
 /**
