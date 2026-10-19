@@ -260,6 +260,12 @@ export interface PnlRollups {
    */
   adjusted_net_income: number | null;
   /**
+   * "85000 Prior Year Adjustment" line amount (positive expense, Other Expenses). A one-off true-up of
+   * an earlier fiscal year — not this month's economics, so adjusted_net_income adds it back too.
+   * Sep 2026 booked $125.5K here, which turned a ~$43K month into −$82K real profit.
+   */
+  prior_year_adjustments: number | null;
+  /**
    * "60510 Digital Advertising" line (Facebook/Google/Amazon ad spend). A VARIABLE cost that sits
    * inside the Expenses section — broken out so Fixed OpEx (cost to operate) excludes it.
    */
@@ -375,6 +381,8 @@ export function sumAmountsByName(report: any, matcher: RegExp): number | null {
 
 /** The "82000 Management Fees" intercompany line (PR→TX transfer pricing). */
 const MANAGEMENT_FEES_MATCHER = /management fee/i;
+/** "85000 Prior Year Adjustment" — a one-off true-up of an earlier fiscal year. */
+const PRIOR_YEAR_ADJ_MATCHER = /prior year adjustment/i;
 /** OpEx-resident ad line only ("60510 Digital Advertising") — used for the Fixed OpEx subtraction. */
 const OPEX_AD_LINE_MATCHER = /digital advertising/i;
 /** Ad-spend BRIDGE: the OpEx "Digital Advertising" line OR the pre-2025 COGS "Ads - {platform}" accounts. */
@@ -392,8 +400,9 @@ const DISCOUNTS_MATCHER = /discounts?\s*(&|and)?\s*coupons?|discounts? & coupons
  * section Row carries a `group` (Income/COGS/GrossProfit/…) and a `Summary.ColData` whose LAST cell
  * is the period total. Robust to missing sections (a section with no activity is simply absent).
  *
- * Also pulls the Management Fees line and computes `adjusted_net_income` = net_income + management_fees
- * (the transfer-pricing addback — the true economic profit north-star line). `net_income` is left
+ * Also pulls the Management Fees + Prior Year Adjustment lines and computes `adjusted_net_income` =
+ * net_income + management_fees + prior_year_adjustments (the transfer-pricing addback plus the one-off
+ * prior-year true-up — the true economic profit north-star line). `net_income` is left
  * exactly as booked (the number the fiscal-year ≤$0 US-tax target watches).
  */
 export function parsePnlRollups(report: any): PnlRollups {
@@ -401,7 +410,7 @@ export function parsePnlRollups(report: any): PnlRollups {
     total_income: null, total_cogs: null, gross_profit: null, total_expenses: null,
     net_operating_income: null, total_other_income: null, total_other_expenses: null,
     net_other_income: null, net_income: null, management_fees: null, adjusted_net_income: null,
-    digital_advertising: null, transaction_fees: null, fixed_opex: null,
+    prior_year_adjustments: null, digital_advertising: null, transaction_fees: null, fixed_opex: null,
     refunds: null, chargebacks: null, discounts_coupons: null, inventory_adjustments: null,
   };
   for (const row of report?.Rows?.Row ?? []) {
@@ -411,8 +420,9 @@ export function parsePnlRollups(report: any): PnlRollups {
     out[field] = toNum(cells[cells.length - 1]?.value);
   }
   out.management_fees = findLineAmount(report, MANAGEMENT_FEES_MATCHER);
+  out.prior_year_adjustments = findLineAmount(report, PRIOR_YEAR_ADJ_MATCHER);
   if (out.net_income !== null) {
-    out.adjusted_net_income = out.net_income + (out.management_fees ?? 0);
+    out.adjusted_net_income = out.net_income + (out.management_fees ?? 0) + (out.prior_year_adjustments ?? 0);
   }
   // Ad spend — bridged across the 2024 (COGS "Ads - X") → 2025 (OpEx "Digital Advertising") migration.
   out.digital_advertising = sumAmountsByName(report, AD_SPEND_MATCHER);

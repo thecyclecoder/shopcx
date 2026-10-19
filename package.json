@@ -109,6 +109,7 @@
     "test:migration-fix-verdict-vocabulary": "tsx --test src/lib/migration-fix.verdict-vocabulary.test.ts",
     "test:shopify-review-metafields-fold": "tsx --test src/lib/shopify-review-metafields.fold.test.ts",
     "test:profit-estimate": "tsx --test src/lib/profit-estimate.test.ts",
+    "test:quickbooks-prior-year-adjustment": "tsx --test src/lib/quickbooks.prior-year-adjustment.test.ts",
     "test:creative-qa-multi-packshot": "tsx --test src/lib/ads/creative-qa.multi-packshot.test.ts",
     "test:subscription-order-link": "tsx --test src/lib/subscription-order-link.test.ts",
     "test:subscription-duplicate-renewal-detector": "tsx --test src/lib/subscription-duplicate-renewal-detector.test.ts",
