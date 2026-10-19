@@ -10,10 +10,11 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "fs";
+import { readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import {
   GATED_MIGRATION_JOB_KIND,
+  isOutOfLeashExecutableClaimStatus,
   buildGatedMigrationApprovalJob,
   decideGatedMigrationFiling,
   gatedMigrationDedupeKey,
@@ -262,4 +263,24 @@ test("the live stuck migration on main is gated (destructive) and would file a c
   assert.notEqual(cls.severity, "additive");
   const d = decideGatedMigrationFiling([], { version: V, dedupeKey: gatedMigrationDedupeKey(V, sql) });
   assert.equal(d.action, "file");
+});
+
+test("executor entry guard accepts the claimed row (claim_agent_job flips queued_resume → building)", () => {
+  assert.equal(isOutOfLeashExecutableClaimStatus("building"), true);
+  assert.equal(isOutOfLeashExecutableClaimStatus("queued_resume"), true);
+  for (const s of ["needs_approval", "queued", "completed", "needs_attention", null, undefined]) {
+    assert.equal(isOutOfLeashExecutableClaimStatus(s as string | null | undefined), false, String(s));
+  }
+});
+
+test("claim_agent_job returns the row as 'building' (the guard must not require queued_resume)", () => {
+  const dir = join(process.cwd(), "supabase/migrations");
+  const files = readdirSync(dir).filter((f: string) => f.endsWith(".sql")).sort();
+  const latest = [...files].reverse().find((f: string) =>
+    /create or replace function public\.claim_agent_job\(/i.test(readFileSync(join(dir, f), "utf8")),
+  );
+  assert.ok(latest, "a claim_agent_job definition exists");
+  const sql = readFileSync(join(dir, latest as string), "utf8");
+  assert.match(sql, /set status = 'building'/, `${latest} claims by flipping to building`);
+  assert.equal(isOutOfLeashExecutableClaimStatus("building"), true);
 });

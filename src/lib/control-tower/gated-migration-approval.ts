@@ -26,6 +26,7 @@
  *   - `resolveGatedMigrationRoute`    — routeDestructiveAction + "dormant Platform ⇒ CEO" fail-safe
  *   - `buildGatedMigrationApprovalJob`— the agent_jobs row (card shows file, severity, matches, SQL preview)
  *   - `validateGatedMigrationExecution` — the executor's pre-apply re-check (same bytes the approver saw)
+ *   - `isOutOfLeashExecutableClaimStatus` — the executor's entry guard (accepts the claimed `building` row)
  */
 import { createHash } from "crypto";
 import {
@@ -330,4 +331,17 @@ export function validateGatedMigrationExecution(input: {
     return { ok: false, outcome: "already-applied", reason: `version ${marker.version} is already in supabase_migrations.schema_migrations — nothing to apply` };
   }
   return { ok: true };
+}
+
+/**
+ * Entry guard for `runCeoAuthorizedOutOfLeashJob`. A `ceo-authorized-out-of-leash` row is inserted
+ * `needs_approval` (not claimable); `/api/roadmap/approve` flips it to `queued_resume` once every
+ * action is decided; `claim_agent_job` then flips it to `building` and returns THAT row. So the row the
+ * executor receives is `building`. The old guard accepted only `queued_resume`, so every approved
+ * out-of-leash action (gated migrations included) was skipped and left `building` until the reaper
+ * re-queued it, forever (2026-10-15: four approved gated migrations never applied). `queued_resume`
+ * stays accepted for a direct (unclaimed) dispatch.
+ */
+export function isOutOfLeashExecutableClaimStatus(status: string | null | undefined): boolean {
+  return status === "building" || status === "queued_resume";
 }
