@@ -14,7 +14,7 @@ The founder's profit read. **Closed months show QuickBooks actuals; the in-progr
 
 | Tile | Line | Meaning |
 |---|---|---|
-| **Real profit** | `adjusted_net_income` | Net profit **before management fees** — the intercompany PR→TX transfer-pricing charge added back. The number to grow. |
+| **Real profit** | `adjusted_net_income` | Net profit **before management fees and one-off prior-year adjustments** — the intercompany PR→TX transfer-pricing charge and any prior-year true-up added back. The number to grow. |
 | **Booked net profit** | `net_income` | As filed. Steered **≤ $0 per fiscal year** for US tax. |
 | **Revenue** | `total_income` | QBO income (closed) or projected full month (estimate). |
 
@@ -22,7 +22,7 @@ A badge marks the source: **QuickBooks** (emerald) or **Estimate** (amber).
 
 ### P&L panel
 
-Income → COGS → gross profit → digital advertising / transaction fees / fixed OpEx → net operating income → **real profit** (highlighted) → management fees → booked net profit.
+Income → COGS → gross profit → digital advertising / transaction fees / fixed OpEx → net operating income → **real profit** (highlighted) → management fees → prior-year adjustment (one-off; shown only when non-zero) → booked net profit.
 
 ### "How this estimate is built" panel
 

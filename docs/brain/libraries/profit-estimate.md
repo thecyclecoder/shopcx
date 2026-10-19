@@ -17,7 +17,7 @@ Worse, it never modelled the **management fee** at all — so it had no way to e
 The management fee is an **intercompany PR→TX transfer-pricing charge**: a Puerto Rico advisory entity bills consulting to the TX Superfoods entity, legally moving pre-tax profit out. From the group's economic view it isn't a real cost. So the headline number is:
 
 ```
-adjusted_net_income = net_income + management_fees
+adjusted_net_income = net_income + management_fees + prior_year_adjustments
 ```
 
 Both lines are first-class and move in **opposite directions on purpose** ([[../tables/qb_pnl_snapshots]] § The two profit lines): `net_income` is steered **≤ $0 per fiscal year** for US tax; `adjusted_net_income` is the number to grow. `computeProfitLines` therefore always emits both, even in an estimate, and the test pins that they differ by exactly the addback.
@@ -53,6 +53,8 @@ Cost factors come from `deriveCalibration` over the last [[#CALIBRATION_MONTHS]]
 | `fixedOpexCents` | trailing mean of QBO `fixed_opex` | G&A `$54,542` fixed | $53K – $60K |
 | `managementFeesCents` | trailing mean of QBO `management_fees` | *(not modelled at all)* | $30K – $60K |
 | `otherNetCents` | mean of (`adjusted_net_income` − `net_operating_income`) | — | −$1.4K – +$7.6K |
+
+> ⚠️ **One-offs must be excluded at the snapshot, not here.** `otherNetCents` averages the last 3 closed months, so a one-off left inside `adjusted_net_income` poisons the next three estimates. Sep 2026's $125.5K Prior Year Adjustment pulled October's estimate from ~$35K to ~−$7K until `prior_year_adjustments` was added back (2026-10-19). A closed month with a non-zero adjustment shows it as its own P&L row plus a flag.
 | `renewalCollectionRate` | realized ÷ expected on the renewal book | — | 64 – 82%, **declining** |
 
 **`incomeRatio` is the one that quietly fixes the most.** Refunds, discounts and chargebacks are **contra-revenue accounts** in QBO (`48300` / `48200` / `48100`), so they're already netted out of `total_income`. Calibrating our gross against QBO income absorbs all three in one measured factor instead of a guessed discount percentage.

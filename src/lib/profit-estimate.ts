@@ -75,9 +75,11 @@ export interface ProfitLines {
   fixedOpexCents: number;
   netOperatingIncomeCents: number;
   managementFeesCents: number;
+  /** One-off "Prior Year Adjustment" true-up (positive expense). Added back with the management fee; always 0 in an estimate. */
+  priorYearAdjustmentsCents: number;
   /** Booked net profit, as QuickBooks reports it. Steered ≤ $0 per fiscal year for US tax. */
   netIncomeCents: number;
-  /** `netIncome + managementFees` — real economic profit. THE headline. */
+  /** `netIncome + managementFees + priorYearAdjustments` — real economic profit. THE headline. */
   adjustedNetIncomeCents: number;
 }
 
@@ -175,6 +177,7 @@ export function computeProfitLines(
     fixedOpexCents,
     netOperatingIncomeCents,
     managementFeesCents,
+    priorYearAdjustmentsCents: 0,
     netIncomeCents,
     adjustedNetIncomeCents,
   };
@@ -383,6 +386,7 @@ interface PnlSnapshot {
   net_operating_income: number | null;
   net_income: number | null;
   management_fees: number | null;
+  prior_year_adjustments: number | null;
   adjusted_net_income: number | null;
   digital_advertising: number | null;
   transaction_fees: number | null;
@@ -390,7 +394,7 @@ interface PnlSnapshot {
 }
 
 const PNL_COLS =
-  "period_month,total_income,total_cogs,gross_profit,total_expenses,net_operating_income,net_income,management_fees,adjusted_net_income,digital_advertising,transaction_fees,fixed_opex";
+  "period_month,total_income,total_cogs,gross_profit,total_expenses,net_operating_income,net_income,management_fees,prior_year_adjustments,adjusted_net_income,digital_advertising,transaction_fees,fixed_opex";
 
 const d2c = (v: number | null | undefined) => Math.round(Number(v ?? 0) * 100);
 
@@ -414,6 +418,11 @@ export async function getClosedMonthProfit(
   if (qb.management_fees == null) {
     flags.push("No management-fee line this month — the addback equals booked net income.");
   }
+  if (qb.prior_year_adjustments) {
+    flags.push(
+      `One-off prior-year adjustment of $${Math.round(Number(qb.prior_year_adjustments)).toLocaleString()} added back — it is not this month's economics.`,
+    );
+  }
 
   return {
     periodMonth,
@@ -430,6 +439,7 @@ export async function getClosedMonthProfit(
       fixedOpexCents: d2c(qb.fixed_opex),
       netOperatingIncomeCents: d2c(qb.net_operating_income),
       managementFeesCents: d2c(qb.management_fees),
+      priorYearAdjustmentsCents: d2c(qb.prior_year_adjustments),
       netIncomeCents: d2c(qb.net_income),
       adjustedNetIncomeCents: d2c(qb.adjusted_net_income),
     },
