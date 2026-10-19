@@ -12,6 +12,7 @@ interface ProfitLines {
   fixedOpexCents: number;
   netOperatingIncomeCents: number;
   managementFeesCents: number;
+  priorYearAdjustmentsCents: number;
   netIncomeCents: number;
   adjustedNetIncomeCents: number;
 }
@@ -150,9 +151,12 @@ export default function ProfitDashboard() {
                   {fmtK(L.adjustedNetIncomeCents)}
                 </span>
               </div>
-              <p className="mt-0.5 text-[11px] text-zinc-500">Before management fees — the real economic number.</p>
+              <p className="mt-0.5 text-[11px] text-zinc-500">Before management fees and one-off prior-year adjustments — the real economic number.</p>
             </div>
             <Row label="Management fees" value={`-${fmtK(L.managementFeesCents)}`} color="text-zinc-400" />
+            {L.priorYearAdjustmentsCents !== 0 && (
+              <Row label="Prior-year adjustment (one-off)" value={`-${fmtK(L.priorYearAdjustmentsCents)}`} color="text-zinc-400" />
+            )}
             <Divider />
             <div className="flex justify-between">
               <span className="font-medium text-zinc-700 dark:text-zinc-300">Booked net profit</span>
