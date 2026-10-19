@@ -47,6 +47,7 @@ No new job kind or parallel approval path. A drift-filed request is an ordinary 
 | `readGatedMigrationMarker(action)` | `{ version, file, content_hash }` or null |
 | `validateGatedMigrationExecution({ marker, onDiskSql, appliedVersions })` | the executor's pre-apply re-check |
 | `gatedMigrationCmd(file)` · `gatedMigrationSqlPreview(sql)` | card display helpers |
+| `isOutOfLeashExecutableClaimStatus(status)` | the executor's entry guard: `building` (what `claim_agent_job` returns) or `queued_resume` |
 
 ## Dedupe rules (`decideGatedMigrationFiling`)
 
@@ -82,6 +83,7 @@ An unreadable ledger (`appliedVersions === null`) proceeds. `applyMigrationAndRe
 
 ## Gotchas
 
+- **The executor receives the row as `building`, not `queued_resume`.** `claim_agent_job` flips the status before returning the row. Until 2026-10-15 `runCeoAuthorizedOutOfLeashJob` required `queued_resume`, so every approved out-of-leash action was skipped and left `building` until the reaper re-queued it (four approved gated migrations sat unapplied). The guard is now `isOutOfLeashExecutableClaimStatus`, pinned by a test that reads the latest `claim_agent_job` migration.
 - **The `cmd` on these actions is a display label, not a shell command.** Only the marker path executes. Never add a shell fallback for `origin: 'migration-drift'`.
 - **Ledger-gap migrations** (objects already live, version unrecorded) still pass through here if they classify destructive. On approval, `applyMigrationAndRecord` reconciles them: duplicate-object statements are verified as already present and the version is recorded.
 - **Decision grades.** `runCeoAuthorizedOutOfLeashJob` writes the Phase-4 `director_decision_grades` marker for a drift-origin request **only** when it was routed to Platform, which makes it Ada's call. A CEO decision on a deterministic tool's filing is not a director call to grade.
