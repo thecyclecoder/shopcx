@@ -14,8 +14,8 @@
  *    pending month-end entries, so we never read it. Instead every cost factor
  *    is CALIBRATED from the last N closed QBO months, and revenue is projected
  *    per-stream:
- *      · renewals      — scheduled, so they come off the billing_forecasts book
- *                        (realized-to-date + remaining pending × collection rate)
+ *      · renewals      — anniversary-dated, so realized-to-date + the rest
+ *                        projected off the same days last month (projectRenewalRest)
  *      · new checkouts — run-rate from complete days so far
  *      · amazon        — run-rate from complete days so far
  *
@@ -102,7 +102,13 @@ export interface ProfitResult {
   /** Per-stream projection detail, so the UI can show what's actual vs projected. */
   projection: {
     renewalRealizedCents: number;
+    /** Pending rows still on the billing book. Informational only — it holds ~2/3 of what really bills. */
     renewalForwardBookCents: number;
+    /** Renewals projected for the remaining days (see projectRenewalRest). */
+    renewalRestCents: number;
+    /** Last month's renewals on the same days already elapsed, and on its remaining days. */
+    renewalPrevSameDaysCents: number;
+    renewalPrevRestCents: number;
     renewalProjectedCents: number;
     newCheckoutToDateCents: number;
     amazonToDateCents: number;
@@ -138,6 +144,11 @@ export function daysInMonth(day: string): number {
 /** The day before `day`. */
 export function previousDay(day: string): string {
   return new Date(Date.parse(`${day}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+}
+
+/** The day after `day`. */
+export function nextDay(day: string): string {
+  return new Date(Date.parse(`${day}T00:00:00Z`) + 86400000).toISOString().slice(0, 10);
 }
 
 // ── pure model ─────────────────────────────────────────────────────────────
@@ -184,19 +195,36 @@ export function computeProfitLines(
 }
 
 /**
- * Project a full-month renewal total. PURE.
+ * Project the renewal revenue still to come this month. PURE.
  *
- * Renewals are SCHEDULED, not paced — every open subscription already has a
- * dated row on the billing book. So we take what actually collected so far and
- * add the remaining book haircut by the observed collection rate, rather than
- * extrapolating a daily average.
+ * Renewals recur on each sub's anniversary date, so the same days last month
+ * are the best guide to the rest of this one. Two estimates, averaged:
+ *   · last month's remaining days, scaled to this month's remaining day count
+ *     and by this month's pace (this month-to-date ÷ last month same days)
+ *   · this month's own daily run rate over the remaining days
+ *
+ * Backtested over 14 months × day 10/18/25 cuts (42 cases): 7.7% mean absolute
+ * error on the remaining renewals. Last-month-pace alone was 8.5%, run rate
+ * alone 9.6%. The previous method (pending billing-book rows × collection
+ * rate) double-discounted: in Oct 2026 the book held ~2/3 of what really bills,
+ * then the 65% rate cut it again, projecting $31.7K for Oct 19-31 against
+ * ~$62K that billed in the same days of September.
  */
-export function projectRenewalRevenue(
+export function projectRenewalRest(
   realizedCents: number,
-  forwardBookCents: number,
-  collectionRate: number,
+  completeDays: number,
+  totalDays: number,
+  prevSameDaysCents: number,
+  prevRestCents: number,
+  prevTotalDays: number,
 ): number {
-  return Math.round(realizedCents + forwardBookCents * collectionRate);
+  const remaining = totalDays - completeDays;
+  if (remaining <= 0 || completeDays <= 0) return 0;
+  const runRate = (realizedCents / completeDays) * remaining;
+  const prevRemaining = prevTotalDays - completeDays;
+  if (prevSameDaysCents <= 0 || prevRemaining <= 0) return Math.round(runRate);
+  const lastMonth = prevRestCents * (remaining / prevRemaining) * (realizedCents / prevSameDaysCents);
+  return Math.round((lastMonth + runRate) / 2);
 }
 
 /**
@@ -514,9 +542,6 @@ export async function estimateCurrentMonthProfit(
   const rateFrom = calInputs.length ? calInputs[0].periodMonth : monthStart(lastCompleteDay);
   const rateTo = calInputs.length ? monthEnd(calInputs[calInputs.length - 1].periodMonth) : lastCompleteDay;
   const observedRate = await readRenewalCollectionRate(admin, workspaceId, rateFrom, rateTo);
-  if (observedRate == null) {
-    flags.push("No renewal book history — using the default collection rate.");
-  }
   const calibration = deriveCalibration(
     calInputs,
     observedRate ?? FALLBACK_CALIBRATION.renewalCollectionRate,
@@ -529,17 +554,27 @@ export async function estimateCurrentMonthProfit(
   const amazonToDate = await sumDaily(admin, "daily_amazon_order_snapshots", ["gross_revenue_cents"], workspaceId, start, lastCompleteDay);
   const metaSpendToDate = await sumDaily(admin, "daily_meta_ad_spend", ["spend_cents"], workspaceId, start, lastCompleteDay);
 
-  // Renewals are scheduled — read the remaining book rather than pacing.
+  // The billing book is kept as a cross-check only — it under-holds real renewals.
   const forwardRows = await readForecasts(admin, workspaceId, today, end);
   let forwardBook = 0;
   for (const r of forwardRows) {
     if (r.status === "pending" && isRenewalBookRow(r)) forwardBook += Number(r.expected_revenue_cents ?? 0);
   }
-  if (forwardBook <= 0 && completeDays < total) {
-    flags.push("Renewal book for the rest of the month is empty — renewals may be understated.");
-  }
 
-  const renewalCents = projectRenewalRevenue(renewalRealized, forwardBook, calibration.renewalCollectionRate);
+  // Renewals: realized so far + the rest projected off the same days last month.
+  const prevStart = monthStart(previousDay(start));
+  const prevEnd = monthEnd(prevStart);
+  const prevTotal = daysInMonth(prevStart);
+  const prevCut = `${prevStart.slice(0, 8)}${String(Math.min(completeDays, prevTotal)).padStart(2, "0")}`;
+  const prevSameDays = await sumDaily(admin, "daily_order_snapshots", ["recurring_revenue_cents"], workspaceId, prevStart, prevCut);
+  const prevRest = completeDays < prevTotal
+    ? await sumDaily(admin, "daily_order_snapshots", ["recurring_revenue_cents"], workspaceId, nextDay(prevCut), prevEnd)
+    : 0;
+  const renewalRest = projectRenewalRest(renewalRealized, completeDays, total, prevSameDays, prevRest, prevTotal);
+  const renewalCents = renewalRealized + renewalRest;
+  if (prevSameDays <= 0 && completeDays < total) {
+    flags.push("No renewal history for last month — the rest of the month's renewals are run-rated.");
+  }
   const newCheckoutCents = projectFromRunRate(newCheckoutToDate, completeDays, total);
   const amazonCents = projectFromRunRate(amazonToDate, completeDays, total);
   const metaSpendCents = projectFromRunRate(metaSpendToDate, completeDays, total);
@@ -557,6 +592,9 @@ export async function estimateCurrentMonthProfit(
     projection: {
       renewalRealizedCents: renewalRealized,
       renewalForwardBookCents: forwardBook,
+      renewalRestCents: renewalRest,
+      renewalPrevSameDaysCents: prevSameDays,
+      renewalPrevRestCents: prevRest,
       renewalProjectedCents: renewalCents,
       newCheckoutToDateCents: newCheckoutToDate,
       amazonToDateCents: amazonToDate,

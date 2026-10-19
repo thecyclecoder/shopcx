@@ -53,9 +53,15 @@ Cost factors come from `deriveCalibration` over the last [[#CALIBRATION_MONTHS]]
 | `fixedOpexCents` | trailing mean of QBO `fixed_opex` | G&A `$54,542` fixed | $53K – $60K |
 | `managementFeesCents` | trailing mean of QBO `management_fees` | *(not modelled at all)* | $30K – $60K |
 | `otherNetCents` | mean of (`adjusted_net_income` − `net_operating_income`) | — | −$1.4K – +$7.6K |
+| `renewalCollectionRate` | realized ÷ expected on the renewal book | — | 64 – 82%, **declining** — informational only since 2026-10-19; no longer drives the renewal projection |
 
 > ⚠️ **One-offs must be excluded at the snapshot, not here.** `otherNetCents` averages the last 3 closed months, so a one-off left inside `adjusted_net_income` poisons the next three estimates. Sep 2026's $125.5K Prior Year Adjustment pulled October's estimate from ~$35K to ~−$7K until `prior_year_adjustments` was added back (2026-10-19). A closed month with a non-zero adjustment shows it as its own P&L row plus a flag.
-| `renewalCollectionRate` | realized ÷ expected on the renewal book | — | 64 – 82%, **declining** |
+
+### Renewal projection (CEO 2026-10-19)
+
+Renewals recur on each sub's anniversary date, so the rest of the month is projected from **the same days last month**. `projectRenewalRest` averages two estimates. The first is last month's remaining-day renewals, scaled to this month's remaining day count and by this month's pace (MTD ÷ last month's same days). The second is this month's own daily run rate. Backtested on 14 months at day-10/18/25 cuts (42 cases): **7.7% mean absolute error** on the remaining renewals (last-month pace alone 8.5%, run rate alone 9.6%).
+
+> ~~Pending `billing_forecasts` rows × collection rate~~ — **double-discounted.** In Oct 2026 the book held only ~2/3 of what really bills, and the 65% rate then cut it again. That projected $31.7K for Oct 19-31 against ~$62K billed on the same days of September, and showed $36.6K real profit instead of ~$61K. The forward book is still returned (`renewalForwardBookCents`) as a cross-check only.
 
 **`incomeRatio` is the one that quietly fixes the most.** Refunds, discounts and chargebacks are **contra-revenue accounts** in QBO (`48300` / `48200` / `48100`), so they're already netted out of `total_income`. Calibrating our gross against QBO income absorbs all three in one measured factor instead of a guessed discount percentage.
 
@@ -64,10 +70,10 @@ Cost factors come from `deriveCalibration` over the last [[#CALIBRATION_MONTHS]]
 ### Pure (no DB, no clock — unit-pinned)
 
 - `computeProfitLines(internalGrossCents, metaSpendCents, cal): ProfitLines` — the full P&L. Emits both profit lines.
-- `projectRenewalRevenue(realizedCents, forwardBookCents, collectionRate): number`
+- `projectRenewalRest(realizedCents, completeDays, totalDays, prevSameDaysCents, prevRestCents, prevTotalDays): number` — renewals still to come this month (see § Renewal projection). Falls back to the run rate when last month has no data or fewer days left.
 - `projectFromRunRate(toDateCents, completeDays, totalDays): number` — **`completeDays` excludes today**; a partial day would drag the daily rate down and understate the month.
 - `deriveCalibration(months: CalibrationInput[], renewalCollectionRate): ProfitCalibration` — **averages the per-month ratios, not the ratio of summed totals**, so one outsized month can't dominate. Pinned by test.
-- `centralToday` / `monthStart` / `monthEnd` / `daysInMonth` / `previousDay` / `lastClosedMonths` — Central-time date helpers matching the snapshot crons.
+- `centralToday` / `monthStart` / `monthEnd` / `daysInMonth` / `previousDay` / `nextDay` / `lastClosedMonths` — Central-time date helpers matching the snapshot crons.
 
 ### DB-backed
 

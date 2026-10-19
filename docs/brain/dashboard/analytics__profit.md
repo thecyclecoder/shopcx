@@ -28,7 +28,7 @@ Income → COGS → gross profit → digital advertising / transaction fees / fi
 
 Only for the in-progress month. Shows the work rather than a black box:
 
-- **Per-stream revenue projection** — renewals (`collected + scheduled book × collection rate`), new checkouts (run-rated), Amazon (run-rated), then `× incomeRatio` to reach QuickBooks income.
+- **Per-stream revenue projection** — renewals (collected + the rest projected off the same days last month, scaled by this month's pace), new checkouts (run-rated), Amazon (run-rated), then `× incomeRatio` to reach QuickBooks income.
 - **Cost factors** — COGS %, transaction-fee %, ad-spend multiplier, fixed OpEx, management fees, each labelled with the closed months it was calibrated from.
 - **Flags** — missing snapshots, thin calibration, an empty renewal book.
 
