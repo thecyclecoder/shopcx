@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import {
   computeProfitLines,
   deriveCalibration,
-  projectRenewalRevenue,
+  projectRenewalRest,
   projectFromRunRate,
   lastClosedMonths,
   monthStart,
@@ -105,13 +105,19 @@ test("no closed months falls back to defaults but keeps the observed renewal rat
   assert.deepEqual(cal.monthsUsed, []);
 });
 
-test("renewals project off the scheduled book, not a run rate", () => {
-  // $130,400 already collected, $36,728 still scheduled, 72% historically collects.
-  assert.equal(projectRenewalRevenue(13040000, 3672800, 0.72), 13040000 + Math.round(3672800 * 0.72));
-  // An empty forward book means the month is already fully realized.
-  assert.equal(projectRenewalRevenue(13040000, 0, 0.72), 13040000);
-  // A 100% collection rate adds the book untouched.
-  assert.equal(projectRenewalRevenue(0, 5000, 1), 5000);
+test("renewals project the rest of the month off the same days last month", () => {
+  // October 2026 at day 18: $105,893 collected vs $102,200 over Sep 1-18; Sep 19-30 billed $61,856.
+  const rest = projectRenewalRest(10589300, 18, 31, 10220000, 6185600, 30);
+  const lastMonth = 6185600 * (13 / 12) * (10589300 / 10220000);
+  const runRate = (10589300 / 18) * 13;
+  assert.equal(rest, Math.round((lastMonth + runRate) / 2));
+  assert.ok(rest > 7000000 && rest < 7500000, "about $73K, not the book-based $31.7K");
+  // No history last month → run rate only.
+  assert.equal(projectRenewalRest(1800000, 18, 30, 0, 0, 31), Math.round((1800000 / 18) * 12));
+  // Month already complete → nothing left.
+  assert.equal(projectRenewalRest(1800000, 30, 30, 1000, 1000, 30), 0);
+  // This month has more days left than last month had (Mar 28 vs Feb 28) → run rate only.
+  assert.equal(projectRenewalRest(2800000, 28, 31, 2800000, 0, 28), Math.round((2800000 / 28) * 3));
 });
 
 test("run-rate projection extrapolates complete days only", () => {

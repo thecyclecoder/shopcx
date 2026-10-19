@@ -30,7 +30,8 @@ interface ProfitResponse {
     fixedOpexCents: number; managementFeesCents: number; renewalCollectionRate: number; monthsUsed: string[];
   } | null;
   projection: {
-    renewalRealizedCents: number; renewalForwardBookCents: number; renewalProjectedCents: number;
+    renewalRealizedCents: number; renewalForwardBookCents: number; renewalRestCents: number;
+    renewalPrevSameDaysCents: number; renewalPrevRestCents: number; renewalProjectedCents: number;
     newCheckoutToDateCents: number; amazonToDateCents: number; metaSpendToDateCents: number;
   } | null;
   flags: string[];
@@ -190,8 +191,13 @@ export default function ProfitDashboard() {
                     color="text-zinc-700 dark:text-zinc-300"
                   />
                   <p className="ml-2 text-[11px] text-zinc-400">
-                    {fmtK(data.projection.renewalRealizedCents)} collected + {fmtK(data.projection.renewalForwardBookCents)} still
-                    scheduled × {(data.calibration.renewalCollectionRate * 100).toFixed(0)}% collection rate
+                    {fmtK(data.projection.renewalRealizedCents)} collected + {fmtK(data.projection.renewalRestCents)} projected for
+                    the remaining {data.daysInMonth - data.daysElapsed} days. Last month billed{" "}
+                    {fmtK(data.projection.renewalPrevRestCents)} on its remaining days, and this month is running{" "}
+                    {data.projection.renewalPrevSameDaysCents > 0
+                      ? `${((data.projection.renewalRealizedCents / data.projection.renewalPrevSameDaysCents - 1) * 100).toFixed(1)}%`
+                      : "n/a"}{" "}
+                    vs the same days last month.
                   </p>
                   <Row label="New checkouts" value={fmtK(data.revenue.newCheckoutCents)} color="text-zinc-700 dark:text-zinc-300" />
                   <p className="ml-2 text-[11px] text-zinc-400">
