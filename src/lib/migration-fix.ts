@@ -352,9 +352,50 @@ export async function applyMigrationFix(
     }
     const sub = await loadSubItems(admin, subscriptionId);
     if (!sub) return { ok: false, detail: "remove_line: subscription not found" };
+
+    // By default `shopify_variant_id` matches only a lingering NON-catalog line (its
+    // items[].variant_id is still the raw Shopify id). An unflagged $0 one-time gift that
+    // RESOLVED to a real catalog variant (e.g. ASC-MIX-1) carries a catalog UUID in
+    // items[].variant_id, so a raw Shopify-id match misses it. Relax that ONLY for a line
+    // whose Appstle snapshot price was $0 — verified here against the stored contract
+    // snapshot, never a caller-declared flag (CEO declined a price_override_cents=0 lock on
+    // audit cd3bd0e1 2026-10-19). A PAID line by Shopify id stays protected.
+    let zeroPriceCatalogUuid: string | null = null;
+    if (shopId) {
+      const contractId = String(audit.appstle_contract_id || "");
+      if (contractId) {
+        const { data: snap } = await admin
+          .from("appstle_contract_snapshots")
+          .select("lines")
+          .eq("workspace_id", workspaceId)
+          .eq("appstle_contract_id", contractId)
+          .maybeSingle();
+        const snapLines = Array.isArray(snap?.lines) ? (snap!.lines as Array<Record<string, unknown>>) : [];
+        const snapLine = snapLines.find((l) => String((l as Record<string, unknown>).variant_id || "") === shopId);
+        const wasZeroOnAppstle =
+          !!snapLine &&
+          Number((snapLine as Record<string, unknown>).current_price_cents ?? -1) === 0 &&
+          ((snapLine as Record<string, unknown>).discounted_total_cents == null ||
+            Number((snapLine as Record<string, unknown>).discounted_total_cents) === 0);
+        if (wasZeroOnAppstle) {
+          const { data: v } = await admin
+            .from("product_variants")
+            .select("id")
+            .eq("workspace_id", workspaceId)
+            .eq("shopify_variant_id", shopId)
+            .maybeSingle();
+          zeroPriceCatalogUuid = v?.id ? String(v.id) : null;
+        }
+      }
+    }
+
     const matches = (i: Record<string, unknown>): boolean => {
       if (lineId && String((i.line_id ?? i.id) || "") !== lineId) return false;
-      if (shopId && String(i.variant_id || "") !== shopId) return false;
+      if (shopId) {
+        const vid = String(i.variant_id || "");
+        const matchesShop = vid === shopId || (zeroPriceCatalogUuid != null && vid === zeroPriceCatalogUuid);
+        if (!matchesShop) return false;
+      }
       if (title && !String(i.title || "").toLowerCase().includes(title)) return false;
       return true;
     };

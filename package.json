@@ -61,6 +61,7 @@
     "test:fraud-confirm-single-customer": "tsx --test src/lib/fraud-confirm-single-customer.test.ts",
     "test:migration-audit-pricing-verdict": "tsx --test src/lib/migration-audit.pricing-verdict.test.ts",
     "test:migration-fix-gap-spec-template": "tsx --test src/lib/migration-fix.gap-spec-template.test.ts",
+    "test:migration-fix-remove-line-zero-price": "tsx --test src/lib/migration-fix.remove-line-zero-price.test.ts",
     "test:braintree-charged-sale": "tsx --test src/lib/integrations/braintree.charged-sale.test.ts",
     "test:backfill-internal-cancelled-at": "tsx --test scripts/_backfill-internal-cancelled-at.test.ts",
     "test:coupons-shopify-classify": "tsx --test src/lib/coupons.shopify-classify.test.ts",
