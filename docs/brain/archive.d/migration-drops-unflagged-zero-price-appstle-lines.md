@@ -1,0 +1,1 @@
+- **Migration drops unflagged $0 Appstle lines instead of billing them** · verified 2026-10-19 · → [[../libraries/migrate-to-internal]]
