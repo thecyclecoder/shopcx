@@ -90,6 +90,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
+  isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
@@ -16763,6 +16764,95 @@ test("isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise KEEPS a c
     isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
       "column customers.address does not exist",
       "update public.customers set address = $1 where id = $2",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/returns?select=...refund_type...` against our `public.returns` table with a
+// guessed, wrong column list. The table exists but has NO `refund_type` column, and no
+// ShopCX code path names it. Foreign-owned surface, no lever from us — drop AT CAPTURE
+// only when BOTH the exact column-missing message on `returns.refund_type` AND a
+// SELECT-lookup shape on `returns` (bare OR PostgREST CTE wrapper) are present. A
+// column-missing on a different `returns` column, on `refund_type` from any other table,
+// or via a non-SELECT statement still pages (Control Tower signature
+// `supabase-logs:0686a08087d88b5a`).
+
+test("isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise drops the captured supabase-logs:0686a08087d88b5a message+query pair (PostgREST CTE SELECT on returns.refund_type)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `returns.refund_type` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise(
+      "column returns.refund_type does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."returns"."id", "public"."returns"."refund_type" FROM "public"."returns" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise(
+      "column public.returns.refund_type does not exist",
+      'WITH pgrst_source AS (SELECT "public"."returns"."refund_type" FROM "public"."returns")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise(
+      "column returns.refund_type does not exist",
+      "select id, refund_type from public.returns",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise(
+      "column returns.refund_type does not exist",
+      "select refund_type from returns limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise(
+      "ERROR: column returns.refund_type does not exist",
+      'WITH pgrst_source AS (SELECT "public"."returns"."refund_type" FROM "public"."returns")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise(
+      "column returns.refund_type does not exist",
+      "SELECT ID, REFUND_TYPE FROM PUBLIC.RETURNS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise KEEPS a column-missing on a different returns column, refund_type on another table, and a non-SELECT statement (real regressions still page)", () => {
+  // A column-missing on a DIFFERENT `returns` column (a real schema regression) must still
+  // page — the pin is `returns.refund_type` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise(
+      "column returns.status does not exist",
+      "select status from public.returns",
+    ),
+    false,
+  );
+  // A column-missing on `refund_type` from a DIFFERENT table must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise(
+      "column order_refunds.refund_type does not exist",
+      "select refund_type from public.order_refunds",
+    ),
+    false,
+  );
+  // A non-SELECT statement against `returns` (real code-bug shape) must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise(
+      "column returns.refund_type does not exist",
+      "update public.returns set refund_type = $1 where id = $2",
     ),
     false,
   );
