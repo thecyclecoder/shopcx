@@ -131,6 +131,65 @@ const VENDOR_NOTIFICATION_BODY_MARKERS: readonly RegExp[] = [
 ];
 
 /**
+ * Chargeback-mitigation / dispute-vendor blast markers — the chargebackgurus.com / FPRONE class
+ * from ticket 5dcb1240. A dispute-alert vendor bot resends an identical automated template asking
+ * us to "attempt refund" for a dispute Alert ID — no order number, amount, card, or merchant
+ * descriptor, and no matching charge on our side. The template is written in the vendor's own
+ * dispute-network voice, never a customer's. The 'refund' cue in `findUnsatisfiedCustomerRequests`
+ * matches it and downgrades a correct `close_no_action` into an endless Sol re-session loop (the
+ * same loop class the GemX Terms/Privacy blast caused — see VENDOR_NOTIFICATION_BODY_MARKERS).
+ *
+ * Kept vendor-voiced + dispute-scoped so a real customer asking for a refund never trips:
+ *   - FPRONE / FPR-ONE — the pre-dispute alert network signature, never in a customer email.
+ *   - "ChargebackGurus" — the vendor's own name appearing in the body.
+ *   - "Alert ID" paired (within 80 chars, either order) with a dispute/chargeback/refund/gateway/
+ *     descriptor cue — the dispute-alert identifier a customer would never cite.
+ *   - vendor-voiced "attempt (a) refund … in (the) Gateway / for the Alert / to avoid a chargeback"
+ *     (a customer says "I want a refund" / "please refund me", not "attempt a refund in the Gateway").
+ */
+const CHARGEBACK_VENDOR_BODY_MARKERS: readonly RegExp[] = [
+  /\bfpr[-\s]?one\b/i,
+  /\bchargeback\s*gurus\b/i,
+  /\balert id\b[\s\S]{0,80}\b(?:refund|chargeback|dispute|gateway|descriptor)\b/i,
+  /\b(?:refund|chargeback|dispute|gateway|descriptor)\b[\s\S]{0,80}\balert id\b/i,
+  /\battempt(?:ing)? (?:a |an |to )?refund\b[\s\S]{0,60}\b(?:gateway|alert|dispute|chargeback)\b/i,
+];
+
+/**
+ * Known chargeback / dispute-mitigation vendor sender domains. Match the exact domain or any
+ * subdomain. A ticket whose From address is on one of these is a dispute-vendor blast, never a
+ * customer — safe to exempt from the close_no_action unsatisfied-request guard. Kept narrow: only
+ * domains that are 100% dispute-vendor automation (sender support@/abdulsalam.a@chargebackgurus.com
+ * in ticket 5dcb1240).
+ */
+const CHARGEBACK_VENDOR_DOMAINS: readonly string[] = [
+  "chargebackgurus.com",
+];
+
+/**
+ * Does the inbound body carry a chargeback-mitigation / dispute-vendor template marker
+ * (ticket 5dcb1240)? Scoped to the close-gate exemption only — see CHARGEBACK_VENDOR_BODY_MARKERS.
+ */
+function bodyHasChargebackVendorMarker(body: string | null | undefined): boolean {
+  if (!body) return false;
+  return CHARGEBACK_VENDOR_BODY_MARKERS.some(re => re.test(body));
+}
+
+/**
+ * Does the From address sit on a known chargeback / dispute-mitigation vendor domain
+ * (ticket 5dcb1240)? Mirrors `isAutomatedSender`'s domain match but is scoped to the close-gate
+ * exemption, so adding a dispute-vendor domain never auto-closes a customer ticket.
+ */
+function isChargebackVendorSender(fromAddress: string | null | undefined): boolean {
+  if (!fromAddress) return false;
+  const addr = fromAddress.toLowerCase().trim();
+  const at = addr.lastIndexOf("@");
+  if (at <= 0 || at === addr.length - 1) return false;
+  const domain = addr.slice(at + 1);
+  return CHARGEBACK_VENDOR_DOMAINS.some(d => domain === d || domain.endsWith("." + d));
+}
+
+/**
  * Does the inbound body carry an out-of-office / auto-reply / vendor-notification marker — the
  * class the active 'Auto-close tickets from automatic replies' and 'Auto-replies/OOO bounces'
  * policy rules recognize? Complements `bodyHasAutomatedMarker` (whose markers stay narrow for the
@@ -141,7 +200,8 @@ export function bodyHasAutoReplyOrNotificationMarker(body: string | null | undef
   if (!body) return false;
   return (
     AUTO_REPLY_BODY_MARKERS.some(re => re.test(body)) ||
-    VENDOR_NOTIFICATION_BODY_MARKERS.some(re => re.test(body))
+    VENDOR_NOTIFICATION_BODY_MARKERS.some(re => re.test(body)) ||
+    bodyHasChargebackVendorMarker(body)
   );
 }
 
@@ -157,5 +217,9 @@ export function isAutoReplyOrNotificationInbound(
   fromAddress: string | null | undefined,
   body: string | null | undefined,
 ): boolean {
-  return isAutomatedInbound(fromAddress, body) || bodyHasAutoReplyOrNotificationMarker(body);
+  return (
+    isAutomatedInbound(fromAddress, body) ||
+    isChargebackVendorSender(fromAddress) ||
+    bodyHasAutoReplyOrNotificationMarker(body)
+  );
 }

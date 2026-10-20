@@ -139,3 +139,34 @@ test("a real customer asking us to update their address does NOT trip (false-pos
     false,
   );
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Chargeback-mitigation / dispute-vendor blast exemption — ticket 5dcb1240.
+// chargebackgurus.com / FPRONE automated "please attempt refund for Alert ID …" templates carry
+// no customer identity and no actionable ask, yet the 'refund' cue in findUnsatisfiedCustomerRequests
+// downgrades a correct close_no_action into an endless Sol re-session loop.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("chargeback-vendor FPRONE 'attempt refund for Alert ID' blast trips the notification marker (ticket 5dcb1240)", () => {
+  const vendorBody =
+    "FPRONE Dispute Alert. Please attempt a refund for Alert ID CBG-88213 in your Gateway " +
+    "within 24 hours to avoid a chargeback. — ChargebackGurus";
+  assert.equal(bodyHasAutoReplyOrNotificationMarker(vendorBody), true);
+});
+
+test("chargeback-vendor sender domain (support@chargebackgurus.com) trips via isAutoReplyOrNotificationInbound", () => {
+  const vendorBody =
+    "Please attempt a refund for Alert ID CBG-88213 in your Gateway to avoid a chargeback.";
+  // Sender-domain signal alone is sufficient for the close-gate exemption.
+  assert.equal(isAutoReplyOrNotificationInbound("support@chargebackgurus.com", "any body"), true);
+  assert.equal(isAutoReplyOrNotificationInbound("abdulsalam.a@chargebackgurus.com", vendorBody), true);
+});
+
+test("a real customer refund request does NOT trip the chargeback-vendor exemption (false-positive averse)", () => {
+  assert.equal(bodyHasAutoReplyOrNotificationMarker("I want a refund for my last order please."), false);
+  assert.equal(bodyHasAutoReplyOrNotificationMarker("Please refund me, the package never arrived."), false);
+  assert.equal(
+    isAutoReplyOrNotificationInbound("customer@gmail.com", "Can I get a refund? My order was wrong."),
+    false,
+  );
+});
