@@ -343,6 +343,7 @@
     "test:check-table-refs-have-migrations": "tsx --test scripts/_check-table-refs-have-migrations.test.ts",
     "test:no-uuid-like": "tsx --test scripts/_check-no-uuid-like.test.ts",
     "test:engine-purity": "tsx --test scripts/_check-engine-purity.test.ts",
+    "test:engine-fraud-velocity": "tsx --test src/lib/engine/fraud/velocity.test.ts",
     "test:commerce-order-create": "tsx --test src/lib/commerce/order.create.test.ts",
     "test:commerce-subscription-create": "tsx --test src/lib/commerce/subscription.create.test.ts",
     "test:commerce-drift-internal-exclusion": "tsx --test src/lib/commerce/shopcx-drift-reconciler.internal-exclusion.test.ts",
