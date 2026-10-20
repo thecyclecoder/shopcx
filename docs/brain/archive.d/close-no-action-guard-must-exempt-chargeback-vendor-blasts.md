@@ -1,0 +1,1 @@
+- **Close-no-action guard must exempt chargeback-mitigation vendor templates** · verified 2026-10-20 · → [[../libraries/automated-sender]]
