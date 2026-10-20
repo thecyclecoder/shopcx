@@ -1,0 +1,76 @@
+# libraries/error-feed
+
+**Error source classifiers and noise filters for Control Tower — determines which errors page an owner vs. silently drop.**
+
+**File:** `src/lib/control-tower/error-feed.ts`
+
+## Purpose
+
+The error feed ingests errors from [[../inngest/supabase-log-poll]], [[../inngest/control-tower-monitor]], and other sources. Before recording an error_event, each source applies a series of narrowly-gated classifiers that either **drop** the error (return `null`, do not record) or **mark it transient** (record for visibility but auto-resolve on first sighting unless it recurs). The classifiers prevent noise (foreign-app errors, intentional constraint violations, momentary gateway saturation) from paging owners.
+
+## Classifier families
+
+### Transient-noise flags
+
+Mark an error as collateral of a brief, self-healing incident (momentary gateway saturation, brief connection loss). A first sighting is recorded for **visibility only**, with **no page**; escalates to a real open+page only if the same signature recurs within `TRANSIENT_RECUR_WINDOW_MS` (1h).
+
+**Functions:**
+- `isTransientInngestTransportError` — Inngest connection timeouts / unavailable (self-heals when service recovers).
+- `isTransientInngestStepRetryThrow` — Inngest step retry logic throwing a transient cause (not a durable code bug).
+- `isTransientSupabaseLogNoise` — Postgres `statement timeout` / connection saturation, edge API 5xx (momentary DB / gateway saturation).
+- `isTransientShopifyWebhookHmacFailure` — Shopify webhook HMAC validation failing transient (clock skew, stale cert).
+- `isTransientAppstleFrequencyUpstreamTimeout` — Appstle frequency check timing out (Appstle service overload, not our code).
+- `isTransientClientNetworkAbort` — Client network abort (browser closed, WiFi dropped).
+
+**Contrast:** A Postgres `FATAL`/`PANIC`, non-timeout ERROR (constraint / data bug), auth error, or non-5xx HTTP status is NEVER transient — pages on first sighting.
+
+### Foreign-noise drops
+
+Errors from external systems querying our schema wrong (stale REST clients, external integrations, direct REST lookups against columns that don't exist). These return `null` — drop, do not record an error_event.
+
+**Families:**
+
+- **Supabase Postgres missing-column noise** — external clients or stale direct-REST queries against phantom columns. Each is narrowly gated: `isForeignSupabasePostgres...ColumnAdhocNoise(message, query)` matches a **specific trimmed message** (e.g., `column returns.refund_type does not exist`) AND a **SELECT-only query** on that table (bare `SELECT ... FROM public.returns` OR the PostgREST `WITH pgrst_source AS (SELECT ... FROM "public"."returns" ...)` CTE wrapper), never a write/DDL/JOIN/different table. Each has a unit test covering true/false cases.
+
+  Examples: `isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise` (the `customers.address` column Appstle or external clients guess at), `isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise` (the phantom `returns.refund_type` column external REST clients query).
+
+- **Supabase Postgres constraint / type noise** — expected-by-design constraint violations or type coercions from retries. Examples: `isExpectedBillingForecastsPendingUniqViolation` (23505 on `billing_forecasts_pending_uniq`; intentional idempotency-race pattern where the second concurrent insert is rejected), `isExpectedSubscriptionCycleChargesCycleUniqViolation` (same pattern for subscription billing).
+
+- **Foreign gateway noise** — errors from payment processors, third-party APIs, when our code has no repair leverage. Examples: `isForeignBraintreeVaultProcessorDecline` (card processor decline on Braintree vault operations), `isForeignEasyPostReturnsSweepRateLimit` (EasyPost rate-limit on the returns label sweep).
+
+- **Foreign auth/edge noise** — Supabase GoTrue and Edge Function errors we cannot fix. Examples: `isForeignGoTrueEdgeNoise` (SSL handshake, HTML body on Edge), `isForeignGoTrueAuthLogNoise` (auth service connection timeout, localhost dial timeout).
+
+### Bare / middleware-log filters
+
+Filters for logs that are NOT errors but are tagged as such (log lines emitted by middleware). These return `null` and never create an error_event.
+
+**Functions:**
+- `isBareLifecycle` — `@vercel/sdk` logging a successful request / response that looks like an error.
+- `isBareInngestStepErrorMiddlewareLog` — Inngest middleware logging a step error (not a durable failure).
+- `isInngestStepWrappedNonErrorLog` — Inngest middleware wrapping a non-Error in a failed step (not a real error).
+- `isInngestTerminalFailureMirrorLog` — Inngest logging a terminal failure that was already recorded (duplicate).
+- `isAbortedStreamNoise` — Vercel streaming error (client disconnected, not our failure).
+
+## Signature generation
+
+**`signatureFor(source, keyParts): string`** — generates a stable signature from a source + key parts (e.g., error message + query hash), used to group identical incidents and detect spikes.
+
+## Tests
+
+All classifiers are unit-tested in `src/lib/control-tower/error-feed.test.ts`. Each foreign-noise helper has test cases for:
+- The exact signature it should match (true case).
+- False cases: a different column name, a different table, a write/DDL statement, etc.
+
+## Called by
+
+- [[../inngest/supabase-log-poll]] (`postgres` LogQuery `mapRow` pre-check before grouping).
+- [[../inngest/control-tower-monitor]] (other source channels: Inngest, Vercel, client errors).
+- [[../libraries/control-tower]] (via `recordError` path).
+
+## Related
+
+[[../tables/error_events]] (recorded incidents) · [[../operational-rules]] (supervisable autonomy — noise must be dropped before it creates a signature) · [[../integrations/supabase-management-logs]]
+
+---
+
+[[../README]] · [[../inngest/supabase-log-poll]] · [[../tables/error_events]]
