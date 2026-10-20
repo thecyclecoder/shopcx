@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc 'column returns.resolution does not exist' Postgres noise at capture** · verified 2026-10-20 · → [[../libraries/error-feed]]
