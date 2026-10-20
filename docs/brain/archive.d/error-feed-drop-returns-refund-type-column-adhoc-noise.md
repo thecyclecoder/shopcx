@@ -1,0 +1,1 @@
+- **Scope out foreign 'column returns.refund_type does not exist' Postgres noise at capture** · verified 2026-10-20 · → [[../libraries/error-feed]]
