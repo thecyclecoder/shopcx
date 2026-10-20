@@ -40,6 +40,7 @@ import {
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
+  isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
@@ -355,6 +356,16 @@ const LOG_QUERIES: LogQuery[] = [
       // regression on any live `returns` column, the same message via a write/DDL, or a
       // FATAL/PANIC/constraint violation still surfaces / pages.
       if (isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.returns` with a guessed, wrong column list naming a bare `resolution` — our
+      // `returns` table has `resolution_type`, never a bare `resolution`. No ShopCX code path
+      // names `returns.resolution`, so the resulting column-missing ERROR is repair work for a
+      // query we don't own (Control Tower signature `supabase-logs:2e193ead386ae229`). Narrowly
+      // gated to require BOTH the exact `column returns.resolution does not exist` message AND
+      // the SELECT-lookup shape on `returns` (bare or PostgREST CTE wrapper) — a real schema
+      // regression on any live `returns` column (including the real `resolution_type`), the same
+      // message via a write/DDL, or a FATAL/PANIC/constraint violation still surfaces / pages.
+      if (isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
       // `public.fraud_cases` expecting an `updated_at` column that lives only on the sibling
       // `fraud_rules` table. The resulting undefined_column ERROR is repair work for a query

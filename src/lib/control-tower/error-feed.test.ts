@@ -91,6 +91,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
+  isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
@@ -16853,6 +16854,95 @@ test("isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise KEEPS a 
     isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise(
       "column returns.refund_type does not exist",
       "update public.returns set refund_type = $1 where id = $2",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/returns?select=...resolution...` against our `public.returns` table with a
+// guessed, wrong column list. The table has `resolution_type`, never a bare `resolution`,
+// and no ShopCX code path names it. Foreign-owned surface, no lever from us — drop AT
+// CAPTURE only when BOTH the exact column-missing message on `returns.resolution` AND a
+// SELECT-lookup shape on `returns` (bare OR PostgREST CTE wrapper) are present. A
+// column-missing on a different `returns` column, on `resolution` from any other table,
+// or via a non-SELECT statement still pages (Control Tower signature
+// `supabase-logs:2e193ead386ae229`).
+
+test("isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise drops the captured supabase-logs:2e193ead386ae229 message+query pair (PostgREST CTE SELECT on returns.resolution)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `returns.resolution` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise(
+      "column returns.resolution does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."returns"."id", "public"."returns"."resolution" FROM "public"."returns" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise(
+      "column public.returns.resolution does not exist",
+      'WITH pgrst_source AS (SELECT "public"."returns"."resolution" FROM "public"."returns")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise(
+      "column returns.resolution does not exist",
+      "select id, resolution from public.returns",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise(
+      "column returns.resolution does not exist",
+      "select resolution from returns limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise(
+      "ERROR: column returns.resolution does not exist",
+      'WITH pgrst_source AS (SELECT "public"."returns"."resolution" FROM "public"."returns")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise(
+      "column returns.resolution does not exist",
+      "SELECT ID, RESOLUTION FROM PUBLIC.RETURNS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise KEEPS a column-missing on a different returns column, resolution on another table, and a non-SELECT statement (real regressions still page)", () => {
+  // A column-missing on a DIFFERENT `returns` column (a real schema regression, including
+  // the real `resolution_type`) must still page — the pin is a bare `returns.resolution`.
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise(
+      "column returns.resolution_type does not exist",
+      "select resolution_type from public.returns",
+    ),
+    false,
+  );
+  // A column-missing on `resolution` from a DIFFERENT table must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise(
+      "column tickets.resolution does not exist",
+      "select resolution from public.tickets",
+    ),
+    false,
+  );
+  // A non-SELECT statement against `returns` (real code-bug shape) must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise(
+      "column returns.resolution does not exist",
+      "update public.returns set resolution = $1 where id = $2",
     ),
     false,
   );
