@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Migration drops unflagged $0 Appstle lines instead of billing them** · verified 2026-10-19 · → [[../libraries/migrate-to-internal]]
 - **Drop foreign ad-hoc orders.tracking_number column-missing noise at capture** · verified 2026-10-18 · → [[../libraries/control-tower#error-feedts--the-error-feed-error-feed-monitoring-phase-1--2]]
 - **Skip subscription-status backing probe when the ticket has no customer (stop empty-UUID Postgres errors)** · verified 2026-10-17 · → [[../libraries/completed-effect-backing]]
 - **CSAT reopen on a merged ticket lands on the live ticket, not the stub** · verified 2026-10-17 · → [[../libraries/ticket-merge]]
