@@ -1,0 +1,1 @@
+- **Scope capture: drop foreign ad-hoc appstle_contract_snapshots.updated_at column-missing noise** · verified 2026-10-21 · → [[../libraries/error-feed]]
