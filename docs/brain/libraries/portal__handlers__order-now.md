@@ -32,6 +32,13 @@ The internal branch already gated on `status !== "active"` — the guard mirrors
 
 Skipping the 502 path is what stops `src/app/api/portal/route.ts` from spawning a `portal-action-failed` ticket and keeps the Vercel error drain / Control Tower (signature `vercel:7b36a7f314c061ed`) from re-firing on a healthy, self-completing race.
 
+**ShopCX advance uses the sub's own cadence, and syncs Shopify's date.** After a settled success the
+handler moves `next_billing_date` with `nextDateAfterCharge(due, now, billing_interval, billing_interval_count)`,
+then calls `shopifySetNextBillingDate` (display-only) so the customer sees the same date. `resolveSub`
+([[portal__helpers]]) must select both cadence columns. Before 2026-10-21 it didn't, so every press fell
+back to `month`/1, and a 4-week sub moved a calendar month while Shopify kept the old date (ground truth:
+contract 36109058221, 11-16 → 12-16). Pinned by `src/lib/portal/order-now-cadence.test.ts`.
+
 ---
 
 [[../README]] · [[../../CLAUDE]]
