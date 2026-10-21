@@ -76,6 +76,8 @@ export interface ResolvedSub {
   items: unknown;
   next_billing_date: string | null;
   applied_discounts: unknown;
+  billing_interval: string | null;
+  billing_interval_count: number | null;
 }
 
 /**
@@ -110,7 +112,7 @@ export async function resolveSub(
 
   // UUID column can't be compared against a non-UUID literal — branch on shape.
   const base = admin.from("subscriptions")
-    .select("id, shopify_contract_id, is_internal, status, customer_id, last_payment_status, items, next_billing_date, applied_discounts")
+    .select("id, shopify_contract_id, is_internal, status, customer_id, last_payment_status, items, next_billing_date, applied_discounts, billing_interval, billing_interval_count")
     .eq("workspace_id", workspaceId)
     .in("customer_id", groupIds);
   if (UUID_RE.test(id)) {

@@ -142,16 +142,23 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
       // encodes both.
       const { nextDateAfterCharge } = await import("@/lib/dunning");
       const admin = createAdminClient();
-      const r = resolved as { billing_interval?: string | null; billing_interval_count?: number | null };
+      // ⭐ `resolveSub` must select the cadence columns. It didn't, so every press fell back to
+      // "month"/1 and a 4-week sub moved a calendar month (ground truth 2026-10-20, 36109058221:
+      // 11-16 → 12-16 while Shopify stayed on 11-16).
       const advanceTo = nextDateAfterCharge(
         new Date(due ?? new Date().toISOString()),
         new Date(),
-        r.billing_interval ?? "month",
-        r.billing_interval_count ?? 1,
+        resolved.billing_interval ?? "month",
+        resolved.billing_interval_count ?? 1,
       );
       await admin.from("subscriptions")
         .update({ next_billing_date: advanceTo.toISOString(), last_payment_status: "succeeded", updated_at: new Date().toISOString() })
         .eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId));
+      // Keep the customer-visible Shopify date in step with ours. Display-only on purpose — see
+      // `subscriptionUpdateNextBillingDate` for why a shopcx date change never re-pins the calendar.
+      const { shopifySetNextBillingDate } = await import("@/lib/commerce/shopify-subscription-client");
+      const shown = await shopifySetNextBillingDate(auth.workspaceId, String(contractId), advanceTo.toISOString());
+      if (!shown.success) console.warn(`[portal order-now] ${contractId}: Shopify date not synced: ${shown.error}`);
     }
 
     const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
