@@ -99,6 +99,7 @@ import {
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
   isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise,
+  isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise,
   isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise,
@@ -17959,6 +17960,126 @@ test("isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise r
   assert.equal(
     isForeignSupabasePostgresMissingQbAmazonSalesGrossRevenueCentsAdhocNoise(
       "column qb_amazon_sales_snapshots.gross_revenue_cents does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client / hand-typed URL / Supabase Studio sort
+// reads `/rest/v1/appstle_contract_snapshots?select=updated_at,...` (or
+// `?order=updated_at`) against our `public.appstle_contract_snapshots` table. The table
+// exists (Appstle subscription-contract snapshot ledger) but by design carries NO
+// `updated_at` column — it is an append-only snapshot ledger whose temporal columns are
+// `fetched_at` / `created_at`, and every ShopCX reader/writer filters/orders by
+// `fetched_at` / `created_at` / `workspace_id` / `appstle_contract_id`. Foreign-owned
+// surface, no lever from us — drop
+// AT CAPTURE only when BOTH the exact column-missing message on
+// `appstle_contract_snapshots.updated_at` AND a SELECT-lookup shape on
+// `appstle_contract_snapshots` (bare OR PostgREST CTE wrapper) are present. A
+// column-missing on any other table, a different column on `appstle_contract_snapshots`,
+// or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise drops the exact failing sample (positive drop — bare SELECT + PostgREST CTE shapes with the exact message)", () => {
+  // Bare SELECT-lookup, unqualified and public.-qualified message variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(
+      "column appstle_contract_snapshots.updated_at does not exist",
+      "select updated_at, raw from public.appstle_contract_snapshots where workspace_id = $1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(
+      "column public.appstle_contract_snapshots.updated_at does not exist",
+      "select updated_at from public.appstle_contract_snapshots",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(
+      "column appstle_contract_snapshots.updated_at does not exist",
+      "select updated_at from appstle_contract_snapshots order by updated_at desc limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(
+      "ERROR: column appstle_contract_snapshots.updated_at does not exist",
+      "select updated_at from public.appstle_contract_snapshots",
+    ),
+    true,
+  );
+  // The PostgREST CTE wrapper form (direct-REST wire shape) is dropped too.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(
+      "column appstle_contract_snapshots.updated_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."appstle_contract_snapshots"."updated_at", "public"."appstle_contract_snapshots"."raw" FROM "public"."appstle_contract_snapshots" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise KEEPS a column-missing on appstle_contract_snapshots for a DIFFERENT column (e.g. `fetched_at` regression — a real temporal column)", () => {
+  // `fetched_at` IS a real temporal column. If it regressed we absolutely want the
+  // page. The pin is `updated_at` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(
+      "column appstle_contract_snapshots.fetched_at does not exist",
+      "select fetched_at from public.appstle_contract_snapshots",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(
+      "column appstle_contract_snapshots.appstle_contract_id does not exist",
+      "select appstle_contract_id from public.appstle_contract_snapshots",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise KEEPS a non-SELECT statement shape on appstle_contract_snapshots (an INSERT/UPDATE with the same message is a real code-bug and still pages)", () => {
+  // An INSERT/UPDATE against appstle_contract_snapshots referencing a bogus `updated_at`
+  // column is real code trying to write the table — a bug we WANT to see, not the ad hoc
+  // read.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(
+      "column appstle_contract_snapshots.updated_at does not exist",
+      "insert into public.appstle_contract_snapshots (workspace_id, appstle_contract_id, updated_at) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(
+      "column appstle_contract_snapshots.updated_at does not exist",
+      "update public.appstle_contract_snapshots set updated_at = $1 where workspace_id = $2",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(
+      "column appstle_contract_snapshots.updated_at does not exist",
       "",
     ),
     false,
