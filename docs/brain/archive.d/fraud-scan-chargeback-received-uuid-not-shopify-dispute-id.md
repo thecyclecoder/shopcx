@@ -1,0 +1,1 @@
+- **Fraud nightly scan must fire chargeback/received with the internal uuid** · verified 2026-10-21 · → [[../inngest/fraud-detection]]
