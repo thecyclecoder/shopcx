@@ -12,6 +12,10 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Fraud nightly scan must fire chargeback/received with the internal uuid** · verified 2026-10-21 · → [[../inngest/fraud-detection]]
+- **Close-no-action guard must exempt chargeback-mitigation vendor templates** · verified 2026-10-20 · → [[../libraries/automated-sender]]
+- **Scope out foreign 'column returns.refund_type does not exist' Postgres noise at capture** · verified 2026-10-20 · → [[../libraries/error-feed]]
+- **Drop foreign ad-hoc 'column returns.resolution does not exist' Postgres noise at capture** · verified 2026-10-20 · → [[../libraries/error-feed]]
 - **Migration drops unflagged $0 Appstle lines instead of billing them** · verified 2026-10-19 · → [[../libraries/migrate-to-internal]]
 - **Drop foreign ad-hoc orders.tracking_number column-missing noise at capture** · verified 2026-10-18 · → [[../libraries/control-tower#error-feedts--the-error-feed-error-feed-monitoring-phase-1--2]]
 - **Skip subscription-status backing probe when the ticket has no customer (stop empty-UUID Postgres errors)** · verified 2026-10-17 · → [[../libraries/completed-effect-backing]]
