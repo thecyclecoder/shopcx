@@ -87,7 +87,7 @@ export const fraudNightlyScan = inngest.createFunction(
               .eq("shopify_order_id", String(d.order_id))
               .single();
 
-            const { error } = await admin.from("chargeback_events").upsert({
+            const { data: upserted, error } = await admin.from("chargeback_events").upsert({
               workspace_id: ws.id,
               shopify_dispute_id: String(d.id),
               shopify_order_id: String(d.order_id),
@@ -103,13 +103,13 @@ export const fraudNightlyScan = inngest.createFunction(
               finalized_on: d.finalized_on,
               initiated_at: d.initiated_at,
               raw_payload: d,
-            }, { onConflict: "workspace_id,shopify_dispute_id" });
+            }, { onConflict: "workspace_id,shopify_dispute_id" }).select("id").single();
 
-            if (!error) {
+            if (!error && upserted?.id) {
               imported++;
               await inngest.send({
                 name: "chargeback/received",
-                data: { chargebackEventId: String(d.id), workspaceId: ws.id },
+                data: { chargebackEventId: upserted.id, workspaceId: ws.id },
               });
             }
           }
