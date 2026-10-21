@@ -51,6 +51,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
+  isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise,
@@ -466,6 +467,19 @@ const LOG_QUERIES: LogQuery[] = [
       // operator mismatch on this table, or a non-SELECT statement on this table (real
       // code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST SELECT (or
+      // a Supabase Studio Table Editor sort) typed against a non-existent `updated_at` column
+      // on `public.appstle_contract_snapshots`. The table is an append-only snapshot ledger
+      // whose temporal columns are `fetched_at` / `created_at` — no ShopCX code path
+      // selects/orders by `updated_at`, so the resulting column-missing ERROR is repair work for a query we
+      // don't own ([[../specs/error-feed-drop-appstle-contract-snapshots-updated-at-adhoc-]],
+      // Control Tower signature `supabase-logs:5767277c3bb3c877`). Narrowly gated to require
+      // BOTH the exact `column appstle_contract_snapshots.updated_at does not exist` message
+      // AND the SELECT-lookup shape on `appstle_contract_snapshots` (bare or PostgREST CTE
+      // wrapper) — a column-missing error on any OTHER table, a DIFFERENT column on this
+      // table (a real schema regression on a live column), or a non-SELECT statement on this
+      // table (real code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a Supabase Studio Table Editor quick-filter (or an
       // external PostgREST probe) typed as a case-insensitive free-text search over the jsonb
       // `sample` column on `public.error_events` emits `WHERE "sample" ILIKE $1`, which
