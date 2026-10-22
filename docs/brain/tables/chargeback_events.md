@@ -93,6 +93,7 @@ const { count } = await admin.from("chargeback_events")
 ## Gotchas
 
 - From Shopify dispute polling + webhook. `reason` drives auto-action routing.
+- `reason` is normalized from Shopify dispute reasons via [[../libraries/shopify-webhooks]] `mapDisputeReason` before insert — Shopify sends reason values (`general`, `customer_initiated`, `bank_not_process`, `debit_not_authorized`, `insufficient_funds`, `incorrect_account_details`, `noncompliant`, empty, …) outside the CHECK constraint's allowed set, and the normalizer maps these to the six exact allowed values (`fraudulent`, `unrecognized`, `duplicate`, `product_unacceptable`, `product_not_received`, `credit_not_processed`), translates `subscription_canceled` → `subscription_cancelled`, or returns `null` — ensuring no constraint violation silently drops the chargeback row.
 - `status`: `under_review` / `won` / `lost` (**lowercase**).
 - `reason` values seen in practice: `fraudulent`, `product_not_received`, `credit_not_processed`, `product_unacceptable`. `fraudulent` is the only one that triggers `auto_action_taken='subscriptions_cancelled'` — the rest get `flagged_for_review` and require an agent to act.
 - `auto_action_taken`: `subscriptions_cancelled` / `flagged_for_review` / `none`.
