@@ -185,7 +185,7 @@ export async function handleDisputeEvent(
 
   // Map Shopify dispute fields
   const disputeType = (payload.type as string) === "inquiry" ? "inquiry" : "chargeback";
-  const reason = (payload.reason as string) || null;
+  const reason = mapDisputeReason((payload.reason as string) || null);
   const status = mapDisputeStatus((payload.status as string) || "");
   const amountCents = dollarsToCents(payload.amount as string);
   const currency = (payload.currency as string) || "USD";
@@ -303,6 +303,27 @@ export async function handleDisputeEvent(
         data: { chargebackEventId, workspaceId },
       }).catch(() => {});
     }
+  }
+}
+
+// Coerce Shopify's dispute reason to the chargeback_events.reason CHECK set
+// (or null). Shopify sends values outside our allowed set (general,
+// customer_initiated, bank_not_process, …) which previously violated the
+// constraint and silently dropped the chargeback insert.
+function mapDisputeReason(raw: string | null): string | null {
+  switch (raw) {
+    case "fraudulent":
+    case "unrecognized":
+    case "duplicate":
+    case "product_unacceptable":
+    case "product_not_received":
+    case "credit_not_processed":
+      return raw;
+    case "subscription_canceled":
+    case "subscription_cancelled":
+      return "subscription_cancelled";
+    default:
+      return null;
   }
 }
 
