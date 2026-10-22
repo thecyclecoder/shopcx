@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Scope capture: drop foreign ad-hoc appstle_contract_snapshots.updated_at column-missing noise** · verified 2026-10-21 · → [[../libraries/error-feed]]
 - **Fraud nightly scan must fire chargeback/received with the internal uuid** · verified 2026-10-21 · → [[../inngest/fraud-detection]]
 - **Close-no-action guard must exempt chargeback-mitigation vendor templates** · verified 2026-10-20 · → [[../libraries/automated-sender]]
 - **Scope out foreign 'column returns.refund_type does not exist' Postgres noise at capture** · verified 2026-10-20 · → [[../libraries/error-feed]]
