@@ -1,0 +1,1 @@
+- **Normalize Shopify dispute reason to the chargeback_events CHECK set so chargebacks stop being dropped** · verified 2026-10-22 · → [[../lifecycles/chargeback-pipeline]]
