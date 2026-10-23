@@ -1,0 +1,1 @@
+- **Drop foreign uuid-ILIKE-on-tickets.id direct-REST noise at capture** · verified 2026-10-23 · → [[lifecycles/control-tower]]
