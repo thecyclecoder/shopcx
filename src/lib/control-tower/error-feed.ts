@@ -2789,11 +2789,13 @@ export function isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `orders.tracking_number` or its `orders.tracking_url` / `orders.carrier` /
- * `orders.shipped_at` twins. Our `orders` table has NEVER carried any of these
- * shipment-tracking top-level columns — fulfillment / tracking state lives on the sibling
- * `shipments` / `fulfillments` tables, not on `orders`. No ShopCX code path (src/,
+ * `orders.shipped_at` / `orders.processed_at` twins. Our `orders` table has NEVER carried
+ * any of these Shopify-REST-shaped top-level columns — fulfillment / tracking state lives
+ * on the sibling `shipments` / `fulfillments` tables, and the order's processed timestamp
+ * is not a top-level `orders` column either; they are all part of the same
+ * Shopify-REST-shaped foreign query. No ShopCX code path (src/,
  * scripts/, shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT that
- * names any of those four columns against `orders`. The message appears on Supabase's
+ * names any of those columns against `orders`. The message appears on Supabase's
  * `postgres_logs` feed only when an external / manual tool (Supabase Studio Table Editor
  * / API Docs, a foreign SQL client, a stale exploratory query, a third-party integration
  * expecting a tracking-shaped `orders` table) does a raw
@@ -2806,11 +2808,11 @@ export function isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
  *
  * Sibling of `isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise` — same
  * narrow-gating shape on the same `public.orders` table, scoped to the generic
- * shipment-tracking `tracking_number` / `tracking_url` / `carrier` / `shipped_at`
- * confusion instead of the EasyPost tracker-id one.
+ * shipment-tracking `tracking_number` / `tracking_url` / `carrier` / `shipped_at` /
+ * `processed_at` confusion instead of the EasyPost tracker-id one.
  *
  * `true` ONLY when BOTH markers are present:
- *   1. the message is Postgres's canonical column-missing shape for ONE of these four
+ *   1. the message is Postgres's canonical column-missing shape for ONE of these
  *      columns — trimmed equal to one of
  *         `column orders.tracking_number does not exist`
  *         `column public.orders.tracking_number does not exist`
@@ -2820,6 +2822,8 @@ export function isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
  *         `column public.orders.carrier does not exist`
  *         `column orders.shipped_at does not exist`
  *         `column public.orders.shipped_at does not exist`
+ *         `column orders.processed_at does not exist`
+ *         `column public.orders.processed_at does not exist`
  *      (with or without the `public.` qualifier and any leading `ERROR: ` prefix
  *      Postgres includes on the logs surface), AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.orders` — either
@@ -2831,8 +2835,8 @@ export function isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
  *   - a column-missing error for ANY OTHER column on `orders` (a real product-schema
  *     regression on a live column like `order_number` / `total_cents`) still pages,
  *   - a column-missing error for `tracking_number` / `tracking_url` / `carrier` /
- *     `shipped_at` on ANY OTHER table (including the real `shipments` tracking columns if
- *     they ever regress) still pages,
+ *     `shipped_at` / `processed_at` on ANY OTHER table (including the real `shipments`
+ *     tracking columns if they ever regress) still pages,
  *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE
  *     / DDL on `orders`) still pages — the pin is the SELECT-lookup shape,
  *   - a FATAL / PANIC / constraint violation is untouched (different message).
@@ -2857,7 +2861,9 @@ export function isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
     stripped === "column orders.carrier does not exist" ||
     stripped === "column public.orders.carrier does not exist" ||
     stripped === "column orders.shipped_at does not exist" ||
-    stripped === "column public.orders.shipped_at does not exist";
+    stripped === "column public.orders.shipped_at does not exist" ||
+    stripped === "column orders.processed_at does not exist" ||
+    stripped === "column public.orders.processed_at does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
