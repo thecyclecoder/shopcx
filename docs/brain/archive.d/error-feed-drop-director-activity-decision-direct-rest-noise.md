@@ -1,0 +1,1 @@
+- **Scope out foreign director_activity.decision direct-REST column-missing noise** · verified 2026-10-23 · → [[../libraries/error-feed]]
