@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc fraud_cases.order_id lookup noise at capture** · verified 2026-10-23 · → [[../libraries/control-tower]] · [[../tables/fraud_cases]]

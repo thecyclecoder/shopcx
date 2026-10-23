@@ -75,7 +75,7 @@ const { count } = await admin.from("fraud_cases")
 
 ## Gotchas
 
-- No `updated_at` column — the case's touch timestamp is `last_seen_at`, which `fraud-detector` rewrites on every re-detection. Callers that want a "when was this last modified?" value should read `last_seen_at`.
+- **No `updated_at` or `order_id` columns — error-feed suppression** ([[../libraries/error-feed]] `isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise`) — the case's touch timestamp is `last_seen_at`, which `fraud-detector` rewrites on every re-detection. Callers that want a "when was this last modified?" value should read `last_seen_at`. The case's orders are held in `order_ids` (a `text[]` of internal [[orders]].`id` UUIDs), not a singular `order_id` FK column. Foreign/stale direct-REST clients that query for `fraud_cases.updated_at` or `fraud_cases.order_id` trigger column-missing errors; both are suppressed at error-feed capture time so they don't page owners or create incidents for queries ShopCX code doesn't own.
 - `rule_type` matches `fraud_rules.slug`.
 - `status`: schema supports `open`, `reviewing`, `confirmed_fraud`, `dismissed`. Production data only has `dismissed` and `confirmed_fraud` — the open/reviewing states exist for the UI workflow but resolve fast (no long-lived `open` cases in prod).
 - Orchestrator bails (closes + escalates with confirmed-fraud reply) if customer has ANY `status='confirmed_fraud'` OR `rule_type='amazon_reseller'`. See feedback_orchestrator_fraud_gate.
