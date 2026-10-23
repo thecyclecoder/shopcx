@@ -15998,14 +15998,15 @@ test("isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise returns fa
 // ── isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise ──
 // A foreign / stale PostgREST direct-REST client reads
 // `/rest/v1/orders?select=...tracking_number...` against our `public.orders` table. The
-// table exists but has NEVER carried any shipment-tracking top-level columns
-// (`tracking_number` / `tracking_url` / `carrier` / `shipped_at`) — fulfillment /
-// tracking state lives on the sibling `shipments` / `fulfillments` tables. Foreign-owned
+// table exists but has NEVER carried any Shopify-REST-shaped top-level columns
+// (`tracking_number` / `tracking_url` / `carrier` / `shipped_at` / `processed_at`) —
+// fulfillment / tracking state lives on the sibling `shipments` / `fulfillments` tables
+// and the processed timestamp is not a top-level `orders` column. Foreign-owned
 // surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
-// message on one of the four `orders` columns AND a SELECT-lookup shape on `orders` (bare
+// message on one of those `orders` columns AND a SELECT-lookup shape on `orders` (bare
 // OR PostgREST CTE wrapper) are present. A column-missing on a live `orders` column
-// (`order_number`), on `tracking_number` / `tracking_url` / `carrier` / `shipped_at` from
-// any other table, or via a non-SELECT statement still pages.
+// (`order_number`), on `tracking_number` / `tracking_url` / `carrier` / `shipped_at` /
+// `processed_at` from any other table, or via a non-SELECT statement still pages.
 
 test("isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise drops the captured message+query pair (ad hoc SELECT on orders.tracking_number + tracking_url/carrier/shipped_at twins)", () => {
   // Unqualified and public.-qualified message variants over the bare-SELECT shape.
@@ -16044,6 +16045,30 @@ test("isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise drops the c
     isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
       "column orders.shipped_at does not exist",
       "select id, shipped_at from public.orders",
+    ),
+    true,
+  );
+  // The `processed_at` twin — the sampled signature supabase-logs:e6b76163bf78d754, the
+  // Shopify-REST-shaped foreign query asking for an order's processed timestamp.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.processed_at does not exist",
+      "select id, processed_at from public.orders order by processed_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column public.orders.processed_at does not exist",
+      "select processed_at from public.orders",
+    ),
+    true,
+  );
+  // The `processed_at` twin via the PostgREST `WITH pgrst_source AS (SELECT ...)` wrapper.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.processed_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."orders"."id", "public"."orders"."processed_at" FROM "public"."orders" ORDER BY "public"."orders"."processed_at" DESC LIMIT $1 )',
     ),
     true,
   );
@@ -16119,6 +16144,37 @@ test("isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise KEEPS a gen
     isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
       "column orders.tracking_number does not exist",
       "update public.orders set tracking_number = $1 where id = $2",
+    ),
+    false,
+  );
+  // A processed_at column-miss on a NON-SELECT (INSERT/UPDATE/DDL) statement still pages —
+  // a real regression writing orders.processed_at must not be silently dropped.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.processed_at does not exist",
+      "update public.orders set processed_at = now() where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.processed_at does not exist",
+      "insert into public.orders (id, processed_at) values ($1, now())",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.processed_at does not exist",
+      "alter table public.orders add column processed_at timestamptz",
+    ),
+    false,
+  );
+  // A processed_at miss on a DIFFERENT table still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column shipments.processed_at does not exist",
+      "select processed_at from public.shipments",
     ),
     false,
   );
