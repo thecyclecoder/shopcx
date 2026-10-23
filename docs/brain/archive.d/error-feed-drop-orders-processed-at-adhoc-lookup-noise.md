@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc orders.processed_at lookup noise at capture** · verified 2026-10-23 · → [[../libraries/control-tower]] · [[../tables/orders]]
