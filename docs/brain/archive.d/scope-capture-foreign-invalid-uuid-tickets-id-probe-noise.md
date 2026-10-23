@@ -1,0 +1,1 @@
+- **Drop Studio/REST malformed-uuid probe noise on tickets.id from the error feed** · verified 2026-10-23 · → [[libraries/error-feed]]
