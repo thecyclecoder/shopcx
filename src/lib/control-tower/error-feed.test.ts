@@ -1957,6 +1957,70 @@ test("isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise KEEPS 
   );
 });
 
+test("isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise drops the order_id variant of the same foreign fraud_cases read (bare + public-qualified, over SELECT + CTE shapes)", () => {
+  // Same foreign direct-REST read, different missing column: the stale client expects a
+  // singular order_id FK column our schema never had (we store order_ids as a text[]).
+  // Bare message + bare SELECT.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column fraud_cases.order_id does not exist",
+      "select id, order_id from public.fraud_cases where order_id = $1",
+    ),
+    true,
+  );
+  // public.-qualified message + bare SELECT.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column public.fraud_cases.order_id does not exist",
+      "select * from fraud_cases where order_id is not null",
+    ),
+    true,
+  );
+  // Bare message + PostgREST CTE wrapper lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column fraud_cases.order_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."fraud_cases"."id", "public"."fraud_cases"."order_id" FROM "public"."fraud_cases" WHERE "public"."fraud_cases"."order_id" = $1 LIMIT $2 )',
+    ),
+    true,
+  );
+  // public.-qualified message + ERROR: prefix + CTE wrapper.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "ERROR: column public.fraud_cases.order_id does not exist",
+      'with pgrst_source as ( select "order_id" from "public"."fraud_cases" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise KEEPS the order_id variant on a non-SELECT statement and on a different table", () => {
+  // order_id column-miss attached to a write (INSERT/UPDATE) is a real code-bug shape and pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column fraud_cases.order_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."fraud_cases"("id","order_id") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column fraud_cases.order_id does not exist",
+      "update public.fraud_cases set order_id = $1 where id = $2",
+    ),
+    false,
+  );
+  // Same order_id-missing message on a DIFFERENT relation is a real product-schema regression
+  // and still pages — the pin names fraud_cases only.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
+      "column orders.order_id does not exist",
+      "select id, order_id from public.orders",
+    ),
+    false,
+  );
+});
+
 
 // ── isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise ──
 // A foreign / stale direct-REST client read `public.loyalty_redemptions` expecting a

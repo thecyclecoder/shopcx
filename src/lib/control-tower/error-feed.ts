@@ -1460,13 +1460,16 @@ export function isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNo
 }
 
 /**
- * Foreign-app noise — Postgres reporting a missing `updated_at` column for an ad hoc
- * direct-REST read of `public.fraud_cases`. A foreign/stale PostgREST client read
+ * Foreign-app noise — Postgres reporting a missing `updated_at` OR `order_id` column for an
+ * ad hoc direct-REST read of `public.fraud_cases`. A foreign/stale PostgREST client reads
  * `fraud_cases` expecting an `updated_at` column that lives only on the sibling
- * `fraud_rules` table; `fraud_cases` never carried it. The resulting undefined_column
- * ERROR is repair work for a query no ShopCX code owns
- * ([[../specs/error-feed-drop-fraud-cases-updated-at-column-adhoc-noise]], Control Tower
- * signature `supabase-logs:59dae748662ce6c8`).
+ * `fraud_rules` table (which `fraud_cases` never carried), OR expecting a singular `order_id`
+ * FK column that our schema never had — we store `order_ids` as a `text[]` of internal order
+ * UUIDs, not a scalar `order_id`. Both are the same foreign direct-REST read; the resulting
+ * undefined_column ERROR is repair work for a query no ShopCX code owns
+ * ([[../specs/error-feed-drop-fraud-cases-updated-at-column-adhoc-noise]] /
+ * [[../specs/error-feed-drop-fraud-cases-order-id-column-adhoc-noise]], Control Tower
+ * signatures `supabase-logs:59dae748662ce6c8` / `supabase-logs:9dba5ea6a4647e88`).
  *
  * Sibling of `isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise` — same
  * narrow-gating shape (exact `column <table>.<name> does not exist` message + SELECT-lookup
@@ -1474,10 +1477,11 @@ export function isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNo
  * `fraud_cases.updated_at` direct-REST shape.
  *
  * `true` ONLY when BOTH markers are present:
- *   1. the message is Postgres's canonical column-missing shape for `updated_at` on
- *      `fraud_cases` — trimmed equal to `column fraud_cases.updated_at does not exist` (or
- *      the `public.`-qualified variant, with any leading `ERROR: ` prefix Postgres includes
- *      on the logs surface stripped), AND
+ *   1. the message is Postgres's canonical column-missing shape for `updated_at` OR `order_id`
+ *      on `fraud_cases` — trimmed equal to `column fraud_cases.updated_at does not exist` or
+ *      `column fraud_cases.order_id does not exist` (or the `public.`-qualified variant of
+ *      either, with any leading `ERROR: ` prefix Postgres includes on the logs surface
+ *      stripped), AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.fraud_cases` — either
  *      (a) the bare `select ... from (public.)?fraud_cases` shape, OR (b) the PostgREST-
  *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."fraud_cases" ... )` CTE
@@ -1486,8 +1490,9 @@ export function isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNo
  * Narrowly gated so:
  *   - a column-missing error on ANY OTHER table (a real schema regression) still pages,
  *   - a column-missing error on `fraud_cases` for a DIFFERENT column (a real column rename
- *     that broke a live query) still pages — the pin names `fraud_cases.updated_at` only,
- *   - a `fraud_cases.updated_at` error attached to a DIFFERENT statement shape (INSERT /
+ *     that broke a live query) still pages — the pin names `fraud_cases.updated_at` /
+ *     `fraud_cases.order_id` only,
+ *   - a `fraud_cases.updated_at` / `fraud_cases.order_id` error attached to a DIFFERENT statement shape (INSERT /
  *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
  *     SELECT-lookup shape; the CTE branch likewise requires the wrapped op to be a SELECT,
  *   - a FATAL / PANIC / constraint violation is untouched (different message),
@@ -1507,7 +1512,9 @@ export function isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNo
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
   const messageMatches =
     stripped === "column fraud_cases.updated_at does not exist" ||
-    stripped === "column public.fraud_cases.updated_at does not exist";
+    stripped === "column public.fraud_cases.updated_at does not exist" ||
+    stripped === "column fraud_cases.order_id does not exist" ||
+    stripped === "column public.fraud_cases.order_id does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
