@@ -67,6 +67,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise,
   isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
@@ -14422,11 +14423,121 @@ test("isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise 
   );
 });
 
-test("isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise KEEPS a DIFFERENT column on director_activity (a real rename regression still pages)", () => {
+// ── isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/director_activity?select=id,decision,ticket_id,reasoning` against our
+// `public.director_activity` table. The table exists but by design carries NO `decision`
+// column — no ShopCX reader selects it. Foreign-owned surface, no lever from us — the new
+// classifier DROPS at capture only when BOTH the exact column-missing message on
+// `director_activity.decision` AND a SELECT-lookup shape on `director_activity` (bare OR
+// PostgREST CTE wrapper) are present. An INSERT/UPDATE/DELETE with the same message is a
+// real code-bug and still pages. (The sibling `.kind` classifier correctly KEEPS a
+// `director_activity.decision` error — the pin there is `kind` only.) Control Tower
+// signature `supabase-logs:09bbb38b8d17361e`.
+test("isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise DROPS the foreign direct-REST SELECT lookup (bare + PostgREST CTE wrapper) on the exact director_activity.decision column-missing shape", () => {
+  // Bare SELECT form — unqualified and public.-qualified message variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(
+      "column director_activity.decision does not exist",
+      "select id, decision, ticket_id, reasoning from public.director_activity",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(
+      "column public.director_activity.decision does not exist",
+      "select decision from director_activity limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(
+      "ERROR: column director_activity.decision does not exist",
+      "select decision from public.director_activity where ticket_id = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // PostgREST CTE wrapper form with double-quoted identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(
+      "column director_activity.decision does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."director_activity"."id", "public"."director_activity"."decision" FROM "public"."director_activity" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise KEEPS a non-SELECT statement shape (INSERT/UPDATE/DELETE with the same message is a real code-bug and still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(
+      "column director_activity.decision does not exist",
+      "insert into public.director_activity (id, decision) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(
+      "column director_activity.decision does not exist",
+      "update public.director_activity set decision = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(
+      "column director_activity.decision does not exist",
+      "delete from public.director_activity where decision = $1",
+    ),
+    false,
+  );
+  // The PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(
+      "column director_activity.decision does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."director_activity"("decision") VALUES ($1) RETURNING "public"."director_activity"."id" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise KEEPS a DIFFERENT column / OTHER table and returns false on empty input", () => {
+  // A real rename regression on a different column still pages — the pin is `decision`.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(
+      "column director_activity.reasoning does not exist",
+      "select id, reasoning from public.director_activity",
+    ),
+    false,
+  );
+  // A `decision` column-missing on any OTHER table still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(
+      "column crisis_customer_actions.decision does not exist",
+      "select decision from public.crisis_customer_actions",
+    ),
+    false,
+  );
+  // The sibling `.kind` classifier still KEEPS a `director_activity.decision` error.
   assert.equal(
     isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
       "column director_activity.decision does not exist",
       "select id, decision from public.director_activity",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(
+      "column director_activity.decision does not exist",
+      "",
     ),
     false,
   );
