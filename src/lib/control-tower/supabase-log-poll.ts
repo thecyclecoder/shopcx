@@ -134,6 +134,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsRunTimestampDirectRestLookupNoise,
   isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise,
   isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingWorkspacesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
@@ -1656,6 +1657,23 @@ const LOG_QUERIES: LogQuery[] = [
       // code-bug shape) still surfaces / pages on first sighting.
       // Static-analysis fingerprint — `isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
       if (isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.director_activity` asking for a non-existent `decision` column.
+      // The `director_activity` table exists but by design carries NO `decision` column —
+      // every ShopCX reader goes through the director SDK / joined queries which never
+      // select a bare `decision`. The column-missing ERROR only reaches this feed when a
+      // foreign app / stale SQL Editor session / deprecated integration queries
+      // `/rest/v1/director_activity?select=id,decision,ticket_id,reasoning`. There is no
+      // lever from ShopCX to make that query resolve — paging Platform on it (Control
+      // Tower signature `supabase-logs:09bbb38b8d17361e`,
+      // [[../specs/error-feed-drop-director-activity-decision-direct-rest-noise]]) is
+      // repair work for a query we don't own. Narrowly gated to require BOTH the exact
+      // column-missing message AND a SELECT-on-director_activity shape (bare OR PostgREST
+      // CTE wrapper) — a column-missing on any other table, a different column on
+      // `director_activity`, or on `director_activity` via a non-SELECT statement (real
+      // code-bug shape) still surfaces / pages on first sighting.
+      // Static-analysis fingerprint — `isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
+      if (isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.workspaces.slug`. The `workspaces` table exists but has NO
       // `slug` column — the workspace slug shape lives on `workspaces.help_slug` (the
