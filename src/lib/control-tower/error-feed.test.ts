@@ -129,6 +129,7 @@ import {
   isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise,
+  isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnAgentJobsIdAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
@@ -3411,6 +3412,113 @@ test("isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise KEEPS a non-SELECT
     isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise(
       "operator does not exist: uuid ~~* unknown",
       "delete from public.tickets where id ilike $1",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise ──
+// The EQUALITY twin of the tickets.id uuid-LIKE probe: a Supabase Studio Table Editor quick-filter
+// / direct-REST probe binds a hand-typed/truncated uuid to `WHERE "tickets"."id" = $1`, which
+// Postgres rejects at parse/bind time with `invalid input syntax for type uuid: "<garbage>"`.
+// Control Tower signature `supabase-logs:d9393a3e4f8314e2` (288× over ~4 weeks). Drop AT CAPTURE
+// only when BOTH the `invalid input syntax for type uuid:` message AND the SELECT-shape on
+// `tickets` with an `id =` equality marker are present; the same error on any OTHER table, or a
+// non-SELECT shape on tickets, still pages.
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise drops the invalid-uuid message paired with the PostgREST CTE wrapper AND the bare SELECT shape", () => {
+  // The Studio-emitted PostgREST CTE wrapper form (double-quoted identifiers), id = $1.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc-not-a-uuid"',
+      'WITH pgrst_source AS ( SELECT "public"."tickets".* FROM "public"."tickets" WHERE "public"."tickets"."id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the prefix check.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(
+      'ERROR: invalid input syntax for type uuid: "123"',
+      'WITH pgrst_source AS ( SELECT * FROM "public"."tickets" WHERE "id" = $1 )',
+    ),
+    true,
+  );
+  // The bare SELECT shape (no PostgREST wrapper) drops too — the predicate accepts both.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(
+      'invalid input syntax for type uuid: "zzz"',
+      "select * from public.tickets where id = 'zzz'",
+    ),
+    true,
+  );
+  // Unqualified `tickets` (no `public.`) + bare SELECT is still the same ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(
+      'invalid input syntax for type uuid: "123"',
+      "select id, status from tickets where id = $1",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise KEEPS the same invalid-uuid message when the FROM is a different table (a real bad-uuid code bug elsewhere still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.subscriptions where id = $1",
+    ),
+    false,
+  );
+  // PostgREST CTE wrapper form, but FROM is a different table — must still page.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      'WITH pgrst_source AS ( SELECT * FROM "public"."orders" WHERE "id" = $1 )',
+    ),
+    false,
+  );
+  // A table whose name merely starts with `tickets` must NOT be swept in by the drop.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.tickets_archive where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise KEEPS a DIFFERENT error on tickets, and the invalid-uuid message with no id-equality marker", () => {
+  // A different error on `tickets` is a real code bug we WANT to see.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(
+      "null value in column id violates not-null constraint",
+      "select * from public.tickets where id = $1",
+    ),
+    false,
+  );
+  // The invalid-uuid message but the SELECT filters some other column (no id-equality) — not the
+  // uuid-primary-key probe shape, so it still pages.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.tickets where customer_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise KEEPS a non-SELECT statement shape on tickets (a real code-bug writing tickets still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "update public.tickets set status = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "delete from public.tickets where id = $1",
     ),
     false,
   );

@@ -98,6 +98,7 @@ import {
   isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise,
+  isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnAgentJobsIdAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
@@ -1061,6 +1062,11 @@ const LOG_QUERIES: LogQuery[] = [
       // predeploy guard forbids LIKE/ILIKE on uuid columns), so the ERROR is repair work for a query
       // we don't own. Control Tower signature `supabase-logs:655d56e7e5279554`.
       if (isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the equality twin of the tickets.id probe — a
+      // malformed-uuid `tickets.id = $1` read rejected by Postgres with `invalid input syntax for
+      // type uuid`. A hand-typed/truncated uuid pasted into a Studio quick-filter / direct-REST
+      // probe; no ShopCX code binds a bad uuid to tickets.id. Signature `supabase-logs:d9393a3e4f8314e2`.
+      if (isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: the agent_jobs twin of the same Studio / direct-REST
       // quick-filter that LIKEs the uuid `agent_jobs.id` column, rejected by Postgres with
       // `operator does not exist: uuid ~~ unknown`. No ShopCX code path issues a uuid LIKE (a

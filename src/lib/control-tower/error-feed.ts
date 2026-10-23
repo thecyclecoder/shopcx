@@ -2266,6 +2266,65 @@ export function isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres rejecting a malformed-uuid EQUALITY read on `tickets.id` with
+ * `invalid input syntax for type uuid: "<garbage>"`. This is the equality twin of
+ * `isForeignSupabasePostgresUuidLikeOnTicketsIdAdhocNoise`: instead of a `id LIKE` operator
+ * mismatch, it is a `WHERE "tickets"."id" = $1` lookup where the bound value is a hand-typed /
+ * truncated uuid (a Supabase Studio Table Editor quick-filter or a direct-REST `?id=eq.<garbage>`
+ * probe against the uuid primary key). Postgres rejects the literal at parse/bind time before any
+ * row is read, so no ShopCX code path produces it — every in-tree reader filters `tickets.id` with
+ * a well-formed uuid. The resulting ERROR is repair work for a query no code owns (Control Tower
+ * signature `supabase-logs:d9393a3e4f8314e2`, logged 288× over ~4 weeks) and is the equality-form
+ * gap left by the uuid-LIKE sibling filters, which only cover the LIKE operator shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message, after stripping any leading `ERROR: ` prefix, starts with
+ *      `invalid input syntax for type uuid:`, AND
+ *   2. the `parsed.query` attribute (quote-stripped + lowercased) is a SELECT-shape on `tickets` —
+ *      either (a) the bare `select ... from (public.)?tickets` shape, OR (b) the PostgREST-generated
+ *      `with pgrst_source as ( select ... from public.tickets` CTE wrapper form — AND it contains an
+ *      `id = ` equality marker.
+ *
+ * Narrowly gated so:
+ *   - a malformed-uuid error on ANY OTHER table (a real code bug binding bad uuids elsewhere) still
+ *     pages,
+ *   - the same message attached to a non-SELECT statement on `tickets` (INSERT / UPDATE / DELETE /
+ *     DDL — a real code-write shape) still pages,
+ *   - a genuine `tickets` write failure with a different message still pages.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts` is
+ * constructed — the mapRow contract treats `null` as `drop, do not record`, so returning null here
+ * fully suppresses the row (no error_event, no loop_alert, no signature). Not a `transient` flag:
+ * this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (!stripped.toLowerCase().startsWith("invalid input syntax for type uuid:")) return false;
+  // Quote-stripped + lowercased so `"public"."tickets"` collapses to `public.tickets` and
+  // `"id" = $1` collapses to `id = $1`, covering both the bare and the double-quoted
+  // PostgREST-wrapper forms with one shape predicate.
+  const q = (query ?? "").trim().toLowerCase().replace(/"/g, "");
+  if (!q) return false;
+  // The uuid-id equality marker — the tell that distinguishes the Studio-click/REST quick-filter
+  // equality probe against the uuid primary key from any other read our own code issues. `$?\d*`
+  // tolerates a bound `$1` placeholder or an inline literal; `.id = ` catches the qualified form.
+  if (!(/\bid\s*=\s*\$?\d*/.test(q) || q.includes(".id = "))) return false;
+  const bareSelect =
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?tickets\b/.test(q);
+  // PostgREST wraps direct-REST row reads as `WITH pgrst_source AS ( SELECT ... FROM
+  // public.tickets ... )` — the branch requires the wrapped op to be a SELECT so a PostgREST
+  // INSERT/UPDATE inside the same envelope (a real code-write) stays captured/paged.
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+public\.tickets\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres rejecting a `WHERE "agent_jobs"."id" LIKE $1` text search typed
  * against the uuid `agent_jobs.id` column with `operator does not exist: uuid ~~ unknown`. The uuid
  * LIKE is an invalid operator pairing (PostgreSQL has no `uuid ~~ text` operator), and the query
