@@ -63,6 +63,70 @@ export function isReconcileEligibleSourceName(sourceName: string | null | undefi
 }
 
 /**
+ * Source names of Shopify-ORIGIN (`SC*`) orders that DO route through Amplifier
+ * at checkout time and therefore MUST become observable when that synchronous
+ * import silently drops. Shopify stamps `subscription_contract_checkout_one` on
+ * every recurring renewal billed through `subscriptionBillingAttemptCreate`
+ * (Appstle/Shopify subscriptions AND our one-time-charge path), and those orders
+ * are handed to the warehouse via `createAmplifierOrder` (the same-sub prior
+ * order SC139301 imported same-day — the path normally works).
+ *
+ * Ticket 277c10ec: SC140881 (this source, in stock, paid 2026-10-20, contract
+ * 36109058221) sat paid + un-imported for 3+ days with `amplifier_import_attempts=0`
+ * and `amplifier_last_error` null. The internal reconcile rail CANNOT see it:
+ * `isShopifyOriginOrder` excludes it (`shopify_order_id` is set) AND this source
+ * is not a `RECONCILE_ELIGIBLE_SOURCE_NAMES` one — so it had no retry, no stamped
+ * attempt/error, and no CEO alert. This set is the discriminator that separates
+ * Amplifier-bound Shopify renewals from the ~125k legacy `SC*` rows the
+ * `shopify_order_id` guard excludes (those were fulfilled through Shopify's own
+ * pipeline and are NOT this source). Combined with the recent-window floor below
+ * (legacy rows are 2024-era), it never re-matches that legacy class.
+ */
+export const SHOPIFY_RENEWAL_SOURCE_NAMES = new Set<string>([
+  "subscription_contract_checkout_one",
+]);
+
+/** True when a Shopify-origin order's source_name is an Amplifier-bound subscription renewal. Pure — unit-tested. */
+export function isShopifyRenewalSourceName(sourceName: string | null | undefined): boolean {
+  return typeof sourceName === "string" && SHOPIFY_RENEWAL_SOURCE_NAMES.has(sourceName);
+}
+
+/**
+ * How far back the Shopify-renewal stuck-import escalation looks. A ROLLING
+ * recent window is the robust discriminator against the ~125k legacy `SC*` rows
+ * (all 2024-era): we only ever consider orders created in the last
+ * `SHOPIFY_RENEWAL_WINDOW_DAYS`, so a 2024 legacy row can never match no matter
+ * what its source_name is. A genuinely stuck renewal is caught within days of
+ * being placed (SC140881 was discovered after 3), and once its card is open the
+ * un-dismissed dedupe keeps it visible even after it ages out of the window.
+ */
+const SHOPIFY_RENEWAL_WINDOW_DAYS = 30;
+/**
+ * The SLA ceiling: a Shopify renewal still un-imported this long after it was
+ * placed is stuck, not in-flight. These orders carry NO `amplifier_last_error`
+ * (the checkout-time import silently never completed — attempts stay 0), so the
+ * `escalateStaleErroredOrders` residue net (which requires a non-null error)
+ * never sees them; 24h is well past any transient checkout-import flake + its
+ * own retries, and still catches the ticket's order ~2 days before a customer
+ * complaint would.
+ */
+const SHOPIFY_RENEWAL_STUCK_HOURS = 24;
+export { SHOPIFY_RENEWAL_WINDOW_DAYS, SHOPIFY_RENEWAL_STUCK_HOURS };
+
+/**
+ * Candidate window bounds for the Shopify-renewal stuck-import escalation, given
+ * a `now` in ms. `createdAfterIso` is the recent floor (excludes legacy rows);
+ * `createdBeforeIso` is the SLA ceiling (past this, a renewal is stuck). Pure —
+ * unit-tested so the boundary logic is deterministic without a clock.
+ */
+export function shopifyRenewalStuckWindow(nowMs: number): { createdAfterIso: string; createdBeforeIso: string } {
+  return {
+    createdAfterIso: new Date(nowMs - SHOPIFY_RENEWAL_WINDOW_DAYS * 24 * 60 * 60_000).toISOString(),
+    createdBeforeIso: new Date(nowMs - SHOPIFY_RENEWAL_STUCK_HOURS * 60 * 60_000).toISOString(),
+  };
+}
+
+/**
  * True when an order is Shopify-origin (`SC*`) and therefore NEVER this rail's
  * business. Shopify orders were fulfilled through Shopify's own pipeline; they
  * carry `amplifier_order_id IS NULL` forever by design, so they match the
@@ -391,6 +455,106 @@ async function escalateStaleErroredOrders(admin: AdminClient): Promise<{ scanned
   return { scanned, opened, already_open: alreadyOpen, skipped_fraud: skippedFraud };
 }
 
+/**
+ * Shopify-origin subscription-renewal stuck-import escalation (ticket 277c10ec).
+ *
+ * The internal rail (sweep + both residue nets) is deliberately blind to
+ * Shopify-origin `SC*` orders — `shopify_order_id IS NULL` at every selection
+ * site keeps it off the ~125k legacy rows. But a NARROW subset of `SC*` orders
+ * DOES route through Amplifier: recurring renewals (`source_name` in
+ * `SHOPIFY_RENEWAL_SOURCE_NAMES`) billed through Shopify. When their synchronous
+ * checkout-time import silently drops, they land paid + un-imported with
+ * `amplifier_import_attempts=0` and `amplifier_last_error` null — invisible to
+ * every existing rail, exactly how SC140881 sat stuck for 3+ days until the
+ * customer wrote in.
+ *
+ * This detector closes the OBSERVABILITY gap (the spec's "at minimum a past-SLA
+ * stuck-paid-order escalation"). It deliberately does NOT re-drive: a
+ * Shopify-ingested order's stored shape isn't owned by us and a blind re-submit
+ * risks a double warehouse hand-off, so — per the north star — hitting this rail
+ * escalates to a human objective-owner rather than silently executing.
+ *
+ * Scope is kept off the legacy class THREE ways: (1) `shopify_order_id IS NOT
+ * NULL` AND an Amplifier-bound renewal `source_name` (legacy rows were
+ * Shopify-fulfilled, not this source); (2) a 30-day rolling `created_at` floor
+ * so 2024-era rows never match; (3) the 24h SLA ceiling. Same
+ * `metadata @> {order_id}` un-dismissed `fulfillment_alert` dedupe the other two
+ * escalations use, so an order gets exactly one card across all three paths.
+ */
+async function escalateStuckShopifyRenewals(admin: AdminClient): Promise<{ scanned: number; opened: number; already_open: number; skipped_fraud: number; skipped_allergen_hold: number }> {
+  const { createdAfterIso, createdBeforeIso } = shopifyRenewalStuckWindow(Date.now());
+  const { data: rows } = await admin
+    .from("orders")
+    .select("id, workspace_id, order_number, source_name, shopify_order_id, amplifier_import_attempts, created_at")
+    .eq("financial_status", "paid")
+    .is("amplifier_order_id", null)
+    .not("shopify_order_id", "is", null)
+    .in("source_name", [...SHOPIFY_RENEWAL_SOURCE_NAMES])
+    .gte("created_at", createdAfterIso)
+    .lt("created_at", createdBeforeIso)
+    .order("created_at", { ascending: true })
+    .limit(BATCH_LIMIT);
+
+  let scanned = 0;
+  let opened = 0;
+  let alreadyOpen = 0;
+  let skippedFraud = 0;
+  let skippedAllergenHold = 0;
+  for (const row of (rows || []) as Array<{
+    id: string;
+    workspace_id: string;
+    order_number: string | null;
+    source_name: string | null;
+    shopify_order_id: string | null;
+    amplifier_import_attempts: number | null;
+    created_at: string;
+  }>) {
+    scanned++;
+    // Defensive — the `.in(...)` query already narrows to renewal sources. A
+    // mismatch here means the selection lost its source predicate.
+    if (!isShopifyRenewalSourceName(row.source_name)) continue;
+    if (await isFraudHeld(admin, row.workspace_id, row.id)) { skippedFraud++; continue; }
+    if (await isOrderOnAllergenHold(admin, row.workspace_id, row.id)) { skippedAllergenHold++; continue; }
+
+    const { data: existing } = await admin
+      .from("dashboard_notifications")
+      .select("id")
+      .eq("workspace_id", row.workspace_id)
+      .eq("type", "fulfillment_alert")
+      .eq("dismissed", false)
+      .contains("metadata", { order_id: row.id })
+      .limit(1)
+      .maybeSingle();
+    if (existing) { alreadyOpen++; continue; }
+
+    const orderLabel = row.order_number || row.id.slice(0, 8);
+    const attempts = row.amplifier_import_attempts ?? 0;
+    const ageHours = Math.round((Date.now() - new Date(row.created_at).getTime()) / 3_600_000);
+    const { error } = await admin.from("dashboard_notifications").insert({
+      workspace_id: row.workspace_id,
+      type: "fulfillment_alert",
+      title: `${orderLabel} — Shopify renewal paid ${ageHours}h, never imported to Amplifier`,
+      body: `Paid subscription renewal ${orderLabel} (Shopify-origin, ${row.source_name}) has sat ${ageHours}h without reaching Amplifier — attempts so far: ${attempts}. The synchronous checkout-time import silently dropped (no retry, no stamped error), so no rail could see it. Re-drive or investigate before the customer notices (unknown SKU, un-fulfillable address, or a hard Amplifier reject). SC140881 sat like this for 3+ days until the customer wrote in.`,
+      link: `/dashboard/orders/${row.id}`,
+      metadata: {
+        kind: "amplifier_import_shopify_renewal_stuck",
+        order_id: row.id,
+        order_number: row.order_number,
+        source_name: row.source_name,
+        shopify_order_id: row.shopify_order_id,
+        attempts,
+        age_hours: ageHours,
+      },
+    });
+    if (error) {
+      console.warn(`[amplifier-import-reconcile] shopify-renewal fulfillment_alert insert failed for order ${row.id}: ${error.message}`);
+    } else {
+      opened++;
+    }
+  }
+  return { scanned, opened, already_open: alreadyOpen, skipped_fraud: skippedFraud, skipped_allergen_hold: skippedAllergenHold };
+}
+
 export const amplifierImportReconcileCron = inngest.createFunction(
   {
     id: "amplifier-import-reconcile",
@@ -479,15 +643,26 @@ export const amplifierImportReconcileCron = inngest.createFunction(
       return escalateStaleErroredOrders(admin);
     });
 
+    // Shopify-origin subscription-renewal stuck-import escalation (ticket
+    // 277c10ec). The only path in this cron that touches Shopify-origin (`SC*`)
+    // orders — a narrow, recent-window, renewal-source-only slice — because
+    // their checkout-time Amplifier import is invisible to every other rail.
+    // Separate step so an escalation error can't fail the sweep and an Inngest
+    // retry re-runs it independently (the dedupe guard keeps it idempotent).
+    const shopifyRenewalEscalation = await step.run("escalate-stuck-shopify-renewals", async () => {
+      const admin = createAdminClient();
+      return escalateStuckShopifyRenewals(admin);
+    });
+
     await step.run("emit-heartbeat", async () => {
       await emitCronHeartbeat("amplifier-import-reconcile", {
         ok: true,
-        produced: { ...result, escalation, stale_escalation: staleEscalation },
-        detail: `${result.scanned} scanned · ${result.imported} imported · ${result.failed} failed · ${result.skipped_fraud + result.skipped_allergen_hold + result.skipped_no_skus + result.skipped_non_storefront + result.skipped_shopify_origin} skipped · escalation ${escalation.opened} opened / ${escalation.already_open} dedup · stale ${staleEscalation.opened} opened / ${staleEscalation.already_open} dedup`,
+        produced: { ...result, escalation, stale_escalation: staleEscalation, shopify_renewal_escalation: shopifyRenewalEscalation },
+        detail: `${result.scanned} scanned · ${result.imported} imported · ${result.failed} failed · ${result.skipped_fraud + result.skipped_allergen_hold + result.skipped_no_skus + result.skipped_non_storefront + result.skipped_shopify_origin} skipped · escalation ${escalation.opened} opened / ${escalation.already_open} dedup · stale ${staleEscalation.opened} opened / ${staleEscalation.already_open} dedup · shopify-renewal ${shopifyRenewalEscalation.opened} opened / ${shopifyRenewalEscalation.already_open} dedup`,
         durationMs: Date.now() - startedAt,
       });
     });
 
-    return { ...result, escalation, stale_escalation: staleEscalation };
+    return { ...result, escalation, stale_escalation: staleEscalation, shopify_renewal_escalation: shopifyRenewalEscalation };
   },
 );
