@@ -170,7 +170,9 @@ LOW-LEVEL insert — writes directly to `coupons` with `single_use=true`, `recur
 - `ensureInternalLoyaltyCouponRow` itself (which pre-verifies).
 - A **NAMED, one-customer ship-time remediation script** (e.g., `scripts/_backfill-brittany-loyalty-15-internal-coupon-46a7aa75.ts`) that has already resolved a specific historical redemption and verified the contract owner out-of-band (per CS-Director spec write-up).
 
-Do NOT expose to any request-time or agent-driven caller. Returns null on unique-index conflict; caller re-reads the row. Added by [[../specs/loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value]] Phase 3 Fix 2.
+Do NOT expose to any request-time or agent-driven caller. Returns null on the `(workspace_id, lower(code))` conflict; caller re-reads the row. Added by [[../specs/loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value]] Phase 3 Fix 2.
+
+**Conflict-tolerant write (Control Tower signature `supabase-logs:bbd5f21ef9289c31`).** The `(workspace_id, lower(code))` collision is the *expected* concurrent-materialization race — two coupon-apply paths minting the same loyalty code at once. Rather than a bare `.insert()` that trips the `coupons_workspace_code_idx` unique index (logging a harmless-but-noisy Postgres unique-violation ERROR on every race), this routes through the SECURITY DEFINER RPC `insert_coupon_on_conflict_ignore(p_workspace_id, p_code, p_type, p_value, p_scope, p_recurring_cycle_limit, p_customer_id, p_single_use)` — `INSERT … ON CONFLICT (workspace_id, lower(code)) DO NOTHING RETURNING id`. The losing caller gets a `null` id back (no ERROR emitted) and the on-null `readExisting()` fallback in `ensureInternalLoyaltyCouponRow` resolves the winner's row exactly as before. Migration: `supabase/migrations/20261024150000_insert_coupon_on_conflict_ignore.sql`.
 
 ## Callers
 
