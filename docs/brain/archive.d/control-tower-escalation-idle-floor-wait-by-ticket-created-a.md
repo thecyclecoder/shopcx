@@ -1,0 +1,1 @@
+- **Control Tower: escalation-idle assertion — floor the measured wait by the ticket's created_at so a backdated escalated_at can't false-fire** · verified 2026-10-24 · → [[libraries/control-tower]]
