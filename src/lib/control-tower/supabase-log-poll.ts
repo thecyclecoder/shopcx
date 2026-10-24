@@ -54,6 +54,7 @@ import {
   isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
+  isForeignSupabasePostgresMissingCouponsDiscountTypeColumnNoise,
   isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise,
   isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
@@ -508,6 +509,17 @@ const LOG_QUERIES: LogQuery[] = [
       // column-missing error on any other table, or on `orders` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingOrdersSourceColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an external client probing our REST API for a
+      // generic coupon schema selects a non-existent `discount_type` column off
+      // `public.coupons` — or the PostgREST `WITH pgrst_source AS ( SELECT ... FROM
+      // "public"."coupons" ... )` CTE wrapper the same client emits. Our `coupons` table
+      // never carried the generic `discount_type`/`discount_value`/`active`/`expires_at`
+      // shape, and no ShopCX code path selects it, so the Postgres
+      // 'column coupons.discount_type does not exist' is a query we don't own (Control
+      // Tower signature `supabase-logs:f14d63453b1a9af0`). Narrowly gated to require BOTH
+      // the exact column-missing message AND the SELECT-lookup shape — a real schema
+      // regression on coupons (any other column, or via a non-SELECT statement) still pages.
+      if (isForeignSupabasePostgresMissingCouponsDiscountTypeColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a manual Supabase Studio browse / external REST
       // probe that selects a non-existent `key` column off `public.kill_switches` — or the
       // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."kill_switches" ... )` CTE

@@ -2520,6 +2520,67 @@ export function isForeignSupabasePostgresMissingOrdersSourceColumnNoise(
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `coupons.discount_type`. Our `coupons` table never carried the generic coupon-schema
+ * shape (`discount_type` / `discount_value` / `active` / `expires_at`) an external client
+ * is probing for — no in-tree reader (src/, scripts/, shopify-extension/,
+ * supabase/migrations/, docs/brain/) issues a SELECT that names `coupons.discount_type`.
+ * The message appears on Supabase's `postgres_logs` feed only when an external / manual
+ * tool (a foreign REST client probing for a generic coupon schema, Supabase Studio's Table
+ * Editor / API Docs, a stale exploratory query) does a raw
+ * `select ... discount_type ... from public.coupons` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."coupons" ... )` CTE wrapper the same
+ * client emits over the REST endpoint. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:f14d63453b1a9af0`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingOrdersSourceColumnNoise` — same narrow-
+ * gating shape, scoped to the non-existent `discount_type` column being looked up on
+ * `public.coupons`.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column coupons.discount_type does not exist` (with or without the
+ *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.coupons` — either
+ *      (a) the bare `select ... from public.coupons` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."coupons" ... )`
+ *      CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `coupons` (a real coupons-schema
+ *     regression on a live column) still pages,
+ *   - a column-missing error for `discount_type` on ANY OTHER table still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL on `coupons`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingCouponsDiscountTypeColumnNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column coupons.discount_type does not exist" ||
+    stripped === "column public.coupons.discount_type does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?coupons\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?coupons\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `kill_switches.key`. Our `kill_switches` table keys each switch by its `node_id` (plus
  * the ancestry columns) — there is no bare `key` column on it, and no in-tree reader
  * (src/, scripts/, shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT
