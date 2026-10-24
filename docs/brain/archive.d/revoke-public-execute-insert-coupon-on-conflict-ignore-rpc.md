@@ -1,0 +1,1 @@
+- **Revoke PUBLIC/anon/authenticated EXECUTE on insert_coupon_on_conflict_ignore SECURITY DEFINER RPC** · verified 2026-10-24 · → [[../tables/coupons]]
