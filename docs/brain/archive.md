@@ -13,8 +13,11 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Reliability rail must catch stuck Shopify-origin subscription-renewal Amplifier imports** · verified 2026-10-23 · → [[../inngest/amplifier-import-reconcile]]
+- **Scope out foreign director_activity.decision direct-REST column-missing noise** · verified 2026-10-23 · → [[../libraries/error-feed]]
 - **Drop foreign ad-hoc fraud_cases.order_id lookup noise at capture** · verified 2026-10-23 · → [[../libraries/control-tower]] · [[../tables/fraud_cases]]
 - **Drop foreign ad-hoc orders.processed_at lookup noise at capture** · verified 2026-10-23 · → [[../libraries/control-tower]] · [[../tables/orders]]
+- **Drop foreign uuid-ILIKE-on-tickets.id direct-REST noise at capture** · verified 2026-10-23 · → [[lifecycles/control-tower]]
+- **Drop Studio/REST malformed-uuid probe noise on tickets.id from the error feed** · verified 2026-10-23 · → [[libraries/error-feed]]
 - **Security dependency upgrades** · verified 2026-10-23 · → [[../libraries/security-agent]]
 - **Normalize Shopify dispute reason to the chargeback_events CHECK set so chargebacks stop being dropped** · verified 2026-10-22 · → [[../lifecycles/chargeback-pipeline]]
 - **Scope capture: drop foreign ad-hoc appstle_contract_snapshots.updated_at column-missing noise** · verified 2026-10-21 · → [[../libraries/error-feed]]
