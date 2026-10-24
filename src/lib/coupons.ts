@@ -1106,6 +1106,17 @@ export async function ensureInternalLoyaltyCouponRow(
  * Do NOT expose to any request-time / agent-driven caller. Returns null on
  * unique-index conflict; caller re-reads the row.
  *
+ * CONFLICT-TOLERANT WRITE: the (workspace_id, lower(code)) collision is the
+ * EXPECTED concurrent-materialization race. Rather than letting a bare INSERT
+ * trip the `coupons_workspace_code_idx` unique index (which makes Postgres log
+ * a harmless-but-noisy unique-violation ERROR — Control Tower signature
+ * supabase-logs:bbd5f21ef9289c31), we route through the SECURITY DEFINER RPC
+ * `insert_coupon_on_conflict_ignore`, which does
+ * `ON CONFLICT (workspace_id, lower(code)) DO NOTHING RETURNING id`. The losing
+ * caller gets a null id back (no ERROR emitted) and the on-null readExisting()
+ * fallback in ensureInternalLoyaltyCouponRow resolves the winner's row exactly
+ * as before.
+ *
  * Spec: loyalty-coupon-reissue-must-be-internal-sub-native-and-verify-real-value
  * § Phase 3 Fix 2 — "Keep any ship-time one-customer remediation explicit
  * and separate if it must handle a previously-applied historical row."
@@ -1117,28 +1128,25 @@ export async function insertInternalLoyaltyCouponRowUnchecked(
   contractOwnerCustomerId: string,
   valueCents: number,
 ): Promise<ResolvedCoupon | null> {
-  const { data: inserted, error } = await admin
-    .from("coupons")
-    .insert({
-      workspace_id: workspaceId,
-      code,
-      type: "fixed_amount",
-      value: valueCents,
-      scope: "order",
-      recurring_cycle_limit: 1,
-      customer_id: contractOwnerCustomerId,
-      single_use: true,
-    })
-    .select("id")
-    .single();
-  if (error || !inserted) return null;
+  const { data: insertedId, error } = await admin.rpc("insert_coupon_on_conflict_ignore", {
+    p_workspace_id: workspaceId,
+    p_code: code,
+    p_type: "fixed_amount",
+    p_value: valueCents,
+    p_scope: "order",
+    p_recurring_cycle_limit: 1,
+    p_customer_id: contractOwnerCustomerId,
+    p_single_use: true,
+  });
+  // null id => the concurrent-insert conflict (loser); caller re-reads the row.
+  if (error || !insertedId) return null;
   return {
     code,
     type: "fixed_amount",
     value: valueCents,
     recurring_cycle_limit: 1,
     source: "internal",
-    coupon_id: inserted.id as string,
+    coupon_id: insertedId as string,
   };
 }
 
