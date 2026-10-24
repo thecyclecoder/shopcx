@@ -8060,9 +8060,19 @@ export function isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLo
   // has a stable shape: `column <table>.<name> does not exist`, pinned here to
   // `director_activity.kind` (with or without the `public.` qualifier).
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  // Normalize Postgres' double-quoting of the identifier tokens. The table-qualified
+  // forms arrive unquoted (`column director_activity.kind does not exist`), but the
+  // UNQUALIFIED spelling this foreign caller emits quotes the bare column —
+  // `column "kind" does not exist`. Stripping surrounding double-quotes lets both the
+  // quoted and bare unqualified forms match the same literal, while leaving the
+  // table-qualified literals (which carry no quotes) unchanged.
+  const normalized = stripped.replace(/"/g, "");
   const messageMatches =
-    stripped === "column director_activity.kind does not exist" ||
-    stripped === "column public.director_activity.kind does not exist";
+    normalized === "column director_activity.kind does not exist" ||
+    normalized === "column public.director_activity.kind does not exist" ||
+    // Unqualified form — the message no longer carries the table name, so the
+    // SELECT-on-director_activity query-shape guard below is what pins it to this table.
+    normalized === "column kind does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
