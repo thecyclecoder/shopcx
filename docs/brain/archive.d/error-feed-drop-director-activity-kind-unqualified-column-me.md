@@ -1,0 +1,1 @@
+- **Widen director_activity.kind foreign-read classifier to unqualified column message** · verified 2026-10-24 · → [[../libraries/error-feed]]
