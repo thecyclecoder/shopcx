@@ -1648,6 +1648,13 @@ export interface AssertionInputs {
   escalatedWaiting: number;
   /** the OLDEST waiting ticket's escalated_at (min over the waiting set) — how long real work has actually waited, or null. */
   oldestEscalatedAt: string | null;
+  /**
+   * The same oldest waiting ticket's own created_at — floors the measured wait so a backdated
+   * escalated_at on a brand-new/freshly re-escalated ticket row can't be reported as a longer
+   * wait than the ticket has actually existed. The escalation-idle wait starts at the LATER of
+   * escalated_at and created_at (build-control-tower-escalation-idle-floor-wait-by-ticket-created-at).
+   */
+  oldestEscalatedCreatedAt: string | null;
   /** most-recent triage-escalations agent_jobs.created_at (any status), or null. */
   latestTriageJobAt: string | null;
   /**
@@ -1838,7 +1845,18 @@ export function evalOutputAssertion(
       if (inputs.escalatedWaiting <= 0 || inputs.oldestEscalatedAt == null) return null;
       // Grace ≥ the cron's hourly cadence so a ticket escalating between ticks isn't flagged before the next run.
       const windowMs = loop.livenessWindowMs ?? 2 * 60 * 60_000;
-      const waitedMs = ageMs(inputs.oldestEscalatedAt);
+      // Floor the wait-start at the LATER of escalated_at and the ticket's own created_at: a brand-new
+      // or freshly re-escalated ticket can carry a backdated escalated_at (e.g. a row created 4m ago
+      // but stamped escalated_at 17h earlier). Measuring from that stale escalated_at fabricates a long
+      // wait and reds the tile before the hourly cron has even had a tick to enqueue it. Starting the
+      // clock at max(escalated_at, created_at) means we only flag a wait the ticket has genuinely
+      // existed for (build-control-tower-escalation-idle-floor-wait-by-ticket-created-at).
+      const waitStartIso =
+        inputs.oldestEscalatedCreatedAt != null &&
+        new Date(inputs.oldestEscalatedCreatedAt).getTime() > new Date(inputs.oldestEscalatedAt).getTime()
+          ? inputs.oldestEscalatedCreatedAt
+          : inputs.oldestEscalatedAt;
+      const waitedMs = ageMs(waitStartIso);
       if (waitedMs <= windowMs) return null;
       // Mirror the cron's actual 'should I enqueue?' decision instead of the created_at proxy: the
       // oldest escalation is HANDLED (so the cron would skip it) when a triage_runs row covers its
@@ -1849,10 +1867,10 @@ export function evalOutputAssertion(
       if (inputs.oldestEscalatedHandled) return null;
       const n = inputs.escalatedWaiting;
       return {
-        statusText: `idle while ${n} ticket${n === 1 ? "" : "s"} wait${n === 1 ? "s" : ""} (oldest ${elapsed(inputs.oldestEscalatedAt)})`,
+        statusText: `idle while ${n} ticket${n === 1 ? "" : "s"} wait${n === 1 ? "s" : ""} (oldest ${elapsed(waitStartIso)})`,
         violation: {
           reason: "idle_while_work",
-          detail: `Escalation triage idle while ${n} routine-escalated ticket${n === 1 ? "" : "s"} wait — oldest has waited ${elapsed(inputs.oldestEscalatedAt)} (past the ${Math.round(windowMs / 60_000)}m grace) with no triage-escalations job enqueued since it escalated (last enqueue ${elapsed(inputs.latestTriageJobAt)} ago).`,
+          detail: `Escalation triage idle while ${n} routine-escalated ticket${n === 1 ? "" : "s"} wait — oldest has waited ${elapsed(waitStartIso)} (past the ${Math.round(windowMs / 60_000)}m grace) with no triage-escalations job enqueued since it escalated (last enqueue ${elapsed(inputs.latestTriageJobAt)} ago).`,
         },
       };
     }
@@ -2354,7 +2372,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
     // been waiting, and which ticket to probe for a covering review / parked job below.
     admin
       .from("tickets")
-      .select("id, escalated_at")
+      .select("id, escalated_at, created_at")
       .not("escalated_at", "is", null)
       .is("escalated_to", null)
       .not("status", "in", '("archived","closed")')
@@ -2423,7 +2441,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   // ticket id). The parked set extends the cron's inflight set with `needs_attention` so a review
   // sitting in the CEO inbox awaiting a human isn't mistaken for un-picked-up work
   // (control-tower-escalation-idle-mirror-cron-dedup Phase 1).
-  const oldestEscalatedRow = oldestEscalated.data as { id: string; escalated_at: string } | null;
+  const oldestEscalatedRow = oldestEscalated.data as { id: string; escalated_at: string; created_at: string } | null;
   let oldestEscalatedHandled = false;
   if (oldestEscalatedRow?.id && oldestEscalatedRow.escalated_at) {
     const [coveringReview, parkedJob] = await Promise.all([
@@ -2454,6 +2472,7 @@ async function fetchAssertionInputs(admin: Admin): Promise<AssertionInputs> {
   return {
     escalatedWaiting: escalated.count ?? 0,
     oldestEscalatedAt: oldestEscalatedRow?.escalated_at ?? null,
+    oldestEscalatedCreatedAt: oldestEscalatedRow?.created_at ?? null,
     latestTriageJobAt: (triageJob.data as { created_at: string } | null)?.created_at ?? null,
     oldestEscalatedHandled,
     latestSpecTestJobAt: (specTestJob.data as { created_at: string } | null)?.created_at ?? null,

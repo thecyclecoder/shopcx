@@ -2330,6 +2330,7 @@ function baselineAssertionInputs(overrides: Partial<AssertionInputs>): Assertion
   return {
     escalatedWaiting: 0,
     oldestEscalatedAt: null,
+    oldestEscalatedCreatedAt: null,
     latestTriageJobAt: null,
     oldestEscalatedHandled: false,
     latestSpecTestJobAt: null,
@@ -2402,6 +2403,47 @@ test("evalOutputAssertion escalation-idle: genuinely un-picked-up escalation pas
     }),
   );
   assert.ok(verdict, "expected a red verdict for an un-picked-up aged escalation");
+  assert.equal(verdict?.violation.reason, "idle_while_work");
+});
+
+test("evalOutputAssertion escalation-idle: fresh ticket row with a backdated escalated_at stays GREEN (created_at floors the wait)", () => {
+  // A ticket row created only a few minutes ago but carrying an escalated_at stamped 17h earlier.
+  // Measuring the wait from the stale escalated_at would fabricate a 17h wait and red the tile
+  // before the hourly cron has had a tick to enqueue it. Flooring the wait-start at the later of
+  // escalated_at and created_at means the ticket has genuinely only waited a few minutes → green
+  // (build-control-tower-escalation-idle-floor-wait-by-ticket-created-at).
+  const escalatedAt = new Date(Date.now() - 17 * ONE_HOUR_MS).toISOString();
+  const createdAt = new Date(Date.now() - 4 * 60_000).toISOString();
+  const verdict = evalOutputAssertion(
+    "escalation-idle",
+    ESCALATION_IDLE_LOOP,
+    null,
+    baselineAssertionInputs({
+      escalatedWaiting: 1,
+      oldestEscalatedAt: escalatedAt,
+      oldestEscalatedCreatedAt: createdAt,
+      oldestEscalatedHandled: false,
+    }),
+  );
+  assert.equal(verdict, null);
+});
+
+test("evalOutputAssertion escalation-idle: genuinely long wait (both escalated_at AND created_at 17h ago) still REDS", () => {
+  // The ticket row is as old as its escalation — the wait is real, not an artifact of a backdated
+  // escalated_at. Flooring by created_at must NOT mask this; the tile still goes red.
+  const seventeenHoursAgo = new Date(Date.now() - 17 * ONE_HOUR_MS).toISOString();
+  const verdict = evalOutputAssertion(
+    "escalation-idle",
+    ESCALATION_IDLE_LOOP,
+    null,
+    baselineAssertionInputs({
+      escalatedWaiting: 1,
+      oldestEscalatedAt: seventeenHoursAgo,
+      oldestEscalatedCreatedAt: seventeenHoursAgo,
+      oldestEscalatedHandled: false,
+    }),
+  );
+  assert.ok(verdict, "expected a red verdict for a genuinely long wait");
   assert.equal(verdict?.violation.reason, "idle_while_work");
 });
 
