@@ -1,0 +1,1 @@
+- **Primary timecard build_started->build_done source bypasses the failed-build init_loop_guard dedupe** · verified 2026-10-24 · → [[lifecycles/mario-pipeline-plumbing]]
