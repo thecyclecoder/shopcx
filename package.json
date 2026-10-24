@@ -66,6 +66,7 @@
     "test:backfill-internal-cancelled-at": "tsx --test scripts/_backfill-internal-cancelled-at.test.ts",
     "test:coupons-shopify-classify": "tsx --test src/lib/coupons.shopify-classify.test.ts",
     "test:coupons-loyalty-resolve": "tsx --test src/lib/coupons.loyalty-resolve.test.ts",
+    "test:coupons-loyalty-materialize-conflict-tolerant": "tsx --test src/lib/coupons.loyalty-materialize-conflict-tolerant.test.ts",
     "test:date-change-ask": "tsx --test src/lib/date-change-ask.test.ts",
     "test:repair-verdict-guard": "tsx --test src/lib/repair-verdict-guard.test.ts",
     "test:security-stale-resume": "tsx --test src/lib/security-stale-resume.test.ts",
