@@ -261,34 +261,90 @@ export async function readFailedBuildStalls(
   if (aged.length === 0) return [];
 
   // ── init_loop_guard dedupe ────────────────────────────────────────────────────────────────
-  // When the platform init lane's loop-guard fires (a build failed the cap, no in-flight),
-  // it POSTS an escalation to the CEO ("stopped resubmitting; approve modifying the spec")
-  // and records a `director_activity` row: action_kind='escalated' with
-  // metadata.escalation_kind='init_loop_guard', dedupe_key='initguard:<slug>' — a human now
-  // OWNS the spec. But the failed-build source above only sees a `failed` build aged past
-  // the grace, so on every Mario tick it re-surfaces the same spec and burns a box session
-  // re-diagnosing pipeline work the CEO already parked. Drop any slug whose latest
-  // init_loop_guard escalation is newer than the LATEST build failure (the escalation covers
-  // this failure) AND is not yet superseded (no later `escorted_init` on the director ledger
-  // or `build_done` on the timecard — either would mean the human resolved it and a new
-  // build has been driven). Genuinely orphaned failures with no such escalation still
-  // surface unchanged. Mirrors the shape of `readPromoteGateHeldStalls`: read the escalation
-  // signal, then re-confirm current state before acting on it.
-  const slugs = aged.map((a) => a.spec_slug);
-  // Anchor the escalation lookback to the OLDEST aged failure's own timestamp — not a fixed
-  // now-minus-7d window. An init_loop_guard escalation always lands JUST AFTER the failure it
-  // covers, so scanning from the failure's own timestamp (minus a 60s epsilon for clock skew)
-  // is guaranteed to find the covering escalation regardless of the failure's age. The prior
-  // now-relative floor silently dropped an escalation once the whole incident aged past 7 days,
-  // and Mario re-fired on the same already-owned spec (close-snapshot-coverage-guard, ~3.5 min
-  // outside the window). The read is still bounded by .in('spec_slug', slugs) and .limit(500),
-  // so widening the time floor stays bounded.
-  const earliestFailedAtMs = aged.reduce(
-    (min, a) => Math.min(min, Date.parse(a.failed_at)),
+  // When the platform init lane's loop-guard fires (a build failed the cap, no in-flight), it
+  // POSTs an escalation to the CEO ("stopped resubmitting; approve modifying the spec") and records
+  // a `director_activity` row (action_kind='escalated', metadata.escalation_kind='init_loop_guard')
+  // — a human now OWNS the spec. The ownership decision (escalation newer than the latest build
+  // failure AND not yet superseded by a later `escorted_init` / `build_done`) now lives in the
+  // exported `readInitLoopGuardOwnedSlugs` helper so `evaluateStalledSpecs` can apply it as a
+  // CROSS-SOURCE drop — the (a) timecard source runs first and used to front-run this (a2) source,
+  // bypassing the dedupe. This source keeps calling it so its own output is unchanged: a failed
+  // build whose spec a human already owns never surfaces here either.
+  const ownedSlugs = await readInitLoopGuardOwnedSlugs(admin, workspace_id);
+
+  const out: Array<{ workspace_id: string; spec_slug: string; age_ms: number }> = [];
+  for (const a of aged) {
+    if (ownedSlugs.has(a.spec_slug)) continue;
+    out.push({ workspace_id, spec_slug: a.spec_slug, age_ms: a.age_ms });
+  }
+  return out;
+}
+
+/**
+ * Returns the set of spec slugs in `workspace_id` whose LATEST build FAILED and whose failure is
+ * currently OWNED by a human via an `init_loop_guard` escalation — so Mario must not re-diagnose it.
+ * The platform init lane's loop-guard, after a build fails the resubmit cap with nothing in-flight,
+ * POSTs an escalation to the CEO and records a `director_activity` row (action_kind='escalated',
+ * metadata.escalation_kind='init_loop_guard'); the human now owns the spec.
+ *
+ * A slug is OWNED when its latest init_loop_guard escalation is NEWER than its latest build failure
+ * (the escalation covers THIS failure) AND is NOT yet superseded (no later `escorted_init` on the
+ * director ledger and no later `build_done` on the timecard — either means the human resolved it and
+ * a new build was driven). A genuinely orphaned failure with no such escalation is NOT owned.
+ *
+ * Extracted from `readFailedBuildStalls` so `evaluateStalledSpecs` can apply this ownership as a
+ * CROSS-SOURCE drop. A failed build always emits `build_started` but never `build_done`, so the
+ * primary timecard source (step (a), build_started→build_done) always matches the failed build and
+ * claims the dedupe `seen` key BEFORE the failed-build source (a2) runs — so the dedupe, when it only
+ * lived inside readFailedBuildStalls, was bypassed for every failed+escalated build (build 6eb22d37:
+ * failed 15:34:05, init_loop_guard escalated 15:36:59, Mario fired anyway, every tick, forever —
+ * build_done never arrives). Lifting it here lets the caller drop ANY candidate for an owned slug,
+ * no matter which source added it.
+ *
+ * FAIL-OPEN: any read error returns an empty set so a transient Supabase failure KEEPS the candidate
+ * (a redundant Mario diagnosis is strictly safer than silently dropping a real stall).
+ *
+ * Bounds preserved from the original dedupe: the escalation lookback is anchored to the EARLIEST
+ * build failure's own timestamp minus a 60s clock-skew epsilon (an init_loop_guard escalation always
+ * lands just AFTER the failure it covers, so this finds it regardless of the failure's age — a fixed
+ * now-minus-7d window once dropped a weeks-old parked escalation and Mario re-fired), and every
+ * director/timecard read is capped at `.limit(500)`.
+ */
+export async function readInitLoopGuardOwnedSlugs(
+  admin: Admin,
+  workspace_id: string,
+): Promise<Set<string>> {
+  const empty = new Set<string>();
+  // Latest build attempt per slug — a failure is only "owned" when it is the spec's CURRENT state.
+  const { data, error } = await admin
+    .from("agent_jobs")
+    .select("spec_slug, status, updated_at")
+    .eq("workspace_id", workspace_id)
+    .eq("kind", "build")
+    .order("created_at", { ascending: false })
+    .limit(2000);
+  if (error || !data) return empty; // fail-open
+  const latestBySlug = new Map<string, { status: string; updated_at: string }>();
+  for (const j of data as Array<{ spec_slug: string; status: string; updated_at: string }>) {
+    if (!j.spec_slug || latestBySlug.has(j.spec_slug)) continue;
+    latestBySlug.set(j.spec_slug, { status: j.status, updated_at: j.updated_at });
+  }
+  const failedAtBySlug = new Map<string, string>();
+  for (const [slug, j] of latestBySlug) {
+    if (j.status !== "failed" || !j.updated_at) continue;
+    failedAtBySlug.set(slug, j.updated_at);
+  }
+  if (failedAtBySlug.size === 0) return empty;
+
+  const slugs = [...failedAtBySlug.keys()];
+  // Anchor the escalation lookback to the OLDEST failure's own timestamp (minus a 60s skew epsilon),
+  // not a now-relative window. Bounded by `.in('spec_slug', slugs)` + `.limit(500)`.
+  const earliestFailedAtMs = [...failedAtBySlug.values()].reduce(
+    (min, at) => Math.min(min, Date.parse(at)),
     Number.POSITIVE_INFINITY,
   );
   const sinceIso = new Date(earliestFailedAtMs - 60_000).toISOString();
-  const { data: escRows } = await admin
+  const { data: escRows, error: escErr } = await admin
     .from("director_activity")
     .select("spec_slug, created_at")
     .eq("workspace_id", workspace_id)
@@ -298,66 +354,63 @@ export async function readFailedBuildStalls(
     .gte("created_at", sinceIso)
     .order("created_at", { ascending: false })
     .limit(500);
+  if (escErr) return empty; // fail-open on a director_activity read error → keep the candidate
   const latestEscBySlug = new Map<string, string>();
   for (const r of (escRows ?? []) as Array<{ spec_slug: string | null; created_at: string }>) {
     if (!r.spec_slug || latestEscBySlug.has(r.spec_slug)) continue;
     latestEscBySlug.set(r.spec_slug, r.created_at);
   }
-  const dropSet = new Set<string>();
-  for (const a of aged) {
-    const escAt = latestEscBySlug.get(a.spec_slug);
-    if (!escAt) continue; // no escalation → normal orphaned failure, keep
-    if (Date.parse(escAt) <= Date.parse(a.failed_at)) continue; // failure came after the escalation → new failure, escalation is stale, keep
-    dropSet.add(a.spec_slug);
+  const owned = new Set<string>();
+  for (const [slug, failedAt] of failedAtBySlug) {
+    const escAt = latestEscBySlug.get(slug);
+    if (!escAt) continue; // no escalation → normal orphaned failure, not owned
+    if (Date.parse(escAt) <= Date.parse(failedAt)) continue; // failure after the escalation → stale escalation, not owned
+    owned.add(slug);
   }
-  if (dropSet.size > 0) {
-    const dropSlugs = [...dropSet];
-    const [{ data: escortedRows }, { data: doneRows }] = await Promise.all([
-      admin
-        .from("director_activity")
-        .select("spec_slug, created_at")
-        .eq("workspace_id", workspace_id)
-        .eq("action_kind", "escorted_init")
-        .in("spec_slug", dropSlugs)
-        .order("created_at", { ascending: false })
-        .limit(500),
-      admin
-        .from("spec_timecard_events")
-        .select("spec_slug, at")
-        .eq("workspace_id", workspace_id)
-        .eq("event_kind", "build_done")
-        .in("spec_slug", dropSlugs)
-        .order("at", { ascending: false })
-        .limit(500),
-    ]);
-    const latestEscortedBySlug = new Map<string, string>();
-    for (const r of (escortedRows ?? []) as Array<{ spec_slug: string | null; created_at: string }>) {
-      if (!r.spec_slug || latestEscortedBySlug.has(r.spec_slug)) continue;
-      latestEscortedBySlug.set(r.spec_slug, r.created_at);
-    }
-    const latestBuildDoneBySlug = new Map<string, string>();
-    for (const r of (doneRows ?? []) as Array<{ spec_slug: string; at: string }>) {
-      if (!r.spec_slug || latestBuildDoneBySlug.has(r.spec_slug)) continue;
-      latestBuildDoneBySlug.set(r.spec_slug, r.at);
-    }
-    for (const slug of dropSlugs) {
-      const escAt = latestEscBySlug.get(slug)!;
-      const escAtMs = Date.parse(escAt);
-      const escortedAt = latestEscortedBySlug.get(slug);
-      const buildDoneAt = latestBuildDoneBySlug.get(slug);
-      const superseded =
-        (escortedAt && Date.parse(escortedAt) > escAtMs) ||
-        (buildDoneAt && Date.parse(buildDoneAt) > escAtMs);
-      if (superseded) dropSet.delete(slug); // escalation resolved → surface as normal failed-build stall
-    }
-  }
+  if (owned.size === 0) return empty;
 
-  const out: Array<{ workspace_id: string; spec_slug: string; age_ms: number }> = [];
-  for (const a of aged) {
-    if (dropSet.has(a.spec_slug)) continue;
-    out.push({ workspace_id, spec_slug: a.spec_slug, age_ms: a.age_ms });
+  // Re-confirm current state: an escalation SUPERSEDED by a later `escorted_init` (human resolved it)
+  // or a later `build_done` (a new build was driven) is no longer owned → surface as a normal stall.
+  const ownedSlugs = [...owned];
+  const [escortedRes, doneRes] = await Promise.all([
+    admin
+      .from("director_activity")
+      .select("spec_slug, created_at")
+      .eq("workspace_id", workspace_id)
+      .eq("action_kind", "escorted_init")
+      .in("spec_slug", ownedSlugs)
+      .order("created_at", { ascending: false })
+      .limit(500),
+    admin
+      .from("spec_timecard_events")
+      .select("spec_slug, at")
+      .eq("workspace_id", workspace_id)
+      .eq("event_kind", "build_done")
+      .in("spec_slug", ownedSlugs)
+      .order("at", { ascending: false })
+      .limit(500),
+  ]);
+  if (escortedRes.error || doneRes.error) return empty; // fail-open
+  const latestEscortedBySlug = new Map<string, string>();
+  for (const r of (escortedRes.data ?? []) as Array<{ spec_slug: string | null; created_at: string }>) {
+    if (!r.spec_slug || latestEscortedBySlug.has(r.spec_slug)) continue;
+    latestEscortedBySlug.set(r.spec_slug, r.created_at);
   }
-  return out;
+  const latestBuildDoneBySlug = new Map<string, string>();
+  for (const r of (doneRes.data ?? []) as Array<{ spec_slug: string; at: string }>) {
+    if (!r.spec_slug || latestBuildDoneBySlug.has(r.spec_slug)) continue;
+    latestBuildDoneBySlug.set(r.spec_slug, r.at);
+  }
+  for (const slug of ownedSlugs) {
+    const escAtMs = Date.parse(latestEscBySlug.get(slug)!);
+    const escortedAt = latestEscortedBySlug.get(slug);
+    const buildDoneAt = latestBuildDoneBySlug.get(slug);
+    const superseded =
+      (escortedAt && Date.parse(escortedAt) > escAtMs) ||
+      (buildDoneAt && Date.parse(buildDoneAt) > escAtMs);
+    if (superseded) owned.delete(slug); // escalation resolved → no longer owned
+  }
+  return owned;
 }
 
 /** Grace before a loop-guard-escalated spec is treated as a stall — same shape as the failed-build grace. */
@@ -960,6 +1013,18 @@ const JOB_PR_SCOPED_FROM_EVENTS: ReadonlySet<string> = new Set(["build_queued", 
 const TERMINAL_OK_FROM_EVENTS: ReadonlySet<string> = new Set(["orphaned_folded_pr"]);
 
 /**
+ * `from_event` values EXEMPT from the cross-source init_loop_guard ownership drop
+ * (mario-timecard-source-bypasses-init-loop-guard-dedupe). These are the pseudo-slug sources whose
+ * candidate `spec_slug` is a PR identifier (`pr-<number>`), not a real spec — init_loop_guard
+ * ownership is a spec concept, so the drop must not match a PR slug against the owned spec set. Every
+ * other source carries a real spec slug and IS subject to the drop.
+ */
+const CROSS_SOURCE_OWNERSHIP_DROP_EXEMPT_FROM_EVENTS: ReadonlySet<string> = new Set([
+  "orphaned_folded_pr",
+  "pr_resolve_storm",
+]);
+
+/**
  * Pure decision predicate — is this build row the ninth-source's orphaned-folded-PR class?
  * Fanned out of `readOrphanedFoldedPrs` so the exact "surface?" logic is unit-testable without a
  * stubbed Supabase client (mirrors [[shouldSurfacePrResolveStorm]] +
@@ -1390,6 +1455,33 @@ export async function evaluateStalledSpecs(
     }
   }
 
+  // Cross-source init_loop_guard ownership drop
+  // (mario-timecard-source-bypasses-init-loop-guard-dedupe). A failed build always emits
+  // `build_started` but never `build_done`, so the primary timecard source (step (a)) always matches
+  // a failed build under the build_started→build_done threshold and claims the `seen` key BEFORE the
+  // (a2) failed-build source — so the init_loop_guard dedupe, when it lived only inside
+  // readFailedBuildStalls, was bypassed for every failed+escalated build (build 6eb22d37: failed
+  // 15:34:05, init_loop_guard escalated 15:36:59, Mario fired anyway, every tick, forever —
+  // build_done never arrives). Apply the ownership (now in `readInitLoopGuardOwnedSlugs`) as a drop
+  // across ALL candidates here, so a human-owned failed build is removed no matter which source added
+  // it. Computed once per unique workspace_id. EXEMPT the pseudo-slug sources (orphaned_folded_pr,
+  // pr_resolve_storm) whose slug is a PR, not a spec. FAIL-OPEN: the helper swallows read errors into
+  // an empty set, and the try/catch is a belt-and-braces guard — a transient read KEEPS the candidate.
+  const ownedSlugsByWs = new Map<string, Set<string>>();
+  await Promise.all(
+    Array.from(new Set(initial.map((c) => c.workspace_id))).map(async (wsId) => {
+      try {
+        ownedSlugsByWs.set(wsId, await readInitLoopGuardOwnedSlugs(admin, wsId));
+      } catch {
+        ownedSlugsByWs.set(wsId, new Set()); // fail-open
+      }
+    }),
+  );
+  const deduped = initial.filter((c) => {
+    if (CROSS_SOURCE_OWNERSHIP_DROP_EXEMPT_FROM_EVENTS.has(c.from_event)) return true;
+    return !ownedSlugsByWs.get(c.workspace_id)?.has(c.spec_slug);
+  });
+
   // spec-read-eff-mario — Phase 3 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
   // The N+1 fix: the pre-Phase-3 loop called getSpecBlockers(slug) per candidate, and each call fires
   // a full getRoadmap() (~9 whole-board scans). One tick with M candidates and N workspaces used to
@@ -1398,7 +1490,7 @@ export async function evaluateStalledSpecs(
   // per-candidate cache miss (unknown workspace / getRoadmap error) so a snapshot error can never
   // silently degrade the (b) uncleared-blocker filter — behavior-preserving.
   const boardBySlug = new Map<string, Map<string, SpecCard["blockedBy"]>>();
-  const uniqueWorkspaceIds = Array.from(new Set(initial.map((c) => c.workspace_id)));
+  const uniqueWorkspaceIds = Array.from(new Set(deduped.map((c) => c.workspace_id)));
   await Promise.all(
     uniqueWorkspaceIds.map(async (wsId) => {
       try {
@@ -1413,7 +1505,7 @@ export async function evaluateStalledSpecs(
   );
 
   const survivors: StalledCandidate[] = [];
-  for (const c of initial) {
+  for (const c of deduped) {
     // (b) uncleared blockedBy → legit wait, drop.
     // spec-read-eff-mario — read from the per-tick board snapshot when present; a workspace whose
     // snapshot failed (or a candidate whose slug isn't on the boardable set — e.g. a pr-<n> pseudo
