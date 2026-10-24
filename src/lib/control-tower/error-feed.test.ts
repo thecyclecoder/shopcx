@@ -14423,6 +14423,55 @@ test("isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise 
   );
 });
 
+test("isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise ALSO drops the UNQUALIFIED `column \"kind\" does not exist` message when paired with the SELECT-on-director_activity shape", () => {
+  // The production sample this spec targets: Postgres emits the unqualified, quoted
+  // `column "kind" does not exist` (no table name in the message) — the SELECT-shape
+  // guard is what pins it to director_activity.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      'column "kind" does not exist',
+      "select id, kind, hrs_ago, ticket_id from public.director_activity order by created_at desc",
+    ),
+    true,
+  );
+  // The bare (unquoted) unqualified spelling is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      "column kind does not exist",
+      "select kind from director_activity limit 10",
+    ),
+    true,
+  );
+  // With the ERROR: prefix and the PostgREST CTE wrapper form.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      'ERROR: column "kind" does not exist',
+      'WITH pgrst_source AS (SELECT "public"."director_activity"."kind" FROM "public"."director_activity")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise KEEPS the unqualified `column \"kind\" does not exist` when the query targets a DIFFERENT table or is a non-SELECT write", () => {
+  // Without the table name in the message, the SELECT-on-director_activity guard is the
+  // only pin — a SELECT on any other table must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      'column "kind" does not exist',
+      "select id, kind from public.agent_jobs where id = 'x'",
+    ),
+    false,
+  );
+  // A write (INSERT) to director_activity with a bogus `kind` column is a real bug — page.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise(
+      'column "kind" does not exist',
+      "insert into public.director_activity (id, kind) values ('x', 'y')",
+    ),
+    false,
+  );
+});
+
 // ── isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise ──
 // A foreign / stale PostgREST direct-REST client reads
 // `/rest/v1/director_activity?select=id,decision,ticket_id,reasoning` against our
