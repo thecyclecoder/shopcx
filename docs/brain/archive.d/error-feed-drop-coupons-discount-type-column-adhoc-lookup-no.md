@@ -1,0 +1,1 @@
+- **Drop foreign coupons.discount_type column noise at supabase-logs intake** · verified 2026-10-24 · → [[../libraries/error-feed]]
