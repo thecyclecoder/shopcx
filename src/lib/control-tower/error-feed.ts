@@ -1460,6 +1460,62 @@ export function isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNo
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column ticket_directions.created_at does not exist`
+ * for an ad hoc SELECT lookup / PostgREST direct-REST call against
+ * `public.ticket_directions.created_at`. The `ticket_directions` table exists as a first-class
+ * artifact store (see [[../tables/ticket_directions]]), but it has never had a `created_at`
+ * column — the offending read is not ShopCX code. It only reaches Supabase's `postgres_logs`
+ * feed when an external / stale PostgREST client (a foreign app assuming a generic
+ * `created_at` shape, a stale SQL Editor session, a deprecated integration) issues a
+ * `select=...created_at...` ordered by the nonexistent column against
+ * `/rest/v1/ticket_directions`. There is no lever from ShopCX to make that query resolve —
+ * paging Platform on it (Control Tower signature `supabase-logs:da9ab67dd50f93d3`) is repair
+ * work for a query we do not own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise` — same
+ * narrow-gating shape (exact `column <table>.created_at does not exist` message + SELECT-lookup
+ * shape that covers BOTH the bare SELECT and the PostgREST CTE wrapper), scoped to the
+ * `ticket_directions.created_at` direct-REST shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the `message` once trimmed equals `column ticket_directions.created_at does not exist`
+ *      (or the `public.` qualified variant, with any leading `ERROR: ` prefix stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.ticket_directions` — either
+ *      the bare `select ... from (public.)?ticket_directions` shape (any WHERE/LIMIT/ORDER BY
+ *      tail is fine), or PostgREST's `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."ticket_directions" ... )` direct-REST wrapper (double-quoted identifiers).
+ *
+ * Narrowly gated so a column-missing error for ANY OTHER table, a DIFFERENT column on
+ * `ticket_directions`, or a non-SELECT statement against the table still pages — the CTE branch
+ * requires the wrapped op to be a SELECT. Empty / nullish message OR query returns `false`.
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]]: returning null
+ * drops the row (no error_event, no loop_alert, no signature). A capture-time drop, not a
+ * transient flag.
+ */
+export function isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column ticket_directions.created_at does not exist" ||
+    stripped === "column public.ticket_directions.created_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `ticket_directions` — any trailing WHERE/LIMIT/ORDER BY is fine; the
+  // pin is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real
+  // code-bug shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?ticket_directions\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."ticket_directions" ... )` with double-quoted identifiers. The CTE branch requires
+  // the wrapped op to be a SELECT, so a PostgREST write still pages.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."ticket_directions"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing `updated_at` OR `order_id` column for an
  * ad hoc direct-REST read of `public.fraud_cases`. A foreign/stale PostgREST client reads
  * `fraud_cases` expecting an `updated_at` column that lives only on the sibling
