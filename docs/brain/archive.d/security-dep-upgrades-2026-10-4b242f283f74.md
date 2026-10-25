@@ -1,0 +1,1 @@
+- **Security dependency upgrades** · verified 2026-10-25 · → [[../libraries/security-agent]]
