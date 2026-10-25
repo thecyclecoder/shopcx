@@ -115,6 +115,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
@@ -1749,6 +1750,110 @@ test("isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise KEEPS 
   assert.equal(isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise("", "select * from worker_heartbeats"), false);
   assert.equal(
     isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise("column worker_heartbeats.created_at does not exist", ""),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise ──
+// A foreign / stale direct-REST client listed `ticket_directions?select=...&order=created_at`
+// against a column the artifact store has never owned; Control Tower signature
+// `supabase-logs:da9ab67dd50f93d3`. Drop AT CAPTURE only when BOTH the exact
+// `column ticket_directions.created_at does not exist` message AND the SELECT-lookup shape on
+// `ticket_directions` (bare or PostgREST CTE wrapper) are present. A real `created_at`-missing
+// on another table, a `ticket_directions` column rename, a non-SELECT write, or a FATAL/PANIC
+// still pages.
+
+test("isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise drops the PostgREST CTE wrapper + bare SELECT listing the non-existent created_at column", () => {
+  // The captured incident shape: a stale direct-REST client lists ticket_directions ordered by
+  // created_at, PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."ticket_directions" ... )` CTE, and Postgres rejects with the column-missing.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise(
+      "column ticket_directions.created_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."ticket_directions"."id", "public"."ticket_directions"."created_at" FROM "public"."ticket_directions" ORDER BY "public"."ticket_directions"."created_at" DESC LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise(
+      "column public.ticket_directions.created_at does not exist",
+      'with pgrst_source as ( select "public"."ticket_directions"."created_at" from "public"."ticket_directions" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise(
+      "ERROR: column ticket_directions.created_at does not exist",
+      'WITH pgrst_source AS ( SELECT "created_at" FROM "public"."ticket_directions" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper), qualified and unqualified FROM, drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise(
+      "column ticket_directions.created_at does not exist",
+      "select id, created_at from public.ticket_directions order by created_at desc limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise(
+      "column ticket_directions.created_at does not exist",
+      "select * from ticket_directions where created_at is not null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise KEEPS real errors (other table, other column, non-SELECT, FATAL)", () => {
+  // Same created_at-missing message on a DIFFERENT relation is a real product-schema
+  // regression and still pages — the pin names ticket_directions only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise(
+      "column tickets.created_at does not exist",
+      "select id, created_at from public.tickets order by created_at desc",
+    ),
+    false,
+  );
+  // A DIFFERENT column on ticket_directions (a real column rename that broke a live query)
+  // still pages — the pin is created_at only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise(
+      "column ticket_directions.updated_at does not exist",
+      "select id, updated_at from public.ticket_directions",
+    ),
+    false,
+  );
+  // A non-SELECT shape (PostgREST CTE write / bare write) is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise(
+      "column ticket_directions.created_at does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."ticket_directions"("id","created_at") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise(
+      "column ticket_directions.created_at does not exist",
+      "update public.ticket_directions set created_at = now() where id = $1",
+    ),
+    false,
+  );
+  // A FATAL / constraint-class error on the same shape is untouched (different message).
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select id, created_at from public.ticket_directions",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise("", "select * from ticket_directions"), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise("column ticket_directions.created_at does not exist", ""),
     false,
   );
 });

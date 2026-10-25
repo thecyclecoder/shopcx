@@ -38,6 +38,7 @@ import {
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
@@ -1007,6 +1008,15 @@ const LOG_QUERIES: LogQuery[] = [
       // not cover it. Same narrow gating: a different table, a different column, or a non-SELECT
       // statement against the table still pages.
       if (isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read against
+      // `public.ticket_directions` ordered by the nonexistent `created_at` column. The artifact
+      // store exists but has never had a `created_at` column — no ShopCX code reads it. The
+      // column-missing ERROR only reaches this feed when a foreign app / stale PostgREST client
+      // reads `created_at` off the table. There is no lever from ShopCX to resolve it — paging
+      // Platform (Control Tower signature `supabase-logs:da9ab67dd50f93d3`) is repair work for a
+      // query we don't own. Narrowly gated: a different table, a different column, or a
+      // non-SELECT statement still pages.
+      if (isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.dunning_cycles.cycle_key`. The billing-retry ledger exists but has never
       // had a `cycle_key` column — no ShopCX code reads it. The column-missing ERROR only reaches
