@@ -12,6 +12,12 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Security dependency upgrades** · verified 2026-10-25 · → [[../libraries/security-agent]]
+- **Control Tower: escalation-idle assertion — floor the measured wait by the ticket's created_at so a backdated escalated_at can't false-fire** · verified 2026-10-24 · → [[libraries/control-tower]]
+- **Drop foreign coupons.discount_type column noise at supabase-logs intake** · verified 2026-10-24 · → [[../libraries/error-feed]]
+- **Widen director_activity.kind foreign-read classifier to unqualified column message** · verified 2026-10-24 · → [[../libraries/error-feed]]
+- **Primary timecard build_started->build_done source bypasses the failed-build init_loop_guard dedupe** · verified 2026-10-24 · → [[lifecycles/mario-pipeline-plumbing]]
+- **Revoke PUBLIC/anon/authenticated EXECUTE on insert_coupon_on_conflict_ignore SECURITY DEFINER RPC** · verified 2026-10-24 · → [[../tables/coupons]]
 - **Reliability rail must catch stuck Shopify-origin subscription-renewal Amplifier imports** · verified 2026-10-23 · → [[../inngest/amplifier-import-reconcile]]
 - **Scope out foreign director_activity.decision direct-REST column-missing noise** · verified 2026-10-23 · → [[../libraries/error-feed]]
 - **Drop foreign ad-hoc fraud_cases.order_id lookup noise at capture** · verified 2026-10-23 · → [[../libraries/control-tower]] · [[../tables/fraud_cases]]
