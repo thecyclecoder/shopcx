@@ -22,6 +22,7 @@ import { randomUUID } from "node:crypto";
 import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAppstleConfig } from "@/lib/subscription-items";
+import { isAppstleRetiredError } from "@/lib/appstle-retired";
 import { isEnginePromotion, type BillingSource } from "@/lib/internal-subscription";
 import { subscriptionCancelAtVendorForMigration } from "@/lib/commerce/subscription";
 import { inferAppstleLineBase, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
@@ -586,8 +587,13 @@ export async function migrateContractToInternalComp(
 
   const compEngine = String(sub.billing_source || "appstle");
 
-  const cfg = await getAppstleConfig(workspaceId);
-  if (compEngine === "appstle" && !cfg) return { ok: false, error: "Appstle not configured" };
+  // appstle_retired: getAppstleConfig throws once Appstle is retired. Treat that as "no Appstle"
+  // so ShopCX rows still migrate and only the Appstle rows report the refusal (never a silent skip).
+  const cfg = await getAppstleConfig(workspaceId).catch((e: unknown) => {
+    if (isAppstleRetiredError(e)) return null;
+    throw e;
+  });
+  if (compEngine === "appstle" && !cfg) return { ok: false, error: "Appstle not configured (or appstle_retired) — an Appstle sub is rebuilt on ShopCX from the mirror instead" };
 
   const isCancelled = sub.status === "cancelled";
   try {
@@ -754,7 +760,12 @@ export async function migrateCustomerAppstleSubsToInternal(
   // CURRENT default. Subs left unpinned still bill via the default-card fallback.
   const defaultPaymentMethodId = billable.paymentMethodId;
 
-  const cfg = await getAppstleConfig(workspaceId);
+  // appstle_retired: getAppstleConfig throws once Appstle is retired. Treat that as "no Appstle"
+  // so ShopCX rows still migrate and only the Appstle rows report the refusal (never a silent skip).
+  const cfg = await getAppstleConfig(workspaceId).catch((e: unknown) => {
+    if (isAppstleRetiredError(e)) return null;
+    throw e;
+  });
   for (const sub of subs) {
     const contractId = String(sub.shopify_contract_id);
     const isCancelled = sub.status === "cancelled";
@@ -770,7 +781,7 @@ export async function migrateCustomerAppstleSubsToInternal(
       result.skipped.push({ contractId, reason: `not_a_promotion_from_${engine}` });
       continue;
     }
-    if (engine === "appstle" && !cfg) { result.failed.push({ contractId, error: "Appstle not configured" }); continue; }
+    if (engine === "appstle" && !cfg) { result.failed.push({ contractId, error: "Appstle not configured (or appstle_retired) — an Appstle sub is rebuilt on ShopCX from the mirror instead" }); continue; }
     try {
       // Read the LIVE contract from WHICHEVER engine holds it — source of truth for current
       // (grandfathered) prices, cadence, and next billing date.

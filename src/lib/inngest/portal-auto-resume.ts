@@ -21,11 +21,17 @@ import { subscriptionAction } from "@/lib/commerce/subscription";
  * longer holds, fail, and stay PAUSED FOREVER — 438 paused subs carry a resume date, 265 of them
  * inside 30 days. The SDK resolves billing_source and also applies the local status truth.
  */
-async function appstleResume(workspaceId: string, contractId: string) {
+async function appstleResume(workspaceId: string, contractId: string): Promise<string> {
   const result = await subscriptionAction(workspaceId, contractId, "resume");
   if (!result.success) {
     throw new Error(`Appstle API error: ${result.error ?? "unknown"}`);
   }
+  // ⭐ appstle_retired: the SDK may have just REBUILT an Appstle sub on ShopCX from our mirror, which
+  // gives the row a NEW contract id. Every write after the resume must target the live id (the old
+  // one still resolves through migrated_from_contract_id, but a Shopify call made with it would hit
+  // the dead Appstle contract id). Unchanged id while the switch is off.
+  const { resolveLiveContractId } = await import("@/lib/internal-subscription");
+  return resolveLiveContractId(workspaceId, contractId);
 }
 
 
@@ -123,10 +129,10 @@ export const portalAutoResumeCron = inngest.createFunction(
           }
 
           // Resume in Appstle
-          await appstleResume(sub.workspace_id, sub.shopify_contract_id);
+          const liveId = await appstleResume(sub.workspace_id, sub.shopify_contract_id);
 
           // ⭐ A resumed sub needs a date it can actually bill on — see retimeAfterResume.
-          const nextDate = await retimeAfterResume(sub.workspace_id, sub.shopify_contract_id, sub);
+          const nextDate = await retimeAfterResume(sub.workspace_id, liveId, sub);
 
           // Update our DB
           await admin.from("subscriptions")
@@ -206,14 +212,14 @@ export const portalAutoResume = inngest.createFunction(
     }
 
     // Resume in Appstle
-    await step.run("appstle-resume", async () => {
-      await appstleResume(workspaceId, contractId);
+    const liveContractId: string = await step.run("appstle-resume", async () => {
+      return appstleResume(workspaceId, contractId);
     });
 
     await step.run("update-db", async () => {
       const admin = createAdminClient();
       // Same retime as the cron path — a resumed sub must carry a billable date.
-      const nextDate = await retimeAfterResume(workspaceId, contractId, sub);
+      const nextDate = await retimeAfterResume(workspaceId, liveContractId, sub);
       await admin.from("subscriptions")
         .update({
           status: "active",
@@ -222,7 +228,7 @@ export const portalAutoResume = inngest.createFunction(
           updated_at: new Date().toISOString(),
         })
         .eq("workspace_id", workspaceId)
-        .eq("shopify_contract_id", contractId);
+        .eq("shopify_contract_id", liveContractId);
     });
 
     await step.run("log-event", async () => {
@@ -230,7 +236,7 @@ export const portalAutoResume = inngest.createFunction(
       const { data: s } = await admin.from("subscriptions")
         .select("customer_id")
         .eq("workspace_id", workspaceId)
-        .eq("shopify_contract_id", contractId)
+        .eq("shopify_contract_id", liveContractId)
         .single();
 
       if (s?.customer_id) {

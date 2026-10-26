@@ -108,7 +108,7 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   // for migrated subs) — switch to it only here.
   const sub = await resolveSub(createAdminClient(), auth.workspaceId, payload?.contractId, auth.loggedInCustomerId);
   if (!sub?.shopify_contract_id) return jsonErr({ error: "missing_contractId" }, 400);
-  const contractId = sub.shopify_contract_id;
+  let contractId = sub.shopify_contract_id;
 
   const oldVariants = asRefArray(payload?.oldVariants);
   const oldOneTimeVariants = asRefArray(payload?.oldOneTimeVariants);
@@ -154,7 +154,26 @@ export const replaceVariants: RouteHandler = async ({ auth, route, req }) => {
   // item mutations in `subscription-items.ts`, which dispatch per contract. Only the Appstle arm
   // needs the vendor's replace-variants-v3 endpoint and its line-id quirks.
   const { resolveBillingSource } = await import("@/lib/internal-subscription");
-  const engine = await resolveBillingSource(auth.workspaceId, String(contractId));
+  let engine = await resolveBillingSource(auth.workspaceId, String(contractId));
+  // ⭐ appstle_retired: a never-migrated Appstle sub is rebuilt on ShopCX from our mirror, then
+  // takes the engine-aware item branch below — never replace-variants-v3. No-op while off.
+  if (engine === "appstle" && (await (await import("@/lib/appstle-retired")).isAppstleRetired())) {
+    // The portal's oldLineId is an APPSTLE line id; the rebuilt contract has new line ids. Resolve
+    // it to a variant on the PRE-flip row so the swap still knows which line it targets.
+    if (oldLineId && !oldVariants.length) {
+      const { data: preFlip } = await createAdminClient().from("subscriptions")
+        .select("items").eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId)).single();
+      const items = (preFlip?.items as { variant_id?: string; line_id?: string }[]) || [];
+      const raw = safeStartsWith(oldLineId, "gid://") ? oldLineId.split("/").pop() : oldLineId;
+      const li = items.find((i) => i.line_id === raw || i.line_id === oldLineId || String(i.variant_id) === raw || String(i.variant_id) === oldLineId);
+      if (li?.variant_id) oldVariants.push(String(li.variant_id));
+    }
+    const { ensureShopcxEngine, ensureFailureText } = await import("@/lib/commerce/shopcx-revive");
+    const ens = await ensureShopcxEngine(auth.workspaceId, String(contractId), "change");
+    if (!ens.ok) return jsonErr({ error: ens.reason, message: ensureFailureText(ens) }, 409);
+    contractId = ens.contractId;
+    if (ens.engine) engine = ens.engine;
+  }
   const isInternal = engine !== "appstle";
 
   const body: Record<string, unknown> = { shop, contractId, eventSource: "CUSTOMER_PORTAL", stopSwapEmails };

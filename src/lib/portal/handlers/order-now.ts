@@ -85,7 +85,38 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
   // contains its billing date. Routing this through the SDK is impossible: by the time control
   // reaches subscriptionAttemptBilling the contract id has already been traded for an attempt id.
   const { resolveBillingSource } = await import("@/lib/internal-subscription");
-  if ((await resolveBillingSource(auth.workspaceId, String(contractId))) === "shopcx") {
+  const orderNowEngine = await resolveBillingSource(auth.workspaceId, String(contractId));
+
+  // ⭐ appstle_retired: an Appstle sub never reaches Appstle's attempt-billing. Through the SDK,
+  // whose chokepoint rebuilds it on ShopCX from our mirror and fires the ShopCX renewal (with the
+  // same repeat-press guard). A no-op branch while the switch is off.
+  if (orderNowEngine === "appstle") {
+    const { isAppstleRetired } = await import("@/lib/appstle-retired");
+    if (await isAppstleRetired()) {
+      const { subscriptionOrderNow } = await import("@/lib/commerce/subscription");
+      const r = await subscriptionOrderNow(auth.workspaceId, String(contractId));
+      if (!r.success) {
+        const reason = String(r.error || "").split(":")[0];
+        if (reason === "needs_payment_method" || reason === "needs_address") {
+          return jsonErr({ error: reason, message: r.error }, 409);
+        }
+        return jsonErr({ error: "billing_failed", message: r.error ?? "Could not start billing." }, 502);
+      }
+      const customer = await findCustomer(auth.workspaceId, auth.loggedInCustomerId);
+      if (customer) {
+        await logPortalAction({
+          workspaceId: auth.workspaceId, customerId: customer.id,
+          eventType: "portal.order_now",
+          summary: "Customer triggered immediate billing via portal (Appstle sub rebuilt on ShopCX)",
+          properties: { subscription_id: resolved.id },
+          createNote: true,
+        });
+      }
+      return jsonOk({ ok: true, pending: true, message: "Your order is being processed." });
+    }
+  }
+
+  if (orderNowEngine === "shopcx") {
     // Same repeat-press refusal as the internal branch. The BILLED pre-check below only
     // covers the CURRENT cycle; once the first press advances next_billing_date, a second
     // press targets the next cycle and would charge again.

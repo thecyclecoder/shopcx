@@ -359,6 +359,18 @@ lost on migration, and a contract-attached code cannot expire by date on either 
 **198 of 354 code instances are PERPETUAL** (no cycle limit) — already permanent on Appstle, and
 faithfully permanent here.
 
+## Shared create helpers (2026-10-26)
+
+`executeMigration`'s create, carried-code application and lost-response orphan lookup are extracted so
+the mirror revive ([[commerce__shopcx-revive]]) builds contracts with the SAME rules instead of a copy:
+
+- `buildMigratedContractInput({ customerGid, status, paymentMethodId, interval, intervalCount, nextBillingDate, deliveryPriceCents, address, shippingOption, plan })` — pure; status carried, billing anchors only, **no delivery anchors**, **delivery price kept verbatim**, MSRP lines + `lineDiscounts`.
+- `applyCarriedCodes(ws, contractId, codes)` — one draft, never twice on a contract.
+- `findCustomerContractsCreatedSince(ws, customerGid, sinceIso)` — non-cancelled contracts created since an attempt (1 min slack).
+
+With `appstle_retired` on ([[appstle-retired]]), `executeMigration` returns `stage:'appstle-retired'`
+and `sweepIncompleteMigrations` returns `[]` — both are Appstle-only.
+
 ## Gotchas
 
 - **Not idempotent without the marker.** The first real run created TWO live contracts for one

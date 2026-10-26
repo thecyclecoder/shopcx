@@ -25,12 +25,14 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
 import { loggedAppstleFetch } from "@/lib/appstle-call-log";
 import { resolveBillingSource } from "@/lib/internal-subscription";
+import { assertAppstleLive, isAppstleRetiredError } from "@/lib/appstle-retired";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
 // Inlined (not imported from subscription-items) to avoid an import cycle —
 // subscription-items + appstle both import THIS module for the gateway.
 async function getAppstleKey(workspaceId: string): Promise<string | null> {
+  await assertAppstleLive("appstle-pricing");
   const admin = createAdminClient();
   const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", workspaceId).maybeSingle();
   return ws?.appstle_api_key_encrypted ? decrypt(ws.appstle_api_key_encrypted) : null;
@@ -184,6 +186,9 @@ export async function healOnTouch(workspaceId: string, contractId: string): Prom
   try {
     await healAppstleContract(workspaceId, contractId);
   } catch (e) {
+    // A heal hiccup is non-fatal — but Appstle being RETIRED is not a hiccup: rethrow so the
+    // caller that was about to mutate an Appstle contract fails loudly instead of proceeding.
+    if (isAppstleRetiredError(e)) throw e;
     console.error(`[appstle-heal] healOnTouch failed (non-fatal) for ${contractId}:`, e instanceof Error ? e.message : e);
   }
 }
