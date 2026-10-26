@@ -75,6 +75,7 @@ import {
   isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
+  isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise,
   isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
@@ -807,6 +808,19 @@ const LOG_QUERIES: LogQuery[] = [
       // another table (workspace_members / tickets), or via a non-SELECT statement (real
       // code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... channel ... from
+      // public.ticket_messages` lookup by an external tool / stale integration reading our
+      // messages table as if the ticket's channel lived there. Our `ticket_messages` table
+      // has never carried a `channel` column — that column lives on the `tickets` table —
+      // so the column-missing ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-ticket-messages-channel-adhoc-lookup-noise]], Control
+      // Tower signature `supabase-logs:ca7aebe985f2401f`). Same narrow-gating shape as the
+      // `ticket_messages.role` / `sender_type` siblings on the same table: BOTH the exact
+      // column-missing message AND the SELECT-lookup shape (bare or PostgREST-CTE) — a
+      // column-missing error on a live `ticket_messages` column (body / author_type), on
+      // `channel` for the `tickets` table (which DOES have one), or via a non-SELECT
+      // statement (real code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... intents ... from
       // public.ticket_analyses` lookup by an external tool / stale integration. The
       // `ticket_analyses` table exists but no ShopCX code path / migration / view /

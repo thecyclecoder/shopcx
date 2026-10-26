@@ -141,6 +141,7 @@ import {
   isForeignSupabasePostgresMissingErrorEventsUnqualifiedColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
+  isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise,
   isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise,
   isForeignSupabasePostgresAggregateIntrospectionNoise,
   isInngestStepWrappedNonErrorLog,
@@ -22245,6 +22246,103 @@ test("isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise KEEPS the mes
     isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise(
       "column ticket_messages.role does not exist",
       "delete from public.ticket_messages where role = 'system'",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise ──
+// Ad hoc `select ... channel ... from public.ticket_messages` lookup by an external tool /
+// stale integration reading our messages table as if the ticket's channel lived there — or
+// the PostgREST CTE wrapper the same client emits. Our `ticket_messages` table has never
+// carried a `channel` column — that column lives on the `tickets` table — so the
+// column-missing ERROR is repair work for a query we don't own (Control Tower signature
+// `supabase-logs:ca7aebe985f2401f`). Narrowly gated: a column-missing on a live
+// `ticket_messages` column, `channel` on the `tickets` table (which DOES have one), or a
+// non-SELECT statement, still surfaces / pages on first sighting.
+
+test("isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise drops the exact sample from signature supabase-logs:ca7aebe985f2401f", () => {
+  // The captured sample: bare SELECT-lookup shape on public.ticket_messages naming a
+  // column that has never existed on our messages table (channel lives on `tickets`).
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise(
+      "column ticket_messages.channel does not exist",
+      "select id, channel, body from public.ticket_messages",
+    ),
+    true,
+  );
+  // PostgREST CTE wrapper form — same foreign-owned read via the REST endpoint.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise(
+      "column ticket_messages.channel does not exist",
+      'with pgrst_source as ( select "id", "channel" from "public"."ticket_messages" limit 100 ) select * from pgrst_source',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix + `public.` qualifier on the column name are tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise(
+      "ERROR: column public.ticket_messages.channel does not exist",
+      "select channel from public.ticket_messages",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise KEEPS a column-missing error for a DIFFERENT column on ticket_messages (a real product-schema regression still pages)", () => {
+  // A missing `body` / `author_type` on ticket_messages IS a real live-column regression we
+  // want to page on — the pin is exact to `channel`.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise(
+      "column ticket_messages.body does not exist",
+      "select body from public.ticket_messages",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise(
+      "column ticket_messages.author_type does not exist",
+      "select author_type from public.ticket_messages",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise KEEPS a channel miss on a DIFFERENT table (the tickets table DOES have one — a real code bug still pages)", () => {
+  // `channel` missing on any OTHER table is a real code bug we want to see, not the foreign
+  // ticket_messages lookup we drop. `tickets.channel` is a real live column; a column-missing
+  // error on it is a genuine schema regression.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise(
+      "column tickets.channel does not exist",
+      "select id, channel from public.tickets",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise KEEPS the message on a non-SELECT statement shape (INSERT/UPDATE/DELETE — real code-bug shape)", () => {
+  // A ShopCX code-path bug that writes to `ticket_messages` and names a nonexistent
+  // `channel` column is the shape we DO want to page on — the pin is the SELECT-lookup
+  // shape only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise(
+      "column ticket_messages.channel does not exist",
+      "insert into public.ticket_messages (id, channel, body) values (gen_random_uuid(), 'sms', 'hi')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise(
+      "column ticket_messages.channel does not exist",
+      "update public.ticket_messages set channel = 'email' where id = '00000000-0000-0000-0000-000000000000'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise(
+      "column ticket_messages.channel does not exist",
+      "delete from public.ticket_messages where channel = 'chat'",
     ),
     false,
   );
