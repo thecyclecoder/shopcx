@@ -12,6 +12,9 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Drop foreign ad-hoc `ticket_messages.channel` missing-column noise from the supabase-logs feed** · verified 2026-10-26 · → [[../libraries/error-feed]]
+- **Stop the AI-orchestrator tile from false-firing on replies to escalated / agent-owned tickets** · verified 2026-10-26 · → [[libraries/control-tower]]
+- **Stop paging on the foreign direct-REST read of ticket_directions ordered by the nonexistent created_at column** · verified 2026-10-25 · → [[../libraries/error-feed]]
 - **Security dependency upgrades** · verified 2026-10-25 · → [[../libraries/security-agent]]
 - **Control Tower: escalation-idle assertion — floor the measured wait by the ticket's created_at so a backdated escalated_at can't false-fire** · verified 2026-10-24 · → [[libraries/control-tower]]
 - **Drop foreign coupons.discount_type column noise at supabase-logs intake** · verified 2026-10-24 · → [[../libraries/error-feed]]
