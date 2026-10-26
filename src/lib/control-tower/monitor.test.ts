@@ -1537,6 +1537,73 @@ test("evalInlineAgent still flips RED on a settled real inbound with no ai:orche
   assert.equal(result.violation?.reason, "idle_while_work");
 });
 
+// ── tickets-awaiting-decision agent-owned exclusion (bypass class 7) ──────────
+// Spec: ticket-decision-workprobe-exclude-agent-owned-tickets.
+// Originating false page (signal `loop:ai:orchestrator`, verdict monitor-false-positive):
+// a customer replied to a ticket already escalated to the founder. unified-ticket-handler.ts
+// derives `agentAssigned = !!(st.assignedTo || st.escalatedTo || st.intervened)` (:908) and the
+// handler defers to the human owner WITHOUT invoking callSonnetOrchestratorV2 — so no
+// ai:orchestrator beat is emitted. The tickets-awaiting-decision probe did not know about that
+// ownership class, counted the reply as unserved orchestrator demand, and flipped the tile red
+// on 0 beats. The fix adds escalated_to / assigned_to / agent_intervened to the subtracted
+// excludedRes `.or(...)` clause so the reply no longer manufactures a false red tile, while an
+// ownerless unserved ticket still fires a real outage.
+
+test("Agent-owned reply — tickets-awaiting-decision probe subtracts escalated / assigned / agent_intervened tickets (bypass class 7)", () => {
+  // Source-fingerprint pin on the excludedRes `.or(...)` clause: these three columns are exactly
+  // the `agentAssigned` predicate in unified-ticket-handler.ts:908. A customer reply on a ticket
+  // a human already owns is a legitimate no-op for the AI orchestrator, not demand — so the probe
+  // must subtract it or the tile false-fires idle_while_work the moment the orchestrator defers.
+  const block = ticketsAwaitingDecisionCaseBlock();
+  assert.match(
+    block,
+    /escalated_to\.not\.is\.null/,
+    "`tickets-awaiting-decision` case must include `escalated_to.not.is.null` in its exclusion OR clause — a reply on a ticket escalated to the founder makes unified-ticket-handler.ts defer (agentAssigned at :908) and emit no orchestrator beat, so counting it as orchestrator demand false-fires idle_while_work on the ai:orchestrator tile. See ticket-decision-workprobe-exclude-agent-owned-tickets.",
+  );
+  assert.match(
+    block,
+    /assigned_to\.not\.is\.null/,
+    "`tickets-awaiting-decision` case must include `assigned_to.not.is.null` in its exclusion OR clause — an assigned (human-owned) ticket is part of the agentAssigned predicate the handler defers on, so a reply on it is not unserved orchestrator demand.",
+  );
+  assert.match(
+    block,
+    /agent_intervened\.eq\.true/,
+    "`tickets-awaiting-decision` case must include `agent_intervened.eq.true` in its exclusion OR clause — an agent-intervened ticket is the third arm of the agentAssigned predicate (unified-ticket-handler.ts:908); dropping it re-opens the false-positive for intervened tickets.",
+  );
+});
+
+test("Agent-owned reply — evalInlineAgent stays GREEN once the escalated reply is excluded (work drops to 0)", () => {
+  // Behavioral pin on the downstream effect: when the probe subtracts the escalated-ticket reply
+  // (bypass class 7), the ai:orchestrator work count is 0. With no outstanding orchestrator demand
+  // the tile must stay green even though no beat ran — the handler correctly deferred to the human
+  // owner, which is by design, not an outage.
+  const orchLoop = MONITORED_LOOPS.find((l) => l.id === INLINE_AGENT_IDS.orchestrator);
+  assert.ok(orchLoop, "ai:orchestrator loop must be registered");
+
+  const pastBeat: LoopHistoryRow = { ran_at: "2026-06-24T00:00:00Z", ok: true, produced: null, detail: null, duration_ms: null };
+  const state: InlineAgentState = { work: 0, okCount: 0, errCount: 0, latest: pastBeat, history: [pastBeat] };
+  const result = evalInlineAgent(orchLoop!, state);
+  assert.equal(result.color, "green");
+  assert.ok(!result.violation, "a deferred (work=0) orchestrator window must carry no violation");
+});
+
+test("Agent-owned reply — evalInlineAgent still flips RED on an open, unowned, no-playbook ticket with no beat (no false negative)", () => {
+  // No-false-negative guard for the agent-owned exclusion. An inbound on a ticket that is NOT
+  // escalated / assigned / intervened (and matches no other bypass class) survives the subtraction
+  // and remains genuine orchestrator demand (work=1). If the orchestrator went silent on it
+  // (0 successful beats, history non-empty) the tile must still flip red and fire idle_while_work
+  // on loop:ai:orchestrator — the exact class the monitor exists to alert on. The agent-owned
+  // exclusion must never mask it.
+  const orchLoop = MONITORED_LOOPS.find((l) => l.id === INLINE_AGENT_IDS.orchestrator);
+  assert.ok(orchLoop, "ai:orchestrator loop must be registered");
+
+  const pastBeat: LoopHistoryRow = { ran_at: "2026-06-24T00:00:00Z", ok: true, produced: null, detail: null, duration_ms: null };
+  const state: InlineAgentState = { work: 1, okCount: 0, errCount: 0, latest: pastBeat, history: [pastBeat] };
+  const result = evalInlineAgent(orchLoop!, state);
+  assert.equal(result.color, "red");
+  assert.equal(result.violation?.reason, "idle_while_work");
+});
+
 // ── countRenewalIntegrityOverdueSubs — dunning-aware renewal-integrity helper ──
 // (build-control-tower-renewal-integrity-exclude-active-dunning P1) — an overdue internal sub
 // already owned by an active dunning cycle is HEALTHY retention state, not a renewal-cron miss.

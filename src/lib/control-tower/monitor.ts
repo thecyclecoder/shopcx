@@ -1513,7 +1513,19 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
                 .lte("created_at", decisionSettleCutoffIso)
                 .lte("tickets.created_at", decisionSettleCutoffIso)
                 .or(
-                  "status.eq.closed,tags.cs.{csat:reopened},tags.cs.{outreach},tags.cs.{cls:outreach},active_playbook_id.not.is.null",
+                  // Bypass class (7) — agent-owned tickets (signature loop:ai:orchestrator).
+                  // escalated_to / assigned_to / agent_intervened are exactly the
+                  // `agentAssigned` predicate in src/lib/inngest/unified-ticket-handler.ts:908
+                  // (`!!(st.assignedTo || st.escalatedTo || st.intervened)`), where a human
+                  // owner makes the handler defer and emit NO orchestrator beat. A customer
+                  // reply on such a ticket is a legitimate no-op for the AI orchestrator, not
+                  // unserved demand, so it must be subtracted or the tile false-fires
+                  // idle_while_work (the originating page). Added to the subtracted excludedRes
+                  // query only — same overlap-safe pattern as the other bypass classes: an
+                  // agent-owned ticket that also matches (1)-(6) double-subtracts, which only
+                  // lowers work further and can never inflate it, while an ownerless, unserved
+                  // ticket still sits in NONE of the sets and still fires a real outage.
+                  "status.eq.closed,tags.cs.{csat:reopened},tags.cs.{outreach},tags.cs.{cls:outreach},active_playbook_id.not.is.null,escalated_to.not.is.null,assigned_to.not.is.null,agent_intervened.eq.true",
                   { referencedTable: "tickets" },
                 ),
               admin
