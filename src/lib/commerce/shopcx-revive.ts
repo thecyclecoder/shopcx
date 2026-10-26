@@ -39,7 +39,6 @@ import {
   planMigration,
   buildMigratedContractInput,
   REQUIRED_ADDRESS_FIELDS,
-  type CarriedCode,
   type MigrationPlan,
   type PricingContext,
 } from "@/lib/commerce/shopify-subscription-migrate";
@@ -80,8 +79,8 @@ export type ReviveResult =
       status: "active" | "paused";
       nextBillingDate: string | null;
       plan?: MigrationPlan;
-      codesCarried?: string[];
-      codesNotCarried?: string[];
+      /** Customer codes on the Appstle row that were NOT carried (revives drop every code). */
+      codesDropped?: string[];
     }
   | { ok: false; reason: ReviveFailureReason; error: string; missing?: string[] };
 
@@ -253,34 +252,25 @@ interface MirrorDiscount {
 }
 
 /**
- * The customer's own codes from the mirror's `applied_discounts`, carried onto the new contract.
+ * Customer codes on the mirror's `applied_discounts` that a revive DROPS (Dylan 2026-10-26:
+ * "Drop all codes"). The mirror has no usage count, so a carried code would recur forever,
+ * including one-time LOYALTY redemptions. A revived sub prices from our rules (S&S + Buy 2/3,
+ * recomputed by the planner) and keeps its delivery price; CS can re-add a code by hand.
  *
- * Same exclusions as `carryableCodes` (the Appstle-raw version): structural discounts are
- * recomputed, never copied, and a "Buy N Discount" percentage code is a quantity break in a code's
- * clothes — carrying it would double the break. ALSO not carried: a SHIPPING_LINE code (a
- * manual contract discount cannot target the shipping line, and applied to products it becomes a
- * fake product discount — the ticket eca3f43b class). Everything not carried is returned BY NAME
- * so the caller can surface it; nothing is dropped silently.
- *
- * ⚠️ The mirror has no usage count, so a carried code is recurring. Recorded on the brain page.
+ * Structural discounts and "Buy N Discount" percentage codes are not listed: the planner
+ * recomputes those. Every other code is returned BY NAME so the caller can surface it.
  */
-export function carryableMirrorCodes(appliedDiscounts: unknown): { carried: CarriedCode[]; notCarried: string[] } {
+export function droppedMirrorCodes(appliedDiscounts: unknown): string[] {
   const arr = Array.isArray(appliedDiscounts) ? (appliedDiscounts as MirrorDiscount[]) : [];
-  const carried: CarriedCode[] = [];
-  const notCarried: string[] = [];
+  const dropped: string[] = [];
   for (const d of arr) {
     const title = String(d.title ?? "code");
     if (String(d.type ?? "") !== "CODE_DISCOUNT") continue; // structural — recomputed by the planner
-    const value = Number(d.value ?? 0);
     const pct = String(d.valueType ?? "").toUpperCase() === "PERCENTAGE";
     if (pct && /^buy\s*\d/i.test(title)) continue; // a quantity break — recomputed
-    if (String(d.targetType ?? "").toUpperCase() === "SHIPPING_LINE") { notCarried.push(`${title} (shipping-line code)`); continue; }
-    if (!Number.isFinite(value) || value <= 0) { notCarried.push(`${title} (no value)`); continue; }
-    carried.push(pct
-      ? { title, amount: 0, percentage: value, appliesOnEachItem: false, recurringCycleLimit: null }
-      : { title, amount: value, appliesOnEachItem: false, recurringCycleLimit: null });
+    dropped.push(title);
   }
-  return { carried, notCarried };
+  return dropped;
 }
 
 function humanizeShippingCode(code: string): string {
@@ -307,7 +297,7 @@ export function planShopcxFromMirror(input: {
       nextBillingDate: string;
       plan: MigrationPlan;
       createInput: ReturnType<typeof buildMigratedContractInput>;
-      codes: { carried: CarriedCode[]; notCarried: string[] };
+      codesDropped: string[];
     }
   | { ok: false; reason: ReviveFailureReason; error: string; missing?: string[] } {
   const { row } = input;
@@ -360,7 +350,7 @@ export function planShopcxFromMirror(input: {
     shippingOption: code ? { code, title: humanizeShippingCode(code) } : null,
     plan,
   });
-  return { ok: true, status: target.status, nextBillingDate, plan, createInput, codes: carryableMirrorCodes(row.applied_discounts) };
+  return { ok: true, status: target.status, nextBillingDate, plan, createInput, codesDropped: droppedMirrorCodes(row.applied_discounts) };
 }
 
 // ── I/O seams ───────────────────────────────────────────────────────────────────────────────
@@ -377,7 +367,6 @@ export interface ReviveDeps {
   findOrphans(workspaceId: string, customerGid: string, sinceIso: string): Promise<{ id: string }[]>;
   createContract(workspaceId: string, input: ReturnType<typeof buildMigratedContractInput>): Promise<{ success: boolean; error?: string; contractId?: string }>;
   syncSchedule(workspaceId: string, contractId: string, firstDate: string): Promise<void>;
-  applyCodes(workspaceId: string, contractId: string, codes: CarriedCode[]): Promise<{ success: boolean; error?: string }>;
   /** Flip the row (only while still appstle). Returns how many rows matched. */
   flip(subscriptionId: string, update: Record<string, unknown>): Promise<{ matched: number; error?: string }>;
   mirrorPricing(workspaceId: string, contractId: string): Promise<void>;
@@ -449,10 +438,6 @@ export function defaultReviveDeps(): ReviveDeps {
       } catch (e) {
         console.error(`[shopcx-revive] ${contractId}: schedule sync threw (non-fatal):`, e instanceof Error ? e.message : e);
       }
-    },
-    async applyCodes(workspaceId, contractId, codes) {
-      const { applyCarriedCodes } = await import("@/lib/commerce/shopify-subscription-migrate");
-      return applyCarriedCodes(workspaceId, contractId, codes);
     },
     async flip(subscriptionId, update) {
       const { data, error } = await (await admin())
@@ -604,22 +589,12 @@ export async function buildShopcxFromMirror(
     return { ok: false, reason: "record_failed", error: `created ${newId} but could not record it: ${rec.error} — DO NOT retry blind` };
   }
   await deps.syncSchedule(workspaceId, newId, planned.nextBillingDate);
-  const codes = await deps.applyCodes(workspaceId, newId, planned.codes.carried);
-  if (!codes.success) {
-    // Leave the row on appstle: the contract is recorded, so a retry adopts it and only re-flips.
-    // Never re-apply codes on adoption (they would double).
-    console.error(`[shopcx-revive] ${newId}: carried codes failed (${codes.error}) — flipping without them`);
-  }
   const flipped = await flipRow(deps, row, newId, planned.status, planned.nextBillingDate, false);
   if (!flipped.ok) return flipped;
   return {
     ...flipped,
     plan: planned.plan,
-    codesCarried: codes.success ? planned.codes.carried.map((c) => c.title) : [],
-    codesNotCarried: [
-      ...planned.codes.notCarried,
-      ...(codes.success ? [] : planned.codes.carried.map((c) => `${c.title} (apply failed)`)),
-    ],
+    codesDropped: planned.codesDropped,
   };
 }
 

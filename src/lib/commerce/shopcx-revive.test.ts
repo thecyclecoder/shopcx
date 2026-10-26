@@ -26,7 +26,7 @@ import {
   resolveReviveAddress,
   resolveReviveNextBillingDate,
   pickUsableCard,
-  carryableMirrorCodes,
+  droppedMirrorCodes,
   targetStatusForIntent,
   type MirrorRow,
   type ReviveDeps,
@@ -110,7 +110,7 @@ const EXPIRED: PaymentMethod = { ...CARD, id: "gid://shopify/CustomerPaymentMeth
 
 /** An in-memory `subscriptions` row + Shopify, with counters. */
 function fakeDeps(row: MirrorRow, over: Partial<ReviveDeps> & { methods?: PaymentMethod[]; customer?: { shopify_customer_id: string | null; default_address: unknown } | null } = {}) {
-  const state = { row: { ...row } as MirrorRow, creates: 0, flips: [] as Record<string, unknown>[], codeCalls: 0, claims: 0, lastInput: null as unknown };
+  const state = { row: { ...row } as MirrorRow, creates: 0, flips: [] as Record<string, unknown>[], claims: 0, lastInput: null as unknown };
   const deps: ReviveDeps = {
     now: () => NOW,
     loadRow: async () => ({ ...state.row }),
@@ -132,7 +132,6 @@ function fakeDeps(row: MirrorRow, over: Partial<ReviveDeps> & { methods?: Paymen
       return { success: true, contractId: `gid://shopify/SubscriptionContract/9900${state.creates}` };
     },
     syncSchedule: async () => {},
-    applyCodes: async () => { state.codeCalls++; return { success: true }; },
     flip: async (_id, update) => {
       if (state.row.billing_source !== "appstle") return { matched: 0 };
       state.flips.push(update);
@@ -230,16 +229,16 @@ test("card: expired skipped, preferred honoured when usable", () => {
   assert.equal(pickUsableCard([CARD], NOW, EXPIRED.id)?.id, CARD.id);
 });
 
-test("codes: customer codes carried; structural, Buy-N and shipping-line codes are not, and are named", () => {
-  const r = carryableMirrorCodes([
+test("codes: every customer code is dropped and named; structural and Buy-N are recomputed, not listed", () => {
+  const r = droppedMirrorCodes([
     { title: "Subscribe & Save", type: "MANUAL", value: 25, valueType: "PERCENTAGE" },
     { title: "Buy 2 Discount_x", type: "CODE_DISCOUNT", value: 8, valueType: "PERCENTAGE" },
     { title: "VIP10", type: "CODE_DISCOUNT", value: 10, valueType: "PERCENTAGE", targetType: "LINE_ITEM" },
     { title: "LOYALTY-5", type: "CODE_DISCOUNT", value: 5, valueType: "FIXED_AMOUNT" },
     { title: "Free Shipping on Subscriptions", type: "CODE_DISCOUNT", value: 100, valueType: "PERCENTAGE", targetType: "SHIPPING_LINE" },
   ]);
-  assert.deepEqual(r.carried.map((c) => [c.title, c.percentage ?? null, c.amount]), [["VIP10", 10, 0], ["LOYALTY-5", null, 5]]);
-  assert.deepEqual(r.notCarried, ["Free Shipping on Subscriptions (shipping-line code)"]);
+  assert.deepEqual(r, ["VIP10", "LOYALTY-5", "Free Shipping on Subscriptions"]);
+  assert.deepEqual(droppedMirrorCodes(null), []);
 });
 
 // ── buildShopcxFromMirror ───────────────────────────────────────────────────────────────────
@@ -292,12 +291,11 @@ test("idempotency: two CONCURRENT revives create exactly one contract", async ()
   if (loser && !loser.ok) assert.equal(loser.reason, "in_progress");
 });
 
-test("idempotency: a contract recorded by a crashed attempt is ADOPTED, never re-created (and codes never re-applied)", async () => {
+test("idempotency: a contract recorded by a crashed attempt is ADOPTED, never re-created", async () => {
   const { deps, state } = fakeDeps(mirrorRow({ shopcx_revive_contract_id: "88001", shopcx_revive_claimed_at: "2026-10-26T14:00:00Z" }));
   const r = await buildShopcxFromMirror(WS, SUB, "resume", {}, deps);
   assert.equal(r.ok, true);
   assert.equal(state.creates, 0);
-  assert.equal(state.codeCalls, 0);
   assert.equal((r as Extract<ReviveResult, { ok: true }>).contractId, "88001");
   assert.equal(state.flips[0].shopify_contract_id, "88001");
 });

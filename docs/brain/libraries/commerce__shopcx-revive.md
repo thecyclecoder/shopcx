@@ -26,7 +26,7 @@ until Dylan sets it.
 | `resolveReviveNextBillingDate(rowNext, interval, count, now, override?)` | pure | Future date kept; lapsed date **rolled forward** by the customer's cadence (`rollForwardToFutureBillingDate`, [[dunning]]); null (cancelled rows — cancel-truth nulls it) → tomorrow. |
 | `pickUsableCard(methods, now, preferredId?)` | pure | First unexpired card from `getCustomerPaymentMethods` (revoked already dropped); preferred wins when usable. |
 | `resolveReviveAddress({override,row,customerDefault})` | pure | First COMPLETE address (`REQUIRED_ADDRESS_FIELDS`) in Shopify `MailingAddressInput` shape. |
-| `carryableMirrorCodes(applied_discounts)` | pure | Customer `CODE_DISCOUNT`s carried; structural + `Buy N` + `SHIPPING_LINE` codes not — the uncarried ones are returned by name. |
+| `droppedMirrorCodes(applied_discounts)` | pure | Names of the customer `CODE_DISCOUNT`s a revive drops (all of them; structural + `Buy N` are recomputed, not listed). Surfaced as `codesDropped`. |
 | `defaultReviveDeps()` / `defaultEnsureDeps()` | factory | Production I/O seams; tests inject fakes. |
 | `ensureFailureText(r)` | pure | `"<reason>: <error>"` for ops that return `{ success:false, error }`. |
 | `MIRROR_ROW_COLUMNS`, `REVIVE_CLAIM_STALE_MS` (10 min) | const | |
@@ -44,7 +44,7 @@ until Dylan sets it.
 | next date | `next_billing_date`, rolled forward if lapsed |
 | **delivery price** | `delivery_price_cents` — **KEPT, never zeroed** (Dylan's shipping rule; see the migrate page's "shipping charge CARRIED") |
 | shipping option | `shipping_method_code` → `{ code, title }` |
-| codes | `applied_discounts` → `carryableMirrorCodes` |
+| codes | **dropped** (Dylan 2026-10-26). Pricing comes from our rules (S&S + Buy 2/3) via the planner; names returned in `codesDropped` so CS can re-add one by hand |
 | address | row `shipping_address` (367/370 paused, ~5% of cancelled) → `customers.default_address` |
 | card | **not on the row** (`payment_method_id` is NULL on Appstle rows) → the customer's Shopify payment methods via `getCustomerPaymentMethods` (`shopify_customer_id` from the row, else `customers`) |
 
@@ -57,7 +57,7 @@ Callers route these to the add-card / confirm-address step (portal reactivate + 
 The contract input comes from `buildMigratedContractInput` and is created with `shopifyCreateContract`
 — the exact builder `executeMigration` now uses too (status carried at create, billing anchors only,
 **no delivery anchors**, MSRP lines with S&S / volume / legacy discounts riding on the atomic create).
-Then `shopifySyncBillingSchedule` (non-fatal) and `applyCarriedCodes` (also shared).
+Then `shopifySyncBillingSchedule` (non-fatal). No codes are applied.
 
 ## Idempotency — claim + record, like executeMigration's attempt marker
 
@@ -87,7 +87,7 @@ executor — so it carries no heartbeat/owner of its own. Its switch is `appstle
 ## Gotchas
 
 - **Turning the switch on while Appstle is still installed and BILLING can double-charge an ACTIVE Appstle sub that gets touched** — the revive creates a live ShopCX contract and cannot cancel the Appstle one (that would be an Appstle call). Paused/cancelled rows are safe (Appstle does not bill them). Flip the switch together with the uninstall, or accept that risk for the ~90 actives.
-- **Mirror codes have no usage count** — a carried code is recurring (`recurringCycleLimit: null`). A consumed one-use code could be re-granted. SHIPPING_LINE codes are reported in `codesNotCarried`, not applied.
+- **Codes are dropped, never carried** (Dylan 2026-10-26, "Drop all codes"). The mirror has no usage count, so a carried code would recur forever, one-time LOYALTY codes included. Grandfathering still applies: it is measured on the line's pre-code `currentPrice`, exactly as in `executeMigration`.
 - **No pricing verify step** (executeMigration verifies before its irreversible Appstle cancel; here there is no cancel and the contract IS the charge). The plan is the same pure core; `mirrorContractPricing` re-mirrors what Shopify actually holds.
 - **Open dunning cycles** are keyed by the old `shopify_contract_id`; a payment-troubled active rebuilt here leaves its Appstle-era cycle behind.
 - Shipping protection as a row FLAG (`shipping_protection_added`) is not synthesized into a line — Appstle rows carry protection as a line item, which the planner keeps.
