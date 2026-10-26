@@ -83,6 +83,21 @@ const ACTION_MARKERS = [
   // "AdsGPT" spam invites, every one pre-filter-closed, escalated to the
   // CS Director with no remedy before this marker landed.
   "Automated-sender pre-filter tripped",
+  // Deterministic CLASSIFIER outreach-close from unified-ticket-handler.ts
+  // § `outreach-deterministic-close` step (one rung later than the pre-filter
+  // above — after the classifier tags `msgType === "outreach"`). The handler
+  // writes the sysNote body
+  //   "[System] Outreach — deterministically closed, no AI response."
+  // The close IS a real state change (open → auto_resolve) and counts as
+  // progress: cold B2B/wholesale/partnership solicitations are by-design never
+  // answered and carry no customer-facing remedy, so a run of outreach-closed
+  // inbounds must not silently accumulate as no_progress_context_cap and
+  // escalate to the CS Director. Same failure mode as the pre-filter marker
+  // above. Ground-truth case: ticket 56c7f63e-cd0a-4fee-a152-b2506fbc1145 —
+  // 4 auto-merged distribution/wholesale cold pitches, every one classifier-
+  // closed, escalated to June (💬 CS Director) with no remedy before this
+  // marker landed.
+  "Outreach — deterministically closed",
 ];
 
 function isActionSystemMessage(m: StreakMessage): boolean {

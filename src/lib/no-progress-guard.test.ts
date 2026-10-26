@@ -119,6 +119,38 @@ test("automated-sender pre-filter close is a streak-resetting handled turn (spec
   );
 });
 
+// ── Named failing state (THIS spec) ──
+// Ticket 56c7f63e-cd0a-4fee-a152-b2506fbc1145: 4 auto-merged distribution/wholesale
+// cold pitches, each deterministically closed by the CLASSIFIER outreach-close path
+// in unified-ticket-handler.ts (`outreach-deterministic-close` step), which writes
+// the sysNote body below with `author_type='system'`. This is the SAME failure mode
+// as the pre-filter close above, one rung later in the pipeline: the note carried no
+// ACTION_MARKERS substring, so the streak counter skipped past it and treated each
+// outreach-closed inbound as un-answered → tripped no_progress_context_cap and
+// escalated by-design-never-answered cold outreach to the CS Director with no remedy.
+test("classifier outreach-close is a streak-resetting handled turn (spec named failing state)", () => {
+  const outreachCloseNote = (): StreakMessage => ({
+    direction: "outbound",
+    author_type: "system",
+    visibility: "internal",
+    body: "[System] Outreach — deterministically closed, no AI response.",
+  });
+  // Simulate the ticket 56c7f63e tail: each cold pitch inbound is immediately
+  // followed by the classifier outreach-close note the handler writes.
+  const messages: StreakMessage[] = [];
+  for (let i = 0; i < 4; i++) {
+    messages.push(inbound(`wholesale distribution pitch #${i + 1}`));
+    messages.push(outreachCloseNote());
+  }
+  const s = inboundStreakSinceLastResponse(messages);
+  assert.equal(s, 0, "the classifier outreach-close is a deterministic 'we closed it' — it must reset the streak, not be skipped past");
+  assert.equal(
+    shouldTripNoProgressCircuit(s),
+    false,
+    "4 deterministically-closed cold outreach inbounds must not trip no_progress_context_cap",
+  );
+});
+
 test("automated-sender pre-filter close resets streak even when interleaved with a plain outbound gap", () => {
   // Belt-and-suspenders: even if a later inbound arrives AFTER the last
   // pre-filter close, only the post-close inbounds should count.
