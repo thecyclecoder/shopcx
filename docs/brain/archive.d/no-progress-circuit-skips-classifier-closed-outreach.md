@@ -1,0 +1,1 @@
+- **No-progress circuit must treat classifier-outreach close as progress** · verified 2026-10-26 · → [[../libraries/no-progress-guard]]
