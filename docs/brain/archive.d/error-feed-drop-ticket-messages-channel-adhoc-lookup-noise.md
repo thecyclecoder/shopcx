@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc `ticket_messages.channel` missing-column noise from the supabase-logs feed** · verified 2026-10-26 · → [[../libraries/error-feed]]
