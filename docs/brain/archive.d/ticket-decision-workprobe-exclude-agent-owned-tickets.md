@@ -1,0 +1,1 @@
+- **Stop the AI-orchestrator tile from false-firing on replies to escalated / agent-owned tickets** · verified 2026-10-26 · → [[libraries/control-tower]]
