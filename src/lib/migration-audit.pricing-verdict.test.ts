@@ -5,12 +5,40 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { judgePricingPreserved, itemSetKey } from "./migration-audit";
+import { judgePricingPreserved, itemSetKey, appstleContractGone } from "./migration-audit";
 
 const base = { tol: 4, allProductLinesStandard: true, itemsChangedSinceMigration: false };
 
 test("exact match → ok", () => {
   assert.deepEqual(judgePricingPreserved({ ...base, pre: 11992, noBreakCents: 11992 }), { ok: true, reason: "match" });
+});
+
+test("C: Appstle baseline already carried a qty/volume break — pre BELOW no-break 11992 but MATCHES with-break engine 8992 (f2d0f1bf) → preserved", () => {
+  assert.deepEqual(
+    judgePricingPreserved({ ...base, pre: 8992, engineCents: 8992, noBreakCents: 11992 }),
+    { ok: true, reason: "match_with_break" },
+  );
+});
+
+test("still FAILS when underpriced beyond the legit break (pre 8000 matches neither no-break 11992 nor with-break 8992)", () => {
+  assert.equal(judgePricingPreserved({ ...base, pre: 8000, engineCents: 8992, noBreakCents: 11992 }).ok, false);
+});
+
+test("still FAILS when engine would charge MORE than the Appstle pre (pre 8500 < with-break 8992, over tol)", () => {
+  assert.equal(judgePricingPreserved({ ...base, pre: 8500, engineCents: 8992, noBreakCents: 11992 }).ok, false);
+});
+
+test("Appstle 404 → contract gone (cancelled check passes)", () => {
+  assert.equal(appstleContractGone(404), true);
+});
+
+test("Appstle 400 → contract gone too — a migrated-away external id no longer resolves (f2d0f1bf)", () => {
+  assert.equal(appstleContractGone(400), true);
+});
+
+test("Appstle 200 / 5xx → NOT 'gone' — must read the contract status, not assume cancelled", () => {
+  assert.equal(appstleContractGone(200), false);
+  assert.equal(appstleContractGone(500), false);
 });
 
 test("A: Appstle billed MSRP flat with no S&S (Jennifer 2670ab86: pre 15990, standard 11992) → moved to standard rate", () => {

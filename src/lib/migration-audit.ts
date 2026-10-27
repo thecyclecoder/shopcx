@@ -196,7 +196,7 @@ export function itemSetKey(items: ReadonlyArray<{ variant_id?: unknown; quantity
 }
 
 /**
- * Pure verdict for `pricing_preserved`. Two legitimate shapes used to false-fail forever:
+ * Pure verdict for `pricing_preserved`. Legitimate shapes that used to false-fail forever:
  *
  *  A. **Moved to the standard rate.** Appstle billed ABOVE our standard subscriber price (no S&S
  *     ever applied, or a base set before a catalog price drop) and every product line now prices
@@ -206,21 +206,54 @@ export function itemSetKey(items: ReadonlyArray<{ variant_id?: unknown; quantity
  *     Still FAILS when we'd charge MORE than Appstle, or less on a locked (grandfathered) line.
  *  B. **The customer changed their items after migration.** The captured baseline prices the
  *     migrated item set; once the box changes, comparing to it is meaningless → skip, with a note.
+ *  C. **The Appstle baseline already carried a quantity/volume break.** The normal migrated case
+ *     has Appstle WITHOUT our mix-and-match break, so `pre` equals the no-break subtotal and the
+ *     engine prices BELOW it by the break (`reason: match` on `noBreakCents`). But some Appstle
+ *     contracts had the volume discount baked into their per-line price, so the captured `pre`
+ *     already sits BELOW the no-break subtotal and MATCHES the engine's WITH-break renewal price
+ *     (`engineCents`). The renewal bills exactly `pre` — preserved, not underpriced. Comparing
+ *     `pre` only to `noBreakCents` false-failed these forever and baited a down-rebill (raising the
+ *     base to "restore" the no-break price would resurrect the dropped discount). So accept a match
+ *     on EITHER the no-break subtotal OR the with-break engine price. Underpricing NOT explained by
+ *     the break (pre matches neither) still fails; charging MORE than `pre` still fails.
+ *     See docs/brain/specs/migration-pricing-preserved-quantity-break.md.
  */
 export function judgePricingPreserved(input: {
   pre: number;
   noBreakCents: number;
+  /**
+   * The engine's WITH-break renewal subtotal (`pricing.product_subtotal_cents`). Defaults to
+   * `noBreakCents` for callers/tests describing a no-break scenario. `engineCents ≤ noBreakCents`
+   * always (the break is ≥ 0).
+   */
+  engineCents?: number;
   tol: number;
   /** Every product line is on the catalog price (no price_override_cents / baked price_cents). */
   allProductLinesStandard: boolean;
   itemsChangedSinceMigration: boolean;
-}): { ok: boolean; reason: "match" | "no_baseline" | "items_changed" | "moved_to_standard_rate" | "mismatch" } {
+}): { ok: boolean; reason: "match" | "match_with_break" | "no_baseline" | "items_changed" | "moved_to_standard_rate" | "mismatch" } {
   const { pre, noBreakCents, tol } = input;
+  const engineCents = input.engineCents ?? noBreakCents;
   if (pre <= 0) return { ok: true, reason: "no_baseline" };
   if (Math.abs(noBreakCents - pre) <= tol) return { ok: true, reason: "match" };
+  // C: the Appstle baseline already carried the volume break — `pre` matches the price we actually
+  // renew at (engine, break applied), sitting below the no-break subtotal. Preserved, do NOT rebill.
+  if (Math.abs(engineCents - pre) <= tol) return { ok: true, reason: "match_with_break" };
   if (input.itemsChangedSinceMigration) return { ok: true, reason: "items_changed" };
   if (noBreakCents < pre && input.allProductLinesStandard) return { ok: true, reason: "moved_to_standard_rate" };
   return { ok: false, reason: "mismatch" };
+}
+
+/**
+ * Does an Appstle contract-fetch HTTP status mean the contract is GONE (migrated-away / deleted),
+ * so the `appstle_cancelled` check passes without reading a body? Appstle returns 404 for an
+ * unknown external id, but ALSO 400 for an id it can no longer resolve (the shape that false-failed
+ * migration f2d0f1bf — the old contract was already gone, but a 400 fell through to a status read
+ * that saw no CANCELLED status and failed). A 200 (read the real status) or a 5xx (transient — let
+ * the retry budget carry it) is NOT 'gone'.
+ */
+export function appstleContractGone(httpStatus: number): boolean {
+  return httpStatus === 404 || httpStatus === 400;
 }
 
 /** Did the customer change this sub's items after the audit was created? */
@@ -297,6 +330,7 @@ async function runChecks(admin: ReturnType<typeof createAdminClient>, audit: Rec
     const verdict = judgePricingPreserved({
       pre,
       noBreakCents,
+      engineCents,
       tol,
       allProductLinesStandard: !lockedItem && productLines.every((l) => !l.is_grandfathered),
       itemsChangedSinceMigration:
@@ -305,6 +339,7 @@ async function runChecks(admin: ReturnType<typeof createAdminClient>, audit: Rec
     const why =
       verdict.reason === "items_changed" ? " — skipped: the customer changed this sub's items after migration"
       : verdict.reason === "moved_to_standard_rate" ? " — moved to the standard subscriber rate (Appstle billed above it; CEO rule 2026-08-02)"
+      : verdict.reason === "match_with_break" ? " — Appstle baseline already carried the volume break; pre matches the with-break renewal price (do NOT rebill)"
       : "";
     push(
       "pricing_preserved",
@@ -470,7 +505,7 @@ async function verifyAppstleCancelled(
     if (!ws?.appstle_api_key_encrypted) { push("appstle_cancelled", true, "appstle not configured — skipped"); push("cancel_reason", true, "skipped"); return; }
     const apiKey = decrypt(ws.appstle_api_key_encrypted);
     const r = await fetch(`https://subscription-admin.appstle.com/api/external/v2/subscription-contracts/contract-external/${appstleContractId}?api_key=${apiKey}`, { headers: { "X-API-Key": apiKey }, cache: "no-store" });
-    if (r.status === 404) { push("appstle_cancelled", true, "contract not found (gone)"); push("cancel_reason", true, "n/a"); return; }
+    if (appstleContractGone(r.status)) { push("appstle_cancelled", true, `contract not found (gone, HTTP ${r.status})`); push("cancel_reason", true, "n/a"); return; }
     const contract = await r.json().catch(() => null);
     const status = contract?.status;
     push("appstle_cancelled", status === "CANCELLED", `appstle status ${status}`);
