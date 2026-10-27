@@ -13,6 +13,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Drop foreign ad-hoc `ticket_messages.channel` missing-column noise from the supabase-logs feed** · verified 2026-10-26 · → [[../libraries/error-feed]]
+- **No-progress circuit must treat classifier-outreach close as progress** · verified 2026-10-26 · → [[../libraries/no-progress-guard]]
 - **Stop the AI-orchestrator tile from false-firing on replies to escalated / agent-owned tickets** · verified 2026-10-26 · → [[libraries/control-tower]]
 - **Stop paging on the foreign direct-REST read of ticket_directions ordered by the nonexistent created_at column** · verified 2026-10-25 · → [[../libraries/error-feed]]
 - **Security dependency upgrades** · verified 2026-10-25 · → [[../libraries/security-agent]]
