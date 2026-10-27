@@ -1,0 +1,1 @@
+- **Migration audit must not false-fail a correctly-migrated sub (Appstle 400 = gone; pre-charge below no-break but matching with-break = preserved)** · verified 2026-10-27 · → [[../libraries/migration-audit]]
