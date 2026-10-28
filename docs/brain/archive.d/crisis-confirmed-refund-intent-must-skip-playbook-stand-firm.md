@@ -1,0 +1,1 @@
+- **Crisis-confirmed customers must bypass the Refund playbook stand-firm ladder** · verified 2026-10-28 · → [[../libraries/playbook-executor]] + [[../inngest/unified-ticket-handler]]
