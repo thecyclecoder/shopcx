@@ -75,6 +75,8 @@ Ledger stamp: `ticket_resolution_events.reasoning = 'sol:unaddressed_date_ask'` 
 
 Phase 2 of [[../specs/every-inbound-handled-within-30-min]]. Before Sol/Sonnet dispatch, the handler calls [[../libraries/playbook-executor]] `routeIntentToPlaybook(admin, wsId, ticketId, intent.intent)` with the classified inbound intent. If the intent matches an active playbook's `trigger_intents` and no playbook is already active on the ticket, the router starts that playbook deterministically via `startPlaybook` — the customer's stated intent (e.g. "refund_request", "unwanted_charge", "charged_without_permission") is now the authoritative routing signal, not a bare cancel-journey fallback. Ground truth: ticket 09f7257a (Angelica Devine, 2026-10-07); her message matched the Refund playbook's trigger intents exactly, yet Sol and Sonnet both routed to a cancel journey and called it out-of-policy, bypassing the playbook's tier ladder. The deterministic intent router closes that gap at the entry point. Ledger stamp: `[System] Intent→playbook router: classified intent="<intent>" matched <playbook_name> … Starting playbook deterministically`.
 
+**Crisis-enrollment guard:** When a matched playbook is a **stand-firm ladder** (`stand_firm_max > 0` — the Refund playbook's OOP tier) and the customer has an **active crisis enrollment**, the router defers to the Sonnet white-glove path instead of starting the stand-firm steps. See [[../specs/crisis-confirmed-refund-intent-must-skip-playbook-stand-firm]] and the implementation in [[../libraries/playbook-executor]] § `routeIntentToPlaybook`.
+
 ## Step 2d — Sol-chosen vs signal-matched playbook dispatch
 
 Phase 2 of [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] moves playbook selection inside Sol's first-touch box session for the Sol cohort. `routeExec` § 2 now branches on the live [[../tables/ticket_directions]] row BEFORE the deterministic matcher fires:
@@ -168,7 +170,7 @@ Per-channel settings come from [[../tables/ai_channel_config]] (`channelCfg`) an
 
 ## Related
 
-[[../specs/every-inbound-handled-within-30-min]] (Phase 2: intent→playbook routing, Phase 4: date-change gate) · [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] · [[../specs/sol-cheap-execution-over-ticket-direction]] · [[../libraries/date-change-ask]] · [[../libraries/playbook-executor]]
+[[../specs/every-inbound-handled-within-30-min]] (Phase 2: intent→playbook routing, Phase 4: date-change gate) · [[../specs/crisis-confirmed-refund-intent-must-skip-playbook-stand-firm]] (crisis-enrollment guard on routeIntentToPlaybook) · [[../specs/sol-session-chosen-playbook-selection-retire-brittle-triggers]] · [[../specs/sol-cheap-execution-over-ticket-direction]] · [[../libraries/date-change-ask]] · [[../libraries/playbook-executor]]
 
 ---
 
