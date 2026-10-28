@@ -3511,6 +3511,32 @@ export async function assertPlaybookStepConfidence(
  * `{ routed: false, reason }` otherwise. The caller (unified-ticket-handler) decides
  * whether to short-circuit the Sonnet orchestrator on `routed:true`.
  */
+/**
+ * Does this customer have an ACTIVE crisis enrollment? Mirrors the exact predicate
+ * `pickOrchestratorModel` uses for its `hard:crisis-enrollment` signal
+ * ([[../../docs/brain/libraries/model-picker]] — `crisis_customer_actions` with
+ * `tier3_response IS NULL`, `paused_at IS NULL`, `removed_item_at IS NULL`,
+ * `cancelled = false`): a row still on the white-glove track, not yet resolved.
+ * Kept here (not imported from model-picker) to avoid a module cycle; the two reads
+ * must stay in lockstep — if one widens, widen both.
+ */
+async function hasActiveCrisisEnrollment(
+  admin: Admin,
+  workspaceId: string,
+  customerId: string,
+): Promise<boolean> {
+  const { count } = await admin
+    .from("crisis_customer_actions")
+    .select("id", { count: "exact", head: true })
+    .eq("workspace_id", workspaceId)
+    .eq("customer_id", customerId)
+    .is("tier3_response", null)
+    .is("paused_at", null)
+    .is("removed_item_at", null)
+    .eq("cancelled", false);
+  return (count ?? 0) > 0;
+}
+
 export async function routeIntentToPlaybook(
   admin: Admin,
   workspaceId: string,
@@ -3518,7 +3544,15 @@ export async function routeIntentToPlaybook(
   intent: string,
 ): Promise<
   | { routed: true; playbook_id: string; playbook_name: string }
-  | { routed: false; reason: "no_intent" | "ticket_has_active_playbook" | "no_match" | "ticket_missing" }
+  | {
+      routed: false;
+      reason:
+        | "no_intent"
+        | "ticket_has_active_playbook"
+        | "no_match"
+        | "ticket_missing"
+        | "crisis_customer_defers_to_orchestrator";
+    }
 > {
   const normIntent = (intent ?? "").toString().trim().toLowerCase();
   if (!normIntent) return { routed: false, reason: "no_intent" };
@@ -3528,7 +3562,7 @@ export async function routeIntentToPlaybook(
   // avoids the playbooks lookup entirely on the common continuation path.
   const { data: ticket } = await admin
     .from("tickets")
-    .select("active_playbook_id")
+    .select("active_playbook_id, customer_id")
     .eq("id", ticketId)
     .single();
   if (!ticket) return { routed: false, reason: "ticket_missing" };
@@ -3536,7 +3570,7 @@ export async function routeIntentToPlaybook(
 
   const { data: playbooks } = await admin
     .from("playbooks")
-    .select("id, name, slug, trigger_intents")
+    .select("id, name, slug, trigger_intents, stand_firm_max")
     .eq("workspace_id", workspaceId)
     .eq("is_active", true)
     .order("priority", { ascending: false });
@@ -3553,6 +3587,28 @@ export async function routeIntentToPlaybook(
       (t) => t.length > 0 && (normIntent === t || normIntent.includes(t) || t.includes(normIntent)),
     );
     if (!hit) continue;
+
+    // ── Crisis-enrollment guard (ticket cbdde02c — April McEntire) ──
+    // A crisis-confirmed customer whose refund-intent message matches a STAND-FIRM
+    // playbook (the Refund playbook: `stand_firm_max > 0`) must NOT be routed into
+    // that ladder — standing firm on a crisis customer is exactly what the Crisis
+    // Policy white-glove rule forbids. Instead we DEFER: return `routed:false` so
+    // unified-ticket-handler falls through to the Sonnet orchestrator, whose
+    // crisis-aware pickOrchestratorModel() (same active-enrollment predicate) routes
+    // the white-glove direct crisis-return path (create_return free_label=true, no
+    // tenure check, no stand-firm). Checked only on a stand-firm hit so the common
+    // non-crisis / non-stand-firm path pays no extra read.
+    const standFirmMax = Number((pb.stand_firm_max as number | null) ?? 0);
+    if (standFirmMax > 0 && ticket.customer_id) {
+      const crisisActive = await hasActiveCrisisEnrollment(
+        admin,
+        workspaceId,
+        ticket.customer_id as string,
+      );
+      if (crisisActive) {
+        return { routed: false, reason: "crisis_customer_defers_to_orchestrator" };
+      }
+    }
 
     // Compare-and-set start: `startPlaybook`'s `.update` already filters by `id`, but we
     // re-assert `active_playbook_id IS NULL` here so a race with another writer doesn't
