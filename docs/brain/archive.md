@@ -12,6 +12,8 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Security dependency upgrades** · verified 2026-10-28 · → [[../libraries/security-agent]]
+- **Migration audit must not false-fail a correctly-migrated sub (Appstle 400 = gone; pre-charge below no-break but matching with-break = preserved)** · verified 2026-10-27 · → [[../libraries/migration-audit]]
 - **Drop foreign ad-hoc `ticket_messages.channel` missing-column noise from the supabase-logs feed** · verified 2026-10-26 · → [[../libraries/error-feed]]
 - **No-progress circuit must treat classifier-outreach close as progress** · verified 2026-10-26 · → [[../libraries/no-progress-guard]]
 - **Stop the AI-orchestrator tile from false-firing on replies to escalated / agent-owned tickets** · verified 2026-10-26 · → [[libraries/control-tower]]
