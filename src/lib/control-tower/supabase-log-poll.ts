@@ -60,6 +60,7 @@ import {
   isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
@@ -578,6 +579,22 @@ const LOG_QUERIES: LogQuery[] = [
       // any other table, or on `orders` via a non-SELECT statement (real code-bug
       // shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... cancelled_at ... from
+      // public.orders` lookup by an external tool / stale exploratory query — or the
+      // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE
+      // wrapper the same client emits over the REST endpoint. Our `orders` table has NO
+      // cancel timestamp — a foreign client expecting Shopify's REST orders shape names
+      // `orders.cancelled_at`, but in our schema the cancel timestamp (`cancelled_at`)
+      // lives on `subscriptions`, not on `orders`. No ShopCX code path issues a SELECT on
+      // `orders.cancelled_at`, so the resulting column-missing ERROR is repair work for a
+      // query we don't own
+      // ([[../specs/error-feed-drop-orders-cancelled-at-adhoc-lookup-noise]], Control
+      // Tower signature `supabase-logs:00e637d0c66e5ad5`). Narrowly gated to require BOTH
+      // the exact column-missing message AND the SELECT-lookup shape — a column-missing
+      // error on any other column of `orders`, on `cancelled_at` from any other table
+      // (including the live `subscriptions.cancelled_at`), or on `orders` via a non-SELECT
+      // statement (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... shipping_name ... from
       // public.orders` lookup by an external tool / stale exploratory query — or the
       // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE
