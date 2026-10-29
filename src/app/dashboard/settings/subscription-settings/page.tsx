@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useWorkspace } from "@/lib/workspace-context";
+import AppstleRetiredCard from "./appstle-retired-card";
 
 interface Frequency {
   value: number;
@@ -149,6 +150,8 @@ export default function SubscriptionSettingsPage() {
             placeholder="Product name (leave blank for none)"
             className="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300" />
         </div>
+
+        <AppstleRetiredCard workspaceId={workspace.id} />
 
         <div className="flex items-center gap-3">
           <button onClick={save} disabled={saving}
