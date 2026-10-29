@@ -1,0 +1,1 @@
+- **Scope out the stale loop_alerts.dedupe_key direct-REST lookup from the Control Tower error feed** · verified 2026-10-29 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise`)
