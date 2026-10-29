@@ -80,3 +80,12 @@ subs still billed by Appstle, and a Retire / Restore button. It calls
 switch's only code writer (allowlisted in `scripts/_check-kill-switch-writer.ts`): ON upserts the row, OFF
 deletes it, both invalidate the caches and write a `director_activity` `kill_switch_toggle` row. The SQL
 above still works.
+
+## Card added after retirement migrates from the mirror (2026-10-29)
+
+`migrateCustomerAppstleSubsToInternal` ([[migrate-to-internal]], the add-card journey's sweep): when Appstle
+is retired, an Appstle sub of ANY status migrates to internal billing from our mirror row. Its lines are
+converted through `appstleLinesToInternalItems` exactly like a live Appstle read, and there is no Appstle
+cancel, because Appstle can bill nothing. Before this, a customer with no Shopify card (about 22% of
+never-migrated subs in the 10-29 rehearsal) would add a card at the revive's add-card step, and their sub
+stayed stranded.
