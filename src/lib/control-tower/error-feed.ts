@@ -1221,19 +1221,22 @@ export function isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
   const msg = (message ?? "").trim();
   if (!msg) return false;
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
-  // Pinned to the six columns observed as foreign direct-REST noise against
+  // Pinned to the seven columns observed as foreign direct-REST noise against
   // `public.loop_alerts`: `closed_at` (`supabase-logs:7dc04785e9561d24`),
   // `error_signature` (`supabase-logs:2f7afeedcba03d28`), `loop_key`
   // (`supabase-logs:1676b561414d21b9`), `message` (`supabase-logs:7be91db5b111b4fd`),
-  // `fingerprint` (`supabase-logs:0ebf66ac2f9a8f98`), and `title`
-  // (`supabase-logs:e66d6020e9db8399`). All are columns the table has never
+  // `fingerprint` (`supabase-logs:0ebf66ac2f9a8f98`), `title`
+  // (`supabase-logs:e66d6020e9db8399`), and `signature_hash`
+  // (`supabase-logs:9329fbe432b32bb9`). All are columns the table has never
   // owned — the lifecycle lives on `status` + `resolved_at`, `error_signature` is an
   // `error_events` concept, `loop_key` is a `loop_heartbeats` concept, neither
   // `message` nor `fingerprint` is a `loop_alerts` column (the error signature lives on
-  // the `signature` column, not `fingerprint`), and `title` is an `error_events`-style
-  // concept confused onto `loop_alerts` by the stale direct-REST read. A different missing
-  // column on `loop_alerts` (e.g. `resolved_at`, `status`, `workspace_id`) is a real
-  // column rename / regression and is intentionally NOT in this set.
+  // the `signature` column, not `fingerprint`), `title` is an `error_events`-style
+  // concept confused onto `loop_alerts` by the stale direct-REST read, and
+  // `signature_hash` is the stale read confusing the real `signature` column for a
+  // hashed variant the table never had. A different missing column on `loop_alerts`
+  // (e.g. `resolved_at`, `status`, `workspace_id`) is a real column rename / regression
+  // and is intentionally NOT in this set.
   const messageMatches =
     stripped === "column loop_alerts.closed_at does not exist" ||
     stripped === "column public.loop_alerts.closed_at does not exist" ||
@@ -1246,7 +1249,9 @@ export function isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
     stripped === "column loop_alerts.fingerprint does not exist" ||
     stripped === "column public.loop_alerts.fingerprint does not exist" ||
     stripped === "column loop_alerts.title does not exist" ||
-    stripped === "column public.loop_alerts.title does not exist";
+    stripped === "column public.loop_alerts.title does not exist" ||
+    stripped === "column loop_alerts.signature_hash does not exist" ||
+    stripped === "column public.loop_alerts.signature_hash does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;

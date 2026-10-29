@@ -1322,6 +1322,71 @@ test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS a Po
   );
 });
 
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise drops the PostgREST CTE wrapper lookup projecting the non-existent signature_hash column while a genuine loop_alerts column rename still pages", () => {
+  // The captured incident shape (Control Tower `supabase-logs:9329fbe432b32bb9`): a stale
+  // Supabase Studio / direct-REST client reads `loop_alerts?select=...signature_hash...`
+  // (`signature_hash` confuses the real `signature` column for a hashed variant the table
+  // never owned), PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."loop_alerts" ... )` CTE, and Postgres rejects with
+  // `column loop_alerts.signature_hash does not exist`.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.signature_hash does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."id", "public"."loop_alerts"."signature_hash" FROM "public"."loop_alerts" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified signature_hash variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column public.loop_alerts.signature_hash does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."signature_hash" FROM "public"."loop_alerts" LIMIT 1 )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.signature_hash does not exist",
+      "select id, signature_hash from loop_alerts where signature_hash = 'x' limit 10",
+    ),
+    true,
+  );
+  // A genuine loop_alerts column rename (e.g. `resolved_at`) going missing on the same CTE
+  // read shape is a real schema regression — the pin covers the foreign-noise columns only,
+  // so it still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.resolved_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."loop_alerts"."resolved_at" FROM "public"."loop_alerts" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS a PostgREST CTE INSERT/UPDATE on loop_alerts naming signature_hash (a real code-bug write still pages)", () => {
+  // A PostgREST write wrapped in the same `WITH pgrst_source AS (...)` envelope is a real
+  // code-bug shape (someone trying to write a bogus `signature_hash` column), not the ad hoc
+  // read this drop targets — the CTE branch requires the wrapped op to be a SELECT.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column loop_alerts.signature_hash does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."loop_alerts"("id","signature_hash") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  // A real column-missing on another table that carries a `signature_hash` column
+  // (e.g. `error_events.signature_hash`) is a genuine regression — the pin names
+  // `loop_alerts.signature_hash` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
+      "column error_events.signature_hash does not exist",
+      "select * from public.error_events where signature_hash = 'x'",
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise KEEPS the closed_at column-missing message on a DIFFERENT relation (a real product-schema regression still pages)", () => {
   // A real column-missing on another table that DOES carry a `closed_at` column
   // (e.g. `tickets.closed_at`) is a genuine regression we want to see — the pin names
