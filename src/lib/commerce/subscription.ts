@@ -99,6 +99,8 @@ import {
   appstleOrderNowByContract,
   appstleCancelContractVendorOnly,
 } from "@/lib/appstle";
+import { ensureShopcxEngine, ensureFailureText } from "@/lib/commerce/shopcx-revive";
+import { isAppstleRetired, assertAppstleLive } from "@/lib/appstle-retired";
 import {
   subAddItem,
   subRemoveItem,
@@ -457,6 +459,18 @@ export async function subscriptionAction(
 ): Promise<OpResult> {
   // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
   contractId = await resolveLiveContractId(workspaceId, contractId);
+  // ⭐ appstle_retired chokepoint — a no-op while the switch is off. On: an Appstle sub's
+  // cancel/pause is written to our row only; a resume rebuilds it on ShopCX from our mirror.
+  const ens = await ensureShopcxEngine(workspaceId, contractId, action, { cancelReason, cancelledBy });
+  if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+  if (ens.handledLocally) return { success: true };
+  contractId = ens.contractId;
+  if (ens.built && action === "resume") {
+    // The contract was just BORN active (status carried at create), so there is nothing to
+    // resume at the vendor — only the local truth (customer rollup) remains.
+    await applySubscriptionStatusTruth(workspaceId, contractId, "resume", { cancelReason, cancelledBy });
+    return { success: true };
+  }
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
     const r = await internalSubscriptionAction(workspaceId, contractId, action);
@@ -512,6 +526,11 @@ export async function subscriptionSkipNextOrder(
 ): Promise<OpResult> {
   // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
   contractId = await resolveLiveContractId(workspaceId, contractId);
+  {
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
     return internalSubSkipNextOrder(workspaceId, contractId);
@@ -533,6 +552,11 @@ export async function subscriptionSkipUpcomingOrder(
 ): Promise<OpResult> {
   // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
   contractId = await resolveLiveContractId(workspaceId, contractId);
+  {
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") return internalSkipUpcoming(workspaceId, contractId);
   if (src === "shopcx") return shopifySkipBillingCycle(workspaceId, contractId);
@@ -569,6 +593,11 @@ export async function subscriptionGetUpcomingOrders(
   // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
   contractId = await resolveLiveContractId(workspaceId, contractId);
   const srcUpcoming = await resolveBillingSource(workspaceId, contractId);
+  // A READ: never builds a contract. With Appstle retired an Appstle sub has no upcoming Appstle
+  // attempts to list, and its callers (dunning, order-now) feed the id into an Appstle attempt API.
+  if (srcUpcoming === "appstle" && (await isAppstleRetired())) {
+    return { success: false, error: "appstle_retired: an Appstle-billed subscription has no upcoming Appstle orders — act on it through the SDK, which rebuilds it on ShopCX" };
+  }
   if (srcUpcoming === "internal") return internalSubGetUpcomingOrders(workspaceId, contractId);
   if (srcUpcoming === "shopcx") {
     const cy = await getUpcomingBillingCycles(workspaceId, contractId, { first: 6 });
@@ -593,6 +622,11 @@ export async function subscriptionUpdateBillingInterval(
 ): Promise<OpResult> {
   // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
   contractId = await resolveLiveContractId(workspaceId, contractId);
+  {
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
     return internalSubUpdateBillingInterval(workspaceId, contractId, interval, intervalCount);
@@ -608,6 +642,12 @@ export async function subscriptionUpdateNextBillingDate(
 ): Promise<OpResult> {
   // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
   contractId = await resolveLiveContractId(workspaceId, contractId);
+  {
+    // A date change on a retired-Appstle sub builds the contract ON the requested date.
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change", { nextBillingDate });
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") {
     return internalSubUpdateNextBillingDate(workspaceId, contractId, nextBillingDate);
@@ -640,6 +680,12 @@ export async function subscriptionSwitchPaymentMethod(
   // Appstle branch.
   // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
   contractId = await resolveLiveContractId(workspaceId, contractId);
+  {
+    // Built with the requested card when it is one of the customer's usable Shopify cards.
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change", { paymentMethodId });
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   const srcPm = await resolveBillingSource(workspaceId, contractId);
   if (srcPm === "internal") return internalSubSwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
   if (srcPm === "shopcx") return shopifySwitchPaymentMethod(workspaceId, contractId, paymentMethodId);
@@ -671,7 +717,9 @@ export async function subscriptionSendPaymentUpdateEmail(
   // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
   contractId = await resolveLiveContractId(workspaceId, contractId);
   const srcEmail = await resolveBillingSource(workspaceId, contractId);
-  if (srcEmail === "appstle") return appstleSendPaymentUpdateEmail(workspaceId, contractId);
+  // With Appstle retired its hosted card page is gone too — send OUR recovery email instead (no
+  // contract is built just to send an email; the card the customer adds rebuilds it on touch).
+  if (srcEmail === "appstle" && !(await isAppstleRetired())) return appstleSendPaymentUpdateEmail(workspaceId, contractId);
 
   const admin = createAdminClient();
   const { data: sub } = await admin
@@ -768,6 +816,18 @@ export async function subscriptionGetLiveContract(
     // even though the local items row still carries the variant (ticket c13fbad1).
     return { ok: true, internal: true, lines: { nodes: [] } };
   }
+  // ⭐ Only an APPSTLE-billed sub has an Appstle contract to read. A ShopCX sub (is_internal=false)
+  // used to fall through to an Appstle fetch of a Shopify contract id, so the agent's variant-driven
+  // remove_item failed on every migrated customer. A retired Appstle has nothing to read either.
+  // `internal: true` hands the caller to `subRemoveItem`, which routes by engine (and rebuilds a
+  // never-migrated sub on ShopCX via ensureShopcxEngine).
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    const { isAppstleRetired } = await import("@/lib/appstle-retired");
+    if ((await resolveBillingSource(workspaceId, contractId)) !== "appstle" || (await isAppstleRetired())) {
+      return { ok: true, internal: true, lines: { nodes: [] } };
+    }
+  }
   const { getAppstleConfig } = await import("@/lib/subscription-items");
   const cfg = await getAppstleConfig(workspaceId);
   if (!cfg) return { ok: false, error: "Subscription vendor not configured" };
@@ -807,6 +867,16 @@ export async function subscriptionGetLiveContract(
  *   address change.
  */
 export interface UpdateShippingAddressDeps {
+  /**
+   * appstle_retired chokepoint. OPTIONAL so the existing injected-fake tests keep working; when
+   * present (production) a retired-Appstle sub is rebuilt on ShopCX — WITH the new address — and
+   * the write continues on the shopcx branch under the returned contract id.
+   */
+  ensureEngine?(
+    workspaceId: string,
+    contractId: string,
+    address: ShippingAddressInput,
+  ): Promise<{ ok: true; contractId: string } | { ok: false; reason: string; error: string }>;
   isInternal(workspaceId: string, contractId: string): Promise<boolean>;
   /**
    * Three-way engine resolution. OPTIONAL so the existing injected-fake tests keep working —
@@ -832,6 +902,8 @@ export interface UpdateShippingAddressDeps {
 /** Real deps for prod. Extracted so tests can inject fakes. */
 export function defaultUpdateShippingAddressDeps(): UpdateShippingAddressDeps {
   return {
+    ensureEngine: (workspaceId, contractId, address) =>
+      ensureShopcxEngine(workspaceId, contractId, "change", { address: address as unknown as Record<string, unknown> }),
     isInternal: isInternalSubscription,
     resolveEngine: resolveBillingSource,
     async writeShopify(workspaceId, contractId, address) {
@@ -839,6 +911,7 @@ export function defaultUpdateShippingAddressDeps(): UpdateShippingAddressDeps {
       return shopifyUpdateShippingAddress(workspaceId, contractId, address);
     },
     async getVendorApiKey(workspaceId: string) {
+      await assertAppstleLive("subscriptionUpdateShippingAddress");
       const admin = createAdminClient();
       const { data: ws } = await admin
         .from("workspaces")
@@ -864,6 +937,17 @@ export async function subscriptionUpdateShippingAddress(
   address: ShippingAddressInput,
   deps: UpdateShippingAddressDeps = defaultUpdateShippingAddressDeps(),
 ): Promise<OpResult> {
+  if (deps.ensureEngine) {
+    const ens = await deps.ensureEngine(workspaceId, contractId, address);
+    if (!ens.ok && ens.reason === "subscription_cancelled") {
+      // A cancelled retired-Appstle sub has no live contract to change and must not be revived by
+      // an address edit — record the address on our row (a later revive builds with it).
+      const w = await deps.writeLocal(workspaceId, contractId, address);
+      return w.success ? { success: true } : { success: false, error: w.error };
+    }
+    if (!ens.ok) return { success: false, error: `${ens.reason}: ${ens.error}` };
+    contractId = ens.contractId;
+  }
   if (await deps.isInternal(workspaceId, contractId)) {
     const w = await deps.writeLocal(workspaceId, contractId, address);
     if (!w.success) return { success: false, error: w.error };
@@ -970,6 +1054,11 @@ export async function subscriptionAddFreeProduct(
 ): Promise<OpResult> {
   // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
   contractId = await resolveLiveContractId(workspaceId, contractId);
+  {
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   const srcGift = await resolveBillingSource(workspaceId, contractId);
   if (srcGift === "internal") return internalSubAddFreeProduct(workspaceId, contractId, variantId, quantity);
   if (srcGift === "shopcx") {
@@ -991,6 +1080,11 @@ export async function subscriptionSwapProduct(
 ): Promise<OpResult> {
   // An old (pre-migration) id resolves to the live migrated row — see resolveLiveContractId.
   contractId = await resolveLiveContractId(workspaceId, contractId);
+  {
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   const srcSwap = await resolveBillingSource(workspaceId, contractId);
   if (srcSwap === "internal") return internalSwapProduct(workspaceId, contractId, oldVariantId, newVariantId);
   if (srcSwap === "shopcx") {
@@ -1055,6 +1149,12 @@ export async function subscriptionOrderNow(
 ): Promise<OpResult & { summary?: string; internal?: boolean }> {
   // An old (pre-migration) id resolves to the live migrated row before the lookup below.
   contractId = await resolveLiveContractId(workspaceId, contractId);
+  {
+    // Before the row read, so a just-built ShopCX contract is what the status gate sees.
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   const admin = createAdminClient();
   const { data: sub } = await admin
     .from("subscriptions")

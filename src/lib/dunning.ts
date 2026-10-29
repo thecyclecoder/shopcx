@@ -822,7 +822,6 @@ export async function cancelForTerminalNoBackup(params: {
 }): Promise<void> {
   const { workspaceId, contractId, customerId, errorCode, errorMessage, paymentMethodCount } = params;
   const admin = createAdminClient();
-  const { appstleSubscriptionAction } = await import("@/lib/appstle");
 
   // Record an EXHAUSTED dunning cycle for this terminal cancel. The recovery flow
   // (reactivateDunningCancelledSubs) only reactivates + charges a cancelled sub
@@ -851,7 +850,7 @@ export async function cancelForTerminalNoBackup(params: {
       `Cancelled by ShopCX — terminal billing error: ${errorCode} (${errorMessage || "no details"}), no other payment methods available`,
     );
   } catch (e) {
-    console.error("[Dunning terminal-cancel] appstle cancel failed:", e);
+    console.error("[Dunning terminal-cancel] cancel failed:", e);
   }
 
   // Magic-link recovery email + tagged closed ticket (replaces Appstle's

@@ -20,6 +20,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import { decrypt } from "@/lib/crypto";
 import { loggedAppstleFetch } from "@/lib/appstle-call-log";
+import { assertAppstleLive } from "@/lib/appstle-retired";
 import { healOnTouch } from "@/lib/appstle-pricing";
 import { applyCancelTruth } from "@/lib/subscription-cancel-truth";
 import { endDunningForSubscription } from "@/lib/dunning";
@@ -59,6 +60,9 @@ async function resolveContractIdForAppstle(
 }
 
 export async function getAppstleCredentials(workspaceId: string): Promise<{ apiKey: string; shop: string } | null> {
+  // ⭐ appstle_retired: every wrapper in this module reads credentials first, so this one line makes
+  // any missed path fail LOUDLY (AppstleRetiredError) instead of calling a vendor that is gone.
+  await assertAppstleLive("getAppstleCredentials");
   const admin = createAdminClient();
   const { data: workspace } = await admin
     .from("workspaces")

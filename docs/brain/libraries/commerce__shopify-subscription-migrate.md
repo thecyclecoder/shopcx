@@ -359,6 +359,18 @@ lost on migration, and a contract-attached code cannot expire by date on either 
 **198 of 354 code instances are PERPETUAL** (no cycle limit) — already permanent on Appstle, and
 faithfully permanent here.
 
+## Shared create helpers (2026-10-26)
+
+`executeMigration`'s create, carried-code application and lost-response orphan lookup are extracted so
+the mirror revive ([[commerce__shopcx-revive]]) builds contracts with the SAME rules instead of a copy:
+
+- `buildMigratedContractInput({ customerGid, status, paymentMethodId, interval, intervalCount, nextBillingDate, deliveryPriceCents, address, shippingOption, plan })` — pure; status carried, billing anchors only, **no delivery anchors**, **delivery price kept verbatim**, MSRP lines + `lineDiscounts`.
+- `applyCarriedCodes(ws, contractId, codes)` — one draft, never twice on a contract.
+- `findCustomerContractsCreatedSince(ws, customerGid, sinceIso)` — non-cancelled contracts created since an attempt (1 min slack).
+
+With `appstle_retired` on ([[appstle-retired]]), `executeMigration` returns `stage:'appstle-retired'`
+and `sweepIncompleteMigrations` returns `[]` — both are Appstle-only.
+
 ## Gotchas
 
 - **Not idempotent without the marker.** The first real run created TWO live contracts for one
@@ -450,3 +462,20 @@ no_lines_after_rules                          1
 
 [[../tables/appstle_contract_snapshots]] · [[commerce__shopify-subscription-client]] ·
 [[appstle-snapshot]] · [[../inngest/shopify-subscription-renewals]] · [[../lifecycles/shopcx-subscriptions]]
+
+### Open dunning cycles follow the swap (2026-10-29)
+
+After `swap-local` flips the row, `executeMigration` calls `repointOpenDunningCyclesForMigration`
+([[migrate-to-internal]]) to move every OPEN `dunning_cycles` row onto the new contract id (a
+collision on cycle_number closes the orphan as `orphaned_by_migration`). Without it, a sub migrated
+mid-dunning keeps its cycle on the cancelled Appstle id, and the payday retry's date reset finds no
+row. Non-fatal; [[dunning-strand-detector]] is the backstop.
+
+
+### Duplicate-SKU drift + address fallback (2026-10-29)
+
+- `detectDrift` pairs lines as a MULTISET. Keyed by SKU, a contract carrying the same SKU twice (paid +
+  promo line) read as drifted on every run and could never migrate (14 of the last 476).
+- `executeMigration({ fallbackAddress })`: when the contract's own address (or the billing fallback) is
+  missing a required field, or is a US address with a blank province (Shopify rejects it at create), the
+  customer's default address is shipped to instead. Never overrides a complete address.

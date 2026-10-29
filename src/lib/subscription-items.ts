@@ -6,6 +6,8 @@ import { errText } from "@/lib/error-text";
 import { decrypt } from "@/lib/crypto";
 import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 import { healOnTouch, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
+import { ensureShopcxEngine, ensureFailureText } from "@/lib/commerce/shopcx-revive";
+import { assertAppstleLive } from "@/lib/appstle-retired";
 import { assertSwapDidNotRaise, type PriceGuardRefusal } from "@/lib/swap-price-assertion";
 import { resolveSubscriptionPricing } from "@/lib/pricing";
 import {
@@ -118,6 +120,8 @@ export async function enrichItemTitles(
 }
 
 export async function getAppstleConfig(workspaceId: string): Promise<{ apiKey: string; shop: string } | null> {
+  // appstle_retired: a missed path fails LOUDLY here instead of calling a vendor that is gone.
+  await assertAppstleLive("getAppstleConfig");
   const admin = createAdminClient();
   const { data: ws } = await admin.from("workspaces")
     .select("appstle_api_key_encrypted, shopify_myshopify_domain")
@@ -991,6 +995,13 @@ export async function subAddItem(
   variantId: string,
   quantity: number = 1,
 ): Promise<{ success: boolean; error?: string; permanent?: boolean; declineErrorKey?: string }> {
+  // ⭐ appstle_retired chokepoint (no-op while the switch is off): a retired-Appstle sub is rebuilt
+  // on ShopCX from our mirror first, and the op continues on the shopcx branch below.
+  {
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubAddItem(workspaceId, contractId, variantId, quantity);
   }
@@ -1087,6 +1098,13 @@ export async function subAddOneTimeGift(
   quantity: number = 1,
   opts: { free?: boolean; priceCents?: number | null } = {},
 ): Promise<{ success: boolean; error?: string; free_confirmed?: boolean; backend?: "internal" | "gift_order" }> {
+  // ⭐ appstle_retired chokepoint (no-op while the switch is off): a retired-Appstle sub is rebuilt
+  // on ShopCX from our mirror first, and the op continues on the shopcx branch below.
+  {
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   const free = opts.free !== false;
   const qty = Math.max(1, Math.floor(quantity || 1));
 
@@ -1190,6 +1208,13 @@ export async function subRemoveItem(
   contractId: string,
   variantOrLine: string | { variantId?: string; lineGid?: string },
 ): Promise<{ success: boolean; error?: string; alreadyAbsent?: boolean; pending?: boolean }> {
+  // ⭐ appstle_retired chokepoint (no-op while the switch is off): a retired-Appstle sub is rebuilt
+  // on ShopCX from our mirror first, and the op continues on the shopcx branch below.
+  {
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   const arg = typeof variantOrLine === "string" ? { variantId: variantOrLine } : variantOrLine;
   // Internal subs are matched by variant_id (no Appstle line gids). Check
   // internal FIRST so a lineId-only call can't silently fall through to the
@@ -1222,6 +1247,13 @@ export async function subChangeQuantity(
   variantId: string,
   quantity: number,
 ): Promise<{ success: boolean; error?: string; permanent?: boolean; declineErrorKey?: string }> {
+  // ⭐ appstle_retired chokepoint (no-op while the switch is off): a retired-Appstle sub is rebuilt
+  // on ShopCX from our mirror first, and the op continues on the shopcx branch below.
+  {
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   if (await isInternalSubscription(workspaceId, contractId)) {
     // Internal path: rewrite the line's quantity directly.
     const admin = createAdminClient();
@@ -1308,6 +1340,13 @@ export async function subUpdateLineItemPrice(
   basePriceCents: number,
   lineGid?: string,
 ): Promise<{ success: boolean; error?: string }> {
+  // ⭐ appstle_retired chokepoint (no-op while the switch is off): a retired-Appstle sub is rebuilt
+  // on ShopCX from our mirror first, and the op continues on the shopcx branch below.
+  {
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   {
     const { resolveBillingSource } = await import("@/lib/internal-subscription");
     if ((await resolveBillingSource(workspaceId, contractId)) === "shopcx") {
@@ -1506,6 +1545,13 @@ export async function subscriptionApplyCoupon(
   code: string,
 ): Promise<{ success: boolean; error?: string }> {
   if (!code) return { success: false, error: "Missing coupon code" };
+  // ⭐ appstle_retired chokepoint (no-op while the switch is off): a retired-Appstle sub is rebuilt
+  // on ShopCX from our mirror first, and the op continues on the shopcx branch below.
+  {
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
 
   // Resolve the sub's status BEFORE the internal/Appstle branch — a coupon is
   // only ever valid on an active sub. Refusing here closes the SC135320 class
@@ -1617,6 +1663,13 @@ export async function subscriptionRemoveCoupon(
   contractId: string,
   discountIdOrCode: string,
 ): Promise<{ success: boolean; error?: string }> {
+  // ⭐ appstle_retired chokepoint (no-op while the switch is off): a retired-Appstle sub is rebuilt
+  // on ShopCX from our mirror first, and the op continues on the shopcx branch below.
+  {
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   {
     const { resolveBillingSource } = await import("@/lib/internal-subscription");
     const engine = await resolveBillingSource(workspaceId, contractId);
@@ -1655,6 +1708,13 @@ export async function subSwapVariant(
   newVariantId: string,
   quantity: number = 1,
 ): Promise<{ success: boolean; error?: string; newLineGid?: string; permanent?: boolean; declineErrorKey?: string; priceGuardRefusal?: PriceGuardRefusal }> {
+  // ⭐ appstle_retired chokepoint (no-op while the switch is off): a retired-Appstle sub is rebuilt
+  // on ShopCX from our mirror first, and the op continues on the shopcx branch below.
+  {
+    const ens = await ensureShopcxEngine(workspaceId, contractId, "change");
+    if (!ens.ok) return { success: false, error: ensureFailureText(ens) };
+    contractId = ens.contractId;
+  }
   if (await isInternalSubscription(workspaceId, contractId)) {
     return internalSubSwapVariant(workspaceId, contractId, oldVariantId, newVariantId, quantity);
   }

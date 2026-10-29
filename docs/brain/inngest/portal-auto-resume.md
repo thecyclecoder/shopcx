@@ -74,3 +74,10 @@ the cron handles everything.
 ---
 
 [[../README]] · [[../integrations/inngest]] · [[../../CLAUDE]]
+
+## Blocked resumes stop retrying (2026-10-29)
+
+When the SDK refuses a resume with `needs_payment_method` or `needs_address` (a never-migrated Appstle
+sub that `ensureShopcxEngine` cannot rebuild without a card or a complete address), the cron clears
+`pause_resume_at` so the row stops being selected every hour, leaves it PAUSED (never billed), and writes
+a `portal.subscription.auto_resume_blocked` customer event naming the reason for CS. Outcome: `blocked: <reason>`.

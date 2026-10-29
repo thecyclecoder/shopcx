@@ -142,6 +142,20 @@ Canonical subscription mutation surface for the Commerce SDK. Every subscription
 **`export type { SubscriptionView, SubscriptionLineView, SubscriptionPricingView }`**
 - Re-exported from [[./types]] (commerce SDK internal type set).
 
+## ⭐ The `appstle_retired` chokepoint (2026-10-26)
+
+Every op calls [[commerce__shopcx-revive]] `ensureShopcxEngine(ws, contractId, intent)` right after
+`resolveLiveContractId`. Switch OFF (default) → no-op, identical behaviour. Switch ON + an Appstle
+row: `subscriptionAction` cancel/pause → our row only (`handledLocally`); resume and every other op
+→ `buildShopcxFromMirror` rebuilds the sub on ShopCX from our mirror, the contract id is rebound, and
+the op runs on the shopcx branch (a just-built contract is born ACTIVE, so `resume` skips the vendor
+call and applies only the local truth). Date changes build on the requested date, payment-method
+switches with the requested card, address changes with the new address (a cancelled sub records the
+address locally only). `subscriptionGetUpcomingOrders` refuses for a retired-Appstle sub (a read
+never builds); `subscriptionSendPaymentUpdateEmail` sends our recovery email instead of Appstle's.
+Typed refusals surface as `{ success:false, error:"<reason>: …" }` (`needs_payment_method`,
+`needs_address`, `subscription_cancelled`, …).
+
 ## Pattern: Internal-vs-Appstle branching
 
 **Every dispatcher first calls `resolveLiveContractId`** ([[internal-subscription]]). An old (pre-migration) Appstle id from a cancel-journey snapshot, a cached portal, ticket history or an exhausted dunning cycle resolves to the live migrated row and its current id. Before this, it fell through to Appstle and acted on the dead contract.

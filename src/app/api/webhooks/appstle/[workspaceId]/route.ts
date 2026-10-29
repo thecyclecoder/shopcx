@@ -74,6 +74,13 @@ export async function POST(
   { params }: { params: Promise<{ workspaceId: string }> }
 ) {
   const { workspaceId } = await params;
+  // ⭐ Appstle is retired (uninstalled): every row it could describe is either rebuilt on ShopCX
+  // or a mirror we own now. A late status webhook (e.g. the uninstall's own cancels) must not
+  // rewrite those rows, and the handler's follow-up Appstle calls would only fail. Ack and drop.
+  {
+    const { isAppstleRetired } = await import("@/lib/appstle-retired");
+    if (await isAppstleRetired()) return NextResponse.json({ ok: true, ignored: "appstle_retired" });
+  }
   const body = await request.text();
   // Svix/webhook headers — Appstle uses "webhook-*" prefix instead of "svix-*"
   const headers = {

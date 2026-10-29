@@ -349,6 +349,8 @@
     "test:commerce-drift-internal-exclusion": "tsx --test src/lib/commerce/shopcx-drift-reconciler.internal-exclusion.test.ts",
     "test:commerce-subscription-create-hydrate": "tsx --test src/lib/commerce/subscription.create-hydrate.test.ts",
     "test:commerce-subscription-update-shipping-address": "tsx --test src/lib/commerce/subscription.updateShippingAddress.test.ts",
+    "test:commerce-shopcx-revive": "tsx --test src/lib/commerce/shopcx-revive.test.ts",
+    "test:appstle-retired": "tsx --test src/lib/appstle-retired.test.ts",
     "test:commerce-refund": "tsx --test src/lib/commerce/refund.test.ts",
     "test:commerce-price-freeship": "tsx --test src/lib/commerce/price.freeship.test.ts",
     "test:pricing-freeship-guarantee": "tsx --test src/lib/pricing.freeship-guarantee.test.ts",
@@ -403,7 +405,9 @@
     "test:shopcx-drift-reconciler-dunning-statuses": "tsx --test src/lib/commerce/shopcx-drift-reconciler.dunning-statuses.test.ts",
     "test:shopcx-renewal-anchor": "tsx --test src/lib/inngest/shopcx-renewal-anchor.test.ts",
     "test:shopcx-anchors": "tsx --test src/lib/commerce/anchors.test.ts",
-    "test:first-touch": "tsx --test src/lib/first-touch.test.ts"
+    "test:first-touch": "tsx --test src/lib/first-touch.test.ts",
+    "test:shopcx-swap-grandfather": "tsx --test src/lib/commerce/shopcx-line-ops.swap-grandfather.test.ts",
+    "test:migrate-detect-drift": "tsx --test src/lib/commerce/migrate-detect-drift.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.165",

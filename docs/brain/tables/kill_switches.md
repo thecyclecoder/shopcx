@@ -31,6 +31,19 @@ The **universal on/off primitive** behind the CEO Control Tower's kill switch ([
 - **`POST /api/developer/control-tower/switch`** ([src/app/api/developer/control-tower/switch/route.ts](../../../src/app/api/developer/control-tower/switch/route.ts)) — the CEO-only writer ([[../specs/a-kill-switch-can-always-be-turned-back-on]] Phase 1). Owner-gated (mirrors the sibling `/api/developer/control-tower/*` routes — `workspace_members.role='owner'`), validates `node_id` through [[../libraries/control-tower-node-registry|resolveNodeOwner]] + slug variants (rejects an unknown node with 400 — the table's `NODE MUST EXIST IN THE REGISTRY` invariant), and calls `invalidateKillSwitchCache()` after every write so the toggle takes effect within one tick. Body `{ node_id, off, reason? }`. On `off=true` UPSERTs on `node_id` (scope mirrored from the registry — `cron`/`reactive` bucket to `tool`, `inline-agent` to `agent`); on `off=false` DELETEs the row (MISSING ROW ⇒ ON per the fail-open invariant — clearing is a delete, NOT a flag flip), deleting both the canonical id AND the caller's raw input so a legacy row stored under the bare slug (like the `ad-creative` freeze that lingered 2026-07-15 → 2026-08-18) cannot survive on the other key. Records a [[director_activity]] row with `action_kind='kill_switch_toggle'` for BOTH set AND clear — the DELETE leaves nothing behind, so the ledger is the only surviving record of who lifted a freeze.
 - **`scripts/_check-kill-switch-writer.ts`** ([[../specs/a-kill-switch-can-always-be-turned-back-on]] Phase 2) — the build-time guard that keeps the claim above honest. Two assertions per `predeploy` run: (a) the sanctioned route file EXISTS and exports a POST handler (deleting the route fails CI with a named offender — the exact drift that let the ad-creative freeze survive a month); (b) no OTHER `.ts`/`.tsx` under `src/`+`scripts/` performs an insert/update/upsert/delete against `public.kill_switches` (a second writer re-opens the CEO-only hole). Legitimate second callers can be added to `WRITE_ALLOWLIST` with a written justification — the guard is tightened, never deleted, when it first fires. Wired into `check:kill-switch-writer` in the `predeploy:static` chain.
 
+## Special row: `appstle_retired` (not an org node)
+
+`node_id = 'appstle_retired'` is the one non-registry row this table carries. Same polarity as every
+other row — present ⇒ switched OFF — where the thing switched off is **the Appstle billing engine**:
+the row means Appstle is **retired**. Missing row (the shipped default) ⇒ Appstle live ⇒ production
+unchanged. Read by [[../libraries/appstle-retired]] `isAppstleRetired()` — **own row only, no
+ancestor cascade** (a department freeze must never re-route billing engines). Because it is not a
+registered node, the Control Tower switch route rejects it; Dylan flips it with SQL (see that page /
+the migration `20270112120000_appstle_retired_switch_and_shopcx_revive_claim.sql`, which writes NO
+row). When on: every revive/change of a never-migrated Appstle sub is built on ShopCX from our
+`subscriptions` mirror ([[../libraries/commerce__shopcx-revive]]), Appstle cancel/pause become
+local-only writes, and every Appstle wrapper throws `AppstleRetiredError`.
+
 ## Migration
 
 `supabase/migrations/20261013000000_kill_switches.sql` (apply: `npx tsx scripts/apply-kill-switches-migration.ts`). Idempotent — `create table if not exists` + RLS policies (drop-if-exists then create). Seeded **empty** on purpose — an unconfigured registry never silently switches a node off. Follow-up: `supabase/migrations/20261016000000_lock_kill_switches_service_role_only.sql` (apply: `npx tsx scripts/apply-lock-kill-switches-service-role-only.ts`) drops the broad `_select to authenticated` policy so only the `_service` policy grants direct table access.

@@ -117,6 +117,15 @@ Drives [[../tables/billing_forecast_events]] (sub created, cancelled, paused, fr
 - **Two payment helper endpoints** exist for "switch card" — `update-existing-payment-method` (what we use) vs Appstle's UI flow. Don't mix them.
 - **Audit log fills fast.** [[../tables/appstle_api_calls]] gets a row per call; expect to query it via index on `(workspace_id, created_at)`.
 
+## Retirement — the `appstle_retired` switch (2026-10-26)
+
+Dylan is uninstalling the app. After that every call below fails, so:
+
+- **Switch:** `kill_switches.node_id='appstle_retired'` ([[../libraries/appstle-retired]]). Row present ⇒ Appstle retired. Shipped OFF (no row) — production unchanged until it is set.
+- **Rule: revive builds on ShopCX from OUR mirror, never from Appstle.** With the switch on, every SDK op calls [[../libraries/commerce__shopcx-revive]] `ensureShopcxEngine` first: an Appstle sub's cancel/pause is written to our row only; any revive or change runs `buildShopcxFromMirror` (plan from `subscriptions` with `planMigration`'s pricing core, card from the customer's Shopify payment methods, address from the row → `customers.default_address`, delivery price KEPT, lapsed date rolled forward), flips the row to `billing_source='shopcx'`, then runs the op on the ShopCX branch. **No bulk Appstle backfill** of cancelled subs (a ~26K-call backfill was refused) — a row is rebuilt only when touched.
+- **Fail loud:** `getAppstleCredentials`, `getAppstleConfig`, `loggedAppstleFetch`, `healOnTouch` throw `AppstleRetiredError`; the sweeper, snapshot puller, `executeMigration`, migration-audit's Appstle check and migration-fix's `appstle_cancel` skip cleanly.
+- ⚠️ Setting the switch while Appstle still BILLS can double-charge a touched ACTIVE Appstle sub (the Appstle contract cannot be cancelled without an Appstle call). Flip it with the uninstall.
+
 ## Files
 
 - `src/lib/appstle.ts` — All endpoint helpers

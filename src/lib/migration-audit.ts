@@ -499,6 +499,12 @@ async function verifyAppstleCancelled(
   push: (key: string, ok: boolean, detail?: string) => void,
 ): Promise<void> {
   if (!appstleContractId) { push("appstle_cancelled", true, "no appstle contract id"); push("cancel_reason", true, "n/a"); return; }
+  // appstle_retired: Appstle is uninstalled — it bills nobody, so there is nothing to verify. Skip
+  // cleanly (same shape as "not configured") so the migration-audit-retry cron does not error.
+  {
+    const { isAppstleRetired } = await import("@/lib/appstle-retired");
+    if (await isAppstleRetired()) { push("appstle_cancelled", true, "appstle_retired — skipped"); push("cancel_reason", true, "skipped"); return; }
+  }
   try {
     const { decrypt } = await import("@/lib/crypto");
     const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", workspaceId).maybeSingle();

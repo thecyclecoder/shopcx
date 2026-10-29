@@ -1012,6 +1012,19 @@ async function resetBillingDateAfterDunning(
     return;
   }
 
+  // ⭐ appstle_retired: never reach Appstle. Through the SDK, whose chokepoint rebuilds the sub on
+  // ShopCX from our mirror (on this date) — or returns a typed refusal (no usable card/address),
+  // logged here. A no-op branch while the switch is off.
+  {
+    const { isAppstleRetired } = await import("@/lib/appstle-retired");
+    if (await isAppstleRetired()) {
+      const { subscriptionUpdateNextBillingDate } = await import("@/lib/commerce/subscription");
+      const r = await subscriptionUpdateNextBillingDate(workspaceId, shopifyContractId, safeDate.toISOString());
+      if (!r.success) console.error(`[Dunning] retired-Appstle date reset for ${shopifyContractId} not applied on ShopCX: ${r.error}`);
+      return;
+    }
+  }
+
   // Update in Appstle via billing date change endpoint
   try {
     const { data: ws } = await admin.from("workspaces").select("appstle_api_key_encrypted").eq("id", workspaceId).single();

@@ -153,6 +153,11 @@ export async function dunningUnskip(
     return;
   }
   if (!appstleBillingAttemptId) return;
+  {
+    // Nothing to unskip on a retired Appstle — the call would only throw AppstleRetiredError.
+    const { isAppstleRetired } = await import("@/lib/appstle-retired");
+    if (await isAppstleRetired()) return;
+  }
   const { subscriptionUnskipOrder } = await import("@/lib/commerce/subscription");
   await subscriptionUnskipOrder(workspaceId, appstleBillingAttemptId);
 }

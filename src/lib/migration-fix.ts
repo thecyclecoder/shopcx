@@ -284,6 +284,12 @@ export async function applyMigrationFix(
     const payload = (action.payload || {}) as AppstleCancelPayload;
     const contractId = String(payload.appstle_contract_id || audit.appstle_contract_id || "");
     if (!contractId) return { ok: false, detail: "appstle_cancel: no appstle_contract_id" };
+    {
+      // appstle_retired: Appstle is uninstalled, so a lingering Appstle contract bills nobody and
+      // cannot be cancelled anyway. Skip cleanly rather than erroring on a dead vendor.
+      const { isAppstleRetired } = await import("@/lib/appstle-retired");
+      if (await isAppstleRetired()) return { ok: true, detail: `appstle_cancel: skipped — appstle_retired is on (contract ${contractId} lives on a retired vendor)` };
+    }
     try {
       const { appstleSubscriptionAction } = await import("@/lib/appstle");
       const r = await appstleSubscriptionAction(workspaceId, contractId, "cancel", payload.reason || "migrated to shopcx", "ShopCX migration-fix");

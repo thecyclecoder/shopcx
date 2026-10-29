@@ -76,6 +76,7 @@ const ENGINE_RESOLVERS: ReadonlyArray<{ path: string; reason: string }> = [
   { path: "src/lib/internal-subscription.ts", reason: "defines resolveBillingSource itself" },
   { path: "src/lib/dunning-charge.ts", reason: "the dunning charge chokepoint" },
   { path: "src/lib/migrate-to-internal.ts", reason: "converts BETWEEN engines; must read the source engine" },
+  { path: "src/lib/commerce/shopcx-revive.ts", reason: "ensureShopcxEngine — the appstle_retired chokepoint the SDK calls; must detect an Appstle sub to rebuild it on ShopCX" },
   { path: "src/lib/appstle-pricing.ts", reason: "declines non-Appstle work (a decline, not a dispatch — see VENDOR_MODULES)" },
   // Portal handlers + surfaces that legitimately branch. Each is a place a FOURTH engine must be
   // remembered — prefer pushing new branches down into a chokepoint over extending this list.
