@@ -49,7 +49,7 @@ type Admin = ReturnType<typeof createAdminClient>;
  * All writes go through the `updateDunningCycle` SDK ([[libraries/dunning]]) —
  * per CLAUDE.md, never a raw `.from('dunning_cycles')` write.
  */
-async function repointOpenDunningCyclesForMigration(
+export async function repointOpenDunningCyclesForMigration(
   admin: Admin,
   workspaceId: string,
   subscriptionId: string,

@@ -60,3 +60,10 @@ test("nothing claims the id → null (callers keep the input; routers keep their
   assert.equal(pickContractRefRow([row({ name: "other", shopify_contract_id: "999" })], OLD), null);
   assert.equal(pickContractRefRow([], OLD), null);
 });
+
+test("a subscriptions row UUID is recognised (and resolved by id, never as a contract id)", async () => {
+  const { isSubscriptionRowUuid } = await import("./internal-subscription");
+  assert.equal(isSubscriptionRowUuid("1881a20d-0bd6-4353-8860-14cd79ff14ca"), true);
+  assert.equal(isSubscriptionRowUuid("54132179117"), false);
+  assert.equal(isSubscriptionRowUuid("internal-3f9a0c1b2d4e5f60"), false);
+});

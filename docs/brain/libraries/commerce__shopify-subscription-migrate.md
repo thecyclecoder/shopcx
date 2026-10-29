@@ -462,3 +462,12 @@ no_lines_after_rules                          1
 
 [[../tables/appstle_contract_snapshots]] · [[commerce__shopify-subscription-client]] ·
 [[appstle-snapshot]] · [[../inngest/shopify-subscription-renewals]] · [[../lifecycles/shopcx-subscriptions]]
+
+### Open dunning cycles follow the swap (2026-10-29)
+
+After `swap-local` flips the row, `executeMigration` calls `repointOpenDunningCyclesForMigration`
+([[migrate-to-internal]]) to move every OPEN `dunning_cycles` row onto the new contract id (a
+collision on cycle_number closes the orphan as `orphaned_by_migration`). Without it, a sub migrated
+mid-dunning keeps its cycle on the cancelled Appstle id, and the payday retry's date reset finds no
+row. Non-fatal; [[dunning-strand-detector]] is the backstop.
+

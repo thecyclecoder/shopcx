@@ -1170,6 +1170,16 @@ export async function executeMigration(
     if (!swapped?.length) {
       return { ok: false, stage: "swap-local", error: `subscription ${subId} matched zero rows — refusing to cancel Appstle`, plan, newContractId };
     }
+    // ⭐ Re-point OPEN dunning cycles onto the new contract, exactly as the internal migration
+    // does. Left on the Appstle id, the payday retry and the post-dunning date reset look the row
+    // up by a contract id it no longer carries (the stranded-cycle class, dunning-strand-detector).
+    // Non-fatal: the swap is done, and the strand detector surfaces any cycle this misses.
+    try {
+      const { repointOpenDunningCyclesForMigration } = await import("@/lib/migrate-to-internal");
+      await repointOpenDunningCyclesForMigration(admin, workspaceId, subId, newContractId.replace("gid://shopify/SubscriptionContract/", ""));
+    } catch (e) {
+      console.error(`[migrate] ${newContractId}: swapped, but re-pointing open dunning cycles failed:`, e instanceof Error ? e.message : e);
+    }
   }
 
   const cancelled = await appstleCancelContractVendorOnly(workspaceId, appstleContractId);

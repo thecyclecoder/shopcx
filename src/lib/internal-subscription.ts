@@ -83,6 +83,12 @@ type ContractRefRow = Record<string, unknown> & {
  * artefact, the migrated row is the subscription. Among migrated rows: internal first, then
  * live, then newest. A row mid-migration (pre-marked: both columns equal the id) is CURRENT.
  */
+const ROW_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** True for a `subscriptions.id` UUID — never a contract id (exported for tests). */
+export function isSubscriptionRowUuid(ref: string): boolean {
+  return ROW_UUID.test(ref);
+}
+
 async function findSubByContractRef(
   admin: ReturnType<typeof createAdminClient>,
   workspaceId: string,
@@ -90,6 +96,16 @@ async function findSubByContractRef(
   cols: string,
 ): Promise<{ row: ContractRefRow | null; error: string | null }> {
   const select = `${cols}, id, shopify_contract_id, migrated_from_contract_id, is_internal, status, created_at`;
+  // ⭐ A subscriptions ROW UUID is not a contract id, but callers hand one in (the Sol mechanism
+  // arm seeded `identified_subscription` from `orders.subscription_id`). Unmatched, it fell to the
+  // "no row ⇒ appstle" default and a ShopCX customer's cancel went to Appstle: our row said
+  // cancelled, the Shopify contract stayed ACTIVE (2026-10-28, sub 1881a20d). Resolve it by id.
+  if (isSubscriptionRowUuid(contractId)) {
+    const { data, error } = await admin
+      .from("subscriptions").select(select)
+      .eq("workspace_id", workspaceId).eq("id", contractId).maybeSingle();
+    return { row: (data as unknown as ContractRefRow | null) ?? null, error: error?.message ?? null };
+  }
   if (!SAFE_CONTRACT_ID.test(contractId)) {
     const { data, error } = await admin
       .from("subscriptions").select(select)
