@@ -47,6 +47,10 @@ const SANCTIONED_ROUTE = "src/app/api/developer/control-tower/switch/route.ts";
 const WRITE_ALLOWLIST = new Set<string>([
   SANCTIONED_ROUTE,
   "scripts/_check-kill-switch-writer.ts",
+  // The `appstle_retired` switch is not a control-tower node, so the sanctioned route rejects it.
+  // This owner-gated route is its only writer (same contract: upsert on, delete off, cache
+  // invalidation, director_activity on every flip). See docs/brain/libraries/appstle-retired.md.
+  "src/app/api/workspaces/[id]/appstle-retired/route.ts",
 ]);
 
 /** Table under guard. */

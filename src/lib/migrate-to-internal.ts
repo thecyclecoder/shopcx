@@ -22,7 +22,7 @@ import { randomUUID } from "node:crypto";
 import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getAppstleConfig } from "@/lib/subscription-items";
-import { isAppstleRetiredError } from "@/lib/appstle-retired";
+import { isAppstleRetired, isAppstleRetiredError } from "@/lib/appstle-retired";
 import { isEnginePromotion, type BillingSource } from "@/lib/internal-subscription";
 import { subscriptionCancelAtVendorForMigration } from "@/lib/commerce/subscription";
 import { inferAppstleLineBase, resolveLineSnsPct, type AppstleLine } from "@/lib/appstle-pricing";
@@ -781,11 +781,18 @@ export async function migrateCustomerAppstleSubsToInternal(
       result.skipped.push({ contractId, reason: `not_a_promotion_from_${engine}` });
       continue;
     }
-    if (engine === "appstle" && !cfg) { result.failed.push({ contractId, error: "Appstle not configured (or appstle_retired) — an Appstle sub is rebuilt on ShopCX from the mirror instead" }); continue; }
+    // ⭐ Appstle RETIRED (uninstalled): nothing can be read from it and nothing there can bill, so a
+    // never-migrated Appstle sub of ANY status migrates from our own mirror row — exactly like the
+    // cancelled-sub branch below. Without this, a customer who adds a card (the add-card step a
+    // revive asks for when they have no Shopify card) vaults it and their sub stays stranded.
+    const retiredAppstle = engine === "appstle" && !cfg && (await isAppstleRetired());
+    if (engine === "appstle" && !cfg && !retiredAppstle) { result.failed.push({ contractId, error: "Appstle not configured — sub left on Appstle" }); continue; }
     try {
       // Read the LIVE contract from WHICHEVER engine holds it — source of truth for current
       // (grandfathered) prices, cadence, and next billing date.
-      const live = engine === "shopcx"
+      const live = retiredAppstle
+        ? null
+        : engine === "shopcx"
         ? await readShopcxContractAsLine(workspaceId, contractId)
         : await (
             await fetch(
@@ -853,7 +860,26 @@ export async function migrateCustomerAppstleSubsToInternal(
         // No usable live Appstle data. Only safe for cancelled subs (they won't
         // bill) — migrate them onto internal rails using the local row. An
         // active/paused sub we can't read is left alone (re-runnable).
-        if (!isCancelled) { result.skipped.push({ contractId, reason: `${engine}_unavailable` }); continue; }
+        if (!isCancelled && !retiredAppstle) { result.skipped.push({ contractId, reason: `${engine}_unavailable` }); continue; }
+        if (retiredAppstle) {
+          // A retired-Appstle sub may RESUME and bill, so its mirror lines (Appstle-shaped: sku,
+          // Shopify variant id, currentPrice in cents) go through the same converter as a live
+          // Appstle read — catalog UUID refs, grandfathered overrides, protection → flag.
+          const mirrorLines = ((sub.items as Array<Record<string, unknown>>) || []).map((i) => ({
+            quantity: Number(i.quantity ?? 1) || 1,
+            currentPrice: { amount: (Number(i.price_cents ?? 0) / 100).toFixed(2) },
+            title: i.title ?? "",
+            variantTitle: i.variant_title ?? "",
+            variantId: i.variant_id ? `gid://shopify/ProductVariant/${String(i.variant_id).split("/").pop()}` : "",
+            sku: i.sku ?? "",
+          }));
+          ({ items, shippingProtectionCents, droppedLines, excludedLines } = await appstleLinesToInternalItems(admin, workspaceId, mirrorLines));
+          if (!items.length && excludedLines.length) { result.skipped.push({ contractId, reason: "only_excluded_products" }); continue; }
+          if (!items.length) { result.skipped.push({ contractId, reason: "retired_appstle_mirror_has_no_lines" }); continue; }
+          interval = String(sub.billing_interval || "week").toLowerCase();
+          intervalCount = Number(sub.billing_interval_count || 1);
+          nextBillingDate = (sub.next_billing_date as string) || new Date().toISOString();
+        } else {
         const local = withoutExcludedItems((sub.items as Array<Record<string, unknown>>) || []);
         if (!local.items.length && local.excludedLines.length) { result.skipped.push({ contractId, reason: "only_excluded_products" }); continue; }
         items = local.items;
@@ -861,6 +887,7 @@ export async function migrateCustomerAppstleSubsToInternal(
         interval = String(sub.billing_interval || "week").toLowerCase();
         intervalCount = Number(sub.billing_interval_count || 1);
         nextBillingDate = (sub.next_billing_date as string) || new Date().toISOString();
+        }
       }
 
       // Flip the EXISTING row in place → internal, billable customer, PRESERVING
