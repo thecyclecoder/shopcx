@@ -521,6 +521,101 @@ export async function claimRegenSpendSlot(
 }
 
 /**
+ * Net-zero reissue policy (spec:
+ * loyalty-expired-unused-reissue-must-be-net-zero-never-fresh-redeem-points).
+ *
+ * The CEO 2026-08-28 loyalty policy requires an EXPIRED-UNUSED loyalty coupon
+ * be reissued at NO points cost ("they already paid for it… issued at no points
+ * cost"). A `loyalty_redemptions` row is REISSUABLE via the apply_loyalty_coupon
+ * regen fallback iff:
+ *   • status is still `active` — so `claimRegenSpendSlot` can compare-and-set
+ *     active→expired and the regen branch refunds the original points and
+ *     re-spends them NET-ZERO. A `rolled_back`/already-`expired` row can't be
+ *     claimed; an `applied`/consumed row was already used up, and
+ *   • its Shopify `endsAt` has already passed (`expires_at` < now) — the live
+ *     code no longer applies, which is exactly why the customer is asking to
+ *     "use" the coupon she already owns.
+ *
+ * Minting a FRESH `redeem_points` for the same value instead double-charges
+ * points for value already paid for (ticket 67eb2e40: Sol T3 spent a second
+ * 1,500 pts to mint LOYALTY-15-U4WVAD while three expired-unused $15 coupons
+ * sat unredeemed). Pure so the `redeem_points` guard and the apply-side
+ * stacking carve-out share ONE definition. Exported for unit tests.
+ */
+export function isReissuableExpiredRedemptionRow(
+  row: { status?: unknown; expires_at?: unknown } | null | undefined,
+  nowMs: number,
+): boolean {
+  if (!row) return false;
+  if (row.status !== "active") return false;
+  if (typeof row.expires_at !== "string") return false;
+  const exp = Date.parse(row.expires_at);
+  return Number.isFinite(exp) && exp < nowMs;
+}
+
+/**
+ * All reissuable expired-unused loyalty redemptions of a given discount value
+ * for one member. Used by the `redeem_points` guard to refuse a fresh mint when
+ * value the customer already owns can be reissued net-zero. Fetches the
+ * member's redemptions of that value and filters in JS through the shared
+ * `isReissuableExpiredRedemptionRow` predicate (so the "reissuable" definition
+ * lives in exactly one place). Exported for unit tests.
+ */
+export async function findReissuableExpiredLoyaltyRedemptions(
+  admin: Admin,
+  workspaceId: string,
+  memberId: string,
+  discountValue: number,
+  nowMs: number,
+): Promise<{ discount_code: string; expires_at: string }[]> {
+  const { data } = await admin
+    .from("loyalty_redemptions")
+    .select("discount_code, expires_at, status, discount_value")
+    .eq("workspace_id", workspaceId)
+    .eq("member_id", memberId)
+    .eq("discount_value", discountValue);
+  const rows = (data ?? []) as Array<{
+    discount_code?: unknown;
+    expires_at?: unknown;
+    status?: unknown;
+  }>;
+  return rows
+    .filter((r) => isReissuableExpiredRedemptionRow(r, nowMs))
+    .map((r) => ({
+      discount_code: String(r.discount_code),
+      expires_at: String(r.expires_at),
+    }));
+}
+
+/**
+ * True when `code` names a reissuable expired-unused redemption (same
+ * predicate as above, keyed by the single code). The apply-side stacking guard
+ * uses it to carve out the net-zero reissue path: a reissue of an EXPIRED code
+ * must still reach the regen fallback even when the sub already carries a
+ * DIFFERENT loyalty coupon (the regen's apply REPLACES via
+ * `applyDiscountWithReplace` / the internal one-coupon ceiling, so no stacking
+ * occurs and the single-$ ceiling holds). Without this carve-out the stacking
+ * guard refuses before the regen path can run. Exported for unit tests.
+ */
+export async function isReissuableExpiredLoyaltyCode(
+  admin: Admin,
+  workspaceId: string,
+  code: string,
+  nowMs: number,
+): Promise<boolean> {
+  const { data } = await admin
+    .from("loyalty_redemptions")
+    .select("status, expires_at")
+    .eq("workspace_id", workspaceId)
+    .eq("discount_code", code)
+    .maybeSingle();
+  return isReissuableExpiredRedemptionRow(
+    data as { status?: unknown; expires_at?: unknown } | null,
+    nowMs,
+  );
+}
+
+/**
  * Phase-1 guard for `apply_loyalty_coupon` (spec:
  * loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen).
  *
@@ -2076,6 +2171,38 @@ export const directActionHandlers: Record<
     const member = await getMemberByCustomerId(ctx.workspaceId, ctx.customerId);
     if (!member) return { success: false, error: "No loyalty member" };
 
+    // Net-zero reissue guard (spec:
+    // loyalty-expired-unused-reissue-must-be-net-zero-never-fresh-redeem-points).
+    // If the member already owns EXPIRED-UNUSED loyalty coupon(s) of this
+    // value, the CEO 2026-08-28 loyalty policy requires they be reissued at NO
+    // points cost — minting a FRESH redeem_points here would double-charge
+    // points for value already paid for (ticket 67eb2e40: Sol T3 spent a second
+    // 1,500 pts to mint LOYALTY-15-U4WVAD while three expired-unused $15 coupons
+    // sat unredeemed). Block the mint and steer to the net-zero expired-code
+    // reissue path (apply_loyalty_coupon with one of those codes → the regen
+    // fallback refunds the original redemption's points and re-spends them).
+    // Runs BEFORE validateRedemption so a customer who can't afford a fresh
+    // redemption is still steered to the (free) reissue she's entitled to.
+    const reissuable = await findReissuableExpiredLoyaltyRedemptions(
+      ctx.admin,
+      ctx.workspaceId,
+      member.id,
+      tier.discount_value,
+      Date.now(),
+    );
+    if (reissuable.length > 0) {
+      const codes = reissuable.map((r) => r.discount_code).join(", ");
+      return {
+        success: false,
+        error:
+          `Blocked: customer has ${reissuable.length} expired-unused $${tier.discount_value} ` +
+          `loyalty coupon(s) (${codes}) that must be reissued at NO points cost per the loyalty ` +
+          `reissue policy. Fire apply_loyalty_coupon with one of those expired codes (the net-zero ` +
+          `regen path refunds the original redemption's points and re-spends them) instead of ` +
+          `redeem_points, which would charge a fresh ${tier.points_cost} points for value already owned.`,
+      };
+    }
+
     const validation = validateRedemption(member, tier);
     if (!validation.valid) return { success: false, error: validation.error };
 
@@ -2249,11 +2376,26 @@ export const directActionHandlers: Record<
             couponCode: code,
           };
         }
-        const capDollars = (LOYALTY_REMEDY_MAX_CENTS / 100).toFixed(0);
-        return {
-          success: false,
-          error: `Subscription ${p.contract_id} already has a loyalty coupon applied (${different[0]}) — no stacking (single-$${capDollars} ceiling)`,
-        };
+        // Net-zero reissue carve-out (spec:
+        // loyalty-expired-unused-reissue-must-be-net-zero-never-fresh-redeem-points).
+        // A reissue of an EXPIRED-UNUSED loyalty code of the same value must
+        // still reach the apply→regen fallback even when the sub already
+        // carries a DIFFERENT loyalty coupon. The regen's apply REPLACES the
+        // existing discount (applyDiscountWithReplace on Appstle subs / the
+        // internal one-coupon ceiling), so no stacking occurs and the single-$
+        // ceiling holds — the customer simply gets back value she already paid
+        // for at no net points cost. Without this carve-out the stacking guard
+        // refuses before the regen path can run (ticket 67eb2e40 gap 2:
+        // reissue unreachable once the sub carries the wrongly-minted coupon).
+        if (await isReissuableExpiredLoyaltyCode(ctx.admin, ctx.workspaceId, code, Date.now())) {
+          // fall through to the apply→regen path below.
+        } else {
+          const capDollars = (LOYALTY_REMEDY_MAX_CENTS / 100).toFixed(0);
+          return {
+            success: false,
+            error: `Subscription ${p.contract_id} already has a loyalty coupon applied (${different[0]}) — no stacking (single-$${capDollars} ceiling)`,
+          };
+        }
       }
     }
 
