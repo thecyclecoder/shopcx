@@ -71,3 +71,12 @@ request, the sweeper / snapshot / executeMigration skip, and the gate is open wh
 - `dunningUnskip` returns early on an Appstle sub when retired.
 - The Appstle webhook route acks with `{ ignored: "appstle_retired" }` and processes nothing.
 - `portal-auto-resume` stops retrying a resume refused for a missing card/address ([[../inngest/portal-auto-resume]]).
+
+## Settings button (2026-10-29)
+
+Settings > Subscriptions shows an **Appstle** card (owner only): the current state, the count of ACTIVE
+subs still billed by Appstle, and a Retire / Restore button. It calls
+`GET|POST /api/workspaces/[id]/appstle-retired` (`src/app/api/workspaces/[id]/appstle-retired/route.ts`), the
+switch's only code writer (allowlisted in `scripts/_check-kill-switch-writer.ts`): ON upserts the row, OFF
+deletes it, both invalidate the caches and write a `director_activity` `kill_switch_toggle` row. The SQL
+above still works.
