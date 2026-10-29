@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: ad hoc SELECT on non-existent orders.cancelled_at** · verified 2026-10-29 · → [[../lifecycles/control-tower]]
