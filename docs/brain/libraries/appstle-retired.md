@@ -60,3 +60,14 @@ silently re-route billing engines.
 
 `npm run test:appstle-retired` (`src/lib/appstle-retired.test.ts`): each wrapper throws before any
 request, the sweeper / snapshot / executeMigration skip, and the gate is open when the switch is off.
+
+## Paths gated on the switch (added 2026-10-29)
+
+- `subscriptionGetLiveContract` returns `internal: true` (empty lines) unless the sub is Appstle-billed AND
+  Appstle is live — the agent's variant-driven `remove_item` then hands off to `subRemoveItem`. This also
+  fixes ShopCX subs, which used to fall through to an Appstle fetch of a Shopify contract id.
+- Agent `update_shipping_address` skips `healOnTouch` when retired (the SDK call rebuilds on ShopCX).
+- Portal loyalty apply treats a retired-Appstle sub as the internal arm (`subscriptionApplyCoupon`).
+- `dunningUnskip` returns early on an Appstle sub when retired.
+- The Appstle webhook route acks with `{ ignored: "appstle_retired" }` and processes nothing.
+- `portal-auto-resume` stops retrying a resume refused for a missing card/address ([[../inngest/portal-auto-resume]]).

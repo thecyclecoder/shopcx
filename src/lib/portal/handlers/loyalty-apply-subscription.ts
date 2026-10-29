@@ -200,7 +200,11 @@ export const loyaltyApplyToSubscription: RouteHandler = async ({ auth, route, re
 
   // ShopCX joins the internal arm. The Appstle arm below is vendor-specific.
   const { resolveBillingSource } = await import("@/lib/internal-subscription");
-  const isInternalLoyalty = (await resolveBillingSource(auth.workspaceId, String(contractId))) !== "appstle";
+  const { isAppstleRetired } = await import("@/lib/appstle-retired");
+  // A retired Appstle joins the internal arm too: subscriptionApplyCoupon rebuilds the
+  // never-migrated sub on ShopCX (ensureShopcxEngine) and applies the code there.
+  const isInternalLoyalty =
+    (await resolveBillingSource(auth.workspaceId, String(contractId))) !== "appstle" || (await isAppstleRetired());
   if (isInternalLoyalty) {
     // Internal / shopcx sub — apply the loyalty code via the canonical
     // `subscriptionApplyCoupon` path (the same one the Sonnet apply_loyalty_coupon

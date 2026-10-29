@@ -159,7 +159,28 @@ export const portalAutoResumeCron = inngest.createFunction(
           return { contractId: sub.shopify_contract_id, outcome: "resumed" };
         } catch (err) {
           console.error(`[Auto-Resume] Failed for ${sub.shopify_contract_id}:`, err);
-          return { contractId: sub.shopify_contract_id, outcome: `error: ${errText(err).slice(0, 100)}` };
+          const msg = errText(err);
+          // ⭐ A never-migrated Appstle sub rebuilt on ShopCX can be refused for a missing card or
+          // address (ensureShopcxEngine). Retrying hourly cannot fix that, so stop selecting the
+          // row (it stays PAUSED, never billed) and record why on the customer's timeline for CS.
+          const blocked = /needs_payment_method|needs_address/.exec(msg)?.[0];
+          if (blocked) {
+            await admin.from("subscriptions")
+              .update({ pause_resume_at: null, updated_at: new Date().toISOString() })
+              .eq("id", sub.id);
+            if (sub.customer_id) {
+              await admin.from("customer_events").insert({
+                workspace_id: sub.workspace_id,
+                customer_id: sub.customer_id,
+                event_type: "portal.subscription.auto_resume_blocked",
+                source: "system",
+                summary: `Subscription #${sub.shopify_contract_id} could not auto-resume: ${blocked === "needs_address" ? "no complete shipping address" : "no usable payment method"} on file`,
+                properties: { shopify_contract_id: sub.shopify_contract_id, reason: blocked },
+              });
+            }
+            return { contractId: sub.shopify_contract_id, outcome: `blocked: ${blocked}` };
+          }
+          return { contractId: sub.shopify_contract_id, outcome: `error: ${msg.slice(0, 100)}` };
         }
       });
 

@@ -816,6 +816,18 @@ export async function subscriptionGetLiveContract(
     // even though the local items row still carries the variant (ticket c13fbad1).
     return { ok: true, internal: true, lines: { nodes: [] } };
   }
+  // ⭐ Only an APPSTLE-billed sub has an Appstle contract to read. A ShopCX sub (is_internal=false)
+  // used to fall through to an Appstle fetch of a Shopify contract id, so the agent's variant-driven
+  // remove_item failed on every migrated customer. A retired Appstle has nothing to read either.
+  // `internal: true` hands the caller to `subRemoveItem`, which routes by engine (and rebuilds a
+  // never-migrated sub on ShopCX via ensureShopcxEngine).
+  {
+    const { resolveBillingSource } = await import("@/lib/internal-subscription");
+    const { isAppstleRetired } = await import("@/lib/appstle-retired");
+    if ((await resolveBillingSource(workspaceId, contractId)) !== "appstle" || (await isAppstleRetired())) {
+      return { ok: true, internal: true, lines: { nodes: [] } };
+    }
+  }
   const { getAppstleConfig } = await import("@/lib/subscription-items");
   const cfg = await getAppstleConfig(workspaceId);
   if (!cfg) return { ok: false, error: "Subscription vendor not configured" };

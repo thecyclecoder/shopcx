@@ -3899,8 +3899,13 @@ export const directActionHandlers: Record<
     // Subscription branch — Appstle endpoint
     if (p.contract_id) {
       try {
-        const { healOnTouch } = await import("@/lib/commerce/pricing");
-        await healOnTouch(ctx.workspaceId, String(p.contract_id));
+        // healOnTouch repairs Appstle-side pricing; a retired Appstle has none to repair, and the
+        // SDK call below rebuilds a never-migrated sub on ShopCX itself (ensureShopcxEngine).
+        const { isAppstleRetired } = await import("@/lib/appstle-retired");
+        if (!(await isAppstleRetired())) {
+          const { healOnTouch } = await import("@/lib/commerce/pricing");
+          await healOnTouch(ctx.workspaceId, String(p.contract_id));
+        }
         // The vendor's GraphQL validation reads countryCode + provinceCode
         // specifically (the bare `country`/`province` fields aren't wired
         // to the SubscriptionDraftInput → deliveryMethod.shipping path).
