@@ -1,0 +1,1 @@
+- **Reissuing an expired-unused loyalty coupon must use the net-zero reissue path, never a fresh redeem_points that double-charges points** · verified 2026-10-29 · → [[../libraries/action-executor]]
