@@ -404,7 +404,8 @@
     "test:shopcx-renewal-anchor": "tsx --test src/lib/inngest/shopcx-renewal-anchor.test.ts",
     "test:shopcx-anchors": "tsx --test src/lib/commerce/anchors.test.ts",
     "test:first-touch": "tsx --test src/lib/first-touch.test.ts",
-    "test:shopcx-swap-grandfather": "tsx --test src/lib/commerce/shopcx-line-ops.swap-grandfather.test.ts"
+    "test:shopcx-swap-grandfather": "tsx --test src/lib/commerce/shopcx-line-ops.swap-grandfather.test.ts",
+    "test:migrate-detect-drift": "tsx --test src/lib/commerce/migrate-detect-drift.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.165",

@@ -428,10 +428,26 @@ export function detectDrift(
     return drift;
   }
   const key = (l: SnapshotLineIn) => `${l.sku ?? l.variant_id}`;
-  const snapBy = new Map(snapshotLines.map((l) => [key(l), l]));
+  // ⭐ Match lines as a MULTISET, not by SKU. A contract can carry the SAME SKU twice (a paid line
+  // plus a free/promo line of the same product). Keyed by SKU, the map kept only the last snapshot
+  // line, so every such contract read as drifted on every run and could never migrate (14 of the
+  // last 476, 2026-10-29). Pair each fresh line with an unused snapshot line of the same SKU,
+  // preferring an exact qty+price match.
+  const pool = snapshotLines.map((l) => ({ l, used: false }));
+  const sameSku = (f: SnapshotLineIn) => pool.filter((p) => !p.used && key(p.l) === key(f));
+  const exact = (f: SnapshotLineIn, p: { l: SnapshotLineIn }) =>
+    p.l.quantity === f.quantity && (p.l.effective_unit_cents ?? 0) === (f.effective_unit_cents ?? 0);
+  const unmatched: SnapshotLineIn[] = [];
   for (const f of freshLines) {
-    const s = snapBy.get(key(f));
-    if (!s) { drift.push(`new line ${key(f)}`); continue; }
+    const hit = sameSku(f).find((p) => exact(f, p));
+    if (hit) hit.used = true;
+    else unmatched.push(f);
+  }
+  for (const f of unmatched) {
+    const p = sameSku(f)[0];
+    if (!p) { drift.push(`new line ${key(f)}`); continue; }
+    p.used = true;
+    const s = p.l;
     if (s.quantity !== f.quantity) drift.push(`${key(f)} qty ${s.quantity} -> ${f.quantity}`);
     if ((s.effective_unit_cents ?? 0) !== (f.effective_unit_cents ?? 0)) {
       drift.push(`${key(f)} price ${s.effective_unit_cents} -> ${f.effective_unit_cents}`);
@@ -743,7 +759,15 @@ export async function executeMigration(
   workspaceId: string,
   appstleContractId: string,
   ctx: PricingContext,
-  opts: { dryRun?: boolean; nextBillingDateOverride?: string; completeSwap?: boolean; resume?: boolean } = {},
+  opts: {
+    dryRun?: boolean; nextBillingDateOverride?: string; completeSwap?: boolean; resume?: boolean;
+    /**
+     * A complete address to ship to when Appstle's (or the billing fallback's) is incomplete — the
+     * customer's own default address. Only used when the contract's own address is missing a
+     * required field; never overrides a complete one.
+     */
+    fallbackAddress?: Record<string, unknown>;
+  } = {},
 ): Promise<MigrationResult> {
   // ⭐ This path needs Appstle three times (fresh read, cancel, cancel verify). Once Appstle is
   // retired a never-migrated sub is rebuilt from OUR mirror instead — see
@@ -785,6 +809,18 @@ export async function executeMigration(
   const fresh = await fetchAppstleContract(workspaceId, appstleContractId);
   if (!fresh.ok) return { ok: false, stage: "fresh-read", error: fresh.error };
   const norm = normalizeAppstleContract(fresh.raw as Record<string, unknown> as Record<string, never>);
+  // Shopify also rejects a blank province on a US address at create ("province code can't be
+  // blank", 27961295021), which REQUIRED_ADDRESS_FIELDS does not cover.
+  const own = resolveShippingAddress(fresh.raw as Record<string, any>);
+  const blankUsProvince = !!own.address && String(own.address.countryCode ?? "").toUpperCase() === "US" &&
+    !own.address.provinceCode && !own.address.province;
+  if (opts.fallbackAddress && (own.missing.length || blankUsProvince)) {
+    const fb = resolveShippingAddress({ deliveryMethod: { address: opts.fallbackAddress } });
+    if (!fb.missing.length) {
+      const raw = fresh.raw as Record<string, any>;
+      raw.deliveryMethod = { ...(raw.deliveryMethod ?? {}), address: opts.fallbackAddress };
+    }
+  }
 
   const drift = detectDrift(
     (snap as { lines: SnapshotLineIn[] }).lines ?? [],

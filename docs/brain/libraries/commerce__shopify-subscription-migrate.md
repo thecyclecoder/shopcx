@@ -471,3 +471,11 @@ collision on cycle_number closes the orphan as `orphaned_by_migration`). Without
 mid-dunning keeps its cycle on the cancelled Appstle id, and the payday retry's date reset finds no
 row. Non-fatal; [[dunning-strand-detector]] is the backstop.
 
+
+### Duplicate-SKU drift + address fallback (2026-10-29)
+
+- `detectDrift` pairs lines as a MULTISET. Keyed by SKU, a contract carrying the same SKU twice (paid +
+  promo line) read as drifted on every run and could never migrate (14 of the last 476).
+- `executeMigration({ fallbackAddress })`: when the contract's own address (or the billing fallback) is
+  missing a required field, or is a US address with a blank province (Shopify rejects it at create), the
+  customer's default address is shipped to instead. Never overrides a complete address.
