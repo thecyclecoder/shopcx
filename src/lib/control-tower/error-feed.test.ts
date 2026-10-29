@@ -80,6 +80,7 @@ import {
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
@@ -15829,6 +15830,207 @@ test("isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise return
   assert.equal(
     isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise(
       "column orders.subtotal_price does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise ──
+// A foreign / stale client expecting Shopify's REST orders shape reads
+// `/rest/v1/orders?select=...cancelled_at...` against our `public.orders` table. The
+// table exists but has NO `cancelled_at` cancel timestamp — in our schema the cancel
+// timestamp (`cancelled_at`) lives on `subscriptions`, not on `orders`. Foreign-owned
+// surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `orders.cancelled_at` AND a SELECT-lookup shape on `orders` (bare OR
+// PostgREST CTE wrapper) are present. A column-missing on any other table (including the
+// live `subscriptions.cancelled_at`), a different column on `orders`, or a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise drops the captured supabase-logs:00e637d0c66e5ad5 message+query pair (ad hoc SELECT on orders.cancelled_at)", () => {
+  // Unqualified and public.-qualified message variants over the bare-SELECT shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column orders.cancelled_at does not exist",
+      "select id, cancelled_at from public.orders",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column public.orders.cancelled_at does not exist",
+      "select cancelled_at from public.orders",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column orders.cancelled_at does not exist",
+      "select cancelled_at from orders limit 10",
+    ),
+    true,
+  );
+  // Trailing WHERE / ORDER BY / LIMIT still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column orders.cancelled_at does not exist",
+      "select id, cancelled_at from public.orders where workspace_id = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column orders.cancelled_at does not exist",
+      "SELECT ID, CANCELLED_AT FROM PUBLIC.ORDERS",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "ERROR: column orders.cancelled_at does not exist",
+      "select cancelled_at from public.orders",
+    ),
+    true,
+  );
+  // Leading / trailing whitespace on message and query is tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "  column orders.cancelled_at does not exist  ",
+      "   select cancelled_at from public.orders   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"orders\" ...)` CTE wrapper form", () => {
+  // The PostgREST direct-REST wire shape: identical foreign-owned lookup wrapped in the
+  // pgrst_source CTE with double-quoted `"public"."orders"` identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column orders.cancelled_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."orders"."id", "public"."orders"."cancelled_at" FROM "public"."orders" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column public.orders.cancelled_at does not exist",
+      'WITH pgrst_source AS (SELECT "public"."orders"."cancelled_at" FROM "public"."orders")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise KEEPS a column-missing on a DIFFERENT column of orders (a real product-schema regression on another orders column still pages)", () => {
+  // If any other `orders` column regressed we absolutely want the page — the pin is
+  // `orders.cancelled_at` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column orders.total_cents does not exist",
+      "select total_cents from public.orders",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise KEEPS a cancelled_at miss on a DIFFERENT table (the live subscriptions.cancelled_at regression still pages)", () => {
+  // `cancelled_at` IS a live column on `subscriptions` — if it ever regresses we WANT the
+  // page. The pin is `orders` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column subscriptions.cancelled_at does not exist",
+      "select cancelled_at from public.subscriptions",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column public.subscriptions.cancelled_at does not exist",
+      "select cancelled_at from public.subscriptions",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise KEEPS a non-SELECT statement shape on orders (an INSERT/UPDATE/DELETE with the same message is a real code-bug and still pages)", () => {
+  // INSERT / UPDATE / DELETE against orders referencing a bogus `cancelled_at` column is
+  // real code trying to write the table — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column orders.cancelled_at does not exist",
+      "insert into public.orders (id, workspace_id, cancelled_at) values ($1, $2, $3)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column orders.cancelled_at does not exist",
+      "update public.orders set cancelled_at = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column orders.cancelled_at does not exist",
+      "delete from public.orders where cancelled_at is null",
+    ),
+    false,
+  );
+  // Sibling: the PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column orders.cancelled_at does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."orders" SET "cancelled_at" = $1 WHERE "public"."orders"."id" = $2 )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise KEEPS a FATAL / PANIC / constraint-violation (different message shape — a real DB problem still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "FATAL: database is shutting down",
+      "select cancelled_at from public.orders",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      'duplicate key value violates unique constraint "orders_pkey"',
+      "select cancelled_at from public.orders",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row
+  // stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column orders.cancelled_at does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
+      "column orders.cancelled_at does not exist",
       null,
     ),
     false,
