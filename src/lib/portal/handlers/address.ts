@@ -92,11 +92,15 @@ export const address: RouteHandler = async ({ auth, route, req }) => {
   const admin = createAdminClient();
   const { resolveBillingSource } = await import("@/lib/internal-subscription");
   const engine = await resolveBillingSource(auth.workspaceId, String(contractId));
+  // ⭐ appstle_retired: an Appstle sub's address change goes through the SDK, whose chokepoint
+  // rebuilds it on ShopCX from our mirror WITH this new address (or, for a cancelled sub, records it
+  // on our row only). Never the Appstle PUT below. False while the switch is off.
+  const appstleRetired = engine === "appstle" && (await (await import("@/lib/appstle-retired")).isAppstleRetired());
 
   // ⭐ ShopCX: the address must round-trip to SHOPIFY — Shopify builds the renewal order from the
   // contract, so a mirror-only write ships the next order to the OLD address while the portal
   // shows the new one. Through the SDK, which also preserves the contract's shipping option.
-  if (engine === "shopcx") {
+  if (engine === "shopcx" || appstleRetired) {
     const { subscriptionUpdateShippingAddress } = await import("@/lib/commerce/subscription");
     const r = await subscriptionUpdateShippingAddress(auth.workspaceId, String(contractId), {
       address1, address2: address2 || "", city, zip,
@@ -110,7 +114,7 @@ export const address: RouteHandler = async ({ auth, route, req }) => {
 
   // Appstle subs: push the address to Appstle. Internal + ShopCX subs aren't on
   // Appstle — the local subscriptions row below is the source of truth / mirror.
-  if (engine === "appstle") {
+  if (engine === "appstle" && !appstleRetired) {
     try {
       const { healOnTouch } = await import("@/lib/appstle-pricing");
       await healOnTouch(auth.workspaceId, String(contractId));

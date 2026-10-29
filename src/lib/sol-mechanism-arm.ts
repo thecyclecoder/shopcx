@@ -147,7 +147,18 @@ export async function armSolPlaybookReplyGated(
       const o = order as { id: string; order_number: string | null; subscription_id: string | null };
       seed.identified_order_id = o.id;
       if (o.order_number && !("identified_orders" in seed)) seed.identified_orders = [o.order_number];
-      if (o.subscription_id && !("identified_subscription" in seed)) seed.identified_subscription = o.subscription_id;
+      // ⚠️ `orders.subscription_id` is our ROW UUID; playbook consumers compare and act on
+      // `identified_subscription` as a CONTRACT id (shopify_contract_id), like every other producer.
+      if (o.subscription_id && !("identified_subscription" in seed)) {
+        const { data: sub } = await admin
+          .from("subscriptions")
+          .select("shopify_contract_id")
+          .eq("workspace_id", workspaceId)
+          .eq("id", o.subscription_id)
+          .maybeSingle();
+        const contractId = (sub as { shopify_contract_id: string | null } | null)?.shopify_contract_id;
+        if (contractId) seed.identified_subscription = contractId;
+      }
     }
   }
 

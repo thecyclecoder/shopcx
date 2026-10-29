@@ -15,6 +15,7 @@
  * `res.ok` proves nothing; every response is sniffed for a leading `<` before parsing.
  */
 import { getAppstleCredentials } from "@/lib/appstle";
+import { isAppstleRetired } from "@/lib/appstle-retired";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 
@@ -169,7 +170,10 @@ export async function snapshotAppstleContract(
   workspaceId: string,
   appstleContractId: string,
   subscriptionId: string | null,
-): Promise<{ ok: boolean; error?: string; rateLimited?: boolean }> {
+): Promise<{ ok: boolean; error?: string; rateLimited?: boolean; skipped?: boolean }> {
+  // appstle_retired: there is nothing left to snapshot. Skip cleanly — and write NO row, since a
+  // fetch_error row would overwrite a good snapshot with an error.
+  if (await isAppstleRetired()) return { ok: false, skipped: true, error: "appstle_retired — snapshot skipped" };
   const admin = createAdminClient();
   const got = await fetchAppstleContract(workspaceId, appstleContractId);
   const base = {

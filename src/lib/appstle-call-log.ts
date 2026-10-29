@@ -115,6 +115,11 @@ export async function loggedAppstleFetch(
   init?: RequestInit,
   endpoint?: string,
 ): Promise<Response> {
+  // appstle_retired: the lowest common Appstle fetch — a missed path fails LOUDLY here.
+  if (/appstle\.com/i.test(url)) {
+    const { assertAppstleLive } = await import("@/lib/appstle-retired");
+    await assertAppstleLive("loggedAppstleFetch");
+  }
   const t0 = Date.now();
   let res: Response;
   try {

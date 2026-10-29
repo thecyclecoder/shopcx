@@ -745,7 +745,7 @@ Tracked here rather than as a spec because it is an operational sequence, not a 
 | 3 | One clean week, 10-01 → 10-07 | **nothing escalates unprompted.** Not "drift is 0 when I look" — the alert stays quiet on its own | ⏳ |
 | 4 | Full migration in daily batches | ~300/day for 6 days, reconciler + parity between each; six chances to stop, not one 7-hour run | ⏳ |
 | 5 | Payment-troubled tail (~50) | deliberately deferred by every wave; migrate after they recover or decide to take them | ⏳ |
-| 6 | Retire Appstle | key rotation (outstanding), webhook teardown, `billing_source` cleanup | ⏳ |
+| 6 | Retire Appstle | key rotation (outstanding), webhook teardown, `billing_source` cleanup | 🚧 `appstle_retired` switch + revive-from-mirror chokepoint shipped (OFF); flip with the uninstall |
 
 **Why the order.** Step 1 came first because every defect this month was found by a human asking —
 the gate for step 3 is meaningless without it. Step 2 before step 4 because codes have produced two
@@ -754,6 +754,35 @@ of the five defects and 126 contracts still carry them; finding the third on 30 
 **Standing pre-flight for every wave:** `--refresh` (snapshots go stale and drift-refuse),
 customer-atomic selection (never split a customer across engines), dunning deferral (a migration does
 not fix a dead card), then `_price-parity.ts` and the drift cron after.
+
+## ⭐ Appstle retired — revive builds on ShopCX from our mirror (2026-10-26)
+
+Dylan is uninstalling Appstle. What never migrated (~370 paused, thousands cancelled, ~90
+payment-troubled actives) stays `billing_source='appstle'`, and every revive/mutate path used to go
+straight to Appstle. The rule now:
+
+- **Switch** `appstle_retired` ([[../libraries/appstle-retired]], a [[../tables/kill_switches]] row).
+  OFF by default — nothing changes until Dylan sets it.
+- **One chokepoint** — [[../libraries/commerce__shopcx-revive]] `ensureShopcxEngine(ws, contractId, intent)`
+  at the top of every SDK op ([[../libraries/commerce__subscription]]) and every `sub*` item op
+  ([[../libraries/subscription-items]]), after `resolveLiveContractId`. Appstle + cancel/pause →
+  our row only (status truth, dunning ended, customer rollup). Appstle + anything else →
+  `buildShopcxFromMirror`, then the op runs on the shopcx branch under the NEW contract id.
+- **Built from OUR row, never Appstle, never a bulk backfill.** Items/prices, cadence, next date,
+  delivery price (**kept**), shipping method and codes come from `subscriptions`; the plan is
+  `planMigration` (same S&S + quantity-break + grandfather core as the waves); the create is the
+  shared `buildMigratedContractInput` → `shopifyCreateContract`. Card: the customer's Shopify payment
+  methods (`payment_method_id` is NULL on Appstle rows). Address: row → `customers.default_address`.
+  None usable → typed `needs_payment_method` / `needs_address` for the add-card / confirm-address step.
+- A lapsed date rolls forward on the customer's cadence; a cancelled row (no date) revives tomorrow;
+  a portal-chosen date wins. A revive is born ACTIVE; a change on a paused sub stays PAUSED; a change
+  on a cancelled sub is refused (only an explicit revive rebuilds it).
+- Idempotent via `subscriptions.shopcx_revive_claimed_at` (CAS claim) + `shopcx_revive_contract_id`
+  (recorded before the flip) — concurrent revives create one contract; a crashed one is adopted.
+- Direct callers routed: portal `reactivate`, `order-now` (Appstle branch), `address`, `coupon`,
+  `replace-variants`; dunning date reset; auto-resume re-resolves the live id. Missed paths throw
+  `AppstleRetiredError`; scheduled Appstle-only work (sweeper, snapshot puller, migration-audit
+  check, migration-fix cancel) skips.
 
 ## Open decisions
 
@@ -799,5 +828,7 @@ code.
 [[../integrations/shopify]] · [[../libraries/pricing]] · [[../tables/subscriptions]] ·
 [[../functions/retention]] · [[../functions/platform]]
 - [[../libraries/commerce__shopify-subscription-client]] — the client itself (exports, gotchas, the guard carve-out)
+- [[../libraries/commerce__shopcx-revive]] — revive/change a never-migrated Appstle sub on ShopCX from our mirror
+- [[../libraries/appstle-retired]] — the `appstle_retired` switch
 - [[../libraries/commerce__shopcx-line-ops]] — line mutations + the structural discount recompute
 - [[../libraries/commerce__shopcx-discount-ops]] — coupons on a ShopCX contract

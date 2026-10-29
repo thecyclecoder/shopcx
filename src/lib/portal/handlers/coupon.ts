@@ -30,7 +30,7 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
   try { payload = await req.json(); } catch { payload = null; }
 
   const resolved = await resolveSub(createAdminClient(), auth.workspaceId, payload?.contractId, auth.loggedInCustomerId);
-  const contractId = resolved?.shopify_contract_id || "";
+  let contractId = resolved?.shopify_contract_id || "";
   const mode = s(payload?.mode);
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
   if (mode !== "apply" && mode !== "remove") return jsonErr({ error: "invalid_mode" }, 400);
@@ -42,6 +42,14 @@ export const coupon: RouteHandler = async ({ auth, route, req }) => {
   // ShopCX takes the same arm as internal: both route through the coupon SDK, which owns the
   // engine dispatch. Only the Appstle arm below is vendor-specific (its self-healing code
   // regeneration and status-code mapping have no meaning off Appstle).
+  // ⭐ appstle_retired chokepoint (no-op while the switch is off): a retired-Appstle sub is rebuilt
+  // on ShopCX from our mirror first, then takes the same SDK arm as every other ShopCX sub.
+  {
+    const { ensureShopcxEngine, ensureFailureText } = await import("@/lib/commerce/shopcx-revive");
+    const ens = await ensureShopcxEngine(auth.workspaceId, String(contractId), "change");
+    if (!ens.ok) return jsonOk({ ok: false, route, contractId, mode, error: ens.reason, message: ensureFailureText(ens) });
+    contractId = ens.contractId;
+  }
   const { resolveBillingSource } = await import("@/lib/internal-subscription");
   const isInternal = (await resolveBillingSource(auth.workspaceId, String(contractId))) !== "appstle";
 

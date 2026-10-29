@@ -106,9 +106,11 @@ caller; it was wired into the create-ingest on 2026-10-08.
 
 ### Deliberate behaviours worth stating
 
-- **A swap does NOT carry the grandfathered rate.** It was negotiated on a specific product, which
-  is exactly why the concession is stored per-line and variant-scoped rather than on the contract.
-  The new line is created at the new variant's catalog MSRP.
+- **A swap carries the grandfathered rate only within the same product at the same MSRP** (a
+  flavor change; `keepsGrandfatherAcrossSwap`). A swap to a different product drops it, since it
+  was negotiated on the outgoing product. The new line is created at the new variant's catalog
+  MSRP either way. Before 2026-10-29 every swap dropped it, and a flavor swap raised a grandfathered
+  customer from $41.97 to $59.97 (54132179117).
 - **`shopcxAddItem` on a variant already present raises the quantity** instead of adding a second
   line. Two lines for one variant splits the quantity and makes every by-variant lookup ambiguous —
   45 Appstle contracts already carry that shape and it is what makes their verify step unreliable.

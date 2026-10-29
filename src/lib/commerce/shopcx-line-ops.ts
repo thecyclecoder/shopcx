@@ -345,6 +345,19 @@ export async function shopcxRemoveItem(
 }
 
 /**
+ * Whether a variant swap keeps the line's grandfathered per-unit concession: only a swap within
+ * the SAME product at the SAME catalog MSRP (a flavor change), so the concession can never price
+ * the new line differently than the old one. Exported for tests.
+ */
+export function keepsGrandfatherAcrossSwap(
+  outgoing: { product_id: string; price_cents: number } | null | undefined,
+  incoming: { product_id: string; price_cents: number } | null | undefined,
+): boolean {
+  if (!outgoing || !incoming) return false;
+  return outgoing.product_id === incoming.product_id && outgoing.price_cents === incoming.price_cents;
+}
+
+/**
  * Swap a line's variant — a flavour change.
  *
  * ⭐ Done as a DRAFT line update rather than `subscriptionContractProductChange`, so the swap and
@@ -352,8 +365,9 @@ export async function shopcxRemoveItem(
  * new variant is priced on the old line's discounts.
  *
  * The new line is created at the new variant's catalog MSRP; `rewriteStructuralDiscounts` then
- * applies S&S and the tier. A grandfathered rate does NOT carry across a swap — it was negotiated
- * on a specific product, which is exactly why it is stored per-line and variant-scoped.
+ * applies S&S and the tier. A grandfathered rate carries across a FLAVOR swap (same product, same
+ * MSRP — `keepsGrandfatherAcrossSwap`) and is dropped on a swap to a different product, where it
+ * was negotiated on the outgoing one.
  */
 export async function shopcxSwapVariant(
   workspaceId: string, contractId: string, oldVariantId: string, newVariantId: string, quantity?: number,
@@ -366,11 +380,14 @@ export async function shopcxSwapVariant(
     const prep = await preparePricing(workspaceId, contractId);
     if ("error" in prep) return { success: false, error: prep.error };
     const { ctx } = prep;
-    // A swap does NOT carry the concession — it was negotiated on the outgoing product.
-    prep.grandfather.delete(line.id);
     const bare = String(newVariantId).replace("gid://shopify/ProductVariant/", "");
     const target = ctx.variantByShopifyId.get(bare);
     if (!target) return { success: false, error: `variant ${bare} is not in the catalog` };
+    // A swap to a DIFFERENT product does not carry the concession — it was negotiated on the
+    // outgoing product. A FLAVOR swap (same product, same MSRP) keeps it: dropping it raised a
+    // grandfathered customer from $41.97 to $59.97 on a flavor change (2026-10-26, 54132179117).
+    const outgoing = ctx.variantByShopifyId.get(String(line.variantId ?? "").replace("gid://shopify/ProductVariant/", ""));
+    if (!keepsGrandfatherAcrossSwap(outgoing, target)) prep.grandfather.delete(line.id);
 
     return mirrored(workspaceId, contractId, withDraft(workspaceId, contractId, async (draftId) => {
       const u = await shopifyUpdateDraftLine(workspaceId, draftId, line.id, {

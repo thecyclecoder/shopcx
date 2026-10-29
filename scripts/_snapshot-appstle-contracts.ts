@@ -39,6 +39,12 @@ async function main() {
 
   const { createAdminClient } = await import("../src/lib/supabase/admin");
   const { snapshotAppstleContract } = await import("../src/lib/appstle-snapshot");
+  // appstle_retired: Appstle is gone — nothing to pull. Exit cleanly rather than erroring per row.
+  const { isAppstleRetired } = await import("../src/lib/appstle-retired");
+  if (await isAppstleRetired()) {
+    console.log("appstle_retired is on — snapshot runner skipped (no Appstle calls made).");
+    return;
+  }
   const admin = createAdminClient();
 
   // Migration population: active + paused, Appstle-backed (internal-* subs are already ours).

@@ -18,7 +18,7 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
   try { payload = await req.json(); } catch { payload = null; }
 
   const resolved = await resolveSub(createAdminClient(), auth.workspaceId, payload?.contractId, auth.loggedInCustomerId);
-  const contractId = resolved?.shopify_contract_id || "";
+  let contractId = resolved?.shopify_contract_id || "";
   if (!contractId) return jsonErr({ error: "missing_contractId" }, 400);
 
   // Accept custom date from frontend, default to tomorrow
@@ -30,11 +30,31 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
     // 1) Set next billing date — Appstle subs go through the Appstle API; internal
     //    subs get their date from the DB update below (no Appstle contract exists).
     const { resolveBillingSource } = await import("@/lib/internal-subscription");
-    const engine = await resolveBillingSource(auth.workspaceId, String(contractId));
+    let engine = await resolveBillingSource(auth.workspaceId, String(contractId));
+
+    // ⭐ appstle_retired: a never-migrated Appstle sub is REVIVED ON SHOPCX, built from our mirror
+    // with the customer's chosen date — never through Appstle. The contract is born ACTIVE, so the
+    // vendor resume below is skipped; only the local truth is applied.
+    let revivedOnShopcx = false;
+    if (engine === "appstle") {
+      const { ensureShopcxEngine, ensureFailureText } = await import("@/lib/commerce/shopcx-revive");
+      const ens = await ensureShopcxEngine(auth.workspaceId, String(contractId), "resume", { nextBillingDate });
+      if (!ens.ok) {
+        if (ens.reason === "needs_payment_method" || ens.reason === "needs_address") {
+          return jsonErr({ error: ens.reason, message: ens.error }, 409);
+        }
+        throw new Error(ensureFailureText(ens));
+      }
+      if (ens.engine === "shopcx") {
+        contractId = ens.contractId;
+        engine = "shopcx";
+        revivedOnShopcx = ens.built;
+      }
+    }
 
     // ShopCX: the date has to reach the CONTRACT, not just our mirror — the portal and every
     // Shopify-sourced view read it from there. Through the SDK; the DB update below still runs.
-    if (engine === "shopcx") {
+    if (engine === "shopcx" && !revivedOnShopcx) {
       const { subscriptionUpdateNextBillingDate } = await import("@/lib/commerce/subscription");
       const d = await subscriptionUpdateNextBillingDate(auth.workspaceId, String(contractId), nextBillingDate);
       if (!d.success) throw new Error(d.error || "Could not set next billing date");
@@ -54,9 +74,19 @@ export const reactivate: RouteHandler = async ({ auth, route, req }) => {
       );
     }
 
-    // 2) Resume subscription (wrapper is internal-aware)
-    const result = await subscriptionAction(auth.workspaceId, String(contractId), "resume");
-    if (!result.success) throw new Error(result.error || "Resume failed");
+    // 2) Resume subscription (wrapper is internal-aware). A contract just revived on ShopCX was
+    //    created ACTIVE on the chosen date — only the local status truth remains.
+    if (revivedOnShopcx) {
+      const { applySubscriptionStatusTruth } = await import("@/lib/commerce/subscription-status-truth");
+      await applySubscriptionStatusTruth(auth.workspaceId, String(contractId), "resume");
+      // The build rolls a lapsed date forward; use the date actually on the contract.
+      const { data: row } = await createAdminClient().from("subscriptions").select("next_billing_date")
+        .eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId)).maybeSingle();
+      if (row?.next_billing_date) nextBillingDate = String(row.next_billing_date);
+    } else {
+      const result = await subscriptionAction(auth.workspaceId, String(contractId), "resume");
+      if (!result.success) throw new Error(result.error || "Resume failed");
+    }
   } catch (e) {
     return handleAppstleError(e);
   }

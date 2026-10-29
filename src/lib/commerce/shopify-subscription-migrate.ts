@@ -42,6 +42,7 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { fetchAppstleContract, normalizeAppstleContract } from "@/lib/appstle-snapshot";
 import { appstleCancelContractVendorOnly } from "@/lib/appstle";
+import { isAppstleRetired } from "@/lib/appstle-retired";
 import {
   shopifyCreateContract,
   shopifySyncBillingSchedule,
@@ -427,10 +428,26 @@ export function detectDrift(
     return drift;
   }
   const key = (l: SnapshotLineIn) => `${l.sku ?? l.variant_id}`;
-  const snapBy = new Map(snapshotLines.map((l) => [key(l), l]));
+  // ⭐ Match lines as a MULTISET, not by SKU. A contract can carry the SAME SKU twice (a paid line
+  // plus a free/promo line of the same product). Keyed by SKU, the map kept only the last snapshot
+  // line, so every such contract read as drifted on every run and could never migrate (14 of the
+  // last 476, 2026-10-29). Pair each fresh line with an unused snapshot line of the same SKU,
+  // preferring an exact qty+price match.
+  const pool = snapshotLines.map((l) => ({ l, used: false }));
+  const sameSku = (f: SnapshotLineIn) => pool.filter((p) => !p.used && key(p.l) === key(f));
+  const exact = (f: SnapshotLineIn, p: { l: SnapshotLineIn }) =>
+    p.l.quantity === f.quantity && (p.l.effective_unit_cents ?? 0) === (f.effective_unit_cents ?? 0);
+  const unmatched: SnapshotLineIn[] = [];
   for (const f of freshLines) {
-    const s = snapBy.get(key(f));
-    if (!s) { drift.push(`new line ${key(f)}`); continue; }
+    const hit = sameSku(f).find((p) => exact(f, p));
+    if (hit) hit.used = true;
+    else unmatched.push(f);
+  }
+  for (const f of unmatched) {
+    const p = sameSku(f)[0];
+    if (!p) { drift.push(`new line ${key(f)}`); continue; }
+    p.used = true;
+    const s = p.l;
     if (s.quantity !== f.quantity) drift.push(`${key(f)} qty ${s.quantity} -> ${f.quantity}`);
     if ((s.effective_unit_cents ?? 0) !== (f.effective_unit_cents ?? 0)) {
       drift.push(`${key(f)} price ${s.effective_unit_cents} -> ${f.effective_unit_cents}`);
@@ -546,6 +563,152 @@ export function carryableCodes(raw: Record<string, unknown> | null): CarriedCode
   return out;
 }
 
+/** The fields `MailingAddressInput` accepts. Anything else (Appstle's __typename, country, name…) is rejected. */
+export const MAILING_ADDRESS_KEYS = ["address1", "address2", "city", "company", "countryCode", "firstName", "lastName", "phone", "provinceCode", "zip"];
+const SHIPPING_OPTION_KEYS = ["title", "presentmentTitle", "description", "code"];
+
+function pickKeys(o: Record<string, unknown> | null | undefined, keys: string[]): Record<string, unknown> {
+  return Object.fromEntries(keys.filter((k) => o?.[k] != null && o[k] !== "").map((k) => [k, (o as Record<string, unknown>)[k]]));
+}
+
+/**
+ * The `subscriptionContractAtomicCreate` input for a ShopCX contract built from a plan.
+ *
+ * PURE, and shared on purpose by the two ways a ShopCX contract is born from an Appstle sub:
+ * `executeMigration` (planned from a fresh Appstle read) and [[commerce__shopcx-revive]]
+ * `buildShopcxFromMirror` (planned from our own `subscriptions` mirror, once Appstle is retired).
+ * One builder means one set of rules — status carried, no delivery anchors, delivery price KEPT,
+ * MSRP lines with their structural discounts riding along — instead of two copies drifting.
+ *
+ * ⚠️ `deliveryPriceCents` is the contract's EXISTING delivery price and is written verbatim. A
+ * migrated contract keeps what the customer already pays for shipping; it is never zeroed here.
+ */
+export function buildMigratedContractInput(args: {
+  /** Shopify customer GID (`gid://shopify/Customer/…`). */
+  customerGid: string;
+  status: "ACTIVE" | "PAUSED";
+  paymentMethodId: string;
+  /** Shopify interval enum value (DAY | WEEK | MONTH | YEAR) — upper-cased here regardless. */
+  interval: string;
+  intervalCount: number;
+  nextBillingDate: string;
+  deliveryPriceCents: number | null;
+  address: Record<string, unknown> | null | undefined;
+  shippingOption: Record<string, unknown> | null | undefined;
+  plan: MigrationPlan;
+}): { customerId: string; nextBillingDate: string; currencyCode: string; contract: Record<string, unknown>; lines: Record<string, unknown>[] } {
+  const interval = String(args.interval || "").toUpperCase();
+  return {
+    customerId: args.customerGid,
+    nextBillingDate: args.nextBillingDate,
+    currencyCode: "USD",
+    contract: {
+      // ⭐ CARRY the source status — do not force ACTIVE. Hardcoding it silently REACTIVATED every
+      // paused subscription (456 of them), billing customers who had deliberately stopped.
+      // `SubscriptionContractSubscriptionStatus` is ACTIVE | PAUSED | CANCELLED | EXPIRED | FAILED,
+      // and PAUSED is accepted at CREATE (probed) — so there is no create-then-pause window where
+      // the contract is briefly active and billable.
+      status: args.status,
+      paymentMethodId: args.paymentMethodId,
+      // The anchor phases a MONTH cadence correctly but CANNOT phase a WEEK/n one — an anchor
+      // says "Mondays", not "starting the 21st", and 96% of this book is WEEK/4 or WEEK/8. It is
+      // kept because it costs nothing and gets the weekday right beyond the pinned horizon; the
+      // REAL sync is `shopifySyncBillingSchedule` immediately after the create.
+      billingPolicy: {
+        interval,
+        intervalCount: args.intervalCount,
+        ...anchorsForSchedule(interval, args.nextBillingDate),
+      },
+      // ⚠️ NO ANCHORS ON THE DELIVERY POLICY. A billing anchor phases the cycle calendar, which is
+      // what we want. A DELIVERY anchor tells Shopify which days deliveries may happen — so any
+      // charge landing off-anchor gets its fulfillment order held in SCHEDULED until the next
+      // anchor day, paid but unreleased to the 3PL.
+      //
+      // Measured 2026-09-25: two dunning recoveries charged on a Friday sat with
+      // `fulfillAt` 3 and 5 days out (SC139358 → 09-30 against a Wednesday anchor). The customer
+      // has paid and is waiting, and nothing reports it — the order looks PAID and simply never
+      // ships. A contract born at PDP checkout carries no anchors at all, which is why only
+      // migrated subs showed this.
+      //
+      // We ship when we are paid; the billing policy alone decides when that is.
+      deliveryPolicy: {
+        interval,
+        intervalCount: args.intervalCount,
+      },
+      // ⭐ Dylan's shipping rule: a migrated contract KEEPS its existing delivery price.
+      deliveryPrice: ((args.deliveryPriceCents ?? 0) / 100).toFixed(2),
+      deliveryMethod: {
+        shipping: {
+          address: pickKeys(args.address ?? undefined, MAILING_ADDRESS_KEYS),
+          shippingOption: pickKeys(args.shippingOption ?? undefined, SHIPPING_OPTION_KEYS),
+        },
+      },
+    },
+    lines: args.plan.lines.map((l) => ({
+      line: {
+        productVariantId: `gid://shopify/ProductVariant/${l.shopifyVariantId}`,
+        quantity: l.quantity,
+        currentPrice: (l.baseCents / 100).toFixed(2), // MSRP — the discounts do the rest
+      },
+      discounts: lineDiscounts(args.plan, l),
+    })),
+  };
+}
+
+/**
+ * Apply the customer's own carried codes to a freshly created contract, in one draft.
+ * Shared by `executeMigration` (step 5) and the mirror revive. Never call it twice on the same
+ * contract: these are fixed/percentage discounts and a second application doubles them.
+ */
+export async function applyCarriedCodes(
+  workspaceId: string,
+  contractId: string,
+  codes: CarriedCode[],
+): Promise<{ success: boolean; error?: string }> {
+  if (!codes.length) return { success: true };
+  return withDraft(workspaceId, contractId, async (draftId) => {
+    for (const c of codes) {
+      const r = await shopifyAddDraftDiscount(workspaceId, draftId, {
+        title: c.title,
+        value: c.percentage != null
+          ? { percentage: c.percentage }
+          : { fixedAmount: { amount: c.amount, appliesOnEachItem: c.appliesOnEachItem } },
+        ...(c.recurringCycleLimit != null ? { recurringCycleLimit: c.recurringCycleLimit } : {}),
+      });
+      if (!r.success) return r;
+    }
+    return { success: true };
+  });
+}
+
+/**
+ * The customer's non-cancelled Shopify contracts created at or after `sinceIso` (less a minute of
+ * clock slack). Used to ADOPT a contract that a previous attempt created but whose response was
+ * lost, instead of creating a duplicate — the 35945087149 + 35945054381 pair. Shared by
+ * `executeMigration` and the mirror revive.
+ */
+export async function findCustomerContractsCreatedSince(
+  workspaceId: string,
+  customerGid: string,
+  sinceIso: string,
+): Promise<{ id: string; status: string; createdAt: string }[]> {
+  const { getShopifyCredentials } = await import("@/lib/shopify-sync");
+  const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
+  const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+  const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
+    method: "POST",
+    headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query: `query($id:ID!){ customer(id:$id){ subscriptionContracts(first:25){ nodes{ id status createdAt } } } }`,
+      variables: { id: customerGid },
+    }),
+  });
+  const j = await res.json().catch(() => null) as { data?: { customer?: { subscriptionContracts?: { nodes?: { id: string; status: string; createdAt: string }[] } } } } | null;
+  const since = new Date(sinceIso).getTime() - 60_000; // a minute of clock slack
+  return (j?.data?.customer?.subscriptionContracts?.nodes ?? [])
+    .filter((c) => new Date(c.createdAt).getTime() >= since && c.status !== "CANCELLED");
+}
+
 /**
  * Migrate ONE contract from Appstle to a ShopCX-owned Shopify contract.
  *
@@ -596,8 +759,22 @@ export async function executeMigration(
   workspaceId: string,
   appstleContractId: string,
   ctx: PricingContext,
-  opts: { dryRun?: boolean; nextBillingDateOverride?: string; completeSwap?: boolean; resume?: boolean } = {},
+  opts: {
+    dryRun?: boolean; nextBillingDateOverride?: string; completeSwap?: boolean; resume?: boolean;
+    /**
+     * A complete address to ship to when Appstle's (or the billing fallback's) is incomplete — the
+     * customer's own default address. Only used when the contract's own address is missing a
+     * required field; never overrides a complete one.
+     */
+    fallbackAddress?: Record<string, unknown>;
+  } = {},
 ): Promise<MigrationResult> {
+  // ⭐ This path needs Appstle three times (fresh read, cancel, cancel verify). Once Appstle is
+  // retired a never-migrated sub is rebuilt from OUR mirror instead — see
+  // [[commerce__shopcx-revive]] buildShopcxFromMirror.
+  if (await isAppstleRetired()) {
+    return { ok: false, stage: "appstle-retired", error: "appstle_retired is on — use buildShopcxFromMirror (commerce/shopcx-revive) instead" };
+  }
   const admin = createAdminClient();
 
   const { data: snap } = await admin
@@ -632,6 +809,18 @@ export async function executeMigration(
   const fresh = await fetchAppstleContract(workspaceId, appstleContractId);
   if (!fresh.ok) return { ok: false, stage: "fresh-read", error: fresh.error };
   const norm = normalizeAppstleContract(fresh.raw as Record<string, unknown> as Record<string, never>);
+  // Shopify also rejects a blank province on a US address at create ("province code can't be
+  // blank", 27961295021), which REQUIRED_ADDRESS_FIELDS does not cover.
+  const own = resolveShippingAddress(fresh.raw as Record<string, any>);
+  const blankUsProvince = !!own.address && String(own.address.countryCode ?? "").toUpperCase() === "US" &&
+    !own.address.provinceCode && !own.address.province;
+  if (opts.fallbackAddress && (own.missing.length || blankUsProvince)) {
+    const fb = resolveShippingAddress({ deliveryMethod: { address: opts.fallbackAddress } });
+    if (!fb.missing.length) {
+      const raw = fresh.raw as Record<string, any>;
+      raw.deliveryMethod = { ...(raw.deliveryMethod ?? {}), address: opts.fallbackAddress };
+    }
+  }
 
   const drift = detectDrift(
     (snap as { lines: SnapshotLineIn[] }).lines ?? [],
@@ -670,8 +859,6 @@ export async function executeMigration(
   // back to when a subscription has no shipping address (CEO, 2026-09-10). So use it rather than
   // blocking a live subscription over a missing field.
   const addrSource = resolvedAddr.address ?? undefined;
-  const pick = (o: Record<string, unknown> | undefined, keys: string[]) =>
-    Object.fromEntries(keys.filter((k) => o?.[k] != null && o[k] !== "").map((k) => [k, (o as Record<string, unknown>)[k]]));
 
   // ⚠️ Shopify rejects a past next-billing-date outright ("Next billing date is invalid").
   // Measured across the migratable population: 0 are in the past, 96 due today, 2,381 future — so
@@ -707,21 +894,7 @@ export async function executeMigration(
   // contract the previous attempt actually made.
   const attemptedAt = (snap as { migration_attempted_at: string | null }).migration_attempted_at;
   if (attemptedAt && !resuming) {
-    const { getShopifyCredentials } = await import("@/lib/shopify-sync");
-    const { SHOPIFY_API_VERSION } = await import("@/lib/shopify");
-    const { shop, accessToken } = await getShopifyCredentials(workspaceId);
-    const res = await fetch(`https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
-      method: "POST",
-      headers: { "X-Shopify-Access-Token": accessToken, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query: `query($id:ID!){ customer(id:$id){ subscriptionContracts(first:25){ nodes{ id status createdAt } } } }`,
-        variables: { id: customerId },
-      }),
-    });
-    const j = await res.json().catch(() => null) as { data?: { customer?: { subscriptionContracts?: { nodes?: { id: string; status: string; createdAt: string }[] } } } } | null;
-    const since = new Date(attemptedAt).getTime() - 60_000; // a minute of clock slack
-    const candidates = (j?.data?.customer?.subscriptionContracts?.nodes ?? [])
-      .filter((c) => new Date(c.createdAt).getTime() >= since && c.status !== "CANCELLED");
+    const candidates = await findCustomerContractsCreatedSince(workspaceId, customerId, attemptedAt);
     if (candidates.length === 1) {
       const adopted = candidates[0].id;
       await admin.from("appstle_contract_snapshots")
@@ -760,60 +933,19 @@ export async function executeMigration(
   // On a resume the contract already exists; adopt it rather than making a second one.
   const created = resuming
     ? { success: true as const, contractId: already as string, error: undefined }
-    : await shopifyCreateContract(workspaceId, {
-    customerId,
-    nextBillingDate: nextBillingDate ?? new Date().toISOString(),
-    currencyCode: "USD",
-    contract: {
-      // ⭐ CARRY the source status — do not force ACTIVE. Hardcoding it silently REACTIVATED every
-      // paused subscription (456 of them), billing customers who had deliberately stopped.
-      // `SubscriptionContractSubscriptionStatus` is ACTIVE | PAUSED | CANCELLED | EXPIRED | FAILED,
-      // and PAUSED is accepted at CREATE (probed) — so there is no create-then-pause window where
-      // the contract is briefly active and billable.
+    : await shopifyCreateContract(workspaceId, buildMigratedContractInput({
+      customerGid: customerId,
+      // ⭐ CARRY the source status — see buildMigratedContractInput.
       status: norm.status === "PAUSED" ? "PAUSED" : "ACTIVE",
-      paymentMethodId: norm.payment_method_id,
-      // The anchor phases a MONTH cadence correctly but CANNOT phase a WEEK/n one — an anchor
-      // says "Mondays", not "starting the 21st", and 96% of this book is WEEK/4 or WEEK/8. It is
-      // kept because it costs nothing and gets the weekday right beyond the pinned horizon; the
-      // REAL sync is `shopifySyncBillingSchedule` immediately after the create.
-      billingPolicy: {
-        interval: norm.billing_interval,
-        intervalCount: norm.billing_interval_count,
-        ...anchorsForSchedule(norm.billing_interval, nextBillingDate),
-      },
-      // ⚠️ NO ANCHORS ON THE DELIVERY POLICY. A billing anchor phases the cycle calendar, which is
-      // what we want. A DELIVERY anchor tells Shopify which days deliveries may happen — so any
-      // charge landing off-anchor gets its fulfillment order held in SCHEDULED until the next
-      // anchor day, paid but unreleased to the 3PL.
-      //
-      // Measured 2026-09-25: two dunning recoveries charged on a Friday sat with
-      // `fulfillAt` 3 and 5 days out (SC139358 → 09-30 against a Wednesday anchor). The customer
-      // has paid and is waiting, and nothing reports it — the order looks PAID and simply never
-      // ships. A contract born at PDP checkout carries no anchors at all, which is why only
-      // migrated subs showed this.
-      //
-      // We ship when we are paid; the billing policy alone decides when that is.
-      deliveryPolicy: {
-        interval: norm.billing_interval,
-        intervalCount: norm.billing_interval_count,
-      },
-      deliveryPrice: ((norm.delivery_price_cents ?? 0) / 100).toFixed(2),
-      deliveryMethod: {
-        shipping: {
-          address: pick(addrSource, ["address1","address2","city","company","countryCode","firstName","lastName","phone","provinceCode","zip"]),
-          shippingOption: pick(dm?.shippingOption, ["title","presentmentTitle","description","code"]),
-        },
-      },
-    },
-    lines: plan.lines.map((l) => ({
-      line: {
-        productVariantId: `gid://shopify/ProductVariant/${l.shopifyVariantId}`,
-        quantity: l.quantity,
-        currentPrice: (l.baseCents / 100).toFixed(2), // MSRP — the discounts do the rest
-      },
-      discounts: lineDiscounts(plan, l),
-    })),
-  });
+      paymentMethodId: String(norm.payment_method_id),
+      interval: String(norm.billing_interval ?? ""),
+      intervalCount: Number(norm.billing_interval_count ?? 1),
+      nextBillingDate: nextBillingDate ?? new Date().toISOString(),
+      deliveryPriceCents: norm.delivery_price_cents ?? 0,
+      address: addrSource,
+      shippingOption: dm?.shippingOption,
+      plan,
+    }));
   if (!created.success || !created.contractId) {
     return { ok: false, stage: "create", error: created.error, plan };
   }
@@ -873,19 +1005,7 @@ export async function executeMigration(
   // re-enters to verify what exists, not to re-apply anything.
   const codes = resuming ? [] : carryableCodes(fresh.raw as Record<string, unknown>);
   if (codes.length) {
-    const applied = await withDraft(workspaceId, newContractId, async (draftId) => {
-      for (const c of codes) {
-        const r = await shopifyAddDraftDiscount(workspaceId, draftId, {
-          title: c.title,
-          value: c.percentage != null
-            ? { percentage: c.percentage }
-            : { fixedAmount: { amount: c.amount, appliesOnEachItem: c.appliesOnEachItem } },
-          ...(c.recurringCycleLimit != null ? { recurringCycleLimit: c.recurringCycleLimit } : {}),
-        });
-        if (!r.success) return r;
-      }
-      return { success: true };
-    });
+    const applied = await applyCarriedCodes(workspaceId, newContractId, codes);
     if (!applied.success) return { ok: false, stage: "codes", error: applied.error, plan, newContractId };
   }
 
@@ -1086,6 +1206,16 @@ export async function executeMigration(
     if (!swapped?.length) {
       return { ok: false, stage: "swap-local", error: `subscription ${subId} matched zero rows — refusing to cancel Appstle`, plan, newContractId };
     }
+    // ⭐ Re-point OPEN dunning cycles onto the new contract, exactly as the internal migration
+    // does. Left on the Appstle id, the payday retry and the post-dunning date reset look the row
+    // up by a contract id it no longer carries (the stranded-cycle class, dunning-strand-detector).
+    // Non-fatal: the swap is done, and the strand detector surfaces any cycle this misses.
+    try {
+      const { repointOpenDunningCyclesForMigration } = await import("@/lib/migrate-to-internal");
+      await repointOpenDunningCyclesForMigration(admin, workspaceId, subId, newContractId.replace("gid://shopify/SubscriptionContract/", ""));
+    } catch (e) {
+      console.error(`[migrate] ${newContractId}: swapped, but re-pointing open dunning cycles failed:`, e instanceof Error ? e.message : e);
+    }
   }
 
   const cancelled = await appstleCancelContractVendorOnly(workspaceId, appstleContractId);
@@ -1180,6 +1310,13 @@ export async function sweepIncompleteMigrations(
   workspaceId: string,
   opts: { apply?: boolean } = {},
 ): Promise<SweepRow[]> {
+  // ⭐ appstle_retired: every action below is an Appstle cancel + an Appstle read-back. With Appstle
+  // gone there is nothing left to cancel or verify, so the sweep skips cleanly instead of erroring
+  // on every half-swapped row.
+  if (await isAppstleRetired()) {
+    console.log("[migrate] sweepIncompleteMigrations skipped — appstle_retired is on");
+    return [];
+  }
   const admin = createAdminClient();
   // ⭐ Paginate. This is the detector for `half_swapped` — the one state this module itself calls
   // "the only state where a double charge is reachable" — so a silent 1000-row truncation would
