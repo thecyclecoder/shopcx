@@ -146,6 +146,7 @@ import {
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsShopifyProductIdAdhocNoise,
   isForeignSupabasePostgresMissingCrisisCustomerActionsColumnDirectRestNoise,
+  isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingProductsPricingRuleIdLookupNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
@@ -1840,6 +1841,19 @@ const LOG_QUERIES: LogQuery[] = [
       // surfaces / pages on first sighting.
       // Pattern-pin (regex, parens-as-group): isForeignSupabasePostgresMissingCrisisCustomerActionsColumnDirectRestNoisemessage, query
       if (isForeignSupabasePostgresMissingCrisisCustomerActionsColumnDirectRestNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.crisis_events` naming the off-schema `product_title` /
+      // `variant_title` columns. `crisis_events` exists but never carried those Shopify
+      // line-item labels — they live on order/line-item tables, and every ShopCX reader
+      // goes through the crisis SDK / joined queries which select the real columns. No
+      // ShopCX code change makes that query resolve, so paging Platform on it (Control
+      // Tower signature `supabase-logs:b648bd6f98de3ed5`) is repair work for a query we
+      // don't own. Narrowly gated to require BOTH the exact column-missing message AND a
+      // SELECT-on-crisis_events shape (bare OR PostgREST CTE wrapper) — a column-missing
+      // error on any other table, a different column on `crisis_events`, or on
+      // `crisis_events` via a non-SELECT statement (real code-bug shape) still surfaces /
+      // pages on first sighting.
+      if (isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.meta_ad_accounts.name`. The `meta_ad_accounts` table exists but
       // has NO bare `name` column — the human-readable account label lives on
