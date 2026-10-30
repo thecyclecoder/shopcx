@@ -123,6 +123,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -25502,6 +25503,99 @@ test("isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise KEEPS 
   assert.equal(
     isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
       "column agent_jobs.finished_at does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise ──
+test("isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise drops the foreign direct-REST lookup projecting the non-existent last_customer_message_at column", () => {
+  // The captured incident shape (Control Tower `supabase-logs:4b5f6298125f3f7a`): a foreign/
+  // stale direct-REST client reads `tickets?select=...last_customer_message_at...`, PostgREST
+  // wraps it as a `WITH pgrst_source AS ( SELECT ... FROM "public"."tickets" ... )` CTE, and
+  // Postgres rejects with `column tickets.last_customer_message_at does not exist`.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(
+      "column tickets.last_customer_message_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."tickets"."id", "public"."tickets"."last_customer_message_at" FROM "public"."tickets" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(
+      "column public.tickets.last_customer_message_at does not exist",
+      'with pgrst_source as ( select "public"."tickets"."last_customer_message_at" from "public"."tickets" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(
+      "ERROR: column tickets.last_customer_message_at does not exist",
+      'WITH pgrst_source AS ( SELECT "last_customer_message_at" FROM "public"."tickets" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(
+      "column tickets.last_customer_message_at does not exist",
+      "select id, last_customer_message_at from public.tickets order by last_customer_message_at desc limit 10",
+    ),
+    true,
+  );
+  // The unqualified-FROM (no `public.`) variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(
+      "column tickets.last_customer_message_at does not exist",
+      "select * from tickets where last_customer_message_at is null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise KEEPS a different tickets column error and a non-SELECT statement (real regressions still page)", () => {
+  // A DIFFERENT missing column on `tickets` (e.g. `status`) is a real column rename /
+  // regression and must still page — the pin covers `last_customer_message_at` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(
+      "column tickets.status does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."tickets"."status" FROM "public"."tickets" LIMIT 1 )',
+    ),
+    false,
+  );
+  // The same `last_customer_message_at` message attached to a non-SELECT statement shape is a
+  // real code-write trying to persist a bogus column — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(
+      "column tickets.last_customer_message_at does not exist",
+      "update public.tickets set last_customer_message_at = now() where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(
+      "column tickets.last_customer_message_at does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."tickets"("id","last_customer_message_at") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  // The `last_customer_message_at` message on a DIFFERENT relation (a real product-schema
+  // regression) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(
+      "column ticket_messages.last_customer_message_at does not exist",
+      "select last_customer_message_at from public.ticket_messages limit 1",
+    ),
+    false,
+  );
+  // Empty / nullish input returns false — both markers required.
+  assert.equal(isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(null, null), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(
+      "column tickets.last_customer_message_at does not exist",
       "",
     ),
     false,

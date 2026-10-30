@@ -47,6 +47,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
@@ -418,6 +419,15 @@ const LOG_QUERIES: LogQuery[] = [
       // lookup shape on `agent_jobs` (bare or PostgREST CTE wrapper) — a different missing
       // column on the table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client SELECTs a
+      // `last_customer_message_at` column from `tickets` that the table never owned. The
+      // resulting undefined_column ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-tickets-last-customer-message-at-direct-rest]], Control
+      // Tower signature `supabase-logs:4b5f6298125f3f7a`). Narrowly gated to require BOTH the
+      // exact `column tickets.last_customer_message_at does not exist` message AND the SELECT-
+      // lookup shape on `tickets` (bare or PostgREST CTE wrapper) — a different missing column
+      // on the table, or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale external/REST client SELECTs an
       // `updated_at` column from `dashboard_notifications` that the table never owned.
       // The resulting undefined_column ERROR is repair work for a query we don't own

@@ -1389,6 +1389,64 @@ export function isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNo
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `tickets.last_customer_message_at` column
+ * for a foreign / stale direct-REST lookup on a table ShopCX does not read that way. A stale
+ * external/REST client SELECTs `last_customer_message_at` from `public.tickets`, Supabase's
+ * `postgres_logs` feed captures the resulting undefined_column ERROR, and log-poll mints a
+ * Control Tower incident for a query we don't own
+ * ([[../specs/error-feed-drop-tickets-last-customer-message-at-direct-rest]], Control Tower
+ * signature `supabase-logs:4b5f6298125f3f7a`). The `tickets` table has never owned a
+ * `last_customer_message_at` column, so there is no lever from ShopCX to make that query
+ * resolve — paging Platform on it is repair work for a query no code owns. The direct twin of
+ * `isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise` /
+ * `isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise` above.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column tickets.last_customer_message_at does not exist` (with or
+ *      without the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on
+ *      the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.tickets` — either (a) the
+ *      bare `select ... from (public.)?tickets` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."tickets" ... )` CTE wrapper form with
+ *      double-quoted identifiers.
+ *
+ * Intentionally narrow — any genuine schema regression still pages:
+ *   - a DIFFERENT missing column on `tickets` still pages — the pin covers
+ *     `last_customer_message_at` only,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL, a non-SELECT wrapped op inside the CTE) still pages,
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — returning null fully suppresses the row (no error_event, no
+ * loop_alert, no signature). A capture-time drop, not a `transient` flag.
+ */
+export function isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column tickets.last_customer_message_at does not exist" ||
+    stripped === "column public.tickets.last_customer_message_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `tickets` — any trailing WHERE/LIMIT/ORDER BY is fine; the pin is
+  // the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real code-bug
+  // shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?tickets\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."tickets" ... )` with double-quoted identifiers. Guarded so the CTE branch
+  // requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper
+  // is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."tickets"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing `created_at` COLUMN on
  * `public.worker_heartbeats` for an ad hoc / stale direct-REST SELECT. The
  * `worker_heartbeats` singleton liveness table (`supabase/migrations/20260619140001_worker_heartbeats.sql`)
