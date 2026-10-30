@@ -1,0 +1,1 @@
+- **Drop foreign crisis_events product_title/variant_title ad-hoc REST lookup noise from the supabase-logs feed** · verified 2026-10-30 · → [[../libraries/error-feed]]
