@@ -12,6 +12,13 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Scope out foreign-app noise: ticket_messages.is_internal ad-hoc SELECT lookup** · verified 2026-10-30 · → [[../libraries/error-feed]]
+- **Scope out foreign direct-REST 'tickets.last_customer_message_at does not exist' noise from the postgres error feed** · verified 2026-10-30 · → [[../libraries/error-feed]]
+- **Normalize full state/province names to USPS 2-letter codes in customer-shipping-address** · verified 2026-10-30 · → [[../libraries/province-usps]]
+- **Security dependency upgrades** · verified 2026-10-30 · → [[../libraries/security-agent]]
+- **Scope out the stale loop_alerts.dedupe_key direct-REST lookup from the Control Tower error feed** · verified 2026-10-29 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise`)
+- **Drop foreign-app noise: ad hoc SELECT on non-existent orders.cancelled_at** · verified 2026-10-29 · → [[../lifecycles/control-tower]]
+- **Reissuing an expired-unused loyalty coupon must use the net-zero reissue path, never a fresh redeem_points that double-charges points** · verified 2026-10-29 · → [[../libraries/action-executor]]
 - **Crisis-confirmed customers must bypass the Refund playbook stand-firm ladder** · verified 2026-10-28 · → [[../libraries/playbook-executor]] + [[../inngest/unified-ticket-handler]]
 - **Security dependency upgrades** · verified 2026-10-28 · → [[../libraries/security-agent]]
 - **Migration audit must not false-fail a correctly-migrated sub (Appstle 400 = gone; pre-charge below no-break but matching with-break = preserved)** · verified 2026-10-27 · → [[../libraries/migration-audit]]
