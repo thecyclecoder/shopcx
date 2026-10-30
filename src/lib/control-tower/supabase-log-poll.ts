@@ -78,6 +78,7 @@ import {
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise,
+  isForeignSupabasePostgresMissingTicketMessagesIsInternalAdhocNoise,
   isForeignSupabasePostgresMissingTicketAnalysesIntentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
   isForeignSupabasePostgresMissingCustomerEventsColumnAdhocNoise,
@@ -848,6 +849,19 @@ const LOG_QUERIES: LogQuery[] = [
       // `channel` for the `tickets` table (which DOES have one), or via a non-SELECT
       // statement (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... is_internal ... from
+      // public.ticket_messages` lookup by an external tool / stale integration reading our
+      // messages table as if an `is_internal` boolean lived there. Our `ticket_messages`
+      // table has never carried an `is_internal` column — `visibility` is our real column
+      // for internal-vs-customer-facing — so the column-missing ERROR is repair work for a
+      // query we don't own ([[../specs/error-feed-drop-ticket-messages-is-internal-adhoc-lookup-noise]],
+      // Control Tower signature `supabase-logs:5ef9ba42fda27fc1`). Same narrow-gating shape
+      // as the `ticket_messages.channel` / `role` / `sender_type` siblings on the same table:
+      // BOTH the exact column-missing message AND the SELECT-lookup shape (bare or
+      // PostgREST-CTE) — a column-missing error on a live `ticket_messages` column
+      // (body / visibility), on `is_internal` for another table, or via a non-SELECT
+      // statement (real code-bug shape) still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingTicketMessagesIsInternalAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... intents ... from
       // public.ticket_analyses` lookup by an external tool / stale integration. The
       // `ticket_analyses` table exists but no ShopCX code path / migration / view /
