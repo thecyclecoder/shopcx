@@ -29,6 +29,7 @@
 
 import type { createAdminClient } from "@/lib/supabase/admin";
 import { normalizeCountryToIso2 } from "@/lib/country-iso2";
+import { normalizeProvinceToCode } from "@/lib/province-usps";
 
 type Admin = ReturnType<typeof createAdminClient>;
 
@@ -118,7 +119,12 @@ export function normalizeAddress(raw: RawShippingAddress): NormalizedShippingAdd
     address2: s(a.address2),
     city: s(a.city),
     province: province,
-    provinceCode: province.toUpperCase().slice(0, 2),
+    // Route through normalizeProvinceToCode so a full-name province like
+    // "Nevada" resolves to "NV" instead of the naive slice "NE" (Nebraska) —
+    // a valid-but-wrong code that fails Shopify zip validation and wedged
+    // Chanen Cross's portal reactivate (ticket 84a8104a). Mirrors the
+    // country normalization above.
+    provinceCode: normalizeProvinceToCode(province),
     zip: s(a.zip) || s(a.postal_code),
     // Route through normalizeCountryToIso2 so a full-name country like
     // "United States" resolves to "US" instead of being sliced to "UN"
