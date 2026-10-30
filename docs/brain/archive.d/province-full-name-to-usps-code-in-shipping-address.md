@@ -1,0 +1,1 @@
+- **Normalize full state/province names to USPS 2-letter codes in customer-shipping-address** · verified 2026-10-30 · → [[../libraries/province-usps]]
