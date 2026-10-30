@@ -207,6 +207,52 @@ test("normalizeAddress with blank country falls back to the store default 'US' (
   assert.equal(a!.countryCode, "US");
 });
 
+// --- Province → USPS code normalization (ticket 84a8104a) ---
+// 'Nevada' → naive .toUpperCase().slice(0,2) gives 'NE' (Nebraska), a
+// valid-but-wrong code that fails Shopify delivery-method zip validation
+// and wedged Chanen Cross's portal reactivate (contract 28153413805).
+test("[84a8104a] full-name provinces resolve to the correct USPS code, not a sliced prefix collision", () => {
+  const cases: Array<[string, string]> = [
+    ["Nevada", "NV"],      // not NE (Nebraska)
+    ["Montana", "MT"],     // not MO (Missouri)
+    ["Mississippi", "MS"],
+    ["Minnesota", "MN"],
+    ["Michigan", "MI"],
+    ["Missouri", "MO"],
+    ["Alaska", "AK"],      // not AL (Alabama)
+    ["Maine", "ME"],
+    ["Maryland", "MD"],
+    ["Massachusetts", "MA"],
+  ];
+  for (const [name, code] of cases) {
+    const a = normalizeAddress({ address1: "1 Main St", city: "Anytown", province: name, zip: "00000", country: "US" });
+    assert.ok(a, `must normalize ${name}`);
+    assert.equal(a!.provinceCode, code, `${name} must map to ${code}, not a naive slice`);
+  }
+});
+
+test("already-valid 2-letter province codes pass through unchanged", () => {
+  const a = normalizeAddress({ address1: "1 Main St", city: "Kirkland", province_code: "WA", zip: "98033", country: "US" });
+  assert.equal(a!.provinceCode, "WA");
+  const b = normalizeAddress({ address1: "1 Main St", city: "Anytown", province: "ca", zip: "90000", country: "US" });
+  assert.equal(b!.provinceCode, "CA"); // lowercase 2-letter uppercased, still valid
+});
+
+test("Canadian province full names resolve to the 2-letter code", () => {
+  const a = normalizeAddress({ address1: "1 King St", city: "Toronto", province: "Ontario", zip: "M5H", country: "CA" });
+  assert.equal(a!.provinceCode, "ON");
+  const b = normalizeAddress({ address1: "1 Rue St", city: "Montreal", province: "Quebec", zip: "H2X", country: "CA" });
+  assert.equal(b!.provinceCode, "QC");
+});
+
+test("unknown/non-mappable province is left unsliced (no wrong 2-char guess)", () => {
+  const a = normalizeAddress({ address1: "1 Weg", city: "Munich", province: "Bavaria", zip: "80000", country: "DE" });
+  assert.ok(a);
+  // The naive slice would have produced 'BA' — we must NOT emit that.
+  assert.notEqual(a!.provinceCode, "BA");
+  assert.equal(a!.provinceCode, "Bavaria");
+});
+
 test("formatDivergenceNote produces a human-readable line naming the from/to and the citing order", () => {
   const resolved = pickCanonicalShippingAddress({
     defaultAddress: KIRKLAND,
