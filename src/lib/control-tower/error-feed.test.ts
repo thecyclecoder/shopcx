@@ -97,6 +97,7 @@ import {
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
+  isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
@@ -25596,6 +25597,88 @@ test("isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise KE
   assert.equal(
     isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise(
       "column tickets.last_customer_message_at does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise drops the bare + PostgREST CTE product_title/variant_title direct-REST reads on crisis_events", () => {
+  // Control Tower signature `supabase-logs:b648bd6f98de3ed5`: a foreign / stale
+  // direct-REST client reads `crisis_events?select=...product_title...`, which Postgres
+  // rejects with `column crisis_events.product_title does not exist` — those Shopify
+  // line-item labels never lived on crisis_events. Pure noise, dropped at capture.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(
+      "column crisis_events.product_title does not exist",
+      "select id, product_title from public.crisis_events where workspace_id = $1",
+    ),
+    true,
+  );
+  // variant_title twin, unqualified FROM.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(
+      "column crisis_events.variant_title does not exist",
+      "select variant_title from crisis_events order by created_at desc limit 10",
+    ),
+    true,
+  );
+  // PostgREST CTE wrapper form with double-quoted identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(
+      "column crisis_events.product_title does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."crisis_events"."id", "public"."crisis_events"."product_title" FROM "public"."crisis_events" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // public.-qualified message + CTE on variant_title, with the `ERROR: ` prefix.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(
+      "ERROR: column public.crisis_events.variant_title does not exist",
+      'WITH pgrst_source AS ( SELECT "variant_title" FROM "public"."crisis_events" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise KEEPS a different column, a non-SELECT write, and a FATAL on crisis_events (real defects still page)", () => {
+  // A different missing column on crisis_events (a real column that got renamed) still
+  // pages — the pin covers product_title/variant_title only.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(
+      "column crisis_events.severity does not exist",
+      "select severity from public.crisis_events",
+    ),
+    false,
+  );
+  // A non-SELECT write naming product_title is a real code-bug shape, not the ad hoc
+  // read this drop targets — stays captured (bare + PostgREST CTE forms).
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(
+      "column crisis_events.product_title does not exist",
+      "insert into public.crisis_events (product_title) values ($1)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(
+      "column crisis_events.product_title does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."crisis_events" SET "product_title" = $1 WHERE "id" = $2 RETURNING * )',
+    ),
+    false,
+  );
+  // A FATAL on crisis_events is a different message — untouched.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select product_title from public.crisis_events",
+    ),
+    false,
+  );
+  // Empty / nullish markers return false — we need both.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(
+      "column crisis_events.product_title does not exist",
       "",
     ),
     false,
