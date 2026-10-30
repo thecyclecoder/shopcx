@@ -1,0 +1,1 @@
+- **Scope out foreign-app noise: ticket_messages.is_internal ad-hoc SELECT lookup** · verified 2026-10-30 · → [[../libraries/error-feed]]

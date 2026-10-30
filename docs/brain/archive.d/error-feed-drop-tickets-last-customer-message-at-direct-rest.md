@@ -1,0 +1,1 @@
+- **Scope out foreign direct-REST 'tickets.last_customer_message_at does not exist' noise from the postgres error feed** · verified 2026-10-30 · → [[../libraries/error-feed]]
