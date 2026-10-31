@@ -1717,6 +1717,15 @@ export interface AssertionInputs {
 const RENEWAL_MIN_CYCLE_SAMPLE = 10;
 /** Anomalous-rate this cycle that trips the alert regardless of baseline — a systemic break (bad creds declining everyone, mass no-PM). */
 const RENEWAL_HARD_FLOOR_RATE = 0.5;
+/**
+ * The systemic hard-floor branch additionally requires that the successful-charge rate itself has
+ * collapsed below this fraction. A collapsed charge-success rate is the shared signature of every
+ * real systemic cause (bad Braintree creds, mass no-payment-method) — charges go to near-zero. A
+ * small cohort that lands at exactly 50% bad while half the subs still charged fine (e.g. 5 charged
+ * / 4 declined→dunning / 1 comp-blocked) is ordinary decline clustering, not a payment outage, so it
+ * must NOT page. Guards the false "bad Braintree creds" systemic alert on healthy small cohorts.
+ */
+const RENEWAL_SYSTEMIC_MAX_CHARGE_RATE = 0.5;
 /** Below this absolute anomalous-rate a relative spike is ignored (don't alarm on tiny noise even if it's 3× a near-zero baseline). */
 const RENEWAL_MIN_SPIKE_RATE = 0.15;
 /** Relative spike: current anomalous-rate ≥ baseline × this. */
@@ -1924,10 +1933,14 @@ export function evalOutputAssertion(
       if (cur.total < RENEWAL_MIN_CYCLE_SAMPLE) return null;
       const bad = badOutcomeCount(cur);
       const rate = bad / cur.total;
+      // A systemic break collapses successful charges to near-zero — the shared signature of bad
+      // creds / mass no-PM. Gating the hard-floor branch on a collapsed charge-success rate stops a
+      // healthy small cohort (half charged, the rest routed correctly to dunning) from false-paging.
+      const chargeRate = cur.total > 0 ? cur.charged / cur.total : 0;
 
       let tripped: "systemic" | "spike" | null = null;
       let baselineNote = "";
-      if (rate >= RENEWAL_HARD_FLOOR_RATE) {
+      if (rate >= RENEWAL_HARD_FLOOR_RATE && chargeRate < RENEWAL_SYSTEMIC_MAX_CHARGE_RATE) {
         tripped = "systemic";
       } else if (inputs.renewalBaseline.total >= RENEWAL_MIN_BASELINE_SAMPLE && rate >= RENEWAL_MIN_SPIKE_RATE) {
         const baseRate = badOutcomeCount(inputs.renewalBaseline) / inputs.renewalBaseline.total;
