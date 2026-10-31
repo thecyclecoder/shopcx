@@ -92,6 +92,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDeliveryAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
+  isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise,
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
@@ -17575,6 +17576,97 @@ test("isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise KEEPS a c
     isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(
       "column customers.address does not exist",
       "update public.customers set address = $1 where id = $2",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise ──
+// A foreign / stale direct-REST client reads
+// `/rest/v1/customers?select=...loyalty_points_balance...` against our `public.customers`
+// table. The table exists but has NEVER owned a `loyalty_points_balance` column — loyalty
+// balance lives on `loyalty_members.points_balance`. Foreign-owned surface, no lever from
+// us — drop AT CAPTURE only when BOTH the exact column-missing message on
+// `customers.loyalty_points_balance` AND a SELECT-lookup shape on `customers` (bare OR
+// PostgREST CTE wrapper) are present. A column-missing on a live `customers` column
+// (`default_address`), on `loyalty_points_balance` from any other table, or via a
+// non-SELECT statement still pages (Control Tower signature
+// `supabase-logs:8e7745a1b663b7d8`).
+
+test("isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise drops the captured supabase-logs:8e7745a1b663b7d8 message+query pair (direct-REST SELECT on customers.loyalty_points_balance)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `customers.loyalty_points_balance` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise(
+      "column customers.loyalty_points_balance does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."customers"."id", "public"."customers"."loyalty_points_balance" FROM "public"."customers" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise(
+      "column public.customers.loyalty_points_balance does not exist",
+      'WITH pgrst_source AS (SELECT "public"."customers"."loyalty_points_balance" FROM "public"."customers")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise(
+      "column customers.loyalty_points_balance does not exist",
+      "select id, loyalty_points_balance from public.customers",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise(
+      "column customers.loyalty_points_balance does not exist",
+      "select loyalty_points_balance from customers limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise(
+      "ERROR: column customers.loyalty_points_balance does not exist",
+      'WITH pgrst_source AS (SELECT "public"."customers"."loyalty_points_balance" FROM "public"."customers")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise(
+      "column customers.loyalty_points_balance does not exist",
+      "SELECT ID, LOYALTY_POINTS_BALANCE FROM PUBLIC.CUSTOMERS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise KEEPS a column-missing on a live customers column (default_address — a real schema regression still pages)", () => {
+  // `default_address` IS a live column on `customers`. If it ever regresses we WANT the
+  // page — the pin is `customers.loyalty_points_balance` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise(
+      "column customers.default_address does not exist",
+      "select default_address from public.customers",
+    ),
+    false,
+  );
+  // A column-missing on `loyalty_points_balance` from a DIFFERENT table must still page —
+  // the pin is `customers.loyalty_points_balance` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise(
+      "column loyalty_members.loyalty_points_balance does not exist",
+      "select loyalty_points_balance from public.loyalty_members",
+    ),
+    false,
+  );
+  // A non-SELECT statement against `customers` (real code-bug shape) must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise(
+      "column customers.loyalty_points_balance does not exist",
+      "update public.customers set loyalty_points_balance = $1 where id = $2",
     ),
     false,
   );

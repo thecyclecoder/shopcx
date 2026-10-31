@@ -73,6 +73,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
+  isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
@@ -785,6 +786,18 @@ const LOG_QUERIES: LogQuery[] = [
       // `customers` via a non-SELECT statement (real code-bug shape), still surfaces
       // / pages on first sighting.
       if (isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a direct-REST `select ... loyalty_points_balance
+      // ... from public.customers` lookup by an external tool (Supabase Studio table editor,
+      // foreign SQL client, third-party integration) or the PostgREST CTE wrapper the same
+      // client emits. The `customers` table has never owned a `loyalty_points_balance`
+      // column (loyalty balance lives on `loyalty_members.points_balance`) — no ShopCX code
+      // path names it, so the resulting column-missing ERROR is foreign noise (Control Tower
+      // signature `supabase-logs:8e7745a1b663b7d8`). Narrowly gated to require BOTH the exact
+      // `column customers.loyalty_points_balance does not exist` message AND a SELECT-lookup
+      // query shape — a column-missing error on any live `customers` column (including
+      // `default_address`), on `loyalty_points_balance` from any other table, or on
+      // `customers` via a non-SELECT statement (real code-bug shape), still surfaces / pages.
+      if (isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... expires_at ... from
       // public.journey_sessions` lookup by an external tool (Supabase Studio table editor,
       // foreign SQL client, third-party integration) or the PostgREST CTE wrapper the same
