@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST customers.loyalty_points_balance undefined-column noise from the Control Tower feed** · verified 2026-10-31 · → [[../libraries/error-feed]]
