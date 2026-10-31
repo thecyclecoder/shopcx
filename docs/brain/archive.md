@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Drop foreign crisis_events product_title/variant_title ad-hoc REST lookup noise from the supabase-logs feed** · verified 2026-10-30 · → [[../libraries/error-feed]]
 - **Scope out foreign-app noise: ticket_messages.is_internal ad-hoc SELECT lookup** · verified 2026-10-30 · → [[../libraries/error-feed]]
 - **Scope out foreign direct-REST 'tickets.last_customer_message_at does not exist' noise from the postgres error feed** · verified 2026-10-30 · → [[../libraries/error-feed]]
 - **Normalize full state/province names to USPS 2-letter codes in customer-shipping-address** · verified 2026-10-30 · → [[../libraries/province-usps]]
