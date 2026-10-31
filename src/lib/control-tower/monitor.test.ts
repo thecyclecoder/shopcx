@@ -2514,6 +2514,66 @@ test("evalOutputAssertion escalation-idle: genuinely long wait (both escalated_a
   assert.equal(verdict?.violation.reason, "idle_while_work");
 });
 
+// ── renewal-outcome-distribution systemic guard (collapsed charge-success rate) ──
+// The systemic hard-floor branch must require that successful charges have genuinely collapsed —
+// the shared signature of every real systemic cause (bad Braintree creds, mass no-PM) — not just
+// a 50%-bad rate on a 10-sample cohort. A healthy half-charged cycle (5 charged / 4 declined→dunning
+// / 1 comp-blocked) lands at exactly 50% bad but half the subs still charged fine, so it must NOT page.
+const RENEWAL_OUTCOME_LOOP = MONITORED_LOOPS.find((l) => l.id === "internal-subscription-renewal-cron")!;
+assert.ok(RENEWAL_OUTCOME_LOOP, "internal-subscription-renewal-cron must be a registered monitored loop");
+
+test("evalOutputAssertion renewal-outcome-distribution: healthy 5-charged/4-dunning/1-comp cycle (50% bad but half charged) returns null", () => {
+  // Exactly at the 10-sample minimum and exactly at the 50% hard-floor bad-rate — but half the
+  // cohort charged successfully, so this is ordinary small-cohort decline clustering, not a payment
+  // outage. The collapsed-charge-success guard must suppress the false systemic page.
+  const verdict = evalOutputAssertion(
+    "renewal-outcome-distribution",
+    RENEWAL_OUTCOME_LOOP,
+    null,
+    baselineAssertionInputs({
+      renewalCurrent: {
+        total: 10,
+        charged: 5,
+        skipped_no_payment_method: 0,
+        skipped_zero_total: 0,
+        declined_to_dunning: 4,
+        comp_shipped: 0,
+        comp_blocked: 1,
+        skipped_other: 0,
+        refused_wedged_cycle: 0,
+        refused_concurrent_renewal: 0,
+      },
+    }),
+  );
+  assert.equal(verdict, null);
+});
+
+test("evalOutputAssertion renewal-outcome-distribution: collapsed 0-charged/9-declined cycle still trips systemic", () => {
+  // A genuine creds / no-payment-method outage — charges collapsed to zero. The guard must still let
+  // this page: bad-rate ≥ hard floor AND charge-success rate collapsed below the max.
+  const verdict = evalOutputAssertion(
+    "renewal-outcome-distribution",
+    RENEWAL_OUTCOME_LOOP,
+    null,
+    baselineAssertionInputs({
+      renewalCurrent: {
+        total: 10,
+        charged: 0,
+        skipped_no_payment_method: 0,
+        skipped_zero_total: 0,
+        declined_to_dunning: 9,
+        comp_shipped: 0,
+        comp_blocked: 1,
+        skipped_other: 0,
+        refused_wedged_cycle: 0,
+        refused_concurrent_renewal: 0,
+      },
+    }),
+  );
+  assert.ok(verdict, "expected a systemic renewal page for a fully-collapsed charge cycle");
+  assert.equal(verdict?.violation.reason, "renewal_outcome_distribution");
+});
+
 function segmentCoverageLatest(ranAtIso: string): LoopHistoryRow {
   return { ran_at: ranAtIso, ok: true, produced: null, detail: null, duration_ms: null };
 }
