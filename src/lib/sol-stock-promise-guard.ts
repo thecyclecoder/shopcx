@@ -40,6 +40,15 @@ export interface SolStockPromiseContext {
    * no 3PL row for.
    */
   outOfStock: StockPromiseVariant[];
+  /**
+   * Variants the 3PL CAN ship — `in_stock === true` from `getCxProducts`. Used only to SUPPRESS a
+   * false match: a bare OOS flavour token ("Berry") that is a substring of an in-stock variant name
+   * the reply actually names ("Mixed Berry") is not an offer of the OOS variant. Optional — when
+   * omitted no suppression happens and the guard behaves exactly as before.
+   * Ticket 42f55634: an OOS "Sleep Gummies / Berry" false-blocked a correct "Superfood Tabs /
+   * Mixed Berry" reactivation confirmation because "berry" is a substring of "mixed berry".
+   */
+  inStock?: StockPromiseVariant[];
 }
 
 export interface SolStockPromiseAssessment {
@@ -87,6 +96,25 @@ const norm = (s: string): string =>
     .replace(/\s+/g, " ")
     .trim();
 
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * All `[start, end)` spans where `phrase` occurs in `text` on WORD BOUNDARIES — so the OOS token
+ * "berry" matches the standalone word "berry" but not the "berry" inside "blueberry". Both inputs
+ * are already normalized (lowercase a–z/0–9/space), so boundaries are "not an alphanumeric".
+ */
+function wordBoundarySpans(text: string, phrase: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  if (!phrase) return spans;
+  const re = new RegExp(`(?<![a-z0-9])${escapeRe(phrase)}(?![a-z0-9])`, "g");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    spans.push([m.index, m.index + m[0].length]);
+    if (m.index === re.lastIndex) re.lastIndex++; // never loop on a zero-width match
+  }
+  return spans;
+}
+
 /**
  * Does the reply OFFER an out-of-stock variant without saying it's unavailable?
  *
@@ -106,12 +134,29 @@ export function assessSolStockPromiseRisk(
   const discloses = UNAVAILABLE_MARKERS.some((m) => reply.includes(norm(m)));
   if (discloses) return clean;
 
+  // Spans the reply has already "spent" naming an IN-STOCK variant. A match of a bare OOS token that
+  // falls entirely inside one of these is explained by the in-stock variant the reply names (e.g.
+  // the OOS "berry" inside the in-stock "mixed berry") and must not be treated as an offer of the
+  // OOS variant. Ticket 42f55634: a shared flavour token can no longer false-block.
+  const coveredSpans: Array<[number, number]> = [];
+  for (const iv of ctx.inStock ?? []) {
+    const name = norm(iv.variant ?? "");
+    if (!name) continue;
+    for (const sp of wordBoundarySpans(reply, name)) coveredSpans.push(sp);
+  }
+  const coveredBy = ([s, e]: [number, number]): boolean =>
+    coveredSpans.some(([cs, ce]) => s >= cs && e <= ce);
+
   const offending: string[] = [];
   for (const v of ctx.outOfStock) {
     const variant = norm(v.variant ?? "");
     // A one-word variant like "Apple" is too generic to match safely; require a real name.
     if (!variant || variant.length < 4) continue;
-    if (reply.includes(variant)) {
+    // Match on word boundaries (not bare substring), then keep only occurrences NOT accounted for by
+    // an in-stock variant name the reply also names. One genuine (uncovered) occurrence is an offer.
+    const spans = wordBoundarySpans(reply, variant);
+    const genuinelyOffered = spans.some((sp) => !coveredBy(sp));
+    if (genuinelyOffered) {
       const label = v.product ? `${v.product} / ${v.variant}` : String(v.variant);
       if (!offending.includes(label)) offending.push(label);
     }

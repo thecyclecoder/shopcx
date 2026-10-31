@@ -57,6 +57,46 @@ test("does not fire on in-stock flavours", () => {
   assert.equal(r.blocked, false);
 });
 
+test("PASSES a bare flavour token shared with an in-stock variant of another product (ticket 42f55634)", () => {
+  // Marjorie reactivated the in-stock 'Superfood Tabs / Mixed Berry'. The OOS 'Sleep Gummies / Berry'
+  // shares the bare token 'Berry', which is a substring of 'Mixed Berry'. The old guard
+  // reply.includes("berry") false-fired and blocked a correct reactivation confirmation. The fixed
+  // guard must suppress the match because the only occurrence of "berry" is inside the in-stock
+  // "Mixed Berry" name the reply actually names.
+  const r = assessSolStockPromiseRisk({
+    firstReply:
+      "All set, Marjorie — your Superfood Tabs in Mixed Berry subscription is active again and your " +
+      "next box is on the way.",
+    outOfStock: [{ product: "Sleep Gummies", variant: "Berry" }],
+    inStock: [{ product: "Superfood Tabs", variant: "Mixed Berry" }],
+  });
+  assert.equal(r.blocked, false);
+  assert.equal(r.reason, null);
+});
+
+test("still BLOCKS a bare offer of the shared token when no in-stock variant explains it", () => {
+  // Suppression is narrow: with nothing in-stock to account for the bare token, a genuine offer of
+  // the OOS 'Berry' must still block — the guard's real protection is preserved.
+  const r = assessSolStockPromiseRisk({
+    firstReply: "Good news — your Berry is on the way!",
+    outOfStock: [{ product: "Sleep Gummies", variant: "Berry" }],
+  });
+  assert.equal(r.blocked, true);
+  assert.deepEqual(r.offendingVariants, ["Sleep Gummies / Berry"]);
+});
+
+test("BLOCKS when the reply offers the OOS token separately from an in-stock compound name", () => {
+  // The in-stock "Mixed Berry" accounts for one occurrence, but a second bare "Berry" offer is not
+  // covered by any in-stock span — that genuine offer must still block.
+  const r = assessSolStockPromiseRisk({
+    firstReply: "Your Mixed Berry is active, and I've added a Berry on top.",
+    outOfStock: [{ product: "Sleep Gummies", variant: "Berry" }],
+    inStock: [{ product: "Superfood Tabs", variant: "Mixed Berry" }],
+  });
+  assert.equal(r.blocked, true);
+  assert.deepEqual(r.offendingVariants, ["Sleep Gummies / Berry"]);
+});
+
 test("matches through HTML and hyphenation", () => {
   const r = assessSolStockPromiseRisk({
     firstReply: "<p>Your <b>Strawberry-Lemonade</b> is on its way!</p>",

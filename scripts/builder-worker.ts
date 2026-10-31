@@ -13615,7 +13615,15 @@ async function runTicketHandleJob(job: Job) {
               .filter((v) => v.in_stock === false)
               .map((v) => ({ product: pr.title, variant: v.title })),
           );
-          stockGuard = assessSolStockPromiseRisk({ firstReply, outOfStock });
+          // In-stock variants let the guard suppress a false match where a bare OOS flavour token
+          // ("Berry") is only a substring of an in-stock variant name the reply names ("Mixed
+          // Berry") — ticket 42f55634. Only in_stock === true (never null/unknown).
+          const inStock = products.flatMap((pr) =>
+            pr.variants
+              .filter((v) => v.in_stock === true)
+              .map((v) => ({ product: pr.title, variant: v.title })),
+          );
+          stockGuard = assessSolStockPromiseRisk({ firstReply, outOfStock, inStock });
         } catch (e) {
           console.warn(`${tag} stock-promise guard skipped (fail-open): ${errText(e)}`);
         }
