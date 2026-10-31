@@ -30,10 +30,23 @@ Strawberry Lemonade had been **3PL-zero since 2026-07-30**, under an ACTIVE [[..
 
 One disclosure anywhere clears the whole reply (`UNAVAILABLE_MARKERS` — out of stock · sold out · unavailable · back in stock · couldn't include · currently out · …). Matching is done on normalized text, so HTML and hyphenation (`<b>Strawberry-Lemonade</b>`) still match.
 
+## Word-boundary match + shared-flavour-token suppression
+
+Matching is on **word boundaries**, not bare substring, and a match is **suppressed when it is fully contained within an in-stock variant name the reply also names** — so a flavour token shared across products can no longer false-block.
+
+Ticket `42f55634` (Marjorie Platt, portal reactivate): Sol correctly revived the in-stock **Superfood Tabs / Mixed Berry** sub, but the confirmation was blocked because the OOS **Sleep Gummies / Berry** variant's bare title `Berry` is a substring of `Mixed Berry`. The old guard did `reply.includes("berry")` and fired. The fix:
+
+- `wordBoundarySpans(text, phrase)` finds every standalone occurrence of a variant title (so `berry` matches the word `berry`, not the `berry` inside `blueberry`).
+- The context now carries an optional `inStock: StockPromiseVariant[]` (built in `runTicketHandleJob` from `in_stock === true` variants, never `null`). Every span the reply spends naming an in-stock variant is "covered"; an OOS token occurrence that falls entirely inside a covered span is the in-stock variant, not an offer, and is dropped.
+- A block fires only when at least **one** OOS occurrence is *uncovered* — a genuine bare offer. So `"Your Mixed Berry is active, and I've added a Berry on top."` still blocks on the second, uncovered `Berry`.
+
+`inStock` is optional — omitted, no suppression happens and the guard is unchanged (the incident `0c9f11a7` text still blocks).
+
 ## Fails open, deliberately
 
 - Empty reply, or empty OOS list → no block.
 - Variant names under 4 chars are skipped (a variant like "Ade" would collide with ordinary prose).
+- A bare OOS token wholly inside an in-stock variant name the reply names is suppressed (ticket 42f55634, above).
 - Only `in_stock === false` is policed — **never** `null`, which would fire on every variant lacking a 3PL row.
 - The worker wraps the lookup in try/catch: a products-read failure logs and skips the gate rather than blocking a legitimate reply.
 
