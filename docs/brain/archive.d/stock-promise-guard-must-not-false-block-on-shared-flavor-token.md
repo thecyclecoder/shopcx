@@ -1,0 +1,1 @@
+- **Stock-promise guard: match full product+variant identity, not a bare shared flavor token** · verified 2026-10-31 · → [[../libraries/sol-stock-promise-guard]]
