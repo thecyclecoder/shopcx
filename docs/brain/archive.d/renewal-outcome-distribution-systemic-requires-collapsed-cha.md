@@ -1,0 +1,1 @@
+- **Renewal outcome-distribution 'systemic' alert must require a collapsed charge-success rate, not just 50% bad on 10 samples** · verified 2026-10-31 · → [[libraries/control-tower]]
