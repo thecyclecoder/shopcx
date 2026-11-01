@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc 'tickets.metadata' column-missing reads at Control Tower capture** · verified 2026-11-01 · → [[../libraries/error-feed]]
