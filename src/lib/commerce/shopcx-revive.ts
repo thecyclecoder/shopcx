@@ -215,6 +215,12 @@ export function resolveReviveAddress(sources: {
   override?: RawShippingAddress;
   row?: RawShippingAddress;
   customerDefault?: RawShippingAddress;
+  /**
+   * The customer record's own name. ⚠️ Appstle stored the subscription address WITHOUT a name
+   * (23,412 of 26,247 never-migrated rows), so without this fallback nearly every old cancelled
+   * sub refused to revive with `needs_address (missing lastName)` and the portal had no way out.
+   */
+  customerName?: { firstName?: string | null; lastName?: string | null };
 }): { address: Record<string, string> | null; source: "override" | "subscription" | "default_address" | null; missing: string[] } {
   let firstMissing: string[] = [...REQUIRED_ADDRESS_FIELDS];
   for (const [source, raw] of [
@@ -229,8 +235,8 @@ export function resolveReviveAddress(sources: {
       address2: n.address2,
       city: n.city,
       countryCode: n.countryCode,
-      firstName: n.firstName,
-      lastName: n.lastName,
+      firstName: n.firstName || (sources.customerName?.firstName ?? "").trim(),
+      lastName: n.lastName || (sources.customerName?.lastName ?? "").trim(),
       phone: n.phone,
       provinceCode: n.provinceCode,
       zip: n.zip,
@@ -355,10 +361,17 @@ export function planShopcxFromMirror(input: {
 
 // ── I/O seams ───────────────────────────────────────────────────────────────────────────────
 
+export interface ReviveCustomer {
+  shopify_customer_id: string | null;
+  default_address: unknown;
+  first_name?: string | null;
+  last_name?: string | null;
+}
+
 export interface ReviveDeps {
   now(): Date;
   loadRow(workspaceId: string, subscriptionId: string): Promise<MirrorRow | null>;
-  loadCustomer(workspaceId: string, customerId: string): Promise<{ shopify_customer_id: string | null; default_address: unknown } | null>;
+  loadCustomer(workspaceId: string, customerId: string): Promise<ReviveCustomer | null>;
   listPaymentMethods(workspaceId: string, shopifyCustomerId: string): Promise<PaymentMethod[]>;
   loadPricingContext(workspaceId: string): Promise<PricingContext | null>;
   /** Compare-and-set: stamp `shopcx_revive_claimed_at = nowIso` only if it still equals `prev` and the row is still appstle. */
@@ -389,9 +402,9 @@ export function defaultReviveDeps(): ReviveDeps {
     },
     async loadCustomer(workspaceId, customerId) {
       const { data } = await (await admin())
-        .from("customers").select("shopify_customer_id, default_address")
+        .from("customers").select("shopify_customer_id, default_address, first_name, last_name")
         .eq("workspace_id", workspaceId).eq("id", customerId).maybeSingle();
-      return (data as { shopify_customer_id: string | null; default_address: unknown } | null) ?? null;
+      return (data as ReviveCustomer | null) ?? null;
     },
     async listPaymentMethods(workspaceId, shopifyCustomerId) {
       const { getCustomerPaymentMethods } = await import("@/lib/dunning");
@@ -508,6 +521,7 @@ export async function buildShopcxFromMirror(
     override: opts.address,
     row: row.shipping_address as RawShippingAddress,
     customerDefault: customer?.default_address as RawShippingAddress,
+    customerName: { firstName: customer?.first_name, lastName: customer?.last_name },
   });
   if (!address.address) {
     return { ok: false, reason: "needs_address", error: `no complete shipping address (missing ${address.missing.join(", ")})`, missing: address.missing };

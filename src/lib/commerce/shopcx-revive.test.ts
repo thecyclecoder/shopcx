@@ -221,6 +221,20 @@ test("address: row first, then the customer's default; incomplete → needs_addr
   assert.deepEqual(none.missing, ["zip", "lastName"]);
 });
 
+test("address: a nameless stored address takes the customer record's name (Appstle stored none)", () => {
+  const nameless = { address1: "1 Main", city: "Austin", country_code: "US", zip: "78701", province_code: "TX" };
+  assert.deepEqual(resolveReviveAddress({ row: nameless }).missing, ["lastName"]);
+  const filled = resolveReviveAddress({ row: nameless, customerName: { firstName: "Grace", lastName: " Hopper " } });
+  assert.equal(filled.source, "subscription");
+  assert.equal(filled.address?.lastName, "Hopper");
+  assert.equal(filled.address?.firstName, "Grace");
+  // The address's own name still wins.
+  const own = resolveReviveAddress({ row: { ...nameless, last_name: "Lovelace" }, customerName: { lastName: "Hopper" } });
+  assert.equal(own.address?.lastName, "Lovelace");
+  // No name anywhere is still a refusal.
+  assert.equal(resolveReviveAddress({ row: nameless, customerName: { firstName: null, lastName: null } }).address, null);
+});
+
 test("card: expired skipped, preferred honoured when usable", () => {
   assert.equal(pickUsableCard([EXPIRED], NOW), null);
   assert.equal(pickUsableCard([EXPIRED, CARD], NOW)?.id, CARD.id);
