@@ -12,6 +12,10 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Security dependency upgrades** · verified 2026-11-01 · → [[../libraries/security-agent]]
+- **Drop foreign direct-REST customers.loyalty_points_balance undefined-column noise from the Control Tower feed** · verified 2026-10-31 · → [[../libraries/error-feed]]
+- **Renewal outcome-distribution 'systemic' alert must require a collapsed charge-success rate, not just 50% bad on 10 samples** · verified 2026-10-31 · → [[libraries/control-tower]]
+- **Stock-promise guard: match full product+variant identity, not a bare shared flavor token** · verified 2026-10-31 · → [[../libraries/sol-stock-promise-guard]]
 - **Drop foreign crisis_events product_title/variant_title ad-hoc REST lookup noise from the supabase-logs feed** · verified 2026-10-30 · → [[../libraries/error-feed]]
 - **Scope out foreign-app noise: ticket_messages.is_internal ad-hoc SELECT lookup** · verified 2026-10-30 · → [[../libraries/error-feed]]
 - **Scope out foreign direct-REST 'tickets.last_customer_message_at does not exist' noise from the postgres error feed** · verified 2026-10-30 · → [[../libraries/error-feed]]
