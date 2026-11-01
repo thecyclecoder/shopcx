@@ -160,6 +160,7 @@ import {
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise,
   isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise,
+  isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise,
   isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
   isForeignSupabasePostgresMissingDailyAmazonOrderSnapshotsUnitsAdhocNoise,
@@ -2190,6 +2191,12 @@ const LOG_QUERIES: LogQuery[] = [
       // SELECT-on-tickets shape (bare OR PostgREST CTE wrapper) — a different column, a
       // non-SELECT, or a JOIN path still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(message, query)) return null;
+      // Same foreign direct-REST shape on the same table, different foreign-expected column: a
+      // stale/foreign client reading `tickets.metadata` (a free-form column ShopCX never
+      // exposed on tickets). Narrowly gated to the exact column-missing message AND a
+      // SELECT-on-tickets shape (bare OR PostgREST CTE wrapper) — a different column, a
+      // non-SELECT, or a JOIN path still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(message, query)) return null;
       // Same foreign direct-REST shape on a different table: a stale/foreign client reading
       // `specs.spec_slug` (the real column is the bare `slug`). Narrowly gated to the exact
       // column-missing message AND a SELECT-on-specs shape (bare OR PostgREST CTE wrapper)
