@@ -110,6 +110,7 @@ import {
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise,
   isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise,
+  isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise,
   isForeignSupabasePostgresMissingSpecsSpecSlugColumnAdhocNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isExpectedBillingForecastsPendingUniqViolation,
@@ -19942,6 +19943,175 @@ test("isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise returns f
   assert.equal(
     isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise(
       "column tickets.escalated does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/tickets?select=...&metadata=...` against our `public.tickets` table. The table
+// exists but by design carries NO free-form `metadata` column — ShopCX never exposed one.
+// Foreign-owned surface, no lever from us — drop AT CAPTURE only when BOTH the exact
+// column-missing message on `tickets.metadata` AND a SELECT-lookup shape on `tickets` (bare
+// OR PostgREST CTE wrapper) are present. A column-missing on any other table, a different
+// column on `tickets`, a non-SELECT write, or a JOIN path still pages.
+
+test("isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise drops the captured message+query pair (positive drop — bare SELECT shape with the exact message)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column tickets.metadata does not exist",
+      "select id, metadata from public.tickets where workspace_id = $1",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column public.tickets.metadata does not exist",
+      "select metadata from public.tickets",
+    ),
+    true,
+  );
+  // The unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column tickets.metadata does not exist",
+      "select metadata from tickets limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "ERROR: column tickets.metadata does not exist",
+      "select metadata from public.tickets",
+    ),
+    true,
+  );
+  // Case-insensitive on the query; trailing WHERE / ORDER BY / LIMIT stays the ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column tickets.metadata does not exist",
+      "SELECT ID, METADATA FROM PUBLIC.TICKETS ORDER BY CREATED_AT DESC LIMIT 50",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise ALSO drops the PostgREST `WITH pgrst_source AS (SELECT ... FROM \"public\".\"tickets\" ...)` CTE wrapper form (positive drop — CTE wrapper shape)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column tickets.metadata does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."tickets"."id", "public"."tickets"."metadata" FROM "public"."tickets" ORDER BY "public"."tickets"."created_at" DESC )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column public.tickets.metadata does not exist",
+      'WITH pgrst_source AS (SELECT "public"."tickets"."metadata" FROM "public"."tickets")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise KEEPS a column-missing on a DIFFERENT column of tickets (`tickets.status` — a real rename regression still pages)", () => {
+  // The pin is `metadata` only. A different column going missing on `tickets` is a real
+  // code-bug / rename regression we DO want to page on.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column tickets.status does not exist",
+      "select status from public.tickets order by created_at desc",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column public.tickets.status does not exist",
+      "select status from public.tickets",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise KEEPS a column-missing on a DIFFERENT table (`orders.metadata` — pin is tickets only)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column orders.metadata does not exist",
+      "select id, metadata from public.orders",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise KEEPS a non-SELECT statement shape on tickets (an INSERT / UPDATE / DELETE / DDL with the same message is a real code-bug and still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column tickets.metadata does not exist",
+      "insert into public.tickets (workspace_id, metadata) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column tickets.metadata does not exist",
+      "update public.tickets set metadata = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column tickets.metadata does not exist",
+      "delete from public.tickets where metadata = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column tickets.metadata does not exist",
+      "alter table public.tickets add column metadata jsonb",
+    ),
+    false,
+  );
+  // The PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column tickets.metadata does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."tickets"("workspace_id", "metadata") VALUES ($1, $2) RETURNING "public"."tickets"."id" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise KEEPS the same message on a JOIN with another table (a real code path joining tickets still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column tickets.metadata does not exist",
+      "select t.id, t.metadata, w.slug from public.tickets t join public.workspaces w on w.id = t.workspace_id where w.slug = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape, so the row stays
+  // captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(
+      "column tickets.metadata does not exist",
       "",
     ),
     false,
