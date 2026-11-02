@@ -81,14 +81,59 @@ test("classifyReconnectRequired — non-400 status does NOT classify (5xx wobble
   );
 });
 
-test("classifyReconnectRequired — an unrelated 400 (invalid token, code 190) does NOT classify", () => {
+test("classifyReconnectRequired — Meta code 190 token-invalidation 400 classifies true (authoritative signal)", () => {
   assert.equal(
     classifyReconnectRequired(400, {
       code: 190,
       message: "Invalid access token",
     }),
-    false,
+    true,
   );
+});
+
+test("classifyReconnectRequired — the exact code-190 session-invalidated 400 boundary classifies true", () => {
+  // The named failure state: a workspace owner changed their Facebook password
+  // (or Meta reset the session) → every sync tick returns this 400 code 190.
+  assert.equal(
+    classifyReconnectRequired(400, {
+      code: 190,
+      error_subcode: 460,
+      message:
+        "Error validating access token: Session has been invalidated because the user changed their password or Facebook has changed the session for security reasons.",
+    }),
+    true,
+  );
+});
+
+test("classifyReconnectRequired — 'session has been invalidated' phrasing (code absent) classifies true", () => {
+  assert.equal(
+    classifyReconnectRequired(400, {
+      error_user_msg: "Session has been invalidated. Please reconnect.",
+    }),
+    true,
+  );
+});
+
+test("classifyReconnectRequired — 'error validating access token' phrasing (code absent) classifies true", () => {
+  assert.equal(
+    classifyReconnectRequired(400, {
+      message: "Error validating access token: the token is no longer valid.",
+    }),
+    true,
+  );
+});
+
+test("classifyReconnectRequired — a code-190 session-invalidated 400 does NOT classify as any other class", () => {
+  const err = {
+    code: 190,
+    error_subcode: 460,
+    message:
+      "Error validating access token: Session has been invalidated because the user changed their password or Facebook has changed the session for security reasons.",
+  };
+  assert.equal(classifyReconnectRequired(400, err), true);
+  assert.equal(classifyAppOwnerActionRequired(400, err), false);
+  assert.equal(isPermanentGraphError(400, err), false);
+  assert.equal(isTransientGraphError(400, err), false);
 });
 
 // ── mutual-exclusion with the other three classes ────────────────────────────
@@ -134,10 +179,21 @@ test("graphError — a message tripping BOTH classifiers tags as app_owner_actio
   assert.equal(err.metaClass, "app_owner_action_required");
 });
 
-test("graphError — a plain fatal 400 (invalid token) does NOT tag metaClass (falls through to ordinary fatal)", () => {
+test("graphError — a code-190 token-invalidation 400 tags metaClass='reconnect_required'", () => {
   const err = graphError(400, {
     code: 190,
-    message: "Invalid OAuth access token.",
+    error_subcode: 460,
+    message:
+      "Error validating access token: Session has been invalidated because the user changed their password or Facebook has changed the session for security reasons.",
+  });
+  assert.equal(err.metaClass, "reconnect_required");
+  assert.equal(err.httpStatus, 400);
+});
+
+test("graphError — a plain param-validation 400 (not a token/reconnect state) does NOT tag metaClass (falls through to ordinary fatal)", () => {
+  const err = graphError(400, {
+    code: 100,
+    message: "Invalid parameter",
   });
   assert.equal(err.metaClass, undefined);
   assert.equal(err.httpStatus, 400);

@@ -144,14 +144,26 @@ export function classifyAppOwnerActionRequired(status: number, error: any): bool
  * live — is the diagnostic: nothing left to fix in the App Dashboard, only
  * OAuth re-consent by the workspace owner will restore reads.
  *
+ * Meta OAuthException **code 190** is the AUTHORITATIVE token-invalidation
+ * signal and is now a recognized trigger here: when a workspace owner changes
+ * their Facebook password (or Meta resets the session for security), Meta
+ * invalidates the stored user token and every call returns HTTP 400 code 190
+ * ("Error validating access token: Session has been invalidated because the
+ * user changed their password…"). Before this classification that error threw
+ * raw into the Control Tower feed and paged the team as a real incident every
+ * sync tick; it is in fact the exact reconnect state. The `session has been
+ * invalidated` / `error validating access token` phrasing fallbacks catch the
+ * same condition defensively when the numeric code is absent from the payload.
+ *
  * ⚠ TRIGGER, NOT PROOF. The `"api access blocked"` phrasing was observed
  * EXACTLY ONCE, in a ~40-minute window on 2026-08-02 between the CEO
- * completing the Data Use Checkup and re-authorizing OAuth. Treat the
- * classifier as a TRIGGER for downstream confirmation — never as sufficient
- * evidence to raise a founder-facing card. It is Phase 2's `debug_token`
- * confirmation ([[reconnect-required-escalation]] `escalateReconnectRequired`)
- * — not this predicate — that decides whether the CEO card is raised. Do
- * NOT 'simplify' the confirmation away in a future refactor.
+ * completing the Data Use Checkup and re-authorizing OAuth. Likewise code 190
+ * is a TRIGGER, not sufficient evidence on its own. Treat the classifier as a
+ * TRIGGER for downstream confirmation — never as sufficient evidence to raise
+ * a founder-facing card. It is Phase 2's `debug_token` confirmation
+ * ([[reconnect-required-escalation]] `escalateReconnectRequired`) — not this
+ * predicate — that decides whether the CEO card is raised. Do NOT 'simplify'
+ * the confirmation away in a future refactor.
  *
  * Distinct from APP_OWNER_ACTION_REQUIRED (which routes to the Meta App
  * Dashboard) and PERMANENT (which requires a code change). All three
@@ -162,11 +174,18 @@ export function classifyAppOwnerActionRequired(status: number, error: any): bool
  */
 export function classifyReconnectRequired(status: number, error: any): boolean {
   if (status !== 400) return false;
+  // Meta OAuthException code 190 = the stored per-workspace user token has been
+  // invalidated (password change / session reset). The authoritative signal —
+  // normalized because Meta sometimes serializes the code as a string.
+  const code = typeof error?.code === "number" ? error.code : Number(error?.code);
+  if (code === 190) return true;
   const rawMsg = typeof error?.message === "string" ? error.message : "";
   const rawTitle = typeof error?.error_user_title === "string" ? error.error_user_title : "";
   const rawUser = typeof error?.error_user_msg === "string" ? error.error_user_msg : "";
   const haystack = `${rawMsg} ${rawTitle} ${rawUser}`.toLowerCase();
   if (haystack.includes("api access blocked")) return true;
+  if (haystack.includes("session has been invalidated")) return true;
+  if (haystack.includes("error validating access token")) return true;
   return false;
 }
 
