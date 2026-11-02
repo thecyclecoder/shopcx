@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Drop foreign ad-hoc 'tickets.metadata' column-missing reads at Control Tower capture** · verified 2026-11-01 · → [[../libraries/error-feed]]
 - **Security dependency upgrades** · verified 2026-11-01 · → [[../libraries/security-agent]]
 - **Drop foreign direct-REST customers.loyalty_points_balance undefined-column noise from the Control Tower feed** · verified 2026-10-31 · → [[../libraries/error-feed]]
 - **Renewal outcome-distribution 'systemic' alert must require a collapsed charge-success rate, not just 50% bad on 10 samples** · verified 2026-10-31 · → [[libraries/control-tower]]
