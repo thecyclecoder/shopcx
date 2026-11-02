@@ -49,3 +49,8 @@ Full flow: [[../lifecycles/subscription-billing]] § Migration path.
 ---
 
 [[../README]] · [[../lifecycles/subscription-billing]] · [[migration-audit]] · [[notify-ops-alert]] · [[appstle-pricing]] · [[../integrations/appstle]] · [[../tables/subscriptions]] · [[../tables/customers]] · [[../../CLAUDE]]
+
+## ShopCX → internal base conversion (`internalBaseFromShopcxLine`)
+
+A ShopCX line's `Legacy rate` concession comes off AFTER S&S / volume, but the internal engine applies S&S / volume to the base. So the concession is **grossed up** by the structural fraction (excluding the Legacy rate itself) when it is subtracted from the base: `base = unitBase − legacyPerUnit / (1 − (structural − legacy) / gross)`. Before 2026-11-02 it was subtracted un-grossed, which shrank the concession 25–35% (e.g. $41.98 → $44.60 a unit). Test: `npm run test:migrate-to-internal-legacy-base`.
+

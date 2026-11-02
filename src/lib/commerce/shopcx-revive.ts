@@ -279,6 +279,22 @@ export function droppedMirrorCodes(appliedDiscounts: unknown): string[] {
   return dropped;
 }
 
+/**
+ * True when the mirror carries a 100% shipping discount. ⚠️ Appstle gave free shipping two ways:
+ * a $0 delivery price, OR a $4.95 delivery price plus an unlimited 100% "Free Shipping on
+ * Subscriptions" discount. A revive drops discounts, so honouring only the delivery price charged
+ * the second kind $4.95 they never paid (2026-11-02 review: 601 mirror rows, 2 live revives).
+ * Older mirror rows omit `targetType`; a 100% percentage discount titled "free ship…" counts too.
+ */
+export function mirrorHasFreeShipping(appliedDiscounts: unknown): boolean {
+  const arr = Array.isArray(appliedDiscounts) ? (appliedDiscounts as MirrorDiscount[]) : [];
+  return arr.some((d) => {
+    if (String(d.valueType ?? "").toUpperCase() !== "PERCENTAGE" || Number(d.value) < 100) return false;
+    if (d.targetType === "SHIPPING_LINE") return true;
+    return !d.targetType && /free\s*ship/i.test(String(d.title ?? ""));
+  });
+}
+
 function humanizeShippingCode(code: string): string {
   return code.replace(/[_-]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
@@ -350,8 +366,9 @@ export function planShopcxFromMirror(input: {
     interval: String(row.billing_interval || "month"),
     intervalCount: Number(row.billing_interval_count || 1),
     nextBillingDate,
-    // ⭐ KEEP the existing delivery price (Dylan's shipping rule) — never zeroed.
-    deliveryPriceCents: row.delivery_price_cents ?? 0,
+    // ⭐ KEEP what the customer actually paid for shipping (Dylan's rule): the delivery price,
+    // unless the mirror carries a 100% shipping discount — then they paid $0 and still do.
+    deliveryPriceCents: mirrorHasFreeShipping(row.applied_discounts) ? 0 : (row.delivery_price_cents ?? 0),
     address: input.address.address,
     shippingOption: code ? { code, title: humanizeShippingCode(code) } : null,
     plan,

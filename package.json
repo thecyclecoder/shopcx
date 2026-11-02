@@ -76,6 +76,7 @@
     "test:create-order-charges": "tsx --test src/lib/action-executor.create-order-charges.test.ts",
     "test:migrate-to-internal-promo-flags": "tsx --test src/lib/migrate-to-internal.promo-flags.test.ts",
     "test:migrate-to-internal-cancel-old-engine": "tsx --test src/lib/migrate-to-internal.cancel-old-engine.test.ts",
+    "test:migrate-to-internal-legacy-base": "tsx --test src/lib/migrate-to-internal.legacy-base.test.ts",
     "test:backfill-migrated-live-subs-phantom-cancelled-at": "tsx --test scripts/_backfill-migrated-live-subs-phantom-cancelled-at.test.ts",
     "test:amazon-sync-connection-id-guard": "tsx --test src/lib/inngest/amazon-sync.connection-id-guard.test.ts",
     "test:close-snapshot-coverage": "tsx --test src/lib/qb-close/sync-sources.coverage.test.ts",

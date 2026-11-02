@@ -68,6 +68,7 @@ import {
   internalSubUpdateNextBillingDate,
   internalSubUpdateShippingAddress,
   resolveVariant,
+  advanceDate,
   type ResolvedVariant,
   type ShippingAddressInput,
 } from "@/lib/internal-subscription";
@@ -79,7 +80,6 @@ import {
   shopifySetNextBillingDate,
   shopifyUpdateBillingInterval,
   shopifySwitchPaymentMethod,
-  shopifySkipBillingCycle,
   getSubscriptionContract,
   getUpcomingBillingCycles,
 } from "@/lib/commerce/shopify-subscription-client";
@@ -535,8 +535,40 @@ export async function subscriptionSkipNextOrder(
   if (src === "internal") {
     return internalSubSkipNextOrder(workspaceId, contractId);
   }
-  if (src === "shopcx") return shopifySkipBillingCycle(workspaceId, contractId);
+  if (src === "shopcx") return shopcxSkipNextOrder(workspaceId, contractId);
   return appstleSkipNextOrder(workspaceId, contractId);
+}
+
+/**
+ * Skip a ShopCX sub's next order by moving OUR planned date one cadence forward.
+ *
+ * ⚠️ NOT `subscriptionBillingCycleSkip`. Our row plans the date and the renewal cron bills the
+ * first UNBILLED non-skipped cycle on that date (`resolveChargeableCycle`). Skipping the Shopify
+ * cycle without moving our date meant the cron still fired on the original day and simply billed
+ * the NEXT cycle early — the customer who asked to skip was charged anyway (2026-11-02 review).
+ * Advancing our date (and Shopify's display date) is the skip: one fewer charge, same billing day.
+ */
+async function shopcxSkipNextOrder(workspaceId: string, contractId: string): Promise<OpResult> {
+  const admin = createAdminClient();
+  const { data: row, error } = await admin
+    .from("subscriptions")
+    .select("id, next_billing_date, billing_interval, billing_interval_count")
+    .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
+  if (error || !row) return { success: false, error: `subscription ${contractId} not found` };
+  if (!row.next_billing_date) return { success: false, error: "no next billing date to skip" };
+  const next = shopcxSkipTargetDate(row.next_billing_date, row.billing_interval, row.billing_interval_count);
+  const r = await shopifySetNextBillingDate(workspaceId, contractId, next);
+  if (!r.success) return r;
+  const { error: upErr } = await admin.from("subscriptions")
+    .update({ next_billing_date: next, updated_at: new Date().toISOString() })
+    .eq("id", row.id).eq("next_billing_date", row.next_billing_date);
+  if (upErr) return { success: false, error: `skip date write failed: ${upErr.message}` };
+  return { success: true };
+}
+
+/** The date a skip moves to: one cadence after the current planned date (billing day kept). */
+export function shopcxSkipTargetDate(current: string, interval: string | null, count: number | null): string {
+  return advanceDate(new Date(current), (interval || "month").toLowerCase(), count || 1).toISOString();
 }
 
 /**
@@ -559,7 +591,7 @@ export async function subscriptionSkipUpcomingOrder(
   }
   const src = await resolveBillingSource(workspaceId, contractId);
   if (src === "internal") return internalSkipUpcoming(workspaceId, contractId);
-  if (src === "shopcx") return shopifySkipBillingCycle(workspaceId, contractId);
+  if (src === "shopcx") return shopcxSkipNextOrder(workspaceId, contractId);
   return appstleSkipUpcomingOrder(workspaceId, contractId);
 }
 
