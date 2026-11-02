@@ -1,0 +1,1 @@
+- **Drop the foreign PostgREST created_at lookup on shopify_billing_attempt_events from the error feed** · verified 2026-11-02 · → [[../libraries/error-feed]] (§ Supabase Postgres missing-column noise § `isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise`)
