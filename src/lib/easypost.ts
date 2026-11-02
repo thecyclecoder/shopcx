@@ -3,6 +3,7 @@
 import EasyPostClient from "@easypost/api";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { decrypt } from "@/lib/crypto";
+import { errText } from "@/lib/error-text";
 
 // ── Types ──
 
@@ -445,9 +446,48 @@ export async function verifyAddress(
 }
 
 /**
+ * Map a Shopify/fulfillment carrier "company" string to the carrier name EasyPost's
+ * Tracker API recognizes. Shopify stores whatever free-text label the merchant's
+ * shipping app writes onto `fulfillment.trackingInfo[].company`, so values like
+ * "OSM Priority Select" / "OSM Worldwide" arrive verbatim — none of which EasyPost
+ * knows, so a Tracker create with that raw string fails "The carrier you have provided
+ * is not supported by EasyPost" and every OSM shipment's live read dies (ticket
+ * ddf7a03d, order SC141273 — OSM Worldwide tracking 9261290378010201495012).
+ *
+ * Returns the normalized EasyPost carrier name, or `undefined` when the input is empty
+ * (EasyPost then auto-detects the carrier from the tracking number). An unknown non-empty
+ * carrier passes through unchanged; if EasyPost still rejects it, `lookupTracking` retries
+ * once with no carrier so auto-detect can take over.
+ */
+const CARRIER_ALIASES: Record<string, string> = {
+  osm: "OSM",
+  "osm priority select": "OSM",
+  "osm worldwide": "OSM",
+  osmworldwide: "OSM",
+};
+
+export function normalizeTrackingCarrier(carrier?: string | null): string | undefined {
+  const raw = (carrier ?? "").trim();
+  if (!raw) return undefined;
+  return CARRIER_ALIASES[raw.toLowerCase()] ?? raw;
+}
+
+/** True when EasyPost rejected the Tracker create because it doesn't know the carrier. */
+function isUnsupportedCarrierError(err: unknown): boolean {
+  const msg = errText(err).toLowerCase();
+  return msg.includes("not supported") || msg.includes("carrier");
+}
+
+/**
  * Look up tracking by tracking number + carrier via EasyPost Tracker API.
  * This costs money per lookup — only call when Shopify data is insufficient.
  * Returns normalized status + full event history with locations.
+ *
+ * The carrier is normalized through `normalizeTrackingCarrier` first (OSM Worldwide /
+ * OSM Priority Select → "OSM"). If EasyPost still rejects the carrier as unsupported,
+ * we retry once WITHOUT a carrier so EasyPost auto-detects it from the tracking number —
+ * a failed live read used to fall back to stale "available within 24 hours" boilerplate
+ * even when the order already carried a usable tracking URL + number.
  */
 export async function lookupTracking(
   workspaceId: string,
@@ -456,11 +496,26 @@ export async function lookupTracking(
 ): Promise<TrackingStatus> {
   const client = await getEasyPostClient(workspaceId);
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const params: any = { tracking_code: trackingNumber };
-  if (carrier) params.carrier = carrier;
+  const createTracker = async (withCarrier: string | undefined) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const params: any = { tracking_code: trackingNumber };
+    if (withCarrier) params.carrier = withCarrier;
+    return client.Tracker.create(params);
+  };
 
-  const tracker = await client.Tracker.create(params);
+  const normalizedCarrier = normalizeTrackingCarrier(carrier);
+
+  let tracker;
+  try {
+    tracker = await createTracker(normalizedCarrier);
+  } catch (err) {
+    // Unknown carrier string → retry with auto-detect rather than failing the whole read.
+    if (normalizedCarrier && isUnsupportedCarrierError(err)) {
+      tracker = await createTracker(undefined);
+    } else {
+      throw err;
+    }
+  }
 
   return {
     status: tracker.status || "unknown",
