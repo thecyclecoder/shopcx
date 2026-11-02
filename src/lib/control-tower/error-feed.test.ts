@@ -139,6 +139,7 @@ import {
   isForeignSupabasePostgresUuidLikeOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise,
+  isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnAgentJobsIdAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
@@ -3633,6 +3634,113 @@ test("isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise KEEPS a no
     isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise(
       'invalid input syntax for type uuid: "abc"',
       "delete from public.tickets where id = $1",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise ──
+// The orders/workspace_id sibling of the tickets.id invalid-uuid probe: a `?workspace_id=eq.<partial-uuid>`
+// direct-REST / Supabase Studio quick-filter binds a hand-typed/truncated workspace uuid to
+// `WHERE "orders"."workspace_id" = $1`, which Postgres rejects at parse/bind time with `invalid
+// input syntax for type uuid: "<garbage>"`. Control Tower signature `supabase-logs:d9393a3e4f8314e2`
+// (290× since 2026-09-26). Drop AT CAPTURE only when BOTH the `invalid input syntax for type uuid:`
+// message AND the SELECT-shape on `orders` with a `workspace_id =` equality marker are present; the
+// same error on any OTHER table, or a non-SELECT shape on orders, still pages.
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise drops the invalid-uuid message paired with the PostgREST CTE wrapper AND the bare SELECT shape", () => {
+  // The Studio-emitted PostgREST CTE wrapper form (double-quoted identifiers), workspace_id = $1.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise(
+      'invalid input syntax for type uuid: "fdc1"',
+      'WITH pgrst_source AS ( SELECT "public"."orders".* FROM "public"."orders" WHERE "public"."orders"."workspace_id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the prefix check.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise(
+      'ERROR: invalid input syntax for type uuid: "123"',
+      'WITH pgrst_source AS ( SELECT * FROM "public"."orders" WHERE "workspace_id" = $1 )',
+    ),
+    true,
+  );
+  // The bare SELECT shape (no PostgREST wrapper) drops too — the predicate accepts both.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise(
+      'invalid input syntax for type uuid: "zzz"',
+      "select * from public.orders where workspace_id = 'zzz'",
+    ),
+    true,
+  );
+  // Unqualified `orders` (no `public.`) + bare SELECT is still the same ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise(
+      'invalid input syntax for type uuid: "123"',
+      "select id, status from orders where workspace_id = $1",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise KEEPS the same invalid-uuid message when the FROM is a different table (a real bad-uuid code bug elsewhere still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.subscriptions where workspace_id = $1",
+    ),
+    false,
+  );
+  // PostgREST CTE wrapper form, but FROM is a different table — must still page.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      'WITH pgrst_source AS ( SELECT * FROM "public"."tickets" WHERE "workspace_id" = $1 )',
+    ),
+    false,
+  );
+  // A table whose name merely starts with `orders` must NOT be swept in by the drop.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.orders_archive where workspace_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise KEEPS a DIFFERENT error on orders, and the invalid-uuid message with no workspace_id-equality marker", () => {
+  // A different error on `orders` is a real code bug we WANT to see.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise(
+      "null value in column id violates not-null constraint",
+      "select * from public.orders where workspace_id = $1",
+    ),
+    false,
+  );
+  // The invalid-uuid message but the SELECT filters some other column (no workspace_id-equality) —
+  // not the workspace_id probe shape, so it still pages.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.orders where customer_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise KEEPS a non-SELECT statement shape on orders (a real code-bug writing orders still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "update public.orders set status = $1 where workspace_id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "delete from public.orders where workspace_id = $1",
     ),
     false,
   );
