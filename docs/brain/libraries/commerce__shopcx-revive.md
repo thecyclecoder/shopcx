@@ -42,7 +42,7 @@ until Dylan sets it.
 | S&S + quantity break | the active `pricing_rules` row via `loadPricingContext` — same core as `executeMigration` |
 | cadence | `billing_interval` / `billing_interval_count` (upper-cased for Shopify) |
 | next date | `next_billing_date`, rolled forward if lapsed |
-| **delivery price** | `delivery_price_cents` — **KEPT, never zeroed** (Dylan's shipping rule; see the migrate page's "shipping charge CARRIED") |
+| **delivery price** | `delivery_price_cents` — **KEPT, never zeroed** (Dylan's shipping rule; see the migrate page's "shipping charge CARRIED"), EXCEPT when the mirror carries a 100% shipping discount (`mirrorHasFreeShipping`): Appstle's "$4.95 + 100% Free Shipping on Subscriptions" form meant the customer paid $0, so the revive ships free. 601 mirror rows have that form (2026-11-02). |
 | shipping option | `shipping_method_code` → `{ code, title }` |
 | codes | **dropped** (Dylan 2026-10-26). Pricing comes from our rules (S&S + Buy 2/3) via the planner; names returned in `codesDropped` so CS can re-add one by hand |
 | address | row `shipping_address` (367/370 paused, ~5% of cancelled) → `customers.default_address`; a missing first/last name is filled from the customer record. ⚠️ Appstle stored the address WITHOUT a name on 23,506 of 26,247 never-migrated rows (2026-10-29 count) — before this fill, nearly every old cancelled sub refused with `needs_address (missing lastName)`; after it, 94 still do. |

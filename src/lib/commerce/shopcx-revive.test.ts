@@ -27,6 +27,7 @@ import {
   resolveReviveNextBillingDate,
   pickUsableCard,
   droppedMirrorCodes,
+  mirrorHasFreeShipping,
   targetStatusForIntent,
   type MirrorRow,
   type ReviveDeps,
@@ -233,6 +234,15 @@ test("address: a nameless stored address takes the customer record's name (Appst
   assert.equal(own.address?.lastName, "Lovelace");
   // No name anywhere is still a refusal.
   assert.equal(resolveReviveAddress({ row: nameless, customerName: { firstName: null, lastName: null } }).address, null);
+});
+
+test("free shipping: a 100% shipping discount on the mirror means the revive ships free", () => {
+  assert.equal(mirrorHasFreeShipping([{ title: "Free Shipping on Subscriptions", type: "AUTOMATIC_DISCOUNT", targetType: "SHIPPING_LINE", valueType: "PERCENTAGE", value: 100 }]), true);
+  // Older mirror rows have no targetType.
+  assert.equal(mirrorHasFreeShipping([{ title: "Free Shipping on Subscriptions", type: "AUTOMATIC_DISCOUNT", valueType: "PERCENTAGE", value: 100 }]), true);
+  assert.equal(mirrorHasFreeShipping([{ title: "Subscribe & Save", type: "AUTOMATIC_DISCOUNT", targetType: "LINE_ITEM", valueType: "PERCENTAGE", value: 25 }]), false);
+  assert.equal(mirrorHasFreeShipping([{ title: "Free Shipping half", targetType: "SHIPPING_LINE", valueType: "PERCENTAGE", value: 50 }]), false);
+  assert.equal(mirrorHasFreeShipping(null), false);
 });
 
 test("card: expired skipped, preferred honoured when usable", () => {

@@ -304,13 +304,26 @@ async function findBillableCustomer(
  * base or they apply twice. The concession has no other representation and would simply be lost,
  * so it — and only it — is subtracted:
  *
- *     basePrice = currentPrice − (legacyRateCents / quantity)
+ *     basePrice = currentPrice − (legacyRateCents / quantity) / (1 − structuralFraction)
+ *
+ * ⚠️ The gross-up matters. On the contract the concession comes off AFTER S&S / volume; the
+ * internal engine applies S&S / volume to the base, so an un-grossed concession shrank by that
+ * fraction ($41.98 → $44.60 a unit at 25% + 12%; 2026-11-02 review).
  *
  * Supplying `pricingPolicy` also means `inferAppstleLineBase` uses that base DIRECTLY instead of
  * reverse-engineering one from the realized price. That matters: the reverse-engineering path
  * divides only by (1 − sns) and knows nothing about quantity breaks, so a customer on the 12%
  * tier would come out with a base ~12% too low and be undercharged from then on.
  */
+/** Internal-engine base (cents/unit) that reproduces a ShopCX line's price once S&S / volume re-apply. */
+export function internalBaseFromShopcxLine(unitBaseCents: number, quantity: number, structuralDiscountCents: number, legacyRateCents: number): number {
+  const qty = quantity || 1;
+  const gross = unitBaseCents * qty;
+  // `structuralDiscountCents` includes the Legacy rate itself — only S&S / volume re-apply.
+  const fraction = gross > 0 ? Math.min(Math.max((structuralDiscountCents - legacyRateCents) / gross, 0), 0.9) : 0;
+  return Math.max(0, Math.round(unitBaseCents - legacyRateCents / qty / (1 - fraction)));
+}
+
 async function readShopcxContractAsLine(
   workspaceId: string,
   contractId: string,
@@ -327,7 +340,7 @@ async function readShopcxContractAsLine(
       nodes: k.lines.map((l) => {
         const qty = l.quantity || 1;
         const unitBase = l.currentPrice != null ? Math.round(parseFloat(l.currentPrice) * 100) : 0;
-        const baseCents = Math.max(0, unitBase - Math.round(l.legacyRateCents / qty));
+        const baseCents = internalBaseFromShopcxLine(unitBase, qty, l.structuralDiscountCents, l.legacyRateCents);
         return {
           title: l.title,
           variantTitle: null,
