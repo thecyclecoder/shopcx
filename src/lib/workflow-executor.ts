@@ -721,12 +721,18 @@ async function executeOrderTracking(admin: Admin, config: Record<string, unknown
     return;
   }
 
-  // In transit, within threshold
+  // In transit (or an indeterminate status once the live read failed) — surface the
+  // fulfillment-provided tracking the order already carries. Reaching here guarantees a
+  // tracking number exists (the no-tracking early-return above owns the "within 24 hours"
+  // copy), so even when the live EasyPost read fell back we hand the customer the real
+  // tracking URL + number + ship date with in-transit framing rather than stale boilerplate
+  // (ticket ddf7a03d, order SC141273 — OSM shipment whose live read failed on carrier mapping).
   const locationInfo = (ctx.fulfillment.easypost_location || ctx.fulfillment.latest_location)
     ? ` It was last seen in ${ctx.fulfillment.easypost_location || ctx.fulfillment.latest_location}.`
     : "";
   const estimateInfo = ctx.fulfillment.estimated_delivery ? ` Estimated delivery: {{fulfillment.estimated_delivery}}.` : "";
-  await sendReply(admin, ctx, (config.reply_in_transit as string) || `Your order {{order.order_number}} shipped on {{fulfillment.date}} via {{fulfillment.carrier}}.${locationInfo}${estimateInfo} Track it here: {{fulfillment.url}}`, config.reply_in_transit_status as string);
+  const trackingNumberInfo = ctx.fulfillment.url ? ` Tracking number {{fulfillment.tracking_number}}.` : "";
+  await sendReply(admin, ctx, (config.reply_in_transit as string) || `Your order {{order.order_number}} shipped on {{fulfillment.date}} via {{fulfillment.carrier}}.${locationInfo}${estimateInfo} Track it here: {{fulfillment.url}}.${trackingNumberInfo}`, config.reply_in_transit_status as string);
 }
 
 /**
