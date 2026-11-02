@@ -1,7 +1,7 @@
 // Inngest dunning functions: payment-failed orchestration, new-card recovery, billing-success cleanup
 
 import { inngest } from "./client";
-import { dunningChargeContract, dunningUnskip } from "@/lib/dunning-charge";
+import { dunningChargeContract, dunningUnskip, priorShopcxAttemptOutcome } from "@/lib/dunning-charge";
 import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { dispatchSlackNotification } from "@/lib/slack-notify";
@@ -276,7 +276,7 @@ export const dunningPaymentFailed = inngest.createFunction(
 
       const card = untried[0];
 
-      await step.run(`rotate-card-${i}`, async () => {
+      const rotation = await step.run(`rotate-card-${i}`, async () => {
         const switchRes = await subscriptionSwitchPaymentMethod(workspace_id, shopify_contract_id, card.id);
         if (!switchRes.success) {
           console.log(`[Dunning] Card switch rejected for ${shopify_contract_id} → ${card.last4}: ${switchRes.error}`);
@@ -292,9 +292,18 @@ export const dunningPaymentFailed = inngest.createFunction(
         const billingRes = await dunningChargeContract(workspace_id, shopify_contract_id, i);
         const attemptId = billingRes.attemptId ?? null;
 
+        // ⚠️ Unresolved is NOT a decline, so the card is not added to `cards_tried` — and the
+        // rotation must STOP here, exactly as the payday pass does. Rotating on meant the next
+        // iteration switched to the same card with ordinal i+1, a NEW idempotency key and a new
+        // real charge; if the first attempt was a slow success (poll timeout, not 3DS), the
+        // customer paid twice. Record the attempt id so the payday pass reads its outcome first.
         if (billingRes.pending) {
-          console.log(`[Dunning] ${shopify_contract_id}: attempt unresolved (3DS) — leaving the cycle open`);
-          return;
+          console.log(`[Dunning] ${shopify_contract_id}: attempt unresolved (3DS) — leaving the cycle open, rotation stopped`);
+          await updateDunningCycle(cycleCheck.id, {
+            billing_attempt_id: attemptId,
+            last_attempted_last4: card.last4,
+          });
+          return "pending" as const;
         }
 
         // ⚠️ A LOOKUP miss is not a decline. Folding lookup+charge into one result deleted this
@@ -344,7 +353,7 @@ export const dunningPaymentFailed = inngest.createFunction(
           ));
           await tagCustomerTickets(workspace_id, customer_id, "dunning:recovered");
           console.log(`[Dunning] ${shopify_contract_id} RECOVERED on card ${card.last4} (settled charge)`);
-          return;
+          return "recovered" as const;
         }
 
         // Log the attempt — includes whether Appstle accepted or rejected it
@@ -386,8 +395,10 @@ export const dunningPaymentFailed = inngest.createFunction(
           last_attempted_last4: card.last4,
           next_retry_at: null, // Clear — we just attempted
         });
+        return "attempted" as const;
       });
 
+      if (rotation === "pending") break;
       attemptNumber++;
     }
 
@@ -1251,9 +1262,25 @@ export const dunningPaydayRetryCron = inngest.createFunction(
         // exactly the runaway cycles it exists to stop.
         await updateDunningCycle(cycle.id, { payday_retry_count: paydayRetriesSoFar + 1 });
 
+        // ⭐ Read the last recorded ShopCX attempt BEFORE presenting any card. Rotation and the
+        // payday pass both stop on an unresolved attempt; if it later settled as a charge, every
+        // card below would be a second charge for the same cycle. An attempt still unresolved
+        // means no card this pass (the pass is already counted, so the cap still bounds it).
+        const prior = await priorShopcxAttemptOutcome(cycle.workspace_id, cycle.billing_attempt_id);
+        if (prior === "succeeded") {
+          await updateDunningCycle(cycle.id, {
+            status: "recovered",
+            recovered_at: new Date().toISOString(),
+            next_retry_at: null,
+          });
+          console.log(`[Dunning Payday] ${cycle.shopify_contract_id} RECOVERED — prior attempt ${cycle.billing_attempt_id} settled as a charge; no card presented`);
+        }
+
         // Try each payment method (no sleep — all at once for this cycle)
-        let recovered = false;
+        let recovered = prior === "succeeded";
         for (const card of paymentMethods) {
+          if (prior !== "clear") break;
+
           // Check if already recovered (billing-success webhook may fire)
           const check = await getActiveDunningCycle(cycle.workspace_id, cycle.shopify_contract_id);
           if (!check || check.status === "recovered") { recovered = true; break; }
@@ -1261,7 +1288,11 @@ export const dunningPaydayRetryCron = inngest.createFunction(
           try {
             await subscriptionSwitchPaymentMethod(cycle.workspace_id, cycle.shopify_contract_id, card.id);
 
-            const paydayRes = await dunningChargeContract(cycle.workspace_id, cycle.shopify_contract_id, (cycle.payday_retry_count ?? 0) + 1);
+            // ⭐ Pass the CARD. Every card in this pass shares one ordinal, so without it card B
+            // reused card A's idempotency key and Shopify replayed A's cached decline — only the
+            // first card was ever presented, and the ladder cancelled customers whose second card
+            // was good. A step retry still rebuilds the same per-card key, so it cannot charge twice.
+            const paydayRes = await dunningChargeContract(cycle.workspace_id, cycle.shopify_contract_id, (cycle.payday_retry_count ?? 0) + 1, card.dedupeKey);
 
             // ⭐ A SETTLED success is a real recovery — act on it HERE, exactly as the card-rotation
             // path does. A ShopCX charge settles inline and no webhook will ever flip the cycle
@@ -1271,6 +1302,12 @@ export const dunningPaydayRetryCron = inngest.createFunction(
             // again on 10-15, and queued for a third charge on 10-16.
             if (paydayRes.pending) {
               console.log(`[Dunning Payday] ${cycle.shopify_contract_id}: attempt unresolved (3DS) — leaving the cycle open, no further cards`);
+              // Record WHICH attempt is unresolved, so the next pass can read its outcome before
+              // presenting any card again (see `priorShopcxAttemptOutcome` above the loop).
+              await updateDunningCycle(cycle.id, {
+                billing_attempt_id: paydayRes.attemptId ?? null,
+                last_attempted_last4: card.last4,
+              });
               break;
             }
             if (paydayRes.settled && paydayRes.success) {

@@ -85,10 +85,13 @@ This is the fix for the wedge case in [[../archive.d/failed-cycle-charge-claim-m
 - `claimCycleCharge(admin, input): Promise<ClaimResult>` — INSERTs `status='in_flight'`. On unique-violation (`23505`), looks up the existing row: same-claimant → resumed; different-claimant on a reclaimable row (`failed` OR stale `in_flight`) → compare-and-set reset back to `in_flight` under the new claimant (prepending a superseded-snapshot); different-claimant on fresh `in_flight`/`succeeded` → refusal. Every other DB error propagates (a service failure while claiming is NOT silently treated as "safe to charge").
 - `readCycleCharge(admin, subscription_id, cycle_key): Promise<CycleChargeRow | null>` — the read-only lookup used inside `claimCycleCharge`'s 23505 branch and exposed for diagnostics.
 - `resolveCycleCharge(admin, id, { status, transaction_id?, order_id?, amount_cents? }): Promise<{ updated: boolean }>` — compare-and-set on `status='in_flight'` so a stale duplicate cannot overwrite a real outcome. `updated=false` means the row was already resolved by a concurrent step (safe; skip the second stamp).
+- `listStaleInFlightClaims(admin, { sources, claimedBeforeIso, limit? })` — read-only: `in_flight` rows of the given `source`s claimed before the cutoff, oldest first (default limit 100). Errors throw. Used by the ShopCX renewal cron to settle claims a pending Shopify attempt left open.
 
 ## Called by
 
 - [[../inngest/internal-subscription-renewals]] `internal-subscription-renewal-attempt` — `claim-cycle-charge` step (post skip-gates, pre pending-transaction), `resolve-cycle-claim-succeeded` step (after the `orders` row lands), `resolve-cycle-claim-failed` step (after Braintree decline).
+- [[../inngest/shopify-subscription-renewals]] — the ShopCX worker claims with `source='shopcx'` on the DISPATCHED date's key; the cron's `settle-pending-attempts` step lists and resolves stale `in_flight` ShopCX claims.
+- [[portal__handlers__order-now]] (ShopCX branch) — claims with `source='shopcx_portal_order_now'` and a per-press claimant before `shopifyAttemptBilling`, on the same key the cron uses.
 
 ## Callers of the guard downstream
 

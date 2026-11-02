@@ -108,12 +108,38 @@ duplicated charge. It logs and moves on.
 ## Flow
 
 **`shopifySubscriptionRenewalCron`** — daily `0 10 * * *` (an hour after the internal cron):
-kill-switch gate → keyset-paginated candidate select → dunning retry-window filter → fan out one
-event per sub → heartbeat carrying `{ due }`.
+kill-switch gate → **settle pending attempts** → keyset-paginated candidate select → dunning
+retry-window filter → fan out one event per sub (stamped with `expected_next_billing_date`) →
+heartbeat carrying `{ due, muted_null_billing_date, settled }`.
+
+**Settling pending attempts (`settlePendingShopcxClaims`).** A pending attempt (3DS, or our 30s poll
+timed out) leaves its cycle claim `in_flight`, and nothing else resolves it: the billing-attempt
+webhook only records, and `claimCycleCharge` never reclaims another claimant's `in_flight`. Before
+this step that wedged the sub for good — every later run refused the cycle, `guardRecentOrderNow`
+blocked every Order Now, a slow success was never advanced and a later failure never reached
+dunning. Now every `in_flight` claim with `source` `shopcx` (worker) or `shopcx_portal_order_now`
+(portal Order Now) older than 1h is read back from Shopify by the idempotency key we sent
+(`findContractBillingAttempt`):
+
+| Shopify says | settle does |
+|---|---|
+| succeeded | advance our date (compare-and-set on the date the claim was keyed on), THEN resolve the claim `succeeded` — advance first, so a crash in between never strands a `succeeded` claim on an old date |
+| failed | resolve the claim `failed`, nothing else. The sub is still due, so this same run selects it, the worker reclaims the failed cycle under the same Shopify key, Shopify replays the decline, and the worker's decline path dispatches dunning — once |
+| still pending / not found / unreadable | leave it `in_flight`. Never released on a guess; the wedged-cycle monitor ([[../libraries/control-tower]] `countRenewalWedgedCycles`) now covers ShopCX `in_flight` rows |
 
 **`shopifySubscriptionRenewalAttempt`** — per sub, concurrency 8:
-kill-switch → stale guard → resolve the due cycle from Shopify → **claim the cycle** →
-`price-check-log` → charge → settle → advance / dun.
+kill-switch → stale guard → **cycle key from the dispatched date** → resolve the due cycle from
+Shopify → **claim the cycle** → `price-check-log` (with the one pre-charge repair) → charge →
+settle → advance / dun.
+
+**The claim key comes from the DISPATCHED date.** `cycleKeyFromDispatchedNextBillingDate(expected_next_billing_date)`,
+never a live read. A successful charge advances `next_billing_date`, so keyed off the live row an
+order-now that loaded the sub seconds after the cron charged claimed the NEXT cycle and charged
+again — the internal engine's sub e9b8a6d9 shape. Both dispatchers stamp it (`subscriptionOrderNow`
+now sends the pre-charge date plus `order_now: true`); an event without one is refused
+(`missing_dispatched_cycle`). An order-now whose cycle the cron already took is dropped by the stale
+guard and logs the `nothing_due` marker. The portal ShopCX Order Now, which charges directly, claims
+the same key first ([[../libraries/portal__handlers__order-now]]).
 
 **`price-check-log` is log-only (CEO 2026-10-10).** [[../libraries/commerce__shopcx-renewal-price-check]]
 compares the contract with the pricing rules and files one `billing_alert` card on a gap over
@@ -122,6 +148,13 @@ contract gets fixed where it was written (ingest normalization, migration, line-
 Dylan had said not to check at all; he chose log-only on 2026-10-10. A dry run over the 172 active
 ShopCX subs on 2026-10-10 found 168 matching, 3 with no rule lines, and 1 real overcharge: Dylan's
 own test contract `35917070509`, which bills Amazing Creamer at $69.95 with no S&S.
+
+**The one repair.** An OVERCHARGE on a contract with **no structural allocation at all**
+(`shouldRepairUnnormalizedContract`) is the shape a failed ingest normalization leaves: lines at
+MSRP, S&S only as an inert checkout copy, a new PDP subscriber about to pay +33% a unit. The step
+runs the idempotent `shopcxNormalizeNewContract` (the write path for exactly that shape) before the
+charge, then re-checks and logs. Normalizing can only lower the charge to the rules price; any other
+gap stays log-only.
 
 ## Gotchas
 
@@ -137,7 +170,8 @@ own test contract `35917070509`, which bills Amazing Creamer at $69.95 with no S
   which after a migration re-anchor is usually not the one intended.
 - **A pending attempt is neither success nor failure.** 3DS/CHALLENGED or a poll timeout returns
   `pending`; the claim stays `in_flight`, the date is untouched, and **dunning is NOT dispatched**
-  — the customer may yet be charged, and dunning a paying customer is worse than being late.
+  — the customer may yet be charged, and dunning a paying customer is worse than being late. The
+  next cron run settles it (see Flow).
 - **Outcome beats go to this function's own reactive channel**, NOT
   `emitRenewalOutcomeHeartbeat`. That helper writes to `RENEWAL_OUTCOME_LOOP_ID`
   (`"internal-subscription-renewal-outcome"`), whose distribution feeds the internal cron's

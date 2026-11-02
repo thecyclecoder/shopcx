@@ -54,7 +54,10 @@ test("the loss compounds across renewals", () => {
 });
 
 test("the worker anchors on scheduledFor, not on the charge-time cycle", () => {
-  assert.match(SRC, /const anchor = new Date\(plan\.scheduledFor\)/);
+  // The advance lives in `advanceAfterShopcxCharge` (shared with the pending-attempt settle);
+  // the worker hands it the un-clamped due date and the helper anchors on exactly that.
+  assert.match(SRC, /advanceAfterShopcxCharge\(admin, sub, plan\.scheduledFor\)/);
+  assert.match(SRC, /const anchor = new Date\(scheduledFor\)/);
   assert.match(SRC, /scheduledFor: due,/);
   assert.doesNotMatch(SRC, /const anchor = new Date\(plan\.dueDate\)/);
 });

@@ -30,9 +30,16 @@ export type IngestOutcome =
   | { ingested: true; subscriptionId: string; contractId: string; created: boolean }
   | { ingested: false; reason: string; contractId: string };
 
-/** Contracts created by one of our own rails are claimed by that rail, not by ingestion. */
-async function existingClaim(workspaceId: string, contractId: string): Promise<string | null> {
-  const admin = createAdminClient();
+/**
+ * Contracts created by one of our own rails are claimed by that rail, not by ingestion.
+ *
+ * Exported (with an injectable client) for the claim-arm tests only.
+ */
+export async function existingClaim(
+  workspaceId: string,
+  contractId: string,
+  admin: ReturnType<typeof createAdminClient> = createAdminClient(),
+): Promise<string | null> {
   const gid = `gid://shopify/SubscriptionContract/${contractId}`;
 
   const { data: sub } = await admin
@@ -42,6 +49,20 @@ async function existingClaim(workspaceId: string, contractId: string): Promise<s
     .eq("shopify_contract_id", contractId)
     .maybeSingle();
   if (sub) return "already ingested";
+
+  // ⚠️ A revive records its new contract on the APPSTLE row (`shopcx_revive_contract_id`) before
+  // it flips `shopify_contract_id`. A revive that crashes between the two leaves the row still
+  // appstle, so the arm above misses it, and ingest would mint a SECOND subscription for the same
+  // contract. The revive retry's flip then collides on (workspace_id, shopify_contract_id) and the
+  // customer's original row and op are stranded. The revive owns this contract.
+  const { data: revived } = await admin
+    .from("subscriptions")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("shopcx_revive_contract_id", contractId)
+    .limit(1)
+    .maybeSingle();
+  if (revived) return "created by a ShopCX revive";
 
   // The migration marker is written in the same breath as the create, and holds the GID form.
   const { data: migrated } = await admin
@@ -357,6 +378,33 @@ export async function mirrorContractPricing(
   }
 }
 
+/** Dunning cycle statuses that hold the billing date — `getActiveDunningCycle`'s open set. */
+const OPEN_DUNNING_STATUSES = ["active", "rotating", "retrying", "skipped", "paused"];
+
+/**
+ * Pure: the `next_billing_date` a contract-update sync may write, or `undefined` to leave ours.
+ *
+ * ⭐ OUR date is the planner for a shopcx row (Phase 2); Shopify's `nextBillingDate` is display
+ * only. Copying it back on every update rewound a renewed sub whose display retime had failed: the
+ * next draft commit (a coupon, a quantity change, a dunning card switch) wrote the already-charged
+ * date D back into our row, the cron claimed D, found it `succeeded`, and skipped every day after.
+ * The reconciler saw no drift (ours = Shopify = D) and the wedged monitor ignores succeeded rows.
+ *
+ * So the sync only FILLS a missing date, and never while dunning holds it. A cancelled contract
+ * clears it (subscriptions cancel-truth).
+ */
+export function syncedNextBillingDate(input: {
+  status: string;
+  ours: string | null;
+  shopify: string | null;
+  dunningOpen: boolean;
+}): string | null | undefined {
+  if (input.status === "cancelled") return null;
+  if (input.dunningOpen) return undefined;
+  if (input.ours) return undefined;
+  return input.shopify ?? undefined;
+}
+
 /**
  * Bring an ALREADY-ingested contract back in step after a Shopify-side edit.
  *
@@ -364,8 +412,8 @@ export async function mirrorContractPricing(
  * move our mirror, but this webhook also fires for every edit WE make, so it must not undo the
  * things ShopCX owns.
  *
- * - `next_billing_date` is skipped while dunning is active — dunning holds a past date on purpose
- *   and will set the real one when it finishes. Same rule as the Appstle webhook.
+ * - `next_billing_date` is ours, not Shopify's: it is only filled when we have none, and never
+ *   while dunning holds it (see `syncedNextBillingDate`).
  * - A contract with no `subscriptions` row falls through to a full ingest, which is what recovers a
  *   contract whose `create` webhook was lost.
  */
@@ -378,7 +426,7 @@ export async function syncShopifyContract(
 
   const { data: sub } = await admin
     .from("subscriptions")
-    .select("id, billing_source")
+    .select("id, billing_source, next_billing_date")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", bare)
     .maybeSingle();
@@ -403,7 +451,7 @@ export async function syncShopifyContract(
       .select("id")
       .eq("workspace_id", workspaceId)
       .eq("shopify_contract_id", bare)
-      .in("status", ["active", "skipped"])
+      .in("status", OPEN_DUNNING_STATUSES)
       .limit(1)
       .maybeSingle();
 
@@ -421,13 +469,17 @@ export async function syncShopifyContract(
       updated_at: new Date().toISOString(),
     };
     if (c.shippingAddress) patch.shipping_address = c.shippingAddress;
+    const nextDate = syncedNextBillingDate({
+      status,
+      ours: (sub as { next_billing_date?: string | null }).next_billing_date ?? null,
+      shopify: c.nextBillingDate ?? null,
+      dunningOpen: !!dunning,
+    });
+    if (nextDate !== undefined) patch.next_billing_date = nextDate;
     if (status === "cancelled") {
-      patch.next_billing_date = null;
       const { data: prior } = await admin
         .from("subscriptions").select("cancelled_at").eq("id", sub.id).maybeSingle();
       patch.cancelled_at = (prior as { cancelled_at?: string } | null)?.cancelled_at ?? new Date().toISOString();
-    } else if (!dunning) {
-      patch.next_billing_date = c.nextBillingDate;
     }
 
     const { error } = await admin.from("subscriptions").update(patch).eq("id", sub.id);

@@ -58,6 +58,47 @@ export interface DunningChargeResult {
 }
 
 /**
+ * Pure: the Shopify idempotency key for one dunning charge on a ShopCX contract.
+ *
+ * `cardKey` (the card's `dedupeKey`) is REQUIRED wherever one ordinal covers several cards. A
+ * payday pass tries every card under the same `payday_retry_count`, so without it card B reused
+ * card A's key and Shopify replayed A's cached decline: only the first card was ever presented,
+ * and the ladder cancelled customers whose second card was good. Card rotation gives each card its
+ * own ordinal, so it may omit it.
+ */
+export function shopcxDunningIdempotencyKey(
+  contractId: string,
+  due: string | null,
+  attemptOrdinal: number,
+  cardKey?: string | null,
+): string {
+  const base = `${contractId}:${cycleKeyFromNextBillingDate(due)}:r${attemptOrdinal}`;
+  return cardKey ? `${base}:${cardKey}` : base;
+}
+
+/**
+ * Pure: must a dunning charge refuse because the cycle was already settled somewhere else?
+ *
+ * Dunning holds `next_billing_date` in the past (or today) ON PURPOSE so the declined cycle stays
+ * targetable. A date beyond today means another path already charged and advanced it — a portal or
+ * agent Order Now, or a settled pending attempt. If the first unbilled cycle is then a FUTURE one
+ * (`inWindow` false), billing it is the NEXT order, early — a second charge the customer never
+ * asked for. Compared on the UTC day, the grain the renewal cron selects on, so a sub due later
+ * today still retries. A resumed sub whose date was set forward still retries while Shopify's open
+ * cycle is unbilled.
+ */
+export function shouldRefuseEarlyDunningCharge(
+  due: string | null,
+  inWindow: boolean,
+  now: Date = new Date(),
+): boolean {
+  if (inWindow || !due) return false;
+  const d = new Date(due);
+  if (!Number.isFinite(d.getTime())) return false;
+  return d.toISOString().slice(0, 10) > now.toISOString().slice(0, 10);
+}
+
+/**
  * Attempt one charge for dunning. `paymentMethodId`, when given, is the card being rotated to —
  * the caller is expected to have switched it onto the contract already.
  */
@@ -74,6 +115,11 @@ export async function dunningChargeContract(
    * The caller already holds a per-cycle counter — pass it.
    */
   attemptOrdinal: number,
+  /**
+   * The card being presented (`PaymentMethod.dedupeKey`). Pass it whenever the same ordinal covers
+   * more than one card (the payday pass) — see `shopcxDunningIdempotencyKey`.
+   */
+  cardKey?: string | null,
 ): Promise<DunningChargeResult> {
   // Exhausted dunning cycles can still carry a sub's pre-migration id (only OPEN cycles are
   // re-pointed) — resolve it to the live migrated row before routing and charging.
@@ -88,7 +134,7 @@ export async function dunningChargeContract(
       .eq("workspace_id", workspaceId).eq("shopify_contract_id", contractId).maybeSingle();
     const due = (sub as { next_billing_date: string | null } | null)?.next_billing_date ?? null;
 
-    const { shopifyAttemptBilling, awaitBillingAttempt } =
+    const { shopifyAttemptBilling, awaitBillingAttempt, resolveChargeableCycle } =
       await import("@/lib/commerce/shopify-subscription-client");
     try {
       // ⚠️ The idempotency key is deliberately DISTINCT from the renewal worker's
@@ -105,10 +151,27 @@ export async function dunningChargeContract(
       //     replays the first decline — so a customer's freshly-rotated good card is never
       //     actually presented and recovery silently cannot succeed.
       // The caller already holds a stable per-cycle counter (rotation index / payday_retry_count).
-      const key = `${contractId}:${cycleKeyFromNextBillingDate(due)}:r${attemptOrdinal}`;
+      const key = shopcxDunningIdempotencyKey(contractId, due, attemptOrdinal, cardKey);
 
+      // ⭐ Address the cycle BY INDEX with an in-window origin time, exactly as the renewal worker
+      // and Order Now do. By-date addressing failed whenever `due` landed in an already-BILLED
+      // cycle or Shopify rejected the origin time ("Origin time needs to be within the selected
+      // billing cycle"): every rotation and payday attempt came back attempt-less, the cycle
+      // exhausted, and cycle 2 cancelled a customer who could have paid.
+      const cycle = await resolveChargeableCycle(workspaceId, contractId, new Date());
+      if (!cycle.success || cycle.index == null || !cycle.originTime) {
+        return { success: false, engine, error: cycle.error ?? "no chargeable cycle" };
+      }
+      // ⚠️ By index, the first unbilled cycle is always billable — including the NEXT one, early.
+      // That is only right while the declined cycle is still owed. When OUR date has moved past
+      // today AND the only unbilled cycle is a future one, someone already paid this cycle (an
+      // Order Now, a settled pending attempt) and a charge here would be a second one. Not a
+      // decline: no attempt id, so dunning records nothing and burns no card.
+      if (shouldRefuseEarlyDunningCharge(due, cycle.inWindow ?? false)) {
+        return { success: false, engine, error: `cycle already settled: next billing date ${due} is past today and only a future cycle is unbilled` };
+      }
       const started = await shopifyAttemptBilling(workspaceId, contractId, key,
-        due ? { billingCycleSelector: { date: due } } : {});
+        { billingCycleSelector: { index: cycle.index }, originTime: cycle.originTime });
       if (!started.success || !started.attemptId) {
         return { success: false, engine, error: started.error ?? "attempt not accepted" };
       }
@@ -136,6 +199,47 @@ export async function dunningChargeContract(
   const billingRes = await subscriptionAttemptBilling(workspaceId, attemptId);
   // Vendor ACCEPTANCE only — the charge result lands later on the Appstle webhook.
   return { success: billingRes.success, engine, settled: false, error: billingRes.error, attemptId };
+}
+
+/** What a dunning cycle's last recorded attempt says about whether to present a card again. */
+export type PriorAttemptOutcome = "succeeded" | "unresolved" | "clear";
+
+/**
+ * Pure: classify the cycle's last recorded attempt.
+ *
+ *  - `succeeded` — it settled as a charge after we stopped waiting (a slow success). The cycle is
+ *    paid; charging any card now is a SECOND charge.
+ *  - `unresolved` — still pending (3DS), or we could not read it. Present no card this pass.
+ *  - `clear` — no Shopify attempt on record, or it settled as a decline. Retry as normal.
+ */
+export function classifyPriorAttempt(
+  read: { success: boolean; pending?: boolean; terminal?: boolean } | null,
+): PriorAttemptOutcome {
+  if (!read) return "clear";
+  if (read.success) return "succeeded";
+  if (read.terminal) return "clear";
+  return "unresolved";
+}
+
+/**
+ * Read the outcome of a ShopCX cycle's last recorded attempt before presenting another card.
+ *
+ * Card rotation and the payday pass both stop on an unresolved attempt and record its id on the
+ * cycle. Nothing else settles it (`dunning/billing-success` comes only from Appstle), so the next
+ * payday pass must look before it charges. Only a Shopify attempt gid is read; an Appstle attempt
+ * id (or none) is `clear`.
+ */
+export async function priorShopcxAttemptOutcome(
+  workspaceId: string,
+  attemptId: string | null | undefined,
+): Promise<PriorAttemptOutcome> {
+  if (!attemptId || !String(attemptId).startsWith("gid://shopify/SubscriptionBillingAttempt/")) return "clear";
+  try {
+    const { getBillingAttempt } = await import("@/lib/commerce/shopify-subscription-client");
+    return classifyPriorAttempt(await getBillingAttempt(workspaceId, String(attemptId)));
+  } catch {
+    return "unresolved";
+  }
 }
 
 /** Unskip whatever the engine considers skipped. A no-op where the concept doesn't apply. */

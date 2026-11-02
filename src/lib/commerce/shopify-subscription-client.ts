@@ -596,6 +596,68 @@ export async function getBillingAttempt(
   };
 }
 
+/** One billing attempt on a contract, as `findContractBillingAttempt` reads it. */
+export interface ContractBillingAttempt {
+  id: string;
+  idempotencyKey: string | null;
+  /** Mirrors `getBillingAttempt`: `success` only on a SETTLED, error-free attempt. */
+  success: boolean;
+  terminal: boolean;
+  pending: boolean;
+  orderId?: string;
+  orderName?: string;
+  errorCode?: string;
+  error?: string;
+}
+
+/**
+ * Find a contract's billing attempt by the idempotency key WE sent. Read-only.
+ *
+ * ⭐ This is how a pending attempt gets settled. The renewal worker and portal Order Now leave the
+ * cycle claim `in_flight` when Shopify has not finished (3DS, or our 30s poll timed out), and the
+ * claim ledger stores no Shopify attempt id. Our keys are deterministic per cycle, so the attempt
+ * is recoverable from the contract itself. Reads the most recent `last` attempts; `found: false`
+ * means none carries the key (the attempt was never created, or it aged out of the window).
+ */
+export async function findContractBillingAttempt(
+  workspaceId: string,
+  contractId: string,
+  idempotencyKey: string,
+  opts: { last?: number } = {},
+): Promise<{ success: boolean; error?: string; found?: boolean; attempt?: ContractBillingAttempt }> {
+  const env = await gql<{
+    subscriptionContract?: {
+      billingAttempts?: {
+        nodes: { id: string; idempotencyKey?: string | null; ready: boolean; errorCode?: string | null; errorMessage?: string | null; completedAt?: string | null; order?: { id: string; name: string } | null }[];
+      };
+    } | null;
+  }>(
+    workspaceId,
+    `query($id:ID!,$n:Int!){ subscriptionContract(id:$id){ billingAttempts(last:$n){ nodes { id idempotencyKey ready errorCode errorMessage completedAt order { id name } } } } }`,
+    { id: contractGid(contractId), n: opts.last ?? 25 },
+  );
+  if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
+  if (!env.data?.subscriptionContract) return { success: false, error: "contract not found" };
+  const a = (env.data.subscriptionContract.billingAttempts?.nodes ?? []).find((n) => n.idempotencyKey === idempotencyKey);
+  if (!a) return { success: true, found: false };
+  const terminal = a.ready || !!a.completedAt || !!a.errorCode;
+  return {
+    success: true,
+    found: true,
+    attempt: {
+      id: a.id,
+      idempotencyKey: a.idempotencyKey ?? null,
+      success: terminal && !a.errorCode,
+      terminal,
+      pending: !terminal,
+      orderId: a.order?.id,
+      orderName: a.order?.name,
+      errorCode: a.errorCode ?? undefined,
+      error: a.errorMessage ?? undefined,
+    },
+  };
+}
+
 /**
  * Poll an attempt to a terminal outcome. Bounded — a CHALLENGED (3DS) attempt can sit pending
  * for hours, and blocking on it would hold the renewal step open; that case is the webhook's.
@@ -968,7 +1030,11 @@ export async function resolveChargeableCycle(
   workspaceId: string,
   contractId: string,
   now: Date | string = new Date(),
-): Promise<{ success: boolean; error?: string; index?: number; originTime?: string }> {
+): Promise<{
+  success: boolean; error?: string; index?: number; originTime?: string;
+  /** `now` sits inside the chosen cycle's window (false = a FUTURE cycle, billed early). */
+  inWindow?: boolean;
+}> {
   const nowMs = (now instanceof Date ? now : new Date(now)).getTime();
   const cycles = await getUpcomingBillingCycles(workspaceId, contractId, { first: 25 });
   if (!cycles.success) return { success: false, error: cycles.error ?? "could not read billing cycles" };
@@ -983,7 +1049,7 @@ export async function resolveChargeableCycle(
   const originTime = inside
     ? new Date(nowMs).toISOString()
     : new Date((Number.isFinite(startMs) ? startMs : nowMs) + 1000).toISOString();
-  return { success: true, index: chargeable.index, originTime };
+  return { success: true, index: chargeable.index, originTime, inWindow: inside };
 }
 
 

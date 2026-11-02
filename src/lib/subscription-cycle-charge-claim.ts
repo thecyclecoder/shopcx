@@ -422,6 +422,29 @@ export async function readCycleCharge(
   };
 }
 
+/**
+ * READ-ONLY: `in_flight` claims from the given `source`s claimed before `claimedBeforeIso`, oldest
+ * first. The ShopCX renewal cron settles these (`settlePendingShopcxClaims`): a ShopCX charge
+ * that Shopify had not finished (3DS, or a 30s poll timeout) leaves its claim `in_flight`, and
+ * nothing else ever resolves it. Errors propagate — a failed read must not look like "nothing to
+ * settle".
+ */
+export async function listStaleInFlightClaims(
+  admin: Admin,
+  opts: { sources: readonly string[]; claimedBeforeIso: string; limit?: number },
+): Promise<Array<Pick<CycleChargeRow, "id" | "workspace_id" | "subscription_id" | "cycle_key" | "claimant" | "source" | "claimed_at">>> {
+  const { data, error } = await admin
+    .from("subscription_cycle_charges")
+    .select("id, workspace_id, subscription_id, cycle_key, claimant, source, claimed_at")
+    .eq("status", "in_flight")
+    .in("source", [...opts.sources])
+    .lt("claimed_at", opts.claimedBeforeIso)
+    .order("claimed_at", { ascending: true })
+    .limit(opts.limit ?? 100);
+  if (error) throw new Error(`list_stale_in_flight_claims_failed: ${error.message}`);
+  return (data ?? []) as Array<Pick<CycleChargeRow, "id" | "workspace_id" | "subscription_id" | "cycle_key" | "claimant" | "source" | "claimed_at">>;
+}
+
 export interface ResolveInput {
   status: "succeeded" | "failed";
   transaction_id?: string | null;

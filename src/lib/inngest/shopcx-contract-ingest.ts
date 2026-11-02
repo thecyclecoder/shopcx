@@ -35,15 +35,32 @@ const SYNC_FN_ID = "shopcx-contract-sync";
  */
 const CLAIM_SETTLE = "3m";
 
+/** The ingest function's Inngest retry budget — also the last attempt `normalize-pricing` retries on. */
+const INGEST_RETRIES = 3;
+
+/**
+ * Pure: on a failed normalization, retry the step or give up and record it?
+ *
+ * Inngest's `attempt` is zero-indexed and the function allows `INGEST_RETRIES` retries, so the
+ * final attempt is `attempt === INGEST_RETRIES`. Every earlier one THROWS so Inngest retries the
+ * step with backoff (a Shopify throttle or 5xx inside `withDraft` is the common cause). The final
+ * one returns the failure instead, so the run still beats `normalize_failed` rather than dying
+ * without a heartbeat. The first renewal re-runs the normalizer before charging (see the renewal
+ * worker's price check), so giving up here never means renewing at MSRP.
+ */
+export function normalizeFailureDisposition(attempt: number, retries: number = INGEST_RETRIES): "retry" | "give_up" {
+  return attempt < retries ? "retry" : "give_up";
+}
+
 export const shopcxContractIngest = inngest.createFunction(
   {
     id: INGEST_FN_ID,
     name: "ShopCX contract ingest — a PDP checkout becomes a subscription",
-    retries: 3,
+    retries: INGEST_RETRIES,
     concurrency: { limit: 4 },
     triggers: [{ event: CONTRACT_CREATED_EVENT }],
   },
-  async ({ event, step }) => {
+  async ({ event, step, attempt }) => {
     const { workspaceId, contractId } = event.data as { workspaceId: string; contractId: string };
 
     await step.sleep("let-our-own-rails-claim-it", CLAIM_SETTLE);
@@ -72,7 +89,15 @@ export const shopcxContractIngest = inngest.createFunction(
     const normalized = result.ingested
       ? await step.run("normalize-pricing", async () => {
           const r = await shopcxNormalizeNewContract(workspaceId, String(contractId).replace("gid://shopify/SubscriptionContract/", ""));
-          if (!r.success) console.error(`[shopcx-ingest] ${contractId}: normalize FAILED — ${r.error}`);
+          if (!r.success) {
+            console.error(`[shopcx-ingest] ${contractId}: normalize FAILED (attempt ${attempt}) — ${r.error}`);
+            // ⚠️ Swallowing this left a new PDP subscriber renewing at full MSRP (+33%/unit, the
+            // tier lost) with nothing ever re-running the step. The normalizer is idempotent, so
+            // a retry is safe.
+            if (normalizeFailureDisposition(attempt) === "retry") {
+              throw new Error(`normalize failed, retrying: ${r.error}`);
+            }
+          }
           return { success: r.success, normalized: r.normalized ?? false, error: r.success ? null : r.error ?? null };
         })
       : null;

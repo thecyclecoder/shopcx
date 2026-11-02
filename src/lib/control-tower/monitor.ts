@@ -2273,10 +2273,13 @@ export async function countSegmentStaleTail(
  */
 export function isWedgedCycleCharge(
   charge: { cycle_key: string; status: string; claimed_at: string },
-  sub: { next_billing_date: string | null },
+  sub: { next_billing_date: string | null; billing_source?: string | null },
   now: number = Date.now(),
 ): boolean {
   if (charge.status === "succeeded") return false;
+  // ShopCX: only a stranded `in_flight` is a wedge. A `failed` claim on the current cycle is the
+  // normal dunning hold (dunning keeps the date in the past on purpose) and is reclaimable.
+  if (sub.billing_source === "shopcx" && charge.status !== "in_flight") return false;
   const currentCycleKey = cycleKeyFromNextBillingDate(sub.next_billing_date);
   if (currentCycleKey === "unknown-cycle") return false;
   if (currentCycleKey !== charge.cycle_key) return false;
@@ -2286,7 +2289,7 @@ export function isWedgedCycleCharge(
 }
 
 /**
- * READ-ONLY: count active internal subscriptions whose CURRENT cycle_key has a non-succeeded
+ * READ-ONLY: count active internal AND ShopCX subscriptions whose CURRENT cycle_key has a non-succeeded
  * `subscription_cycle_charges` row that has persisted past `STALE_IN_FLIGHT_RECLAIM_MS`. Phase
  * 3 of [[../specs/a-declined-renewal-must-not-wedge-the-cycle-forever]].
  *
@@ -2299,6 +2302,11 @@ export function isWedgedCycleCharge(
  *
  * The spec-test sandbox is excluded on BOTH sides so a seeded stuck-wedge fixture cannot
  * inflate the real count.
+ *
+ * ⭐ ShopCX subs count too (in_flight only — see `isWedgedCycleCharge`). A pending Shopify attempt
+ * leaves the claim in_flight and nothing but the renewal cron's settle step resolves it; filtering
+ * on `is_internal` hid every ShopCX wedge, so a sub the settle could not resolve stopped billing in
+ * silence.
  */
 export async function countRenewalWedgedCycles(admin: Admin, now: number = Date.now()): Promise<number> {
   const { data: nonSucceededRows } = await admin
@@ -2322,19 +2330,17 @@ export async function countRenewalWedgedCycles(admin: Admin, now: number = Date.
   const candidateIds = Array.from(persistentBySub.keys());
   const { data: subs } = await admin
     .from("subscriptions")
-    .select("id, next_billing_date")
+    .select("id, next_billing_date, billing_source")
     .in("id", candidateIds)
-    .eq("is_internal", true)
+    .or("is_internal.eq.true,billing_source.eq.shopcx")
     .eq("status", "active")
     .neq("workspace_id", SPEC_TEST_SANDBOX_WORKSPACE_ID);
   if (!subs || subs.length === 0) return 0;
 
   let wedged = 0;
-  for (const sub of subs as Array<{ id: string; next_billing_date: string | null }>) {
-    const currentCycleKey = cycleKeyFromNextBillingDate(sub.next_billing_date);
-    if (currentCycleKey === "unknown-cycle") continue;
+  for (const sub of subs as Array<{ id: string; next_billing_date: string | null; billing_source: string | null }>) {
     const rows = persistentBySub.get(sub.id) ?? [];
-    if (rows.some((r) => r.cycle_key === currentCycleKey)) wedged += 1;
+    if (rows.some((r) => isWedgedCycleCharge(r, sub, now))) wedged += 1;
   }
   return wedged;
 }
