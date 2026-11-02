@@ -616,7 +616,7 @@ export interface ContractBillingAttempt {
  * ⭐ This is how a pending attempt gets settled. The renewal worker and portal Order Now leave the
  * cycle claim `in_flight` when Shopify has not finished (3DS, or our 30s poll timed out), and the
  * claim ledger stores no Shopify attempt id. Our keys are deterministic per cycle, so the attempt
- * is recoverable from the contract itself. Reads the most recent `last` attempts; `found: false`
+ * is recoverable from the contract itself. Reads the most recent attempts (`first` + `reverse` — Shopify rejects `last` without `before`, verified 2026-11-02); `found: false`
  * means none carries the key (the attempt was never created, or it aged out of the window).
  */
 export async function findContractBillingAttempt(
@@ -633,7 +633,7 @@ export async function findContractBillingAttempt(
     } | null;
   }>(
     workspaceId,
-    `query($id:ID!,$n:Int!){ subscriptionContract(id:$id){ billingAttempts(last:$n){ nodes { id idempotencyKey ready errorCode errorMessage completedAt order { id name } } } } }`,
+    `query($id:ID!,$n:Int!){ subscriptionContract(id:$id){ billingAttempts(first:$n, reverse:true){ nodes { id idempotencyKey ready errorCode errorMessage completedAt order { id name } } } } }`,
     { id: contractGid(contractId), n: opts.last ?? 25 },
   );
   if (env.errors?.length) return { success: false, error: env.errors.map((e) => e.message).join("; ") };
