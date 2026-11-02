@@ -30,7 +30,12 @@ Bounded, batched drain for Twilio SMS callbacks. Consumes fast-ack events from t
 - **No batching** — every inbound is a per-customer state change and Shopify consent mutation; batching adds complexity without win.
 - **STOP / START classification:** trust `params.OptOutType` (Twilio Advanced Opt-Out only), then keyword match on the body. Same rules as the pre-fast-ack inline code (whole-message or first-word match, never substring — a "thanks!" reply doesn't unsubscribe).
 - **Consent flip:** workspace lookup by `to.replace('+','')` against `workspaces.twilio_phone_number` (holds the bare shortcode digits for marketing); phone match via `find_customers_by_phone` RPC (uses the last-10-digits expression index — verified via EXPLAIN); per-matched-customer Shopify mutation (`unsubscribeFromSmsMarketing` / `subscribeToSmsMarketing`) then `customers.sms_marketing_status` UPDATE. Skips rows already in the target state (idempotency).
-- **STOP/START autoresponder:** none — Twilio's Advanced Opt-Out already sends the carrier-mandated confirmation from its edge; a second reply looks broken.
+- **Keyword replies (CTIA short-code rules — 85041 carrier audit, cure date 2026-11-02):** Twilio does NOT auto-reply to keywords on a short code unless Advanced Opt-Out is on, and it is off for 85041. The audit found no STOP/START reply and no program name in HELP, so the drain sends them itself, never deduped:
+  - STOP-class → `STOP_REPLY_TEXT` (program name + no further messages + how to resubscribe).
+  - START-class, now including `JOIN` → `START_REPLY_TEXT` (program name + recurring + frequency + rates + HELP/STOP).
+  - `HELP` / `INFO` → `HELP_REPLY_TEXT` (program name + support@superfoodscompany.com + rates + STOP). Handled in its own branch before the generic autoresponder.
+  - All three are GSM-7 and one segment. The program name is `KEYWORD_PROGRAM_NAME` ("Superfoods Company SMS Offers").
+  - When the inbound carries `params.OptOutType`, Twilio Advanced Opt-Out already replied at the edge, so the drain skips its STOP/START reply to avoid a double message.
 - **Generic-reply autoresponder:** dedupe-gated (24h window, one autoresponse per `(shortcode, from_phone)`). Sends via `sendSMS(workspace_id, from, AUTORESPONSE_TEXT)` because Phase 1 fast-ack drops the TwiML response body.
 
 ## Upstream events

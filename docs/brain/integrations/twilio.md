@@ -50,7 +50,7 @@ Both Twilio webhooks (`marketing-status` + `marketing-sms`) do **zero Postgres w
 | `POST /api/webhooks/twilio/marketing-status` | `sms/status-callback.received` | `{ params: Record<string,string>, url: string }` — parsed Twilio form body + request URL. `params.MessageSid` is the consumer's idempotency key. | `src/app/api/webhooks/twilio/marketing-status/route.ts` |
 | `POST /api/webhooks/twilio/marketing-sms` | `sms/inbound.received` | `{ params: Record<string,string>, url: string }` — same shape. `params.MessageSid` is the consumer's idempotency key; `params.From` / `params.To` / `params.Body` drive STOP/START + inbound-log. | `src/app/api/webhooks/twilio/marketing-sms/route.ts` |
 
-Signature-check behavior is preserved: bad signature → 200 empty body, no event enqueued (silent drop, so Twilio doesn't retry). The `marketing-sms` autoresponder (previously TwiML in the response body) now sends out-of-band via the Twilio API from the drain consumer — STOP/START confirmations remain Twilio's Advanced Opt-Out at the carrier edge.
+Signature-check behavior is preserved: bad signature → 200 empty body, no event enqueued (silent drop, so Twilio doesn't retry). The `marketing-sms` autoresponder (previously TwiML in the response body) now sends out-of-band via the Twilio API from the drain consumer. The drain also sends the carrier-mandated STOP / START (incl. JOIN) / HELP (incl. INFO) replies itself: Twilio does not auto-reply to keywords on a short code without Advanced Opt-Out, which is off for 85041. See [[../inngest/sms-callback-drain]] § Keyword replies; a 2026-10-29 CTIA audit flagged their absence.
 
 Consumers register in [[../inngest/sms-callback-drain]] (Phase 2+).
 
