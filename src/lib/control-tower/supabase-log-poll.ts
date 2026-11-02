@@ -55,6 +55,7 @@ import {
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
   isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingCouponsDiscountTypeColumnNoise,
@@ -512,6 +513,18 @@ const LOG_QUERIES: LogQuery[] = [
       // table (a real schema regression on a live column), or a non-SELECT statement on this
       // table (real code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise(message, query)) return null;
+      // Sibling drop on the SAME table for the `contract_id` column: `appstle_contract_snapshots`
+      // is keyed by `appstle_contract_id` (never a bare `contract_id`), so a foreign PostgREST
+      // probe / stale Studio filter selecting `contract_id` emits `column
+      // appstle_contract_snapshots.contract_id does not exist` — repair work for a query we don't
+      // own ([[../specs/error-feed-drop-appstle-contract-snapshots-contract-id-adhoc]], Control
+      // Tower signature `supabase-logs:807ba2d15d6f53b0`). Narrowly gated to require BOTH the exact
+      // `column appstle_contract_snapshots.contract_id does not exist` message AND the SELECT-lookup
+      // shape on `appstle_contract_snapshots` (bare or PostgREST CTE wrapper) — a column-missing
+      // error on any OTHER table, a DIFFERENT column on this table (a real schema regression on a
+      // live column), or a non-SELECT statement on this table (real code-bug shape) still surfaces
+      // / pages on first sighting.
+      if (isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a Supabase Studio Table Editor quick-filter (or an
       // external PostgREST probe) typed as a case-insensitive free-text search over the jsonb
       // `sample` column on `public.error_events` emits `WHERE "sample" ILIKE $1`, which
