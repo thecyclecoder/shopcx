@@ -47,6 +47,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise,
@@ -423,6 +424,15 @@ const LOG_QUERIES: LogQuery[] = [
       // lookup shape on `agent_jobs` (bare or PostgREST CTE wrapper) — a different missing
       // column on the table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client SELECTs an
+      // `ad_account_id` column from `iteration_runs` that the table never owned. The resulting
+      // undefined_column ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-iteration-runs-ad-account-id-adhoc-noise]], Control Tower
+      // signature `supabase-logs:a529eeb8bab58f73`). Narrowly gated to require BOTH the exact
+      // `column iteration_runs.ad_account_id does not exist` message AND the SELECT-lookup
+      // shape on `iteration_runs` (bare or PostgREST CTE wrapper) — a different missing column
+      // on the table, or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client SELECTs a
       // `last_customer_message_at` column from `tickets` that the table never owned. The
       // resulting undefined_column ERROR is repair work for a query we don't own

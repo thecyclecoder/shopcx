@@ -126,6 +126,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise,
@@ -25766,6 +25767,99 @@ test("isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise KEEPS 
   assert.equal(
     isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
       "column agent_jobs.finished_at does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise ──
+test("isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise drops the foreign direct-REST lookup projecting the non-existent ad_account_id column", () => {
+  // The captured incident shape (Control Tower `supabase-logs:a529eeb8bab58f73`): a foreign /
+  // stale direct-REST client reads `iteration_runs?select=...ad_account_id...`, PostgREST wraps
+  // it as a `WITH pgrst_source AS ( SELECT ... FROM "public"."iteration_runs" ... )` CTE, and
+  // Postgres rejects with `column iteration_runs.ad_account_id does not exist`.
+  assert.equal(
+    isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(
+      "column iteration_runs.ad_account_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."iteration_runs"."id", "public"."iteration_runs"."ad_account_id" FROM "public"."iteration_runs" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(
+      "column public.iteration_runs.ad_account_id does not exist",
+      'with pgrst_source as ( select "public"."iteration_runs"."ad_account_id" from "public"."iteration_runs" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(
+      "ERROR: column iteration_runs.ad_account_id does not exist",
+      'WITH pgrst_source AS ( SELECT "ad_account_id" FROM "public"."iteration_runs" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface.
+  assert.equal(
+    isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(
+      "column iteration_runs.ad_account_id does not exist",
+      "select id, ad_account_id from public.iteration_runs order by id desc limit 10",
+    ),
+    true,
+  );
+  // The unqualified-FROM (no `public.`) variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(
+      "column iteration_runs.ad_account_id does not exist",
+      "select * from iteration_runs where ad_account_id is null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise KEEPS a different iteration_runs column error and a non-SELECT statement (real regressions still page)", () => {
+  // A DIFFERENT missing column on `iteration_runs` is a real column rename / regression and
+  // must still page — the pin covers `ad_account_id` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(
+      "column iteration_runs.status does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."iteration_runs"."status" FROM "public"."iteration_runs" LIMIT 1 )',
+    ),
+    false,
+  );
+  // The same `ad_account_id` message attached to a non-SELECT statement shape is a real
+  // code-write trying to persist a bogus column — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(
+      "column iteration_runs.ad_account_id does not exist",
+      "update public.iteration_runs set ad_account_id = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(
+      "column iteration_runs.ad_account_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."iteration_runs"("id","ad_account_id") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  // The `ad_account_id` message on a DIFFERENT relation (a real product-schema regression)
+  // still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(
+      "column meta_campaigns.ad_account_id does not exist",
+      "select ad_account_id from public.meta_campaigns limit 1",
+    ),
+    false,
+  );
+  // Empty / nullish input returns false — both markers required.
+  assert.equal(isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(null, null), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(
+      "column iteration_runs.ad_account_id does not exist",
       "",
     ),
     false,

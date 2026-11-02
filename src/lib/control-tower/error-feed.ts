@@ -1389,6 +1389,64 @@ export function isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNo
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `iteration_runs.ad_account_id` column for an
+ * ad hoc direct-REST lookup on a table ShopCX does not read that way. A foreign / stale
+ * external/REST client SELECTs `ad_account_id` from `public.iteration_runs`, Supabase's
+ * `postgres_logs` feed captures the resulting undefined_column ERROR, and log-poll mints a
+ * Control Tower incident for a query we don't own
+ * ([[../specs/error-feed-drop-iteration-runs-ad-account-id-adhoc-noise]], Control Tower
+ * signature `supabase-logs:a529eeb8bab58f73`). The `iteration_runs` table has never owned an
+ * `ad_account_id` column (grep confirms no ShopCX code reads it), so there is no lever from
+ * ShopCX to make that query resolve — paging Platform on it is repair work for a query no code
+ * owns. The direct twin of `isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise`
+ * / `isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise` above.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column iteration_runs.ad_account_id does not exist` (with or without
+ *      the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.iteration_runs` — either (a)
+ *      the bare `select ... from (public.)?iteration_runs` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."iteration_runs" ... )` CTE wrapper form
+ *      with double-quoted identifiers.
+ *
+ * Intentionally narrow — any genuine schema regression still pages:
+ *   - a DIFFERENT missing column on `iteration_runs` still pages — the pin covers
+ *     `ad_account_id` only,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL, a non-SELECT wrapped op inside the CTE) still pages,
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — returning null fully suppresses the row (no error_event, no
+ * loop_alert, no signature). A capture-time drop, not a `transient` flag.
+ */
+export function isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column iteration_runs.ad_account_id does not exist" ||
+    stripped === "column public.iteration_runs.ad_account_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `iteration_runs` — any trailing WHERE/LIMIT/ORDER BY is fine; the
+  // pin is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real
+  // code-bug shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?iteration_runs\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."iteration_runs" ... )` with double-quoted identifiers. Guarded so the CTE branch
+  // requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper
+  // is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."iteration_runs"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing `tickets.last_customer_message_at` column
  * for a foreign / stale direct-REST lookup on a table ShopCX does not read that way. A stale
  * external/REST client SELECTs `last_customer_message_at` from `public.tickets`, Supabase's
