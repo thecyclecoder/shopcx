@@ -38,6 +38,7 @@ Canonical subscription mutation surface for the Commerce SDK. Every subscription
 
 **`subscriptionSkipNextOrder`** — `async (workspaceId, contractId) → OpResult`
 - Branches on `isInternalSubscription()` → `internalSubSkipNextOrder` or `appstleSkipNextOrder`.
+- **ShopCX (`shopcxSkipNextOrder`)** moves OUR `next_billing_date` one cadence forward (`shopcxSkipTargetDate`) and sets Shopify's display date to match. ⚠️ It does NOT call `subscriptionBillingCycleSkip`: the renewal cron selects by our date and bills the first unbilled non-skipped cycle, so a Shopify-only skip still charged on the original day (the NEXT cycle, early). Found in the 2026-11-02 review; 0 contracts had been hit. `subscriptionSkipUpcomingOrder` uses the same path.
 - Replaces `appstleSkipNextOrder`.
 
 **`subscriptionUpdateBillingInterval`** — `async (workspaceId, contractId, interval, intervalCount) → OpResult`
