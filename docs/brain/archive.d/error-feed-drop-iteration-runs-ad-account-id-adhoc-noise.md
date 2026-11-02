@@ -1,0 +1,1 @@
+- **Scope foreign ad-hoc 'iteration_runs.ad_account_id does not exist' noise out of the Control Tower error feed** · verified 2026-11-02 · → [[../libraries/error-feed]] · [[../inngest/supabase-log-poll]]
