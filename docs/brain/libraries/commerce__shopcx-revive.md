@@ -25,7 +25,7 @@ until Dylan sets it.
 | `targetStatusForIntent(rowStatus, intent)` | pure | `resume` → ACTIVE; `change` keeps paused/active; `change` on cancelled → `subscription_cancelled`; cancel/pause → `local_only_intent`. |
 | `resolveReviveNextBillingDate(rowNext, interval, count, now, override?)` | pure | Future date kept; lapsed date **rolled forward** by the customer's cadence (`rollForwardToFutureBillingDate`, [[dunning]]); null (cancelled rows — cancel-truth nulls it) → tomorrow. |
 | `pickUsableCard(methods, now, preferredId?)` | pure | First unexpired card from `getCustomerPaymentMethods` (revoked already dropped); preferred wins when usable. |
-| `resolveReviveAddress({override,row,customerDefault})` | pure | First COMPLETE address (`REQUIRED_ADDRESS_FIELDS`) in Shopify `MailingAddressInput` shape. |
+| `resolveReviveAddress({override,row,customerDefault,customerName})` | pure | First COMPLETE address (`REQUIRED_ADDRESS_FIELDS`) in Shopify `MailingAddressInput` shape. A source with no name takes `customers.first_name/last_name` (`customerName`); the address's own name wins. |
 | `droppedMirrorCodes(applied_discounts)` | pure | Names of the customer `CODE_DISCOUNT`s a revive drops (all of them; structural + `Buy N` are recomputed, not listed). Surfaced as `codesDropped`. |
 | `defaultReviveDeps()` / `defaultEnsureDeps()` | factory | Production I/O seams; tests inject fakes. |
 | `ensureFailureText(r)` | pure | `"<reason>: <error>"` for ops that return `{ success:false, error }`. |
@@ -45,7 +45,7 @@ until Dylan sets it.
 | **delivery price** | `delivery_price_cents` — **KEPT, never zeroed** (Dylan's shipping rule; see the migrate page's "shipping charge CARRIED") |
 | shipping option | `shipping_method_code` → `{ code, title }` |
 | codes | **dropped** (Dylan 2026-10-26). Pricing comes from our rules (S&S + Buy 2/3) via the planner; names returned in `codesDropped` so CS can re-add one by hand |
-| address | row `shipping_address` (367/370 paused, ~5% of cancelled) → `customers.default_address` |
+| address | row `shipping_address` (367/370 paused, ~5% of cancelled) → `customers.default_address`; a missing first/last name is filled from the customer record. ⚠️ Appstle stored the address WITHOUT a name on 23,506 of 26,247 never-migrated rows (2026-10-29 count) — before this fill, nearly every old cancelled sub refused with `needs_address (missing lastName)`; after it, 94 still do. |
 | card | **not on the row** (`payment_method_id` is NULL on Appstle rows) → the customer's Shopify payment methods via `getCustomerPaymentMethods` (`shopify_customer_id` from the row, else `customers`) |
 
 No usable card → `needs_payment_method`; no complete address → `needs_address` (with `missing[]`).
