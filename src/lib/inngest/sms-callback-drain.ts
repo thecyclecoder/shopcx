@@ -383,14 +383,28 @@ export const smsCallbackDrain = inngest.createFunction(
 // INSERT → dedupe-gated TwiML autoresponse) happens here, bounded so a
 // STOP-storm after a big send can't DDoS Postgres via the webhook path.
 //
-// STOP / HELP / START confirmation replies are still handled by
-// Twilio's Advanced Opt-Out at the carrier edge (per docs/brain/
-// integrations/twilio.md); we log the inbound + mirror consent to
-// Shopify so audience builds line up with Twilio's block list.
+// STOP / HELP / START confirmation replies are sent HERE (CTIA short
+// code rules). Twilio does not auto-reply to keywords on short codes
+// unless Advanced Opt-Out is on, and the 2026-10-29 carrier audit of
+// 85041 found no STOP/START reply and no program name in HELP. When an
+// inbound carries `OptOutType`, Twilio's Advanced Opt-Out handled it at
+// the edge and already replied, so we skip ours to avoid a double reply.
 // ═════════════════════════════════════════════════════════════════════
 
 const AUTORESPONSE_TEXT =
   "This number isn't monitored. For help, please visit https://help.superfoodscompany.com — our team responds within a few hours.";
+
+// Carrier-mandated keyword replies (CTIA / Twilio short code standards):
+// HELP = program name + support contact; STOP = program name + no further
+// messages; START/JOIN = program name + rates + frequency + HELP/STOP.
+// GSM-7 only, one segment each.
+export const KEYWORD_PROGRAM_NAME = "Superfoods Company SMS Offers";
+export const HELP_REPLY_TEXT =
+  `${KEYWORD_PROGRAM_NAME}: Get help at support@superfoodscompany.com. Msg frequency varies. Msg&data rates may apply. Reply STOP to unsubscribe.`;
+export const STOP_REPLY_TEXT =
+  `${KEYWORD_PROGRAM_NAME}: You are unsubscribed and will receive no further messages. Reply START to resubscribe.`;
+export const START_REPLY_TEXT =
+  `${KEYWORD_PROGRAM_NAME}: You're subscribed to recurring marketing texts. Msg frequency varies. Msg&data rates may apply. Reply HELP for help, STOP to end.`;
 
 const DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -402,16 +416,21 @@ const STOP_KEYWORDS = new Set([
   "OPTOUT", "OPT-OUT", "OPT OUT", "REMOVE",
 ]);
 const START_KEYWORDS = new Set([
-  "START", "UNSTOP", "YES", "SUBSCRIBE", "OPTIN", "OPT-IN", "OPT IN",
+  "START", "UNSTOP", "YES", "SUBSCRIBE", "OPTIN", "OPT-IN", "OPT IN", "JOIN",
 ]);
+const HELP_KEYWORDS = new Set(["HELP", "INFO"]);
 
-function isStopMessage(body: string): boolean {
+export function isHelpMessage(body: string): boolean {
+  return HELP_KEYWORDS.has(body.trim().toUpperCase());
+}
+
+export function isStopMessage(body: string): boolean {
   const trimmed = body.trim().toUpperCase();
   if (STOP_KEYWORDS.has(trimmed)) return true;
   return /^(PLEASE\s+STOP|REMOVE\s+ME|STOP\s+MESSAGES|STOP\s+TEXTS|STOP\s+ALL)\b/i.test(body.trim());
 }
 
-function isStartMessage(body: string): boolean {
+export function isStartMessage(body: string): boolean {
   const trimmed = body.trim().toUpperCase();
   if (START_KEYWORDS.has(trimmed)) return true;
   return /^(RESUBSCRIBE|RE-?SUBSCRIBE\s+ME|RESUME)\b/i.test(body.trim());
@@ -510,10 +529,10 @@ export const smsInboundDrain = inngest.createFunction(
         return { workspace_id: ws?.id || null, matched, flipped };
       });
 
-      // Log the inbound. Autoresponder skipped — Twilio's Advanced
-      // Opt-Out replies with the carrier-mandated STOP/START
-      // confirmation from its edge, so a second reply would look
-      // broken (matches pre-fast-ack behavior).
+      // Carrier-mandated STOP/START confirmation — always sent (no
+      // dedupe), unless Twilio Advanced Opt-Out already replied at the
+      // edge (signalled by OptOutType on the inbound).
+      const sendConfirmation = !optOutType && !!outcome.workspace_id;
       await step.run("log-inbound-optout", async () => {
         const admin = createAdminClient();
         await admin.from("sms_marketing_inbound").insert({
@@ -521,11 +540,52 @@ export const smsInboundDrain = inngest.createFunction(
           from_phone: from,
           body: messageBody,
           message_sid: messageSid,
-          autoresponded: false,
+          autoresponded: sendConfirmation,
         });
       });
+      if (sendConfirmation) {
+        await step.run("send-optout-confirmation", async () => {
+          const res = await sendSMS(
+            outcome.workspace_id as string,
+            from,
+            isOptOut ? STOP_REPLY_TEXT : START_REPLY_TEXT,
+          );
+          if (!res.success) {
+            console.error("[sms-inbound-drain] opt-out confirmation send failed:", res.error);
+          }
+        });
+      }
 
       return { drained: 1, type: isOptOut ? "opt_out" : "opt_in", ...outcome };
+    }
+
+    // ── HELP / INFO — carrier-mandated reply, never deduped ──────────
+    if (isHelpMessage(messageBody)) {
+      const helpWs = await step.run("log-inbound-help", async () => {
+        const admin = createAdminClient();
+        const { data: ws } = await admin
+          .from("workspaces")
+          .select("id")
+          .eq("twilio_phone_number", to.replace(/^\+/, ""))
+          .maybeSingle();
+        await admin.from("sms_marketing_inbound").insert({
+          shortcode: to,
+          from_phone: from,
+          body: messageBody,
+          message_sid: messageSid,
+          autoresponded: !!ws?.id,
+        });
+        return ws?.id || null;
+      });
+      if (helpWs) {
+        await step.run("send-help-reply", async () => {
+          const res = await sendSMS(helpWs, from, HELP_REPLY_TEXT);
+          if (!res.success) {
+            console.error("[sms-inbound-drain] HELP reply send failed:", res.error);
+          }
+        });
+      }
+      return { drained: 1, type: "help", autoresponded: !!helpWs };
     }
 
     // ── Generic inbound — dedupe-gated autoresponder ─────────────────
