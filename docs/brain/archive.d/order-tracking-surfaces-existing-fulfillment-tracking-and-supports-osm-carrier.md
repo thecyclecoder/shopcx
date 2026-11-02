@@ -1,0 +1,1 @@
+- **Order-tracking workflow surfaces existing fulfillment tracking and supports OSM carrier** · verified 2026-11-02 · → [[integrations/easypost]]
