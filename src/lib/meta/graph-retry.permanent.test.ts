@@ -122,9 +122,14 @@ test("graphError — permanent classification tags metaClass='permanent_api_remo
   assert.equal(err.httpStatus, 400);
 });
 
-test("graphError — ordinary fatal (code 190 token) has NO metaClass tag", () => {
+test("graphError — a code-190 token error is NOT permanent_api_removed (it routes to reconnect_required, a different remedy)", () => {
+  // Code 190 is a token invalidation, not a removed API surface. It must never
+  // tag permanent_api_removed (a code-change escalation); it now tags
+  // reconnect_required (OAuth re-consent) — see [[graph-retry]]
+  // classifyReconnectRequired.
   const err = graphError(400, { code: 190, message: "Invalid access token" });
-  assert.equal(err.metaClass, undefined);
+  assert.notEqual(err.metaClass, "permanent_api_removed");
+  assert.equal(err.metaClass, "reconnect_required");
 });
 
 // ── graphFetchJson — never retries a permanent error + fires the handler ─────

@@ -66,7 +66,7 @@ function classifyAppOwnerActionRequired(status: number, error: any): boolean
 ```ts
 function classifyReconnectRequired(status: number, error: any): boolean
 ```
-**[[../specs/meta-reconnect-required-class]] Phase 1** — classifies a Graph response as RECONNECT_REQUIRED: the stored per-workspace user access token has been invalidated by Meta and only OAuth re-consent restores access. The app-level gate is CLEAR — the App Dashboard has nothing left to do. Fires on HTTP 400 when the concatenated `message` + `error_user_title` + `error_user_message` (lowercased) contains `"api access blocked"`. Seed observation: the 2026-08-02 incident, where after the CEO completed the Data Use Checkup Meta switched to this second phrasing on every call made with the stored user token, while the APP token (`{app_id}|{secret}`) still returned 200.
+**[[../specs/meta-reconnect-required-class]] Phase 1** — classifies a Graph response as RECONNECT_REQUIRED: the stored per-workspace user access token has been invalidated by Meta and only OAuth re-consent restores access. The app-level gate is CLEAR — the App Dashboard has nothing left to do. Fires on HTTP 400 when **either** (a) Meta OAuthException **code 190** is present (the authoritative token-invalidation signal — a workspace owner changed their Facebook password or Meta reset the session for security), **or** (b) the concatenated `message` + `error_user_title` + `error_user_message` (lowercased) contains one of `"api access blocked"`, `"session has been invalidated"`, or `"error validating access token"`. The code is normalized (Meta sometimes serializes it as a string). Code-190 added by [[../specs/meta-reconnect-classify-oauth-code-190-token-invalidation]] — before it, a code-190 session-reset threw raw into the Control Tower error feed and paged the team every sync tick while ad spend ran unmeasured. Seed observation for the `"api access blocked"` phrasing: the 2026-08-02 incident, where after the CEO completed the Data Use Checkup Meta switched to that second phrasing on every call made with the stored user token, while the APP token (`{app_id}|{secret}`) still returned 200.
 
 ⚠ **TRIGGER, NOT PROOF.** The seed phrasing was observed EXACTLY ONCE across a ~40-minute window. Treat this predicate as a trigger for downstream confirmation — never as sufficient evidence to raise a founder-facing card. [[meta__reconnect-required-escalation]] `escalateReconnectRequired` calls `debug_token` and only raises the card when Meta reports the token as invalid. Do NOT 'simplify' the confirmation away.
 
@@ -166,9 +166,11 @@ are swallowed.
 
 ## Gotchas
 
-- **Fatal errors still fail fast** (190 invalid/expired token, 200/10/803
-  permissions, plain 400 validation) — a real misconfiguration surfaces
-  immediately, not masked by backoff.
+- **Fatal errors still fail fast** (200/10/803 permissions, plain 400
+  validation) — a real misconfiguration surfaces immediately, not masked by
+  backoff. (Note: code **190** no longer falls through to ordinary fatal — it
+  is now classified as `reconnect_required` and routed to the reconnect card;
+  it still never retries.)
 - A genuine **sustained** outage still throws after the attempt budget, so the
   run records `failed` + DMs owners exactly as before — resilience, not silent
   swallowing.
@@ -182,7 +184,7 @@ are swallowed.
 - **Ordering — app-owner-action-required, then reconnect-required, then permanent, then transient.** The
   `graphError` function classifies in this order: `classifyAppOwnerActionRequired`
   (HTTP 400 with the Data Use Checkup / disrupted / unavailable phrasings),
-  `classifyReconnectRequired` (HTTP 400 with `"api access blocked"`),
+  `classifyReconnectRequired` (HTTP 400 with code 190 or the `"api access blocked"` / `"session has been invalidated"` / `"error validating access token"` phrasings),
   `isPermanentGraphError` (HTTP 400 with removed-endpoint wording or
   code/subcode), then transient (is_transient / code 1/2 / 429 / 5xx). Load-bearing:
   a Data Use Checkup 400 can never be downgraded to a reconnect prompt, and a

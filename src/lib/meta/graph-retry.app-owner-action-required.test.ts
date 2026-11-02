@@ -207,16 +207,20 @@ test("today-sync's isHandledTransient predicate treats app_owner_action_required
   assert.equal(isHandledTransient, true);
 });
 
-test("today-sync's isHandledTransient predicate treats a plain fatal 400 as error (unchanged)", () => {
+test("today-sync contains a code-190 token 400 as reconnect_required (human-blocked, warn+skip — no longer a raw error-feed page)", () => {
+  // Was: a code-190 400 fell through to console.error and paged the team every
+  // sync tick. Now code 190 tags reconnect_required (see
+  // [[../../../docs/brain/specs/meta-reconnect-classify-oauth-code-190-token-invalidation]]),
+  // so today-sync's human-blocked branch contains it (deduped CEO card via the
+  // debug_token-confirmed handler, warn+skip). Mirror the real predicate:
+  // isMetaHumanActionBlock(err) || isHumanBlockedGraphError(err).
   const tagged = graphError(400, {
     code: 190,
     message: "Invalid OAuth access token.",
   }) as { metaCode?: number; metaSubcode?: number; httpStatus?: number; metaClass?: string };
-  const isHandledTransient =
-    tagged?.metaCode === 1 ||
-    tagged?.metaCode === 2 ||
-    tagged?.metaSubcode === 1504018 ||
-    (typeof tagged?.httpStatus === "number" && tagged.httpStatus >= 500) ||
-    tagged?.metaClass === "app_owner_action_required";
-  assert.equal(isHandledTransient, false);
+  const isHumanBlocked =
+    tagged?.metaClass === "app_owner_action_required" ||
+    tagged?.metaClass === "reconnect_required";
+  assert.equal(tagged.metaClass, "reconnect_required");
+  assert.equal(isHumanBlocked, true);
 });
