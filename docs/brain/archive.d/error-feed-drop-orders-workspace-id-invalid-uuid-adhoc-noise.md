@@ -1,0 +1,1 @@
+- **Drop orders/workspace_id invalid-uuid REST probe noise** · verified 2026-11-02 · → [[../libraries/error-feed]] · [[../tables/orders]]
