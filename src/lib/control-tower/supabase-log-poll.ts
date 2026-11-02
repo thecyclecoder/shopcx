@@ -98,6 +98,7 @@ import {
   isForeignSupabasePostgresMissingSpecStatusHistoryOldValueAdhocNoise,
   isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
@@ -1073,6 +1074,14 @@ const LOG_QUERIES: LogQuery[] = [
       // `supabase-logs:dc5495e4064edd50`) is repair work for a query we don't own. Narrowly
       // gated: a different table, a different column, or a non-SELECT statement still pages.
       if (isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.shopify_billing_attempt_events.created_at`. The table has never had a
+      // `created_at` column — the column-missing ERROR only reaches this feed when a foreign
+      // app / stale PostgREST client reads `created_at` off the table. There is no lever from
+      // ShopCX to resolve it — paging Platform (Control Tower signature
+      // `supabase-logs:2a7914826d24d670`) is repair work for a query we don't own. Narrowly
+      // gated: a different table, a different column, or a non-SELECT statement still pages.
+      if (isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.ticket_resolution_events.event_type`. The ledger exists but has never
       // had an `event_type` column — the column-missing ERROR only reaches this feed when a

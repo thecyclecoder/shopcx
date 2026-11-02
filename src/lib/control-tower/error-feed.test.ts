@@ -32,6 +32,7 @@ import {
   isForeignSupabasePostgresMissingSpecStatusHistoryOldValueAdhocNoise,
   isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
@@ -6356,6 +6357,130 @@ test("isForeignSupabasePostgresMissingSpecStatusHistoryOldValueAdhocNoise return
   assert.equal(
     isForeignSupabasePostgresMissingSpecStatusHistoryOldValueAdhocNoise(
       "column spec_status_history.old_value does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/shopify_billing_attempt_events?select=...created_at...` against our
+// `public.shopify_billing_attempt_events` table, which has never had a `created_at` column.
+// Foreign-owned surface, no lever from us (Control Tower signature
+// `supabase-logs:2a7914826d24d670`) — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `shopify_billing_attempt_events.created_at` AND the bare SELECT-lookup (or
+// pgrst_source wrapper) shape on `shopify_billing_attempt_events` are present. A column-missing
+// on any other table, a different column, or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise drops the ad hoc SELECT lookup on the exact shopify_billing_attempt_events.created_at column-missing shape", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      "column shopify_billing_attempt_events.created_at does not exist",
+      "select id, created_at from public.shopify_billing_attempt_events order by created_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      "column public.shopify_billing_attempt_events.created_at does not exist",
+      "select id, created_at from public.shopify_billing_attempt_events order by created_at desc limit 100",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      "column shopify_billing_attempt_events.created_at does not exist",
+      "select created_at from shopify_billing_attempt_events limit 10",
+    ),
+    true,
+  );
+  // Case-insensitive on the query, `ERROR: ` prefix stripped before equality.
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      "ERROR: column shopify_billing_attempt_events.created_at does not exist",
+      "SELECT ID, CREATED_AT FROM PUBLIC.SHOPIFY_BILLING_ATTEMPT_EVENTS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise drops the PostgREST direct-REST WITH pgrst_source wrapper shape (signature 2a7914826d24d670)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      "column shopify_billing_attempt_events.created_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."shopify_billing_attempt_events".* FROM "public"."shopify_billing_attempt_events" ORDER BY "public"."shopify_billing_attempt_events"."created_at" DESC LIMIT 100 ) SELECT * FROM "pgrst_source"',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      "column public.shopify_billing_attempt_events.created_at does not exist",
+      'with pgrst_source as ( select "shopify_billing_attempt_events".* from "shopify_billing_attempt_events" order by created_at desc limit 10 )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      "column shopify_billing_attempt_events.created_at does not exist",
+      "insert into public.shopify_billing_attempt_events (created_at) values (now())",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      "column shopify_billing_attempt_events.created_at does not exist",
+      "update public.shopify_billing_attempt_events set created_at = now() where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      "column shopify_billing_attempt_events.created_at does not exist",
+      'with pgrst_source as ( insert into "public"."shopify_billing_attempt_events" ("created_at") values (now()) returning * )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise KEEPS a column-missing error on any OTHER table (a different table's created_at still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      "column orders.created_at does not exist",
+      "select created_at from public.orders where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
+      "select created_at from public.subscription_cycle_charges limit 10",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise("", ""),
+    false,
+  );
+  // Exact message but empty query — cannot confirm the shape, stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise(
+      "column shopify_billing_attempt_events.created_at does not exist",
       "",
     ),
     false,
