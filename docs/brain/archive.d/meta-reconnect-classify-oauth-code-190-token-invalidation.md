@@ -1,0 +1,1 @@
+- **Classify Meta OAuth code-190 token invalidation as reconnect_required** · verified 2026-11-02 · → [[../libraries/meta__graph-retry]]
