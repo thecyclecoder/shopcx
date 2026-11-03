@@ -15,7 +15,7 @@ The error feed ingests errors from [[../inngest/supabase-log-poll]], [[../innges
 Mark an error as collateral of a brief, self-healing incident (momentary gateway saturation, brief connection loss). A first sighting is recorded for **visibility only**, with **no page**; escalates to a real open+page only if the same signature recurs within `TRANSIENT_RECUR_WINDOW_MS` (1h).
 
 **Functions:**
-- `isTransientInngestTransportError` — Inngest connection timeouts / unavailable (self-heals when service recovers).
+- `isTransientInngestTransportError` — Inngest connection timeouts / unavailable (self-heals when service recovers) OR Inngest's own execution-engine internal error (name `InngestErrInternal` and/or message `'internal error and could not continue'` — the platform-side failure, not an application throw).
 - `isTransientInngestStepRetryThrow` — Inngest step retry logic throwing a transient cause (not a durable code bug).
 - `isTransientSupabaseLogNoise` — Postgres `statement timeout` / connection saturation, edge API 5xx (momentary DB / gateway saturation).
 - `isTransientShopifyWebhookHmacFailure` — Shopify webhook HMAC validation failing transient (clock skew, stale cert).
