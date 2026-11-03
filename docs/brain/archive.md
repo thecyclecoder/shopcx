@@ -12,6 +12,12 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Stop the Control Tower paging on foreign REST probes of appstle_contract_snapshots.contract_id** · verified 2026-11-02 · → [[../libraries/error-feed]]
+- **Drop the foreign PostgREST created_at lookup on shopify_billing_attempt_events from the error feed** · verified 2026-11-02 · → [[../libraries/error-feed]] (§ Supabase Postgres missing-column noise § `isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise`)
+- **Scope foreign ad-hoc 'iteration_runs.ad_account_id does not exist' noise out of the Control Tower error feed** · verified 2026-11-02 · → [[../libraries/error-feed]] · [[../inngest/supabase-log-poll]]
+- **Drop orders/workspace_id invalid-uuid REST probe noise** · verified 2026-11-02 · → [[../libraries/error-feed]] · [[../tables/orders]]
+- **Classify Meta OAuth code-190 token invalidation as reconnect_required** · verified 2026-11-02 · → [[../libraries/meta__graph-retry]]
+- **Order-tracking workflow surfaces existing fulfillment tracking and supports OSM carrier** · verified 2026-11-02 · → [[integrations/easypost]]
 - **Drop foreign ad-hoc 'tickets.metadata' column-missing reads at Control Tower capture** · verified 2026-11-01 · → [[../libraries/error-feed]]
 - **Security dependency upgrades** · verified 2026-11-01 · → [[../libraries/security-agent]]
 - **Drop foreign direct-REST customers.loyalty_points_balance undefined-column noise from the Control Tower feed** · verified 2026-10-31 · → [[../libraries/error-feed]]
