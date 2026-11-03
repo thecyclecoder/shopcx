@@ -4,16 +4,19 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import {
   centralToday,
   estimateCurrentMonthProfit,
+  estimateUnclosedMonthProfit,
   getClosedMonthProfit,
   monthStart,
   lastClosedMonths,
+  unclosedMonths,
 } from "@/lib/profit-estimate";
 
 /**
  * GET /api/workspaces/[id]/analytics/profit?period=this_month|last_month|YYYY-MM
  *
  * Closed months return QuickBooks ACTUALS from qb_pnl_snapshots; the in-progress
- * month returns a calibrated estimate. See src/lib/profit-estimate.ts and
+ * month returns a calibrated estimate, and so does an elapsed month whose
+ * snapshot hasn't landed yet (books close ~the 15th). See src/lib/profit-estimate.ts and
  * docs/brain/libraries/profit-estimate.md.
  */
 export async function GET(
@@ -41,10 +44,24 @@ export async function GET(
   }
 
   try {
+    // Which months are actually selectable (have a snapshot), newest first.
+    const { data: available } = await admin
+      .from("qb_pnl_snapshots")
+      .select("period_month")
+      .eq("workspace_id", workspaceId)
+      .order("period_month", { ascending: false })
+      .limit(24);
+    const availableMonths = (available ?? []).map((r) => String(r.period_month).slice(0, 7));
+    // Elapsed months not yet snapshotted — estimated until their books close.
+    const estimatedMonths = unclosedMonths(availableMonths, today);
+
     const isCurrentMonth = periodMonth === monthStart(today);
+    const isUnclosed = estimatedMonths.includes(periodMonth);
     const result = isCurrentMonth
       ? await estimateCurrentMonthProfit(admin, workspaceId, today)
-      : await getClosedMonthProfit(admin, workspaceId, periodMonth);
+      : isUnclosed
+        ? await estimateUnclosedMonthProfit(admin, workspaceId, periodMonth)
+        : await getClosedMonthProfit(admin, workspaceId, periodMonth);
 
     if (!result) {
       return NextResponse.json(
@@ -57,17 +74,10 @@ export async function GET(
       );
     }
 
-    // Which months are actually selectable (have a snapshot), newest first.
-    const { data: available } = await admin
-      .from("qb_pnl_snapshots")
-      .select("period_month")
-      .eq("workspace_id", workspaceId)
-      .order("period_month", { ascending: false })
-      .limit(24);
-
     return NextResponse.json({
       ...result,
-      available_months: (available ?? []).map((r) => String(r.period_month).slice(0, 7)),
+      available_months: availableMonths,
+      estimated_months: estimatedMonths.map((m) => m.slice(0, 7)),
     });
   } catch (err) {
     return NextResponse.json({ error: String(err instanceof Error ? err.message : err) }, { status: 500 });
