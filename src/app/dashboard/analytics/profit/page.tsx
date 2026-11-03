@@ -36,6 +36,8 @@ interface ProfitResponse {
   } | null;
   flags: string[];
   available_months: string[];
+  /** Elapsed months whose books aren't closed yet — offered as estimates. */
+  estimated_months?: string[];
   error?: string;
   message?: string;
 }
@@ -81,6 +83,7 @@ export default function ProfitDashboard() {
 
   const L = data.lines;
   const isEstimate = data.source === "estimate";
+  const monthDone = data.daysElapsed >= data.daysInMonth;
 
   return (
     <div className="min-w-0 px-4 py-6 sm:px-6">
@@ -89,7 +92,9 @@ export default function ProfitDashboard() {
           <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Profit</h1>
           <p className="mt-1 text-sm text-zinc-500">
             {isEstimate
-              ? `Estimate for ${monthLabel(data.periodMonth)} — ${data.daysElapsed} of ${data.daysInMonth} days complete. Cost ratios calibrated from closed QuickBooks months.`
+              ? monthDone
+                ? `Estimate for ${monthLabel(data.periodMonth)} — month complete, books not closed yet. Revenue and ad spend are actuals; costs calibrated from closed QuickBooks months.`
+                : `Estimate for ${monthLabel(data.periodMonth)} — ${data.daysElapsed} of ${data.daysInMonth} days complete. Cost ratios calibrated from closed QuickBooks months.`
               : `QuickBooks actuals for ${monthLabel(data.periodMonth)}.`}
           </p>
         </div>
@@ -99,6 +104,11 @@ export default function ProfitDashboard() {
           className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
         >
           <option value="this_month">This Month (estimate)</option>
+          {data.estimated_months?.map((m) => (
+            <option key={m} value={m}>
+              {monthLabel(`${m}-01`)} (estimate, not closed)
+            </option>
+          ))}
           {data.available_months?.map((m) => (
             <option key={m} value={m}>
               {monthLabel(`${m}-01`)}
@@ -124,7 +134,7 @@ export default function ProfitDashboard() {
         />
         <Headline
           label="Revenue"
-          hint={isEstimate ? "Projected full month" : "QuickBooks total income"}
+          hint={isEstimate ? (monthDone ? "Full month, calibrated to QuickBooks" : "Projected full month") : "QuickBooks total income"}
           value={L.incomeCents}
           neutral
         />
@@ -190,6 +200,9 @@ export default function ProfitDashboard() {
                     value={fmtK(data.revenue.renewalCents)}
                     color="text-zinc-700 dark:text-zinc-300"
                   />
+                  {monthDone ? (
+                    <p className="ml-2 text-[11px] text-zinc-400">Collected over the full month.</p>
+                  ) : (
                   <p className="ml-2 text-[11px] text-zinc-400">
                     {fmtK(data.projection.renewalRealizedCents)} collected + {fmtK(data.projection.renewalRestCents)} projected for
                     the remaining {data.daysInMonth - data.daysElapsed} days. Last month billed{" "}
@@ -199,13 +212,16 @@ export default function ProfitDashboard() {
                       : "n/a"}{" "}
                     vs the same days last month.
                   </p>
+                  )}
                   <Row label="New checkouts" value={fmtK(data.revenue.newCheckoutCents)} color="text-zinc-700 dark:text-zinc-300" />
                   <p className="ml-2 text-[11px] text-zinc-400">
-                    {fmtK(data.projection.newCheckoutToDateCents)} over {data.daysElapsed} days, run-rated to {data.daysInMonth}
+                    {monthDone
+                      ? `Full month, ${data.daysInMonth} days`
+                      : `${fmtK(data.projection.newCheckoutToDateCents)} over ${data.daysElapsed} days, run-rated to ${data.daysInMonth}`}
                   </p>
                   <Row label="Amazon" value={fmtK(data.revenue.amazonCents)} color="text-zinc-700 dark:text-zinc-300" />
                   <p className="ml-2 text-[11px] text-zinc-400">
-                    {fmtK(data.projection.amazonToDateCents)} to date, run-rated
+                    {monthDone ? "Full month" : `${fmtK(data.projection.amazonToDateCents)} to date, run-rated`}
                   </p>
                   <Divider />
                   <Row label="Gross (our books)" value={fmtK(data.revenue.internalGrossCents)} color="font-medium" />

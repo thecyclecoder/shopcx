@@ -36,7 +36,7 @@ For a closed month the panel just says every line is read straight from the mont
 
 ### Period picker
 
-`This Month (estimate)` plus one entry per month that actually has a [[../tables/qb_pnl_snapshots]] row (`available_months` from the API) — so the picker can never offer a month with no data.
+`This Month (estimate)`, then any elapsed month whose books aren't closed yet as "(estimate, not closed)" (`estimated_months`, e.g. October from Nov 1 until the snapshot refresh on the 16th), then one entry per month that actually has a [[../tables/qb_pnl_snapshots]] row (`available_months`). An unclosed month shows full-month revenue and ad spend actuals with calibrated costs, and flips to QuickBooks actuals once snapshotted.
 
 ## Sub-routes
 

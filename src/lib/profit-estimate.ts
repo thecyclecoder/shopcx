@@ -405,6 +405,46 @@ export function lastClosedMonths(n: number, today: string): string[] {
   return out;
 }
 
+/**
+ * Fully-elapsed months that have NO QuickBooks snapshot yet, newest first. PURE.
+ *
+ * Walks back from last month until it hits a month that is snapshotted, capped
+ * at `max`. The snapshot refresh runs on the 16th (books aren't closed before
+ * ~the 15th), so from the 1st to the 16th last month is elapsed but has no
+ * actuals. Without this it vanished from the page entirely: "This Month" had
+ * rolled on to the new month and the picker only lists snapshotted months.
+ */
+export function unclosedMonths(snapshotMonths: string[], today: string, max = 3): string[] {
+  const have = new Set(snapshotMonths.map((m) => m.slice(0, 7)));
+  const out: string[] = [];
+  for (const m of lastClosedMonths(max, today).reverse()) {
+    if (have.has(m.slice(0, 7))) break;
+    out.push(m);
+  }
+  return out;
+}
+
+/**
+ * Estimate a fully-elapsed month whose books aren't closed yet.
+ *
+ * Runs the in-progress estimator as of the day after the month ends, so every
+ * revenue stream and Meta spend is the full month's actuals (nothing left to
+ * project) and the cost factors calibrate off the 3 months before it. Only the
+ * QuickBooks cost lines are modelled; they're replaced by actuals once the
+ * month is snapshotted.
+ */
+export async function estimateUnclosedMonthProfit(
+  admin: Admin,
+  workspaceId: string,
+  periodMonth: string,
+): Promise<ProfitResult> {
+  const result = await estimateCurrentMonthProfit(admin, workspaceId, nextDay(monthEnd(periodMonth)), periodMonth);
+  result.flags.unshift(
+    "Books not closed for this month yet — revenue and ad spend are full-month actuals, costs are calibrated estimates until the QuickBooks snapshot lands (refreshes on the 16th).",
+  );
+  return result;
+}
+
 interface PnlSnapshot {
   period_month: string;
   total_income: number | null;
@@ -490,10 +530,13 @@ export async function estimateCurrentMonthProfit(
   admin: Admin,
   workspaceId: string,
   today: string,
+  /** Estimate this fully-elapsed month instead (first-of-month). See estimateUnclosedMonthProfit. */
+  elapsedMonth?: string,
 ): Promise<ProfitResult> {
-  const start = monthStart(today);
-  const end = monthEnd(today);
-  const total = daysInMonth(today);
+  if (elapsedMonth) today = nextDay(monthEnd(elapsedMonth));
+  const start = elapsedMonth ?? monthStart(today);
+  const end = monthEnd(start);
+  const total = daysInMonth(start);
   const lastCompleteDay = previousDay(today);
   const completeDays = Number(lastCompleteDay.slice(8, 10));
   const flags: string[] = [];
