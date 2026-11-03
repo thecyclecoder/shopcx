@@ -10,6 +10,11 @@ Dunning orchestrator: payment-failed → card rotation → payday retries → cy
 - **Trigger:** event `dunning/payment-failed`
 - **Retries:** 2
 - **Concurrency:** `concurrency: [{ limit: 3, key: "event.data.workspace_id" }]`
+- **Card rotation stops on an unresolved (pending) attempt.** The rotation step returns `"pending"`,
+  records the attempt id on the cycle (`billing_attempt_id`) and the loop breaks — exactly as the
+  payday pass does. It used to rotate on: the next iteration switched to the same card (pending is
+  not added to `cards_tried`) with a new ordinal, i.e. a new Shopify key and a new real charge, so a
+  slow success was charged twice. See [[../libraries/dunning-charge]].
 
 
 ### `dunning-new-card-recovery`
@@ -30,6 +35,13 @@ Dunning orchestrator: payment-failed → card rotation → payday retries → cy
 - **Concurrency:** `concurrency: [{ limit: 1 }]`
 
 **Filters internal cycles (Braintree-billed subs).** The find-retryable-cycles query excludes `.not('shopify_contract_id', 'ilike', 'internal-%')` so the Appstle payday cron never selects internal-contract rows. Internal subs don't go through Appstle card rotation — their renewal failures route to `handleInternalDunningFailure` (internal-dunning.ts), which reschedules `next_billing_date` to the next payday and marks the cycle `retrying`. The DAILY `internalSubscriptionRenewalCron` then re-charges Braintree on that payday (internal-subscription-renewals.ts:31-90), providing up to MAX_PAYDAY_RETRIES=4 retries. Skipping internal cycles in the Appstle cron removes noise (Appstle 400s on synthetic `internal-*` billing-attempt ids) without changing any billing outcome — see [[../specs/archive.d/internal-sub-write-path-gaps]] (Phase 3) and [[../specs/archive.d/dunning-payday-retry-skip-internal-subs]].
+
+**ShopCX payday passes (2026-11-02).** Each card is charged with its own idempotency key
+(`card.dedupeKey` appended — one ordinal covers the whole pass, so a shared key made Shopify replay
+card A's decline for card B and backup cards were never presented). Before any card, the pass reads
+the cycle's last recorded Shopify attempt (`priorShopcxAttemptOutcome`): settled as a charge → the
+cycle is marked `recovered` and no card is presented; still unresolved → no card this pass; a
+decline → normal retry. An unresolved payday attempt records its id on the cycle too.
 
 **Control Tower heartbeat fires on every tick, including empty ones.** The `if (cycles.length === 0)` early-return (no `dunning_cycles` in `status='retrying'` with `next_retry_at <= now()`) emits its own `emitCronHeartbeat("dunning-payday-retry-cron", { produced: { status: "no_cycles_to_retry", processed: 0, results: [] } })` before returning, so a healthy hourly cron in a quiet dunning period reads green instead of tripping [[../libraries/control-tower]] monitor `never_fired`. The beat means "Inngest invoked me", not "there was work" — same fix as [[deliver-pending-send]], [[ticket-csat]], and [[abandoned-cart]] ([[../specs/cron-heartbeat-on-idle-tick]]).
 

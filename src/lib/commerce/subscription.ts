@@ -1162,11 +1162,14 @@ export async function subscriptionAttemptBilling(
  * claims it before charging — so an order-now racing the nightly cron cannot double-bill.
  * Appstle subs go through get-upcoming → attempt-billing.
  *
- * ShopCX (Shopify-billed) events pass `expected_next_billing_date: null` deliberately: the
- * shopify stale guard exists to drop a fan-out whose cycle someone else already took, and an
- * order-now IS the someone else.
+ * ⭐ BOTH engines STAMP the sub's pre-charge `next_billing_date` onto the event. ShopCX events
+ * used to pass null, so the worker keyed its claim off the LIVE date: an order-now that loaded the
+ * sub just after the 10:00 cron had charged and advanced it claimed the NEXT cycle and charged
+ * again, seconds apart. Stamped, both attempts claim the same cycle and the second is refused; and
+ * an order-now whose cycle the cron already took is dropped by the stale guard instead of billing
+ * the next order. `order_now: true` lets the worker report that as a truthful nothing-due.
  *
- * ⭐ Internal (Braintree) events STAMP the sub's pre-charge `next_billing_date` onto the event
+ * Internal (Braintree) events STAMP the sub's pre-charge `next_billing_date` onto the event
  * so the per-cycle claim pins to the DISPATCHED cycle, not a post-advance live read. Without
  * that stamp a delayed order-now overlapping a scheduled cron read the sub AFTER the cron had
  * advanced next_billing_date, computed a different key, and both charged — see
@@ -1223,7 +1226,12 @@ export async function subscriptionOrderNow(
       const { RENEWAL_ATTEMPT_EVENT } = await import("@/lib/inngest/shopify-subscription-renewals");
       await inngest.send({
         name: RENEWAL_ATTEMPT_EVENT,
-        data: { subscription_id: sub.id, workspace_id: workspaceId, expected_next_billing_date: null },
+        data: {
+          subscription_id: sub.id,
+          workspace_id: workspaceId,
+          expected_next_billing_date: (sub as { next_billing_date?: string | null }).next_billing_date ?? null,
+          order_now: true,
+        },
       });
       return { success: true, summary: "Triggered ShopCX renewal (order now)" };
     }

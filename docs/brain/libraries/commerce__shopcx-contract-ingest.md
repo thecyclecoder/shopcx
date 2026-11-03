@@ -26,6 +26,7 @@ We create contracts ourselves, and Shopify fires the same topic for those:
 | Appstle migration | `appstle_contract_snapshots.migrated_to_contract_id` (stored as a **GID**) | duplicates a customer who already has a row, and the migration is mid-flight |
 | one-time charges | `one_time_charges.shopify_contract_id` | turns a single $1 charge into a recurring subscription |
 | a prior ingest | `subscriptions.shopify_contract_id` | duplicate row |
+| a ShopCX revive | `subscriptions.shopcx_revive_contract_id` (bare id, on the still-appstle row) | a revive that crashed between recording its contract and the flip leaves the row appstle; ingest minted a second row 3 min later and the revive retry's flip then collided on `(workspace_id, shopify_contract_id)` — the customer's original row and op stranded ([[commerce__shopcx-revive]]) |
 
 `originOrder` looks like the obvious "born at checkout?" discriminator and **is not** — measured
 2026-09-17 across all 23 app-owned contracts, contracts we created with
@@ -42,6 +43,8 @@ verified; rows like that inflate churn with relationships that never existed.
 |---|---|
 | `ingestShopifyContract(ws, contractId, {force?})` | claim-check → read → resolve customer → upsert the `subscriptions` row → link the origin order |
 | `syncShopifyContract(ws, contractId)` | refresh an ALREADY-ingested row after a Shopify-side edit; falls through to a full ingest if no row exists |
+| `existingClaim(ws, contractId, admin?)` | the claim check above; exported with an injectable client for its tests |
+| `syncedNextBillingDate({status, ours, shopify, dunningOpen})` | pure — the `next_billing_date` the sync may write (see below) |
 
 Neither throws — both return `{ingested: false, reason}`.
 
@@ -81,8 +84,13 @@ create-ingest. See [[../inngest/shopcx-contract-ingest]].
 
 The `update` topic fires for every edit **we** make too, so the sync must not undo what ShopCX owns:
 
-- `next_billing_date` is skipped while a dunning cycle is `active`/`skipped` — dunning holds a past
-  date on purpose and sets the real one when it finishes. Same rule as the Appstle webhook.
+- **`next_billing_date` is ours, never Shopify's** (`syncedNextBillingDate`). The sync only FILLS a
+  null date, and never while a dunning cycle is open (`active`/`rotating`/`retrying`/`skipped`/
+  `paused`, `getActiveDunningCycle`'s set — dunning holds a past date on purpose). It used to copy
+  Shopify's display date on every update: after a renewal whose display retime failed, the next
+  draft commit (a coupon, a quantity change, a dunning card switch) wrote the already-charged date
+  back, the cron claimed that key, found it `succeeded`, and skipped the sub every day after — with
+  ours = Shopify, the drift reconciler saw nothing.
 - a row billed by another engine is refused outright (verified: an `appstle` row returns
   `row is billed by appstle`).
 - cancel-truth is preserved: `status='cancelled'` forces `next_billing_date` null and keeps the
