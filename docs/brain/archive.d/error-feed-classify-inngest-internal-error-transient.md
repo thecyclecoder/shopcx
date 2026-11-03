@@ -1,0 +1,1 @@
+- **Classify Inngest's own InngestErrInternal platform failure as transient in the error-feed capture** · verified 2026-11-03 · → [[../libraries/error-feed]]
