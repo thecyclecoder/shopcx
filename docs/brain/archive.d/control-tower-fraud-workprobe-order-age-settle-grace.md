@@ -1,0 +1,1 @@
+- **Fraud-detector work probe: add order-age settle grace so a just-created order isn't counted before its async screen beat lands** · verified 2026-11-03 · → [[../libraries/control-tower#orders-awaiting-fraud-screen-probe]]
