@@ -280,6 +280,13 @@ export function isInngestTerminalFailureMirrorLog(
  * threw and the next beat recovers. Minting a fresh OPEN incident for it pages Platform
  * owners on a loop that already healed (Control Tower `inngest:06e8cf82e141fbaa`).
  *
+ * The same family includes Inngest's own EXECUTION-ENGINE internal failure
+ * (`InngestErrInternal` / "the function run failed due to an internal error and could not
+ * continue") — an engine-side abort, not an application throw, on a healthy self-healing
+ * cron (budget-watch, every 10 min; Control Tower `inngest:2819af784ba47d08`). A single
+ * sighting should record-but-auto-resolve exactly like `http_unreachable`; only a chronic
+ * recurrence of the same signature escalates.
+ *
  * `true` when the error name OR message names a member of the transport-failure family.
  * NOTE this only CLASSIFIES the noise — the capture path uses it as the `transient` flag
  * to `recordError`, which auto-resolves a FIRST sighting (recorded, not paged) and only
@@ -296,7 +303,9 @@ export function isTransientInngestTransportError(
     text.includes("http_unreachable") ||
     text.includes("performing request to sdk url") ||
     text.includes("reset the connection") ||
-    text.includes("unexpected ending response")
+    text.includes("unexpected ending response") ||
+    text.includes("inngesterrinternal") ||
+    text.includes("internal error and could not continue")
   );
 }
 
