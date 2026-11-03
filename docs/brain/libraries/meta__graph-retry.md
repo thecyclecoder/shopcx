@@ -76,8 +76,13 @@ function classifyReconnectRequired(status: number, error: any): boolean
 function isAppOwnerActionRequiredError(err: unknown): boolean
 function isReconnectRequiredError(err: unknown): boolean
 function isHumanBlockedGraphError(err: unknown): boolean
+// serialized-message fallback twins (survive the Inngest step boundary):
+function reconnectRequiredFromSerializedMessage(err: unknown): boolean
+function appOwnerActionRequiredFromSerializedMessage(err: unknown): boolean
 ```
 **[[../specs/meta-reconnect-required-class]] Phase 3** — the SHARED predicates the 5 human-blocked call sites (meta-sync, today-sync, meta-performance, media-buyer-test-cadence, media-buyer-all-customers-refresh) funnel through, replacing copy-pasted `metaClass === "app_owner_action_required"` string comparisons. `isHumanBlockedGraphError` is the true reason for this cluster — a NEW human-blocked class only requires editing THIS one predicate, not touching all five sites. Callers can still branch on the specific class after the human-blocked filter to pick the right escalation SDK.
+
+**[[../specs/meta-human-blocked-class-survive-inngest-step-serialization]] Phase 1 — containment survives the Inngest step boundary.** Inngest only preserves name/message/stack/code/cause across a step-retry boundary, so a `GraphError` raised INSIDE a step is rehydrated as a plain `Error` with the `metaClass` tag STRIPPED by the time the function catch runs — silently defeating the human-blocked containment and paging Platform daily for a condition the system was designed to contain. The ONE signal that survives is the canonical `meta_<status>: <detail>` message from `graphError`. `isReconnectRequiredError` / `isAppOwnerActionRequiredError` now check the authoritative in-memory `metaClass` tag FIRST (original path unchanged), then fall back to `reconnectRequiredFromSerializedMessage` / `appOwnerActionRequiredFromSerializedMessage` — which re-extract the status via `/^meta_(\d+):/` and re-run the authoritative classifiers against `{ message }`. So a rehydrated `meta_400: Error validating access token: …` is still contained; an unrelated `meta_400: Invalid parameter` and a `meta_503` wobble are NOT. This heals `isHumanBlockedGraphError` and all five sibling call sites with no per-site edits.
 
 ### `graphError` — function
 
