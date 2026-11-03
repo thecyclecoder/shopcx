@@ -32,11 +32,13 @@ import {
   SOL_HANDLE_BYPASS_REASONS,
   firstScheduledFiringMs,
   FRAUD_DETECTOR_HEARTBEAT_COALESCE_GRACE_MS,
+  FRAUD_SCREEN_SETTLE_MS,
   INTERNAL_RENEWAL_ORDER_SOURCE_NAMES,
   isBoxEmittedCronLoop,
   isOrderAwaitingFraudScreen,
   isWorkerUnavailable,
   orderIsInsideFraudCoalesceCoverage,
+  orderIsPastFraudScreenSettle,
   jobStuckSince,
   nextFiringAtOrAfter,
   parseCronExpr,
@@ -1057,6 +1059,28 @@ test("orderIsInsideFraudCoalesceCoverage covers the exact edge of the coalesce w
   assert.equal(orderIsInsideFraudCoalesceCoverage(beat + 60_001, beat), false);
   // Null latest beat (never any successful run) — nothing to coalesce:
   assert.equal(orderIsInsideFraudCoalesceCoverage(beat, null), false);
+});
+
+test("FRAUD_SCREEN_SETTLE_MS is the fraud-screen async delivery window (~2 min)", () => {
+  // The settle grace must sit above the observed ~10s screen latency and track the
+  // fraud/order.check Inngest delivery budget so a slow-but-healthy screen still settles
+  // inside it before the order is counted as unscreened work.
+  assert.equal(FRAUD_SCREEN_SETTLE_MS, 120_000);
+});
+
+test("orderIsPastFraudScreenSettle: a settle-fresh order is not counted while a stale one is", () => {
+  // The core repair: an order created seconds before the monitor tick (its async screen may
+  // still be in flight) is NOT yet countable work; an order older than the settle window with
+  // no beat IS real unscreened work and still counts.
+  const now = Date.parse("2026-08-27T18:00:00Z");
+  // Just-created order (10s old) — inside the async delivery window, must NOT count:
+  assert.equal(orderIsPastFraudScreenSettle(now - 10_000, now), false);
+  // Exactly at the settle boundary — past the window, counts (inclusive lower edge):
+  assert.equal(orderIsPastFraudScreenSettle(now - FRAUD_SCREEN_SETTLE_MS, now), true);
+  // One ms inside the window — must NOT count:
+  assert.equal(orderIsPastFraudScreenSettle(now - FRAUD_SCREEN_SETTLE_MS + 1, now), false);
+  // Well past the window (5 min old) with no beat — real unscreened work, counts:
+  assert.equal(orderIsPastFraudScreenSettle(now - 5 * 60_000, now), true);
 });
 
 test("orderIsInsideFraudCoalesceCoverage covers the sliding-window edge shape from the alert", () => {

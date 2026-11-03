@@ -947,6 +947,36 @@ export function orderIsInsideFraudCoalesceCoverage(
   return orderCreatedAtMs >= latestOkBeatAtMs && orderCreatedAtMs <= latestOkBeatAtMs + graceMs;
 }
 
+// control-tower-fraud-workprobe-order-age-settle-grace (signal loop:ai:fraud-detector,
+// verdict monitor-false-positive): the fraud screen is ASYNC — an order row appears the
+// instant it is inserted, but `fraud/order.check` → `checkOrderForFraud` runs on Inngest and
+// its success heartbeat lands ~10s later. A monitor tick that samples the work count in that
+// gap sees a brand-new, healthy order as unscreened work with no beat and false-fires
+// idle_while_work on the `ai:fraud-detector` tile. So the probe stops counting an order until
+// it is older than the fraud-screen async DELIVERY window — sized to ~2 minutes, the
+// `fraud/order.check` delivery budget, comfortably above the observed ~10s screen latency so a
+// slow-but-healthy screen still settles inside it. An order older than the window with no
+// coalesced beat still counts, so a genuine detector outage still flips the tile red. This is
+// an order-AGE boundary (now − created_at), orthogonal to the beat-relative coalesce coverage
+// above; both graces apply.
+export const FRAUD_SCREEN_SETTLE_MS = 120_000;
+
+/**
+ * True iff an order created at `orderCreatedAtMs` is old enough (relative to `nowMs`) that its
+ * async fraud screen has had the full `settleMs` delivery window to run and emit its heartbeat.
+ * Orders younger than the window are not yet countable as unscreened work — their screen may
+ * still be in flight. Shared between the DB probe's `created_at` upper-bound filter and the unit
+ * tests so the settle boundary has one source of truth (same pattern as
+ * `orderIsInsideFraudCoalesceCoverage`).
+ */
+export function orderIsPastFraudScreenSettle(
+  orderCreatedAtMs: number,
+  nowMs: number,
+  settleMs: number = FRAUD_SCREEN_SETTLE_MS,
+): boolean {
+  return orderCreatedAtMs <= nowMs - settleMs;
+}
+
 /**
  * Shared list of `agent_jobs.kind='ticket-handle'` `instructions.reason` values that identify a
  * dispatch OWNED by Sol rather than the inline Sonnet orchestrator. Each reason represents a
@@ -1317,10 +1347,17 @@ async function fetchInlineAgentState(admin: Admin): Promise<Map<string, InlineAg
             const latestOkBeatMs = latestOkBeat.data?.ran_at
               ? Date.parse(latestOkBeat.data.ran_at)
               : null;
+            // Order-age settle grace (control-tower-fraud-workprobe-order-age-settle-grace): don't
+            // count an order whose async fraud screen hasn't yet had FRAUD_SCREEN_SETTLE_MS to run
+            // and heartbeat — a tick seconds after an order lands would otherwise read a healthy
+            // just-screened order as unscreened work. Upper-bound the window by the settle cutoff;
+            // orderIsPastFraudScreenSettle shares this boundary with the unit tests.
+            const settleCutoffIso = new Date(Date.now() - FRAUD_SCREEN_SETTLE_MS).toISOString();
             let query = admin
               .from("orders")
               .select("id", { count: "exact", head: true })
               .gte("created_at", sinceIso)
+              .lte("created_at", settleCutoffIso)
               .or(`source_name.is.null,source_name.not.in.(${excluded})`);
             if (latestOkBeatMs != null) {
               const coalesceCutoffIso = new Date(
