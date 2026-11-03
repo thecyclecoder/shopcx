@@ -17,6 +17,7 @@ import {
   projectRenewalRest,
   projectFromRunRate,
   lastClosedMonths,
+  unclosedMonths,
   monthStart,
   monthEnd,
   daysInMonth,
@@ -144,4 +145,15 @@ test("lastClosedMonths excludes the in-progress month", () => {
   // Year boundary.
   assert.deepEqual(lastClosedMonths(2, "2026-01-15"), ["2025-11-01", "2025-12-01"]);
   assert.deepEqual(lastClosedMonths(1, "2026-08-24"), ["2026-07-01"]);
+});
+
+// Nov 3 2026: October has elapsed but its snapshot lands on the 16th. It must
+// still be offered (as an estimate) rather than vanish from the page.
+test("unclosedMonths: last month offered until its snapshot lands", () => {
+  assert.deepEqual(unclosedMonths(["2026-09", "2026-08"], "2026-11-03"), ["2026-10-01"]);
+  assert.deepEqual(unclosedMonths(["2026-10", "2026-09"], "2026-11-17"), []);
+  // Walks back past a missed refresh, newest first, stops at the first snapshot.
+  assert.deepEqual(unclosedMonths(["2026-08"], "2026-11-03"), ["2026-10-01", "2026-09-01"]);
+  // Capped — a fresh workspace with no snapshots doesn't list every month.
+  assert.deepEqual(unclosedMonths([], "2026-11-03"), ["2026-10-01", "2026-09-01", "2026-08-01"]);
 });

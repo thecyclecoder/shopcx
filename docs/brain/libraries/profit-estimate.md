@@ -42,6 +42,10 @@ Revenue is projected **per stream**, because the streams behave differently:
 
 Cost factors come from `deriveCalibration` over the last [[#CALIBRATION_MONTHS]] closed months (default 3).
 
+### Elapsed but not closed → `estimateUnclosedMonthProfit`
+
+From the 1st until the snapshot refresh on the 16th ([[../inngest/qb-snapshot-refresh]]), last month has elapsed but has no [[../tables/qb_pnl_snapshots]] row. Before 2026-11-03 it vanished from the page: "This Month" had rolled on, and the picker only listed snapshotted months. Now `unclosedMonths` lists those months and the route estimates them by running `estimateCurrentMonthProfit` with `elapsedMonth` set. Revenue streams and Meta spend are then full-month actuals (nothing left to project), and costs calibrate off the 3 months before it. The result carries a flag saying the books aren't closed. Once the snapshot lands, the month switches to QuickBooks actuals automatically.
+
 ## Calibration factors — each replaces a hardcoded constant
 
 | Factor | Definition | Replaces | Observed Apr–Jul 2026 |
@@ -73,12 +77,14 @@ Renewals recur on each sub's anniversary date, so the rest of the month is proje
 - `projectRenewalRest(realizedCents, completeDays, totalDays, prevSameDaysCents, prevRestCents, prevTotalDays): number` — renewals still to come this month (see § Renewal projection). Falls back to the run rate when last month has no data or fewer days left.
 - `projectFromRunRate(toDateCents, completeDays, totalDays): number` — **`completeDays` excludes today**; a partial day would drag the daily rate down and understate the month.
 - `deriveCalibration(months: CalibrationInput[], renewalCollectionRate): ProfitCalibration` — **averages the per-month ratios, not the ratio of summed totals**, so one outsized month can't dominate. Pinned by test.
+- `unclosedMonths(snapshotMonths, today, max = 3): string[]` — elapsed months with no snapshot, newest first, stopping at the first snapshotted month. Pinned by test.
 - `centralToday` / `monthStart` / `monthEnd` / `daysInMonth` / `previousDay` / `nextDay` / `lastClosedMonths` — Central-time date helpers matching the snapshot crons.
 
 ### DB-backed
 
 - `getClosedMonthProfit(admin, workspaceId, periodMonth): Promise<ProfitResult | null>`
-- `estimateCurrentMonthProfit(admin, workspaceId, today): Promise<ProfitResult>`
+- `estimateCurrentMonthProfit(admin, workspaceId, today, elapsedMonth?): Promise<ProfitResult>` — `elapsedMonth` (first-of-month) estimates that fully-elapsed month instead, as of the day after it ends.
+- `estimateUnclosedMonthProfit(admin, workspaceId, periodMonth): Promise<ProfitResult>` — the elapsed-month wrapper; adds the "books not closed" flag.
 - `readRenewalCollectionRate(admin, workspaceId, from, to): Promise<number | null>`
 
 ### Constants
@@ -88,7 +94,7 @@ Renewals recur on each sub's anniversary date, so the rest of the month is proje
 
 ## Callers
 
-- `src/app/api/workspaces/[id]/analytics/profit/route.ts` — `?period=this_month|last_month|YYYY-MM`. Also returns `available_months` (months with a snapshot) so the page's picker only offers real data.
+- `src/app/api/workspaces/[id]/analytics/profit/route.ts` — `?period=this_month|last_month|YYYY-MM`. Also returns `available_months` (months with a snapshot) and `estimated_months` (elapsed months awaiting their snapshot, from `unclosedMonths`).
 
 ## Callees
 
@@ -104,7 +110,7 @@ Renewals recur on each sub's anniversary date, so the rest of the month is proje
 - **The renewal collection rate is declining** — 81.9% (May) → 69.9% (Jun) → 64.1% (Jul). The 3-month mean (~72%) therefore runs slightly optimistic against the latest month. Sensitivity is small (~$3K on a full month) but the trend is worth watching; if it keeps falling, weight recent months.
 - **Every daily-table read pages past the 1000-row cap.** A single ranged `select` silently truncates — the same bug the `onsite_nonrenewal_revenue` RPC was created to fix ([[shopify-internal-revenue]]). `sumDaily` and `readForecasts` both loop on `.range()`.
 - **`managementFeesCents` is a policy number, not a rate.** It's whatever the PR entity billed, so a trailing mean lags a step change (Apr $30K → Jul $60K). It only moves the *booked* line — real profit is unaffected by construction.
-- **Never call `estimateCurrentMonthProfit` for a closed month.** The route routes on `periodMonth === monthStart(today)`; the estimator would happily model a month that has exact actuals sitting in QBO.
+- **Never estimate a month that has a snapshot.** The route estimates only the current month and `unclosedMonths`; anything else reads actuals. The estimator would happily model a month that has exact actuals sitting in QBO.
 
 ## Related
 
