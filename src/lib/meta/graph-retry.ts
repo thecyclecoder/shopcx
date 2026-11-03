@@ -190,10 +190,58 @@ export function classifyReconnectRequired(status: number, error: any): boolean {
 }
 
 /**
+ * Re-derive the human-blocked class from a Meta error's SERIALIZED message when
+ * the in-memory `metaClass` tag has been stripped.
+ *
+ * ⚠ THE INNGEST STEP BOUNDARY. The containment built for the 2026-08-02
+ * invalidated-token incident is silently defeated whenever a Meta GraphError is
+ * raised INSIDE an Inngest step: Inngest only preserves name/message/stack/code/
+ * cause across a step-retry boundary, so by the time the function-level catch
+ * runs the error has been rehydrated as a plain Error and the `metaClass` tag
+ * the human-blocked predicates read is GONE. The one signal that DOES survive is
+ * the canonical `meta_<status>: <detail>` message built by [[graphError]]. These
+ * two helpers extract the status back out of that message (`/^meta_(\d+):/`) and
+ * re-run the authoritative classifiers ([[classifyReconnectRequired]] /
+ * [[classifyAppOwnerActionRequired]]) against it — so a rehydrated error with
+ * `message = 'meta_400: Error validating access token: …'` is still contained.
+ *
+ * Introduced by [[../../docs/brain/specs/meta-human-blocked-class-survive-inngest-step-serialization]]
+ * Phase 1.
+ */
+export function reconnectRequiredFromSerializedMessage(err: unknown): boolean {
+  const message = typeof (err as { message?: unknown } | null)?.message === "string"
+    ? (err as { message: string }).message
+    : "";
+  const m = /^meta_(\d+):/.exec(message);
+  if (!m) return false;
+  return classifyReconnectRequired(Number(m[1]), { message });
+}
+
+/**
+ * App-owner twin of [[reconnectRequiredFromSerializedMessage]] — re-derive
+ * `app_owner_action_required` from the surviving `meta_<status>: <detail>`
+ * message after Inngest's step-boundary serialization strips `metaClass`.
+ */
+export function appOwnerActionRequiredFromSerializedMessage(err: unknown): boolean {
+  const message = typeof (err as { message?: unknown } | null)?.message === "string"
+    ? (err as { message: string }).message
+    : "";
+  const m = /^meta_(\d+):/.exec(message);
+  if (!m) return false;
+  return classifyAppOwnerActionRequired(Number(m[1]), { message });
+}
+
+/**
  * True iff `err` carries `metaClass='app_owner_action_required'` (see
  * [[classifyAppOwnerActionRequired]]). The Meta App Dashboard gate — the
  * workspace owner must clear it manually; retrying never fixes it. Callers
  * use this to downgrade a cron ERROR to a warn+skip.
+ *
+ * The authoritative in-memory `metaClass` tag is checked FIRST so the original
+ * path is unchanged; the serialized-message fallback
+ * ([[appOwnerActionRequiredFromSerializedMessage]]) only engages when the tag
+ * is ABSENT — i.e. the error crossed an Inngest step boundary and was rehydrated
+ * without its tag.
  *
  * Canonical location — the sibling
  * `src/lib/inngest/meta-performance-app-owner-action.ts` re-exports this
@@ -201,7 +249,10 @@ export function classifyReconnectRequired(status: number, error: any): boolean {
  * should import from there.
  */
 export function isAppOwnerActionRequiredError(err: unknown): boolean {
-  return (err as { metaClass?: string } | null)?.metaClass === "app_owner_action_required";
+  if ((err as { metaClass?: string } | null)?.metaClass === "app_owner_action_required") {
+    return true;
+  }
+  return appOwnerActionRequiredFromSerializedMessage(err);
 }
 
 /**
@@ -211,11 +262,23 @@ export function isAppOwnerActionRequiredError(err: unknown): boolean {
  * retrying never fixes it. Callers use this to downgrade a cron ERROR to a
  * warn+skip.
  *
+ * The authoritative in-memory `metaClass` tag is checked FIRST so the original
+ * path is unchanged; the serialized-message fallback
+ * ([[reconnectRequiredFromSerializedMessage]]) only engages when the tag is
+ * ABSENT — i.e. the error crossed an Inngest step boundary and was rehydrated
+ * without its tag.
+ *
  * Introduced by [[../../docs/brain/specs/meta-reconnect-required-class]]
- * Phase 3 (containment at the 5 human-blocked call sites).
+ * Phase 3 (containment at the 5 human-blocked call sites); the serialized-message
+ * fallback added by
+ * [[../../docs/brain/specs/meta-human-blocked-class-survive-inngest-step-serialization]]
+ * Phase 1.
  */
 export function isReconnectRequiredError(err: unknown): boolean {
-  return (err as { metaClass?: string } | null)?.metaClass === "reconnect_required";
+  if ((err as { metaClass?: string } | null)?.metaClass === "reconnect_required") {
+    return true;
+  }
+  return reconnectRequiredFromSerializedMessage(err);
 }
 
 /**
