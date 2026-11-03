@@ -1098,6 +1098,24 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
     const taxCents = taxResult?.tax_cents ?? 0;
     const avalaraTransactionCode = taxResult?.transaction_code || null;
 
+    // ⚠️ The invoice above is COMMITTED before the claim and in-flight guards below. Every refusal
+    // after this point returns without a sale, so it must void the invoice, exactly as the
+    // failed-charge path does — otherwise each refused duplicate (an order-now racing the cron, a
+    // replayed event) leaves a committed SalesInvoice with no sale and we remit tax we never
+    // collected. The document code is this attempt's own reserved order number, so the void can
+    // never touch the winning attempt's invoice.
+    const voidCommittedTaxOnRefusal = async (stepId: string) => {
+      if (!avalaraTransactionCode) return;
+      await step.run(stepId, async () => {
+        try {
+          const { voidTransaction } = await import("@/lib/avalara");
+          await voidTransaction(workspace_id, avalaraTransactionCode);
+        } catch (err) {
+          console.warn(`[renewal] Avalara void after refusal threw for ${orderNumber}:`, err);
+        }
+      });
+    };
+
     const totalCents = Math.max(0, subtotalCents - discountCents) + shippingCents + protectionCents + taxCents;
     if (totalCents <= 0) {
       await step.run("emit-outcome-zero-total", () => emitRenewalOutcomeHeartbeat("skipped_zero_total"));
@@ -1177,6 +1195,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
           },
         });
       });
+      await voidCommittedTaxOnRefusal("avalara-void-on-missing-dispatched-cycle");
       return {
         skipped: true,
         reason: "missing_dispatched_cycle",
@@ -1237,6 +1256,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
           },
         });
       });
+      await voidCommittedTaxOnRefusal("avalara-void-on-refused-concurrent-renewal");
       return {
         skipped: true,
         reason: "refused_concurrent_renewal",
@@ -1326,6 +1346,7 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
           });
         });
       }
+      await voidCommittedTaxOnRefusal("avalara-void-on-refused-duplicate-cycle");
       return {
         skipped: true,
         reason: "refused_duplicate_cycle",

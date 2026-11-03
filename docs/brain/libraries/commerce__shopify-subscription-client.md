@@ -31,6 +31,7 @@ Design + migration plan: [[../lifecycles/shopcx-subscriptions]]. Dunning interac
 | `shopifyUpdateLineQuantity(ws, contractId, lineId, qty, alsoInDraft?)` | — | draft |
 | `shopifyAttemptBilling(ws, contractId, idempotencyKey, opts?)` | `appstleAttemptBilling` / `orderNowByContract` | direct |
 | `getBillingAttempt` / `awaitBillingAttempt` | — | read |
+| `findContractBillingAttempt(ws, contractId, idempotencyKey, {last?})` | — | read |
 | `getSubscriptionContract(ws, contractId)` | — | read |
 | `getUpcomingBillingCycles(ws, contractId, opts?)` | `appstleGetUpcomingOrders` | read |
 | `getBillingCycleForDate(ws, contractId, date)` | — | read |
@@ -133,9 +134,14 @@ commits, a charge landing in the window bills the new quantity at the old tier.
   carries `accepted` / `terminal` / `pending` — **`success` is only meaningful once `terminal` is
   true.** `awaitBillingAttempt` is bounded (30s) and returns `{success:false, pending:true,
   timedOut:true}` rather than reporting an unsettled charge as collected.
-  ⚠️ **There is no webhook backstop yet.** [[shopify-billing-attempt-webhook]] is explicitly
-  RECORDS-ONLY and does not drive dunning. Until it does, a CHALLENGED (3DS) attempt that outlives
-  the poll is genuinely unresolved — the renewal worker must leave the cycle open, not guess.
+  ⚠️ **There is no webhook backstop.** [[shopify-billing-attempt-webhook]] is explicitly
+  RECORDS-ONLY and does not drive dunning. A CHALLENGED (3DS) attempt that outlives the poll is
+  genuinely unresolved — the renewal worker leaves the cycle open, not guessing, and the NEXT renewal
+  cron settles it with `findContractBillingAttempt`: it reads the contract's last 25
+  `billingAttempts` and matches the idempotency key we sent (our keys are deterministic per cycle,
+  and the claim ledger stores no Shopify attempt id). `found: false` is never read as a failure.
+  [verify] the `SubscriptionContract.billingAttempts` connection + `idempotencyKey` field on the
+  pinned API version before relying on it — an unreadable result only leaves the claim open.
 - **Pass a real `idempotencyKey`** — the renewal cycle key. It is Shopify's own double-charge guard.
 - Uses the pinned `SHOPIFY_API_VERSION` (2025-07). Verified: the full subscription surface exists
   there, so no version bump is needed.
@@ -156,8 +162,10 @@ commits, a charge landing in the window bills the new quantity at the old tier.
   index the first unbilled cycle is always billable, so a date landing inside a spent cycle can no
   longer strand the sub. Double-charge protection moves entirely to our claim ledger
   ([[subscription-cycle-charge-claim]] / `guardRecentOrderNow`), not Shopify's calendar. Callers:
-  [[../inngest/shopify-subscription-renewals]] (`resolve-chargeable-cycle` step) and
-  `portal/handlers/order-now.ts` (the ShopCX branch).
+  [[../inngest/shopify-subscription-renewals]] (`resolve-chargeable-cycle` step),
+  `portal/handlers/order-now.ts` (the ShopCX branch) and [[dunning-charge]] (ShopCX dunning, since
+  2026-11-02). It also returns `inWindow` — false means the chosen cycle is a FUTURE one, billed
+  early — which dunning uses to refuse a charge on a cycle already paid elsewhere.
 - **`originTime` on `shopifyAttemptBilling`.** Shopify validates the attempt's origin time against the
   SELECTED cycle and rejects a future-cycle attempt with *"Origin time needs to be within the selected
   billing cycle"*. `shopifyAttemptBilling` now accepts `opts.originTime`, which `resolveChargeableCycle`

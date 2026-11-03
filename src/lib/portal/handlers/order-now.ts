@@ -128,9 +128,13 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
       return jsonErr({ error: recentGuard.reason, message: recentGuard.message }, 409);
     }
     const { shopifyAttemptBilling, awaitBillingAttempt, resolveChargeableCycle } = await import("@/lib/commerce/shopify-subscription-client");
-    const { cycleKeyFromNextBillingDate } = await import("@/lib/subscription-cycle-charge-claim");
+    const { cycleKeyFromDispatchedNextBillingDate, claimCycleCharge, resolveCycleCharge } = await import("@/lib/subscription-cycle-charge-claim");
+    const { SHOPCX_PORTAL_CLAIM_SOURCE } = await import("@/lib/inngest/shopify-subscription-renewals");
     const due = (resolved as { next_billing_date?: string | null }).next_billing_date ?? null;
-    const cycleKey = cycleKeyFromNextBillingDate(due);
+    const cycleKey = cycleKeyFromDispatchedNextBillingDate(due);
+    if (!cycleKey) {
+      return jsonErr({ error: "no_chargeable_cycle", message: "No upcoming order date to bill." }, 409);
+    }
     // ⚠️ NOT the renewal worker's key. Reusing it makes Shopify REPLAY that cycle's cached
     // attempt: if the cron already succeeded the customer is told a new order was placed when none
     // was, and if it declined they can never self-serve after fixing their card — the stale
@@ -145,18 +149,43 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
     if (!cycle.success || cycle.index == null || !cycle.originTime) {
       return jsonErr({ error: "no_chargeable_cycle", message: cycle.error ?? "No upcoming cycle to bill." }, 409);
     }
+    // ⭐ CLAIM the cycle on the same ledger the renewal worker uses, BEFORE charging. This branch
+    // charges directly, so without a claim a press about a second before the 10:00 cron loaded the
+    // sub was invisible to it: the cron claimed the same date, charged, and this press charged too.
+    // Same key as the cron's claim (the date it will dispatch), so exactly one of them wins. The
+    // claimant is unique per press, so a second press is refused too.
+    const admin = createAdminClient();
+    const claim = await claimCycleCharge(admin, {
+      workspace_id: auth.workspaceId,
+      subscription_id: resolved.id,
+      cycle_key: cycleKey,
+      claimant: `portal:${resolved.id}:${crypto.randomUUID()}`,
+      source: SHOPCX_PORTAL_CLAIM_SOURCE,
+    });
+    if (!claim.ok) {
+      return jsonErr({ error: "order_in_progress", message: "Your order is already being placed." }, 409);
+    }
     const started = await shopifyAttemptBilling(
       auth.workspaceId, String(contractId), `${contractId}:${cycleKey}:portal`,
       { billingCycleSelector: { index: cycle.index }, originTime: cycle.originTime },
     );
     if (!started.success || !started.attemptId) {
+      // Release the claim only on a real refusal. A transport fault may have reached Shopify and
+      // created the attempt; that claim stays in_flight for the renewal cron to settle from
+      // Shopify's record (`settlePendingShopcxClaims`) rather than letting the cron charge again.
+      const msg = started.error ?? "attempt_not_accepted";
+      if (!/HTTP \d|fetch|network|ENOTFOUND|ECONNRESET|timeout|Throttled|not connected/i.test(msg)) {
+        await resolveCycleCharge(admin, claim.id, { status: "failed" });
+      }
       return jsonErr({ error: "billing_failed", message: started.error ?? "Could not start billing." }, 502);
     }
     const outcome = await awaitBillingAttempt(auth.workspaceId, started.attemptId);
     if (outcome.pending) {
+      // The claim stays in_flight: the renewal cron settles it once Shopify finishes.
       return jsonOk({ ok: true, pending: true, message: "Your order is being processed." });
     }
     if (!outcome.success) {
+      await resolveCycleCharge(admin, claim.id, { status: "failed" });
       return jsonErr({ error: "billing_failed", message: outcome.error ?? "Payment was declined." }, 502);
     }
     // ⭐ ADVANCE THE DATE. Charging without advancing freezes the subscription permanently: the
@@ -172,7 +201,6 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
       // 2026-10-08, Ashley Denson). A late press rolls forward past now. `nextDateAfterCharge`
       // encodes both.
       const { nextDateAfterCharge } = await import("@/lib/dunning");
-      const admin = createAdminClient();
       // ⭐ `resolveSub` must select the cadence columns. It didn't, so every press fell back to
       // "month"/1 and a 4-week sub moved a calendar month (ground truth 2026-10-20, 36109058221:
       // 11-16 → 12-16 while Shopify stayed on 11-16).
@@ -185,6 +213,8 @@ export const orderNow: RouteHandler = async ({ auth, route, req }) => {
       await admin.from("subscriptions")
         .update({ next_billing_date: advanceTo.toISOString(), last_payment_status: "succeeded", updated_at: new Date().toISOString() })
         .eq("workspace_id", auth.workspaceId).eq("shopify_contract_id", String(contractId));
+      // Resolve AFTER the date moved, so the claim never reads `succeeded` on an un-advanced date.
+      await resolveCycleCharge(admin, claim.id, { status: "succeeded" });
       // Keep the customer-visible Shopify date in step with ours. Display-only on purpose — see
       // `subscriptionUpdateNextBillingDate` for why a shopcx date change never re-pins the calendar.
       const { shopifySetNextBillingDate } = await import("@/lib/commerce/shopify-subscription-client");

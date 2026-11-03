@@ -19,7 +19,7 @@
 | `status` | `text` | — | default `'in_flight'` · CHECK `IN ('in_flight','succeeded','failed')` |
 | `amount_cents` | `integer` | ✓ | the total the caller intended to charge — helps the Phase 2 duplicate-renewal detector shape the "same amount" query |
 | `claimant` | `text` | — | the Inngest `event.id` (or a synthetic `sub:<id>:cycle:<key>` when the event has none). Same claimant hitting the same key on a step re-run = a resumed claim (not a duplicate) — [[../libraries/subscription-cycle-charge-claim]] `claimCycleCharge` returns `{ ok: true, resumed: true }` |
-| `source` | `text` | ✓ | which caller / reason (e.g. `internal_subscription_renewal`) — audit + future taxonomy |
+| `source` | `text` | ✓ | which caller / reason: `internal_subscription_renewal`, `shopcx` (ShopCX renewal worker), `shopcx_portal_order_now` (portal ShopCX Order Now). The ShopCX renewal cron settles stale `in_flight` rows of the two `shopcx*` sources from Shopify's record of the attempt ([[../inngest/shopify-subscription-renewals]] `settlePendingShopcxClaims`) |
 | `transaction_id` | `uuid` | ✓ | back-link to the [[transactions]] row the charge produced (null on `in_flight` and often on `failed` if the Braintree sale never seated a transaction row) |
 | `order_id` | `uuid` | ✓ | back-link to the [[orders]] row on `succeeded` (null on `in_flight` / `failed`) |
 | `claimed_at` | `timestamptz` | — | default `now()` |

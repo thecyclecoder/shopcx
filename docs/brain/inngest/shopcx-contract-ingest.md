@@ -29,8 +29,13 @@ of not waiting is a corrupted row on a money path.
   break**, because Shopify's automatic discounts (Buy 2/3) run only at checkout and never on an
   app-led billing attempt. Without this step a Buy 2/3 subscriber gets the break on the first order
   only, and the first portal edit applies 25% again on top of the baked price. The step rebases rule lines to
-  MSRP and adds "Subscribe & Save" + "Volume discount" in one draft. A failure is logged, not
-  thrown: the row is already ingested and billable, just at the plan price.
+  MSRP and adds "Subscribe & Save" + "Volume discount" in one draft. **A failure THROWS so Inngest
+  retries the step** (`normalizeFailureDisposition`): it used to be logged and swallowed, which left
+  a new PDP subscriber renewing at full MSRP (+33% a unit, tier lost) with nothing ever re-running
+  the step. The normalizer is idempotent, so a retry is safe. On the final attempt
+  (`attempt === retries`) it returns the failure instead, so the run still beats `normalize_failed`.
+  The backstop is the renewal: [[shopify-subscription-renewals]] `price-check-log` re-runs the
+  normalizer before charging an overcharging contract that carries no structural allocation.
   The normalizer shipped with no caller and was wired here on 2026-10-08 ahead of the product-page cutover.
 - **Heartbeat:** `emitReactiveHeartbeat("shopcx-contract-ingest", { produced: { outcome, normalized, normalize_failed } })` on
   every run, ingested or skipped — a skip is the common, healthy case (it means one of our own rails
@@ -43,6 +48,8 @@ of not waiting is a corrupted row on a money path.
   out; and if no row exists yet, `syncShopifyContract` falls through to a full ingest whose own claim
   check does the same job. That fallthrough is also what recovers a contract whose `create` webhook
   was lost.
+- **Never rewinds our date.** `syncShopifyContract` only FILLS a missing `next_billing_date`, never
+  while any dunning cycle is open (`syncedNextBillingDate`). Ours is the planner; Shopify's is display.
 - **Never normalizes.** A line pinned below MSRP on purpose (agent price restore) carries no
   allocation either, so running the normalizer on every update would undo the pin. ⚠️ So a contract
   recovered through this fallthrough is NOT normalized. Run `shopcxNormalizeNewContract` by hand

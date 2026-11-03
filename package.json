@@ -410,6 +410,11 @@
     "test:shopcx-anchors": "tsx --test src/lib/commerce/anchors.test.ts",
     "test:first-touch": "tsx --test src/lib/first-touch.test.ts",
     "test:shopcx-swap-grandfather": "tsx --test src/lib/commerce/shopcx-line-ops.swap-grandfather.test.ts",
+    "test:shopcx-contract-ingest": "tsx --test src/lib/commerce/shopcx-contract-ingest.test.ts",
+    "test:shopcx-ingest-normalize-retry": "tsx --test src/lib/inngest/shopcx-contract-ingest.normalize-retry.test.ts",
+    "test:shopcx-renewal-settle-and-claim": "tsx --test src/lib/inngest/shopify-subscription-renewals.settle-and-claim.test.ts",
+    "test:dunning-charge-shopcx-cycle": "tsx --test src/lib/dunning-charge.shopcx-cycle.test.ts",
+    "test:internal-renewal-avalara-void-on-refusal": "tsx --test src/lib/inngest/internal-subscription-renewals.avalara-void-on-refusal.test.ts",
     "test:migrate-detect-drift": "tsx --test src/lib/commerce/migrate-detect-drift.test.ts"
   },
   "dependencies": {

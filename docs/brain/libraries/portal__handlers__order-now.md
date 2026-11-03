@@ -39,6 +39,18 @@ then calls `shopifySetNextBillingDate` (display-only) so the customer sees the s
 back to `month`/1, and a 4-week sub moved a calendar month while Shopify kept the old date (ground truth:
 contract 36109058221, 11-16 → 12-16). Pinned by `src/lib/portal/order-now-cadence.test.ts`.
 
+**ShopCX claims the cycle before charging (2026-11-02).** This branch charges Shopify directly, so it
+used to write no [[../tables/subscription_cycle_charges]] claim; its only cross-path guard was
+`guardRecentOrderNow`, which needs the cron's claim row or a linked order. A press about a second
+before the 10:00 cron loaded the sub was invisible to it: the cron claimed the same date and charged,
+and the press charged too. Now it claims `cycleKeyFromDispatchedNextBillingDate(next_billing_date)`
+(the key the cron dispatches) with `source='shopcx_portal_order_now'` and a per-press claimant, and
+refuses 409 `order_in_progress` when the claim is held. Outcomes: success → advance the date, THEN
+resolve `succeeded`; a decline or a real userError → resolve `failed`; pending, or a transport fault
+that may have reached Shopify → the claim stays `in_flight` and the next renewal cron settles it from
+Shopify's record ([[../inngest/shopify-subscription-renewals]] `settlePendingShopcxClaims`). A sub
+with no billing date is refused (`no_chargeable_cycle`).
+
 ---
 
 [[../README]] · [[../../CLAUDE]]

@@ -40,8 +40,25 @@ export interface RenewalPriceLine {
 
 export type RenewalPriceVerdict =
   | { status: "match"; expectedCents: number; actualCents: number }
-  | { status: "overcharge" | "undercharge"; expectedCents: number; actualCents: number; lines: RenewalPriceLine[] }
+  | {
+      status: "overcharge" | "undercharge"; expectedCents: number; actualCents: number; lines: RenewalPriceLine[];
+      /** Sum of OUR structural allocations across every line. 0 = the contract was never normalized. */
+      contractStructuralCents: number;
+    }
   | { status: "unchecked"; reason: string };
+
+/**
+ * Pure: should the renewal re-run the (idempotent) checkout normalizer before charging?
+ *
+ * Only for an OVERCHARGE on a contract that carries NO structural allocation at all — the shape a
+ * failed ingest normalization leaves behind (lines at MSRP, S&S only as an inert checkout copy).
+ * Normalizing it can only bring the charge DOWN to the rules price. A contract that carries any
+ * structural allocation has been through our line ops already: a gap there is a human's call, and
+ * the check stays log-only for it (CEO 2026-10-10).
+ */
+export function shouldRepairUnnormalizedContract(verdict: RenewalPriceVerdict): boolean {
+  return verdict.status === "overcharge" && verdict.contractStructuralCents === 0;
+}
 
 /** Pure: is this gap worth a human's attention? */
 export function isMaterialGap(expectedCents: number, actualCents: number): boolean {
@@ -86,6 +103,7 @@ export async function checkShopcxRenewalPrice(workspaceId: string, contractId: s
       status: actualCents > expectedCents ? "overcharge" : "undercharge",
       expectedCents, actualCents,
       lines: lines.filter((x) => x.actualCents !== x.expectedCents),
+      contractStructuralCents: live.contract.lines.reduce((a, l) => a + (l.structuralDiscountCents || 0), 0),
     };
   } catch (err) {
     return { status: "unchecked", reason: errText(err) };

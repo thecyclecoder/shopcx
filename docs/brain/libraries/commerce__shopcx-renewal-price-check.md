@@ -20,6 +20,10 @@ renewal, not that this one should stop.
 | `checkShopcxRenewalPrice(ws, contractId)` | read-only → `match` · `overcharge` · `undercharge` (with per-line detail) · `unchecked` (reason). Never throws. |
 | `surfaceRenewalPriceMismatch(admin, {...})` | one `dashboard_notifications` card (`type='billing_alert'`, `metadata.kind='shopcx_renewal_price_mismatch'`), deduped on `metadata->>dedupe_key = shopcx-renewal-price:<sub>:<cycle>`. Never throws. |
 | `isMaterialGap(expected, actual)` | pure: gap > max($1, 2%) — the same bar [[subscription-overcharge]] uses |
+| `shouldRepairUnnormalizedContract(verdict)` | pure: `overcharge` AND `contractStructuralCents === 0` (no structural allocation on any line — the shape a failed ingest normalization leaves). The renewal worker then runs the idempotent `shopcxNormalizeNewContract` before charging; normalizing can only lower the charge to the rules. Every other gap stays log-only. |
+
+An `overcharge`/`undercharge` verdict also carries `contractStructuralCents`, the sum of OUR
+structural allocations across every line of the contract.
 
 ## The math
 

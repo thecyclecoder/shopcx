@@ -28,9 +28,11 @@ const shopcxBranch = (() => {
 test("the shopcx idempotency key is built from attemptOrdinal", () => {
   assert.match(
     shopcxBranch,
-    /const key = `\$\{contractId\}:\$\{cycleKeyFromNextBillingDate\(due\)\}:r\$\{attemptOrdinal\}`/,
+    /const key = shopcxDunningIdempotencyKey\(contractId, due, attemptOrdinal, cardKey\)/,
     "the key must use the caller's stable ordinal",
   );
+  const helper = SRC.slice(SRC.indexOf("export function shopcxDunningIdempotencyKey"));
+  assert.match(helper, /`\$\{contractId\}:\$\{cycleKeyFromNextBillingDate\(due\)\}:r\$\{attemptOrdinal\}`/);
 });
 
 test("the shopcx branch never derives the key from a live payment_failures count", () => {
