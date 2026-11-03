@@ -244,6 +244,23 @@ test("isTransientInngestTransportError matches each transport-family phrase", ()
   assert.equal(isTransientInngestTransportError("Error", "Unexpected ending response"), true);
 });
 
+test("isTransientInngestTransportError matches Inngest's own InngestErrInternal engine failure (inngest:2819af784ba47d08)", () => {
+  assert.equal(
+    isTransientInngestTransportError(
+      "InngestErrInternal",
+      "The function run failed due to an internal error and could not continue",
+    ),
+    true,
+  );
+  // name alone carries the class
+  assert.equal(isTransientInngestTransportError("InngestErrInternal", null), true);
+  // message alone carries the class
+  assert.equal(
+    isTransientInngestTransportError("Error", "internal error and could not continue"),
+    true,
+  );
+});
+
 test("isTransientInngestTransportError KEEPS a real application throw (not transport noise)", () => {
   assert.equal(
     isTransientInngestTransportError("TypeError", "Cannot read properties of undefined (reading 'id')"),
