@@ -1,0 +1,1 @@
+- **Meta human-blocked class survives Inngest step serialization** · verified 2026-11-03 · → [[../libraries/meta__graph-retry]]
