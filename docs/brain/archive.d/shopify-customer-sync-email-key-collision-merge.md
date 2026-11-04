@@ -1,0 +1,1 @@
+- **Shopify customer sync: merge same-email duplicate before upsert so it stops violating the email unique key** · verified 2026-11-04 · → [[../libraries/shopify-webhooks]]
