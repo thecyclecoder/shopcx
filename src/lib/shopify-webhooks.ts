@@ -501,6 +501,49 @@ export async function handleCustomerUpdate(workspaceId: string, payload: Record<
           .update({ shopify_customer_id: shopifyCustomerId })
           .eq("id", emailOnly.id);
       }
+    } else {
+      // The email is already owned by a row carrying a DIFFERENT non-null
+      // shopify_customer_id (the customer exists twice in Shopify under one
+      // email). Our upsert can only reconcile on (workspace_id,
+      // shopify_customer_id), so it would fall through to an INSERT carrying
+      // this email and violate customers_workspace_id_email_key — the silently
+      // dropped update. Merge the stale duplicate away before the upsert.
+      const { data: emailOwnerConflict } = await admin
+        .from("customers")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .eq("email", email)
+        .not("shopify_customer_id", "is", null)
+        .neq("shopify_customer_id", shopifyCustomerId)
+        .maybeSingle();
+
+      if (emailOwnerConflict) {
+        // Does a row for the incoming shopify_customer_id already exist?
+        const { data: existing } = await admin
+          .from("customers")
+          .select("id")
+          .eq("workspace_id", workspaceId)
+          .eq("shopify_customer_id", shopifyCustomerId)
+          .maybeSingle();
+
+        if (existing) {
+          // Both exist — reassign tickets/orders/subscriptions from the stale
+          // duplicate onto the row that survives as the incoming
+          // shopify_customer_id's record, then delete the duplicate so the
+          // upsert updates `existing` in place (reuse the both-exist logic).
+          await admin.from("tickets").update({ customer_id: existing.id }).eq("customer_id", emailOwnerConflict.id);
+          await admin.from("orders").update({ customer_id: existing.id }).eq("customer_id", emailOwnerConflict.id);
+          await admin.from("subscriptions").update({ customer_id: existing.id }).eq("customer_id", emailOwnerConflict.id);
+          await admin.from("customers").delete().eq("id", emailOwnerConflict.id);
+        } else {
+          // No incoming-id row yet — repoint the conflicting owner onto the
+          // incoming shopify_customer_id so the upsert matches it on the
+          // conflict key and updates it in place instead of inserting.
+          await admin.from("customers")
+            .update({ shopify_customer_id: shopifyCustomerId })
+            .eq("id", emailOwnerConflict.id);
+        }
+      }
     }
   }
 
