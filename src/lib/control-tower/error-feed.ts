@@ -2845,10 +2845,14 @@ export function isForeignSupabasePostgresMissingCouponsDiscountTypeColumnNoise(
  * `public.kill_switches`.
  *
  * `true` ONLY when BOTH markers are present:
- *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *   1. the message is Postgres's canonical column-missing shape for THIS lookup —
  *      trimmed equal to `column kill_switches.key does not exist` (with or without the
  *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the
- *      logs surface), AND
+ *      logs surface), OR the bare-unqualified twin `column "key" does not exist` /
+ *      `column "name" does not exist` that Postgres emits when the SQL-Editor lookup
+ *      references the columns unqualified (`where key ilike ... or name ilike ...`) —
+ *      the ad-hoc Supabase SQL-Editor form, mirroring the bare-vs-qualified pair the
+ *      loop_alerts matcher carries, AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.kill_switches` — either
  *      (a) the bare `select ... from public.kill_switches` shape, OR (b) the PostgREST-
  *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."kill_switches" ... )`
@@ -2876,7 +2880,9 @@ export function isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise(
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
   const messageMatches =
     stripped === "column kill_switches.key does not exist" ||
-    stripped === "column public.kill_switches.key does not exist";
+    stripped === "column public.kill_switches.key does not exist" ||
+    stripped === 'column "key" does not exist' ||
+    stripped === 'column "name" does not exist';
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
