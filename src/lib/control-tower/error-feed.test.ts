@@ -81,6 +81,7 @@ import {
   isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise,
+  isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
@@ -15722,6 +15723,51 @@ test("isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise return
     isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise(
       "column orders.subtotal_cents does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise ──
+// A human runs an ad-hoc Supabase SQL-Editor lookup to find the appstle kill switch by
+// column names `key`/`name` that `kill_switches` never owned. Postgres rejects the
+// unqualified reference with the BARE `column "key" does not exist` (or `"name"`) shape —
+// the twin of the qualified `column kill_switches.key does not exist` form. Foreign-owned
+// query, no lever from us — drop AT CAPTURE only when BOTH a recognized column-missing
+// message (qualified OR bare) AND a SELECT-lookup shape on `kill_switches` are present. A
+// bare `column "key" does not exist` over a FROM on a DIFFERENT table still pages.
+
+test("isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise drops the sampled supabase-logs:0e3379f172768a91 bare SQL-Editor pair (bare `column \"key\" does not exist` + SELECT on kill_switches by key/name)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise(
+      'column "key" does not exist',
+      "select * from kill_switches where key ilike '%appstle%' or name ilike '%appstle%'",
+    ),
+    true,
+  );
+  // The `name` column is referenced by the same ad-hoc query — its bare twin drops too.
+  assert.equal(
+    isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise(
+      'column "name" does not exist',
+      "select * from kill_switches where key ilike '%appstle%' or name ilike '%appstle%'",
+    ),
+    true,
+  );
+  // The pre-existing qualified message forms over the bare-SELECT shape still drop.
+  assert.equal(
+    isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise(
+      "column kill_switches.key does not exist",
+      "select * from public.kill_switches where key ilike '%appstle%'",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise KEEPS a bare `column \"key\" does not exist` over a FROM on a DIFFERENT table (not a kill_switches lookup — still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise(
+      'column "key" does not exist',
+      "select * from feature_flags where key ilike '%appstle%'",
     ),
     false,
   );
