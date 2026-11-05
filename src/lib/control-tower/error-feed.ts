@@ -5770,6 +5770,63 @@ export function isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `syntax error at or near "day"` for a hand-typed,
+ * exploratory MRR / retention cohort analysis someone ran directly against the Superfoods
+ * database (SQL Editor / external BI tool). The query is a `WITH lastord AS ( ... )` CTE
+ * that buckets subscriptions by `CASE s.billing_interval` and expands
+ * `jsonb_array_elements(s.items)`, and it dangles on a malformed interval expression near
+ * the `day` keyword. None of those three fingerprints appears in any ShopCX product query
+ * (grep-verified), so the combination pins this one un-owned ad hoc query — there is no
+ * lever from ShopCX to make it resolve, so paging Platform on it is pure noise (Control
+ * Tower signature `supabase-logs:0860b55806401464`).
+ *
+ * Sibling of `isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise` — the same narrow
+ * gating shape (exact trimmed syntax-error message + required query fingerprints), scoped
+ * to this MRR-cohort query's three fingerprints.
+ *
+ * `true` ONLY when ALL markers are present:
+ *   1. the message (with any leading `ERROR: ` prefix stripped) equals
+ *      `syntax error at or near "day"` (case-insensitive), AND
+ *   2. the query is non-empty and its lowercased form contains ALL of
+ *      `with lastord as`, `case s.billing_interval`, and `jsonb_array_elements(s.items)`.
+ *
+ * Narrowly gated so:
+ *   - a syntax error on ANY OTHER query shape (including a real product query) still pages
+ *     — the pin requires all three MRR-cohort fingerprints,
+ *   - the SAME MRR-cohort query under a DIFFERENT message (a column-missing error, a
+ *     different syntax-error position) still pages — the pin requires the exact `day`
+ *     syntax message,
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The syntax-error message itself has a
+  // stable shape: `syntax error at or near "day"`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped.toLowerCase() !== 'syntax error at or near "day"') return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Require all three fingerprints no ShopCX product query contains — the ad hoc MRR cohort
+  // CTE's `WITH lastord AS ( ... )` head, its `CASE s.billing_interval` bucketing, and its
+  // `jsonb_array_elements(s.items)` expansion. A real product query missing any of these
+  // stays captured and paging.
+  if (!q.includes("with lastord as")) return false;
+  if (!q.includes("case s.billing_interval")) return false;
+  if (!q.includes("jsonb_array_elements(s.items)")) return false;
+  return true;
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column
  * specs.<archived_at|folded_at|deferred_at|fold_status|verified_at> does not exist` for
  * an ad hoc / stale PostgREST direct-REST SELECT against `public.specs`. The `specs`

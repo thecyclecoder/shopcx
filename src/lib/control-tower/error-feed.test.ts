@@ -38,6 +38,7 @@ import {
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
+  isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise,
@@ -7281,6 +7282,103 @@ test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise returns false on
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "syntax error at end of input",
       null,
+    ),
+    false,
+  );
+});
+
+// -- isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise --
+// A hand-typed, exploratory MRR / retention cohort analysis someone ran directly against the
+// Superfoods database (SQL Editor / external BI tool). Postgres reports it as
+// `syntax error at or near "day"`. Foreign-owned surface - no lever from us - drop AT CAPTURE
+// only when ALL of the exact `day` syntax message AND the three MRR-cohort fingerprints
+// (`with lastord as`, `case s.billing_interval`, `jsonb_array_elements(s.items)`) are present.
+// Control Tower signature `supabase-logs:0860b55806401464`.
+
+const MRR_COHORT_QUERY =
+  "WITH lastord AS ( SELECT s.id, s.billing_interval, s.items FROM subscriptions s ) " +
+  "SELECT CASE s.billing_interval WHEN 'month' THEN 'monthly' ELSE 'other' END AS bucket, " +
+  "date_trunc('day', created_at) + interval 1 day AS cohort_day, " +
+  "(SELECT sum((i->>'price')::numeric) FROM jsonb_array_elements(s.items) i) AS mrr " +
+  "FROM lastord s GROUP BY 1, 2";
+
+test("isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise drops the captured ad hoc MRR-cohort 'day' syntax sample", () => {
+  assert.equal(
+    isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(
+      'syntax error at or near "day"',
+      MRR_COHORT_QUERY,
+    ),
+    true,
+  );
+  // Tolerates the leading `ERROR: ` prefix, surrounding whitespace, and message casing.
+  assert.equal(
+    isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(
+      '  ERROR: SYNTAX ERROR AT OR NEAR "day"  ',
+      "   " + MRR_COHORT_QUERY + "   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise KEEPS a syntax error on a DIFFERENT query", () => {
+  assert.equal(
+    isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(
+      'syntax error at or near "day"',
+      "select id from public.orders where created_at + interval 1 day >",
+    ),
+    false,
+  );
+  // A real product query that happens to touch ONE fingerprint but not all three stays paged.
+  assert.equal(
+    isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(
+      'syntax error at or near "day"',
+      "select i from jsonb_array_elements(s.items) i where interval 1 day",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise KEEPS the same MRR query under a DIFFERENT message", () => {
+  assert.equal(
+    isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(
+      "syntax error at end of input",
+      MRR_COHORT_QUERY,
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(
+      'column s.billing_interval does not exist',
+      MRR_COHORT_QUERY,
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise KEEPS a real product query (and handles empty / nullish input)", () => {
+  assert.equal(
+    isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(
+      'syntax error at or near "day"',
+      "select id, status from public.subscriptions where next_billing_date <",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise("", ""),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(
+      'syntax error at or near "day"',
+      "",
     ),
     false,
   );
