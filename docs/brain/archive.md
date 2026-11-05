@@ -12,6 +12,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Shopify customer sync: merge same-email duplicate before upsert so it stops violating the email unique key** · verified 2026-11-04 · → [[../libraries/shopify-webhooks]]
 - **Fraud-detector work probe: add order-age settle grace so a just-created order isn't counted before its async screen beat lands** · verified 2026-11-03 · → [[../libraries/control-tower#orders-awaiting-fraud-screen-probe]]
 - **Classify Inngest's own InngestErrInternal platform failure as transient in the error-feed capture** · verified 2026-11-03 · → [[../libraries/error-feed]]
 - **Meta human-blocked class survives Inngest step serialization** · verified 2026-11-03 · → [[../libraries/meta__graph-retry]]
