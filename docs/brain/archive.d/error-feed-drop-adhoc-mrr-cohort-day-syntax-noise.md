@@ -1,0 +1,1 @@
+- **Drop the ad-hoc MRR-cohort 'syntax error at or near day' from the Control Tower postgres feed** · verified 2026-11-05 · → [[../libraries/error-feed]]
