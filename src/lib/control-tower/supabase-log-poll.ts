@@ -112,6 +112,7 @@ import {
   isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnAgentJobsIdAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
+  isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesPhaseIndexAdhocNoise,
@@ -1211,6 +1212,16 @@ const LOG_QUERIES: LogQuery[] = [
       // `syntax error at end of input`. Narrowly gated to require the exact message, the
       // bare SELECT-on-approval_decisions shape, and the `agent_jobs.branch_name` marker.
       if (isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a hand-typed, exploratory MRR / retention cohort
+      // analysis someone ran directly against the Superfoods database, which Postgres reports
+      // as `syntax error at or near "day"`. The query is a `WITH lastord AS ( ... )` CTE that
+      // buckets subscriptions by `CASE s.billing_interval` and expands
+      // `jsonb_array_elements(s.items)` — three fingerprints no ShopCX product query contains
+      // (grep-verified). There is no lever from ShopCX to fix a query we don't own, so paging
+      // Platform on it (Control Tower signature `supabase-logs:0860b55806401464`) is pure
+      // noise. Narrowly gated to require the exact `day` syntax message AND all three
+      // fingerprints, so every real syntax error and every other query shape stays captured.
+      if (isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.specs.<archived_at|folded_at|deferred_at>`. The `specs` card table
       // exists but records lifecycle state via `status text` (with a `folded` value) plus
