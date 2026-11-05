@@ -1,0 +1,1 @@
+- **Drop bare SQL-Editor `column "key"/"name" does not exist` noise on kill_switches ad-hoc lookups** · verified 2026-11-05 · → [[../libraries/error-feed]]
