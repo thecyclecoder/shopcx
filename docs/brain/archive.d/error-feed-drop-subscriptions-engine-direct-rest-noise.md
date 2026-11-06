@@ -1,0 +1,1 @@
+- **Drop foreign PostgREST `subscriptions.engine` column-missing noise at capture** · verified 2026-11-06 · → [[../libraries/error-feed]]

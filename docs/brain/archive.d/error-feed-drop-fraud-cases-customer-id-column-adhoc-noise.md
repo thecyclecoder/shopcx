@@ -1,0 +1,1 @@
+- **Drop ad-hoc fraud_cases.customer_id undefined-column noise from the Control Tower error feed** · verified 2026-11-06 · → [[../libraries/error-feed]]

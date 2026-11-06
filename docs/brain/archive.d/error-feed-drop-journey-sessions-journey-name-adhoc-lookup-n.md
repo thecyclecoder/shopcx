@@ -1,0 +1,1 @@
+- **Scope out foreign journey_sessions.journey_name adhoc-REST column-missing noise from the error feed** · verified 2026-11-06 · → [[../libraries/error-feed]]
