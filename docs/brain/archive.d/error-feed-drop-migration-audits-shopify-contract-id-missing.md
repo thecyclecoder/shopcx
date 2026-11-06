@@ -1,0 +1,1 @@
+- **Drop foreign Studio/REST probe filtering migration_audits by the non-existent shopify_contract_id column from the error feed** · verified 2026-11-06 · → [[../lifecycles/control-tower]]
