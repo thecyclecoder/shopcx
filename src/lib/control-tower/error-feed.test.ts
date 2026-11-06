@@ -139,6 +139,7 @@ import {
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnSubscriptionsIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise,
+  isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise,
@@ -3327,6 +3328,96 @@ test("isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise KEEPS a non
     isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise(
       "operator does not exist: uuid ~~ unknown",
       "delete from public.migration_audits where id like $1",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise ──
+// The missing-column sibling of the migration_audits.id uuid-LIKE probe: a Supabase Studio /
+// direct-REST SELECT on `migration_audits` filtering by the non-existent `shopify_contract_id`
+// column, rejected with `column migration_audits.shopify_contract_id does not exist`. Control
+// Tower signature `supabase-logs:2dbda1482e9f802b`. Drop AT CAPTURE only when BOTH the exact
+// column-missing message AND a SELECT-shape on `migration_audits` are present; a missing-column
+// error on any OTHER table, a DIFFERENT missing column on this table, or a non-SELECT shape
+// still pages.
+
+test("isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise drops the column-missing message paired with the PostgREST CTE wrapper AND the bare SELECT shape", () => {
+  // The Studio-emitted PostgREST CTE wrapper form (double-quoted identifiers).
+  assert.equal(
+    isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise(
+      "column migration_audits.shopify_contract_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."migration_audits".* FROM "public"."migration_audits" WHERE "public"."migration_audits"."shopify_contract_id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix + the `public.`-qualified message variant both strip to the pin.
+  assert.equal(
+    isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise(
+      "ERROR: column public.migration_audits.shopify_contract_id does not exist",
+      'WITH pgrst_source AS ( SELECT * FROM "public"."migration_audits" WHERE "shopify_contract_id" = $1 )',
+    ),
+    true,
+  );
+  // The bare SELECT shape (no PostgREST wrapper) drops too — the predicate accepts both.
+  assert.equal(
+    isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise(
+      "column migration_audits.shopify_contract_id does not exist",
+      "select * from public.migration_audits where shopify_contract_id = 'gid://123'",
+    ),
+    true,
+  );
+  // Unqualified `migration_audits` (no `public.`) + bare SELECT is still the same ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise(
+      "column migration_audits.shopify_contract_id does not exist",
+      "select id, shopify_contract_id from migration_audits where id = $1",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise KEEPS a non-SELECT statement, a different column, and a different table (real defects still page)", () => {
+  // A non-SELECT statement on migration_audits (real code writing the table) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise(
+      "column migration_audits.shopify_contract_id does not exist",
+      "update public.migration_audits set shopify_contract_id = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise(
+      "column migration_audits.shopify_contract_id does not exist",
+      "delete from public.migration_audits where shopify_contract_id = $1",
+    ),
+    false,
+  );
+  // A missing-column error on ANY OTHER table (real schema regression) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise(
+      "column subscriptions.shopify_contract_id does not exist",
+      "select * from public.subscriptions where shopify_contract_id = $1",
+    ),
+    false,
+  );
+  // A DIFFERENT missing column on migration_audits (real same-table defect) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise(
+      "column migration_audits.workspace_id does not exist",
+      "select * from public.migration_audits where workspace_id = $1",
+    ),
+    false,
+  );
+  // Empty / nullish markers return false — both markers are required.
+  assert.equal(
+    isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise("", ""),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise(
+      "column migration_audits.shopify_contract_id does not exist",
+      null,
     ),
     false,
   );
