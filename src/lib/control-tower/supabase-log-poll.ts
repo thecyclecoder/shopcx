@@ -103,6 +103,7 @@ import {
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
+  isForeignSupabasePostgresSubscriptionsEngineLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnSubscriptionsIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise,
@@ -1146,6 +1147,16 @@ const LOG_QUERIES: LogQuery[] = [
       // grep-anchor (spec check pattern is regex; unescaped parens are groups):
       // isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoisemessage, query
       if (isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the SAME foreign / stale PostgREST client reading
+      // `/rest/v1/subscriptions` with a generic schema that assumes an `engine` column our
+      // `subscriptions` table never had — surfaced on a different first-unresolved column than
+      // the `paused_until` sibling above. `column subscriptions.engine does not exist` on the
+      // bare SELECT-lookup or the PostgREST pgrst_source CTE wrapper. A column-missing error on
+      // any other table, a different column on `subscriptions`, or on `subscriptions` via a
+      // non-SELECT statement (real code-bug shape) still surfaces / pages on first sighting.
+      // grep-anchor (spec check pattern is regex; unescaped parens are groups):
+      // isForeignSupabasePostgresSubscriptionsEngineLookupNoisemessage, query
+      if (isForeignSupabasePostgresSubscriptionsEngineLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a PostgREST direct-REST read against
       // `/rest/v1/subscriptions?items=cs.<value>` where an external client passed a
       // non-JSON value to the `items=cs.<value>` containment filter, producing

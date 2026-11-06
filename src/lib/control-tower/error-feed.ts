@@ -5679,6 +5679,66 @@ export function isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column subscriptions.engine does not exist` for a
+ * foreign / stale PostgREST client reading `/rest/v1/subscriptions` with a generic schema that
+ * assumes an `engine` column our `subscriptions` table never had. Same not-ours caller as the
+ * already-filtered `paused_until` read (Control Tower signature `supabase-logs:5bcf27c7e898d96f`,
+ * [[../specs/error-feed-drop-subscriptions-engine-direct-rest-noise]]), surfaced on a different
+ * first-unresolved column. There is no lever from ShopCX to make that query resolve — paging
+ * Platform on it is repair work for a query we don't own.
+ *
+ * Direct sibling of `isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise` — identical
+ * ERROR-prefix strip + two accepted query shapes (bare `select ... from (public.)subscriptions`
+ * and the `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions" ... )` wrapper),
+ * pinned to the `engine` column instead of `paused_until`.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER table still pages — the pin is
+ *     `subscriptions.engine` only,
+ *   - a column-missing error on `subscriptions` for a DIFFERENT column still pages — the pin
+ *     covers `engine` only, not any column name,
+ *   - a `subscriptions.engine` error attached to a DIFFERENT statement shape (INSERT / UPDATE /
+ *     DELETE / DDL, a JOIN across other tables) still pages — the pin is the bare SELECT-lookup
+ *     shape, matching the ad hoc direct-REST read we've observed,
+ *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
+ *     `subscriptions` is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts`
+ * is constructed — the mapRow contract treats `null` as `drop, do not record`, so returning
+ * null here fully suppresses the row (no error_event, no loop_alert, no signature). Not a
+ * `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresSubscriptionsEngineLookupNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
+  // surface sometimes carries it, sometimes doesn't. The column-missing message itself
+  // has a stable shape: `column <table>.<name> does not exist`.
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column subscriptions.engine does not exist" ||
+    stripped === "column public.subscriptions.engine does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name `subscriptions`
+  // (with or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
+  // captured — a caller that actually writes to subscriptions with a bogus `engine`
+  // column is a code bug we DO want to page on, not the ad hoc direct-REST read this
+  // drop targets.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?subscriptions\b/.test(q)) return true;
+  // PostgREST direct-REST reads arrive wrapped as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."subscriptions" ... )` (double-quoted identifiers) — same foreign read, matching
+  // the sibling widenings. The wrapped op must be a SELECT, so a PostgREST write still pages.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?subscriptions\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `invalid input syntax for type json` for a PostgREST
  * direct-REST read against `/rest/v1/subscriptions?items=cs.<value>` where the external
  * client passed a non-JSON value to the `items=cs.<value>` containment filter. The
