@@ -36,6 +36,7 @@ import {
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise,
   isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise,
+  isForeignSupabasePostgresSubscriptionsEngineLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise,
@@ -26169,6 +26170,108 @@ test("isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise drops the Pos
     isForeignSupabasePostgresSubscriptionsPausedUntilLookupNoise(
       "column subscriptions.paused_until does not exist",
       'WITH pgrst_source AS ( UPDATE "public"."subscriptions" SET "paused_until" = $1 WHERE "id" = $2 RETURNING * )',
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresSubscriptionsEngineLookupNoise ──
+// The SAME foreign / stale PostgREST direct-REST client reads `/rest/v1/subscriptions`
+// with a generic schema that assumes an `engine` column our `public.subscriptions` table
+// never had — surfaced on a different first-unresolved column than the `paused_until`
+// sibling. Foreign-owned surface, no lever from us — drop AT CAPTURE only when BOTH the
+// exact column-missing message on `subscriptions.engine` AND the bare SELECT-lookup (or
+// PostgREST CTE wrapper) shape on `subscriptions` are present. A column-missing on any
+// other table, a different column on `subscriptions`, or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresSubscriptionsEngineLookupNoise drops the exact PostgREST wrapper from the signature", () => {
+  // The captured PostgREST direct-REST pgrst_source CTE wrapper (double-quoted identifiers).
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsEngineLookupNoise(
+      "column subscriptions.engine does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."id", "public"."subscriptions"."engine" FROM "public"."subscriptions" WHERE "public"."subscriptions"."id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // The public.-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsEngineLookupNoise(
+      "column public.subscriptions.engine does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."engine" FROM "public"."subscriptions" )',
+    ),
+    true,
+  );
+  // The bare SELECT-lookup shape (unqualified + public.-qualified FROM) also drops.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsEngineLookupNoise(
+      "column subscriptions.engine does not exist",
+      "select id, engine from public.subscriptions where status = 'active' limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsEngineLookupNoise(
+      "column subscriptions.engine does not exist",
+      "select engine from subscriptions limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped; whitespace tolerated; case-insensitive query.
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsEngineLookupNoise(
+      "  ERROR: column subscriptions.engine does not exist  ",
+      "   SELECT ENGINE FROM PUBLIC.SUBSCRIPTIONS   ",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsEngineLookupNoise KEEPS a column-missing error on a different table (still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsEngineLookupNoise(
+      "column journeys.engine does not exist",
+      "select engine from public.journeys where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsEngineLookupNoise KEEPS a different column-missing on subscriptions (still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsEngineLookupNoise(
+      "column subscriptions.paused_until does not exist",
+      "select paused_until from public.subscriptions where status = 'paused'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsEngineLookupNoise KEEPS a non-SELECT statement shape (a real code-bug writing subscriptions.engine still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsEngineLookupNoise(
+      "column subscriptions.engine does not exist",
+      "update public.subscriptions set engine = 'appstle' where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsEngineLookupNoise(
+      "column subscriptions.engine does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."subscriptions" SET "engine" = $1 WHERE "id" = $2 RETURNING * )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresSubscriptionsEngineLookupNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsEngineLookupNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresSubscriptionsEngineLookupNoise(
+      "column subscriptions.engine does not exist",
+      "",
     ),
     false,
   );
