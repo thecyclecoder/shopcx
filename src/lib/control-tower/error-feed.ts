@@ -11464,6 +11464,40 @@ export function isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirect
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `customer_id` column for an ad hoc
+ * direct-REST read of `public.migration_audits`. A foreign/stale PostgREST client
+ * queries `migration_audits` filtered by a `customer_id` column the table has never
+ * shipped — `migration_audits` is keyed to a migration run / workspace member, not a
+ * customer, so there is no ShopCX lever to make the query resolve (adding the column
+ * would be a schema lie). The resulting `column migration_audits.customer_id does not
+ * exist` ERROR is repair work for a query no ShopCX code owns (Control Tower signature
+ * `supabase-logs:602de2e21afac0c4`). Mirrors
+ * {@link isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise} —
+ * same capture-time drop, same narrow SELECT/CTE anchors so a real schema regression on
+ * `migration_audits` (or any write to it) still pages.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not
+ * record`, so returning null there fully suppresses the row.
+ */
+export function isForeignSupabasePostgresMissingMigrationAuditsCustomerIdDirectRestNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column migration_audits.customer_id does not exist" ||
+    stripped === "column public.migration_audits.customer_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?migration_audits\b/.test(q)) return true;
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?migration_audits\b/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing `verdict` column for an ad hoc
  * direct-REST read of `public.spec_test_runs`. A foreign/stale PostgREST client read
  * `spec_test_runs` expecting a `verdict` column the table never carried — the real

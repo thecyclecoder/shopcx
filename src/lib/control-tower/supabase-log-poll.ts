@@ -174,6 +174,7 @@ import {
   isForeignSupabasePostgresMissingPendingFoldsFoldJobIdAdhocNoise,
   isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise,
   isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise,
+  isForeignSupabasePostgresMissingMigrationAuditsCustomerIdDirectRestNoise,
   isExpectedDashboardNotificationsDedupeKeyOpenUniqViolation,
   isExpectedBillingForecastsPendingUniqViolation,
   isExpectedSubscriptionCycleChargesCycleUniqViolation,
@@ -2053,6 +2054,13 @@ const LOG_QUERIES: LogQuery[] = [
       // `workspace_members`, or on `workspace_members` via a non-SELECT statement (real
       // code-write bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise(message, query)) return null;
+      // Same capture-time drop for the foreign direct-REST probe that SELECTs
+      // `public.migration_audits` filtered by a `customer_id` column the table has never
+      // shipped (Control Tower signature `supabase-logs:602de2e21afac0c4`). migration_audits
+      // is keyed to a migration run / member, not a customer — no ShopCX lever makes the
+      // query resolve. Narrow: a real column regression on migration_audits, any other
+      // table, or a write to migration_audits still records / pages.
+      if (isForeignSupabasePostgresMissingMigrationAuditsCustomerIdDirectRestNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.products` naming one of three columns that have NEVER lived on
       // the products table — `ingredients`, `supplement_facts`, `benefits`. Product
