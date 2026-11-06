@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST contract_id probe on migration_audits from the Supabase log feed** · verified 2026-11-06 · → [[../libraries/error-feed]]
