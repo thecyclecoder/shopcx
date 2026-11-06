@@ -106,6 +106,7 @@ import {
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnSubscriptionsIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise,
+  isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise,
@@ -1177,6 +1178,15 @@ const LOG_QUERIES: LogQuery[] = [
       // uuid LIKE (a predeploy guard forbids LIKE on uuid columns), so the ERROR is repair work
       // for a query we don't own. Control Tower signature `supabase-logs:a3e4adaac3bc5983`.
       if (isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a Supabase Studio / direct-REST SELECT on
+      // `migration_audits` filtering by the non-existent `shopify_contract_id` column, rejected
+      // by Postgres with `column migration_audits.shopify_contract_id does not exist`.
+      // migration_audits joins everything on internal UUIDs (Shopify is being sunset) — no
+      // ShopCX code path reads a `shopify_contract_id` column, so the ERROR is repair work for a
+      // query we don't own. The existing migration_audits uuid-LIKE filter only matches the
+      // `operator does not exist` message class, so this missing-column probe leaks through.
+      // Control Tower signature `supabase-logs:2dbda1482e9f802b`.
+      if (isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: the tickets twin of the same Studio / direct-REST
       // quick-filter that LIKEs the uuid `tickets.id` column, rejected by Postgres with
       // `operator does not exist: uuid ~~ unknown`. No ShopCX code path issues a uuid LIKE (a

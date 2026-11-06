@@ -2321,6 +2321,68 @@ export function isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `migration_audits.shopify_contract_id`
+ * column for an ad hoc Supabase Studio / direct-REST SELECT on a table ShopCX does not read
+ * that way. `migration_audits` joins everything on internal UUIDs (Shopify is being sunset), so
+ * no ShopCX code path ever filters it by a `shopify_contract_id` column — that column has never
+ * existed on the table. A stale external/REST client SELECTs it, Supabase's `postgres_logs`
+ * feed captures the resulting undefined_column ERROR, and log-poll mints a Control Tower
+ * incident for a query we don't own (Control Tower signature
+ * `supabase-logs:2dbda1482e9f802b`). The missing-column sibling of
+ * `isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise` above — the existing
+ * migration_audits filters only match the uuid-LIKE `operator does not exist` message class, so
+ * this missing-column probe leaks through and needs its own narrowly-gated drop.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column migration_audits.shopify_contract_id does not exist` (with or
+ *      without the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on
+ *      the logs surface), AND
+ *   2. the `parsed.query` attribute (quote-stripped + lowercased) is a SELECT-shape on
+ *      `migration_audits` — either (a) the bare `select ... from (public.)?migration_audits`
+ *      shape, OR (b) the PostgREST-generated `with pgrst_source as ( select ... from
+ *      public.migration_audits` CTE wrapper form.
+ *
+ * Intentionally narrow — any genuine schema regression still pages:
+ *   - a DIFFERENT missing column on `migration_audits` still pages — the pin covers
+ *     `shopify_contract_id` only,
+ *   - the same message attached to a non-SELECT statement on `migration_audits` (INSERT /
+ *     UPDATE / DELETE / DDL — a real code-bug shape) still pages,
+ *   - a missing-column error on ANY OTHER table still pages,
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts`
+ * is constructed — the mapRow contract treats `null` as `drop, do not record`, so returning
+ * null here fully suppresses the row (no error_event, no loop_alert, no signature). Not a
+ * `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column migration_audits.shopify_contract_id does not exist" ||
+    stripped === "column public.migration_audits.shopify_contract_id does not exist";
+  if (!messageMatches) return false;
+  // Quote-stripped + lowercased so `"public"."migration_audits"` collapses to
+  // `public.migration_audits`, covering both the bare and the double-quoted PostgREST-wrapper
+  // forms with one shape predicate.
+  const q = (query ?? "").trim().toLowerCase().replace(/"/g, "");
+  if (!q) return false;
+  const bareSelect =
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?migration_audits\b/.test(q);
+  // PostgREST wraps direct-REST row reads as `WITH pgrst_source AS ( SELECT ... FROM
+  // public.migration_audits ... )` — the branch requires the wrapped op to be a SELECT so a
+  // PostgREST INSERT/UPDATE inside the same envelope (a real code-write) stays captured/paged.
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+public\.migration_audits\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres rejecting a `WHERE "tickets"."id" LIKE $1` text search typed
  * against the uuid `tickets.id` column with `operator does not exist: uuid ~~ unknown`. The uuid
  * LIKE is an invalid operator pairing (PostgreSQL has no `uuid ~~ text` operator), and the query
