@@ -76,6 +76,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsRenewalSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsEngineColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
@@ -818,6 +819,11 @@ const LOG_QUERIES: LogQuery[] = [
       // `free_shipping` from any other table, or on `subscriptions` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise(message, query)) return null;
+      // Same narrow gate for the foreign `subscriptions.engine` lookup — we track the
+      // subscription engine via is_internal + billing_source, there is no `engine`
+      // column, and no ShopCX code path selects it; a real regression on any other
+      // subscriptions column (e.g. `items`) or a non-SELECT shape still pages.
+      if (isForeignSupabasePostgresMissingSubscriptionsEngineColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... address ... from
       // public.customers` lookup by an external tool (Supabase Studio Table Editor /
       // API Docs, foreign SQL client, stale exploratory session, third-party
