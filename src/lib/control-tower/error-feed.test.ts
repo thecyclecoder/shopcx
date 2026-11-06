@@ -101,6 +101,7 @@ import {
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
+  isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
@@ -18523,6 +18524,97 @@ test("isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoi
     isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise(
       "column journey_sessions.trigger_intent does not exist",
       "update public.journey_sessions set trigger_intent = $1 where id = $2",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/journey_sessions?select=...journey_name...` (or a Supabase Studio browse)
+// against our `public.journey_sessions` table with `journey_definitions` columns. The
+// table exists but has NO `journey_name` column — `journey_name` lives on
+// `journey_definitions`. Foreign-owned surface, no lever from us — drop AT CAPTURE only
+// when BOTH the exact column-missing message on `journey_sessions.journey_name` AND a
+// SELECT-lookup shape on `journey_sessions` (bare OR PostgREST CTE wrapper) are present. A
+// column-missing on a live `journey_sessions` column, on `journey_name` from any other
+// table (the live `journey_definitions.journey_name`), or via a non-SELECT statement
+// still pages.
+
+test("isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise drops the captured supabase-logs:1d2afacc4e90e206 message+query pair (PostgREST CTE SELECT on journey_sessions.journey_name)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `journey_sessions.journey_name` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise(
+      "column journey_sessions.journey_name does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."journey_sessions"."id", "public"."journey_sessions"."journey_name" FROM "public"."journey_sessions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise(
+      "column public.journey_sessions.journey_name does not exist",
+      'WITH pgrst_source AS (SELECT "public"."journey_sessions"."journey_name" FROM "public"."journey_sessions")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise(
+      "column journey_sessions.journey_name does not exist",
+      "select id, journey_name from public.journey_sessions",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise(
+      "column journey_sessions.journey_name does not exist",
+      "select journey_name from journey_sessions limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise(
+      "ERROR: column journey_sessions.journey_name does not exist",
+      'WITH pgrst_source AS (SELECT "public"."journey_sessions"."journey_name" FROM "public"."journey_sessions")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise(
+      "column journey_sessions.journey_name does not exist",
+      "SELECT ID, JOURNEY_NAME FROM PUBLIC.JOURNEY_SESSIONS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise KEEPS a column-missing on a live journey_sessions column (token_expires_at), on journey_name for another table, or via a non-SELECT statement (real regressions still page)", () => {
+  // A column-missing on a live `journey_sessions` column must still page — the pin is
+  // `journey_sessions.journey_name` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise(
+      "column journey_sessions.token_expires_at does not exist",
+      "select token_expires_at from public.journey_sessions",
+    ),
+    false,
+  );
+  // A column-missing on `journey_name` from a DIFFERENT table (the live
+  // `journey_definitions.journey_name`) must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise(
+      "column journey_definitions.journey_name does not exist",
+      "select journey_name from public.journey_definitions",
+    ),
+    false,
+  );
+  // A non-SELECT statement against `journey_sessions` (real code-bug shape) must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise(
+      "column journey_sessions.journey_name does not exist",
+      "update public.journey_sessions set journey_name = $1 where id = $2",
     ),
     false,
   );
