@@ -56,6 +56,7 @@ import {
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
   isForeignSupabasePostgresMissingAppstleContractSnapshotsUpdatedAtAdhocNoise,
   isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise,
+  isForeignSupabasePostgresMissingMigrationAuditsContractIdAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingCouponsDiscountTypeColumnNoise,
@@ -528,6 +529,12 @@ const LOG_QUERIES: LogQuery[] = [
       // live column), or a non-SELECT statement on this table (real code-bug shape) still surfaces
       // / pages on first sighting.
       if (isForeignSupabasePostgresMissingAppstleContractSnapshotsContractIdAdhocNoise(message, query)) return null;
+      // Same foreign short-name mistake against `migration_audits` — a stale SQL Editor / Supabase
+      // Studio / deprecated-integration SELECT-lookup selecting the non-existent `contract_id`
+      // column (the schema spells it `appstle_contract_id` / `internal_contract_id`). Drop the
+      // SELECT-lookup shape (bare or PostgREST CTE wrapper); a different column, a write/DDL, or a
+      // JOIN against migration_audits still pages on first sighting.
+      if (isForeignSupabasePostgresMissingMigrationAuditsContractIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a Supabase Studio Table Editor quick-filter (or an
       // external PostgREST probe) typed as a case-insensitive free-text search over the jsonb
       // `sample` column on `public.error_events` emits `WHERE "sample" ILIKE $1`, which
