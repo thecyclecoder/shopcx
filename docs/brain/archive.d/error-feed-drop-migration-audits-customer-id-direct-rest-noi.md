@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST 'migration_audits.customer_id does not exist' noise from the supabase-logs feed** · verified 2026-11-06 · → [[../libraries/error-feed]], [[../tables/migration_audits]]
