@@ -126,6 +126,7 @@ import {
   isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
@@ -2154,6 +2155,116 @@ test("isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise KEEPS 
       "column orders.order_id does not exist",
       "select id, order_id from public.orders",
     ),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise ──
+// A foreign / stale direct-REST client read `public.fraud_cases` expecting a singular
+// `customer_id` FK column our schema never carried — our fraud_cases code only filters the
+// `customer_ids` text[] array; Control Tower signature `supabase-logs:d4abf3f1057eebc1`. The
+// existing fraud_cases filter pins updated_at/order_id only, so this customer_id CTE-wrapper
+// shape slips past it and needs its own predicate. Drop AT CAPTURE only when BOTH the exact
+// `column fraud_cases.customer_id does not exist` message AND the SELECT-lookup shape on
+// `fraud_cases` (bare or PostgREST CTE wrapper) are present. A different column, a non-SELECT
+// write, or a FATAL still pages.
+
+test("isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise drops the captured PostgREST CTE-wrapper shape", () => {
+  // The captured incident shape: a stale direct-REST client lists fraud_cases filtered by a
+  // non-existent customer_id, PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."fraud_cases" ... )` CTE, and Postgres rejects with the column-missing.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise(
+      "column fraud_cases.customer_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."fraud_cases"."id", "public"."fraud_cases"."customer_id" FROM "public"."fraud_cases" WHERE "public"."fraud_cases"."customer_id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise(
+      "column public.fraud_cases.customer_id does not exist",
+      'with pgrst_source as ( select "public"."fraud_cases"."customer_id" from "public"."fraud_cases" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise(
+      "ERROR: column fraud_cases.customer_id does not exist",
+      'WITH pgrst_source AS ( SELECT "customer_id" FROM "public"."fraud_cases" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise drops the bare SELECT shape (qualified + unqualified FROM)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise(
+      "column fraud_cases.customer_id does not exist",
+      "select id, customer_id from public.fraud_cases where customer_id = $1 limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise(
+      "column fraud_cases.customer_id does not exist",
+      "select * from fraud_cases where customer_id is not null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise KEEPS real errors (other column, other table, non-SELECT, FATAL, empty)", () => {
+  // A DIFFERENT column on fraud_cases (a real column rename / schema regression) still pages —
+  // the pin is customer_id only.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise(
+      "column fraud_cases.status does not exist",
+      "select id, status from public.fraud_cases",
+    ),
+    false,
+  );
+  // Same customer_id-missing message on a DIFFERENT relation is a real product-schema
+  // regression and still pages — the pin names fraud_cases only.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise(
+      "column orders.customer_id does not exist",
+      "select id, customer_id from public.orders",
+    ),
+    false,
+  );
+  // A non-SELECT shape (PostgREST CTE write / bare write) is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise(
+      "column fraud_cases.customer_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."fraud_cases"("id","customer_id") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise(
+      "column fraud_cases.customer_id does not exist",
+      "update public.fraud_cases set customer_id = $1 where id = $2",
+    ),
+    false,
+  );
+  // A FATAL on the same shape is untouched (different message).
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select id, customer_id from public.fraud_cases",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise("", "select * from fraud_cases"),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise("column fraud_cases.customer_id does not exist", ""),
     false,
   );
 });

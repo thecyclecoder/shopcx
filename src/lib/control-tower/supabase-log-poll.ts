@@ -43,6 +43,7 @@ import {
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
@@ -393,6 +394,16 @@ const LOG_QUERIES: LogQuery[] = [
       // lookup shape on `fraud_cases` (bare or PostgREST CTE wrapper) — a different missing
       // column, a non-SELECT write, or a FATAL/PANIC/constraint violation still surfaces / pages.
       if (isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.fraud_cases` expecting a singular `customer_id` FK column our schema never
+      // carried — our fraud_cases code only filters the `customer_ids` `text[]` array. The
+      // resulting undefined_column ERROR is repair work for a query we don't own (Control Tower
+      // signature `supabase-logs:d4abf3f1057eebc1`). Narrowly gated to require BOTH the exact
+      // `column fraud_cases.customer_id does not exist` message AND the SELECT-lookup shape on
+      // `fraud_cases` (bare or PostgREST CTE wrapper) — the existing fraud_cases filter above
+      // pins `updated_at`/`order_id` only, so this `customer_id` shape needs its own predicate;
+      // a different missing column, a non-SELECT write, or a FATAL/PANIC still surfaces / pages.
+      if (isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale external/REST client SELECTs a
       // `customer_id` column from `loyalty_redemptions` that the table never owned (it lives on
       // the sibling `loyalty_members` table). The resulting undefined_column ERROR is repair
