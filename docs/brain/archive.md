@@ -12,6 +12,15 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Drop ad-hoc fraud_cases.customer_id undefined-column noise from the Control Tower error feed** · verified 2026-11-06 · → [[../libraries/error-feed]]
+- **Scope out foreign journey_sessions.journey_name adhoc-REST column-missing noise from the error feed** · verified 2026-11-06 · → [[../libraries/error-feed]]
+- **Drop foreign direct-REST contract_id probe on migration_audits from the Supabase log feed** · verified 2026-11-06 · → [[../libraries/error-feed]]
+- **Drop foreign direct-REST 'migration_audits.customer_id does not exist' noise from the supabase-logs feed** · verified 2026-11-06 · → [[../libraries/error-feed]], [[../tables/migration_audits]]
+- **Drop foreign Studio/REST probe filtering migration_audits by the non-existent shopify_contract_id column from the error feed** · verified 2026-11-06 · → [[../lifecycles/control-tower]]
+- **Drop foreign ad-hoc `subscriptions.engine` missing-column noise from the Supabase log feed** · verified 2026-11-06 · → [[../libraries/error-feed]]
+- **Drop foreign PostgREST `subscriptions.engine` column-missing noise at capture** · verified 2026-11-06 · → [[../libraries/error-feed]]
+- **Drop the ad-hoc MRR-cohort 'syntax error at or near day' from the Control Tower postgres feed** · verified 2026-11-05 · → [[../libraries/error-feed]]
+- **Drop bare SQL-Editor `column "key"/"name" does not exist` noise on kill_switches ad-hoc lookups** · verified 2026-11-05 · → [[../libraries/error-feed]]
 - **Shopify customer sync: merge same-email duplicate before upsert so it stops violating the email unique key** · verified 2026-11-04 · → [[../libraries/shopify-webhooks]]
 - **Fraud-detector work probe: add order-age settle grace so a just-created order isn't counted before its async screen beat lands** · verified 2026-11-03 · → [[../libraries/control-tower#orders-awaiting-fraud-screen-probe]]
 - **Classify Inngest's own InngestErrInternal platform failure as transient in the error-feed capture** · verified 2026-11-03 · → [[../libraries/error-feed]]
