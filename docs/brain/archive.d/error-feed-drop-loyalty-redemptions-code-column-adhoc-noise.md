@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: ad-hoc loyalty_redemptions.code column-missing PostgREST reads** · verified 2026-11-07 · → [[../libraries/error-feed]]
