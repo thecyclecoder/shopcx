@@ -168,6 +168,7 @@ import {
   isForeignSupabasePostgresMissingQbAmazonSalesSkuAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyMembersLifetimePointsAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise,
+  isForeignSupabasePostgresMissingLoyaltyRedemptionsCodeColumnNoise,
   isForeignSupabasePostgresMissingTicketsAssignedAgentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsPlaybookIdDirectRestColumnNoise,
   isForeignSupabasePostgresMissingTicketsEscalatedColumnAdhocNoise,
@@ -2279,6 +2280,13 @@ const LOG_QUERIES: LogQuery[] = [
       // shape, bare OR PostgREST CTE wrapper); any other column / table / non-SELECT still
       // pages on first sighting.
       if (isForeignSupabasePostgresMissingLoyaltyRedemptionsCouponCodeAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.loyalty_redemptions.code`. Same table as the `coupon_code` sibling
+      // above, the other foreign-owned column name — the real column is `discount_code`.
+      // Same narrow gating (exact column-missing message AND a SELECT-on-loyalty_redemptions
+      // shape, bare OR PostgREST CTE wrapper); any other column / table / non-SELECT still
+      // pages on first sighting.
+      if (isForeignSupabasePostgresMissingLoyaltyRedemptionsCodeColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.tickets.assigned_agent`. The `tickets` table exists but has NO
       // `assigned_agent` column — the actual assignee column is
