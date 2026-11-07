@@ -77,6 +77,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsEngineColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
@@ -824,6 +825,12 @@ const LOG_QUERIES: LogQuery[] = [
       // column, and no ShopCX code path selects it; a real regression on any other
       // subscriptions column (e.g. `items`) or a non-SELECT shape still pages.
       if (isForeignSupabasePostgresMissingSubscriptionsEngineColumnAdhocNoise(message, query)) return null;
+      // Same narrow gate for the foreign `subscriptions.discount_code` lookup — the real
+      // discount storage is the `applied_discounts` jsonb column, there is no
+      // `discount_code` column, and no ShopCX code path selects it; a real regression on
+      // any other subscriptions column or a non-SELECT shape still pages (signature
+      // supabase-logs:5a59ebef1beda819).
+      if (isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... address ... from
       // public.customers` lookup by an external tool (Supabase Studio Table Editor /
       // API Docs, foreign SQL client, stale exploratory session, third-party

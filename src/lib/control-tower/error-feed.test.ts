@@ -104,6 +104,7 @@ import {
   isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise,
+  isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
@@ -27090,6 +27091,84 @@ test("isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise KEEPS 
   assert.equal(
     isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(
       "column crisis_events.product_title does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// error-feed-drop-subscriptions-discount-code-column-adhoc-noise spec — Control Tower
+// signature supabase-logs:5a59ebef1beda819. Our `subscriptions` table has NO
+// `discount_code` column — the real discount storage is the `applied_discounts` jsonb
+// column — and no ShopCX code path selects it; the message surfaces only when a foreign /
+// stale / manual client issues an ad hoc SELECT lookup. Drop AT CAPTURE only when BOTH the
+// exact column-missing message on `subscriptions.discount_code` AND a SELECT-lookup shape
+// on `subscriptions` (bare OR PostgREST CTE wrapper) are present.
+test("isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise drops the canonical message on bare-SELECT + PostgREST CTE shapes", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `subscriptions.discount_code` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise(
+      "column subscriptions.discount_code does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."id", "public"."subscriptions"."discount_code" FROM "public"."subscriptions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise(
+      "column public.subscriptions.discount_code does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."discount_code" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise(
+      "column subscriptions.discount_code does not exist",
+      "select id, discount_code from public.subscriptions",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise(
+      "ERROR: column subscriptions.discount_code does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."discount_code" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise KEEPS other columns / tables / non-SELECT shapes (real regressions still page)", () => {
+  // A DIFFERENT subscriptions column — `items` IS a live column; if it regresses we WANT
+  // the page. The pin is `discount_code` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise(
+      "column subscriptions.items does not exist",
+      "select items from public.subscriptions",
+    ),
+    false,
+  );
+  // The same `discount_code` column on ANOTHER table — the pin is subscriptions only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise(
+      "column orders.discount_code does not exist",
+      "select discount_code from public.orders",
+    ),
+    false,
+  );
+  // A NON-SELECT statement on subscriptions — real code-bug shape, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise(
+      "column subscriptions.discount_code does not exist",
+      "update public.subscriptions set discount_code = 'x' where id = 1",
+    ),
+    false,
+  );
+  // An empty / missing query attribute — cannot confirm the SELECT-lookup shape, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise(
+      "column subscriptions.discount_code does not exist",
       "",
     ),
     false,
