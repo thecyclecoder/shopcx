@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc loyalty_redemptions.redeemed_at column-missing noise from the Control Tower error feed** · verified 2026-11-07 · → [[../libraries/error-feed]]
