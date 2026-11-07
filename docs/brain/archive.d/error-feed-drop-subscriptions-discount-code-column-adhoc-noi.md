@@ -1,0 +1,1 @@
+- **Scope out foreign-app noise: subscriptions.discount_code column-missing SELECT** · verified 2026-11-07 · → [[../libraries/error-feed]]
