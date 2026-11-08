@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc coupons.source REST lookup noise at capture** · verified 2026-11-08 · → [[../libraries/error-feed]]
