@@ -82,6 +82,7 @@ import {
   isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise,
+  isForeignSupabasePostgresMissingCouponsSourceColumnNoise,
   isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise,
@@ -1048,6 +1049,78 @@ test("isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoi
     isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise(
       "",
       "select dismissed_at from public.dashboard_notifications",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCouponsSourceColumnNoise drops the foreign coupons.source SELECT lookup", () => {
+  // The captured incident shape (Control Tower `supabase-logs:eb3f6604660ca562`): a foreign
+  // PostgREST client probes our coupons REST endpoint for a `source` column we never had,
+  // PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM "public"."coupons" ... )`
+  // CTE, and Postgres rejects with `column coupons.source does not exist`.
+  assert.equal(
+    isForeignSupabasePostgresMissingCouponsSourceColumnNoise(
+      "column coupons.source does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."coupons"."id", "public"."coupons"."source" FROM "public"."coupons" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // Bare SELECT form.
+  assert.equal(
+    isForeignSupabasePostgresMissingCouponsSourceColumnNoise(
+      "column coupons.source does not exist",
+      "select source from coupons order by source desc limit 10",
+    ),
+    true,
+  );
+  // `public.`-qualified message + `ERROR: ` prefix are both normalized before the check.
+  assert.equal(
+    isForeignSupabasePostgresMissingCouponsSourceColumnNoise(
+      "ERROR: column public.coupons.source does not exist",
+      'WITH pgrst_source AS ( SELECT "source" FROM "public"."coupons" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCouponsSourceColumnNoise KEEPS a non-SELECT statement, a missing column on another table, and empty markers", () => {
+  // The exact message via a non-SELECT statement (INSERT/UPDATE write) is a real regression
+  // and still pages — the pin is the SELECT-lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingCouponsSourceColumnNoise(
+      "column coupons.source does not exist",
+      "insert into public.coupons (source) values ($1)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCouponsSourceColumnNoise(
+      "column coupons.source does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."coupons" SET "source" = $1 WHERE "id" = $2 RETURNING * )',
+    ),
+    false,
+  );
+  // A missing `source` column on ANOTHER table is a real code bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingCouponsSourceColumnNoise(
+      "column orders.source does not exist",
+      "select source from public.orders where source is null",
+    ),
+    false,
+  );
+  // Both markers are required.
+  assert.equal(
+    isForeignSupabasePostgresMissingCouponsSourceColumnNoise(
+      "column coupons.source does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCouponsSourceColumnNoise(
+      "",
+      "select source from public.coupons",
     ),
     false,
   );
