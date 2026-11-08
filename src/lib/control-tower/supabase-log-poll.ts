@@ -61,6 +61,7 @@ import {
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
   isForeignSupabasePostgresMissingCouponsDiscountTypeColumnNoise,
+  isForeignSupabasePostgresMissingCouponsSourceColumnNoise,
   isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise,
   isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
@@ -589,6 +590,16 @@ const LOG_QUERIES: LogQuery[] = [
       // the exact column-missing message AND the SELECT-lookup shape — a real schema
       // regression on coupons (any other column, or via a non-SELECT statement) still pages.
       if (isForeignSupabasePostgresMissingCouponsDiscountTypeColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/ad-hoc PostgREST client probing our
+      // coupons REST endpoint selects a non-existent `source` column off `public.coupons` —
+      // or the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."coupons" ... )` CTE
+      // wrapper the same client emits. Our `coupons` table never carried a `source` column,
+      // and no ShopCX code path selects it, so the Postgres 'column coupons.source does not
+      // exist' is a query we don't own (Control Tower signature
+      // `supabase-logs:eb3f6604660ca562`). Narrowly gated to require BOTH the exact
+      // column-missing message AND the SELECT-lookup shape — a real schema regression on
+      // coupons (any other column, or via a non-SELECT statement) still pages.
+      if (isForeignSupabasePostgresMissingCouponsSourceColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a manual Supabase Studio browse / external REST
       // probe that selects a non-existent `key` column off `public.kill_switches` — or the
       // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."kill_switches" ... )` CTE
