@@ -13,6 +13,7 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Drop foreign-app noise: ad-hoc loyalty_redemptions.code column-missing PostgREST reads** · verified 2026-11-07 · → [[../libraries/error-feed]]
+- **Drop foreign ad-hoc loyalty_redemptions.redeemed_at column-missing noise from the Control Tower error feed** · verified 2026-11-07 · → [[../libraries/error-feed]]
 - **Scope out foreign-app noise: subscriptions.discount_code column-missing SELECT** · verified 2026-11-07 · → [[../libraries/error-feed]]
 - **Drop ad-hoc fraud_cases.customer_id undefined-column noise from the Control Tower error feed** · verified 2026-11-06 · → [[../libraries/error-feed]]
 - **Scope out foreign journey_sessions.journey_name adhoc-REST column-missing noise from the error feed** · verified 2026-11-06 · → [[../libraries/error-feed]]
