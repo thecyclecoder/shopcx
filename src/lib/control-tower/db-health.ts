@@ -461,6 +461,21 @@ export function isInfrastructuralQuery(query: string): boolean {
   return INFRASTRUCTURAL_QUERY_RES.some((re) => re.test(q));
 }
 
+// db-health-request-volume-top-callers-use-delta: TRANSACTION-CONTROL statements (BEGIN / COMMIT /
+// ROLLBACK / START TRANSACTION / SAVEPOINT / SET / SHOW / RESET / DISCARD) are counted as their own
+// rows in pg_stat_statements, but they are driven by CONNECTION churn, not by app request volume — they
+// carry no rows (no egress) and there is no endpoint to cache or poll interval to widen. Ranking them
+// among the top request-volume callers crowds out the real app queries actually driving load. Excluded
+// from the caller ranking (the aggregate totals already reflect real request volume via the delta
+// window). Anchored at statement start so a query that merely mentions one of these words is untouched;
+// the PostgREST `SELECT set_config(...)` preamble starts with SELECT, so it is NOT swept here — it stays
+// an isInfrastructuralQuery, labelled but still named.
+const TXN_CONTROL_STMT_RE =
+  /^\s*(begin|commit|rollback|end|start\s+transaction|savepoint|release\s+savepoint|set\b|show\b|reset\b|discard\b)/i;
+export function isTransactionControlStatement(query: string): boolean {
+  return TXN_CONTROL_STMT_RE.test(query || "");
+}
+
 // ── A finding ────────────────────────────────────────────────────────────────
 
 export interface DbHealthFinding {
@@ -1195,6 +1210,13 @@ export interface RequestVolumeInput {
    *  finding so the enqueue path can tell a post-fold-breach from a pre-fold one. Only meaningful when
    *  `windowSource === 'delta'`. (db-health-detector-measures-current-rate Phase 2.) */
   windowStartMs?: number;
+  /** The prior snapshot's per-queryid counters (db_stat_statement_snapshots.per_query). When present in a
+   *  `windowSource === 'delta'` sweep, analyzeRequestVolume diffs the top callers against these so each
+   *  caller's count + share is a per-WINDOW delta over the SAME window as the totals (not a
+   *  cumulative-since-reset count divided by a delta total). Absent on the reset-window fallback, where the
+   *  cumulative top-caller counts already match the cumulative totals.
+   *  (db-health-request-volume-top-callers-use-delta.) */
+  priorPerQuery?: StatStatementPerQuery[];
 }
 
 export interface RequestVolumeThresholds {
@@ -1307,6 +1329,51 @@ export function rateFromSnapshotDelta(args: {
   return { windowHours, totalCalls: dCalls, totalRows: dRows, source: "delta", resetDetected: false };
 }
 
+/** A per-queryid delta between two snapshots — both the raw over-window delta and its per-hour rate. */
+export interface PerQueryDelta {
+  queryid: string;
+  /** calls that fired over the window (curr − prev). */
+  calls: number;
+  /** rows shipped over the window (curr − prev) — the egress proxy. */
+  rows: number;
+  callsPerHour: number;
+  rowsPerHour: number;
+}
+
+/**
+ * db-health-request-volume-top-callers-use-delta — diff per-queryid cumulative counters (prev → curr) by
+ * queryid and divide by the elapsed window to get per-hour rates. The per-caller analogue of
+ * rateFromSnapshotDelta: the request-volume totals are a per-hour DELTA over the prior→now window, so the
+ * TOP CALLERS have to be ranked over the SAME window, else a caller's cumulative-since-reset count divided
+ * by a delta total names the wrong share (a caller that's been quiet for weeks still shows a huge
+ * cumulative count). A counter going DOWN for a queryid means pg_stat_statements was reset (or that
+ * normalized statement aged out and re-entered) between the two snapshots, so its delta is untrustworthy —
+ * skip it rather than report a negative rate. A queryid with no prior counter can't be delta'd (it wasn't
+ * in the prior top-N capture) — also skipped, so the ranking only ever compares like with like. Returns a
+ * Map keyed by queryid. Pure + deterministic.
+ */
+export function perQueryDeltaPerHour(
+  prev: StatStatementPerQuery[] | null | undefined,
+  curr: StatStatementPerQuery[] | null | undefined,
+  elapsedMs: number,
+): Map<string, PerQueryDelta> {
+  const out = new Map<string, PerQueryDelta>();
+  if (!Array.isArray(curr) || !(elapsedMs > 0)) return out;
+  const hours = elapsedMs / 3_600_000;
+  const prevByQueryid = new Map<string, StatStatementPerQuery>();
+  for (const p of prev ?? []) if (p?.queryid) prevByQueryid.set(p.queryid, p);
+  for (const c of curr) {
+    if (!c?.queryid) continue;
+    const p = prevByQueryid.get(c.queryid);
+    if (!p) continue; // no prior counter ⇒ can't delta this caller (new / not previously captured)
+    const calls = c.calls - p.calls;
+    const rows = c.rows - p.rows;
+    if (calls < 0 || rows < 0) continue; // counter went down ⇒ reset / aged-out; skip the nonsense delta
+    out.set(c.queryid, { queryid: c.queryid, calls, rows, callsPerHour: calls / hours, rowsPerHour: rows / hours });
+  }
+  return out;
+}
+
 /**
  * Build the per-queryid prior map `analyzeSlowQuery` reads (DELTA self-clear) from a stored snapshot,
  * plus the reading age in hours. Mirrors the loop-heartbeat prior-beat shape so the slow-query pass can
@@ -1361,16 +1428,56 @@ export function analyzeRequestVolume(
 
   const fmtRate = (n: number) => Math.round(n).toLocaleString();
   const share = (n: number, total: number) => (total > 0 ? pct(n / total) : "0%");
-  const topCalls = input.topByCalls.slice(0, 8);
-  const topRows = input.topByRows.slice(0, 8);
-  // An infrastructural caller (the auth preamble) can't be spec-fixed directly, but naming it explains
-  // the volume; an app caller in the top list IS the actionable lever.
-  const label = (q: RequestVolumeTopQuery) => isInfrastructuralQuery(q.query) ? " [infrastructural]" : "";
 
   // db-health-detector-measures-current-rate Phase 1 — the window is a snapshot DELTA (~24h, the rate
   // happening now) when a prior snapshot exists, else the cumulative reset window (labelled so a
   // months-wide average is never passed off as a current rate).
   const isDelta = input.windowSource === "delta";
+
+  // db-health-request-volume-top-callers-use-delta — rank the top callers over the SAME window as the
+  // totals. The totals are a per-window DELTA when windowSource==='delta', so a caller shown next to them
+  // must be a delta too, else `share(q.calls, totalCalls)` divides a cumulative-since-reset count by a
+  // delta total and names the wrong culprit. Transaction-control statements (BEGIN/COMMIT/SET/SHOW/…) are
+  // connection churn, not requests — dropped from the ranking in every mode.
+  const notTxnControl = (q: RequestVolumeTopQuery) => !isTransactionControlStatement(q.query);
+  const callsCandidates = input.topByCalls.filter(notTxnControl);
+  const rowsCandidates = input.topByRows.filter(notTxnControl);
+  let topCalls: RequestVolumeTopQuery[];
+  let topRows: RequestVolumeTopQuery[];
+  if (isDelta && input.priorPerQuery && input.priorPerQuery.length > 0) {
+    // Diff each candidate's cumulative counter against the prior snapshot, then re-rank + slice by the
+    // per-window delta. `calls`/`rows` on the returned rows become the DELTA, so they add up to (and share
+    // against) the delta totals. A candidate with no prior counter / a reset drops out of the ranking.
+    const currPerQuery: StatStatementPerQuery[] = [...callsCandidates, ...rowsCandidates].map((q) => ({
+      queryid: q.queryid,
+      calls: q.calls,
+      totalExecTime: 0,
+      rows: q.rows,
+    }));
+    const deltas = perQueryDeltaPerHour(input.priorPerQuery, currPerQuery, input.windowHours * 3_600_000);
+    const toDelta = (q: RequestVolumeTopQuery): RequestVolumeTopQuery | null => {
+      const d = deltas.get(q.queryid);
+      return d ? { queryid: q.queryid, query: q.query, calls: d.calls, rows: d.rows } : null;
+    };
+    topCalls = callsCandidates
+      .map(toDelta)
+      .filter((q): q is RequestVolumeTopQuery => q !== null)
+      .sort((a, b) => b.calls - a.calls)
+      .slice(0, 8);
+    topRows = rowsCandidates
+      .map(toDelta)
+      .filter((q): q is RequestVolumeTopQuery => q !== null)
+      .sort((a, b) => b.rows - a.rows)
+      .slice(0, 8);
+  } else {
+    // Reset-window fallback (first sweep / reset detected / no prior per-query): the cumulative top-caller
+    // counts already match the cumulative totals, so share compares like with like. Keep SQL rank order.
+    topCalls = callsCandidates.slice(0, 8);
+    topRows = rowsCandidates.slice(0, 8);
+  }
+  // An infrastructural caller (the auth preamble) can't be spec-fixed directly, but naming it explains
+  // the volume; an app caller in the top list IS the actionable lever.
+  const label = (q: RequestVolumeTopQuery) => isInfrastructuralQuery(q.query) ? " [infrastructural]" : "";
   const windowLine = isDelta
     ? `Window: ${input.windowHours.toFixed(1)}h (delta between two pg_stat_statements snapshots — the rate happening now).`
     : `Window: ${input.windowHours.toFixed(1)}h cumulative since the last pg_stat_statements reset (no prior snapshot yet — this averages the whole reset window, not the current rate).`;
@@ -1385,10 +1492,10 @@ export function analyzeRequestVolume(
     `Totals: ${input.totalCalls.toLocaleString()} statements (${fmtRate(callsPerHr)}/hr${callsOver ? ` — ≥ ${callsFlag.toLocaleString()}/hr flag` : ""}), ${input.totalRows.toLocaleString()} rows shipped (${fmtRate(rowsPerHr)}/hr${rowsOver ? ` — ≥ ${rowsFlag.toLocaleString()}/hr flag` : ""}).`,
     `Rows shipped to clients is the egress proxy — most PostgREST/Supabase billing is metered on it.`,
     ``,
-    `Top callers by request count:`,
+    `Top callers by request count${isDelta ? " (Δ over the window, same basis as the totals)" : ""}:`,
     ...topCalls.map((q) => `  - ${q.calls.toLocaleString()} calls (${share(q.calls, input.totalCalls)} of all)${label(q)} — \`${previewQuery(q.query)}\``),
     ``,
-    `Top callers by rows shipped (egress):`,
+    `Top callers by rows shipped (egress)${isDelta ? " (Δ over the window, same basis as the totals)" : ""}:`,
     ...topRows.map((q) => `  - ${q.rows.toLocaleString()} rows (${share(q.rows, input.totalRows)} of all) over ${q.calls.toLocaleString()} calls${label(q)} — \`${previewQuery(q.query)}\``),
     ``,
     `This is an aggregate VOLUME signal, not a per-query cost problem — a single index won't move it. Cut the volume at the source: widen poll intervals on internal loops, cache/batch hot reads, reuse authenticated connections (a burst of distinct auth sessions is the "connections aren't pooled" tell), and replace row-shipping reads with aggregate RPCs.`,

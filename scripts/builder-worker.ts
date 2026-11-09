@@ -5649,9 +5649,17 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
       const resetWindowHours = statsReset ? Math.max(0, (Date.now() - new Date(statsReset).getTime()) / 3_600_000) : 0;
       const totalsRes = await c.query(`select coalesce(sum(calls),0)::bigint as calls, coalesce(sum(rows),0)::bigint as rows from pg_stat_statements`);
       const totals = (totalsRes.rows[0] ?? {}) as Record<string, unknown>;
-      const topCallsRes = await c.query(`select queryid::text as queryid, query, calls, rows from pg_stat_statements order by calls desc limit 8`);
-      const topRowsRes = await c.query(`select queryid::text as queryid, query, calls, rows from pg_stat_statements order by rows desc limit 8`);
+      // db-health-request-volume-top-callers-use-delta — fetch a WIDE candidate pool (top 30 by calls /
+      // by rows) so analyzeRequestVolume can re-rank by per-window DELTA and still find the true top 8;
+      // the single cumulative top-8 could miss a caller that's only recently become hot. total_exec_time
+      // is carried so the stored per_query snapshot doubles as the slow-query Δ/hr baseline.
+      const topCallsRes = await c.query(`select queryid::text as queryid, query, calls, total_exec_time, rows from pg_stat_statements order by calls desc limit 30`);
+      const topRowsRes = await c.query(`select queryid::text as queryid, query, calls, total_exec_time, rows from pg_stat_statements order by rows desc limit 30`);
       const mapTop = (rs: Array<Record<string, unknown>>) => rs.map((r) => ({ queryid: String(r.queryid ?? ""), query: String(r.query ?? ""), calls: Number(r.calls ?? 0), rows: Number(r.rows ?? 0) }));
+      // Drop transaction-control statements (BEGIN/COMMIT/ROLLBACK/SET/SHOW) — connection churn, not
+      // requests — from the caller ranking (also excluded from the stored snapshot below).
+      const topByCalls = mapTop(topCallsRes.rows as Array<Record<string, unknown>>).filter((q) => !mod.isTransactionControlStatement(q.query));
+      const topByRows = mapTop(topRowsRes.rows as Array<Record<string, unknown>>).filter((q) => !mod.isTransactionControlStatement(q.query));
       const curCalls = Number(totals.calls ?? 0);
       const curRows = Number(totals.rows ?? 0);
       // db-health-detector-measures-current-rate Phase 1 — rate from the DELTA to the ~24h snapshot, not
@@ -5672,15 +5680,30 @@ async function runDbHealthSlowQueryJob(): Promise<void> {
         // The delta window starts at the prior snapshot's capture instant — carried so the enqueue path
         // can suppress a re-proposal whose breach predates a folded fix (Phase 2 post-fix suppression).
         windowStartMs: window.source === "delta" && priorSnapshot ? Date.parse(priorSnapshot.capturedAt) : undefined,
-        topByCalls: mapTop(topCallsRes.rows as Array<Record<string, unknown>>),
-        topByRows: mapTop(topRowsRes.rows as Array<Record<string, unknown>>),
+        topByCalls,
+        topByRows,
+        // db-health-request-volume-top-callers-use-delta — the prior snapshot's per-caller counters so the
+        // top callers are diffed to per-window deltas (same window as the totals), not cumulative counts.
+        priorPerQuery: priorSnapshot?.perQuery,
       });
       if (rvFinding) findings.push(rvFinding);
 
       // Store THIS sweep's snapshot so the next sweep can delta against it. Per-query counters cover the
       // rows we scanned this pass (bounded) — enough for the per-query Δ/hr self-clear. Best-effort.
       try {
-        const perQuery = rows.map((r) => ({ queryid: r.queryid, calls: r.calls, totalExecTime: r.total_exec_time, rows: r.rows }));
+        // db-health-request-volume-top-callers-use-delta — store BOTH the slow-query rows (for
+        // analyzeSlowQuery's Δ/hr self-clear) AND the top request-volume callers by calls + by rows (for
+        // next sweep's per-caller delta ranking), deduped by queryid (slow-query row wins — it carries the
+        // real total_exec_time) and excluding transaction-control statements.
+        const perQueryByQueryid = new Map<string, { queryid: string; calls: number; totalExecTime: number; rows: number }>();
+        for (const r of rows) perQueryByQueryid.set(r.queryid, { queryid: r.queryid, calls: r.calls, totalExecTime: r.total_exec_time, rows: r.rows });
+        for (const raw of [...(topCallsRes.rows as Array<Record<string, unknown>>), ...(topRowsRes.rows as Array<Record<string, unknown>>)]) {
+          const queryid = String(raw.queryid ?? "");
+          if (!queryid || perQueryByQueryid.has(queryid)) continue;
+          if (mod.isTransactionControlStatement(String(raw.query ?? ""))) continue;
+          perQueryByQueryid.set(queryid, { queryid, calls: Number(raw.calls ?? 0), totalExecTime: Number(raw.total_exec_time ?? 0), rows: Number(raw.rows ?? 0) });
+        }
+        const perQuery = Array.from(perQueryByQueryid.values());
         const { error: snapErr } = await db.from("db_stat_statement_snapshots").insert({
           total_calls: curCalls,
           total_rows: curRows,
