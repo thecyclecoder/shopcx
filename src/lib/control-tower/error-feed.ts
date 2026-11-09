@@ -1190,7 +1190,8 @@ export function isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise(
  *      columns on `loop_alerts` — trimmed equal to `column loop_alerts.<col> does not
  *      exist` (or the `public.` qualified variant, with any leading `ERROR: ` prefix
  *      Postgres includes on the logs surface stripped) for `<col>` in {`closed_at`,
- *      `error_signature`, `loop_key`, `message`, `fingerprint`, `title`, `dedupe_key`}.
+ *      `error_signature`, `loop_key`, `message`, `fingerprint`, `title`, `dedupe_key`,
+ *      `signature_hash`}.
  *      The qualified
  *      `<table>.<name>` form is the shape
  *      Postgres emits when PostgREST's CTE wrapper names the relation on the column
@@ -1236,13 +1237,15 @@ export function isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
   // `error_signature` (`supabase-logs:2f7afeedcba03d28`), `loop_key`
   // (`supabase-logs:1676b561414d21b9`), `message` (`supabase-logs:7be91db5b111b4fd`),
   // `fingerprint` (`supabase-logs:0ebf66ac2f9a8f98`), `title`
-  // (`supabase-logs:e66d6020e9db8399`), and `dedupe_key`
-  // (`supabase-logs:2e841decef496022`). All are columns the table has never
+  // (`supabase-logs:e66d6020e9db8399`), `dedupe_key`
+  // (`supabase-logs:2e841decef496022`), and `signature_hash`
+  // (`supabase-logs:9c3b7a1e5f20a4d6`). All are columns the table has never
   // owned — the lifecycle lives on `status` + `resolved_at`, `error_signature` is an
   // `error_events` concept, `loop_key` is a `loop_heartbeats` concept, neither
   // `message` nor `fingerprint` is a `loop_alerts` column (the error signature lives on
   // the `signature` column, not `fingerprint`), `title` is an `error_events`-style
-  // concept, and `dedupe_key` is a `dashboard_notifications.metadata` concept — all
+  // concept, `dedupe_key` is a `dashboard_notifications.metadata` concept, and
+  // `signature_hash` is a stale read confusing it with the real `signature` column — all
   // confused onto `loop_alerts` by the stale direct-REST read. A different missing
   // column on `loop_alerts` (e.g. `resolved_at`, `status`, `workspace_id`) is a real
   // column rename / regression and is intentionally NOT in this set.
@@ -1260,7 +1263,9 @@ export function isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
     stripped === "column loop_alerts.title does not exist" ||
     stripped === "column public.loop_alerts.title does not exist" ||
     stripped === "column loop_alerts.dedupe_key does not exist" ||
-    stripped === "column public.loop_alerts.dedupe_key does not exist";
+    stripped === "column public.loop_alerts.dedupe_key does not exist" ||
+    stripped === "column loop_alerts.signature_hash does not exist" ||
+    stripped === "column public.loop_alerts.signature_hash does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
