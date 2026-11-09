@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST loop_alerts.signature_hash missing-column noise at capture** · verified 2026-11-09 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise`)
