@@ -2736,6 +2736,26 @@ test("isWedgedCycleCharge: stale in_flight on the current cycle is wedged (catch
   assert.equal(isWedgedCycleCharge(charge, sub, NOW), true);
 });
 
+test("isWedgedCycleCharge: a reclaimable 'failed' current-cycle row on a NOT-YET-DUE sub is not wedged (ground truth: sub 9379e53d / next_billing_date in the future)", () => {
+  // The sub's next renewal has not run yet, so the reclaim trigger (a new claim attempt) is not
+  // expected to have fired — the 'should have taken the row over but did not' premise is false.
+  const NOW = new Date("2026-11-09T12:00:00Z").getTime();
+  const charge = { cycle_key: "2026-11-20", status: "failed", claimed_at: "2026-10-01T00:00:00Z" };
+  const sub = { next_billing_date: "2026-11-20" };
+  assert.equal(isWedgedCycleCharge(charge, sub, NOW), false);
+});
+
+test("isWedgedCycleCharge: a stranded stale in_flight row wedges even when the sub is not yet due (crashed attempt, due-guard must not mask it)", () => {
+  const NOW = new Date("2026-11-09T12:00:00Z").getTime();
+  const charge = {
+    cycle_key: "2026-11-20",
+    status: "in_flight",
+    claimed_at: new Date(NOW - (STALE_IN_FLIGHT_RECLAIM_MS + 10_000)).toISOString(),
+  };
+  const sub = { next_billing_date: "2026-11-20" };
+  assert.equal(isWedgedCycleCharge(charge, sub, NOW), true);
+});
+
 test("isWedgedCycleCharge: cycle_key that does NOT match the sub's current next_billing_date is not wedged (dunning moved the calendar forward already)", () => {
   const NOW = new Date("2026-11-01T12:00:00Z").getTime();
   // Sub's live next_billing_date advanced to a later cycle; the older failed row is orphaned
