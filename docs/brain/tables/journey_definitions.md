@@ -58,6 +58,7 @@ const { count } = await admin.from("journey_definitions")
 - `match_patterns` is empty `[]` for non-auto-triggered journeys (e.g. account_linking — only ever prepended).
 - `trigger_intent` is the slug Sonnet may return; lookup is case-insensitive vs `name` too.
 - `slug` is the stable identifier Sol names on the Direction (`plan.journey_slug`) when she picks `chosen_path='journey'` at first-touch. Phase 1 of [[../specs/sol-dispatch-matches-journey-playbook-workflow-via-sdk-not-freeform-cta]] — the [[../libraries/cx-agent-sdk]] `listActionableOutcomes` catalog reader returns rows matched by `trigger_intent` + optional `channels` filter, and [[../libraries/ticket-directions]] `writeDirection` gates the slug against this table (`is_active=true`, workspace-scoped) before the Direction row lands, so an unknown slug bails there — not at Phase 2's `launchJourneyForTicket`.
+- There is **no `intent` column** (nor `steps`) on this table — the slug lives on `trigger_intent`. A foreign/stale PostgREST or Studio client that reads `journey_definitions` with an `intent`/`steps` column it doesn't have emits a `column journey_definitions.intent does not exist` Postgres-log ERROR that no ShopCX code owns; it's dropped at capture by [[../libraries/error-feed]] `isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise` (Control Tower signature `supabase-logs:20fde736a02f1195`) so it never opens a Platform problem, while a real column-missing on a live column still pages.
 
 ---
 

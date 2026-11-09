@@ -105,6 +105,7 @@ import {
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise,
+  isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise,
   isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise,
@@ -19324,6 +19325,95 @@ test("isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise
     isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise(
       "column journey_sessions.journey_name does not exist",
       "update public.journey_sessions set journey_name = $1 where id = $2",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/journey_definitions?select=...intent...` (or a Supabase Studio browse)
+// against our `public.journey_definitions` table with columns it doesn't have (`intent`,
+// `steps`). The table exists but has NEVER carried an `intent` column. Foreign-owned
+// surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `journey_definitions.intent` AND a SELECT-lookup shape on
+// `journey_definitions` (bare OR PostgREST CTE wrapper) are present. A column-missing on a
+// live `journey_definitions` column, on `intent` from any other table, or via a non-SELECT
+// statement still pages.
+
+test("isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise drops the captured supabase-logs:20fde736a02f1195 message+query pair (PostgREST CTE SELECT on journey_definitions.intent)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `journey_definitions.intent` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column journey_definitions.intent does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."journey_definitions"."id", "public"."journey_definitions"."intent" FROM "public"."journey_definitions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column public.journey_definitions.intent does not exist",
+      'WITH pgrst_source AS (SELECT "public"."journey_definitions"."intent" FROM "public"."journey_definitions")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column journey_definitions.intent does not exist",
+      "select id, intent from public.journey_definitions",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column journey_definitions.intent does not exist",
+      "select intent, steps from journey_definitions limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "ERROR: column journey_definitions.intent does not exist",
+      'WITH pgrst_source AS (SELECT "public"."journey_definitions"."intent" FROM "public"."journey_definitions")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column journey_definitions.intent does not exist",
+      "SELECT ID, INTENT FROM PUBLIC.JOURNEY_DEFINITIONS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise KEEPS a column-missing on a live journey_definitions column (journey_name), on intent for another table, or via a non-SELECT statement (real regressions still page)", () => {
+  // A column-missing on a live `journey_definitions` column must still page — the pin is
+  // `journey_definitions.intent` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column journey_definitions.journey_name does not exist",
+      "select journey_name from public.journey_definitions",
+    ),
+    false,
+  );
+  // A column-missing on `intent` from a DIFFERENT table must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column journey_sessions.intent does not exist",
+      "select intent from public.journey_sessions",
+    ),
+    false,
+  );
+  // A non-SELECT statement against `journey_definitions` (real code-bug shape) must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column journey_definitions.intent does not exist",
+      "update public.journey_definitions set intent = $1 where id = $2",
     ),
     false,
   );
