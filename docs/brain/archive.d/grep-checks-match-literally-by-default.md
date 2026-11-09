@@ -1,0 +1,1 @@
+- **Grep checks match literally by default** · verified 2026-11-09 · → [[../libraries/spec-phase-checks-table]]
