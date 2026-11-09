@@ -31,6 +31,7 @@ import {
   isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryOldValueAdhocNoise,
   isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
+  isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
@@ -7265,6 +7266,182 @@ test("isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise returns fa
   assert.equal(
     isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(
       "column dunning_cycles.cycle_key does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise ──
+// Same foreign / stale PostgREST direct-REST noise as the cycle_key sibling, pinned to the
+// `retry_count` column variant (Control Tower signature `supabase-logs:4f1de121bcc18f18`). The
+// `public.dunning_cycles` table exists but has never had a `retry_count` column — no ShopCX code
+// reads it. Drop AT CAPTURE only when BOTH the exact column-missing message on
+// `dunning_cycles.retry_count` AND the SELECT-lookup / pgrst_source wrapper shape on
+// `dunning_cycles` are present. A different table/column or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise drops the ad hoc SELECT lookup on the exact dunning_cycles.retry_count column-missing shape", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.retry_count does not exist",
+      "select id, retry_count from public.dunning_cycles order by created_at desc limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column public.dunning_cycles.retry_count does not exist",
+      "select id, retry_count from public.dunning_cycles order by created_at desc limit 100",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.retry_count does not exist",
+      "select retry_count from dunning_cycles limit 10",
+    ),
+    true,
+  );
+  // A trailing WHERE / ORDER BY / LIMIT is still the ad hoc lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.retry_count does not exist",
+      "select id, retry_count from public.dunning_cycles where status = 'failed' order by created_at desc limit 50",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.retry_count does not exist",
+      "SELECT ID, RETRY_COUNT FROM PUBLIC.DUNNING_CYCLES",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "ERROR: column dunning_cycles.retry_count does not exist",
+      "select retry_count from public.dunning_cycles",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise drops the PostgREST direct-REST WITH pgrst_source wrapper shape (signature 4f1de121bcc18f18)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.retry_count does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."dunning_cycles".* FROM "public"."dunning_cycles" ORDER BY "public"."dunning_cycles"."retry_count" DESC LIMIT 100 ) SELECT * FROM "pgrst_source"',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column public.dunning_cycles.retry_count does not exist",
+      'with pgrst_source as ( select "dunning_cycles".* from "dunning_cycles" order by retry_count desc limit 10 )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise KEEPS a PostgREST INSERT/UPDATE wrapper writing retry_count (a real code-bug still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.retry_count does not exist",
+      'with pgrst_source as ( insert into "public"."dunning_cycles" ("retry_count") values (\'x\') returning * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.retry_count does not exist",
+      'with pgrst_source as ( update "public"."dunning_cycles" set "retry_count" = \'x\' returning * )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise KEEPS a column-missing error on any OTHER table (a different table's retry_count still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column subscription_cycle_charges.retry_count does not exist",
+      "select retry_count from public.subscription_cycle_charges where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column orders.retry_count does not exist",
+      "select retry_count from public.orders limit 10",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise KEEPS a DIFFERENT column-missing on dunning_cycles (a real column regression still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.cycle_key does not exist",
+      "select cycle_key from public.dunning_cycles where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.status does not exist",
+      "select status from public.dunning_cycles where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing dunning_cycles.retry_count still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.retry_count does not exist",
+      "insert into public.dunning_cycles (retry_count) values ('x')",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.retry_count does not exist",
+      "update public.dunning_cycles set retry_count = 'x' where id = 'y'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.retry_count does not exist",
+      "delete from public.dunning_cycles where retry_count = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise("", ""), false);
+  // Exact message but empty / null query — cannot confirm the shape, stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.retry_count does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(
+      "column dunning_cycles.retry_count does not exist",
       null,
     ),
     false,
