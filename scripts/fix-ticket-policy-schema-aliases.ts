@@ -74,6 +74,13 @@ async function main() {
       title: r.title,
       content: corrected,
       category: r.category,
+      // Keep the corrected rule LIVE. The supersede verdict leaves `enabled`
+      // untouched (sonnet-prompts-table.ts applyReviewDecision supersede case)
+      // and buildPreContext loads ONLY `enabled=true AND status='approved'`
+      // rows, so proposing with the default `enabled=false` would land the
+      // corrected rule approved-but-disabled — silently dropping the escalation
+      // hard gate out of the model context once the old enabled row is archived.
+      enabled: true,
     });
     if (!proposed.id) {
       console.error(`  ✗ ${r.id}: propose failed — ${proposed.error}`);
