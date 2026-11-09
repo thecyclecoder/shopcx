@@ -2322,7 +2322,18 @@ export function isWedgedCycleCharge(
   if (currentCycleKey !== charge.cycle_key) return false;
   const claimedAtMs = new Date(charge.claimed_at).getTime();
   if (!Number.isFinite(claimedAtMs)) return false;
-  return now - claimedAtMs > STALE_IN_FLIGHT_RECLAIM_MS;
+  if (now - claimedAtMs <= STALE_IN_FLIGHT_RECLAIM_MS) return false;
+  // Due/overdue guard: a reclaimable (non-`in_flight`, i.e. `failed`) row is only a wedge once the
+  // sub is actually due. If `next_billing_date` is still in the future the sub is not yet due — the
+  // renewal cron has not been expected to fire for this cycle, so the assertion's "the reclaim
+  // should have taken the row over but did not" premise is simply untrue — not a wedge (ground
+  // truth: sub 9379e53d). The `in_flight` path is left untouched so a stranded crashed attempt
+  // still wedges irrespective of due state.
+  if (charge.status !== "in_flight") {
+    const nextBillingMs = sub.next_billing_date ? new Date(sub.next_billing_date).getTime() : NaN;
+    if (Number.isFinite(nextBillingMs) && nextBillingMs > now) return false;
+  }
+  return true;
 }
 
 /**
