@@ -264,6 +264,37 @@ function buildPoliciesSection(policies: AgentPolicyPackageEntry[]): string {
   return formatAgentPolicyPackage(policies);
 }
 
+// Narrow schema-alias guard for ticket policy / prompt text. Approved
+// conversation rules occasionally name a tickets column that does not exist —
+// the live incident was Postgres rejecting a `tickets.assigned_agent` select
+// traced to an approved customer-support prompt, which led Sol/Sonnet to emit a
+// PostgREST read for a legacy/invented field. This rewrites the KNOWN stale
+// aliases to the real tickets schema BEFORE the text is placed in the model
+// context, so the model never sees (and therefore never reproduces) the bad
+// column name. Real tickets columns: `assigned_to` (human ownership),
+// `escalated_at` / `escalated_to` (escalation state). Pure + narrow by design —
+// it only touches these specific tokens; see
+// docs/brain/specs/ticket-policy-schema-alias-guard.md.
+const TICKET_SCHEMA_ALIAS_REWRITES: Array<{ pattern: RegExp; replacement: string }> = [
+  // `assigned_agent` is an invented field — the real human-ownership column is
+  // `assigned_to`. Distinctive enough to rewrite wherever it appears (this also
+  // covers the qualified `tickets.assigned_agent` form).
+  { pattern: /\bassigned_agent\b/g, replacement: "assigned_to" },
+  // A bare, qualified `tickets.escalated` is not a column — escalation state
+  // lives in `escalated_at` / `escalated_to`. The negative lookahead leaves the
+  // already-correct `escalated_at` / `escalated_to` untouched, and only the
+  // qualified form is rewritten so ordinary prose ("escalated tickets") is safe.
+  { pattern: /\btickets\.escalated\b(?!_)/g, replacement: "tickets.escalated_at" },
+];
+
+export function canonicalizeTicketPolicySchemaTerms(content: string): string {
+  let out = content;
+  for (const { pattern, replacement } of TICKET_SCHEMA_ALIAS_REWRITES) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+
 function buildPromptSections(prompts: { category: string; title: string; content: string }[]): string {
   const grouped: Record<string, string[]> = {};
   for (const p of prompts) {
@@ -525,6 +556,15 @@ async function buildPreContext(
     })(),
   ]);
 
+  // Rewrite known stale tickets-schema aliases in approved prompt content
+  // before it reaches the model context (see canonicalizeTicketPolicySchemaTerms).
+  // This is the narrow guard that stops Sol/Sonnet from reproducing a
+  // non-existent column name like `tickets.assigned_agent` from an approved rule.
+  const canonicalPrompts = (dbPrompts || []).map((p) => ({
+    ...p,
+    content: canonicalizeTicketPolicySchemaTerms(p.content),
+  }));
+
   const wsName = workspace?.name || "our store";
   const cName = [customer?.first_name, customer?.last_name].filter(Boolean).join(" ") || "Customer";
   const cEmail = customer?.email || "unknown";
@@ -768,7 +808,7 @@ ${persBlock}
 
 ${buildPoliciesSection(policies || [])}
 
-${buildPromptSections(dbPrompts || [])}
+${buildPromptSections(canonicalPrompts)}
 
 ${compiledLibrarySection ? `${compiledLibrarySection}\n\n` : ""}DISCOUNT-CLAIM VERIFICATION (hard rule — never agree-and-refund a discount claim):
 UNIDENTIFIED CUSTOMER — IDENTIFY FIRST, PROMISE NOTHING (ticket 879dd36b, 2026-08-12).
