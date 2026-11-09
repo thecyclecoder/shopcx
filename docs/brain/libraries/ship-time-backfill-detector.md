@@ -6,7 +6,7 @@ The post-merge safety net for one-time data backfills that ship as `scripts/_bac
 
 ## North star — detect + escalate; the CEO disposes
 
-Mirrors the migration-drift ledger pattern ([[control-tower/migration-drift]]). The detector is the SUPERVISOR on the "ship-a-backfill" proxy — its degenerate state is a spec whose data-op silently never runs (the Superfood Tabs 2/4 incident; the migration-ledger drift class). It escalates every un-run row to the CEO inbox as a routed `agent_approval_request` and NEVER auto-passes. Phase 2 will add the auto-execute + Control Tower tile so the loop closes for idempotent scripts.
+Mirrors the migration-drift ledger pattern ([[control-tower/migration-drift]]). The detector is the SUPERVISOR on the "ship-a-backfill" proxy — its degenerate state is a spec whose data-op silently never runs (the Superfood Tabs 2/4 incident; the migration-ledger drift class). It escalates every un-run row to the CEO inbox as a routed `agent_approval_request` and NEVER auto-passes. Phase 2 closes the loop via [[ship-time-backfill-executor]] + [[ship-time-backfill-reaudit]]: the executor spawns `pending` rows with `--apply`, and the reaudit repairs any historical rows that the old executor only dry-ran.
 
 ## Exports
 
@@ -29,7 +29,7 @@ Mirrors the migration-drift ledger pattern ([[control-tower/migration-drift]]). 
 - **NEVER THROWS.** Wrapped in try/catch so a GitHub outage / missing token / DB hiccup can't break the merge hook that carries it. The caller ALSO wraps the call in try/catch, so nothing here can break `applyMergedBuildEffects`.
 - **Idempotent on repeat calls.** The ledger's unique `(workspace_id, spec_slug, script_path)` and the escalation's per-UTC-day dedupe mean the manual-squash-reconcile + auto-merge-webhook race collapses to one row + one card, safe to re-fire.
 - **BOUNDED convention.** Only `scripts/_backfill-*.ts` filenames match. An arbitrary existing script is never surfaced or auto-run — the ledger scopes strictly to files THIS spec's merge added.
-- **NEVER SILENTLY PASSES.** A `pending` or `failed` row escalates every UTC day until it becomes `ran` (Phase 2 will provide the executor; today the escalation calls for a human to run `npx tsx <path>` or convert it to a migration).
+- **NEVER SILENTLY PASSES.** A `pending` or `failed` row escalates every UTC day until it becomes `ran` — the [[ship-time-backfill-executor]] spawns the script on the box post-merge, or a human can run `npx tsx <path>` / convert it to a migration.
 - **NODE-COMPLETENESS TRIO** ([[../operational-rules]] § Node completeness). OWNER: `platform` in the MONITORED_LOOPS entry. KILL-SWITCH ANCESTRY: inherits Platform's via the node-registry (`parentIdForOwner('platform') → 'director:platform'` → `dept:platform`). HEARTBEAT: `emitReactiveHeartbeat(SHIP_TIME_BACKFILL_LOOP_ID, …)` from `try/finally`.
 
 ## Related

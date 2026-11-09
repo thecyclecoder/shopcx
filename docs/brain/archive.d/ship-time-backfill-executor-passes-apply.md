@@ -1,0 +1,1 @@
+- **Backfill runner actually applies backfills** · verified 2026-11-09 · → [[../libraries/ship-time-backfill-executor]] · [[../libraries/ship-time-backfill-detector]] · [[../libraries/ship-time-backfill-reaudit]]

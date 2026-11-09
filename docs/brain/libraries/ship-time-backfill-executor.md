@@ -6,7 +6,7 @@ Closes the loop the [[ship-time-backfill-detector]] opens. The detector ledgers 
 
 ## North star — run the data-op for real, never a phantom success
 
-The executor's degenerate state is marking a row `ran` when nothing wrote. That exact bug shipped: `spawnBackfill` spawned `npx tsx -- <script>` with NO `--apply`, but 42 of 55 backfill scripts on main are **dry-run by default** (`const APPLY = process.argv.includes("--apply") || process.env.APPLY === "1"`). So the executor dry-ran them and the ledger recorded `ran` though prod was untouched — ~14 APPLY-gated rows marked `ran` this way. [[../specs/ship-time-backfill-executor-passes-apply]] Phase 1 fixes it.
+The executor's degenerate state is marking a row `ran` when nothing wrote. That exact bug shipped: `spawnBackfill` spawned `npx tsx -- <script>` with NO `--apply`, but 42 of 55 backfill scripts on main are **dry-run by default** (`const APPLY = process.argv.includes("--apply") || process.env.APPLY === "1"`). So the executor dry-ran them and the ledger recorded `ran` though prod was untouched — ~14 APPLY-gated rows marked `ran` this way. [[../specs/ship-time-backfill-executor-passes-apply]] Phase 1 fixed it via `buildBackfillArgv` + `buildBackfillEnv` + `isDryRunStdout` detection.
 
 ## Exports
 
