@@ -3062,6 +3062,64 @@ export function isForeignSupabasePostgresMissingOrdersSourceColumnNoise(
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `orders.updated_at`. Our `orders` table never carried a plain `updated_at` column — no
+ * ShopCX code path (src/, scripts/, shopify-extension/, supabase/migrations/, docs/brain/)
+ * issues a SELECT on `orders.updated_at`. The message appears on Supabase's `postgres_logs`
+ * feed only when an external / manual tool does a raw `select ... updated_at ... from
+ * public.orders` lookup — a foreign REST client, a stale Supabase Studio Table Editor sort,
+ * an exploratory SQL session — or the PostgREST `WITH pgrst_source AS ( SELECT ... FROM
+ * "public"."orders" ... )` CTE wrapper the same client emits over the REST endpoint. There
+ * is no lever from ShopCX to make that query resolve — paging Platform on it (Control Tower
+ * signature `supabase-logs:cbf98fb3e48e086a`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingOrdersSourceColumnNoise` — same narrow-
+ * gating shape, scoped to the non-existent `updated_at` column being looked up on
+ * `public.orders`.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column orders.updated_at does not exist` (with or without the
+ *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.orders` — either
+ *      (a) the bare `select ... from public.orders` shape, OR (b) the PostgREST-
+ *      generated `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )`
+ *      CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `orders` (a real orders-schema
+ *     regression on a live column) still pages,
+ *   - a column-missing error for `updated_at` on ANY OTHER table still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL on `orders`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column orders.updated_at does not exist" ||
+    stripped === "column public.orders.updated_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?orders\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?orders\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `coupons.discount_type`. Our `coupons` table never carried the generic coupon-schema
  * shape (`discount_type` / `discount_value` / `active` / `expires_at`) an external client
  * is probing for — no in-tree reader (src/, scripts/, shopify-extension/,

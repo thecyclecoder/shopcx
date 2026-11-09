@@ -82,6 +82,7 @@ import {
   isForeignSupabasePostgresMissingLoopHeartbeatsBeatAtDirectRestNoise,
   isForeignSupabasePostgresMissingWorkspaceMembersCustomerIdDirectRestNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingCouponsSourceColumnNoise,
   isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise,
@@ -1124,6 +1125,86 @@ test("isForeignSupabasePostgresMissingCouponsSourceColumnNoise KEEPS a non-SELEC
     isForeignSupabasePostgresMissingCouponsSourceColumnNoise(
       "",
       "select source from public.coupons",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise drops the foreign orders.updated_at SELECT lookup", () => {
+  // The captured incident shape (Control Tower `supabase-logs:cbf98fb3e48e086a`): an external
+  // REST client (or a stale Supabase Studio sort) reads `orders?select=...updated_at...`,
+  // PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )`
+  // CTE, and Postgres rejects with `column orders.updated_at does not exist`.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise(
+      "column orders.updated_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."orders"."id", "public"."orders"."updated_at" FROM "public"."orders" ORDER BY "public"."orders"."updated_at" DESC LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // Bare SELECT form.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise(
+      "column orders.updated_at does not exist",
+      "select updated_at from public.orders order by updated_at desc limit 10",
+    ),
+    true,
+  );
+  // `public.`-qualified message + `ERROR: ` prefix are both normalized before the check.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise(
+      "ERROR: column public.orders.updated_at does not exist",
+      'WITH pgrst_source AS ( SELECT "updated_at" FROM "public"."orders" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise KEEPS a non-SELECT statement, a different column, a different table, and empty markers", () => {
+  // The exact message via a non-SELECT statement (UPDATE write) is a real regression and
+  // still pages — the pin is the SELECT-lookup shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise(
+      "column orders.updated_at does not exist",
+      "update public.orders set updated_at = now() where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise(
+      "column orders.updated_at does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."orders" SET "updated_at" = $1 WHERE "id" = $2 RETURNING * )',
+    ),
+    false,
+  );
+  // A missing column on a DIFFERENT, live column of `orders` is a real regression and pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise(
+      "column orders.total_cents does not exist",
+      "select total_cents from public.orders",
+    ),
+    false,
+  );
+  // A missing `updated_at` column on ANOTHER table is a real code bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise(
+      "column customers.updated_at does not exist",
+      "select updated_at from public.customers where updated_at is null",
+    ),
+    false,
+  );
+  // Both markers are required.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise(
+      "column orders.updated_at does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise(
+      "",
+      "select updated_at from public.orders",
     ),
     false,
   );
