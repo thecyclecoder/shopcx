@@ -1,0 +1,1 @@
+- **Stop ticket AI policies from naming non-existent assignment columns** · verified 2026-11-09 · → [[../libraries/sonnet-orchestrator-v2]]
