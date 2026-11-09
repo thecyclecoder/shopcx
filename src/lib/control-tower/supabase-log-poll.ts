@@ -48,6 +48,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
   isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
@@ -454,6 +455,13 @@ const LOG_QUERIES: LogQuery[] = [
       // lookup shape on `agent_jobs` (bare or PostgREST CTE wrapper) — a different missing
       // column on the table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale external/REST client SELECTed the
+      // non-existent `attempts` column from `agent_jobs` (Control Tower signature
+      // `supabase-logs:014f31bac4b0502c`). Narrowly gated to require BOTH the exact
+      // `column agent_jobs.attempts does not exist` message AND the SELECT-lookup shape on
+      // `agent_jobs` (bare or PostgREST CTE wrapper) — a different missing column on the table,
+      // or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale external/REST client assumed every
       // table has an `id` column and SELECTed/ordered `qb_shipping_protection_products` by `id`,
       // but that table's PK is the composite `(workspace_id, shopify_product_id)` and no `id`
