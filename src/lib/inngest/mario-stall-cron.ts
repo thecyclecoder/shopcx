@@ -18,6 +18,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import {
   evaluateStalledSpecs,
   enqueueMarioJob,
+  escalateIdleSpecsToCeo,
   readMarioAccuracy,
   readMarioAccuracyAlarmPct,
 } from "@/lib/mario";
@@ -78,6 +79,23 @@ export const marioStallCron = inngest.createFunction(
         jobs_deduped: jobsDeduped,
         cap_reached: capReached,
       };
+    });
+
+    // Idle-spec backstop (idle-spec-backstop-escalates-to-ceo Phase 1) — the TIME-BASED catch-all that
+    // runs right after `evaluateStalledSpecs`' specific detectors. Per workspace, card every spec idle
+    // ≥ 3 days (no phase change / new build commit / merged PR) with its concrete reason to the CEO
+    // approvals inbox. Deduped per (spec, reason) + self-retiring, so a persistent stall pings once.
+    // Best-effort per workspace — one tenant's failure never aborts the sweep.
+    await step.run("escalate-idle-specs", async () => {
+      const admin = createAdminClient();
+      const { data: workspaces } = await admin.from("workspaces").select("id");
+      for (const ws of workspaces ?? []) {
+        try {
+          await escalateIdleSpecsToCeo(admin, ws.id);
+        } catch (e) {
+          console.warn(`[mario-stall-cron] idle-spec backstop for ws=${ws.id} failed:`, e instanceof Error ? e.message : e);
+        }
+      }
     });
 
     // Phase 4 — supervisor telemetry alarm. Per workspace, compute the last-24h accuracy_pct;

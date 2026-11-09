@@ -205,6 +205,7 @@
     "test:mario-failed-build-escalation-anchor": "tsx --test src/lib/mario.failed-build-escalation-anchor.test.ts",
     "test:mario-init-loop-guard-owned-slugs": "tsx --test src/lib/mario.init-loop-guard-owned-slugs.test.ts",
     "test:mario-intent-file-line": "tsx --test src/lib/mario.intent-file-line.test.ts",
+    "test:mario-idle-spec-backstop": "tsx --test src/lib/mario.idle-spec-backstop.test.ts",
     "test:agent-jobs-columns": "tsx --test src/lib/agent-jobs-columns.test.ts",
     "test:build-lifecycle": "tsx --test src/lib/build-lifecycle.test.ts",
     "test:box-auth-refresh": "tsx --test scripts/builder-worker.auth-refresh.test.ts",
