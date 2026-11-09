@@ -48,6 +48,32 @@ Closing the holes stops new bad checks, but every check authored BEFORE the fix 
 
 The two known-good repairs already applied by hand on 2026-08-02 (subscription-mutation's `verifyContractEndState` + `test:.*mutation-verify`; placeholder's `resolvePlaceholderSafeMessage|stripUnsubstitutedPlaceholders`) sit correctly outside the offender set — the subscription-mutation names are pinned in the spec body and the placeholder pattern is an alternation both of whose branches the placeholder spec names.
 
+### Grep checks match literally by default: grepModeOf + GrepCheckParams.mode
+
+[[../specs/grep-checks-match-literally-by-default]] — `GrepCheckParams` carries an optional
+`mode?: 'literal' | 'regex'`, and this module exports the ONE reader `grepModeOf(params)` that
+resolves an unset `mode` to `'literal'`. Agents author code snippets, not regexes, so a NEW grep
+check is interpreted as a fixed string: a pattern like `isForeign…AdhocNoise(message, query)` is
+searched verbatim instead of being read as a regex group (the parens) that can never match the
+call site. BOTH grep lanes route through `grepModeOf` so they cannot drift — [[spec-check-runner]]
+`buildGrepArgv` prepends `-F` for literal, and [[specs-table]] `defaultRunGitGrepOnBranch` uses
+`git grep -F` for literal / `-E` for regex (evidence appends `[literal: -F]` when it fired). The
+author-time lints that only make sense for a regex (`validateGrepPatternIsPosixEre` for PCRE
+constructs, `validateGrepPatternIsNotMisreadLiteral` for call-site groups / empty alternations)
+run ONLY in regex mode — a literal pattern needs no escaping — and the misread lint now suggests
+`mode:'literal'` as the fix.
+
+Behavior is preserved for everything already shipped: migration
+`20270113120000_grep_check_mode_backfill` stamps every pre-existing grep row `mode:'regex'` (so
+nothing currently passing changes), then demotes to `'literal'` only the rows whose pattern reads
+like a bare call site (an identifier char immediately followed by `(`) and carries none of the
+real-regex markers `|`, `.*`, `\b`, `^`, `$`, `\(` — exactly the unpassable code-snippet checks
+this spec fixes.
+
+Ground-truth incident (2026-11-09): error-feed-drop-* specs each failed self-verify three times on
+a grep check `isForeign…AdhocNoise(message, query)` because both lanes read it as a regex and the
+literal call site could never match; the two specs sat 10–16 days before this fix.
+
 ### Grep is smart-case: shouldGrepCaseInsensitively
 
 [[../specs/spec-phase-check-grep-is-smart-case]] Phase 1 — this module exports the ONE
