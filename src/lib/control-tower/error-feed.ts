@@ -1827,6 +1827,67 @@ export function isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNo
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `updated_at` column for an ad hoc
+ * direct-REST read of `public.agent_action_requests`. A foreign/stale PostgREST client (or a
+ * Supabase Studio session) reads `agent_action_requests` assuming a conventional `updated_at`
+ * column that the table never carried — the resulting undefined_column ERROR is repair work
+ * for a query no ShopCX code owns.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise` — same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` message + SELECT-lookup
+ * shape that covers BOTH the bare SELECT and the PostgREST CTE wrapper), scoped to the
+ * `agent_action_requests.updated_at` direct-REST shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for `updated_at` on
+ *      `agent_action_requests` — trimmed equal to `column agent_action_requests.updated_at
+ *      does not exist` or the `public.`-qualified variant (with any leading `ERROR: ` prefix
+ *      Postgres includes on the logs surface stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.agent_action_requests` —
+ *      either (a) the bare `select ... from (public.)?agent_action_requests` shape, OR (b) the
+ *      PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."agent_action_requests" ... )` CTE wrapper form with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error on ANY OTHER table (a real schema regression) still pages,
+ *   - a column-missing error on `agent_action_requests` for a DIFFERENT column (a real column
+ *     rename that broke a live query) still pages — the pin names
+ *     `agent_action_requests.updated_at` only,
+ *   - an `agent_action_requests.updated_at` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
+ *     SELECT-lookup shape; the CTE branch likewise requires the wrapped op to be a SELECT,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column agent_action_requests.updated_at does not exist" ||
+    stripped === "column public.agent_action_requests.updated_at does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `agent_action_requests` — any trailing WHERE/LIMIT/ORDER BY is fine;
+  // the pin is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real
+  // code-bug shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?agent_action_requests\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."agent_action_requests" ... )` with double-quoted identifiers. Same foreign-owned
+  // read, different rendering. Guarded so the CTE branch requires the wrapped op to be a SELECT.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."agent_action_requests"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing `customer_id` column for an ad hoc
  * direct-REST read of `public.fraud_cases`. A foreign/stale PostgREST client read
  * `fraud_cases` expecting a singular `customer_id` FK column our schema never carried — our
