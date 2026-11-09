@@ -7,7 +7,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import { getRoadmap, getSpec, listArchivedSlugs, type Phase } from "@/lib/brain-roadmap";
 import { rollupPhaseStatus } from "@/lib/spec-card-state";
-import { getSpec as getSpecFromDb, listSpecs, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete, verifyPhaseAccumulatedOnBranch, mergeContainsPhaseBuild, type VerifyPhaseDeps, type SpecStatus } from "@/lib/specs-table";
+import { getSpec as getSpecFromDb, listSpecs, stampPhaseShipped, stampSpecMergeProvenance, isSpecAccumulationComplete, verifyPhaseAccumulatedOnBranch, mergeContainsPhaseBuild, type VerifyPhaseDeps, type SpecStatus, type SpecRow } from "@/lib/specs-table";
 
 export type JobStatus =
   | "queued"
@@ -1369,6 +1369,57 @@ export async function maybeEnqueuePreMergeSecurityOnAccumulation(_args: {
  * `security-review` row from `runSpecTestJob`'s evidence-backed fused envelope). `securityEnqueued`
  * stays on the result shape for backward-compat and is always empty. Best-effort per branch; never throws.
  */
+/**
+ * standing-pass-sweeps-scan-in-flight-specs-only — one batched load of the NON-TERMINAL specs for the
+ * standing pass, keyed by slug. The three sweeps below (`backstopPreMergeChecks`,
+ * `escalateStalledPromoteEligibility`, `promoteEligibleSpecsToGoalBranch`) each used to walk every
+ * historical `claude/build-*` build job and call `getSpecFromDb` PER SLUG (an N+1 over ~746 slugs,
+ * almost all long-finished) before skipping the shipped/folded/merged ones — ~12k `getSpec` calls an
+ * hour with no real work happening (the DB-health ~22.9M-calls/day finding). This replaces that N+1
+ * with ONE `listSpecs` RPC per pass: load the in-flight specs up front, drop every build job whose
+ * slug isn't in the map BEFORE any per-slug read, and read the spec straight from the map.
+ *
+ * "In-flight" = the DERIVED card status ([[../libraries/brain-roadmap]] `deriveSpecCardStatus`) is not
+ * `shipped` and the spec is not folded/archived. `listSpecs({ scope: 'active' })` already excludes
+ * folded server-side; `deriveSpecCardStatus` then drops the shipped-but-not-yet-folded tail (its stored
+ * `status` column is null — shipped is derived from the phase/merge rollup, not stored). No raw
+ * `.from('specs')` — the specs-table SDK is the only reader.
+ *
+ * Keyed by slug. When `workspaceId` is omitted the map is loaded for every workspace that owns a build
+ * job (this app is effectively single-tenant, so slugs don't collide); consumers still assert
+ * `spec.workspace_id === job.workspace_id` so the lookup is workspace-scoped exactly as the old
+ * `getSpecFromDb(job.workspace_id, slug)` was — a cross-workspace slug reads as "not in-flight here",
+ * never another workspace's row.
+ */
+export async function loadInFlightSpecsBySlug(
+  db: Admin,
+  workspaceId?: string,
+): Promise<Map<string, SpecRow>> {
+  const bySlug = new Map<string, SpecRow>();
+  const { deriveSpecCardStatus } = await import("@/lib/brain-roadmap");
+  let workspaceIds: string[];
+  if (workspaceId) {
+    workspaceIds = [workspaceId];
+  } else {
+    // Distinct workspaces that own a build job — the same universe the sweeps' `agent_jobs` scans cover.
+    // One bounded single-column read replaces the per-slug `getSpec` N+1 it enables below.
+    const { data } = await db.from("agent_jobs").select("workspace_id").eq("kind", "build");
+    workspaceIds = [...new Set(((data ?? []) as Array<{ workspace_id: string }>).map((r) => r.workspace_id))];
+  }
+  for (const ws of workspaceIds) {
+    // scope:'active' ⇒ status IS NULL OR status <> 'folded' (folded excluded server-side).
+    const specs = await listSpecs(ws, { scope: "active" });
+    for (const spec of specs) {
+      // deriveSpecCardStatus maps a folded override → "shipped" and never returns "folded", so the single
+      // shipped check covers both terminal states (and `scope:'active'` already dropped folded server-side).
+      const derived = deriveSpecCardStatus(spec, spec.phases);
+      if (derived === "shipped") continue; // terminal — not in-flight
+      bySlug.set(spec.slug, spec);
+    }
+  }
+  return bySlug;
+}
+
 export interface PreMergeBackstopResult {
   /** branches whose pre-merge spec-test was (re-)enqueued this pass. */
   specTestEnqueued: string[];
@@ -1394,6 +1445,12 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
     // spec's stale READY-preview branch got a fresh security-review enqueued each pass, forever (observed on
     // spec-test-request-fix-inline-author-and-approve + in-testing-board-and-lifecycle-timeline). The
     // archived-slug set is built once up front so the per-branch test is a cheap lookup.
+    // standing-pass-sweeps-scan-in-flight-specs-only: load the in-flight specs ONCE up front (one
+    // `listSpecs` RPC per pass) so a build job for a long-finished spec is dropped by a cheap map lookup
+    // BEFORE `findMergedSiblingBuild` / `getSpecFromDb` — retiring the per-slug N+1 that re-read ~746
+    // historical slugs each pass. The map also carries the spec row, so the per-slug `getSpecFromDb`
+    // below is gone. (The `archivedSlugs` set still fast-skips folded slugs the same way it did before.)
+    const inFlightBySlug = await loadInFlightSpecsBySlug(admin);
     const archivedSlugs = new Set(await listArchivedSlugs());
     const { data: jobs } = await admin
       .from("agent_jobs")
@@ -1424,25 +1481,24 @@ export async function backstopPreMergeChecks(adminClient?: Admin): Promise<PreMe
       // already merged/folded — so don't (re-)enqueue spec-test or security for it. (Checked BEFORE the
       // preview-state branch so the no-preview RECOVERY path below also honours it.)
       if (archivedSlugs.has(slug)) continue;
+      // standing-pass-sweeps-scan-in-flight-specs-only: in-flight gate FIRST. A slug absent from the
+      // batched in-flight map (shipped/folded/archived/deleted, or in-flight only in another workspace)
+      // is dropped here — before `findMergedSiblingBuild` / any per-slug read. This subsumes the old
+      // `!specRow` (deleted spec) + `specRow.status === shipped/folded` skips, and reads the spec row
+      // straight from the map (no `getSpecFromDb`). Workspace-scoped exactly as the old per-slug read:
+      // the map entry must belong to THIS job's workspace.
+      const specRow = inFlightBySlug.get(slug);
+      if (!specRow || specRow.workspace_id !== j.workspace_id) continue;
       // ⭐ vault-security-review-loop-fix (MERGED-SPEC SKIP — post-merge backstop loop fix): a build whose PR is
       // already MERGED has its `claude/build-*` branch DELETED, so a pre-merge spec-test / security review of it
       // is meaningless — it reviews a gone branch ("[security] reviewing unmerged branch …" for a deleted ref,
-      // wasting Max sessions every pass). The `spec.status === shipped/folded` guard below is NOT enough: a spec
-      // whose merge stamped only ONE phase (the BUG 1 case) still reads `in_progress`/`planned` even though its
-      // PR merged, so the security loop ran forever (noop-pipeline-test-4 / #837). Skip on the actual MERGE
-      // signal: the latest build job for the slug is `merged`, OR a merged sibling build exists for the slug.
+      // wasting Max sessions every pass). The in-flight-map gate above is NOT enough: a spec whose merge stamped
+      // only ONE phase (the BUG 1 case) still derives `in_progress`/`planned` even though its PR merged, so the
+      // security loop ran forever (noop-pipeline-test-4 / #837). Skip on the actual MERGE signal: the latest
+      // build job for the slug is `merged`, OR a merged sibling build exists for the slug.
       if (j.status === "merged") continue;
       const mergedSibling = await findMergedSiblingBuild(j.workspace_id, slug, { admin });
       if (mergedSibling) continue;
-      const specRow = await getSpecFromDb(j.workspace_id, slug).catch(() => null);
-      // deleted-spec skip: a build job whose spec ROW is GONE (the CEO deleted a redundant/malformed spec —
-      // the pm-detail-page + pr-resolve dismissals on 2026-07-02) has nothing to pre-merge-test or promote,
-      // yet its `claude/build-*` branch lingers. Without this, the backstop re-enqueues a spec-test EVERY
-      // pass — each parks ("spec gone") → a fresh "Parked spec-test" card + wasted spec-test tokens (a
-      // contributor to the spec-test budget breach). getSpecFromDb null = deleted (or a transient read miss,
-      // in which case a one-tick skip is harmless — the next pass retries).
-      if (!specRow) continue;
-      if (specRow.status === "shipped" || specRow.status === "folded") continue;
 
       let previewUrl = j.preview_url;
       // ⭐ NO-CAPTURED-PREVIEW RECOVERY (fix: a resume-after-approval finalize never captures the branch tip's
@@ -1622,6 +1678,9 @@ export async function escalateStalledPromoteEligibility(
   const out: { scanned: number; escalated: PromoteStallEscalation[] } = { scanned: 0, escalated: [] };
   try {
     const cutoffIso = new Date(Date.now() - PROMOTE_STALL_ESCALATE_AFTER_MS).toISOString();
+    // standing-pass-sweeps-scan-in-flight-specs-only: batch-load the in-flight specs once, so a stalled
+    // candidate for a long-finished spec drops by a map lookup instead of a per-slug `getSpecFromDb`.
+    const inFlightBySlug = await loadInFlightSpecsBySlug(admin);
     // Candidates: the latest branch-owning build per spec that OPENED A PR, is unmerged, and whose PR has
     // been open past the stall window. `created_at` ordering + a seen-set mirrors the shape
     // `backstopPreMergeChecks` uses, so the two agree on "the branch-bearing row for this spec".
@@ -1650,9 +1709,10 @@ export async function escalateStalledPromoteEligibility(
       if (seen.has(key)) continue;
       seen.add(key);
       if (j.status === "merged") continue; // landed — nothing stalled
-      const spec = await getSpecFromDb(j.workspace_id, slug).catch(() => null);
-      if (!spec) continue; // deleted spec — not a stall
-      if (spec.status === "shipped" || spec.status === "folded") continue;
+      // standing-pass-sweeps-scan-in-flight-specs-only: in-flight gate from the batched map (subsumes the
+      // old deleted-spec + shipped/folded skips). Workspace-scoped like the old per-slug `getSpecFromDb`.
+      const spec = inFlightBySlug.get(slug);
+      if (!spec || spec.workspace_id !== j.workspace_id) continue;
       out.scanned++;
 
       const elig = await isSpecPromoteEligible(j.workspace_id, slug, branch).catch(() => null);
@@ -1791,9 +1851,15 @@ export async function isSpecPromoteEligible(
  * goals-table-only (no raw PM SQL). Used by the spec→goal promote (which goal branch to merge into) AND the
  * claim-time gate (are two specs goal-MATES — same goal?).
  */
-export async function resolveGoalSlugForSpec(workspaceId: string, slug: string): Promise<string | null> {
+export async function resolveGoalSlugForSpec(
+  workspaceId: string,
+  slug: string,
+  preloadedSpec?: SpecRow | null,
+): Promise<string | null> {
   try {
-    const spec = await getSpecFromDb(workspaceId, slug);
+    // standing-pass-sweeps-scan-in-flight-specs-only: when the caller already holds the spec (from the
+    // batched in-flight map), use it instead of re-reading — `undefined` means "not provided, fetch it".
+    const spec = preloadedSpec !== undefined ? preloadedSpec : await getSpecFromDb(workspaceId, slug);
     if (!spec || !spec.milestone_id) return null;
     const admin = createAdminClient();
     const { data: ms } = await admin
@@ -1956,6 +2022,10 @@ export async function promoteEligibleSpecsToGoalBranch(adminClient?: Admin): Pro
       .not("spec_branch", "is", null)
       .order("created_at", { ascending: false });
     const { isGoalParentExempt } = await import("@/lib/goals-table");
+    // standing-pass-sweeps-scan-in-flight-specs-only: batch-load the in-flight specs once. A candidate for a
+    // long-finished spec is dropped by a map lookup BEFORE resolveGoalSlugForSpec, and the preloaded row is
+    // threaded into resolveGoalSlugForSpec + reused for the TERMINAL-SPEC gate — no per-slug getSpecFromDb.
+    const inFlightBySlug = await loadInFlightSpecsBySlug(admin);
     const seen = new Set<string>();
     const exemptByGoal = new Map<string, boolean>(); // memoize parent-exemption per (workspace:goalSlug)
     type Cand = { workspaceId: string; slug: string; branch: string; goalSlug: string };
@@ -1967,7 +2037,12 @@ export async function promoteEligibleSpecsToGoalBranch(adminClient?: Admin): Pro
       const key = `${j.workspace_id}:${slug}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const goalSlug = await resolveGoalSlugForSpec(j.workspace_id, slug);
+      // standing-pass-sweeps-scan-in-flight-specs-only: in-flight gate FIRST — this subsumes the TERMINAL-SPEC
+      // SKIP below (a shipped/folded spec isn't in the map), so a done goal's already-shipped specs seed
+      // nothing. Workspace-scoped like the old per-slug read.
+      const specRow = inFlightBySlug.get(slug);
+      if (!specRow || specRow.workspace_id !== j.workspace_id) { result.skipped.push(slug); continue; }
+      const goalSlug = await resolveGoalSlugForSpec(j.workspace_id, slug, specRow);
       if (!goalSlug) continue; // one-off / not goal-bound — M4 is goal-branch integration only
       // PARENT-GOAL SKIP (parent-goal-not-goal-branch-promotable): a PARENT goal (`is_parent`, or structurally
       // — has child goals / no buildable specs) is EXEMPT from the atomic goal-branch promotion flow (its
@@ -1982,13 +2057,8 @@ export async function promoteEligibleSpecsToGoalBranch(adminClient?: Admin): Pro
         exemptByGoal.set(exKey, exempt);
       }
       if (exempt) { result.skipped.push(slug); continue; }
-      // TERMINAL-SPEC SKIP (all-shipped goal seeds nothing): a spec already `shipped`/`folded` landed one-off on
-      // main — it bypassed the goal-branch flow entirely, so promoting it now would spuriously seed a goal
-      // branch for a done goal. A goal whose member specs are ALL terminal yields zero candidates ⇒ no branch
-      // seeded (the requested "skip an all-shipped goal" guard, applied at spec granularity so a goal with SOME
-      // in-flight specs still promotes those).
-      const specRow = await getSpecFromDb(j.workspace_id, slug);
-      if (specRow && (specRow.status === "shipped" || specRow.status === "folded")) { result.skipped.push(slug); continue; }
+      // TERMINAL-SPEC SKIP is now handled by the in-flight-map gate at the top of the loop (a
+      // shipped/folded spec isn't in `inFlightBySlug`), so the second per-slug getSpecFromDb is gone.
       // Already on the goal branch? skip (idempotent — one merge per spec).
       if (await isSpecOnGoalBranch(j.workspace_id, slug)) continue;
       // Promote-eligible (M3 seam)? accumulation ∧ spec-test green ∧ security green on the branch.
