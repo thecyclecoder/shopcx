@@ -48,6 +48,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
@@ -450,6 +451,17 @@ const LOG_QUERIES: LogQuery[] = [
       // lookup shape on `agent_jobs` (bare or PostgREST CTE wrapper) — a different missing
       // column on the table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale external/REST client assumed every
+      // table has an `id` column and SELECTed/ordered `qb_shipping_protection_products` by `id`,
+      // but that table's PK is the composite `(workspace_id, shopify_product_id)` and no `id`
+      // column has ever existed. The resulting undefined_column ERROR is repair work for a query
+      // we don't own ([[../specs/error-feed-drop-qb-shipping-protection-products-id-adhoc-noi]],
+      // Control Tower signature `supabase-logs:839fc674f9e5eb09`). Narrowly gated to require BOTH
+      // the exact `column qb_shipping_protection_products.id does not exist` message AND the
+      // SELECT-lookup shape on `qb_shipping_protection_products` (bare or PostgREST CTE wrapper) —
+      // a different missing column on the table, or the same message via a non-SELECT statement,
+      // still pages.
+      if (isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client SELECTs an
       // `ad_account_id` column from `iteration_runs` that the table never owned. The resulting
       // undefined_column ERROR is repair work for a query we don't own

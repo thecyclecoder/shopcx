@@ -139,6 +139,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
@@ -27454,6 +27455,100 @@ test("isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise K
   assert.equal(
     isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise(
       "column iteration_runs.ad_account_id does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise ──
+test("isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise drops the foreign direct-REST lookup projecting the non-existent id column", () => {
+  // The captured incident shape (Control Tower `supabase-logs:839fc674f9e5eb09`): a foreign /
+  // stale direct-REST client assumed every table has an `id` column and ordered
+  // `qb_shipping_protection_products` by `id`, but the PK is the composite
+  // `(workspace_id, shopify_product_id)` and no `id` column has ever existed. PostgREST wraps the
+  // read as a `WITH pgrst_source AS ( SELECT ... FROM "public"."qb_shipping_protection_products"
+  // ... )` CTE, and Postgres rejects with `column qb_shipping_protection_products.id does not exist`.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise(
+      "column qb_shipping_protection_products.id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."qb_shipping_protection_products"."id" FROM "public"."qb_shipping_protection_products" ORDER BY "public"."qb_shipping_protection_products"."id" ASC LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise(
+      "column public.qb_shipping_protection_products.id does not exist",
+      'with pgrst_source as ( select "public"."qb_shipping_protection_products"."id" from "public"."qb_shipping_protection_products" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise(
+      "ERROR: column qb_shipping_protection_products.id does not exist",
+      'WITH pgrst_source AS ( SELECT "id" FROM "public"."qb_shipping_protection_products" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise(
+      "column qb_shipping_protection_products.id does not exist",
+      "select id from public.qb_shipping_protection_products order by id desc limit 10",
+    ),
+    true,
+  );
+  // The unqualified-FROM (no `public.`) variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise(
+      "column qb_shipping_protection_products.id does not exist",
+      "select * from qb_shipping_protection_products where id = 1",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise KEEPS a different qb_shipping_protection_products column error and a non-SELECT statement (real regressions still page)", () => {
+  // A DIFFERENT missing column on `qb_shipping_protection_products` (e.g. `shopify_product_id`) is
+  // a real column rename / regression and must still page — the pin covers `id` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise(
+      "column qb_shipping_protection_products.shopify_product_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."qb_shipping_protection_products"."shopify_product_id" FROM "public"."qb_shipping_protection_products" LIMIT 1 )',
+    ),
+    false,
+  );
+  // The same `id` message attached to a non-SELECT statement shape is a real code-write trying to
+  // persist against a bogus column — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise(
+      "column qb_shipping_protection_products.id does not exist",
+      "update public.qb_shipping_protection_products set id = $1 where workspace_id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise(
+      "column qb_shipping_protection_products.id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."qb_shipping_protection_products"("id") VALUES ($1) RETURNING * )',
+    ),
+    false,
+  );
+  // The `id` message on a DIFFERENT relation (a real product-schema regression) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise(
+      "column orders.id does not exist",
+      "select id from public.orders limit 1",
+    ),
+    false,
+  );
+  // Empty / nullish input returns false — both markers required.
+  assert.equal(isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise(null, null), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise(
+      "column qb_shipping_protection_products.id does not exist",
       "",
     ),
     false,
