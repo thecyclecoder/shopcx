@@ -1,0 +1,1 @@
+- **Drop foreign qb_manual_inventory product_id invalid-uuid probe at capture** · verified 2026-11-09 · → [[../libraries/error-feed]]
