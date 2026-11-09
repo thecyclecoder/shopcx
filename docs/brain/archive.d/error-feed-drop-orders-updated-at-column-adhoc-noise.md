@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc orders.updated_at column-missing noise from the error feed** · verified 2026-11-09 · → [[../libraries/error-feed]]
