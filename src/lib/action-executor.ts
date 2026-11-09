@@ -2313,6 +2313,32 @@ export const directActionHandlers: Record<
     if (!code) return { success: false, error: "Missing coupon code (pass via 'code')" };
     if (!p.contract_id) return { success: false, error: "apply_loyalty_coupon missing contract_id" };
 
+    // Already-spent guard (spec: internal-renewal-consumes-loyalty-redemption).
+    // A redemption row with `used_at` set has already been delivered on an
+    // order — re-applying it would honor the same reward twice. Internal
+    // Braintree renewals now call consumeRedemption when they discount a charge,
+    // so a delivered reward reads as `used` everywhere (not just Shopify orders).
+    // Before this, an internal charge recorded nothing and the redemption stayed
+    // `active`, so Sol saw an "unused" reward and re-applied Mary Tanner's $15
+    // LOYALTY-15-C5YE9N to her next renewal (SHOPCX695 — $15 twice). Runs FIRST,
+    // before the 2s propagation delay and the apply→regen self-heal, so a spent
+    // code never mints or replaces anything. A legitimate net-zero reissue
+    // targets an EXPIRED-UNUSED row (used_at IS NULL), so this never blocks it.
+    const { data: usedRedemption } = await ctx.admin
+      .from("loyalty_redemptions")
+      .select("used_at")
+      .eq("workspace_id", ctx.workspaceId)
+      .eq("discount_code", code)
+      .maybeSingle();
+    if (usedRedemption?.used_at) {
+      return {
+        success: false,
+        error:
+          `Loyalty coupon ${code} was already redeemed (used on ` +
+          `${String(usedRedemption.used_at).slice(0, 10)}) — a spent reward can't be applied again.`,
+      };
+    }
+
     // Phase-1 owner-mismatch guard (spec:
     // loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen).
     // A code minted for one Shopify customer cannot land on a contract owned

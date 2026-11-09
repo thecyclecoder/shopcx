@@ -70,6 +70,29 @@ export function filterCandidatesByDunningRetryWindow<T extends { id: string }>(
   return candidates.filter((c) => !blocked.has(c.id));
 }
 
+// From the codes that actually reduced an internal charge, pick the LOYALTY-*
+// rewards whose redemption must be stamped `used` via consumeRedemption. An
+// internal Braintree order never passes through the Shopify order webhook (the
+// only other caller of consumeRedemption), so this is the sole place a loyalty
+// reward applied on an internal renewal gets marked spent — without it the
+// redemption stays `active`/used_at=null and Sol re-applies it next cycle
+// (Mary Tanner, SHOPCX695 — $15 honored twice). Case-insensitive on the prefix;
+// deduped so a code listed twice can't double-fire. Pure — no I/O.
+export function loyaltyCodesToConsume(appliedCodes: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of appliedCodes) {
+    if (typeof raw !== "string") continue;
+    const code = raw.trim();
+    if (!code || !code.toUpperCase().startsWith("LOYALTY-")) continue;
+    const key = code.toUpperCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(code);
+  }
+  return out;
+}
+
 // ─── Stale renewal-attempt guard ────────────────────────────────────
 // Every dispatcher — the cron fan-out AND the immediate-charge callers (portal
 // order-now, payment-method recovery, subscriptionOrderNow) — stamps the sub's
@@ -1010,6 +1033,15 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
       ),
     );
 
+    // Codes that ACTUALLY reduced this charge (`toRedeem` is pushed only for a
+    // resolved, non-exhausted coupon that applied a discount). These get stamped
+    // onto the new order's `discount_codes` AND, for LOYALTY-* codes, consumed via
+    // consumeRedemption below so an internal (Braintree) renewal honors a loyalty
+    // reward exactly once — Shopify's order webhook never fires for internal orders,
+    // so this is the only place the redemption can be marked used
+    // (spec: internal-renewal-consumes-loyalty-redemption).
+    const appliedDiscountCodes = toRedeem.map((rc) => rc.code);
+
     // ── Coupon lookup unavailable → HOLD, never bill full price ─────────
     // A code whose live lookup FAILED (Shopify throttle / HTTP / GraphQL error) is not an
     // invalid code. Before this, the renewal dropped it: one transient failure charged full price
@@ -1515,6 +1547,10 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
           financial_status: "paid",
           fulfillment_status: null,
           line_items: items,
+          // Record the codes that reduced this charge. Internal orders never pass
+          // through the Shopify order webhook, so without this the order looks
+          // discount-free and a consumed LOYALTY-* reward reads as still available.
+          discount_codes: appliedDiscountCodes,
           source_name: "internal_subscription_renewal",
           shipping_address: ctx.shipping_address,
           billing_address: ctx.billing_address || ctx.shipping_address,
@@ -1609,6 +1645,23 @@ export const internalSubscriptionRenewalAttempt = inngest.createFunction(
             subscriptionId: subscription_id,
             orderId: newOrder.id,
           });
+        }
+      });
+    }
+
+    // Mark each LOYALTY-* reward this charge spent as `used`. Internal Braintree
+    // orders never reach the Shopify order webhook (the only other caller of
+    // consumeRedemption), so this is the sole place a loyalty redemption on an
+    // internal renewal gets stamped. Without it the reward stays `active`/
+    // used_at=null and Sol re-applies it to the next cycle (Mary Tanner, SHOPCX695
+    // — $15 honored twice). consumeRedemption is a compare-and-set on
+    // `used_at IS NULL`, so an Inngest step replay is a harmless no-op.
+    const loyaltyRedemptionCodes = loyaltyCodesToConsume(appliedDiscountCodes);
+    if (loyaltyRedemptionCodes.length) {
+      await step.run("consume-loyalty-redemptions", async () => {
+        const { consumeRedemption } = await import("@/lib/loyalty");
+        for (const code of loyaltyRedemptionCodes) {
+          await consumeRedemption(workspace_id, code, "subscription_renewal");
         }
       });
     }
