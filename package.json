@@ -75,6 +75,7 @@
     "test:order-now-guard": "tsx --test src/lib/portal/order-now-guard.test.ts",
     "test:order-now-cadence": "tsx --test src/lib/portal/order-now-cadence.test.ts",
     "test:create-order-charges": "tsx --test src/lib/action-executor.create-order-charges.test.ts",
+    "test:money-order-ref": "tsx --test src/lib/action-executor.money-order-ref.test.ts",
     "test:migrate-to-internal-promo-flags": "tsx --test src/lib/migrate-to-internal.promo-flags.test.ts",
     "test:migrate-to-internal-cancel-old-engine": "tsx --test src/lib/migrate-to-internal.cancel-old-engine.test.ts",
     "test:migrate-to-internal-legacy-base": "tsx --test src/lib/migrate-to-internal.legacy-base.test.ts",

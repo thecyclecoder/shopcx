@@ -89,6 +89,11 @@ export interface ActionParams {
   expected_current_realized_cents?: number;
   crisis_action_id?: string;
   order_number?: string;
+  // Our internal orders.id (UUID). `promoteRecommendedRemedyToExecutable`
+  // (src/lib/cs-director.ts) emits this as `order_id` when the recommendation
+  // named the order by its internal id — the money handlers resolve it via
+  // resolveMoneyOrderRef alongside shopify_order_id / order_number.
+  order_id?: string;
   free_label?: boolean;
   // create_return — how the return resolves once the item is back. Passed
   // through to createFullReturn.resolutionType (src/lib/shopify-returns.ts). Omit
@@ -1594,6 +1599,46 @@ export function resolveCreateReturnResolutionType(
     ok: false,
     error: `Invalid resolution_type: ${JSON.stringify(value)}. Must be 'refund_return' or 'store_credit_return' (or omitted for the refund_return default).`,
   };
+}
+
+// ── Money-handler order reference resolution ──
+
+/**
+ * ⭐ The order reference a money handler (full_order_refund / partial_refund /
+ * redeem_points_as_refund) should refund against. `promoteRecommendedRemedyToExecutable`
+ * (src/lib/cs-director.ts) emits whichever of these keys named the order the
+ * founder-approved remedy targets: `shopify_order_id` (all-digit Shopify id),
+ * `order_number` (the human-facing SC… number) or `order_id` (our internal
+ * orders.id UUID). Reading ONLY `shopify_order_id` was why Nicole Salmon's
+ * approved full_order_refund failed twice with 'Missing shopify_order_id'
+ * (ticket e0a4f0c8) — June's promoted remedy carried `order_number`, not
+ * `shopify_order_id`. Returns the first present ref, or undefined when the
+ * payload names no order at all (the only case that should fail the guard).
+ */
+export function resolveMoneyOrderRef(p: {
+  shopify_order_id?: string;
+  order_number?: string;
+  order_id?: string;
+}): string | undefined {
+  return p.shopify_order_id ?? p.order_number ?? p.order_id ?? undefined;
+}
+
+/**
+ * Classify a money order ref into the `orders` column it matches — the same
+ * numeric → shopify_order_id, UUID → id, else order_number lookup the money
+ * handlers already do, extended so a promoted `order_id` UUID resolves against
+ * orders.id. Keep this in lockstep with resolveMoneyOrderRef.
+ */
+export function moneyOrderMatch(ref: string): {
+  col: "shopify_order_id" | "id" | "order_number";
+  val: string;
+} {
+  const val = String(ref);
+  if (/^\d+$/.test(val)) return { col: "shopify_order_id", val };
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val)) {
+    return { col: "id", val };
+  }
+  return { col: "order_number", val };
 }
 
 // ── Direct Action Handler Registry ──
@@ -3143,13 +3188,14 @@ export const directActionHandlers: Record<
     const { refundOrder, hashActionRefundKey } = await import("@/lib/refund");
     const reason = p.reason || "Price adjustment — customer was overcharged";
 
-    if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
+    const partialRef = resolveMoneyOrderRef(p);
+    if (!partialRef) return { success: false, error: "Missing order reference" };
     if (!p.amount_cents) return { success: false, error: "Missing amount_cents" };
 
     // Resolve internal order UUID — issueRefund takes our internal
     // orders.id, never the human-facing shopify_order_id / order_number.
-    const oid = String(p.shopify_order_id);
-    const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
+    const oid = String(partialRef);
+    const orderMatch = moneyOrderMatch(oid);
     const { data: ord } = await ctx.admin
       .from("orders")
       .select("id, subscription_id, total_cents")
@@ -3372,10 +3418,11 @@ export const directActionHandlers: Record<
         error: `Refusing full_order_refund on order ${p.shopify_order_id ?? "(no order)"}: no ticket customer bound to this action context — an unbound remedy cannot be authorised.`,
       };
     }
-    if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
+    const fullRef = resolveMoneyOrderRef(p);
+    if (!fullRef) return { success: false, error: "Missing order reference" };
 
-    const oid = String(p.shopify_order_id);
-    const orderMatch = /^\d+$/.test(oid) ? { col: "shopify_order_id", val: oid } : { col: "order_number", val: oid };
+    const oid = String(fullRef);
+    const orderMatch = moneyOrderMatch(oid);
     const forOwnerIds = await linkGroupIds(ctx.admin, ctx.workspaceId, ctx.customerId);
     const { data: ord } = await ctx.admin
       .from("orders")
@@ -3447,7 +3494,8 @@ export const directActionHandlers: Record<
     const { getLoyaltySettings, getRedemptionTiers, validateRedemption, spendPoints } = await import("@/lib/loyalty");
     const { refundOrder, hashActionRefundKey } = await import("@/lib/refund");
 
-    if (!p.shopify_order_id) return { success: false, error: "Missing shopify_order_id" };
+    const redeemRef = resolveMoneyOrderRef(p);
+    if (!redeemRef) return { success: false, error: "Missing order reference" };
     if (p.tier_index == null) return { success: false, error: "Missing tier_index" };
 
     const settings = await getLoyaltySettings(ctx.workspaceId);
@@ -3468,9 +3516,10 @@ export const directActionHandlers: Record<
     const validation = validateRedemption(member, tier);
     if (!validation.valid) return { success: false, error: validation.error };
 
+    const redeemMatch = moneyOrderMatch(redeemRef);
     const { data: order } = await ctx.admin.from("orders")
       .select("id, order_number, total_cents, financial_status, discount_codes")
-      .eq("workspace_id", ctx.workspaceId).eq("shopify_order_id", p.shopify_order_id).single();
+      .eq("workspace_id", ctx.workspaceId).eq(redeemMatch.col, redeemMatch.val).maybeSingle();
     if (!order) return { success: false, error: "Order not found" };
     if (order.financial_status === "refunded") return { success: false, error: "Order already fully refunded" };
 
