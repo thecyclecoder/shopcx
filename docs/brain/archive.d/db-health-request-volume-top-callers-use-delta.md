@@ -1,0 +1,1 @@
+- **DB-health top callers use the same window as the totals** · verified 2026-11-09 · → [[db-health]]
