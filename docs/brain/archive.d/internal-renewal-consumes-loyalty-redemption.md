@@ -1,0 +1,1 @@
+- **Internal renewals mark a loyalty code used when it discounts the charge** · verified 2026-11-09 · → [[../lifecycles/subscription-billing]]
