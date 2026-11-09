@@ -62,6 +62,7 @@ import {
   isForeignSupabasePostgresMissingMigrationAuditsContractIdAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSourceColumnNoise,
+  isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingCouponsDiscountTypeColumnNoise,
   isForeignSupabasePostgresMissingCouponsSourceColumnNoise,
   isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise,
@@ -604,6 +605,16 @@ const LOG_QUERIES: LogQuery[] = [
       // column-missing error on any other table, or on `orders` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingOrdersSourceColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an external REST client (or a stale Supabase
+      // Studio sort) selects a non-existent `updated_at` column off `public.orders` — or
+      // the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE
+      // wrapper the same client emits. Our `orders` table never carried a plain
+      // `updated_at` column, and no ShopCX code path selects it, so the Postgres
+      // 'column orders.updated_at does not exist' is a query we don't own (Control Tower
+      // signature `supabase-logs:cbf98fb3e48e086a`). Narrowly gated to require BOTH the
+      // exact column-missing message AND the SELECT-lookup shape — any other column, any
+      // other table, or a non-SELECT statement on `orders` still surfaces / pages.
+      if (isForeignSupabasePostgresMissingOrdersUpdatedAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an external client probing our REST API for a
       // generic coupon schema selects a non-existent `discount_type` column off
       // `public.coupons` — or the PostgREST `WITH pgrst_source AS ( SELECT ... FROM
