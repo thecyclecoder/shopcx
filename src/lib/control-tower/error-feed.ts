@@ -1398,6 +1398,57 @@ export function isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNo
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `qb_shipping_protection_products.id` column
+ * for an ad hoc direct-REST lookup on a table ShopCX does not read that way. A foreign / stale
+ * external/REST client assumed every table has an `id` column and ordered / SELECTed
+ * `qb_shipping_protection_products` by `id`, but that table's primary key is the composite
+ * `(workspace_id, shopify_product_id)` and no `id` column has ever existed. Supabase's
+ * `postgres_logs` feed captures the resulting undefined_column ERROR, and log-poll mints a
+ * Control Tower incident for a query we don't own
+ * ([[../specs/error-feed-drop-qb-shipping-protection-products-id-adhoc-noi]], Control Tower
+ * signature `supabase-logs:839fc674f9e5eb09`). No ShopCX code issues this query, so there is no
+ * lever to make it resolve — paging Platform on it is repair work for a query no code owns. The
+ * direct twin of `isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise` /
+ * `isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise` above.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column qb_shipping_protection_products.id does not exist` (with or
+ *      without the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the
+ *      logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.qb_shipping_protection_products`
+ *      — either (a) the bare `select ... from (public.)?qb_shipping_protection_products` shape, OR
+ *      (b) the PostgREST-generated `WITH pgrst_source AS ( SELECT ... FROM
+ *      "public"."qb_shipping_protection_products" ... )` CTE wrapper form with double-quoted
+ *      identifiers.
+ *
+ * Intentionally narrow — any genuine schema regression still pages:
+ *   - a DIFFERENT missing column on `qb_shipping_protection_products` (e.g. `shopify_product_id`)
+ *     still pages — the pin covers `id` only,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE / DDL, a
+ *     non-SELECT wrapped op inside the CTE) still pages,
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ */
+export function isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column qb_shipping_protection_products.id does not exist" ||
+    stripped === "column public.qb_shipping_protection_products.id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?qb_shipping_protection_products\b/.test(q)) return true;
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."qb_shipping_protection_products"/.test(
+    q,
+  );
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing `iteration_runs.ad_account_id` column for an
  * ad hoc direct-REST lookup on a table ShopCX does not read that way. A foreign / stale
  * external/REST client SELECTs `ad_account_id` from `public.iteration_runs`, Supabase's
