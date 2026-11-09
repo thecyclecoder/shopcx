@@ -1,0 +1,1 @@
+- **Drop foreign PostgREST read noise: dunning_cycles.retry_count column does not exist** · verified 2026-11-09 · → [[../libraries/error-feed]] (§ `isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise`)
