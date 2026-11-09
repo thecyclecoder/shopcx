@@ -104,6 +104,7 @@ import {
   isForeignSupabasePostgresMissingSpecStatusHistoryFromStatusAdhocNoise,
   isForeignSupabasePostgresMissingSpecStatusHistoryOldValueAdhocNoise,
   isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
+  isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
@@ -1190,6 +1191,11 @@ const LOG_QUERIES: LogQuery[] = [
       // `supabase-logs:e848ee2371263d01`) is repair work for a query we don't own. Narrowly
       // gated: a different table, a different column, or a non-SELECT statement still pages.
       if (isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise(message, query)) return null;
+      // Same foreign-read noise, pinned to the `retry_count` column variant (Control Tower
+      // signature `supabase-logs:4f1de121bcc18f18`) — `dunning_cycles` has no `retry_count`
+      // column and no ShopCX code reads it; a foreign/stale PostgREST SELECT is unfixable noise.
+      // Narrowly gated: a different table/column or a non-SELECT write still pages.
+      if (isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.subscriptions.paused_until`. The `subscriptions` table exists but
       // has no `paused_until` column — the canonical pause timestamp is `pause_resume_at`
