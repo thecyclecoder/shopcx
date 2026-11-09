@@ -346,10 +346,12 @@ test("buildGrepArgv places `--` before the user-controlled path (rg option-injec
   // `--pre=`-style preprocessor. Pattern goes via `-e`; path goes after `--`; both are covered.
   // Uppercase-only patterns keep smart-case OFF, so the argv shape is unchanged from the
   // pre-smart-case pin (see spec-check-runner.smart-case.test.ts for the smart-case ON shape).
-  const withPath = buildGrepArgv({ pattern: "PRESENT", path: "src/lib", expect: "present" });
+  // mode:'regex' keeps the argv shape focused on the `--` hardening invariant; the literal default
+  // (`-F` prepend) is pinned by its own test below (grep-checks-match-literally-by-default).
+  const withPath = buildGrepArgv({ pattern: "PRESENT", path: "src/lib", expect: "present", mode: "regex" });
   assert.deepEqual(withPath, ["-e", "PRESENT", "--", "src/lib"]);
 
-  const noPath = buildGrepArgv({ pattern: "PRESENT", expect: "present" });
+  const noPath = buildGrepArgv({ pattern: "PRESENT", expect: "present", mode: "regex" });
   assert.deepEqual(noPath, ["-e", "PRESENT", "--", "."]);
 
   // A pattern that itself starts with `-` still lands under `-e`, so rg treats it as data. This
@@ -364,6 +366,33 @@ test("buildGrepArgv places `--` before the user-controlled path (rg option-injec
   assert.equal(dashPattern[eIdx + 1], "-not-a-flag", "pattern must land immediately after `-e`");
   assert.equal(dashPattern[ddIdx + 1], "src/lib", "path must land immediately after `--`");
   assert.ok(eIdx < ddIdx, "`-e` must come before `--`");
+});
+
+test("buildGrepArgv — grep-checks-match-literally-by-default: an unset mode is literal (`-F`), a call-site snippet matches as a fixed string", () => {
+  // The ground-truth incident: an author's code snippet `isForeignAgentActionRequestsAdhocNoise(message, query)`
+  // read as a regex (parens = group) could never match the literal call site, so error-feed-drop-* failed
+  // self-verify three times. With the literal default the pattern is handed to `rg -F`, matching verbatim.
+  const literalDefault = buildGrepArgv({
+    pattern: "isForeignAgentActionRequestsAdhocNoise(message, query)",
+    path: "src/lib",
+    expect: "present",
+  });
+  assert.equal(literalDefault[0], "-F", "an unset mode defaults to literal → `-F` is prepended");
+  const eIdx = literalDefault.indexOf("-e");
+  assert.equal(
+    literalDefault[eIdx + 1],
+    "isForeignAgentActionRequestsAdhocNoise(message, query)",
+    "the call-site snippet is passed verbatim under -e (fixed-string, not a regex group)",
+  );
+
+  // An explicit literal with uppercase keeps smart-case OFF but still carries `-F`.
+  const literalUpper = buildGrepArgv({ pattern: "Foo(x)", expect: "present", mode: "literal" });
+  assert.deepEqual(literalUpper, ["-F", "-e", "Foo(x)", "--", "."]);
+
+  // regex mode is unchanged — no `-F`, so pre-existing (backfilled) checks behave exactly as before.
+  const regex = buildGrepArgv({ pattern: "Foo.*Bar", expect: "present", mode: "regex" });
+  assert.deepEqual(regex, ["-e", "Foo.*Bar", "--", "."]);
+  assert.ok(!regex.includes("-F"), "regex mode never adds -F");
 });
 
 test("ensureRealTopLevelNodeModulesForBuild — no-op when node_modules is already a real directory", async () => {

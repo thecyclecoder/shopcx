@@ -13,6 +13,7 @@ import {
   validateExecutableCheck,
   validateGrepPatternIsPosixEre,
   validateGrepPatternIsNotMisreadLiteral,
+  grepModeOf,
   isPlainReadonlySql,
   detectBuilderChosenNameInGrep,
   collectSpecPinnedGrepLiterals,
@@ -59,6 +60,49 @@ test("grep requires { pattern, expect } with expect in {present, absent}", () =>
   });
   assert.equal(badExpect.valid, false);
   assert.match((badExpect as { reason: string }).reason, /'present' or 'absent'/);
+});
+
+// ── grep-checks-match-literally-by-default ──────────────────────────────────────────────────────
+//
+// Agents author code snippets, not regexes. A new grep check defaults to mode 'literal' (fixed-string
+// in both grep lanes), so a call-site snippet matches the real code instead of being read as a regex
+// group that can never match. Existing rows are backfilled to 'regex' so nothing passing changes.
+
+test("grepModeOf defaults an unset mode to 'literal' and honors an explicit mode", () => {
+  assert.equal(grepModeOf({ pattern: "isFoo(x)", expect: "present" }), "literal");
+  assert.equal(grepModeOf({ pattern: "isFoo(x)", expect: "present", mode: "literal" }), "literal");
+  assert.equal(grepModeOf({ pattern: "a.*b", expect: "present", mode: "regex" }), "regex");
+});
+
+test("validateExecutableCheck rejects an invalid grep.mode", () => {
+  const r = validateExecutableCheck({
+    exec_kind: "grep",
+    params: { pattern: "x", expect: "present", mode: "glob" },
+  });
+  assert.equal(r.valid, false);
+  assert.match((r as { reason: string }).reason, /mode must be 'literal' or 'regex'/);
+});
+
+test("literal mode (default) ACCEPTS a call-site snippet the regex-mode misread lint rejects", () => {
+  const specText = "Phase 1 calls isForeignAgentActionRequestsAdhocNoise(message, query) in the drop loop.";
+  const pattern = "isForeignAgentActionRequestsAdhocNoise(message, query)";
+
+  // Default (literal) — the whole point of the spec: the parens are matched verbatim, so the check
+  // can actually match the call site. This is exactly the error-feed-drop-* pattern that failed 3x.
+  const literal = validateExecutableCheck(
+    { exec_kind: "grep", params: { pattern, path: "src/lib", expect: "present" } },
+    { specText },
+  );
+  assert.equal(literal.valid, true, "a literal call-site snippet is a valid fixed-string check");
+
+  // Regex mode — the same snippet is a malformed regex (parens = empty group), so the misread lint
+  // fires AND now points the author at literal mode.
+  const regex = validateExecutableCheck(
+    { exec_kind: "grep", params: { pattern, path: "src/lib", expect: "present", mode: "regex" } },
+    { specText },
+  );
+  assert.equal(regex.valid, false, "regex mode still rejects a call-site group");
+  assert.match((regex as { reason: string }).reason, /mode:'literal'/, "the lint suggests literal mode");
 });
 
 // ── a-broken-verification-check-cannot-kill-a-build Phase 1 ─────────────────────────────────────
@@ -127,18 +171,28 @@ test("validateExecutableCheck routes grep.pattern through the POSIX gate", () =>
   // The whole point of the fix: (?i) reaches the DB via validateExecutableCheck, so the integration
   // must fire — not just the pure predicate. A rejection here is what makes the broken check never
   // reach a build.
+  // The POSIX gate only applies in regex mode (a literal pattern is never handed to the POSIX
+  // engine), so these fixtures declare mode:'regex' — the mode under which (?i) is a real defect.
   const bad = validateExecutableCheck({
     exec_kind: "grep",
-    params: { pattern: "(?i)add column if not exists\\s+cancelled_at", expect: "present" },
+    params: { pattern: "(?i)add column if not exists\\s+cancelled_at", expect: "present", mode: "regex" },
   });
   assert.equal(bad.valid, false);
   assert.match((bad as { reason: string }).reason, /PCRE-only/);
 
   const good = validateExecutableCheck({
     exec_kind: "grep",
-    params: { pattern: "add column if not exists.*cancelled_at", expect: "present" },
+    params: { pattern: "add column if not exists.*cancelled_at", expect: "present", mode: "regex" },
   });
   assert.equal(good.valid, true, "the -i / smart-case rewrite must pass the same gate");
+
+  // In the literal default, the same (?i)-prefixed pattern is a valid fixed string — nothing is
+  // handed to the POSIX engine, so the gate must NOT fire (the parens are matched verbatim).
+  const literal = validateExecutableCheck({
+    exec_kind: "grep",
+    params: { pattern: "(?i)add column if not exists cancelled_at", expect: "present" },
+  });
+  assert.equal(literal.valid, true, "literal mode never routes through the POSIX gate");
 });
 
 test("grep.path rejects option-looking, absolute, traversing, NUL, and empty values", () => {
@@ -605,7 +659,9 @@ test("validateGrepPatternIsNotMisreadLiteral accepts real regexes and escaped li
 });
 
 test("the misread-literal gate fires at authoring (specText given), never retroactively at run time", () => {
-  const check = { exec_kind: "grep" as const, params: { pattern: "a || b", expect: "absent" } };
+  // The misread gate is a REGEX-mode concern (in literal mode `a || b` is a valid fixed string), so
+  // this pins the regex fixture — the gate still fires at authoring and never at run time.
+  const check = { exec_kind: "grep" as const, params: { pattern: "a || b", expect: "absent", mode: "regex" as const } };
   assert.equal(validateExecutableCheck(check).valid, true);
   assert.equal(validateExecutableCheck(check, { specText: "spec body" }).valid, false);
 });

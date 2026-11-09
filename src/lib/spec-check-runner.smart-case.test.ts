@@ -35,11 +35,15 @@ test("shouldGrepCaseInsensitively — false when the pattern carries ANY upperca
   assert.equal(shouldGrepCaseInsensitively("A pattern with one upper"), false);
 });
 
+// These pins isolate the smart-case `-i` concern, so the fixtures declare `mode: "regex"` to keep
+// the deterministic-runner lane (`rg -e`, no `-F`) — the literal default (`-F`) is pinned separately
+// in spec-check-runner.test.ts (grep-checks-match-literally-by-default).
 test("buildGrepArgv — prepends -i when the pattern is all lowercase (smart-case ON)", () => {
   const argv = buildGrepArgv({
     pattern: "cannot filter by log level",
     path: "docs/brain/integrations",
     expect: "present",
+    mode: "regex",
   });
   assert.deepEqual(argv, ["-i", "-e", "cannot filter by log level", "--", "docs/brain/integrations"]);
 });
@@ -49,6 +53,7 @@ test("buildGrepArgv — omits -i when the pattern carries uppercase (smart-case 
     pattern: "VERCEL_LOG_DRAIN",
     path: "src/lib",
     expect: "present",
+    mode: "regex",
   });
   assert.deepEqual(argv, ["-e", "VERCEL_LOG_DRAIN", "--", "src/lib"]);
 });
@@ -57,10 +62,10 @@ test("buildGrepArgv — smart-case preserves the existing argv hardening (patter
   // A `-`-leading pattern (also all-lowercase) still lands under `-e` so rg treats it as data,
   // and the path still sits after the `--` separator — the smart-case `-i` is a prepend, not a
   // rewrite of the hardening layout.
-  const argv = buildGrepArgv({ pattern: "-not-a-flag", path: "src/lib", expect: "present" });
+  const argv = buildGrepArgv({ pattern: "-not-a-flag", path: "src/lib", expect: "present", mode: "regex" });
   assert.deepEqual(argv, ["-i", "-e", "-not-a-flag", "--", "src/lib"]);
   // Default path (`.`) is preserved through the smart-case path.
-  const noPath = buildGrepArgv({ pattern: "lowercase phrase", expect: "present" });
+  const noPath = buildGrepArgv({ pattern: "lowercase phrase", expect: "present", mode: "regex" });
   assert.deepEqual(noPath, ["-i", "-e", "lowercase phrase", "--", "."]);
 });
 

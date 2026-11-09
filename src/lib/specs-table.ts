@@ -37,7 +37,7 @@ import { spawn } from "node:child_process";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { errText } from "@/lib/error-text";
 import type { Phase } from "@/lib/brain-roadmap";
-import { shouldGrepCaseInsensitively, type GrepCheckParams } from "@/lib/spec-phase-checks-table";
+import { shouldGrepCaseInsensitively, grepModeOf, type GrepCheckParams } from "@/lib/spec-phase-checks-table";
 
 export type { Phase } from "@/lib/brain-roadmap";
 
@@ -1962,13 +1962,19 @@ async function defaultRunGitGrepOnBranch(
   const ref = resolved.ref;
   // git grep against a tree-ish, path passed after `--` — matches the [[spec-check-runner]] grep hardening
   // (pattern via `-e` so a `-`-leading pattern isn't reparsed as an option; path after `--`).
+  // mode: `-F` (fixed-string) when [[spec-phase-checks-table]] `grepModeOf` resolves to 'literal' (the
+  // default for a new check), else `-E` (POSIX ERE) for a 'regex' row. Routing through the same shared
+  // `grepModeOf` as the runner's ripgrep lane ([[spec-check-runner]] `buildGrepArgv`) means a literal
+  // code snippet `isFoo(message, query)` matches identically at both gates instead of being misread as
+  // a regex group here — the exact drift the grep-checks-match-literally-by-default spec removes.
+  //
   // smart-case: `git grep` has no `--smart-case` flag, so emulate it by adding `-i` when the shared
   // [[spec-phase-checks-table]] `shouldGrepCaseInsensitively` predicate says so. The predicate is
-  // the sole source of truth — both this lane and the deterministic runner's ripgrep lane
-  // ([[spec-check-runner]] `buildGrepArgv`) route through it, so a check cannot pass one lane and
-  // fail the other over a casing difference.
+  // the sole source of truth — both this lane and the deterministic runner's ripgrep lane route
+  // through it, so a check cannot pass one lane and fail the other over a casing difference.
   const smart = shouldGrepCaseInsensitively(params.pattern);
-  const args: string[] = ["grep", "-l", "-E"];
+  const literal = grepModeOf(params) === "literal";
+  const args: string[] = ["grep", "-l", literal ? "-F" : "-E"];
   if (smart) args.push("-i");
   args.push("-e", params.pattern, ref);
   if (params.path) {
@@ -1994,11 +2000,12 @@ async function defaultRunGitGrepOnBranch(
   const found = r.code === 0;
   const ok = params.expect === "present" ? found : !found;
   const smartCase = smart ? " [smart-case: -i]" : "";
+  const modeTag = literal ? " [literal: -F]" : "";
   return {
     ok,
     outcome: ok ? "match" : "no-match",
     ref,
-    evidence: `git grep '${params.pattern}' on ${ref}${params.path ? " -- " + params.path : ""}${smartCase} — ${found ? "match(es) found" : "no match"} (expect=${params.expect})`,
+    evidence: `git grep '${params.pattern}' on ${ref}${params.path ? " -- " + params.path : ""}${modeTag}${smartCase} — ${found ? "match(es) found" : "no match"} (expect=${params.expect})`,
   };
 }
 
