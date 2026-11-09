@@ -143,6 +143,7 @@ import {
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise,
+  isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
@@ -2794,6 +2795,106 @@ test("isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise KE
   assert.equal(
     isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise(
       "column dashboard_notifications.status does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise ──
+// A foreign / stale direct-REST client read `public.qb_items` expecting a `name` column the
+// table never carried (it uses `quickbooks_name`); Control Tower signature
+// `supabase-logs:7d15bab892daf79c`. Drop AT CAPTURE only when BOTH the exact `column
+// qb_items.name does not exist` message AND the SELECT-lookup shape on `qb_items` (bare or
+// PostgREST CTE wrapper) are present. A real name-missing on another table, a `qb_items`
+// column rename, a non-SELECT write, or a FATAL still pages.
+
+test("isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise drops the PostgREST CTE wrapper + bare SELECT listing the non-existent name column", () => {
+  // The captured incident shape: a stale direct-REST client lists qb_items selecting
+  // `id, sku, name`, PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."qb_items" ... )` CTE, and Postgres rejects with the column-missing.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(
+      "column qb_items.name does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."qb_items"."id", "public"."qb_items"."sku", "public"."qb_items"."name" FROM "public"."qb_items" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(
+      "column public.qb_items.name does not exist",
+      'with pgrst_source as ( select "public"."qb_items"."name" from "public"."qb_items" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(
+      "ERROR: column qb_items.name does not exist",
+      'WITH pgrst_source AS ( SELECT "name" FROM "public"."qb_items" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper), qualified and unqualified FROM, drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(
+      "column qb_items.name does not exist",
+      "select id, sku, name from public.qb_items limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(
+      "column qb_items.name does not exist",
+      "select * from qb_items where sku is not null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise KEEPS real errors (other table, other column, non-SELECT, empty)", () => {
+  // Same name-missing message on a DIFFERENT relation is a real product-schema regression
+  // and still pages — the pin names qb_items only.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(
+      "column products.name does not exist",
+      "select id, name from public.products",
+    ),
+    false,
+  );
+  // A DIFFERENT column on qb_items (a real column rename that broke a live query) still pages
+  // here — the pin is name only.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(
+      "column qb_items.quickbooks_name does not exist",
+      "select id, quickbooks_name from public.qb_items",
+    ),
+    false,
+  );
+  // A non-SELECT shape (PostgREST CTE write / bare write) is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(
+      "column qb_items.name does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."qb_items"("id","name") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(
+      "column qb_items.name does not exist",
+      "update public.qb_items set name = 'x' where id = $1",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(
+    isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise("", "select * from qb_items"),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(
+      "column qb_items.name does not exist",
       "",
     ),
     false,

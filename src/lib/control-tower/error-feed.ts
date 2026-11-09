@@ -2029,6 +2029,61 @@ export function isForeignSupabasePostgresMissingDashboardNotificationsStatusColu
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column qb_items.name does not exist` for a
+ * direct-REST read we don't own. `qb_items` has no `name` column (it uses
+ * `quickbooks_name`), and no ShopCX code path selects `id, sku, name` from it, so the
+ * error originates from a foreign/stale PostgREST consumer. Twin of
+ * `isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise`, aimed at
+ * the qb_items.name signature (Control Tower signature `supabase-logs:7d15bab892daf79c`).
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column qb_items.name does not exist` (with or without the
+ *      `public.` qualifier and any leading `ERROR: ` prefix the logs surface includes),
+ *      AND
+ *   2. the `parsed.query` is a SELECT-lookup on `qb_items` — either (a) the bare
+ *      `select ... from (public.)qb_items` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."qb_items" ... )` CTE wrapper
+ *      with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error on ANY OTHER table (a real schema regression) still pages,
+ *   - a column-missing error on `qb_items` for a DIFFERENT column (a real rename that
+ *     broke a live query) still pages — the pin names `qb_items.name` only,
+ *   - a `qb_items.name` error attached to a DIFFERENT statement shape (INSERT / UPDATE /
+ *     DELETE / DDL) still pages — the pin is the SELECT-lookup shape; the CTE branch
+ *     likewise requires the wrapped op to be a SELECT,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed; returning null there fully suppresses the row (no
+ * error_event, no loop_alert, no signature). A capture-time drop, not a transient flag.
+ */
+export function isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column qb_items.name does not exist" ||
+    stripped === "column public.qb_items.name does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `qb_items` — any trailing WHERE/LIMIT/ORDER BY is fine; the pin
+  // is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement stays
+  // captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?qb_items\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."qb_items" ... )` with double-quoted identifiers. Same foreign-owned read,
+  // different rendering. Guarded so the CTE branch requires the wrapped op to be a SELECT.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."qb_items"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc lookup that
  * mistypes `error_events.first_seen` (our schema has `first_seen_at`, not `first_seen`).
  * The twin of `isForeignSupabasePostgresMissingControlTowerEventsLookupNoise`, aimed at

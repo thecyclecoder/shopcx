@@ -52,6 +52,7 @@ import {
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise,
+  isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
@@ -486,6 +487,16 @@ const LOG_QUERIES: LogQuery[] = [
       // SELECT-lookup shape (bare or PostgREST CTE wrapper) — a different missing column on
       // the table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client SELECTs a
+      // `name` column from `qb_items` that the table never owned (it uses
+      // `quickbooks_name`), and no ShopCX code path selects `id, sku, name`. The resulting
+      // undefined_column ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-qb-items-name-column-adhoc-noise]], Control Tower
+      // signature `supabase-logs:7d15bab892daf79c`). Narrowly gated to require BOTH the
+      // exact `column qb_items.name does not exist` message AND the SELECT-lookup shape on
+      // `qb_items` (bare or PostgREST CTE wrapper) — a different missing column on the
+      // table, or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an operator typo — a manual SQL client did a
       // `select ... from error_events` naming the wrong column (`first_seen` instead of
       // our real `first_seen_at`). The resulting undefined_column ERROR is repair work
