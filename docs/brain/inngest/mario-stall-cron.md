@@ -13,21 +13,27 @@ Mario's M3 detector tick ([[../specs/spec-mario-stall-detector-cron-and-threshol
 - **Self-monitoring:** emits a `mario-stall-cron` heartbeat at the end (`emitCronHeartbeat`). `ok` = the tick completed; a dedupe hit is a product signal, not a cron failure. Registered in `src/lib/control-tower/registry.ts` once M4 lands so a dead evaluator shows as a stale cron tile.
 - **Returns** `{ candidates_evaluated, jobs_enqueued, jobs_deduped, cap_reached }` — every field logged per tick so the M4 self-tuner + a human operator can watch the lane's throughput.
 
+### Idle-spec backstop step (idle-spec-backstop-escalates-to-ceo Phase 1)
+
+After the evaluate-and-enqueue step, a dedicated `escalate-idle-specs` step iterates workspaces and calls [[../libraries/mario]] `escalateIdleSpecsToCeo(admin, ws.id)` — the TIME-BASED catch-all that complements the specific detectors above. It cards any non-terminal, non-deferred spec with **no forward progress for 3 days** (no phase status change, no new build commit, no merged PR) to the CEO approvals inbox via [[../libraries/platform-director]] `escalateDiagnosisToCeo`, naming the concrete reason (failed build + error · needs_attention + error · PR #N closed/conflicted · shipped-but-parked on N `needs_human` spec-tests · Mario fired and gave up). Deduped per `(spec, reason)` + self-retiring (a `spec_progressed` `retire_when` descriptor, retired by [[../libraries/escalation-retirement-sweep]] once the spec moves again or folds), so a persistent stall pings once. Best-effort per workspace — a `try/catch` keeps one tenant's failure from aborting the sweep. No new node: it rides the existing cron's kill-switch + heartbeat envelope. Motivated by 2026-11-09, when the founder found 5 of 7 in-flight specs stuck 10–40 days with no alert.
+
 ## Downstream events sent
 
-_None._ Side effects are the new `kind='mario'` [[../tables/agent_jobs]] rows (one per surviving, non-dedupe-blocked candidate) and the end-of-tick heartbeat in [[../tables/loop_heartbeats]]. The M4 reasoning agent (out of this spec's scope; the follow-on milestone) picks up the queued mario rows and drives the actual response — the cron only surfaces WHAT is stalled, never WHAT TO DO.
+_None._ Side effects are the new `kind='mario'` [[../tables/agent_jobs]] rows (one per surviving, non-dedupe-blocked candidate), the idle-spec backstop's CEO `dashboard_notifications` cards, and the end-of-tick heartbeat in [[../tables/loop_heartbeats]]. The M4 reasoning agent (out of this spec's scope; the follow-on milestone) picks up the queued mario rows and drives the actual response — the cron only surfaces WHAT is stalled, never WHAT TO DO.
 
 ## Tables written
 
 - [[../tables/agent_jobs]] (one `kind='mario', status='queued'` row per stalled candidate — dedupe-guarded by [[../libraries/mario]] `enqueueMarioJob` so a spec_slug can't have two live mario rows at once)
+- `dashboard_notifications` (the idle-spec backstop's CEO approvals cards via [[../libraries/platform-director]] `escalateDiagnosisToCeo`; deduped per `(spec, reason)`)
 - [[../tables/loop_heartbeats]] (its own end-of-run beat via `emitCronHeartbeat`)
 
 ## Tables read
 
 - [[../tables/mario_thresholds]] (every row, per workspace — the M4 self-tuner's SLA output)
 - [[../tables/spec_timecard_events]] (via [[../libraries/spec-timecards]] `listStalledCandidates`)
-- [[../tables/specs]] + [[../tables/spec_phases]] (via [[../libraries/specs-table]] `getSpec` — the fold-cooldown / deferred override check)
-- [[../tables/agent_jobs]] (the live-status check per candidate + the dedupe SELECT)
+- [[../tables/specs]] + [[../tables/spec_phases]] (via [[../libraries/specs-table]] `getSpec` / `getActiveSpecs` — the fold-cooldown / deferred override check + the idle-spec backstop's in-flight set)
+- [[../tables/agent_jobs]] (the live-status check per candidate + the dedupe SELECT + the idle-spec backstop's build/mario-job reads)
+- [[../tables/spec_test_runs]] (the idle-spec backstop's consecutive-`needs_human` park check)
 - [[../tables/workspaces]] (the per-tick iteration source)
 
 ## Dedupe contract

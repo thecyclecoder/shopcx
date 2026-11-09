@@ -73,6 +73,7 @@ test("validateEscalationRecheckDescriptor — round-trips every well-formed shap
     { kind: "job_terminal", agent_job_id: "abcd-1234" },
     { kind: "action_satisfied", action: "subscription_exists", customer_id: "cust-1" },
     { kind: "action_satisfied", action: "order_exists", customer_id: "cust-2" },
+    { kind: "spec_progressed", spec_slug: "idle-slug", since_iso: "2026-11-01T00:00:00.000Z" },
     { kind: "non_retirable", reason: "founder yes/no" },
   ];
   for (const s of shapes) {
@@ -80,6 +81,15 @@ test("validateEscalationRecheckDescriptor — round-trips every well-formed shap
     assert.ok(v.valid, `shape ${s.kind} must validate`);
     if (v.valid) assert.deepEqual(v.value, s);
   }
+});
+
+test("validateEscalationRecheckDescriptor — spec_progressed rejects a missing slug or unparseable since_iso", () => {
+  const noSlug = validateEscalationRecheckDescriptor({ kind: "spec_progressed", since_iso: "2026-11-01T00:00:00.000Z" });
+  assert.ok(!noSlug.valid);
+  if (!noSlug.valid) assert.match(noSlug.reason, /spec_slug/);
+  const badIso = validateEscalationRecheckDescriptor({ kind: "spec_progressed", spec_slug: "s", since_iso: "nope" });
+  assert.ok(!badIso.valid);
+  if (!badIso.valid) assert.match(badIso.reason, /since_iso/);
 });
 
 test("validateEscalationRecheckDescriptor — action_satisfied only accepts the enumerated action set", () => {
