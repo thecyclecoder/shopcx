@@ -25,9 +25,17 @@
  *     (`^scripts/_backfill-[a-z0-9][a-z0-9._-]*\.ts$`) — rejects option-looking values
  *     (leading `-`), absolute paths, path traversal (`..`), and any name outside
  *     `scripts/_backfill-*.ts`.
- *   2. `spawn("npx", ["tsx", "--", scriptPath])` — array argv (never a shell string) with
- *     an explicit `--` separator so tsx's own argument parser can't consume the path as a
+ *   2. `spawn("npx", ["tsx", "--", scriptPath, "--apply"])` — array argv (never a shell string)
+ *     with an explicit `--` separator so tsx's own argument parser can't consume the path as a
  *     flag even hypothetically.
+ *
+ * APPLY MODE (not a dry run). 42 of 55 backfill scripts on main are dry-run unless passed
+ * `--apply` (`const APPLY = process.argv.includes("--apply") || process.env.APPLY === "1"`), so a
+ * spawn WITHOUT the flag only dry-ran them and the ledger recorded `ran` though nothing wrote. The
+ * executor now passes BOTH `--apply` on argv AND `APPLY=1` in the child env (a script that keys on
+ * either writes; a script that always writes ignores both). Belt-and-braces: if a run still prints
+ * a `DRY-RUN` banner on stdout (a future script with a different flag name), it's recorded `failed`
+ * with error `ran in dry-run mode` so a silent no-op can never masquerade as `ran`.
  *
  * BOX-ONLY: the deployed Next runtime has neither the `tsx` binary nor the repo working
  * tree. This module is invoked from the box worker's post-merge on-box pass (mirrors
@@ -162,6 +170,35 @@ interface SpawnResult {
   error: string;
 }
 
+/**
+ * Build the child argv for a backfill spawn — a pure function so the `--apply` contract is
+ * unit-testable without spawning a process. `["tsx", "--", scriptPath, "--apply"]`: the `--`
+ * separator keeps tsx from parsing the (already capability-validated) path as a flag, and
+ * `--apply` makes every APPLY-gated script actually write instead of dry-running.
+ */
+export function buildBackfillArgv(scriptPath: string): string[] {
+  return ["tsx", "--", scriptPath, "--apply"];
+}
+
+/**
+ * The child env for a backfill spawn — base env plus `APPLY=1`. Scripts that key on the env var
+ * instead of (or as well as) the `--apply` argv flag still run in write mode; one that keys on
+ * neither (always writes) is unaffected. Pure so the contract is unit-testable.
+ */
+export function buildBackfillEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...base, APPLY: "1" };
+}
+
+/**
+ * Belt-and-braces no-op detector: true iff a backfill's stdout announces a DRY RUN. The `--apply`
+ * flag + `APPLY=1` env should force every known script into write mode, but a future script with a
+ * different flag name could still no-op — if its banner says `DRY-RUN` / `dry-run`, we refuse to
+ * mark the row `ran`. Case-insensitive so both the uppercase banner and lowercase prose match.
+ */
+export function isDryRunStdout(stdout: string): boolean {
+  return /dry-run/i.test(stdout);
+}
+
 /** Spawn one `npx tsx <script>` under the repo working tree. Never throws. */
 function spawnBackfill(args: {
   repoDir: string;
@@ -177,10 +214,11 @@ function spawnBackfill(args: {
     }
     // spawn with argv array (NEVER a shell string). `--` separator so tsx's own arg parser
     // treats scriptPath as a positional argument, not a flag — defense-in-depth against a
-    // maliciously-authored path that somehow bypassed the regex.
-    const child = spawn("npx", ["tsx", "--", args.scriptPath], {
+    // maliciously-authored path that somehow bypassed the regex. `--apply` + `APPLY=1` run the
+    // script in WRITE mode (without them an APPLY-gated backfill only dry-runs — the whole bug).
+    const child = spawn("npx", buildBackfillArgv(args.scriptPath), {
       cwd: args.repoDir,
-      env: process.env,
+      env: buildBackfillEnv(process.env),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stderr = "";
@@ -213,6 +251,12 @@ function spawnBackfill(args: {
       settled = true;
       clearTimeout(timer);
       if (code === 0) {
+        // Belt-and-braces: a clean exit that STILL announces a dry run never wrote. Record it as
+        // failed so a future script whose flag name we don't pass can't silently no-op as `ran`.
+        if (isDryRunStdout(stdout)) {
+          res({ ok: false, error: "ran in dry-run mode" });
+          return;
+        }
         res({ ok: true, error: "" });
       } else {
         const tag = signal ? `killed by ${signal}` : `exit ${code ?? "?"}`;
