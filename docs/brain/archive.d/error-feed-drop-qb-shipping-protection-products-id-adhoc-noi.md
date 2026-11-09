@@ -1,0 +1,1 @@
+- **Scope out foreign ad-hoc qb_shipping_protection_products.id undefined-column noise from the Control Tower error feed** · verified 2026-11-09 · → [[../lifecycles/control-tower]]
