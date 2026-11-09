@@ -28,6 +28,8 @@ import {
   isForeignQuery,
   isInfrastructuralQuery,
   isMaintenanceCommand,
+  isTransactionControlStatement,
+  perQueryDeltaPerHour,
   pickPriorSnapshot,
   priorPerQueryFromSnapshot,
   seqScanRelationRowEstimate,
@@ -1222,6 +1224,90 @@ test("analyzeRequestVolume — a delta window labels the card 'the last Nh', a r
   assert.ok(reset);
   assert.match(reset!.evidence, /cumulative since the last pg_stat_statements reset/);
   assert.match(reset!.impact, /cumulative 1720\.0h window/);
+});
+
+// ── db-health-request-volume-top-callers-use-delta: per-caller deltas over the totals' window ──
+
+test("perQueryDeltaPerHour — diffs by queryid, skips a counter going down (reset) and a new caller", () => {
+  const prev = [
+    { queryid: "a", calls: 1_000, totalExecTime: 0, rows: 5_000 },
+    { queryid: "b", calls: 9_000, totalExecTime: 0, rows: 9_000 }, // will go DOWN (reset) ⇒ skipped
+    { queryid: "c", calls: 100, totalExecTime: 0, rows: 100 },
+  ];
+  const curr = [
+    { queryid: "a", calls: 3_400, totalExecTime: 0, rows: 29_000 }, // +2,400 calls / +24,000 rows over 24h
+    { queryid: "b", calls: 50, totalExecTime: 0, rows: 50 },        // counter went DOWN ⇒ skip
+    { queryid: "d", calls: 500, totalExecTime: 0, rows: 500 },      // no prior ⇒ skip
+  ];
+  const deltas = perQueryDeltaPerHour(prev, curr, 24 * HOUR_MS);
+  assert.equal(deltas.get("a")?.calls, 2_400);
+  assert.equal(deltas.get("a")?.rows, 24_000);
+  assert.equal(Math.round(deltas.get("a")!.callsPerHour), 100); // 2,400 / 24h
+  assert.equal(deltas.has("b"), false, "a counter going down (reset) is skipped, not negative");
+  assert.equal(deltas.has("c"), false, "a prior caller absent from curr is simply not in the map");
+  assert.equal(deltas.has("d"), false, "a caller with no prior counter can't be delta'd");
+  // Degenerate windows ⇒ empty map (no divide-by-zero).
+  assert.equal(perQueryDeltaPerHour(prev, curr, 0).size, 0);
+  assert.equal(perQueryDeltaPerHour(null, curr, HOUR_MS).size, 3 - 3); // no prior ⇒ nothing to diff
+});
+
+test("isTransactionControlStatement — BEGIN/COMMIT/SET/SHOW are txn-control; the set_config preamble is NOT", () => {
+  for (const q of ["BEGIN", "commit", "ROLLBACK", "SET search_path TO public", "SHOW statement_timeout", "RESET ALL", "DISCARD ALL"]) {
+    assert.equal(isTransactionControlStatement(q), true, `${q} should be txn-control`);
+  }
+  assert.equal(isTransactionControlStatement(SET_CONFIG_PREAMBLE), false, "SELECT set_config(...) is a request, not txn-control");
+  assert.equal(isTransactionControlStatement('SELECT * FROM "public"."tickets" WHERE workspace_id = $1'), false);
+});
+
+test("analyzeRequestVolume — top callers become per-window DELTAS (not cumulative) and their shares add up", () => {
+  // Totals are a 24h DELTA (2.4M calls ⇒ 100K/hr, at the flag). Caller `hot` fired 1.8M of those calls in
+  // the window; caller `cold` has a huge cumulative count but barely moved this window. Ranking by the
+  // cumulative count would name `cold` the top culprit and compute a nonsense >100% share.
+  const priorPerQuery = [
+    { queryid: "hot", calls: 200_000, totalExecTime: 0, rows: 200_000 },
+    { queryid: "cold", calls: 50_000_000, totalExecTime: 0, rows: 50_000_000 },
+  ];
+  const f = analyzeRequestVolume({
+    windowHours: 24,
+    totalCalls: 2_400_000,
+    totalRows: 2_400_000,
+    windowSource: "delta",
+    priorPerQuery,
+    topByCalls: [
+      { queryid: "cold", query: 'SELECT * FROM "public"."cold" WHERE id = $1', calls: 50_600_000, rows: 50_600_000 }, // +600K this window
+      { queryid: "hot", query: 'SELECT * FROM "public"."hot" WHERE id = $1', calls: 2_000_000, rows: 2_000_000 },      // +1.8M this window
+    ],
+    topByRows: [
+      { queryid: "cold", query: 'SELECT * FROM "public"."cold" WHERE id = $1', calls: 50_600_000, rows: 50_600_000 },
+      { queryid: "hot", query: 'SELECT * FROM "public"."hot" WHERE id = $1', calls: 2_000_000, rows: 2_000_000 },
+    ],
+  });
+  assert.ok(f, "expected a finding at the flag");
+  // `hot` (1.8M delta) ranks above `cold` (600K delta), and the printed count is the DELTA, not 50.6M.
+  const callerLines = f!.evidence.split("\n").filter((l) => l.includes("WHERE id = $1"));
+  assert.match(callerLines[0], /1,800,000 calls/);
+  assert.match(callerLines[0], /hot/);
+  assert.match(callerLines[0], /75% of all/); // 1.8M / 2.4M delta total — a real, ≤100% share
+  assert.doesNotMatch(f!.evidence, /50,600,000 calls/); // the cumulative count never appears
+});
+
+test("analyzeRequestVolume — transaction-control callers are excluded from the ranking", () => {
+  const f = analyzeRequestVolume({
+    windowHours: 24,
+    totalCalls: 2_400_000,
+    totalRows: 2_400_000,
+    windowSource: "reset_window",
+    topByCalls: [
+      { queryid: "txn", query: "COMMIT", calls: 2_000_000, rows: 0 },
+      { queryid: "app", query: 'SELECT * FROM "public"."orders" WHERE id = $1', calls: 400_000, rows: 400_000 },
+    ],
+    topByRows: [
+      { queryid: "app", query: 'SELECT * FROM "public"."orders" WHERE id = $1', calls: 400_000, rows: 400_000 },
+    ],
+  });
+  assert.ok(f);
+  assert.doesNotMatch(f!.evidence, /COMMIT/, "transaction-control statements are not requests — excluded");
+  assert.match(f!.evidence, /orders/);
 });
 
 test("priorPerQueryFromSnapshot — builds the per-queryid prior map + reading age for the Δ/hr self-clear", () => {
