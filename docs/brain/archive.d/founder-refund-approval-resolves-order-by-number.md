@@ -1,0 +1,1 @@
+- **Founder-approved refunds resolve the order by order number, not only shopify_order_id** · verified 2026-11-09 · → [[../libraries/action-executor]]
