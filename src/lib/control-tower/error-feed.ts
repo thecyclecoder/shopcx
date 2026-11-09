@@ -2804,6 +2804,69 @@ export function isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdh
 }
 
 /**
+ * Foreign-app noise — Postgres rejecting a malformed-uuid EQUALITY read on
+ * `qb_manual_inventory.product_id` with `invalid input syntax for type uuid: "<garbage>"`. This is
+ * the `qb_manual_inventory/product_id` sibling of
+ * `isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise`: instead of an
+ * `orders.workspace_id` equality lookup, it is a `?product_id=eq.<non-uuid>` direct-REST (or
+ * Supabase Studio quick-filter) read of `public.qb_manual_inventory` where the bound value is a
+ * hand-typed non-uuid token (e.g. `"SKIP"`). Postgres rejects the literal at parse/bind time before
+ * any row is read, so no ShopCX code path produces it — every in-tree reader filters
+ * `qb_manual_inventory.product_id` with a well-formed uuid. The resulting ERROR is repair work for a
+ * query no code owns (Control Tower signature `supabase-logs:d9393a3e4f8314e2`, which has paged
+ * Platform 292× over six weeks) and is the last sibling of the invalid-uuid-syntax noise family not
+ * yet filtered, so it is the sole remaining reason that signature stays open.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message, after stripping any leading `ERROR: ` prefix, starts with
+ *      `invalid input syntax for type uuid:`, AND
+ *   2. the `parsed.query` attribute (quote-stripped + lowercased) is a SELECT-shape on
+ *      `qb_manual_inventory` — either (a) the bare `select ... from (public.)?qb_manual_inventory`
+ *      shape, OR (b) the PostgREST-generated `with pgrst_source as ( select ... from
+ *      public.qb_manual_inventory` CTE wrapper form — AND it contains a `product_id = ` equality
+ *      marker.
+ *
+ * Narrowly gated so:
+ *   - a malformed-uuid error on ANY OTHER table (a real code bug binding bad uuids elsewhere) still
+ *     pages,
+ *   - the same message attached to a non-SELECT statement on `qb_manual_inventory` (INSERT / UPDATE
+ *     / DELETE / DDL — a real code-write shape) still pages,
+ *   - a genuine `qb_manual_inventory` read failure with a different message still pages.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts` is
+ * constructed — the mapRow contract treats `null` as `drop, do not record`, so returning null here
+ * fully suppresses the row (no error_event, no loop_alert, no signature). Not a `transient` flag:
+ * this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresInvalidUuidSyntaxOnQbManualInventoryProductIdAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (!stripped.toLowerCase().startsWith("invalid input syntax for type uuid:")) return false;
+  // Quote-stripped + lowercased so `"public"."qb_manual_inventory"` collapses to
+  // `public.qb_manual_inventory` and `"product_id" = $1` collapses to `product_id = $1`, covering
+  // both the bare and the double-quoted PostgREST-wrapper forms with one shape predicate.
+  const q = (query ?? "").trim().toLowerCase().replace(/"/g, "");
+  if (!q) return false;
+  // The uuid product_id equality marker — the tell that distinguishes the Studio-click/REST
+  // quick-filter equality probe against the uuid product_id column from any other read our own
+  // code issues. `$?\d*` tolerates a bound `$1` placeholder or an inline literal; `.product_id = `
+  // catches the qualified form.
+  if (!(/\bproduct_id\s*=\s*\$?\d*/.test(q) || q.includes(".product_id = "))) return false;
+  const bareSelect =
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?qb_manual_inventory\b/.test(q);
+  // PostgREST wraps direct-REST row reads as `WITH pgrst_source AS ( SELECT ... FROM
+  // public.qb_manual_inventory ... )` — the branch requires the wrapped op to be a SELECT so a
+  // PostgREST INSERT/UPDATE inside the same envelope (a real code-write) stays captured/paged.
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+public\.qb_manual_inventory\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres rejecting a `WHERE "agent_jobs"."id" LIKE $1` text search typed
  * against the uuid `agent_jobs.id` column with `operator does not exist: uuid ~~ unknown`. The uuid
  * LIKE is an invalid operator pairing (PostgreSQL has no `uuid ~~ text` operator), and the query
