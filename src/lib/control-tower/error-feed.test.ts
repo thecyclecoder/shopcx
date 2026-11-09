@@ -140,6 +140,7 @@ import {
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
   isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
@@ -27595,6 +27596,98 @@ test("isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise KEEPS 
   assert.equal(
     isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(
       "column agent_jobs.finished_at does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise ──
+test("isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise drops the PostgREST CTE wrapper lookup projecting the non-existent attempts column", () => {
+  // The captured incident shape (Control Tower `supabase-logs:014f31bac4b0502c`): a foreign /
+  // stale direct-REST client reads `agent_jobs?select=...attempts...`, PostgREST wraps it as a
+  // `WITH pgrst_source AS ( SELECT ... FROM "public"."agent_jobs" ... )` CTE, and Postgres
+  // rejects with `column agent_jobs.attempts does not exist`.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(
+      "column agent_jobs.attempts does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs"."id", "public"."agent_jobs"."attempts" FROM "public"."agent_jobs" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(
+      "column public.agent_jobs.attempts does not exist",
+      'with pgrst_source as ( select "public"."agent_jobs"."attempts" from "public"."agent_jobs" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(
+      "ERROR: column agent_jobs.attempts does not exist",
+      'WITH pgrst_source AS ( SELECT "attempts" FROM "public"."agent_jobs" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(
+      "column agent_jobs.attempts does not exist",
+      "select id, attempts from public.agent_jobs order by attempts desc limit 10",
+    ),
+    true,
+  );
+  // The unqualified-FROM (no `public.`) variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(
+      "column agent_jobs.attempts does not exist",
+      "select * from agent_jobs where attempts > 0",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise KEEPS a different agent_jobs column error and a non-SELECT statement (real regressions still page)", () => {
+  // A DIFFERENT missing column on `agent_jobs` (e.g. `finished_at`) is a real column rename /
+  // regression and must still page — the pin covers `attempts` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(
+      "column agent_jobs.finished_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs"."finished_at" FROM "public"."agent_jobs" LIMIT 1 )',
+    ),
+    false,
+  );
+  // The same `attempts` message attached to a non-SELECT statement shape is a real code-write
+  // trying to persist a bogus column — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(
+      "column agent_jobs.attempts does not exist",
+      "update public.agent_jobs set attempts = attempts + 1 where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(
+      "column agent_jobs.attempts does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."agent_jobs"("id","attempts") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  // The `attempts` message on a DIFFERENT relation (a real product-schema regression) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(
+      "column jobs.attempts does not exist",
+      "select attempts from public.jobs limit 1",
+    ),
+    false,
+  );
+  // Empty / nullish input returns false — both markers required.
+  assert.equal(isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(null, null), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(
+      "column agent_jobs.attempts does not exist",
       "",
     ),
     false,
