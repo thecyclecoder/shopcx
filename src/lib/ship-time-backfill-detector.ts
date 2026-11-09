@@ -116,6 +116,35 @@ export async function markLedgerRowFailed(
   return Array.isArray(data) && data.length === 1;
 }
 
+/**
+ * Ledger writer — flip ONE `ran` `data_op_runs` row BACK to `pending` with an audit note, through
+ * the module that owns the ledger. Used by `scripts/_backfill-reaudit-dry-run-ledger-rows.ts`
+ * ([[../specs/ship-time-backfill-executor-passes-apply]] Phase 2): a historical `ran` row whose
+ * APPLY-gated script, on a fresh DRY-RUN, still reports pending work never actually wrote (it was
+ * marked `ran` after a pre-fix dry run) — so it is reset to `pending` and re-drained with `--apply`.
+ * Compare-and-set on `(id, workspace_id, status='ran')` + `.select('id')` so a row a concurrent
+ * pass already advanced is NOT clobbered (returns false); `ran_at` is cleared and the note lands in
+ * `error` (the row's only free-text column) for the audit trail.
+ */
+export async function markLedgerRowPendingForReaudit(
+  admin: ReturnType<typeof createAdminClient>,
+  args: { id: string; workspaceId: string; note: string },
+): Promise<boolean> {
+  const { data } = await admin
+    .from("data_op_runs")
+    .update({
+      status: "pending",
+      ran_at: null,
+      error: args.note,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", args.id)
+    .eq("workspace_id", args.workspaceId)
+    .eq("status", "ran")
+    .select("id");
+  return Array.isArray(data) && data.length === 1;
+}
+
 /** One entry from GitHub's PR-files response — only the fields we consume. */
 interface GhPrFile {
   filename: string;
