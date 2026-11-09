@@ -1,0 +1,1 @@
+- **Standing-pass sweeps only look at in-flight specs** · verified 2026-11-09 · → [[../libraries/agent-jobs]]
