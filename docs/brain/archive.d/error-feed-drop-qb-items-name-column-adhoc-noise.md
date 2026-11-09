@@ -1,0 +1,1 @@
+- **Scope out foreign-REST column qb_items.name does not exist noise from the Control Tower error feed** · verified 2026-11-09 · → [[../lifecycles/control-tower]]
