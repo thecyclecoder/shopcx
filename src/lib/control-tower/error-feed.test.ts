@@ -135,6 +135,7 @@ import {
   isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
@@ -2369,6 +2370,115 @@ test("isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise KEEPS 
     isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(
       "column orders.order_id does not exist",
       "select id, order_id from public.orders",
+    ),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise ──
+// A foreign / stale direct-REST client (or a Supabase Studio session) read
+// `public.agent_action_requests` assuming a conventional `updated_at` column the table never
+// carried. Drop AT CAPTURE only when BOTH the exact `column agent_action_requests.updated_at
+// does not exist` message AND the SELECT-lookup shape on `agent_action_requests` (bare or
+// PostgREST CTE wrapper) are present. A real `updated_at`-missing on another table, an
+// `agent_action_requests` column rename, a non-SELECT write, or a FATAL still pages.
+
+test("isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise drops the PostgREST CTE wrapper + bare SELECT listing the non-existent updated_at column", () => {
+  // The captured incident shape: a stale direct-REST client lists agent_action_requests ordered
+  // by updated_at, PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."agent_action_requests" ... )` CTE, and Postgres rejects with the column-missing.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(
+      "column agent_action_requests.updated_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_action_requests"."id", "public"."agent_action_requests"."updated_at" FROM "public"."agent_action_requests" ORDER BY "public"."agent_action_requests"."updated_at" DESC LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(
+      "column public.agent_action_requests.updated_at does not exist",
+      'with pgrst_source as ( select "public"."agent_action_requests"."updated_at" from "public"."agent_action_requests" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(
+      "ERROR: column agent_action_requests.updated_at does not exist",
+      'WITH pgrst_source AS ( SELECT "updated_at" FROM "public"."agent_action_requests" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper), qualified and unqualified FROM, drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(
+      "column agent_action_requests.updated_at does not exist",
+      "select id, updated_at from public.agent_action_requests order by updated_at desc limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(
+      "column agent_action_requests.updated_at does not exist",
+      "select * from agent_action_requests where updated_at is not null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise KEEPS real errors (other table, other column, non-SELECT, FATAL)", () => {
+  // Same updated_at-missing message on a DIFFERENT relation is a real product-schema
+  // regression and still pages — the pin names agent_action_requests only.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(
+      "column tickets.updated_at does not exist",
+      "select id, updated_at from public.tickets order by updated_at desc",
+    ),
+    false,
+  );
+  // A DIFFERENT column on agent_action_requests (a real column rename / schema regression)
+  // still pages — the pin is updated_at only.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(
+      "column agent_action_requests.status does not exist",
+      "select id, status from public.agent_action_requests",
+    ),
+    false,
+  );
+  // A non-SELECT shape (PostgREST CTE write / bare write) is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(
+      "column agent_action_requests.updated_at does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."agent_action_requests"("id","updated_at") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(
+      "column agent_action_requests.updated_at does not exist",
+      'update public.agent_action_requests set updated_at = now() where id = $1',
+    ),
+    false,
+  );
+  // A FATAL / constraint-class error on the same shape is untouched (different message).
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select id, updated_at from public.agent_action_requests",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise("", "select * from agent_action_requests"),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(
+      "column agent_action_requests.updated_at does not exist",
+      "",
     ),
     false,
   );

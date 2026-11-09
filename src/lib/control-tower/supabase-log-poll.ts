@@ -43,6 +43,7 @@ import {
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
@@ -409,6 +410,12 @@ const LOG_QUERIES: LogQuery[] = [
       // lookup shape on `fraud_cases` (bare or PostgREST CTE wrapper) — a different missing
       // column, a non-SELECT write, or a FATAL/PANIC/constraint violation still surfaces / pages.
       if (isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client (or a Supabase
+      // Studio session) reads `public.agent_action_requests` assuming a conventional
+      // `updated_at` column the table never carried. Only the exact column-missing message +
+      // SELECT-lookup shape on `agent_action_requests` (bare or PostgREST CTE wrapper) drops —
+      // a different missing column, a non-SELECT write, or a FATAL/PANIC still surfaces / pages.
+      if (isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
       // `public.fraud_cases` expecting a singular `customer_id` FK column our schema never
       // carried — our fraud_cases code only filters the `customer_ids` `text[]` array. The
