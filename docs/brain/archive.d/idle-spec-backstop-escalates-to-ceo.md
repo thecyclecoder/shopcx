@@ -1,0 +1,1 @@
+- **Any spec idle for 3 days escalates to the CEO** · verified 2026-11-09 · → [[../lifecycles/mario-pipeline-plumbing]]
