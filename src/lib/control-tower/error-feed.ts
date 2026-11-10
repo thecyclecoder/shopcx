@@ -4924,27 +4924,29 @@ export function isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumn
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
- * `journey_definitions.intent`. Our `journey_definitions` table has never carried an
- * `intent` column (nor a `steps` column) — no ShopCX code path (src/, scripts/,
- * shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT that names
- * `journey_definitions.intent`. The message appears on Supabase's `postgres_logs` feed
- * only when an external / manual tool (Supabase Studio Table Editor / API Docs, a foreign
- * SQL client reading our `journey_definitions` table with columns it doesn't have, a
- * stale exploratory query, a third-party integration) does a raw
- * `select ... intent ... from public.journey_definitions` lookup — or the PostgREST
- * `WITH pgrst_source AS ( SELECT ... FROM "public"."journey_definitions" ... )` CTE wrapper
- * the same client emits over the REST endpoint. There is no lever from ShopCX to make that
- * query resolve — paging Platform on it (Control Tower signature
- * `supabase-logs:20fde736a02f1195`) is repair work for a query we don't own.
+ * `journey_definitions.intent` or `journey_definitions.steps`. Our `journey_definitions`
+ * table has never carried an `intent` column nor a `steps` column — no ShopCX code path
+ * (src/, scripts/, shopify-extension/, supabase/migrations/, docs/brain/) issues a SELECT
+ * that names `journey_definitions.intent` or `journey_definitions.steps`. The message
+ * appears on Supabase's `postgres_logs` feed only when an external / manual tool (Supabase
+ * Studio Table Editor / API Docs, a foreign SQL client reading our `journey_definitions`
+ * table with columns it doesn't have, a stale exploratory query, a third-party integration)
+ * does a raw `select ... intent|steps ... from public.journey_definitions` lookup — or the
+ * PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."journey_definitions" ... )`
+ * CTE wrapper the same client emits over the REST endpoint. There is no lever from ShopCX
+ * to make that query resolve — paging Platform on it (Control Tower signatures
+ * `supabase-logs:20fde736a02f1195` for the intent variant, `supabase-logs:5494c0b3127c03c7`
+ * for the steps variant) is repair work for a query we don't own.
  *
  * Sibling of `isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise`
  * / `isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise` — same
- * narrow-gating shape, scoped to the `journey_definitions.intent` lookup (query on the
- * `journey_definitions` table itself) instead of the `journey_sessions.*` ones.
+ * narrow-gating shape, scoped to the `journey_definitions.{intent,steps}` lookups (query on
+ * the `journey_definitions` table itself) instead of the `journey_sessions.*` ones.
  *
  * `true` ONLY when BOTH markers are present:
- *   1. the message is Postgres's canonical column-missing shape for THIS column —
- *      trimmed equal to `column journey_definitions.intent does not exist` (with or
+ *   1. the message is Postgres's canonical column-missing shape for one of THESE columns —
+ *      trimmed equal to `column journey_definitions.intent does not exist` or
+ *      `column journey_definitions.steps does not exist` (with or
  *      without the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes
  *      on the logs surface), AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.journey_definitions` —
@@ -4955,7 +4957,7 @@ export function isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumn
  * Narrowly gated so:
  *   - a column-missing error for ANY OTHER column on `journey_definitions` (a real product-
  *     schema regression on a live column) still pages,
- *   - a column-missing error for `intent` on ANY OTHER table still pages,
+ *   - a column-missing error for `intent` or `steps` on ANY OTHER table still pages,
  *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE /
  *     DELETE / DDL on `journey_definitions`) still pages — the pin is the SELECT-lookup shape,
  *   - a FATAL / PANIC / constraint violation is untouched (different message).
@@ -4974,7 +4976,9 @@ export function isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAd
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
   const messageMatches =
     stripped === "column journey_definitions.intent does not exist" ||
-    stripped === "column public.journey_definitions.intent does not exist";
+    stripped === "column public.journey_definitions.intent does not exist" ||
+    stripped === "column journey_definitions.steps does not exist" ||
+    stripped === "column public.journey_definitions.steps does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
