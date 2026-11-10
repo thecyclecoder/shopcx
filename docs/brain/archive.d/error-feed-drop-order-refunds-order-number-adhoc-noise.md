@@ -1,0 +1,1 @@
+- **Scope out the foreign order_refunds.order_number ad-hoc PostgREST read from the error feed** · verified 2026-11-10 · → [[../libraries/error-feed]]
