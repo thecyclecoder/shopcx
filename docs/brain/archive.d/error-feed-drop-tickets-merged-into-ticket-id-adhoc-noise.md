@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST tickets.merged_into_ticket_id missing-column noise at capture** · verified 2026-11-10 · → [[../libraries/error-feed]]
