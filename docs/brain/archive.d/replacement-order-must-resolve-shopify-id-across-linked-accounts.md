@@ -1,0 +1,1 @@
+- **create_replacement_order / dollar_replacement / switch_payment_method must resolve shopify_customer_id across the linked-account group** · verified 2026-11-10 · → [[../libraries/action-executor]]
