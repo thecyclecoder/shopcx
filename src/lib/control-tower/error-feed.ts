@@ -4462,6 +4462,49 @@ export function isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnA
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `subscriptions.billing_engine` column
+ * for an ad hoc SELECT lookup. Our `subscriptions` table has NO `billing_engine` column —
+ * the engine a subscription bills on is captured by `is_internal` + `billing_source`; no
+ * ShopCX code path (src/, scripts/, shopify-extension/, supabase/migrations/, docs/brain/)
+ * issues a SELECT that names `subscriptions.billing_engine`. The message surfaces on
+ * Supabase's `postgres_logs` feed only when an external / stale / manual client (Supabase
+ * Studio, a foreign SQL client, a third-party integration) does a raw
+ * `select ... billing_engine ... from public.subscriptions` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."subscriptions" ... )` CTE wrapper the
+ * same client emits over the REST endpoint. There is no lever from ShopCX to make that
+ * query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:e17a9b5e9ac40aaf`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSubscriptionsEngineColumnAdhocNoise` —
+ * same narrow-gating shape, scoped to the `subscriptions.billing_engine` lookup. Narrowly
+ * gated so a column-missing error for ANY OTHER column on `subscriptions` (a real schema
+ * regression like `subscriptions.items`), for `billing_engine` on ANY OTHER table, or on a
+ * DIFFERENT statement shape (INSERT / UPDATE / DELETE / DDL) still pages.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — returning `null` fully suppresses the row (no error_event,
+ * no loop_alert, no signature). A capture-time drop, not a `transient` flag.
+ */
+export function isForeignSupabasePostgresMissingSubscriptionsBillingEngineColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column subscriptions.billing_engine does not exist" ||
+    stripped === "column public.subscriptions.billing_engine does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?subscriptions\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?subscriptions\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `customers.address`. Our `customers` table has NO bare `address` column — the live
  * address-related columns are `default_address` (JSONB) and `addresses` (JSONB array);
