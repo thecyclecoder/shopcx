@@ -12,6 +12,25 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Scope out foreign-tool journey_definitions.intent column-missing noise at capture** · verified 2026-11-10 · → [[../libraries/error-feed]] + [[../tables/journey_definitions]]
+- **Scope out foreign-app noise: subscription_cycle_charges.customer_id direct-REST lookups** · verified 2026-11-10 · → [[../libraries/error-feed]] (§ Supabase Postgres missing-column noise § `isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise`)
+- **DB-health top callers use the same window as the totals** · verified 2026-11-09 · → [[db-health]]
+- **Drop foreign-REST read of the non-existent agent_action_requests.updated_at column from Control Tower error feed** · verified 2026-11-09 · → [[../libraries/error-feed]] (§ `isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise`)
+- **Stop Control Tower from paging on a foreign REST client's bogus agent_jobs.attempts column lookup** · verified 2026-11-09 · → [[../libraries/error-feed]]
+- **Drop foreign PostgREST read noise: dunning_cycles.retry_count column does not exist** · verified 2026-11-09 · → [[../libraries/error-feed]] (§ `isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise`)
+- **Drop foreign direct-REST loop_alerts.signature_hash missing-column noise at capture** · verified 2026-11-09 · → [[../libraries/control-tower]] (§ error-feed.ts § `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise`)
+- **Drop foreign ad-hoc orders.updated_at column-missing noise from the error feed** · verified 2026-11-09 · → [[../libraries/error-feed]]
+- **Scope out foreign-REST column qb_items.name does not exist noise from the Control Tower error feed** · verified 2026-11-09 · → [[../lifecycles/control-tower]]
+- **Drop foreign qb_manual_inventory product_id invalid-uuid probe at capture** · verified 2026-11-09 · → [[../libraries/error-feed]]
+- **Scope out foreign ad-hoc qb_shipping_protection_products.id undefined-column noise from the Control Tower error feed** · verified 2026-11-09 · → [[../lifecycles/control-tower]]
+- **Founder-approved refunds resolve the order by order number, not only shopify_order_id** · verified 2026-11-09 · → [[../libraries/action-executor]]
+- **Grep checks match literally by default** · verified 2026-11-09 · → [[../libraries/spec-phase-checks-table]]
+- **Any spec idle for 3 days escalates to the CEO** · verified 2026-11-09 · → [[../lifecycles/mario-pipeline-plumbing]]
+- **Internal renewals mark a loyalty code used when it discounts the charge** · verified 2026-11-09 · → [[../lifecycles/subscription-billing]]
+- **renewal-wedged-cycles tile must not red on a reclaimable 'failed' charge for a not-yet-due subscription** · verified 2026-11-09 · → [[../libraries/control-tower]]
+- **Backfill runner actually applies backfills** · verified 2026-11-09 · → [[../libraries/ship-time-backfill-executor]] · [[../libraries/ship-time-backfill-detector]] · [[../libraries/ship-time-backfill-reaudit]]
+- **Standing-pass sweeps only look at in-flight specs** · verified 2026-11-09 · → [[../libraries/agent-jobs]]
+- **Stop ticket AI policies from naming non-existent assignment columns** · verified 2026-11-09 · → [[../libraries/sonnet-orchestrator-v2]]
 - **Drop foreign ad-hoc coupons.source REST lookup noise at capture** · verified 2026-11-08 · → [[../libraries/error-feed]]
 - **Drop foreign-app noise: ad-hoc loyalty_redemptions.code column-missing PostgREST reads** · verified 2026-11-07 · → [[../libraries/error-feed]]
 - **Drop foreign ad-hoc loyalty_redemptions.redeemed_at column-missing noise from the Control Tower error feed** · verified 2026-11-07 · → [[../libraries/error-feed]]
