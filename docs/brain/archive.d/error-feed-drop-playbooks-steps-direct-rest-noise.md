@@ -1,0 +1,1 @@
+- **Drop foreign direct-REST `playbooks.steps`/`config` missing-column noise at capture** · verified 2026-11-10 · → [[../libraries/error-feed]]

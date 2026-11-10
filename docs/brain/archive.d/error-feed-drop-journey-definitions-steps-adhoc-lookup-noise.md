@@ -1,0 +1,1 @@
+- **Suppress foreign journey_definitions.steps missing-column noise in the error feed** · verified 2026-11-10 · → [[../libraries/error-feed]]
