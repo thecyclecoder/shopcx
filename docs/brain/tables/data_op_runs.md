@@ -31,9 +31,12 @@ The **ledger for ship-time data backfills** ([[../specs/ship-time-data-backfills
 
 ## Readers / writers
 
-- **[[../libraries/ship-time-backfill-detector|`detectAndEscalateShipTimeBackfills`]]** — Phase 1 · the ONLY writer. Called from [[../libraries/agent-jobs|`applyMergedBuildEffects`]] on every merged claude/* build. Idempotent + best-effort — never throws.
+- **[[../libraries/ship-time-backfill-detector|`detectAndEscalateShipTimeBackfills`]]** — the detect/escalate writer. Called from [[../libraries/agent-jobs|`applyMergedBuildEffects`]] on every merged claude/* build. Idempotent + best-effort — never throws. (Also now excludes `*.test.ts` / `*.spec.ts` from the convention — see [[../specs/ship-time-backfill-executor-passes-apply]] Phase 1.)
+- **[[../libraries/ship-time-backfill-detector]] `markLedgerRowFailed` / `markLedgerRowPendingForReaudit`** — the ledger's own compare-and-set writers (never raw SQL from a one-off). `markLedgerRowFailed` flips `pending → failed` (used to retire phantom test-file rows). `markLedgerRowPendingForReaudit` flips `ran → pending` with an audit note in `error` + clears `ran_at` (used by the Phase-2 re-audit below).
 - **[[../libraries/agent-jobs|`applyMergedBuildEffects`]]** — the caller. Passes `(workspaceId, specSlug, prNumber, mergeSha)` behind a try/catch so a detector failure never breaks the merge hook.
-- **Phase 2** (planned) — the box-side executor will `SELECT` `pending` rows and run each via `tsx`, flipping to `ran` on exit 0 / `failed` on non-zero. A Control Tower `migration-drift`-shaped output assertion will read `SELECT count(*) FROM data_op_runs WHERE status IN ('pending','failed')` to flip a tile RED.
+- **[[../libraries/ship-time-backfill-executor|`executeShipTimeBackfillsForSpec`]]** — the box-side drain. `SELECT`s `pending` rows for a spec and spawns each via `npx tsx -- <script> --apply` (+ `APPLY=1`), flipping to `ran` on exit 0 / `failed` on non-zero (or on a DRY-RUN-stdout no-op). Every flip is a compare-and-set on `status='pending'`.
+- **[[../libraries/ship-time-backfill-reaudit|`scripts/_backfill-reaudit-dry-run-ledger-rows.ts`]]** — [[../specs/ship-time-backfill-executor-passes-apply]] Phase 2 · the one-time audit of historical `ran` rows that the OLD (pre-`--apply`) executor may have marked `ran` after a no-write dry run. DRY-RUNs each APPLY-gated script again: pending-work verdict ⇒ `markLedgerRowPendingForReaudit` resets it + the Phase-1 executor re-drains; no-op ⇒ left `ran`; ambiguous / missing / surgical ⇒ escalated on ONE CEO card (`dedupeKey: "backfill-reaudit"`), never auto-re-run.
+- **status transitions:** `pending → ran` / `pending → failed` (executor); `pending → failed` (test-file retirement); `ran → pending` (re-audit, then re-drained). A Control Tower `migration-drift`-shaped assertion reading `count(*) WHERE status IN ('pending','failed')` can flip a tile RED while any row is unsettled.
 
 ## Related
 

@@ -1,0 +1,1 @@
+- **Scope out foreign-tool journey_definitions.intent column-missing noise at capture** · verified 2026-11-10 · → [[../libraries/error-feed]] + [[../tables/journey_definitions]]

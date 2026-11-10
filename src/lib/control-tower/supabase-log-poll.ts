@@ -43,11 +43,13 @@ import {
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
   isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
@@ -81,6 +83,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsShippingPriceCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsFreeShippingColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsEngineColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsBillingEngineColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
@@ -88,6 +91,7 @@ import {
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise,
+  isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise,
@@ -110,6 +114,7 @@ import {
   isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
   isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise,
   isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise,
@@ -410,6 +415,12 @@ const LOG_QUERIES: LogQuery[] = [
       // lookup shape on `fraud_cases` (bare or PostgREST CTE wrapper) — a different missing
       // column, a non-SELECT write, or a FATAL/PANIC/constraint violation still surfaces / pages.
       if (isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client (or a Supabase
+      // Studio session) reads `public.agent_action_requests` assuming a conventional
+      // `updated_at` column the table never carried. Only the exact column-missing message +
+      // SELECT-lookup shape on `agent_action_requests` (bare or PostgREST CTE wrapper) drops —
+      // a different missing column, a non-SELECT write, or a FATAL/PANIC still surfaces / pages.
+      if (isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
       // `public.fraud_cases` expecting a singular `customer_id` FK column our schema never
       // carried — our fraud_cases code only filters the `customer_ids` `text[]` array. The
@@ -455,6 +466,13 @@ const LOG_QUERIES: LogQuery[] = [
       // lookup shape on `agent_jobs` (bare or PostgREST CTE wrapper) — a different missing
       // column on the table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale external/REST client SELECTed the
+      // non-existent `attempts` column from `agent_jobs` (Control Tower signature
+      // `supabase-logs:014f31bac4b0502c`). Narrowly gated to require BOTH the exact
+      // `column agent_jobs.attempts does not exist` message AND the SELECT-lookup shape on
+      // `agent_jobs` (bare or PostgREST CTE wrapper) — a different missing column on the table,
+      // or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale external/REST client assumed every
       // table has an `id` column and SELECTed/ordered `qb_shipping_protection_products` by `id`,
       // but that table's PK is the composite `(workspace_id, shopify_product_id)` and no `id`
@@ -875,6 +893,12 @@ const LOG_QUERIES: LogQuery[] = [
       // column, and no ShopCX code path selects it; a real regression on any other
       // subscriptions column (e.g. `items`) or a non-SELECT shape still pages.
       if (isForeignSupabasePostgresMissingSubscriptionsEngineColumnAdhocNoise(message, query)) return null;
+      // Same narrow gate for the foreign `subscriptions.billing_engine` lookup — we track
+      // the billing engine via is_internal + billing_source, there is no `billing_engine`
+      // column, and no ShopCX code path selects it; a real regression on any other
+      // subscriptions column (e.g. `items`) or a non-SELECT shape still pages (signature
+      // supabase-logs:e17a9b5e9ac40aaf).
+      if (isForeignSupabasePostgresMissingSubscriptionsBillingEngineColumnAdhocNoise(message, query)) return null;
       // Same narrow gate for the foreign `subscriptions.discount_code` lookup — the real
       // discount storage is the `applied_discounts` jsonb column, there is no
       // `discount_code` column, and no ShopCX code path selects it; a real regression on
@@ -954,6 +978,18 @@ const LOG_QUERIES: LogQuery[] = [
       // `journey_definitions.journey_name`), or on `journey_sessions` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... intent ... from
+      // public.journey_definitions` lookup by an external tool reading our
+      // `journey_definitions` table with columns it doesn't have (`intent`, `steps`), or the
+      // PostgREST CTE wrapper the same client emits. `journey_definitions` has never carried
+      // an `intent` column, and no ShopCX code path names it, so the resulting column-missing
+      // ERROR is foreign noise (Control Tower signature `supabase-logs:20fde736a02f1195`).
+      // Same narrow-gating shape as the `journey_sessions.*` siblings: BOTH the exact
+      // column-missing message AND the SELECT-lookup shape — a column-missing error on any
+      // live `journey_definitions` column, on `intent` from any other table, or on
+      // `journey_definitions` via a non-SELECT statement (real code-bug shape), still
+      // surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... sender_type ... from
       // public.ticket_messages` lookup by an external tool (Supabase Studio table editor,
       // foreign SQL client, third-party integration) or the PostgREST CTE wrapper the
@@ -1193,6 +1229,15 @@ const LOG_QUERIES: LogQuery[] = [
       // `supabase-logs:dc5495e4064edd50`) is repair work for a query we don't own. Narrowly
       // gated: a different table, a different column, or a non-SELECT statement still pages.
       if (isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the SAME foreign caller's `customer_id` variant — an
+      // ad hoc / stale PostgREST direct-REST read against
+      // `public.subscription_cycle_charges.customer_id`. The ledger has never had a `customer_id`
+      // column, so the column-missing ERROR only reaches this feed when a foreign app / stale
+      // PostgREST client filters the table by `customer_id`. There is no lever from ShopCX to
+      // resolve it — paging Platform (Control Tower signature `supabase-logs:6e2a1de36aa5949a`)
+      // is repair work for a query we don't own. Narrowly gated: a different table, a different
+      // column, or a non-SELECT statement still pages.
+      if (isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.shopify_billing_attempt_events.created_at`. The table has never had a
       // `created_at` column — the column-missing ERROR only reaches this feed when a foreign

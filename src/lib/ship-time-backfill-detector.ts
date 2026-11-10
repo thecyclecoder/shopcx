@@ -67,12 +67,82 @@ const PLATFORM_DIRECTOR_FUNCTION = "platform";
 const BACKFILL_PATH_RE = /^scripts\/_(?:backfill|ledger-reconcile)-[a-z0-9][a-z0-9._-]*\.ts$/;
 
 /**
+ * A test/spec companion of a backfill script is NOT a data-op to ledger. `_backfill-foo.test.ts`
+ * matches BACKFILL_PATH_RE (the `.test` is just more `[a-z0-9._-]`), so the detector used to
+ * ledger it as a `pending` backfill — then the executor would "run" a unit test as if it wrote
+ * prod data (two such phantom rows exist today). Reject the convention suffixes explicitly.
+ */
+const TEST_FILE_RE = /\.(?:test|spec)\.ts$/;
+
+/**
  * True iff a repo-relative path is a tracked ship-time one-off script (bounded convention).
  * Historically named for `_backfill-*.ts` alone; kept as-is to preserve every caller import
  * after the regex was widened to also cover `_ledger-reconcile-*.ts` (see BACKFILL_PATH_RE).
+ * A `*.test.ts` / `*.spec.ts` companion is excluded — it is a test, never a backfill to run.
  */
 export function isBackfillScriptPath(path: string): boolean {
+  if (TEST_FILE_RE.test(path)) return false;
   return BACKFILL_PATH_RE.test(path);
+}
+
+/** True iff a repo-relative path is a `*.test.ts` / `*.spec.ts` companion (never a backfill). */
+export function isTestFileScriptPath(path: string): boolean {
+  return TEST_FILE_RE.test(path);
+}
+
+/**
+ * Ledger writer — flip ONE `pending` `data_op_runs` row to `failed` with a reason, through the
+ * module that owns the ledger (never raw `.from(...).update` from a one-off script). Compare-and-
+ * set on `(id, workspace_id, status='pending')` + `.select('id')` so a row a concurrent pass
+ * already advanced is NOT clobbered (returns false), per the confirming-predicate rule. Used by
+ * `scripts/_backfill-fail-test-file-ledger-rows.ts` to retire the two phantom test-file rows the
+ * old detector ledgered before `isBackfillScriptPath` learned to reject them.
+ */
+export async function markLedgerRowFailed(
+  admin: ReturnType<typeof createAdminClient>,
+  args: { id: string; workspaceId: string; error: string },
+): Promise<boolean> {
+  const { data } = await admin
+    .from("data_op_runs")
+    .update({
+      status: "failed",
+      error: args.error,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", args.id)
+    .eq("workspace_id", args.workspaceId)
+    .eq("status", "pending")
+    .select("id");
+  return Array.isArray(data) && data.length === 1;
+}
+
+/**
+ * Ledger writer — flip ONE `ran` `data_op_runs` row BACK to `pending` with an audit note, through
+ * the module that owns the ledger. Used by `scripts/_backfill-reaudit-dry-run-ledger-rows.ts`
+ * ([[../specs/ship-time-backfill-executor-passes-apply]] Phase 2): a historical `ran` row whose
+ * APPLY-gated script, on a fresh DRY-RUN, still reports pending work never actually wrote (it was
+ * marked `ran` after a pre-fix dry run) — so it is reset to `pending` and re-drained with `--apply`.
+ * Compare-and-set on `(id, workspace_id, status='ran')` + `.select('id')` so a row a concurrent
+ * pass already advanced is NOT clobbered (returns false); `ran_at` is cleared and the note lands in
+ * `error` (the row's only free-text column) for the audit trail.
+ */
+export async function markLedgerRowPendingForReaudit(
+  admin: ReturnType<typeof createAdminClient>,
+  args: { id: string; workspaceId: string; note: string },
+): Promise<boolean> {
+  const { data } = await admin
+    .from("data_op_runs")
+    .update({
+      status: "pending",
+      ran_at: null,
+      error: args.note,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", args.id)
+    .eq("workspace_id", args.workspaceId)
+    .eq("status", "ran")
+    .select("id");
+  return Array.isArray(data) && data.length === 1;
 }
 
 /** One entry from GitHub's PR-files response — only the fields we consume. */

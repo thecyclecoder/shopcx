@@ -32,7 +32,7 @@ import { errText } from "@/lib/error-text";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { listStalledCandidates } from "@/lib/spec-timecards";
 import { getSpec, getSpecBlockers, getRoadmap, type SpecCard } from "@/lib/brain-roadmap";
-import { getSpec as getSpecFromDb, type SpecRow } from "@/lib/specs-table";
+import { getSpec as getSpecFromDb, getActiveSpecs, type SpecRow } from "@/lib/specs-table";
 import {
   ACTIVE_STATUSES,
   evaluateGoalMemberBuildDispatch,
@@ -40,6 +40,9 @@ import {
 } from "@/lib/agent-jobs";
 import { whyDidSpecReviewFail } from "@/lib/spec-investigation";
 import type { SpecPhaseCheckInput } from "@/lib/spec-phase-checks-table";
+import { escalateDiagnosisToCeo } from "@/lib/agents/platform-director";
+import { getPr } from "@/lib/github-pr-resolve";
+import type { EscalationRecheckDescriptor } from "@/lib/escalation-recheck";
 
 type Admin = SupabaseClient;
 
@@ -1689,6 +1692,289 @@ export function isMarioTerminalSpec(specRow: Pick<SpecRow, "status" | "phases">)
   const derivedShipped =
     specRow.phases.length > 0 && specRow.phases.every((p) => p.status === "shipped");
   return specRow.status === "folded" || specRow.status === "deferred" || derivedShipped;
+}
+
+// ── Idle-spec backstop (idle-spec-backstop-escalates-to-ceo Phase 1) ─────────────────────────────
+// Every SPECIFIC stall detector above has a blind spot: a build that failed self-verify but already
+// fired once, a PR that closed unmerged or sits conflicted, a shipped spec whose daily spec-test keeps
+// returning needs_human, a Mario attempt that ran and gave up. This is the TIME-BASED CATCH-ALL — any
+// non-terminal, non-deferred spec with NO FORWARD PROGRESS (a phase status change, a new build commit,
+// or a merged PR) for 3 days lands ONE CEO approvals card naming the spec, how long it has idled, and
+// the concrete reason. One card per (spec, reason); it retires itself (the `spec_progressed` retire_when
+// descriptor) the moment the spec moves again or folds. No new node — it runs inside the existing
+// mario-stall-cron tick next to `evaluateStalledSpecs`.
+
+/** 3 days — the idle floor before the backstop cards a spec. */
+export const IDLE_SPEC_BACKSTOP_MS = 3 * 24 * 60 * 60 * 1000;
+
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Build-job statuses that read as a FAILED self-verify (mirrors the escort loop-guard set). Local
+ *  copy so the backstop needs no cross-module import of the director's private set. */
+const IDLE_FAILED_BUILD_STATUSES: ReadonlySet<string> = new Set(["failed", "needs_attention"]);
+
+/** Consecutive `needs_human` spec-test runs before a shipped-but-parked spec counts as idle. */
+const IDLE_SPEC_TEST_PARK_FLOOR = 3;
+
+/** The reason-kind discriminator — ALSO the `${reasonKind}` half of the dedupe key, so a spec carries
+ *  at most one open card per distinct reason. */
+export type IdleSpecReasonKind =
+  | "failed_build"
+  | "needs_attention"
+  | "pr_wedged"
+  | "spec_test_parked"
+  | "mario_gave_up";
+
+export interface IdleSpec {
+  workspace_id: string;
+  slug: string;
+  title: string;
+  /** How long the spec has had no forward progress (ms). */
+  idle_ms: number;
+  reason_kind: IdleSpecReasonKind;
+  /** Plain-language reason naming the concrete blind spot (failed build + error, PR #N closed, …). */
+  reason: string;
+  /** ISO of the last forward-progress observed — the baseline the retire_when descriptor compares against. */
+  last_progress_iso: string;
+}
+
+/** A build job row the forward-progress clock + the failed/PR reasons read. */
+interface IdleBuildJobRow {
+  id: string;
+  status: string | null;
+  error: string | null;
+  pr_number: number | null;
+  created_at: string;
+}
+
+/**
+ * PURE — the spec's last FORWARD-PROGRESS moment (ms since epoch): the MAX of a phase status change
+ * (`spec_phases.updated_at`), the spec row itself changing (`specs.updated_at` — bumped when a
+ * merged_pr / last_merge_sha / status stamp lands), and the most recent build job that PUSHED a PR
+ * (`agent_jobs.created_at` for a kind='build' row with a non-null pr_number). Older than the idle floor
+ * ⇒ idle. Exported so the escalation-retirement sweep recomputes progress IDENTICALLY when it decides
+ * whether a `spec_progressed` card has healed. Returns 0 when nothing is parseable (treated as "never
+ * moved" → maximally idle; the reason gate below still decides whether to card it).
+ */
+export function lastForwardProgressMs(
+  spec: Pick<SpecRow, "updated_at" | "phases">,
+  buildJobsWithPr: Array<{ created_at: string }>,
+): number {
+  const stamps: number[] = [];
+  const push = (iso: string | null | undefined) => {
+    if (!iso) return;
+    const t = Date.parse(iso);
+    if (!Number.isNaN(t)) stamps.push(t);
+  };
+  push(spec.updated_at);
+  for (const p of spec.phases) push(p.updated_at);
+  for (const j of buildJobsWithPr) push(j.created_at);
+  return stamps.length ? Math.max(...stamps) : 0;
+}
+
+/** Count consecutive most-recent `needs_human` spec-test verdicts for a spec (newest-first; stops at
+ *  the first non-needs_human run). ≥ {@link IDLE_SPEC_TEST_PARK_FLOOR} ⇒ a shipped spec parked on
+ *  manual checks. */
+async function countConsecutiveNeedsHuman(admin: Admin, workspaceId: string, slug: string): Promise<number> {
+  const { data } = await admin
+    .from("spec_test_runs")
+    .select("agent_verdict, run_at")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .order("run_at", { ascending: false })
+    .limit(20);
+  const rows = (data ?? []) as Array<{ agent_verdict: string | null }>;
+  let n = 0;
+  for (const r of rows) {
+    if (r.agent_verdict === "needs_human") n += 1;
+    else break;
+  }
+  return n;
+}
+
+/** Did Mario fire on this spec and give up? True when the LATEST mario job for the spec is terminal
+ *  (completed/failed/needs_attention) — it ran and the spec is still idle. An ACTIVE mario job means
+ *  the spec is being handled right now → not "gave up" (return false, don't card). */
+async function marioFiredAndGaveUp(admin: Admin, workspaceId: string, slug: string): Promise<boolean> {
+  const { data } = await admin
+    .from("agent_jobs")
+    .select("status")
+    .eq("workspace_id", workspaceId)
+    .eq("kind", "mario")
+    .eq("spec_slug", slug)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const status = String((data as { status?: string } | null)?.status ?? "");
+  if (!status) return false;
+  return !(ACTIVE_STATUSES as readonly string[]).includes(status);
+}
+
+/** Derive the single most-actionable reason a spec is idle, or null if none of the enumerated blind
+ *  spots applies (idle but no concrete reason ⇒ don't card, to avoid noise). Priority mirrors how a
+ *  human triages: a failed/parked build first, then a wedged PR, then a parked spec-test, then Mario. */
+async function deriveIdleReason(
+  admin: Admin,
+  workspaceId: string,
+  slug: string,
+  builds: IdleBuildJobRow[],
+): Promise<{ kind: IdleSpecReasonKind; text: string } | null> {
+  // 1 / 2 — the latest build failed self-verify or parked on needs_human.
+  const latest = builds[0];
+  if (latest && IDLE_FAILED_BUILD_STATUSES.has(String(latest.status ?? ""))) {
+    const excerpt = (latest.error ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
+    if (latest.status === "needs_attention") {
+      return { kind: "needs_attention", text: `latest build parked needs_attention${excerpt ? ` — ${excerpt}` : ""}` };
+    }
+    return { kind: "failed_build", text: `latest build failed self-verify${excerpt ? ` — ${excerpt}` : ""}` };
+  }
+  // 3 — a build PR that closed unmerged or sits conflicted (mergeable_state dirty). Best-effort: a
+  // missing GH token / API hiccup returns ok:false and we fall through to the next reason.
+  const prJob = builds.find((b) => b.pr_number != null);
+  if (prJob?.pr_number != null) {
+    try {
+      const pr = await getPr(prJob.pr_number);
+      if (pr.ok) {
+        if (pr.state === "closed" && !pr.merged) {
+          return { kind: "pr_wedged", text: `PR #${prJob.pr_number} closed unmerged` };
+        }
+        if (pr.mergeableState === "dirty") {
+          return { kind: "pr_wedged", text: `PR #${prJob.pr_number} is conflicted (mergeable_state dirty)` };
+        }
+      }
+    } catch {
+      /* best-effort — a GH read failure must never swallow the other reasons */
+    }
+  }
+  // 4 — shipped but parked on a daily spec-test that keeps returning needs_human.
+  const parked = await countConsecutiveNeedsHuman(admin, workspaceId, slug);
+  if (parked >= IDLE_SPEC_TEST_PARK_FLOOR) {
+    return {
+      kind: "spec_test_parked",
+      text: `shipped but parked on ${parked} consecutive manual-check (needs_human) spec-test runs`,
+    };
+  }
+  // 5 — Mario fired on it and gave up without unsticking it.
+  if (await marioFiredAndGaveUp(admin, workspaceId, slug)) {
+    return { kind: "mario_gave_up", text: "Mario fired on this spec and gave up — the spec still hasn't moved" };
+  }
+  return null;
+}
+
+/**
+ * Find in-flight specs (not folded, not deferred — a shipped-but-parked spec STAYS in scope) whose last
+ * forward-progress is older than `idleMs` AND that carry a concrete reason. One `IdleSpec` per spec with
+ * its single dominant reason. Read-only.
+ */
+export async function findIdleSpecs(admin: Admin, workspaceId: string, idleMs: number): Promise<IdleSpec[]> {
+  const now = Date.now();
+  const specs = await getActiveSpecs(workspaceId); // status IS NULL OR status <> 'folded'
+  const out: IdleSpec[] = [];
+  for (const spec of specs) {
+    // FOLDED is already excluded by getActiveSpecs; drop DEFERRED here. SHIPPED is deliberately kept —
+    // a shipped spec parked on a daily needs_human spec-test is exactly the fifth reason.
+    if (spec.deferred || spec.status === "deferred") continue;
+
+    const { data: jobRows } = await admin
+      .from("agent_jobs")
+      .select("id, status, error, pr_number, created_at")
+      .eq("workspace_id", workspaceId)
+      .eq("spec_slug", spec.slug)
+      .eq("kind", "build")
+      .order("created_at", { ascending: false })
+      .limit(20);
+    const builds = (jobRows ?? []) as IdleBuildJobRow[];
+    const buildsWithPr = builds.filter((b) => b.pr_number != null);
+
+    const lastProgress = lastForwardProgressMs(spec, buildsWithPr);
+    const idle = now - lastProgress;
+    if (idle < idleMs) continue; // still moving within the window
+
+    const reason = await deriveIdleReason(admin, workspaceId, spec.slug, builds);
+    if (!reason) continue; // idle but no concrete blind spot → don't card
+
+    out.push({
+      workspace_id: workspaceId,
+      slug: spec.slug,
+      title: spec.title,
+      idle_ms: idle,
+      reason_kind: reason.kind,
+      reason: reason.text,
+      last_progress_iso: new Date(lastProgress).toISOString(),
+    });
+  }
+  return out;
+}
+
+/**
+ * The spec's CURRENT last-forward-progress + terminal state, recomputed from live DB rows with the same
+ * {@link lastForwardProgressMs} the escalator used. The escalation-retirement sweep calls this to decide
+ * whether a `spec_progressed` card has healed (progress advanced past the minted `since_iso`, or the
+ * spec folded). Returns `progressMs: null` when the spec can't be read (sweep treats that as unreadable
+ * → fail-closed, leaves the card).
+ */
+export async function specLastForwardProgressMs(
+  admin: Admin,
+  workspaceId: string,
+  slug: string,
+): Promise<{ progressMs: number | null; folded: boolean }> {
+  const spec = await getSpecFromDb(workspaceId, slug);
+  if (!spec) return { progressMs: null, folded: false };
+  if (spec.status === "folded") return { progressMs: null, folded: true };
+  const { data: jobRows } = await admin
+    .from("agent_jobs")
+    .select("created_at, pr_number")
+    .eq("workspace_id", workspaceId)
+    .eq("spec_slug", slug)
+    .eq("kind", "build")
+    .not("pr_number", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(20);
+  const buildsWithPr = (jobRows ?? []) as Array<{ created_at: string }>;
+  return { progressMs: lastForwardProgressMs(spec, buildsWithPr), folded: false };
+}
+
+/**
+ * The time-based catch-all: card every spec idle ≥ 3 days to the CEO approvals inbox via
+ * `escalateDiagnosisToCeo`. Deduped per (spec, reason) so a persistent stall pings once and bumps a
+ * counter rather than re-minting; carries a `spec_progressed` retire_when descriptor so the card
+ * retires itself the moment the spec moves again or folds. Best-effort per spec — one spec's escalation
+ * failure never aborts the rest.
+ */
+export async function escalateIdleSpecsToCeo(
+  admin: Admin,
+  workspaceId: string,
+): Promise<{ carded: number; slugs: string[] }> {
+  const idle = await findIdleSpecs(admin, workspaceId, IDLE_SPEC_BACKSTOP_MS);
+  const slugs: string[] = [];
+  for (const s of idle) {
+    const days = Math.max(1, Math.floor(s.idle_ms / ONE_DAY_MS));
+    const retireWhen: EscalationRecheckDescriptor = {
+      kind: "spec_progressed",
+      spec_slug: s.slug,
+      since_iso: s.last_progress_iso,
+    };
+    try {
+      const r = await escalateDiagnosisToCeo(admin, {
+        workspaceId,
+        specSlug: s.slug,
+        title: `Spec "${s.slug}" idle ${days}d — ${s.reason_kind.replace(/_/g, " ")}`,
+        diagnosis:
+          `"${s.title}" has shown no forward progress (a phase status change, a new build commit, or a ` +
+          `merged PR) for ${days} days. Reason: ${s.reason}. This is the time-based backstop — a specific ` +
+          `stall detector missed it. Decide: redrive, re-scope, defer, or fold.`,
+        dedupeKey: `idle-spec:${s.slug}:${s.reason_kind}`,
+        deepLink: `/dashboard/roadmap/${s.slug}`,
+        escalationKind: "idle_spec",
+        metadata: { idle_ms: s.idle_ms, idle_days: days, reason_kind: s.reason_kind },
+        retireWhen,
+      });
+      if (r.emitted) slugs.push(s.slug);
+    } catch (e) {
+      console.warn(`[mario] escalateIdleSpecsToCeo(${s.slug}) failed:`, e instanceof Error ? e.message : e);
+    }
+  }
+  return { carded: slugs.length, slugs };
 }
 
 export async function enqueueMarioJob(

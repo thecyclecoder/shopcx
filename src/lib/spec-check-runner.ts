@@ -32,6 +32,7 @@ import { resolve as resolvePath } from "node:path";
 import {
   AUTO_TESTABLE_EXEC_KINDS,
   shouldGrepCaseInsensitively,
+  grepModeOf,
   validateExecutableCheck,
   type SpecPhaseCheckExecKind,
   type SpecPhaseCheckParams,
@@ -359,13 +360,22 @@ export function summarizeCommandFailure(out: string, max = COMMAND_EVIDENCE_MAX)
  * an argv separator `--` so even a validated path cannot be interpreted by ripgrep as a flag or a
  * `--pre=`-style preprocessor. `validateExecutableCheck` is the primary gate; this is the belt.
  *
+ * mode: push `-F` (fixed-string) when [[spec-phase-checks-table]] `grepModeOf` resolves to `'literal'`
+ * (the default for a new check), so an author's code snippet `isFoo(message, query)` matches the
+ * literal call site instead of being parsed as a regex group that can never match. `'regex'` rows
+ * (every pre-existing check, backfilled) keep the POSIX-ERE `-e` behavior unchanged. The merge-gate
+ * `git grep` lane routes through the same `grepModeOf`, so a check cannot pass one lane and fail the
+ * other over interpretation.
+ *
  * smart-case: prepend `-i` when [[spec-phase-checks-table]] `shouldGrepCaseInsensitively` returns
  * true (an all-lowercase pattern is a prose phrase whose source-casing the author cannot know). We
  * deliberately do NOT use ripgrep's `-S`/`--smart-case` flag — the predicate is the single source
  * of truth so the merge-gate `git grep` lane (which has no `--smart-case` available) cannot drift.
+ * `-F` and `-i` compose: a literal fixed-string still matches case-insensitively.
  */
 export function buildGrepArgv(params: GrepCheckParams): string[] {
   const args: string[] = [];
+  if (grepModeOf(params) === "literal") args.push("-F");
   if (shouldGrepCaseInsensitively(params.pattern)) args.push("-i");
   args.push("-e", params.pattern, "--", params.path ?? ".");
   return args;

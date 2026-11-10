@@ -53,6 +53,34 @@ export interface GrepCheckParams {
   pattern: string;
   path?: string;
   expect: "present" | "absent";
+  /**
+   * How `pattern` is interpreted by BOTH grep lanes (the deterministic runner's ripgrep path in
+   * [[spec-check-runner]] `buildGrepArgv` and the merge-gate `git grep` path in [[specs-table]]
+   * `defaultRunGitGrepOnBranch`):
+   *   - `'literal'` (the DEFAULT for a new check) → fixed-string match (`-F`). An author writing a
+   *     code snippet like `isForeign(message, query)` gets exactly that substring searched, so the
+   *     parens are not a regex group and the check can actually match the call site.
+   *   - `'regex'` → POSIX ERE (`-E` / `rg -e`). The behavior of every row authored before this field
+   *     existed (the backfill migration stamps them `'regex'` so nothing currently passing changes).
+   *
+   * `grepModeOf(params)` is the single reader — an unset `mode` resolves to `'literal'`. The
+   * author-time PCRE/misread lints run only in regex mode (a literal pattern needs no escaping).
+   *
+   * Ground-truth incident (2026-11-09): error-feed-drop-* specs each failed self-verify three times
+   * on a grep check `isForeign…AdhocNoise(message, query)` because both lanes read it as a regex and
+   * the literal call site could never match. Authors write code snippets, not regexes.
+   */
+  mode?: "literal" | "regex";
+}
+
+/**
+ * Single reader for a grep check's interpretation mode. An unset `mode` resolves to `'literal'`
+ * (the DEFAULT for every new check) — both grep lanes and the author-time lints route through this so
+ * the "code snippet, not a regex" default can never diverge across surfaces. Existing rows are
+ * backfilled to `'regex'` by the mode-backfill migration so their behavior is unchanged.
+ */
+export function grepModeOf(params: GrepCheckParams): "literal" | "regex" {
+  return params.mode ?? "literal";
 }
 
 /**
@@ -750,17 +778,27 @@ export function validateExecutableCheck(
     }
     case "grep": {
       if (!isRecord(params)) return { valid: false, reason: "grep requires { pattern, expect } params" };
-      const { pattern, path, expect } = params as Record<string, unknown>;
+      const { pattern, path, expect, mode } = params as Record<string, unknown>;
       if (typeof pattern !== "string" || !pattern.trim()) {
         return { valid: false, reason: "grep.pattern must be a non-empty string" };
       }
+      if (mode !== undefined && mode !== "literal" && mode !== "regex") {
+        return { valid: false, reason: "grep.mode must be 'literal' or 'regex' (omit for the literal default)" };
+      }
+      // grep-checks-match-literally-by-default — an unset mode is 'literal' (fixed-string `-F` in both
+      // lanes), so an author's code snippet matches as-written and the regex-shaped lints below are
+      // skipped: a literal `isFoo(message, query)` is a valid fixed string, not a malformed regex.
+      const resolvedMode = grepModeOf(params as unknown as GrepCheckParams);
       // a-broken-verification-check-cannot-kill-a-build Phase 1 — reject a pattern the git-grep POSIX
       // engine refuses to compile at authoring, before it can reach a build (a PCRE `(?i)` inline flag
       // is the exact class that stranded cancelled-subs-stop-reporting-a-future-billing-date +
       // playbook-drift-classifier-sees-the-pending-question in August 2026 — the runner reported an
       // infrastructure fault and the re-drive path burned three builds treating it as unverified code).
-      const posix = validateGrepPatternIsPosixEre(pattern);
-      if (!posix.valid) return posix;
+      // Only meaningful in regex mode — a literal pattern is never handed to the POSIX engine.
+      if (resolvedMode === "regex") {
+        const posix = validateGrepPatternIsPosixEre(pattern);
+        if (!posix.valid) return posix;
+      }
       if (path !== undefined) {
         // grep.path flows into `rg` as a raw argument, so treat it as an untrusted capability
         // boundary — a spec-authored value must be a safe repo-relative path and can NEVER be
@@ -778,8 +816,19 @@ export function validateExecutableCheck(
       // therefore never retroactively fails an already-authored check on this basis (defense-in-depth
       // lives at authoring, where a rejection is actionable).
       if (typeof ctx?.specText === "string") {
-        const misread = validateGrepPatternIsNotMisreadLiteral(pattern);
-        if (!misread.valid) return misread;
+        // The misread-literal lint (call-site group, empty alternation) only applies in regex mode —
+        // in literal mode the parens/pipes ARE the code the author means to match, which is the whole
+        // point of the default. In regex mode a detected call site now suggests switching to
+        // mode:'literal' rather than hand-escaping every metacharacter.
+        if (resolvedMode === "regex") {
+          const misread = validateGrepPatternIsNotMisreadLiteral(pattern);
+          if (!misread.valid) {
+            return {
+              valid: false,
+              reason: `${misread.reason} Or set grep.mode:'literal' to match the snippet verbatim.`,
+            };
+          }
+        }
         const guess = detectBuilderChosenNameInGrep(pattern, ctx.specText);
         if (guess) {
           return { valid: false, reason: `${guess.reason}. Try grep.pattern: ${guess.suggested}` };

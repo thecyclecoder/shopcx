@@ -1,0 +1,1 @@
+- **Drop foreign-REST read of the non-existent agent_action_requests.updated_at column from Control Tower error feed** · verified 2026-11-09 · → [[../libraries/error-feed]] (§ `isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise`)

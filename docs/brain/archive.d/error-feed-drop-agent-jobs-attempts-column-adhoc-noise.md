@@ -1,0 +1,1 @@
+- **Stop Control Tower from paging on a foreign REST client's bogus agent_jobs.attempts column lookup** · verified 2026-11-09 · → [[../libraries/error-feed]]

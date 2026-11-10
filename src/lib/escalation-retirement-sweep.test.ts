@@ -42,6 +42,37 @@ test("ticket_terminal — unreadable state → fail-closed (never retire on miss
   if (!d.retire) assert.match(d.reason, /unreadable/);
 });
 
+test("spec_progressed — retires when the spec moved past since_iso OR folded; leaves a still-idle spec", () => {
+  const base = { kind: "spec_progressed", spec_slug: "idle-slug", since_iso: "2026-11-01T00:00:00.000Z" } as const;
+
+  // Progress advanced past the baseline → retire.
+  const moved = decideRetirement(base, { specProgressMs: Date.parse("2026-11-06T00:00:00.000Z") });
+  assert.equal(moved.retire, true);
+  if (moved.retire) assert.match(moved.evidenceReason, /moved/);
+
+  // Folded (terminal) → retire unconditionally, even with no progress read.
+  const folded = decideRetirement(base, { specFolded: true });
+  assert.equal(folded.retire, true);
+  if (folded.retire) assert.equal((folded.evidence as { folded?: boolean }).folded, true);
+
+  // Still at the same moment → leave the card.
+  const stuck = decideRetirement(base, { specProgressMs: Date.parse("2026-11-01T00:00:00.000Z") });
+  assert.equal(stuck.retire, false);
+  if (!stuck.retire) assert.match(stuck.reason, /not moved/);
+
+  // Unreadable spec → fail-closed.
+  const unreadable = decideRetirement(base, {});
+  assert.equal(unreadable.retire, false);
+  if (!unreadable.retire) assert.match(unreadable.reason, /unreadable/);
+
+  // Unparseable baseline → fail-closed (cannot prove healing).
+  const badBaseline = decideRetirement(
+    { kind: "spec_progressed", spec_slug: "s", since_iso: "nope" },
+    { specProgressMs: Date.now() },
+  );
+  assert.equal(badBaseline.retire, false);
+});
+
 test("job_terminal — retires when job left needs_attention / active statuses; leaves live", () => {
   const done = decideRetirement(
     { kind: "job_terminal", agent_job_id: "job-abc" },

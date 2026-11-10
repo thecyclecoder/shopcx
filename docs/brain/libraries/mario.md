@@ -110,9 +110,39 @@ Pure security predicate — recomputes the fifth-source (missing-blocker) class 
 
 Pure decision predicate — computes the merged blocked_by (UNION of existing + add) or rejects the verdict. ADDITIVE-ONLY: an empty add-list is rejected; any payload that would DROP an existing blocker is rejected (verification bullet: "drop existing blocker → rejected"). Returns `{ ok: true, merged: string[] }` on success, or `{ ok: false, reason: "empty_add" | "would_drop_existing" }` on rejection. Split out as pure so the contract is unit-testable.
 
+## Idle-spec backstop — the time-based catch-all (idle-spec-backstop-escalates-to-ceo Phase 1)
+
+Every SPECIFIC stall detector above has a blind spot: a build that failed self-verify but already fired once, a PR that closed unmerged or sits conflicted, a shipped spec whose daily spec-test keeps returning `needs_human`, a Mario attempt that ran and gave up. On 2026-11-09 the founder found 5 of 7 in-flight specs stuck 10–40 days by hand. The backstop is the TIME-BASED catch-all that closes them all: any non-terminal, non-deferred spec with **no forward progress for 3 days** lands ONE CEO approvals card with the concrete reason. No new node — it runs inside the existing [[../inngest/mario-stall-cron]] tick right after `evaluateStalledSpecs`.
+
+### `lastForwardProgressMs(spec, buildJobsWithPr)` (pure, exported)
+
+The spec's last FORWARD-PROGRESS moment (ms since epoch): the MAX of a phase status change (`spec_phases.updated_at`), the spec row changing (`specs.updated_at` — bumped when a merged_pr / last_merge_sha / status stamp lands), and the most recent build job that PUSHED a PR (`agent_jobs.created_at` for a `kind='build'` row with a non-null `pr_number`). Older than the 3-day floor ⇒ idle. ONE definition, shared by the escalator and the self-retirement sweep so a card can never retire too early or never. Unparseable stamps are skipped; no parseable stamp ⇒ `0` (maximally idle).
+
+### `findIdleSpecs(admin, workspaceId, idleMs)` (read-only)
+
+In-flight specs ([[./specs-table]] `getActiveSpecs` — `status IS NULL OR status <> 'folded'`; `deferred` dropped here, SHIPPED deliberately KEPT) whose `lastForwardProgressMs` is older than `idleMs` AND that carry a concrete reason. Returns one `IdleSpec` per spec with its single DOMINANT reason (priority order mirrors human triage):
+
+| `reason_kind` | Derived from |
+|---|---|
+| `failed_build` | latest `kind='build'` job status `failed` + error excerpt |
+| `needs_attention` | latest build job status `needs_attention` + error excerpt |
+| `pr_wedged` | the build's PR via [[./github-pr-resolve]] `getPr` — `state=closed`+`!merged`, or `mergeable_state='dirty'` (best-effort; a missing GH token falls through) |
+| `spec_test_parked` | ≥ 3 consecutive most-recent `needs_human` [[../tables/spec_test_runs]] verdicts (a shipped spec parked on manual checks) |
+| `mario_gave_up` | the LATEST `kind='mario'` job for the spec is terminal (it ran and the spec is still idle) |
+
+A spec that is idle but matches NO reason gets no card (avoids noise — a just-shipped spec awaiting fold with a green spec-test is not a stall).
+
+### `specLastForwardProgressMs(admin, workspaceId, slug)` (read-only)
+
+The spec's CURRENT forward progress + folded flag, recomputed from live rows with the SAME `lastForwardProgressMs`. The [[./escalation-retirement-sweep]] calls this to decide whether a `spec_progressed` card has healed (progress advanced past the minted `since_iso`, or the spec folded). `progressMs: null` ⇒ spec unreadable ⇒ the sweep fails closed (leaves the card).
+
+### `escalateIdleSpecsToCeo(admin, workspaceId)`
+
+Calls `findIdleSpecs(…, 3 days)` and cards each via [[./platform-director]] `escalateDiagnosisToCeo` with `escalationKind: 'idle_spec'`, `dedupeKey: 'idle-spec:${slug}:${reasonKind}'`, a deep-link to the spec, and a `retireWhen` descriptor `{ kind: 'spec_progressed', spec_slug, since_iso }` ([[./escalation-recheck]]) so the card RETIRES ITSELF the moment the spec moves again or folds. Deduped per (spec, reason): a persistent stall pings once and bumps the escalation counter rather than re-minting. Best-effort per spec — one spec's failure never aborts the rest. Called from the cron per workspace.
+
 ## Callers
 
-- [[../inngest/mario-stall-cron]] — the once-per-minute cron; iterates workspaces, calls `evaluateStalledSpecs` per workspace, calls `enqueueMarioJob` per candidate, applies a per-tick cap so a massive backlog doesn't overwhelm the mario lane.
+- [[../inngest/mario-stall-cron]] — the once-per-minute cron; iterates workspaces, calls `evaluateStalledSpecs` per workspace, calls `enqueueMarioJob` per candidate, applies a per-tick cap so a massive backlog doesn't overwhelm the mario lane. ALSO calls `escalateIdleSpecsToCeo` per workspace (the idle-spec backstop step).
 - Nowhere else. The SDK is Mario-owned; the M4 self-tuning path (`applyBoxMario` → `widenMarioThreshold`, shipped) writes the thresholds table directly to widen an SLA on a false trigger — that write path does NOT go through the read exports above.
 
 ## The mario skill

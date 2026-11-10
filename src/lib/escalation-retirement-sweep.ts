@@ -83,6 +83,10 @@ export interface CurrentStateForRetireCheck {
   activeSubscriptionId?: string | null;
   /** For `action_satisfied` (order_exists): any order id for the customer. */
   orderId?: string | null;
+  /** For `spec_progressed`: the spec's CURRENT last-forward-progress (ms) — undefined if unreadable. */
+  specProgressMs?: number;
+  /** For `spec_progressed`: whether the spec is now folded (terminal → retire). */
+  specFolded?: boolean;
 }
 
 /**
@@ -166,6 +170,37 @@ export function decideRetirement(
       }
       return { retire: false, reason: "unknown action_satisfied action" };
     }
+    case "spec_progressed": {
+      // Terminal state (folded) retires unconditionally — the spec is done, no stall to flag.
+      if (state.specFolded) {
+        return {
+          retire: true,
+          evidenceReason: `spec ${descriptor.spec_slug} is folded`,
+          evidence: { kind: "spec_progressed", spec_slug: descriptor.spec_slug, folded: true },
+        };
+      }
+      if (state.specProgressMs === undefined) {
+        return { retire: false, reason: "spec unreadable — cannot re-check forward progress" };
+      }
+      const sinceMs = Date.parse(descriptor.since_iso);
+      // A malformed baseline can't prove healing — fail closed (leave the card).
+      if (Number.isNaN(sinceMs)) {
+        return { retire: false, reason: "since_iso unparseable — cannot re-check" };
+      }
+      if (state.specProgressMs > sinceMs) {
+        return {
+          retire: true,
+          evidenceReason: `spec ${descriptor.spec_slug} moved (progress advanced past ${descriptor.since_iso})`,
+          evidence: {
+            kind: "spec_progressed",
+            spec_slug: descriptor.spec_slug,
+            since_iso: descriptor.since_iso,
+            current_progress_at: new Date(state.specProgressMs).toISOString(),
+          },
+        };
+      }
+      return { retire: false, reason: "spec has not moved since it was flagged" };
+    }
   }
 }
 
@@ -217,6 +252,14 @@ async function readCurrentState(
           .limit(1);
         if (!error) state.orderId = (data?.[0]?.id as string | undefined) ?? null;
       }
+    } else if (descriptor.kind === "spec_progressed") {
+      // Recompute the spec's current forward progress with the SAME helper the escalator used, so
+      // "has it moved since we flagged it" is a byte-for-byte comparison. A null progressMs (spec
+      // unreadable) leaves specProgressMs undefined → decideRetirement fails closed.
+      const { specLastForwardProgressMs } = await import("@/lib/mario");
+      const live = await specLastForwardProgressMs(admin, workspaceId, descriptor.spec_slug);
+      state.specFolded = live.folded;
+      if (live.progressMs !== null) state.specProgressMs = live.progressMs;
     }
   } catch (e) {
     console.warn(

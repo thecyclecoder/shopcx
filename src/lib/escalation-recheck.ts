@@ -67,6 +67,7 @@ export type EscalationRecheckKind =
   | "ticket_terminal"
   | "job_terminal"
   | "action_satisfied"
+  | "spec_progressed"
   | "non_retirable";
 
 /**
@@ -99,10 +100,27 @@ export interface NonRetirableRecheck {
   reason: string;
 }
 
+/**
+ * idle-spec-backstop-escalates-to-ceo Phase 1 — the retire-when for an `idle_spec` backstop card.
+ * The sweep retires it the moment the spec shows FORWARD PROGRESS (its current last-forward-progress
+ * timestamp advances past `since_iso`) OR the spec reaches a terminal state (folded). `since_iso` is
+ * the last-moved moment captured when the card was minted, so the check is "has the spec moved since
+ * we flagged it." See [[./mario]] `lastForwardProgressMs` / `specLastForwardProgressMs` — the sweep
+ * recomputes progress with the SAME helper the escalator used.
+ */
+export interface SpecProgressedRecheck {
+  kind: "spec_progressed";
+  /** The spec whose forward progress (or fold) retires this card. */
+  spec_slug: string;
+  /** ISO of the last forward-progress observed at mint time; retire once the spec moves past it. */
+  since_iso: string;
+}
+
 export type EscalationRecheckDescriptor =
   | TicketTerminalRecheck
   | JobTerminalRecheck
   | ActionSatisfiedRecheck
+  | SpecProgressedRecheck
   | NonRetirableRecheck;
 
 /** Result shape shared with other validators in the codebase (spec-phase-checks-table). */
@@ -170,6 +188,17 @@ export function validateEscalationRecheckDescriptor(input: unknown): EscalationR
         valid: true,
         value: { kind: "action_satisfied", action, customer_id: customerId },
       };
+    }
+    case "spec_progressed": {
+      const specSlug = requireNonEmptyString(input, "spec_slug");
+      if (!specSlug) {
+        return { valid: false, reason: "spec_progressed.spec_slug must be a non-empty string" };
+      }
+      const sinceIso = requireNonEmptyString(input, "since_iso");
+      if (!sinceIso || Number.isNaN(Date.parse(sinceIso))) {
+        return { valid: false, reason: "spec_progressed.since_iso must be an ISO timestamp string" };
+      }
+      return { valid: true, value: { kind: "spec_progressed", spec_slug: specSlug, since_iso: sinceIso } };
     }
     case "non_retirable": {
       const reason = requireNonEmptyString(input, "reason");
