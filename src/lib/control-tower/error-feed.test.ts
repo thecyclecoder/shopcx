@@ -103,6 +103,7 @@ import {
   isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise,
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
+  isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise,
@@ -19196,6 +19197,95 @@ test("isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise KEEPS a 
     isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise(
       "column returns.refund_type does not exist",
       "update public.returns set refund_type = $1 where id = $2",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/tickets?select=...merged_into_ticket_id...` against our `public.tickets` table
+// with a guessed, wrong column name. Our ticket-merge FK column is `merged_into`, NOT
+// `merged_into_ticket_id`, and no ShopCX code path names `tickets.merged_into_ticket_id`.
+// Foreign-owned surface, no lever from us — drop AT CAPTURE only when BOTH the exact
+// column-missing message on `tickets.merged_into_ticket_id` AND a SELECT-lookup shape on
+// `tickets` (bare OR PostgREST CTE wrapper) are present. A column-missing on the real
+// `merged_into` column, on `merged_into_ticket_id` from any other table, or via a
+// non-SELECT statement still pages (Control Tower signature `supabase-logs:71ee0b69a27e12cf`).
+
+test("isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise drops the captured supabase-logs:71ee0b69a27e12cf message+query pair (PostgREST CTE SELECT on tickets.merged_into_ticket_id)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `tickets.merged_into_ticket_id` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise(
+      "column tickets.merged_into_ticket_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."tickets"."id", "public"."tickets"."merged_into_ticket_id" FROM "public"."tickets" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise(
+      "column public.tickets.merged_into_ticket_id does not exist",
+      'WITH pgrst_source AS (SELECT "public"."tickets"."merged_into_ticket_id" FROM "public"."tickets")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise(
+      "column tickets.merged_into_ticket_id does not exist",
+      "select id, merged_into_ticket_id from public.tickets",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise(
+      "column tickets.merged_into_ticket_id does not exist",
+      "select merged_into_ticket_id from tickets limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise(
+      "ERROR: column tickets.merged_into_ticket_id does not exist",
+      'WITH pgrst_source AS (SELECT "public"."tickets"."merged_into_ticket_id" FROM "public"."tickets")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise(
+      "column tickets.merged_into_ticket_id does not exist",
+      "SELECT ID, MERGED_INTO_TICKET_ID FROM PUBLIC.TICKETS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise KEEPS a column-missing on the real merged_into column, merged_into_ticket_id on another table, and a non-SELECT statement (real regressions still page)", () => {
+  // A column-missing on the REAL `tickets.merged_into` column (a genuine schema regression)
+  // must still page — the pin is `tickets.merged_into_ticket_id` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise(
+      "column tickets.merged_into does not exist",
+      "select merged_into from public.tickets",
+    ),
+    false,
+  );
+  // A column-missing on `merged_into_ticket_id` from a DIFFERENT table must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise(
+      "column ticket_merges.merged_into_ticket_id does not exist",
+      "select merged_into_ticket_id from public.ticket_merges",
+    ),
+    false,
+  );
+  // A non-SELECT statement against `tickets` (real code-bug shape) must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise(
+      "column tickets.merged_into_ticket_id does not exist",
+      "update public.tickets set merged_into_ticket_id = $1 where id = $2",
     ),
     false,
   );

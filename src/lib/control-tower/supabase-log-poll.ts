@@ -42,6 +42,7 @@ import {
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
+  isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
@@ -2451,6 +2452,14 @@ const LOG_QUERIES: LogQuery[] = [
       // SELECT-on-tickets shape (bare OR PostgREST CTE wrapper) — a different column, a
       // non-SELECT, or a JOIN path still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingTicketsMetadataColumnAdhocNoise(message, query)) return null;
+      // Same foreign direct-REST shape on the same table, different foreign-expected column: a
+      // stale/foreign client reading `tickets.merged_into_ticket_id` — our ticket-merge FK
+      // column is `merged_into`, not `merged_into_ticket_id`, and no ShopCX code path names it.
+      // Narrowly gated to the exact column-missing message AND a SELECT-on-tickets shape (bare
+      // OR PostgREST CTE wrapper) — a column-missing on the real `merged_into`, the same column
+      // name on another table, or a non-SELECT write still surfaces / pages on first sighting
+      // (Control Tower signature `supabase-logs:71ee0b69a27e12cf`).
+      if (isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise(message, query)) return null;
       // Same foreign direct-REST shape on a different table: a stale/foreign client reading
       // `specs.spec_slug` (the real column is the bare `slug`). Narrowly gated to the exact
       // column-missing message AND a SELECT-on-specs shape (bare OR PostgREST CTE wrapper)
