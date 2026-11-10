@@ -1,0 +1,1 @@
+- **Scope out foreign-app noise: subscription_cycle_charges.customer_id direct-REST lookups** · verified 2026-11-10 · → [[../libraries/error-feed]] (§ Supabase Postgres missing-column noise § `isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise`)
