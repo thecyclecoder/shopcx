@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: ad-hoc REST SELECT of non-existent subscriptions.cancellation_reason** · verified 2026-11-10 · → [[../libraries/error-feed]]
