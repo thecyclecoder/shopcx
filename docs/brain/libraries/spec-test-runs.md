@@ -193,6 +193,14 @@ sufficient to fold. **Human QA is advisory** — a `needs_human` *verdict*, a wa
     Same signal Phase 1's `securityCompletedClean` reads, so the [[build-lifecycle]] Security node and this gate **can never
     disagree**. A spec with a live or surfaced security-review **defers** the fold (hitting the rail = escalate, never fold past
     it); a shipped spec missing a security-review record entirely also defers (the post-merge enqueue hasn't fired yet).
+    **⭐ [[../specs/fold-gate-counts-real-vuln-resolved-when-fix-spec-folded]] Phase 1 — a real-vuln review resolved through its
+    authored fix spec clears the gate.** `getSecurityStateBySlug` now counts a `completed` `real-vuln` latest review as
+    `completedClean` once the fix spec it authored (`instructions.authored_slug`) has **shipped or folded** (batch-read via the
+    specs-table SDK). Before this, a finding whose fix landed in an UNRELATED commit left the origin spec's latest review a
+    permanent `real-vuln` that no re-review could clear — loyalty-coupon-materialize-conflict-tolerant-insert passed spec-test
+    4/4 on 2026-11-10 but could not auto-fold because its latest review authored the already-folded
+    revoke-public-execute-insert-coupon-on-conflict-ignore-rpc, so the founder archived it by hand. A real-vuln review with no
+    `authored_slug`, or whose fix spec is not yet shipped/folded, still blocks.
   - **Pre-fold assertions ([[../specs/a-merge-stamps-only-the-phases-whose-code-it-actually-contains]] Phase 2):** Before folding, verify each phase's claimed `merge_sha` really contains that phase's `build_sha` (reuse the Phase-1 containment helper from [[agent-jobs]] — one definition of "this merge carried this phase"). On containment failure, defer the fold (leave the spec on the board, record the reason naming the specific phase and missing evidence). Additionally, refuse to fold while an OPEN pull request still exists for the spec's build branch (`claude/build-{slug}`) — the presence of an open PR is evidence the spec is not finished. On PR refusal, defer the fold, never auto-repair. A spec that is FOLDED but whose phases fail the containment test is a live incident (not history) — surface those to the operator rather than auto-repairing them (un-folding is a judgment call, and the brain page may have already been rewritten).
   - **fold-guard-live-build:** a slug with a live `build`/`spec-test` `agent_jobs` row (status in `ACTIVE_STATUSES`) is **also
     excluded** — auto-folding it would orphan the running build (its spec page 404s the moment the fold merges), so the fold is

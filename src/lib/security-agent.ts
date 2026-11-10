@@ -131,6 +131,37 @@ export function isCleanSecurityVerdict(verdict: string | null | undefined): bool
 }
 
 /**
+ * ⭐ fold-gate-counts-real-vuln-resolved-when-fix-spec-folded Phase 1 — a `completed` real-vuln review
+ * is RESOLVED (and may read green) once the fix spec it authored has SHIPPED or FOLDED.
+ *
+ * The box, on a real-vuln finding, authors a fix spec and stamps its slug onto the review's
+ * `instructions.authored_slug` (see [[SecurityDiffInstructions]] / [[SecurityBranchInstructions]]). When that
+ * fix spec ships (all phases shipped) or folds (archived), the vulnerability HAS landed its fix — but the
+ * ORIGIN spec's latest security review is still a `completed` `real-vuln` row, so the latest-row green rule
+ * ([[isLatestSecurityReviewGreen]]) would refuse it forever (a re-review never runs when the fix landed in an
+ * unrelated commit). The ground-truth incident: loyalty-coupon-materialize-conflict-tolerant-insert passed
+ * spec-test 4/4 on 2026-11-10 but [[../specs/fold-gate-counts-real-vuln-resolved-when-fix-spec-folded]]'s fold
+ * gate refused it because its latest review was `real-vuln` with `authored_slug`
+ * revoke-public-execute-insert-coupon-on-conflict-ignore-rpc (already folded) — the founder had to archive by
+ * hand. This predicate is the fix: a real-vuln row counts as resolved when its authored fix spec is in the
+ * caller-supplied `resolvedFixSpecSlugs` set (slugs whose spec status is `shipped`/`folded`).
+ *
+ * A real-vuln row with NO `authored_slug`, or whose fix spec is not yet shipped/folded, is NOT resolved and
+ * still blocks. Pure — the resolved-slug set is computed by the rollup ([[getSecurityStateBySlug]]) via the
+ * specs-table SDK and passed in.
+ */
+export function isRealVulnResolvedByFixSpec(
+  row: { status: string; verdict?: string | null; authored_slug?: string | null },
+  resolvedFixSpecSlugs: ReadonlySet<string>,
+): boolean {
+  if (row.status !== "completed") return false; // only a terminal verdict can be "resolved"
+  if (!isRealVulnVerdict(row.verdict)) return false; // not a real-vuln finding
+  const slug = String(row.authored_slug || "").trim();
+  if (!slug) return false; // no fix spec authored → nothing could have shipped/folded → still blocks
+  return resolvedFixSpecSlugs.has(slug);
+}
+
+/**
  * ⭐ security-review-lane-must-always-produce-a-verdict Phase 1 — GREEN means the LATEST review is clean.
  *
  * A slug/branch is security-green iff the MOST RECENT security-review row (by `created_at`) reached a
@@ -141,17 +172,29 @@ export function isCleanSecurityVerdict(verdict: string | null | undefined): bool
  *   - the latest row has no verdict, `needs-human`, or `real-vuln`
  *   - there are no review rows at all (absence ≠ clean)
  *
+ * fold-gate-counts-real-vuln-resolved-when-fix-spec-folded Phase 1 — ONE exception to the real-vuln RED
+ * rule: a `completed` `real-vuln` latest row whose `authored_slug` fix spec is in `resolvedFixSpecSlugs`
+ * (shipped/folded) reads GREEN via [[isRealVulnResolvedByFixSpec]]. `resolvedFixSpecSlugs` is OPTIONAL — the
+ * pre-merge branch gate + the single-slug fast path pass nothing (unchanged live/surfaced semantics, and a
+ * real-vuln there still blocks); only the board rollup ([[getSecurityStateBySlug]]) supplies the set. A
+ * live/surfaced latest row is still red (not `completed`), so the resolution can only ever rescue a terminal
+ * real-vuln review, never an in-flight one.
+ *
  * `rowsNewestFirst` MUST be ordered newest-first — the three rollups all query
  * `.order("created_at", { ascending: false })`, so the first element is the latest review. Callers
  * exclude dep-watch-mode rows before calling (a dep-watch scan is infra, not a per-spec verdict).
  */
 export function isLatestSecurityReviewGreen(
-  rowsNewestFirst: ReadonlyArray<{ status: string; verdict?: string | null }>,
+  rowsNewestFirst: ReadonlyArray<{ status: string; verdict?: string | null; authored_slug?: string | null }>,
+  resolvedFixSpecSlugs?: ReadonlySet<string>,
 ): boolean {
   const latest = rowsNewestFirst[0];
   if (!latest) return false; // no review on record ≠ clean
   if (latest.status !== "completed") return false; // live/surfaced/failed latest → no verdict yet
-  return isCleanSecurityVerdict(latest.verdict);
+  if (isCleanSecurityVerdict(latest.verdict)) return true;
+  // The sole real-vuln exception: resolved through its shipped/folded authored fix spec.
+  if (resolvedFixSpecSlugs && isRealVulnResolvedByFixSpec(latest, resolvedFixSpecSlugs)) return true;
+  return false;
 }
 
 /** Statuses that mean a security-review job is still "live" — being worked or surfaced (awaiting owner). */
@@ -973,35 +1016,85 @@ export async function getSecurityStateBySlug(admin: Admin, workspaceId: string):
   const surfacedSet: ReadonlySet<string> = new Set(SURFACED_SECURITY_STATUSES);
   // Collect each slug's security-review rows newest-first (the query is already `created_at` desc), so
   // `completedClean` can key on the LATEST row via [[isLatestSecurityReviewGreen]] rather than "any
-  // completed non-real-vuln row" (which let a stale clean / a flipped needs-human read as green).
-  const rowsBySlug: Record<string, Array<{ status: string; verdict: string }>> = {};
+  // completed non-real-vuln row" (which let a stale clean / a flipped needs-human read as green). Carry
+  // `authored_slug` so a real-vuln latest row can be rescued once its authored fix spec ships/folds
+  // ([[isRealVulnResolvedByFixSpec]]).
+  const rowsBySlug: Record<string, Array<{ status: string; verdict: string; authored_slug: string }>> = {};
   for (const row of (data ?? []) as Array<{ spec_slug: string; status: string; instructions?: string }>) {
     const slug = String(row.spec_slug || "");
     // Exclude infra dep-watch jobs by IDENTITY: the sentinel slug OR the dep-watch mode. A real
     // `diff`/`branch` review of the `security-dep-upgrades` fix spec is NOT infra — it rolls up.
     let mode = "";
     let verdict = "";
+    let authored_slug = "";
     try {
-      const parsed = JSON.parse(String(row.instructions || "{}")) as { mode?: string; verdict?: string };
+      const parsed = JSON.parse(String(row.instructions || "{}")) as { mode?: string; verdict?: string; authored_slug?: string };
       mode = String(parsed.mode || "");
       verdict = String(parsed.verdict || "");
+      authored_slug = String(parsed.authored_slug || "");
     } catch {
       /* not JSON — treat as a non-dep-watch (diff) review, unknown verdict */
     }
     if (!slug || slug === SECURITY_DEP_WATCH_SLUG || mode === "dep-watch") continue;
-    (rowsBySlug[slug] ||= []).push({ status: row.status, verdict });
+    (rowsBySlug[slug] ||= []).push({ status: row.status, verdict, authored_slug });
   }
+  // fold-gate-counts-real-vuln-resolved-when-fix-spec-folded Phase 1 — collect the fix-spec slugs authored
+  // by a LATEST-row real-vuln review (the ONLY rows whose greenness a shipped/folded fix can rescue), then
+  // batch-read their status in ONE specs-table SDK call (never a raw `.from('specs')`). The common path (no
+  // latest-row real-vuln with an authored fix) adds zero extra reads.
+  const authoredFixSlugs = new Set<string>();
+  for (const rows of Object.values(rowsBySlug)) {
+    const latest = rows[0];
+    if (latest && latest.status === "completed" && isRealVulnVerdict(latest.verdict) && latest.authored_slug) {
+      authoredFixSlugs.add(latest.authored_slug);
+    }
+  }
+  const resolvedFixSlugs = authoredFixSlugs.size
+    ? await resolveShippedOrFoldedFixSlugs(workspaceId, authoredFixSlugs)
+    : (new Set<string>() as ReadonlySet<string>);
   const map: Record<string, SecurityStateBySlug> = {};
   for (const [slug, rows] of Object.entries(rowsBySlug)) {
     map[slug] = {
       live: rows.some((r) => runningSet.has(r.status)),
       surfaced: rows.some((r) => surfacedSet.has(r.status)),
       // GREEN keys on the latest review only — a live/surfaced latest row already reads red here (it is
-      // not a `completed` clean verdict), so no separate override is needed.
-      completedClean: isLatestSecurityReviewGreen(rows),
+      // not a `completed` clean verdict), so no separate override is needed. A `completed` real-vuln latest
+      // row reads green ONLY when its authored fix spec is shipped/folded (in `resolvedFixSlugs`).
+      completedClean: isLatestSecurityReviewGreen(rows, resolvedFixSlugs),
     };
   }
   return map;
+}
+
+/**
+ * fold-gate-counts-real-vuln-resolved-when-fix-spec-folded Phase 1 — given the fix-spec slugs authored by
+ * real-vuln reviews, return the subset whose spec is SHIPPED or FOLDED. Reads through the specs-table SDK
+ * (`getAllSpecs`, which includes folded specs via `scope: 'all'`) — NEVER a raw `.from('specs')`. Status is
+ * the SAME derivation the board + fold gate use (`deriveSpecCardStatus`: phase rollup, with a `folded`
+ * stored-status mapping to shipped), so "resolved" here can never disagree with what the roadmap shows. A
+ * read error fails CLOSED (returns the empty set) — a security gate must never clear a real-vuln finding on
+ * a lookup blip; the daily fold cron re-checks the moment the read recovers.
+ */
+async function resolveShippedOrFoldedFixSlugs(
+  workspaceId: string,
+  candidateSlugs: ReadonlySet<string>,
+): Promise<ReadonlySet<string>> {
+  const resolved = new Set<string>();
+  try {
+    const { getAllSpecs } = await import("@/lib/specs-table");
+    const { deriveSpecCardStatus } = await import("@/lib/brain-roadmap");
+    const specs = await getAllSpecs(workspaceId);
+    for (const row of specs) {
+      if (!candidateSlugs.has(row.slug)) continue;
+      // `folded` stored status is explicit (archived); `shipped` is the phase-rollup derivation.
+      if (row.status === "folded" || deriveSpecCardStatus(row, row.phases) === "shipped") {
+        resolved.add(row.slug);
+      }
+    }
+  } catch {
+    /* read blip — fail CLOSED: leave unresolved so the fold defers, never clears on a miss. */
+  }
+  return resolved;
 }
 
 /**

@@ -53,6 +53,7 @@ import {
   getSecurityStateForSlug,
   getSecurityStateForBranch,
   isLatestSecurityReviewGreen,
+  isRealVulnResolvedByFixSpec,
 } from "./security-agent";
 
 type StubRow = { spec_slug: string; status: string; instructions?: string; created_at?: string };
@@ -171,4 +172,68 @@ test("getSecurityStateForBranch — latest-row rule applies to the pre-merge pro
     { spec_slug: "s", status: "completed", instructions: JSON.stringify({ mode: "branch", verdict: "clean" }), created_at: "2026-10-01T00:00:00Z" },
   ]);
   assert.equal((await getSecurityStateForBranch(red, "claude/build-x")).completedClean, false);
+});
+
+// ── fold-gate-counts-real-vuln-resolved-when-fix-spec-folded Phase 1 ──
+// A completed real-vuln review reads GREEN once the fix spec it authored has shipped/folded.
+
+test("isRealVulnResolvedByFixSpec — completed real-vuln whose authored fix spec is shipped/folded resolves", () => {
+  const resolved = new Set(["revoke-public-execute-insert-coupon-on-conflict-ignore-rpc"]);
+  // real-vuln + folded fix → resolved
+  assert.equal(
+    isRealVulnResolvedByFixSpec(
+      { status: "completed", verdict: "real-vuln", authored_slug: "revoke-public-execute-insert-coupon-on-conflict-ignore-rpc" },
+      resolved,
+    ),
+    true,
+  );
+  // real-vuln + PLANNED (not-yet-shipped) fix → NOT resolved (slug absent from the resolved set)
+  assert.equal(
+    isRealVulnResolvedByFixSpec(
+      { status: "completed", verdict: "real-vuln", authored_slug: "some-planned-fix" },
+      resolved,
+    ),
+    false,
+  );
+  // real-vuln with NO authored_slug → NOT resolved (nothing could have shipped)
+  assert.equal(isRealVulnResolvedByFixSpec({ status: "completed", verdict: "real-vuln" }, resolved), false);
+  assert.equal(isRealVulnResolvedByFixSpec({ status: "completed", verdict: "real-vuln", authored_slug: "" }, resolved), false);
+  // clean / non-real-vuln verdict → the predicate never fires (clean is handled by the base green rule)
+  assert.equal(
+    isRealVulnResolvedByFixSpec({ status: "completed", verdict: "clean", authored_slug: "whatever" }, resolved),
+    false,
+  );
+  // a non-terminal real-vuln row (surfaced/live) is never "resolved" — only a completed verdict can be
+  assert.equal(
+    isRealVulnResolvedByFixSpec(
+      { status: "needs_approval", verdict: "real-vuln", authored_slug: "revoke-public-execute-insert-coupon-on-conflict-ignore-rpc" },
+      resolved,
+    ),
+    false,
+  );
+});
+
+test("isLatestSecurityReviewGreen — real-vuln latest reads green ONLY with a resolved authored fix spec", () => {
+  const resolved = new Set(["fix-shipped"]);
+  // real-vuln with folded/shipped fix → green
+  assert.equal(
+    isLatestSecurityReviewGreen([{ status: "completed", verdict: "real-vuln", authored_slug: "fix-shipped" }], resolved),
+    true,
+  );
+  // real-vuln with planned fix (slug not in set) → red
+  assert.equal(
+    isLatestSecurityReviewGreen([{ status: "completed", verdict: "real-vuln", authored_slug: "fix-planned" }], resolved),
+    false,
+  );
+  // real-vuln with no authored_slug → red
+  assert.equal(isLatestSecurityReviewGreen([{ status: "completed", verdict: "real-vuln" }], resolved), false);
+  // clean latest → green regardless of the resolved set (base rule)
+  assert.equal(isLatestSecurityReviewGreen([{ status: "completed", verdict: "clean" }], resolved), true);
+  // no resolved set supplied (branch/slug fast path) → a real-vuln latest still blocks
+  assert.equal(isLatestSecurityReviewGreen([{ status: "completed", verdict: "real-vuln", authored_slug: "fix-shipped" }]), false);
+  // a NEWER real-vuln+resolved behind nothing stays green; a live latest is still red even if resolved set has it
+  assert.equal(
+    isLatestSecurityReviewGreen([{ status: "building", verdict: "real-vuln", authored_slug: "fix-shipped" }], resolved),
+    false,
+  );
 });
