@@ -89,6 +89,7 @@ import {
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsTriggerIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise,
+  isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesSenderTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesRoleAdhocNoise,
   isForeignSupabasePostgresMissingTicketMessagesChannelAdhocNoise,
@@ -962,6 +963,18 @@ const LOG_QUERIES: LogQuery[] = [
       // `journey_definitions.journey_name`), or on `journey_sessions` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... intent ... from
+      // public.journey_definitions` lookup by an external tool reading our
+      // `journey_definitions` table with columns it doesn't have (`intent`, `steps`), or the
+      // PostgREST CTE wrapper the same client emits. `journey_definitions` has never carried
+      // an `intent` column, and no ShopCX code path names it, so the resulting column-missing
+      // ERROR is foreign noise (Control Tower signature `supabase-logs:20fde736a02f1195`).
+      // Same narrow-gating shape as the `journey_sessions.*` siblings: BOTH the exact
+      // column-missing message AND the SELECT-lookup shape — a column-missing error on any
+      // live `journey_definitions` column, on `intent` from any other table, or on
+      // `journey_definitions` via a non-SELECT statement (real code-bug shape), still
+      // surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... sender_type ... from
       // public.ticket_messages` lookup by an external tool (Supabase Studio table editor,
       // foreign SQL client, third-party integration) or the PostgREST CTE wrapper the
