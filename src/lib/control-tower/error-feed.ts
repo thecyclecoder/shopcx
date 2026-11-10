@@ -1285,6 +1285,71 @@ export function isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `playbooks.steps` / `playbooks.config`
+ * column for an ad hoc direct-REST lookup on a table ShopCX does not read that way. A stale
+ * external/REST client SELECTs `steps` / `config` from `public.playbooks`, Supabase's
+ * `postgres_logs` feed captures the resulting undefined_column ERROR, and log-poll mints a
+ * Control Tower incident for a query we don't own
+ * ([[../specs/error-feed-drop-playbooks-steps-direct-rest-noise]], Control Tower signature
+ * `supabase-logs:c19182e4043d30c3`). `public.playbooks` has never owned a `steps` or a
+ * `config` column (the playbook body lives on its own columns, not a JSON `steps`/`config`
+ * blob), so there is no lever from ShopCX to make that query resolve — paging Platform on it
+ * is repair work for a query no code owns. The direct twin of
+ * `isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise` /
+ * `isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise` above.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for one of THESE columns —
+ *      trimmed equal to `column playbooks.steps does not exist` / `column playbooks.config
+ *      does not exist` (with or without the `public.` qualifier and any leading `ERROR: `
+ *      prefix Postgres includes on the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.playbooks` — either (a) the
+ *      bare `select ... from public.playbooks` shape, OR (b) the PostgREST-generated `WITH
+ *      pgrst_source AS ( SELECT ... FROM "public"."playbooks" ... )` CTE wrapper form with
+ *      double-quoted identifiers.
+ *
+ * Intentionally narrow — any genuine schema regression still pages:
+ *   - a DIFFERENT missing column on `playbooks` (e.g. `title`, `enabled`, `workspace_id`)
+ *     still pages — the pin covers `steps` / `config` only,
+ *   - the same `steps`/`config` message on a DIFFERENT relation (e.g. `journey_definitions`)
+ *     still pages — the pin is `playbooks` only,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL, a JOIN, a non-SELECT wrapped op inside the CTE) still pages,
+ *   - a FATAL / PANIC / constraint violation / relation-missing on the table is untouched
+ *     (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — returning null fully suppresses the row (no error_event, no
+ * loop_alert, no signature). A capture-time drop, not a `transient` flag.
+ */
+export function isForeignSupabasePostgresMissingPlaybooksStepsDirectRestColumnNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column playbooks.steps does not exist" ||
+    stripped === "column public.playbooks.steps does not exist" ||
+    stripped === "column playbooks.config does not exist" ||
+    stripped === "column public.playbooks.config does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `playbooks` — any trailing WHERE/LIMIT/ORDER BY is fine; the pin
+  // is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real code-bug
+  // shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?playbooks\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."playbooks" ... )` with double-quoted identifiers. Guarded so the CTE branch
+  // requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper
+  // is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."playbooks"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing `dashboard_notifications.dismissed_at`
  * column for an ad hoc direct-REST lookup on a table ShopCX does not read that way. A
  * stale external/REST client SELECTs `dismissed_at` from `public.dashboard_notifications`,

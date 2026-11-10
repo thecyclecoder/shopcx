@@ -37,6 +37,7 @@ import {
   isForeignSupabasePostgresMissingControlTowerEventsLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsColumnLookupNoise,
   isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise,
+  isForeignSupabasePostgresMissingPlaybooksStepsDirectRestColumnNoise,
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
@@ -364,6 +365,17 @@ const LOG_QUERIES: LogQuery[] = [
       // a `loop_alerts` column rename, a non-SELECT write, or a FATAL/PANIC/constraint
       // violation still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingLoopAlertsDirectRestColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign / stale direct-REST client SELECTs
+      // `steps` / `config` from `public.playbooks` — columns the table has never owned (the
+      // playbook body is not a JSON `steps`/`config` blob). The resulting undefined_column
+      // ERROR is repair work for a query we don't own
+      // ([[../specs/error-feed-drop-playbooks-steps-direct-rest-noise]], Control Tower
+      // signature `supabase-logs:c19182e4043d30c3`). Narrowly gated to require BOTH the exact
+      // `column playbooks.<steps|config> does not exist` message AND the SELECT-lookup shape
+      // on `playbooks` (bare or PostgREST CTE wrapper) — a real `steps`/`config`-missing on
+      // another table, a `playbooks` column rename, a non-SELECT write, or a
+      // FATAL/PANIC/constraint violation still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingPlaybooksStepsDirectRestColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign / stale direct-REST client listed
       // `worker_heartbeats` ordered by a non-existent `created_at` column (the singleton
       // liveness table uses `updated_at` / `started_at` / `last_poll_at`, never `created_at`).
