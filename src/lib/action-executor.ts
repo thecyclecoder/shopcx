@@ -1367,6 +1367,56 @@ async function resolveVaultedPm(
 }
 
 /**
+ * DB roundtrip — resolve the Shopify customer id for a ticket customer,
+ * SPANNING the customer's link group via [[customer-links]] `linkGroupIds`.
+ *
+ * Prefers the ticket customer's OWN `shopify_customer_id`; when that is null,
+ * falls back to the first linked sibling (in `linkGroupIds` order) that carries
+ * a non-null one. This mirrors the ownership-widening `create_return` already
+ * does on the orders lookup: a linked account is the SAME person (see
+ * [[../libraries/customer-links]]), so the Shopify identity can legitimately
+ * live on a sibling record even when the ticket's resolved profile has none.
+ *
+ * Ground truth (spec:
+ * create_replacement_order-dollar_replacement-switch_payment_method-must-resolve-shopify-id-across-linked-accounts,
+ * ticket ab664ee7-65bc-4c1d-9e34-ff6e14d02dc5): an in-policy replacement could
+ * not execute because `ctx.customerId` was tiffany@dccpasfirm.com (d2baa618,
+ * shopify_customer_id NULL) while the Shopify identity lived on the already-
+ * linked sibling tcornwell2001@yahoo.com (aee8bd3f, shopify_customer_id
+ * 7060558217389). `create_replacement_order` / `dollar_replacement` /
+ * `switch_payment_method` resolved the id from `ctx.customerId` alone and
+ * returned "No Shopify customer ID".
+ *
+ * `linkGroupIds` returns `[customerId]` for an unlinked customer, so an
+ * ungrouped customer keeps the exact pre-fallback behavior (own id or null).
+ * Returns null when no member of the group carries a `shopify_customer_id`.
+ */
+async function resolveGroupShopifyCustomerId(
+  admin: Admin,
+  workspaceId: string,
+  customerId: string,
+): Promise<string | null> {
+  const ids = await linkGroupIds(admin, workspaceId, customerId);
+  const { data: rows } = await admin
+    .from("customers")
+    .select("id, shopify_customer_id")
+    .in("id", ids);
+  const byId = new Map(
+    ((rows ?? []) as Array<{ id: string; shopify_customer_id?: string | null }>).map(
+      (r) => [r.id, r.shopify_customer_id ?? null] as const,
+    ),
+  );
+  // Prefer the ticket customer's own id, then the remaining group members in
+  // `linkGroupIds` order — first non-null `shopify_customer_id` wins.
+  const ordered = [customerId, ...ids.filter((id) => id !== customerId)];
+  for (const id of ordered) {
+    const sid = byId.get(id);
+    if (sid) return String(sid);
+  }
+  return null;
+}
+
+/**
  * Fail-closed handoff for create_order / create_subscription when the
  * customer has no vaulted PM. Launches the add_payment_method journey
  * (the assisted-purchase path) so the customer gets a card-entry link,
@@ -4300,14 +4350,15 @@ export const directActionHandlers: Record<
     if (last4.length !== 4) return { success: false, error: `card_last4 must be 4 digits, got "${p.card_last4}"` };
 
     // Pull the customer's Shopify ID + linked accounts so we cover all
-    // active subs across the link group.
-    const { data: cust } = await ctx.admin.from("customers")
-      .select("shopify_customer_id").eq("id", ctx.customerId).single();
-    if (!cust?.shopify_customer_id) return { success: false, error: "No Shopify customer ID on record" };
+    // active subs across the link group. Resolve across the link group so a
+    // ticket profile with a null shopify_customer_id still finds the identity
+    // on a linked sibling (ticket ab664ee7).
+    const shopifyCustomerId = await resolveGroupShopifyCustomerId(ctx.admin, ctx.workspaceId, ctx.customerId);
+    if (!shopifyCustomerId) return { success: false, error: "No Shopify customer ID on record" };
 
     // Match by last4 against Shopify payment methods (active only).
     const { getCustomerPaymentMethods } = await import("@/lib/dunning");
-    const cards = await getCustomerPaymentMethods(ctx.workspaceId, cust.shopify_customer_id as string);
+    const cards = await getCustomerPaymentMethods(ctx.workspaceId, shopifyCustomerId);
     const matches = cards.filter((c) => c.last4 === last4);
     if (matches.length === 0) {
       return { success: false, error: `No active card ending in ${last4} on file. Cards on file: ${cards.map((c) => `*${c.last4}`).join(", ") || "(none)"}` };
@@ -4361,10 +4412,11 @@ export const directActionHandlers: Record<
   },
 
   create_replacement_order: async (ctx, p) => {
-    // Get customer's Shopify ID
-    const { data: cust } = await ctx.admin.from("customers")
-      .select("shopify_customer_id").eq("id", ctx.customerId).single();
-    if (!cust?.shopify_customer_id) return { success: false, error: "No Shopify customer ID" };
+    // Get customer's Shopify ID — resolved across the link group so a ticket
+    // profile with a null shopify_customer_id falls back to a linked sibling's
+    // (ticket ab664ee7).
+    const shopifyCustomerId = await resolveGroupShopifyCustomerId(ctx.admin, ctx.workspaceId, ctx.customerId);
+    if (!shopifyCustomerId) return { success: false, error: "No Shopify customer ID" };
 
     // Resolve shipping address through the shared current-address
     // resolver — priority: explicit override → customers.default_address
@@ -4452,7 +4504,7 @@ export const directActionHandlers: Record<
     const r = await createReplacementOrder({
       workspaceId: ctx.workspaceId,
       customerId: ctx.customerId,
-      shopifyCustomerId: cust.shopify_customer_id,
+      shopifyCustomerId,
       items: resolvedItems,
       shippingAddress: {
         firstName: addr.firstName,
@@ -4499,9 +4551,10 @@ export const directActionHandlers: Record<
     if (!amountCents || amountCents <= 0) return { success: false, error: "dollar_replacement missing replacement_amount_cents" };
     if (!p.shopify_order_id && !p.order_number) return { success: false, error: "dollar_replacement missing shopify_order_id / order_number to refund against" };
 
-    const { data: cust } = await ctx.admin.from("customers")
-      .select("shopify_customer_id").eq("id", ctx.customerId).single();
-    if (!cust?.shopify_customer_id) return { success: false, error: "No Shopify customer ID" };
+    // Resolve across the link group so a ticket profile with a null
+    // shopify_customer_id falls back to a linked sibling's (ticket ab664ee7).
+    const shopifyCustomerId = await resolveGroupShopifyCustomerId(ctx.admin, ctx.workspaceId, ctx.customerId);
+    if (!shopifyCustomerId) return { success: false, error: "No Shopify customer ID" };
 
     // Resolve order UUID for the refund half — issueRefund takes an
     // internal orders.id UUID, never the human-facing identifier.
@@ -4550,7 +4603,7 @@ export const directActionHandlers: Record<
     const { issueDollarReplacement } = await import("@/lib/commerce/replacement");
     const r = await issueDollarReplacement(ctx.workspaceId, {
       customerId: ctx.customerId,
-      shopifyCustomerId: cust.shopify_customer_id,
+      shopifyCustomerId,
       items: [{ variantId, quantity }],
       shippingAddress: {
         firstName: addr.firstName,

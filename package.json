@@ -377,6 +377,7 @@
     "test:action-executor-full-order-refund-customer-binding": "tsx --test src/lib/action-executor.full-order-refund-customer-binding.test.ts",
     "test:create-return-resolution-type": "tsx --test src/lib/action-executor.create-return-resolution-type.test.ts",
     "test:create-return-linked-accounts": "tsx --test src/lib/action-executor.create-return-linked-accounts.test.ts",
+    "test:replacement-shopify-id-linked-accounts": "tsx --test src/lib/action-executor.replacement-shopify-id-linked-accounts.test.ts",
     "test:playbook-executor-check-vaulted-pm": "tsx --test src/lib/playbook-executor.check-vaulted-pm.test.ts",
     "test:playbook-executor-crisis-defers-stand-firm": "tsx --test src/lib/playbook-executor.crisis-defers-stand-firm.test.ts",
     "test:playbook-executor-assisted-purchase-routing": "tsx --test src/lib/playbook-executor.assisted-purchase-routing.test.ts",
