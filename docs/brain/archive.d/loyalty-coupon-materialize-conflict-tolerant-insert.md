@@ -1,0 +1,1 @@
+- **Make loyalty-coupon materialization conflict-tolerant (ON CONFLICT DO NOTHING)** · verified 2026-11-10 · → [[../lifecycles/subscription-billing]]
