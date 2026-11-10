@@ -29,6 +29,10 @@ The refund **mirror table** — one row per authoritative refund fired against a
 
 **Out:** `workspace_id` → [[workspaces]].id · `order_id` → [[orders]].id.
 
+## Gotchas / Known issues
+
+- **Foreign-noise drops on phantom columns.** Stale direct-REST clients or external integrations sometimes probe for non-existent columns on order_refunds: `customer_id`, `order_number`, `reason`. The error feed classifier [[../libraries/error-feed]] `isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise` drops all three at capture (they're the same foreign SELECT query, just with different column-order variants), preventing each variant from opening a fresh Control Tower signature. Pages on a *real* missing column (e.g., `amount_cents` or `vendor_refund_id` on a live code path) are preserved. Signatures: `supabase-logs:d919f14fa13296c8` (customer_id) and `supabase-logs:5695252ec06074f3` (order_number).
+
 ## Invariants
 
 - **Live-fire writes come from two chokepoints — never freehand.** Refunds ShopCX itself dispatches resolve to [[../libraries/refund]] `refundOrder`, which writes the mirror row on the success side (`vendor_refund_id` = the vendor's own id). Refunds fired at the vendor (Shopify admin, Braintree gateway, or any path that does not call `refundOrder`) reach the ledger through [[../libraries/vendor-refund-mirror]] — for Shopify via the `refunds/create` webhook ([[../libraries/shopify-webhooks]] `handleRefundCreate`) with a REST reconcile fallback; for Braintree via `reconcileBraintreeRefundsForOrder` on order load or explicit backfill (Phase 2). Both paths write the SAME row shape (`vendor` / `amount_cents` / `status` / `vendor_refund_id` / stable `request_key`), so the double-refund guard reads a complete ledger. The vendor path dedupes on `vendor_refund_id` before insert, so an echo of a refund `refundOrder` already mirrored never lands a duplicate.
