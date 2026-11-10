@@ -6400,6 +6400,64 @@ test("isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise drops the
   );
 });
 
+test("isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise drops the order_number and reason column-missing variants of the SAME foreign order_refunds read (signature supabase-logs:5695252ec06074f3)", () => {
+  // order_number variant — the new Control Tower signature supabase-logs:5695252ec06074f3.
+  // Same foreign SELECT, different off-schema column flagged first.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(
+      "column order_refunds.order_number does not exist",
+      "select id, order_number, customer_id from public.order_refunds where id = '00000000-0000-0000-0000-000000000000'",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(
+      "column public.order_refunds.order_number does not exist",
+      "select order_number from order_refunds limit 1",
+    ),
+    true,
+  );
+  // order_number via the PostgREST direct-REST CTE wrapper.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(
+      "column order_refunds.order_number does not exist",
+      'with pgrst_source as (select "order_refunds".* from "public"."order_refunds" where "order_refunds"."order_number" = $1) select * from pgrst_source',
+    ),
+    true,
+  );
+  // reason variant — unqualified and public.-qualified.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(
+      "column order_refunds.reason does not exist",
+      "select id, reason from public.order_refunds",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(
+      "ERROR:  column public.order_refunds.reason does not exist",
+      "select reason from order_refunds",
+    ),
+    true,
+  );
+  // A non-SELECT write naming order_number is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(
+      "column order_refunds.order_number does not exist",
+      "insert into public.order_refunds (order_number) values ($1)",
+    ),
+    false,
+  );
+  // A LEGITIMATE order_refunds column (real schema regression) is NOT in the drop set.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(
+      "column order_refunds.amount does not exist",
+      "select id, amount from public.order_refunds",
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise KEEPS other tables, other columns, and non-SELECT statements (real regressions still page)", () => {
   // Different table.
   assert.equal(

@@ -1165,17 +1165,21 @@ const LOG_QUERIES: LogQuery[] = [
       // sighting.
       if (isForeignSupabasePostgresMissingSpecPhasesWorkspaceSlugLookupNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
-      // against `public.order_refunds.customer_id`. The `order_refunds` table exists but
-      // has no `customer_id` column — every ShopCX refund lookup joins through
-      // `order_id` / `workspace_id`. The column-missing ERROR only reaches this feed when a
-      // foreign app / stale SQL Editor session queries
-      // `/rest/v1/order_refunds?select=...customer_id...`. There is no lever from ShopCX to
-      // make that query resolve — paging Platform on it (Control Tower signature
-      // `supabase-logs:d919f14fa13296c8`) is repair work for a query we don't own. Narrowly
-      // gated to require BOTH the exact column-missing message AND the bare-SELECT /
-      // PostgREST-CTE shape on order_refunds — a column-missing error on any other table, a
-      // different column on `order_refunds`, or on it via a non-SELECT statement (real
-      // code-bug / schema-regression shape) still surfaces / pages on first sighting.
+      // against `public.order_refunds`, naming any of the off-schema columns the same
+      // foreign caller lists — `{customer_id, order_number, reason}`. The `order_refunds`
+      // table exists but has none of these columns — every ShopCX refund lookup joins
+      // through `order_id` / `workspace_id`. The column-missing ERROR only reaches this feed
+      // when a foreign app / stale SQL Editor session queries
+      // `/rest/v1/order_refunds?select=...customer_id...order_number...reason...`. Whichever
+      // off-schema column Postgres flags first just opens a fresh signature for the SAME
+      // query — `supabase-logs:d919f14fa13296c8` (customer_id) and
+      // `supabase-logs:5695252ec06074f3` (order_number) are the same foreign read. There is
+      // no lever from ShopCX to make that query resolve — paging Platform on it is repair
+      // work for a query we don't own. Narrowly gated to require BOTH an exact column-missing
+      // message from the off-schema column set AND the bare-SELECT / PostgREST-CTE shape on
+      // order_refunds — a column-missing error on any other table, a LEGITIMATE column on
+      // `order_refunds` (a real schema regression), or on it via a non-SELECT statement (real
+      // code-bug shape) still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingOrderRefundsCustomerIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.smart_patterns.content`. The `smart_patterns` table exists but
