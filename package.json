@@ -302,6 +302,7 @@
     "test:gated-migration-approval": "tsx --test src/lib/control-tower/gated-migration-approval.test.ts",
     "test:error-feed": "tsx --test src/lib/control-tower/error-feed.test.ts",
     "test:error-feed-subscriptions-engine-noise": "tsx --test src/lib/control-tower/error-feed.subscriptions-engine-noise.test.ts",
+    "test:error-feed-subscriptions-billing-engine-noise": "tsx --test src/lib/control-tower/error-feed.subscriptions-billing-engine-noise.test.ts",
     "test:portal-remediation": "tsx --test src/lib/portal/remediation.test.ts",
     "test:experiment-delivery-audit": "tsx --test src/lib/storefront/experiment-delivery-audit.test.ts",
     "test:ready-to-test": "tsx --test src/lib/ads/ready-to-test.test.ts",
