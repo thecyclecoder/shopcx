@@ -1,0 +1,1 @@
+- **Fold gate treats a fixed security finding as resolved** · verified 2026-11-10 · → [[../libraries/security-agent]]
