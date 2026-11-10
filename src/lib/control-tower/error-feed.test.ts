@@ -19573,12 +19573,12 @@ test("isForeignSupabasePostgresMissingJourneySessionsJourneyNameColumnAdhocNoise
 // A foreign / stale PostgREST direct-REST client reads
 // `/rest/v1/journey_definitions?select=...intent...` (or a Supabase Studio browse)
 // against our `public.journey_definitions` table with columns it doesn't have (`intent`,
-// `steps`). The table exists but has NEVER carried an `intent` column. Foreign-owned
-// surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
-// message on `journey_definitions.intent` AND a SELECT-lookup shape on
-// `journey_definitions` (bare OR PostgREST CTE wrapper) are present. A column-missing on a
-// live `journey_definitions` column, on `intent` from any other table, or via a non-SELECT
-// statement still pages.
+// `steps`). The table exists but has NEVER carried an `intent` NOR a `steps` column.
+// Foreign-owned surface, no lever from us — drop AT CAPTURE only when BOTH the exact
+// column-missing message on `journey_definitions.intent` or `journey_definitions.steps`
+// AND a SELECT-lookup shape on `journey_definitions` (bare OR PostgREST CTE wrapper) are
+// present. A column-missing on a live `journey_definitions` column, on `intent`/`steps`
+// from any other table, or via a non-SELECT statement still pages.
 
 test("isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise drops the captured supabase-logs:20fde736a02f1195 message+query pair (PostgREST CTE SELECT on journey_definitions.intent)", () => {
   // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
@@ -19653,6 +19653,77 @@ test("isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise K
     isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
       "column journey_definitions.intent does not exist",
       "update public.journey_definitions set intent = $1 where id = $2",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise drops the captured supabase-logs:5494c0b3127c03c7 message+query pair (the steps column variant, PostgREST CTE + bare SELECT on journey_definitions.steps)", () => {
+  // Sibling of the intent variant — our `journey_definitions` table has never carried a
+  // `steps` column either, so the same foreign SELECT-lookup shape must drop at capture.
+  // PostgREST CTE wrapper (unqualified + public.-qualified message).
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column journey_definitions.steps does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."journey_definitions"."id", "public"."journey_definitions"."steps" FROM "public"."journey_definitions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column public.journey_definitions.steps does not exist",
+      'WITH pgrst_source AS (SELECT "public"."journey_definitions"."steps" FROM "public"."journey_definitions")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column journey_definitions.steps does not exist",
+      "select id, steps from public.journey_definitions",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column journey_definitions.steps does not exist",
+      "select steps from journey_definitions limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "ERROR: column journey_definitions.steps does not exist",
+      'WITH pgrst_source AS (SELECT "public"."journey_definitions"."steps" FROM "public"."journey_definitions")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise KEEPS a column-missing on steps for another table, and other journey_definitions columns (steps regressions elsewhere still page)", () => {
+  // A column-missing on `steps` from a DIFFERENT table must still page — the pin is
+  // `journey_definitions.steps` only, not steps anywhere.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column journey_sessions.steps does not exist",
+      "select steps from public.journey_sessions",
+    ),
+    false,
+  );
+  // A column-missing on a live `journey_definitions` column must still page.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column journey_definitions.config does not exist",
+      "select config from public.journey_definitions",
+    ),
+    false,
+  );
+  // A non-SELECT statement naming `steps` on `journey_definitions` (real code-bug shape) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise(
+      "column journey_definitions.steps does not exist",
+      "update public.journey_definitions set steps = $1 where id = $2",
     ),
     false,
   );
