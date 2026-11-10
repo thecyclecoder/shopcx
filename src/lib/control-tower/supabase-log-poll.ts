@@ -85,6 +85,7 @@ import {
   isForeignSupabasePostgresMissingSubscriptionsEngineColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsBillingEngineColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersAddressColumnAdhocNoise,
   isForeignSupabasePostgresMissingCustomersLoyaltyPointsBalanceColumnNoise,
   isForeignSupabasePostgresMissingJourneySessionsExpiresAtColumnAdhocNoise,
@@ -904,6 +905,12 @@ const LOG_QUERIES: LogQuery[] = [
       // any other subscriptions column or a non-SELECT shape still pages (signature
       // supabase-logs:5a59ebef1beda819).
       if (isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise(message, query)) return null;
+      // Same narrow gate for the foreign `subscriptions.cancellation_reason` lookup — a
+      // cancelled subscription's reason lives on the cancel-flow rows, there is no
+      // `cancellation_reason` column on `subscriptions`, and no ShopCX code path selects
+      // it; a real regression on any other subscriptions column or a non-SELECT shape
+      // still pages.
+      if (isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... address ... from
       // public.customers` lookup by an external tool (Supabase Studio Table Editor /
       // API Docs, foreign SQL client, stale exploratory session, third-party

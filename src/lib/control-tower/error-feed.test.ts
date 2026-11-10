@@ -110,6 +110,7 @@ import {
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise,
   isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
@@ -28508,6 +28509,77 @@ test("isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise 
   assert.equal(
     isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise(
       "column subscriptions.discount_code does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise drops the canonical message on bare-SELECT + PostgREST CTE shapes", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `subscriptions.cancellation_reason` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise(
+      "column subscriptions.cancellation_reason does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."id", "public"."subscriptions"."cancellation_reason" FROM "public"."subscriptions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise(
+      "column public.subscriptions.cancellation_reason does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."cancellation_reason" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise(
+      "column subscriptions.cancellation_reason does not exist",
+      "select id, cancellation_reason from public.subscriptions",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise(
+      "ERROR: column subscriptions.cancellation_reason does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."cancellation_reason" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise KEEPS other columns / tables / non-SELECT shapes (real regressions still page)", () => {
+  // A DIFFERENT subscriptions column — `items` IS a live column; if it regresses we WANT
+  // the page. The pin is `cancellation_reason` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise(
+      "column subscriptions.items does not exist",
+      "select items from public.subscriptions",
+    ),
+    false,
+  );
+  // The same `cancellation_reason` column on ANOTHER table — the pin is subscriptions only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise(
+      "column cancellation_attempts.cancellation_reason does not exist",
+      "select cancellation_reason from public.cancellation_attempts",
+    ),
+    false,
+  );
+  // A NON-SELECT statement on subscriptions — real code-bug shape, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise(
+      "column subscriptions.cancellation_reason does not exist",
+      "update public.subscriptions set cancellation_reason = 'x' where id = 1",
+    ),
+    false,
+  );
+  // An empty / missing query attribute — cannot confirm the SELECT-lookup shape, still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise(
+      "column subscriptions.cancellation_reason does not exist",
       "",
     ),
     false,
