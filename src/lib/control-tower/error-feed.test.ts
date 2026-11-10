@@ -33,6 +33,7 @@ import {
   isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
   isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise,
   isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise,
@@ -7427,6 +7428,185 @@ test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNois
   assert.equal(
     isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(
       "column subscription_cycle_charges.created_at does not exist",
+      null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise ──
+// The SAME foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/subscription_cycle_charges?customer_id=eq...` against our
+// `public.subscription_cycle_charges` ledger. The table exists but has never had a
+// `customer_id` column — the created_at filter is gated on the exact created_at string, so
+// this customer_id variant leaks through. Foreign-owned surface, no lever from us (Control
+// Tower signature `supabase-logs:6e2a1de36aa5949a`) — drop AT CAPTURE only when BOTH the exact
+// column-missing message on `subscription_cycle_charges.customer_id` AND the bare SELECT-lookup
+// shape on `subscription_cycle_charges` are present. A column-missing on any other table, a
+// different column on `subscription_cycle_charges`, or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise drops the ad hoc SELECT lookup on the exact subscription_cycle_charges.customer_id column-missing shape", () => {
+  // The real captured sample — unqualified and public.-qualified message variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column subscription_cycle_charges.customer_id does not exist",
+      "select id, customer_id from public.subscription_cycle_charges where customer_id = 'x' limit 100",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column public.subscription_cycle_charges.customer_id does not exist",
+      "select id, customer_id from public.subscription_cycle_charges where customer_id = 'x' limit 100",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column subscription_cycle_charges.customer_id does not exist",
+      "select customer_id from subscription_cycle_charges limit 10",
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column subscription_cycle_charges.customer_id does not exist",
+      "SELECT ID, CUSTOMER_ID FROM PUBLIC.SUBSCRIPTION_CYCLE_CHARGES",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "ERROR: column subscription_cycle_charges.customer_id does not exist",
+      "select customer_id from public.subscription_cycle_charges",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise drops the PostgREST direct-REST WITH pgrst_source wrapper shape (signature 6e2a1de36aa5949a)", () => {
+  // The recurring query shape — PostgREST wraps the direct-REST read in a
+  // `WITH pgrst_source AS ( SELECT ... )` CTE with double-quoted identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column subscription_cycle_charges.customer_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscription_cycle_charges".* FROM "public"."subscription_cycle_charges" WHERE "public"."subscription_cycle_charges"."customer_id" = $1 LIMIT 100 ) SELECT * FROM "pgrst_source"',
+    ),
+    true,
+  );
+  // Unqualified double-quoted table name inside the wrapper is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column public.subscription_cycle_charges.customer_id does not exist",
+      'with pgrst_source as ( select "subscription_cycle_charges".* from "subscription_cycle_charges" where customer_id = $1 limit 10 )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise KEEPS a PostgREST INSERT/UPDATE wrapper writing customer_id (a real code-bug still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column subscription_cycle_charges.customer_id does not exist",
+      'with pgrst_source as ( insert into "public"."subscription_cycle_charges" ("customer_id") values ($1) returning * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column subscription_cycle_charges.customer_id does not exist",
+      'with pgrst_source as ( update "public"."subscription_cycle_charges" set "customer_id" = $1 returning * )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise KEEPS a column-missing error on any OTHER table (a different table's customer_id still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column orders.customer_id does not exist",
+      "select customer_id from public.orders where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column dunning_cycles.customer_id does not exist",
+      "select customer_id from public.dunning_cycles limit 10",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise KEEPS a DIFFERENT column-missing on subscription_cycle_charges (a real column regression still pages)", () => {
+  // The sibling created_at column must NOT be dropped by the customer_id predicate.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column subscription_cycle_charges.created_at does not exist",
+      "select created_at from public.subscription_cycle_charges order by created_at desc limit 50",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column subscription_cycle_charges.cycle_key does not exist",
+      "select cycle_key from public.subscription_cycle_charges where id = 'x'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise KEEPS a non-SELECT statement shape (a real code-bug writing subscription_cycle_charges.customer_id still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column subscription_cycle_charges.customer_id does not exist",
+      "insert into public.subscription_cycle_charges (customer_id) values ($1)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column subscription_cycle_charges.customer_id does not exist",
+      "update public.subscription_cycle_charges set customer_id = $1 where id = 'x'",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column subscription_cycle_charges.customer_id does not exist",
+      "delete from public.subscription_cycle_charges where customer_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise returns false on empty / nullish input", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(undefined, undefined),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise("", ""),
+    false,
+  );
+  // Exact message but empty / null query — cannot confirm the shape, stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column subscription_cycle_charges.customer_id does not exist",
+      "",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+      "column subscription_cycle_charges.customer_id does not exist",
       null,
     ),
     false,

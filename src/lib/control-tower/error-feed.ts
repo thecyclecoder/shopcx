@@ -6122,6 +6122,64 @@ export function isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedA
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column subscription_cycle_charges.customer_id does not
+ * exist` for an ad hoc SELECT lookup / PostgREST direct-REST call against
+ * `public.subscription_cycle_charges.customer_id`. The `subscription_cycle_charges` ledger has
+ * never had a `customer_id` column — the offending read is not ShopCX code. It only reaches
+ * Supabase's `postgres_logs` feed when an external / stale PostgREST client (a foreign app
+ * assuming a generic `customer_id` shape, a stale SQL Editor session, a deprecated integration)
+ * issues a `customer_id=eq...` filter against `/rest/v1/subscription_cycle_charges`. There is no
+ * lever from ShopCX to make that query resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:6e2a1de36aa5949a`) is repair work for a query we do not own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise` — the
+ * same narrow-gating shape, aimed at the SAME foreign caller's `customer_id` variant (the
+ * created_at filter is message-gated on the exact created_at string, so the customer_id variant
+ * leaks through). `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column subscription_cycle_charges.customer_id does not exist` (or
+ *      the `public.` qualified variant, with any leading `ERROR: ` prefix stripped), AND
+ *   2. the `parsed.query` attribute is a bare `select ... from public.subscription_cycle_charges`
+ *      lookup shape (any WHERE / LIMIT / ORDER BY tail is fine), or PostgREST's
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."subscription_cycle_charges" ... )`
+ *      direct-REST wrapper (double-quoted identifiers).
+ *
+ * Narrowly gated so a column-missing error for ANY OTHER table, a DIFFERENT column on
+ * `subscription_cycle_charges`, or a non-SELECT statement against the table still pages — the
+ * wrapped op must itself be a SELECT, so a PostgREST INSERT/UPDATE/DELETE naming the bogus
+ * `customer_id` column is a real code bug we keep paging on.
+ * Empty / nullish message OR query returns `false` — we need both markers. Consumed by the
+ * `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]]: returning null drops the row
+ * (no error_event, no loop_alert, no signature). A capture-time drop, not a transient flag.
+ */
+export function isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column subscription_cycle_charges.customer_id does not exist" ||
+    stripped === "column public.subscription_cycle_charges.customer_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on the table — allow any trailing WHERE/LIMIT/ORDER BY, but the
+  // statement MUST start with `select` and its FROM clause MUST name
+  // `subscription_cycle_charges` (with or without the `public.` schema qualifier). A non-SELECT
+  // statement (a real code bug writing the bogus column) stays captured.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?subscription_cycle_charges\b/.test(q)) return true;
+  // PostgREST direct-REST reads arrive wrapped as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."subscription_cycle_charges" ... WHERE ...customer_id=... )` (double-quoted
+  // identifiers) — same foreign read, the shape recurring in this signature.
+  // The wrapped op must be a SELECT, so a PostgREST write still pages.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?subscription_cycle_charges\b/.test(
+    q,
+  );
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column shopify_billing_attempt_events.created_at does
  * not exist` for an ad hoc SELECT lookup / PostgREST direct-REST call against
  * `public.shopify_billing_attempt_events.created_at`. The `shopify_billing_attempt_events` table

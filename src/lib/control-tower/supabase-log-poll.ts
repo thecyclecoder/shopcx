@@ -112,6 +112,7 @@ import {
   isForeignSupabasePostgresMissingDunningCyclesCycleKeyAdhocNoise,
   isForeignSupabasePostgresMissingDunningCyclesRetryCountAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise,
   isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsEventTypeAdhocNoise,
   isForeignSupabasePostgresMissingTicketResolutionEventsCreatedAtAdhocNoise,
@@ -1214,6 +1215,15 @@ const LOG_QUERIES: LogQuery[] = [
       // `supabase-logs:dc5495e4064edd50`) is repair work for a query we don't own. Narrowly
       // gated: a different table, a different column, or a non-SELECT statement still pages.
       if (isForeignSupabasePostgresMissingSubscriptionCycleChargesCreatedAtAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the SAME foreign caller's `customer_id` variant — an
+      // ad hoc / stale PostgREST direct-REST read against
+      // `public.subscription_cycle_charges.customer_id`. The ledger has never had a `customer_id`
+      // column, so the column-missing ERROR only reaches this feed when a foreign app / stale
+      // PostgREST client filters the table by `customer_id`. There is no lever from ShopCX to
+      // resolve it — paging Platform (Control Tower signature `supabase-logs:6e2a1de36aa5949a`)
+      // is repair work for a query we don't own. Narrowly gated: a different table, a different
+      // column, or a non-SELECT statement still pages.
+      if (isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.shopify_billing_attempt_events.created_at`. The table has never had a
       // `created_at` column — the column-missing ERROR only reaches this feed when a foreign
