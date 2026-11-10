@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc subscriptions.billing_engine column-missing noise at capture** · verified 2026-11-10 · → [[../libraries/error-feed]]
