@@ -12973,6 +12973,67 @@ export function isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNois
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column tickets.merged_into_ticket_id does not
+ * exist` for an ad hoc / stale PostgREST direct-REST SELECT against our `public.tickets`
+ * table. Our ticket-merge FK column is `merged_into` (a self-referential `tickets.id` FK) —
+ * the table carries NO `merged_into_ticket_id` column, and no ShopCX code path (src/,
+ * scripts/, shopify-extension/, supabase/migrations/, docs/brain/) names
+ * `tickets.merged_into_ticket_id`. The message appears on Supabase's `postgres_logs` feed
+ * only when an external / manual tool (Supabase Studio Table Editor / API Docs, a foreign
+ * SQL client reading our `tickets` table with a guessed/wrong column name, a stale
+ * exploratory query, a third-party integration) does a raw
+ * `select ... merged_into_ticket_id ... from public.tickets` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."tickets" ... )` CTE wrapper the same
+ * client emits over the REST endpoint. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:71ee0b69a27e12cf`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise` — same
+ * narrow-gating shape, scoped to the `tickets.merged_into_ticket_id` lookup.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column tickets.merged_into_ticket_id does not exist` (with or
+ *      without the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes
+ *      on the logs surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.tickets` — either (a) the
+ *      bare `select ... from public.tickets` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."tickets" ... )` CTE wrapper form
+ *      with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `tickets` (a real schema regression on
+ *     a live column, including the real `merged_into`) still pages,
+ *   - a column-missing error for `merged_into_ticket_id` on ANY OTHER table still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL on `tickets`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column tickets.merged_into_ticket_id does not exist" ||
+    stripped === "column public.tickets.merged_into_ticket_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?tickets\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?tickets\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `returns.resolution`. Our `public.returns` table has a `resolution_type` column, NOT a
  * bare `resolution` column, and no ShopCX code path (src/, scripts/, shopify-extension/,
