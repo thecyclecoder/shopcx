@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: ad-hoc `orders.note` missing-column PostgREST lookup on the supabase-logs feed** · verified 2026-11-11 · → [[../libraries/error-feed]]
