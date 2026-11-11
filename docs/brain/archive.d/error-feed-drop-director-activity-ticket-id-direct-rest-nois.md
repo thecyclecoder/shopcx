@@ -1,0 +1,1 @@
+- **Drop foreign-app PostgREST noise: column director_activity.ticket_id does not exist** · verified 2026-11-11 · → [[../libraries/error-feed]]
