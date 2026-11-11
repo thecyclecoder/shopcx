@@ -75,6 +75,7 @@ import {
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
@@ -751,6 +752,14 @@ const LOG_QUERIES: LogQuery[] = [
       // (including the live `subscriptions.cancelled_at`), or on `orders` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... note ... from
+      // public.orders` lookup by an external tool / stale exploratory query (a foreign
+      // client expecting Shopify's REST orders shape, which carries a `note` free-text
+      // column our `orders` never defines) — or the PostgREST `WITH pgrst_source AS (
+      // SELECT ... FROM "public"."orders" ... )` CTE wrapper. Gated on the exact
+      // column-missing message AND the SELECT-lookup shape — any other missing column on
+      // `orders`, `note` on any other table, or a non-SELECT statement still pages.
+      if (isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... shipping_name ... from
       // public.orders` lookup by an external tool / stale exploratory query — or the
       // PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE

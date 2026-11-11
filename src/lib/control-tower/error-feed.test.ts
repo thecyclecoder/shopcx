@@ -90,6 +90,7 @@ import {
   isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShippingNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyOrderNameAdhocNoise,
   isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise,
@@ -17710,6 +17711,104 @@ test("isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise returns 
     isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise(
       "column orders.cancelled_at does not exist",
       null,
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise ──
+// A foreign / stale client expecting Shopify's REST orders shape reads
+// `/rest/v1/orders?select=...note...` against our `public.orders` table. The table exists
+// but has NO `note` free-text column — Shopify's REST orders shape carries `note`, ShopCX's
+// `orders` never does. Foreign-owned surface, no lever from us — drop AT CAPTURE only when
+// BOTH the exact column-missing message on `orders.note` AND a SELECT-lookup shape on
+// `orders` (bare OR PostgREST CTE wrapper) are present. A different column on `orders`,
+// `note` on another table, or a non-SELECT statement still pages.
+
+test("isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise drops the captured supabase-logs:43e38028237ac707 message+query pair (ad hoc SELECT on orders.note)", () => {
+  // Unqualified and public.-qualified message variants over the bare-SELECT shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise(
+      "column orders.note does not exist",
+      "select id, note from public.orders",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise(
+      "column public.orders.note does not exist",
+      "select note from public.orders",
+    ),
+    true,
+  );
+  // Unqualified FROM (no `public.`) is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise(
+      "column orders.note does not exist",
+      "select note from orders limit 10",
+    ),
+    true,
+  );
+  // Case-insensitive, `ERROR: ` prefix stripped, whitespace tolerated.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise(
+      "ERROR: column orders.note does not exist",
+      "  SELECT ID, NOTE FROM PUBLIC.ORDERS  ",
+    ),
+    true,
+  );
+  // PostgREST direct-REST CTE wrapper form.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise(
+      "column orders.note does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."orders"."id", "public"."orders"."note" FROM "public"."orders" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise KEEPS a different orders column / a non-SELECT statement / a FATAL / empty input (real problems still page)", () => {
+  // A different column on orders — real product-schema regression, pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise(
+      "column orders.total_cents does not exist",
+      "select total_cents from public.orders",
+    ),
+    false,
+  );
+  // `note` on a different table — pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise(
+      "column tickets.note does not exist",
+      "select note from public.tickets",
+    ),
+    false,
+  );
+  // Non-SELECT statement shape on orders — real code-bug, pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise(
+      "column orders.note does not exist",
+      "update public.orders set note = $1 where id = $2",
+    ),
+    false,
+  );
+  // Different message shape (FATAL) — pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise(
+      "FATAL: database is shutting down",
+      "select note from public.orders",
+    ),
+    false,
+  );
+  // Empty / nullish input — stays captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise(
+      "column orders.note does not exist",
+      "",
     ),
     false,
   );
