@@ -1,25 +1,25 @@
 /**
- * Review-request canary CEO-inbox digest cron — Phase 3 of
- * review-request-sol-session.
+ * Review-request canary digest cron — Phase 3 of review-request-sol-session,
+ * amended by review-request-digest-not-a-ceo-card.
  *
- * Spec § "The gap that needs closing":
+ * ORIGINAL intent: hold each draft with a LONG pending_send_at (12-24h) while
+ * the canary flag is on, and raise ONE digest card per batch so the founder
+ * could cancel or edit a wrong ask before the outbox shipped it.
  *
- *   > pending_send_at is only rendered INSIDE an individual ticket — there
- *   > is no list view. Twenty drafts scattered across twenty tickets is not
- *   > a review queue, it is a scavenger hunt against a cron. So while the
- *   > canary flag is on: hold each draft with a LONG pending_send_at (12-24h
- *   > rather than minutes) and raise ONE digest card in the CEO inbox per
- *   > batch — dashboard_notifications, type 'agent_approval_request', the
- *   > pattern src/lib/ship-time-backfill-detector.ts already uses — reading
- *   > '5 review requests drafted, sending 9am tomorrow' with a link to each
- *   > ticket. The founder opens the inbox they already read, clicks through,
- *   > and cancels or edits anything wrong.
+ * AMENDED (founder 2026-11-11 — "no more review request drafts.. I don't think
+ * we need those as ceo cards anymore"): the drafts keep sending on their own
+ * schedule regardless, so the digest is a pure FYI that needs no decision. An
+ * FYI does not belong in the CEO approvals inbox. This cron NO LONGER inserts a
+ * CEO-routed `agent_approval_request` `dashboard_notifications` row. Instead it
+ * records ONE non-approval `director_activity` ledger row per workspace-day
+ * under the review-request owner (`cs`) — a surfacing row that shows up in the
+ * owner's activity feed / EOD recap but never counts toward the CEO approvals
+ * feed.
  *
- * This cron runs once a day at 08:00 UTC, sweeps the last 24h of drafts
- * whose canary hold hasn't yet fired (pending_send_at is in the future),
- * and raises ONE digest card per workspace-day. Dedupe key is
- * `review_request_canary_digest:<workspace_id>:<yyyy-mm-dd>` so a re-run on
- * the same day is a no-op.
+ * It still runs once a day at 08:00 UTC and sweeps the last 24h of drafts whose
+ * canary hold hasn't yet fired. Dedupe key is
+ * `review_request_canary_digest:<workspace_id>:<yyyy-mm-dd>` so a re-run on the
+ * same day is a no-op.
  *
  * Node-completeness (CLAUDE.md hard rule):
  *   1. Owner `cs` (Sol reports to June) — registered in
@@ -30,16 +30,18 @@
  *
  * The canary flag is a config gate — when off, this cron's inner work
  * short-circuits (holdMs drops to the normal response delay in the
- * delivery SDK) and no digest lands. Ship it ON per the spec.
+ * delivery SDK) and no drafts land in the window ⇒ no digest row.
  */
 import { inngest } from "./client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 import { enforceSwitch } from "@/lib/control-tower/enforce-switch";
+import { recordDirectorActivity } from "@/lib/director-activity";
 
-const REVIEW_CANARY_DIGEST_TYPE = "agent_approval_request";
-const REVIEW_CANARY_ROUTED_TO = "ceo";
-const REVIEW_CANARY_ESCALATION_KIND = "review_request_canary_digest";
+/** Non-approval director_activity action kind — an FYI ledger row, never a CEO card. */
+const REVIEW_CANARY_DIGEST_ACTION_KIND = "review_request_canary_digest";
+/** The function slug whose objective owns this cron (Sol reports to June). */
+const REVIEW_CANARY_OWNER_FUNCTION = "cs";
 
 /** Format `YYYY-MM-DD` from a Date (UTC) — pure so the dedupe key is stable. */
 export function reviewCanaryDigestDedupeKey(
@@ -106,7 +108,7 @@ export const reviewRequestCanaryDigestCron = inngest.createFunction(
         ticket_id: string | null;
         created_at: string;
       }>;
-      if (!rows.length) return { workspaces: 0, cards: 0, drafts: 0 };
+      if (!rows.length) return { workspaces: 0, digests: 0, drafts: 0 };
 
       const byWorkspace = new Map<
         string,
@@ -122,17 +124,18 @@ export const reviewRequestCanaryDigestCron = inngest.createFunction(
         });
       }
 
-      let cards = 0;
+      let digests = 0;
       for (const [workspaceId, drafts] of byWorkspace) {
         const dedupeKey = reviewCanaryDigestDedupeKey(workspaceId, now);
-        // Confirming predicate — never enumerate-then-insert without
-        // re-asserting the "not yet raised today" state. Same shape
-        // ship-time-backfill-detector uses for its dedupe.
+        // Confirming predicate — never enumerate-then-record without
+        // re-asserting the "not yet logged today" state. Dedupe against the
+        // director_activity ledger (the CEO card is gone per founder
+        // 2026-11-11), keyed by the same stable per-(workspace,day) key.
         const { data: prior } = await admin
-          .from("dashboard_notifications")
+          .from("director_activity")
           .select("id")
           .eq("workspace_id", workspaceId)
-          .eq("type", REVIEW_CANARY_DIGEST_TYPE)
+          .eq("action_kind", REVIEW_CANARY_DIGEST_ACTION_KIND)
           .eq("metadata->>dedupe_key", dedupeKey)
           .limit(1);
         if ((prior ?? []).length > 0) continue;
@@ -146,34 +149,31 @@ export const reviewRequestCanaryDigestCron = inngest.createFunction(
             d.ticket_id ? `/dashboard/tickets/${d.ticket_id}` : "(no ticket)",
           )
           .filter(Boolean);
-        const title = `${drafts.length} review request${drafts.length === 1 ? "" : "s"} drafted`;
         const body = composeReviewCanaryDigestBody({
           count: drafts.length,
           earliestSendAt: earliest,
           ticketLinks,
         });
 
-        const { error } = await admin.from("dashboard_notifications").insert({
-          workspace_id: workspaceId,
-          type: REVIEW_CANARY_DIGEST_TYPE,
-          title: title.slice(0, 200),
-          body: body.slice(0, 4000),
-          link: "/dashboard/tickets",
+        // FYI ledger row under the review-request owner — NOT a CEO approval
+        // card. recordDirectorActivity is best-effort + never throws.
+        const { recorded } = await recordDirectorActivity(admin, {
+          workspaceId,
+          directorFunction: REVIEW_CANARY_OWNER_FUNCTION,
+          actionKind: REVIEW_CANARY_DIGEST_ACTION_KIND,
+          reason: body,
           metadata: {
-            routed_to_function: REVIEW_CANARY_ROUTED_TO,
-            escalation_kind: REVIEW_CANARY_ESCALATION_KIND,
             dedupe_key: dedupeKey,
             draft_count: drafts.length,
+            earliest_send_at: earliest,
           },
-          read: false,
-          dismissed: false,
         });
-        if (!error) cards++;
+        if (recorded) digests++;
       }
 
       return {
         workspaces: byWorkspace.size,
-        cards,
+        digests,
         drafts: rows.length,
       };
     });

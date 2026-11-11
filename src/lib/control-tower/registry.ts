@@ -826,11 +826,12 @@ export const MONITORED_LOOPS: MonitoredLoop[] = [
   // unsubscribed / already nudged) and queues ONE email via the deliver-pending-sends
   // outbox (so the ticket UI's cancel-in-flight behaviour applies for free). Owner cs.
   { id: "review-request-nudge-cron", kind: "cron", owner: "cs", label: "Review request nudge", description: "Every 30 min sweep: for review_requests sent ≥ 3d ago with no nudge and no positive outcome, compare-and-set `nudged_at` + queue ONE email as a pending ticket_message that deliver-pending-sends ships. Single-nudge maximum per ask; the spec's suppression conditions (submitted / clicked / customer-replied / unsubscribed) are enforced by shouldSuppressReviewRequestNudge.", expectedCadence: "every 30 min (*/30 * * * *)", livenessWindowMs: 45 * MIN, registeredAt: "2026-08-28T00:00:00Z" },
-  // Review-request canary CEO-inbox digest cron (review-request-sol-session Phase 3).
-  // Daily at 08:00 UTC — raises ONE `dashboard_notifications` card per workspace-day
-  // summarizing the review-request drafts on canary hold, so the founder can cancel/edit
-  // a wrong ask before it ships (per-ticket pending_send_at has no list view). Owner cs.
-  { id: "review-request-canary-digest-cron", kind: "cron", owner: "cs", label: "Review request canary digest", description: "Daily digest that raises ONE dashboard_notifications card per workspace-day summarizing the review-request drafts on canary hold (12-24h pending_send_at). The founder cancels or edits any wrong ask before the outbox ships it. Ships ON per the spec (canary flag is a config, not a rewrite).", expectedCadence: "daily (0 8 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-08-28T00:00:00Z" },
+  // Review-request canary digest cron (review-request-sol-session Phase 3, amended by
+  // review-request-digest-not-a-ceo-card). Daily at 08:00 UTC — records ONE non-approval
+  // `director_activity` FYI row per workspace-day summarizing the review-request drafts on
+  // canary hold. No longer a CEO card (founder 2026-11-11: review-request digests don't
+  // belong in the approvals inbox). Owner cs.
+  { id: "review-request-canary-digest-cron", kind: "cron", owner: "cs", label: "Review request canary digest", description: "Daily digest that records ONE non-approval director_activity row per workspace-day summarizing the review-request drafts on canary hold (12-24h pending_send_at). No CEO approval card (founder 2026-11-11: FYIs don't belong in the approvals inbox). Canary flag is a config, not a rewrite.", expectedCadence: "daily (0 8 * * *)", livenessWindowMs: 30 * HOUR, registeredAt: "2026-08-28T00:00:00Z" },
   // Post-order review-ask detector cron (review-request-post-order-ask Phase 1).
   // Hourly — sweeps orders whose ORDER DATE has just crossed the per-product 10d
   // (repeat-buyer) or 21d (first-time-for-this-product) window, joins
