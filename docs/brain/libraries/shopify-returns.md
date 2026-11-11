@@ -36,11 +36,29 @@ async function disposeReturnItems(workspaceId: string, params: DisposeParams,) :
 async function processReturn(workspaceId: string, returnId: string,) : Promise<
 ```
 
+Drives Shopify's `returnProcess` (which issues the refund). **Double-pay guard:** before any Shopify call it reads the live gateway ledger (`getOrderRefundLedger`, which sees out-of-band Shopify refunds the local mirror misses); when the order is already fully refunded (`refundableCents <= 0 && refundedCents > 0`) it refuses, escalates to `dashboard_notifications` (`metadata.type='return_process_double_pay_refused'`), and returns `{ success: false }` — never paying a second time. Ground truth: Lori Hall SC140786. Pinned by `shopify-returns.cancelReturn.test.ts`.
+
 ### `closeReturn` — function
 
 ```ts
 async function closeReturn(workspaceId: string, returnId: string,) : Promise<
 ```
+
+### `cancelReturn` — function
+
+```ts
+async function cancelReturn(workspaceId: string, returnId: string, reason: string) : Promise<{ success: boolean; error?: string }>
+```
+
+The one audited path to cancel a non-terminal return — the fix for a store-credit/refund return left open after the order was already fully refunded (Lori Hall SC140786, 2026-11-11: order refunded $99.66 in full while store_credit return a600d09c / $82.18 stayed `label_created`, so mailing the box back could double-pay; cancelling it took a founder-approved one-row UPDATE because no SDK existed and `closeReturn` no-ops on an internal return). Flips `status → 'cancelled'` via a **compare-and-set** — the UPDATE is filtered to `.in('status', CANCELLABLE_RETURN_STATUSES)` (`open | label_created | in_transit`) and asserts exactly one row transitioned; a return already `delivered`/`refunded`/`closed`/`cancelled` matches zero rows and is refused, so a cancel can never reopen or double-handle a resolved return. After the authoritative DB flip, best-effort cleanup (a Shopify/EasyPost failure logs but never un-cancels): `returnCancel` (falling back to `returnClose`) on Shopify when `shopify_return_gid` is set, void the EasyPost label (`easypost_shipment_id`) via a shipment refund, and write one `customer_events` (`event_type='return_cancelled'`) audit row. Reachable by agents through the `cancel_return` direct-action handler (ownership-scoped to the ticket customer's link group). Pinned by `shopify-returns.cancelReturn.test.ts`.
+
+### `CANCELLABLE_RETURN_STATUSES` — const
+
+```ts
+const CANCELLABLE_RETURN_STATUSES = ["open", "label_created", "in_transit"] as const;
+```
+
+The only statuses `cancelReturn`'s compare-and-set transitions FROM.
 
 ### `getReturnableItems` — function
 

@@ -170,6 +170,7 @@
     "test:return-net-refund": "tsx --test src/lib/shopify-returns.netRefund.test.ts",
     "test:shopify-returns-derive-subtotal": "tsx --test src/lib/shopify-returns.deriveSubtotal.test.ts",
     "test:shopify-returns-clamp-net-refund": "tsx --test src/lib/shopify-returns.clampNetRefund.test.ts",
+    "test:shopify-returns-cancel-return": "tsx --test src/lib/shopify-returns.cancelReturn.test.ts",
     "test:inflection-resession": "tsx --test src/lib/inflection-detector.reSessionSol.test.ts",
     "test:meta-insights-inline-link-clicks": "tsx --test src/lib/meta/performance.inline-link-clicks.test.ts",
     "test:insights-per-copy-mode": "tsx --test src/lib/media-buyer/insights.per-copy-mode.test.ts",
