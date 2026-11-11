@@ -73,6 +73,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsTerminalReasonAdhocNoise,
   isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise,
   isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
   isForeignSupabasePostgresMissingMetaAdAccountsNameLookupNoise,
@@ -16092,6 +16093,128 @@ test("isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNo
   assert.equal(
     isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(
       "column director_activity.decision does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/director_activity?select=id,ticket_id,reasoning&ticket_id=eq.<uuid>` against
+// our `public.director_activity` table. The table exists but by design carries NO
+// top-level `ticket_id` column — the ticket reference lives inside
+// `director_activity.metadata` (jsonb), and no ShopCX reader selects a bare `ticket_id`.
+// Foreign-owned surface, no lever from us — the new classifier DROPS at capture only when
+// BOTH the exact column-missing message on `director_activity.ticket_id` AND a
+// SELECT-lookup shape on `director_activity` (bare OR PostgREST CTE wrapper) are present.
+// An INSERT/UPDATE/DELETE with the same message is a real code-bug and still pages. (The
+// sibling `.decision` classifier correctly KEEPS a `director_activity.ticket_id` error —
+// the pin there is `decision` only.) Control Tower signature
+// `supabase-logs:0f499bb3965b898e`.
+test("isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise DROPS the foreign direct-REST SELECT lookup (bare + PostgREST CTE wrapper) on the exact director_activity.ticket_id column-missing shape", () => {
+  // The exact observed PostgREST CTE wrapper sample: WHERE ticket_id = $1 ... LIMIT/OFFSET.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise(
+      "column director_activity.ticket_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."director_activity"."id", "public"."director_activity"."ticket_id", "public"."director_activity"."reasoning" FROM "public"."director_activity" WHERE "public"."director_activity"."ticket_id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Bare SELECT form — unqualified and public.-qualified message variants.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise(
+      "column director_activity.ticket_id does not exist",
+      "select id, ticket_id, reasoning from public.director_activity",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise(
+      "column public.director_activity.ticket_id does not exist",
+      "select ticket_id from director_activity limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise(
+      "ERROR: column director_activity.ticket_id does not exist",
+      "select ticket_id from public.director_activity where ticket_id = 'x' order by created_at desc limit 50",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise KEEPS a non-SELECT statement shape (INSERT/UPDATE/DELETE with the same message is a real code-bug and still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise(
+      "column director_activity.ticket_id does not exist",
+      "insert into public.director_activity (id, ticket_id) values ($1, $2)",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise(
+      "column director_activity.ticket_id does not exist",
+      "update public.director_activity set ticket_id = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise(
+      "column director_activity.ticket_id does not exist",
+      "delete from public.director_activity where ticket_id = $1",
+    ),
+    false,
+  );
+  // The PostgREST CTE wrapper whose wrapped op is a WRITE stays paged too.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise(
+      "column director_activity.ticket_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."director_activity"("ticket_id") VALUES ($1) RETURNING "public"."director_activity"."id" )',
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise KEEPS a DIFFERENT column / OTHER table and returns false on empty input", () => {
+  // A real rename regression on a different column still pages — the pin is `ticket_id`.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise(
+      "column director_activity.reasoning does not exist",
+      "select id, reasoning from public.director_activity",
+    ),
+    false,
+  );
+  // A `ticket_id` column-missing on any OTHER table still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise(
+      "column ticket_messages.ticket_id does not exist",
+      "select ticket_id from public.ticket_messages",
+    ),
+    false,
+  );
+  // The sibling `.decision` classifier still KEEPS a `director_activity.ticket_id` error.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise(
+      "column director_activity.ticket_id does not exist",
+      "select id, ticket_id from public.director_activity",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise("", ""),
+    false,
+  );
+  // Empty query — even with the exact message we cannot confirm the shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise(
+      "column director_activity.ticket_id does not exist",
       "",
     ),
     false,
