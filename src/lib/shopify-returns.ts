@@ -5,6 +5,7 @@ import { errText } from "@/lib/error-text";
 import { SHOPIFY_API_VERSION } from "@/lib/shopify";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getOrderRefundLedger } from "@/lib/refund-ledger";
+import { logCustomerEvent } from "@/lib/customer-events";
 
 // ── GraphQL helper ──
 
@@ -825,13 +826,51 @@ export async function processReturn(
 
   const { data: ret } = await admin
     .from("returns")
-    .select("shopify_return_gid, return_line_items")
+    .select("shopify_return_gid, return_line_items, order_id, order_number")
     .eq("id", returnId)
     .eq("workspace_id", workspaceId)
     .single();
 
   if (!ret?.shopify_return_gid) {
     return { success: false, error: "Return not found or missing Shopify GID" };
+  }
+
+  // ── Double-pay guard ──
+  // processReturn drives Shopify's returnProcess, which issues the refund. A
+  // return left open on an order that has ALREADY been fully refunded would pay
+  // the customer a second time. Ground truth: Lori Hall SC140786 (2026-11-11) was
+  // refunded $99.66 in full while a store_credit return (a600d09c, $82.18) stayed
+  // open — processing it would have double-paid. Read the LIVE gateway ledger
+  // (getOrderRefundLedger sees out-of-band Shopify refunds the local mirror
+  // misses) BEFORE any Shopify call; when there is no refundable headroom left,
+  // refuse and escalate to the founder dashboard instead of paying.
+  if (ret.order_id) {
+    const ledger = await getOrderRefundLedger(workspaceId, ret.order_id as string);
+    if (ledger.ok && ledger.refundedCents > 0 && ledger.refundableCents <= 0) {
+      const refundedUsd = `$${(ledger.refundedCents / 100).toFixed(2)}`;
+      await admin.from("dashboard_notifications").insert({
+        workspace_id: workspaceId,
+        type: "system",
+        title: "Return processing refused — order already fully refunded",
+        body:
+          `Refused to process return ${ret.order_number ?? returnId}: the order is already fully refunded (${refundedUsd}) ` +
+          `with $0 refundable headroom left, so processing would have double-paid the customer. ` +
+          `Cancel the return via cancelReturn if the box has been handled, or investigate the gateway ledger ` +
+          `(getOrderRefundLedger in src/lib/refund-ledger.ts).`,
+        metadata: {
+          type: "return_process_double_pay_refused",
+          return_id: returnId,
+          order_number: ret.order_number ?? null,
+          refunded_cents: ledger.refundedCents,
+        },
+      });
+      return {
+        success: false,
+        error:
+          `Order already fully refunded (${refundedUsd}); refusing to process return ${returnId} to avoid double-paying. ` +
+          `Escalated to the founder dashboard.`,
+      };
+    }
   }
 
   // We need Shopify ReturnLineItem IDs for processReturn — query them
@@ -959,6 +998,150 @@ export async function closeReturn(
     console.error(`Failed to close return ${returnId}:`, err);
     return { success: false, error: errText(err) };
   }
+}
+
+// ── 5b. cancelReturn ──
+
+const RETURN_CANCEL_MUTATION = `
+  mutation ReturnCancel($id: ID!) {
+    returnCancel(id: $id) {
+      return { id status }
+      userErrors { field message }
+    }
+  }
+`;
+
+/**
+ * The ONLY return statuses a cancel may transition FROM. A return that has
+ * already moved money or been resolved (delivered, refunded, closed, restocked)
+ * or is already cancelled is excluded — a cancel must never reopen or
+ * double-handle a resolved return. Used as the compare-and-set filter in
+ * `cancelReturn`; exported so the unit test pins the exact set.
+ */
+export const CANCELLABLE_RETURN_STATUSES = ["open", "label_created", "in_transit"] as const;
+
+/**
+ * Cancel a non-terminal return through ONE audited path — the SDK the
+ * [[../../docs/brain/specs/returns-cancel-return-chokepoint]] spec adds so a
+ * cancel no longer needs a founder-approved raw table write.
+ *
+ * Ground truth: Lori Hall SC140786 (2026-11-11) was fully refunded ($99.66)
+ * while her store_credit return a600d09c ($82.18, label_created) stayed open, so
+ * mailing the box back could double-pay. Cancelling it required a one-row
+ * `UPDATE` because no SDK existed and `closeReturn` no-ops on an internal return
+ * (no shopify_return_gid).
+ *
+ * The status flip is a COMPARE-AND-SET: `status → 'cancelled'` fires ONLY from a
+ * status in `CANCELLABLE_RETURN_STATUSES`, scoped to the workspace, and asserts
+ * exactly one row transitioned — a return already delivered/refunded/closed/
+ * cancelled matches zero rows and is refused. Everything after the CAS is
+ * BEST-EFFORT cleanup: the DB flip is authoritative, so a Shopify/EasyPost
+ * failure logs but never un-cancels the return.
+ */
+export async function cancelReturn(
+  workspaceId: string,
+  returnId: string,
+  reason: string,
+): Promise<{ success: boolean; error?: string }> {
+  const admin = createAdminClient();
+
+  const { data: ret } = await admin
+    .from("returns")
+    .select("id, status, order_number, customer_id, shopify_return_gid, easypost_shipment_id")
+    .eq("id", returnId)
+    .eq("workspace_id", workspaceId)
+    .maybeSingle();
+
+  if (!ret) return { success: false, error: "Return not found" };
+
+  // Compare-and-set — flip to 'cancelled' ONLY from a non-terminal status,
+  // scoped to the workspace, and assert exactly one row transitioned. A stale
+  // read (another path refunded/closed the return in between) matches zero rows
+  // and is refused rather than overwriting a resolved state.
+  const { data: transitioned, error: updErr } = await admin
+    .from("returns")
+    .update({ status: "cancelled", updated_at: new Date().toISOString() })
+    .eq("id", returnId)
+    .eq("workspace_id", workspaceId)
+    .in("status", CANCELLABLE_RETURN_STATUSES as unknown as string[])
+    .select("id");
+
+  if (updErr) return { success: false, error: `Failed to cancel return: ${updErr.message}` };
+  if (!transitioned || transitioned.length === 0) {
+    return {
+      success: false,
+      error:
+        `Return ${returnId} is not in a cancellable state (current status '${ret.status}'). ` +
+        `Only open/label_created/in_transit returns can be cancelled.`,
+    };
+  }
+
+  // 1. Cancel/close the Shopify return when one exists (internal returns have
+  //    no shopify_return_gid — nothing to do there). Best-effort.
+  if (ret.shopify_return_gid) {
+    try {
+      const { shop, accessToken } = await getShopifyCredentials(workspaceId);
+      const result = await shopifyGraphQL(shop, accessToken, RETURN_CANCEL_MUTATION, {
+        id: ret.shopify_return_gid,
+      });
+      const cancelErr =
+        result.errors?.[0]?.message ||
+        (result.data?.returnCancel as { userErrors?: { message: string }[] } | undefined)?.userErrors?.[0]?.message;
+      if (cancelErr) {
+        // returnCancel rejects a return already processed/closed on Shopify's
+        // side — fall back to returnClose so the Shopify mirror still settles.
+        const closeRes = await shopifyGraphQL(shop, accessToken, RETURN_CLOSE_MUTATION, {
+          id: ret.shopify_return_gid,
+        });
+        const closeErr =
+          closeRes.errors?.[0]?.message ||
+          (closeRes.data?.returnClose as { userErrors?: { message: string }[] } | undefined)?.userErrors?.[0]?.message;
+        if (closeErr) {
+          console.warn(`[cancelReturn] Shopify cancel/close failed for return ${returnId}: ${cancelErr} / ${closeErr}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`[cancelReturn] Shopify cancel error for return ${returnId}:`, errText(err));
+    }
+  }
+
+  // 2. Void the EasyPost label when one was purchased — refund the postage so a
+  //    cancelled return doesn't leave us paying for an unused label. Best-effort.
+  if (ret.easypost_shipment_id) {
+    try {
+      const { data: ws } = await admin
+        .from("workspaces")
+        .select("easypost_live_api_key_encrypted")
+        .eq("id", workspaceId)
+        .single();
+      if (ws?.easypost_live_api_key_encrypted) {
+        const { decrypt } = await import("@/lib/crypto");
+        const easypostKey = decrypt(ws.easypost_live_api_key_encrypted);
+        await fetch(`https://api.easypost.com/v2/shipments/${ret.easypost_shipment_id}/refund`, {
+          method: "POST",
+          headers: { Authorization: "Basic " + btoa(easypostKey + ":") },
+        });
+      }
+    } catch (err) {
+      console.warn(`[cancelReturn] EasyPost void error for return ${returnId}:`, errText(err));
+    }
+  }
+
+  // 3. Audit trail — one customer_events row records the cancel + reason.
+  try {
+    await logCustomerEvent({
+      workspaceId,
+      customerId: (ret.customer_id as string | null) ?? null,
+      eventType: "return_cancelled",
+      source: "system",
+      summary: `Return ${ret.order_number ?? returnId} cancelled: ${reason}`,
+      properties: { return_id: returnId, order_number: ret.order_number ?? null, reason },
+    });
+  } catch (err) {
+    console.warn(`[cancelReturn] customer_event log failed for return ${returnId}:`, errText(err));
+  }
+
+  return { success: true };
 }
 
 // ── 6. getReturnableItems ──

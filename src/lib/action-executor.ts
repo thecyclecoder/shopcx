@@ -104,6 +104,12 @@ export interface ActionParams {
   // that agents could not reach through the direct-action handler before this
   // parameter existed. Reject any other value at the handler.
   resolution_type?: "refund_return" | "store_credit_return";
+  // cancel_return — the internal `returns.id` (UUID) of the return to cancel.
+  // Handed to cancelReturn (src/lib/shopify-returns.ts) which runs a compare-and-set
+  // on non-terminal statuses, closes the Shopify return, voids the EasyPost label,
+  // and logs a customer_event. The handler proves ownership (return's customer in
+  // the ticket's link group) before cancelling.
+  return_id?: string;
   // add_one_time_gift — a one-time item on the sub's NEXT renewal that drops
   // off after it ships (never recurs). `free` defaults true (a $0 gift); set
   // false + base_price_cents for a paid one-time add-on (internal only).
@@ -3258,6 +3264,36 @@ export const directActionHandlers: Record<
       };
     }
     return { ...r, summary: r.success ? `Return created for ${order.order_number}` : undefined };
+  },
+
+  // Cancel a non-terminal return (open / label_created / in_transit) through the
+  // audited cancelReturn SDK — the double-pay fix for a store-credit/refund return
+  // left open after the order was already fully refunded (Lori Hall SC140786).
+  // Scoped to the ticket customer's link group so a model-supplied return_id can
+  // never cancel a foreign customer's return (same ownership rule as create_return).
+  cancel_return: async (ctx, p) => {
+    if (!p.return_id) return { success: false, error: "Missing return_id to cancel" };
+    const admin = ctx.admin;
+    if (!ctx.customerId) {
+      return { success: false, error: "Cannot cancel a return without a resolved customer on the ticket" };
+    }
+    // Ownership check — the return must belong to a customer in this ticket's
+    // link group. `linkGroupIds` returns `[ctx.customerId]` when unlinked, so the
+    // lookup proves ownership before anything is cancelled. Generic not-found text
+    // (no "exists but isn't yours") so it does not confirm a foreign return.
+    const ownerIds = await linkGroupIds(admin, ctx.workspaceId, ctx.customerId);
+    const { data: ret } = await admin.from("returns")
+      .select("id, customer_id")
+      .eq("id", p.return_id)
+      .eq("workspace_id", ctx.workspaceId)
+      .maybeSingle();
+    if (!ret || !ret.customer_id || !ownerIds.includes(ret.customer_id)) {
+      return { success: false, error: `Return ${p.return_id} not found` };
+    }
+
+    const { cancelReturn } = await import("@/lib/shopify-returns");
+    const r = await cancelReturn(ctx.workspaceId, p.return_id, p.reason || "Cancelled by support");
+    return { success: r.success, error: r.error, summary: r.success ? `Cancelled return ${p.return_id}` : undefined };
   },
 
   partial_refund: async (ctx, p) => {

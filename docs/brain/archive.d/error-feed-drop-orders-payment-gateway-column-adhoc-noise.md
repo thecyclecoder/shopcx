@@ -1,0 +1,1 @@
+- **Drop foreign 'column orders.payment_gateway does not exist' ad-hoc PostgREST noise at capture** · verified 2026-11-11 · → [[../libraries/error-feed]]
