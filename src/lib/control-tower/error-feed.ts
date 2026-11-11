@@ -3684,6 +3684,48 @@ export function isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNo
 
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `orders.payment_gateway`. Our `orders` table has NO `payment_gateway` column — the
+ * payment-gateway attribute lives on the Shopify order payload, not on our internal
+ * `orders` row, and no ShopCX code path (src/, scripts/, shopify-extension/,
+ * supabase/migrations/, docs/brain/) issues a SELECT that names `orders.payment_gateway`.
+ * The message appears on Supabase's `postgres_logs` feed only when an external / manual
+ * tool (Supabase Studio, a foreign SQL client, a stale exploratory query) does a raw
+ * `select ... payment_gateway ... from public.orders` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE wrapper the same
+ * client emits over the REST endpoint. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:1efa960e9c5c7a12`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise` —
+ * same narrow-gating shape on the same `public.orders` table, scoped to the
+ * `payment_gateway` column instead of the `subtotal_cents` one.
+ *
+ * Narrowly gated so a column-missing error for ANY OTHER column on `orders` (a real
+ * product-schema regression), on `payment_gateway` from any OTHER table, or on `orders`
+ * via a non-SELECT statement (real code-bug shape), still surfaces / pages on first
+ * sighting.
+ */
+export function isForeignSupabasePostgresMissingOrdersPaymentGatewayColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column orders.payment_gateway does not exist" ||
+    stripped === "column public.orders.payment_gateway does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?orders\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?orders\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `orders.shipping_name`. Our `orders` table does NOT carry a `shipping_name` column —
  * the ship-to recipient name lives nested inside the `orders.shipping_address` JSONB
  * (every in-tree reader pulls it out of that JSONB), and the same paging query also
