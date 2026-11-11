@@ -1,0 +1,1 @@
+- **Drop foreign 'replacements.shopify_order_id does not exist' direct-REST noise from the error feed** · verified 2026-11-11 · → [[../libraries/error-feed]]
