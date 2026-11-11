@@ -73,6 +73,7 @@ import {
   isForeignSupabasePostgresMissingKillSwitchesKeyColumnNoise,
   isForeignSupabasePostgresMissingTransactionsSourceNameColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingOrdersPaymentGatewayColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersShopifyPriceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingOrdersCancelledAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingOrdersNoteColumnAdhocNoise,
@@ -720,6 +721,13 @@ const LOG_QUERIES: LogQuery[] = [
       // (including the real `cart_drafts.subtotal_cents`), or on `orders` via a non-SELECT
       // statement (real code-bug shape), still surfaces / pages on first sighting.
       if (isForeignSupabasePostgresMissingOrdersSubtotalCentsColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc `select ... payment_gateway ... from
+      // public.orders` lookup (or its PostgREST CTE wrapper) by an external client expecting
+      // a `payment_gateway` column our `orders` table never had. Scoped to the exact
+      // column-missing message AND the SELECT-lookup shape — a column-missing error on any
+      // other `orders` column, on `payment_gateway` from any other table, or via a non-SELECT
+      // statement (real code-bug shape), still surfaces / pages on first sighting.
+      if (isForeignSupabasePostgresMissingOrdersPaymentGatewayColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc `select ... total_price ... from
       // public.orders` lookup (or its `subtotal_price` twin) by an external client
       // expecting Shopify's REST orders shape — or the PostgREST `WITH pgrst_source AS (
