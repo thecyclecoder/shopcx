@@ -1,0 +1,1 @@
+- **Scope Control Tower capture to drop foreign customer_links.linked_customer_id missing-column REST noise** · verified 2026-11-11 · → [[../libraries/error-feed]]
