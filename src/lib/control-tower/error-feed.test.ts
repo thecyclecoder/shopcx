@@ -142,6 +142,7 @@ import {
   isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
+  isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
@@ -2712,6 +2713,116 @@ test("isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise KE
   assert.equal(
     isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(
       "column loyalty_redemptions.customer_id does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+
+// ── isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise ──
+// A foreign / stale direct-REST client read `public.customer_links` with an edge-list assumption
+// (`customer_id` OR `linked_customer_id`) that our `group_id`-based schema never supported;
+// `customer_links.linked_customer_id` has never existed. Control Tower signature
+// `supabase-logs:68e72ff8ce04dec4`. Drop AT CAPTURE only when BOTH the exact `column
+// customer_links.linked_customer_id does not exist` message AND the SELECT-lookup shape on
+// `customer_links` (bare or PostgREST CTE wrapper) are present. A real column-missing on another
+// table, a DIFFERENT customer_links column, a non-SELECT write, or a FATAL still pages.
+
+test("isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise drops the PostgREST CTE wrapper + bare SELECT listing the non-existent linked_customer_id column", () => {
+  // The captured incident shape: a stale direct-REST client lists customer_links filtered by
+  // linked_customer_id, PostgREST wraps it as a `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."customer_links" ... )` CTE, and Postgres rejects with the column-missing.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(
+      "column customer_links.linked_customer_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."customer_links"."id", "public"."customer_links"."linked_customer_id" FROM "public"."customer_links" WHERE "public"."customer_links"."linked_customer_id" = $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(
+      "column public.customer_links.linked_customer_id does not exist",
+      'with pgrst_source as ( select "public"."customer_links"."linked_customer_id" from "public"."customer_links" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(
+      "ERROR: column customer_links.linked_customer_id does not exist",
+      'WITH pgrst_source AS ( SELECT "linked_customer_id" FROM "public"."customer_links" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper), qualified and unqualified FROM, drops.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(
+      "column customer_links.linked_customer_id does not exist",
+      "select id, linked_customer_id from public.customer_links where linked_customer_id = $1 limit 10",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(
+      "column customer_links.linked_customer_id does not exist",
+      "select * from customer_links where linked_customer_id is not null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise KEEPS real errors (other table, DIFFERENT customer_links column, non-SELECT, FATAL)", () => {
+  // Same linked_customer_id-missing message on a DIFFERENT relation is a real product-schema
+  // regression and still pages — the pin names customer_links only.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(
+      "column tickets.linked_customer_id does not exist",
+      "select id, linked_customer_id from public.tickets",
+    ),
+    false,
+  );
+  // A DIFFERENT column on customer_links (a real column rename / schema regression) still pages —
+  // the pin is linked_customer_id only.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(
+      "column customer_links.group_id does not exist",
+      "select id, group_id from public.customer_links",
+    ),
+    false,
+  );
+  // A non-SELECT shape (PostgREST CTE write / bare write) is a real code-bug and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(
+      "column customer_links.linked_customer_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."customer_links"("id","linked_customer_id") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(
+      "column customer_links.linked_customer_id does not exist",
+      "update public.customer_links set linked_customer_id = $1 where id = $2",
+    ),
+    false,
+  );
+  // A FATAL / constraint-class error on the same shape is untouched (different message).
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select id, linked_customer_id from public.customer_links",
+    ),
+    false,
+  );
+  // Empty / nullish message or query returns false — we need both markers.
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise("", "select * from customer_links"),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(
+      "column customer_links.linked_customer_id does not exist",
       "",
     ),
     false,

@@ -48,6 +48,7 @@ import {
   isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
+  isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
@@ -453,6 +454,15 @@ const LOG_QUERIES: LogQuery[] = [
       // shape on `loyalty_redemptions` (bare or PostgREST CTE wrapper) — a different missing
       // column, `customer_id` on `loyalty_members`, a non-SELECT write, or a FATAL still pages.
       if (isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale external/REST client SELECTs `customer_links`
+      // with an edge-list assumption (`customer_id` OR `linked_customer_id`) that our
+      // `group_id`-based schema never supported — `customer_links.linked_customer_id` has never
+      // existed. The resulting undefined_column ERROR is repair work for a query no ShopCX code
+      // owns (Control Tower signature `supabase-logs:68e72ff8ce04dec4`). Narrowly gated to require
+      // BOTH the exact `column customer_links.linked_customer_id does not exist` message AND the
+      // SELECT-lookup shape on `customer_links` (bare or PostgREST CTE wrapper) — a different
+      // missing column, a non-SELECT write, or a FATAL still pages.
+      if (isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale external/REST client SELECTs redemption-lineage
       // columns (`parent_redemption_id` / `source_redemption_id`) from `loyalty_redemptions` that
       // our schema has never carried. The resulting undefined_column ERROR is repair work for a
