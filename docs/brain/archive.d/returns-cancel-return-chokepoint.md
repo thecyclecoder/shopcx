@@ -1,0 +1,1 @@
+- **Add a cancelReturn chokepoint for returns** · verified 2026-11-11 · → [[../libraries/shopify-returns]]
