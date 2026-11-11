@@ -1,6 +1,6 @@
 # inngest/review-request-canary-digest-cron
 
-Daily cron that records ONE non-approval `director_activity` ledger row per workspace-day summarizing the review-request drafts on canary hold. Phase 3 of [[../specs/review-request-sol-session]], amended by [[../specs/review-request-digest-not-a-ceo-card]].
+Daily cron that records ONE non-approval `director_activity` ledger row per workspace-day summarizing the review-request drafts on canary hold. Phase 3 of [[../specs/review-request-sol-session]].
 
 **File:** `src/lib/inngest/review-request-canary-digest-cron.ts`
 
