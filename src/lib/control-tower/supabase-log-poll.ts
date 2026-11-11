@@ -171,6 +171,7 @@ import {
   isForeignSupabasePostgresMissingDirectorActivityKindDirectRestLookupNoise,
   isForeignSupabasePostgresMissingDirectorActivityDecisionDirectRestLookupNoise,
   isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise,
+  isForeignSupabasePostgresMissingReplacementsShopifyOrderIdDirectRestNoise,
   isForeignSupabasePostgresMissingWorkspacesSlugAdhocNoise,
   isForeignSupabasePostgresMissingWorkspacesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductVariantsPriceAdhocNoise,
@@ -2050,6 +2051,14 @@ const LOG_QUERIES: LogQuery[] = [
       // code-bug shape) still surfaces / pages on first sighting.
       // Static-analysis fingerprint — `isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoisemessage, query` is the classifier/arg-pair the spec-check runner pins to this capture-time drop.
       if (isForeignSupabasePostgresMissingDirectorActivityTicketIdDirectRestLookupNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
+      // against `public.replacements.shopify_order_id`. The `replacements` table exists but
+      // has NEVER carried a `shopify_order_id` column (internal joins key on UUIDs; Shopify
+      // is being sunset) — there is no ShopCX lever to make the query resolve. Narrowly
+      // gated to require BOTH the exact column-missing message AND a SELECT-on-replacements
+      // shape (bare OR PostgREST CTE wrapper); a different column / other table / non-SELECT
+      // still pages.
+      if (isForeignSupabasePostgresMissingReplacementsShopifyOrderIdDirectRestNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.workspaces.slug`. The `workspaces` table exists but has NO
       // `slug` column — the workspace slug shape lives on `workspaces.help_slug` (the
