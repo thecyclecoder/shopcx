@@ -1,0 +1,1 @@
+- **Drop director_activity.reasoning foreign-read noise from error feed** · verified 2026-11-11 · → [[../libraries/error-feed]]
