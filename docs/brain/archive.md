@@ -12,8 +12,19 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Scope Control Tower capture to drop foreign customer_links.linked_customer_id missing-column REST noise** · verified 2026-11-11 · → [[../libraries/error-feed]]
+- **Drop foreign-app PostgREST noise: column director_activity.ticket_id does not exist** · verified 2026-11-11 · → [[../libraries/error-feed]]
 - **Scope out foreign-tool journey_definitions.intent column-missing noise at capture** · verified 2026-11-10 · → [[../libraries/error-feed]] + [[../tables/journey_definitions]]
+- **Suppress foreign journey_definitions.steps missing-column noise in the error feed** · verified 2026-11-10 · → [[../libraries/error-feed]]
+- **Scope out the foreign order_refunds.order_number ad-hoc PostgREST read from the error feed** · verified 2026-11-10 · → [[../libraries/error-feed]]
+- **Drop foreign direct-REST `playbooks.steps`/`config` missing-column noise at capture** · verified 2026-11-10 · → [[../libraries/error-feed]]
 - **Scope out foreign-app noise: subscription_cycle_charges.customer_id direct-REST lookups** · verified 2026-11-10 · → [[../libraries/error-feed]] (§ Supabase Postgres missing-column noise § `isForeignSupabasePostgresMissingSubscriptionCycleChargesCustomerIdAdhocNoise`)
+- **Drop foreign ad-hoc subscriptions.billing_engine column-missing noise at capture** · verified 2026-11-10 · → [[../libraries/error-feed]]
+- **Drop foreign-app noise: ad-hoc REST SELECT of non-existent subscriptions.cancellation_reason** · verified 2026-11-10 · → [[../libraries/error-feed]]
+- **Drop foreign direct-REST tickets.merged_into_ticket_id missing-column noise at capture** · verified 2026-11-10 · → [[../libraries/error-feed]]
+- **Fold gate treats a fixed security finding as resolved** · verified 2026-11-10 · → [[../libraries/security-agent]]
+- **Make loyalty-coupon materialization conflict-tolerant (ON CONFLICT DO NOTHING)** · verified 2026-11-10 · → [[../lifecycles/subscription-billing]]
+- **create_replacement_order / dollar_replacement / switch_payment_method must resolve shopify_customer_id across the linked-account group** · verified 2026-11-10 · → [[../libraries/action-executor]]
 - **DB-health top callers use the same window as the totals** · verified 2026-11-09 · → [[db-health]]
 - **Drop foreign-REST read of the non-existent agent_action_requests.updated_at column from Control Tower error feed** · verified 2026-11-09 · → [[../libraries/error-feed]] (§ `isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise`)
 - **Stop Control Tower from paging on a foreign REST client's bogus agent_jobs.attempts column lookup** · verified 2026-11-09 · → [[../libraries/error-feed]]
