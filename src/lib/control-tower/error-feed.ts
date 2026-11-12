@@ -7288,6 +7288,46 @@ export function isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column "category" does not exist` for a stale /
+ * hand-typed ad hoc SELECT run directly against `public.approval_decisions` that references
+ * a non-existent `category` column. `approval_decisions` is a real product table, but it has
+ * NO `category` column — the captured shape is a one-off SQL Editor / stale external tool
+ * query with spec-shaped columns it doesn't own. There is no lever from ShopCX to make that
+ * query resolve, so paging Platform on it is pure noise (Control Tower signature
+ * `supabase-logs:0e3379f172768a91`).
+ *
+ * Sibling of `isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise` — the same narrow
+ * gating shape (exact trimmed message + required `approval_decisions` SELECT fingerprint),
+ * scoped here to the `column "category" does not exist` error.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message (with any leading `ERROR: ` prefix stripped) equals
+ *      `column "category" does not exist`, AND
+ *   2. the query is non-empty and its lowercased/trimmed form matches a SELECT FROM
+ *      (`public.`)`approval_decisions` AND contains the token `category`.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error on ANY OTHER table still pages (the pin requires the
+ *     `approval_decisions` SELECT fingerprint),
+ *   - a real `approval_decisions` read that does NOT reference `category` still passes
+ *     through,
+ *   - a `category`-missing error carrying a DIFFERENT message still pages.
+ */
+export function isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (stripped !== 'column "category" does not exist') return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  if (!/^select\b[\s\S]*\bfrom\s+(?:public\.)?approval_decisions\b/.test(q)) return false;
+  return q.includes("category");
+}
+
+/**
  * Foreign-app noise — Postgres reporting `syntax error at or near "day"` for a hand-typed,
  * exploratory MRR / retention cohort analysis someone ran directly against the Superfoods
  * database (SQL Editor / external BI tool). The query is a `WITH lastord AS ( ... )` CTE

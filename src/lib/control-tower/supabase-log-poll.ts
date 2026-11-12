@@ -141,6 +141,7 @@ import {
   isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnAgentJobsIdAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
+  isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise,
   isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
@@ -1476,6 +1477,13 @@ const LOG_QUERIES: LogQuery[] = [
       // `syntax error at end of input`. Narrowly gated to require the exact message, the
       // bare SELECT-on-approval_decisions shape, and the `agent_jobs.branch_name` marker.
       if (isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale / hand-typed ad hoc SELECT against
+      // `public.approval_decisions` referencing the non-existent `category` column, which
+      // Postgres reports as `column "category" does not exist`. Narrowly gated to the exact
+      // message + the bare SELECT-on-approval_decisions shape carrying the `category` token,
+      // so every real column-missing regression on a table we own still surfaces. Control
+      // Tower signature `supabase-logs:0e3379f172768a91`.
+      if (isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a hand-typed, exploratory MRR / retention cohort
       // analysis someone ran directly against the Superfoods database, which Postgres reports
       // as `syntax error at or near "day"`. The query is a `WITH lastord AS ( ... )` CTE that
