@@ -13,7 +13,13 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
 - **Scope Control Tower capture to drop foreign customer_links.linked_customer_id missing-column REST noise** · verified 2026-11-11 · → [[../libraries/error-feed]]
+- **Drop director_activity.reasoning foreign-read noise from error feed** · verified 2026-11-11 · → [[../libraries/error-feed]]
 - **Drop foreign-app PostgREST noise: column director_activity.ticket_id does not exist** · verified 2026-11-11 · → [[../libraries/error-feed]]
+- **Drop foreign-app noise: ad-hoc `orders.note` missing-column PostgREST lookup on the supabase-logs feed** · verified 2026-11-11 · → [[../libraries/error-feed]]
+- **Drop foreign 'column orders.payment_gateway does not exist' ad-hoc PostgREST noise at capture** · verified 2026-11-11 · → [[../libraries/error-feed]]
+- **Drop foreign 'replacements.shopify_order_id does not exist' direct-REST noise from the error feed** · verified 2026-11-11 · → [[../libraries/error-feed]]
+- **Add a cancelReturn chokepoint for returns** · verified 2026-11-11 · → [[../libraries/shopify-returns]]
+- **Review-request digest stops landing in the CEO inbox** · verified 2026-11-11 · → [[inngest/review-request-canary-digest-cron]]
 - **Scope out foreign-tool journey_definitions.intent column-missing noise at capture** · verified 2026-11-10 · → [[../libraries/error-feed]] + [[../tables/journey_definitions]]
 - **Suppress foreign journey_definitions.steps missing-column noise in the error feed** · verified 2026-11-10 · → [[../libraries/error-feed]]
 - **Scope out the foreign order_refunds.order_number ad-hoc PostgREST read from the error feed** · verified 2026-11-10 · → [[../libraries/error-feed]]
