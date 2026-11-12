@@ -17,6 +17,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { decideSerialClaimDispatchOutcome } from "./agent-jobs";
+import { shouldDropSeriallyHeldGoalMember } from "./mario";
 
 test("serial.ok:true → dispatch (one-off / independent goal-mate / cleared head)", () => {
   const outcome = decideSerialClaimDispatchOutcome({ serial: { ok: true } });
@@ -44,4 +45,48 @@ test("named failing state: a held goal-mate never returns `dispatch` (the wedge 
     const outcome = decideSerialClaimDispatchOutcome({ serial });
     assert.equal(outcome.action, "release", `held verdict "${serial.reason}" must map to release`);
   }
+});
+
+/**
+ * mario-serializer-aware-drop-for-queued-goal-member-builds Phase 1 — the (d3) serializer-aware
+ * legit-wait drop must now cover the QUEUED-BUILD sources (`job_queued` timecard-gap + `build_queued`
+ * stuck-queued), not only the sixth `spec_authored` source. `shouldDropSeriallyHeldGoalMember` is the
+ * pure predicate the detector loop keys off: dispatch.ok===false on any allowed source ⇒ drop.
+ */
+const HELD = { ok: false as const, reason: "widget-signed-identity-pass is not the earliest ready goal-member of shopgrowth-software-support (software-mode-orchestrator-toolset is next); serialized within the goal" };
+const ADMISSIBLE = { ok: true as const };
+
+test("named failing state: job_queued timecard-gap source now drops a serially-held queued member", () => {
+  // The exact stall class the spec fixes — before this phase the gate was `spec_authored`-only, so
+  // the job_queued→job_claimed 600 000 ms SLA surfaced a legitimately-serialized queued build as a
+  // false stall and fired Mario every cycle.
+  assert.equal(
+    shouldDropSeriallyHeldGoalMember({ fromEvent: "job_queued", dispatch: HELD }),
+    true,
+    "a queued member the serializer is refusing (ok:false) off the job_queued source must drop",
+  );
+});
+
+test("the seventh stuck-queued-build source (build_queued) also drops a serially-held queued member", () => {
+  assert.equal(shouldDropSeriallyHeldGoalMember({ fromEvent: "build_queued", dispatch: HELD }), true);
+});
+
+test("spec_authored (sixth source) drop is preserved", () => {
+  assert.equal(shouldDropSeriallyHeldGoalMember({ fromEvent: "spec_authored", dispatch: HELD }), true);
+});
+
+test("invariant: a truly-starved queued build (dispatch.ok:true — its turn has arrived) still SURFACES", () => {
+  // The member whose turn has come, a one-off spec, or a member of a fully-admissible goal must NOT
+  // be dropped — only ok:false (serialized behind another member) drops.
+  assert.equal(shouldDropSeriallyHeldGoalMember({ fromEvent: "job_queued", dispatch: ADMISSIBLE }), false);
+  assert.equal(shouldDropSeriallyHeldGoalMember({ fromEvent: "build_queued", dispatch: ADMISSIBLE }), false);
+  assert.equal(shouldDropSeriallyHeldGoalMember({ fromEvent: "spec_authored", dispatch: ADMISSIBLE }), false);
+});
+
+test("invariant: a non-serializer source (failed build / pr-resolve-storm) is NEVER dropped by this filter", () => {
+  // Those classes carry a real job/PR to act on; the serial-build gate does not apply even when a
+  // serializer read would say ok:false.
+  assert.equal(shouldDropSeriallyHeldGoalMember({ fromEvent: "build_started", dispatch: HELD }), false);
+  assert.equal(shouldDropSeriallyHeldGoalMember({ fromEvent: "pr_resolve_storm", dispatch: HELD }), false);
+  assert.equal(shouldDropSeriallyHeldGoalMember({ fromEvent: "orphaned_folded_pr", dispatch: HELD }), false);
 });

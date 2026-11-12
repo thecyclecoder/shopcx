@@ -1016,6 +1016,31 @@ const JOB_PR_SCOPED_FROM_EVENTS: ReadonlySet<string> = new Set(["build_queued", 
 const TERMINAL_OK_FROM_EVENTS: ReadonlySet<string> = new Set(["orphaned_folded_pr"]);
 
 /**
+ * The QUEUED-BUILD sources whose surviving candidate can be a goal member sitting `status='queued'`
+ * ONLY because the goal build-dispatch serializer is legitimately holding it behind an in-flight
+ * mate. Two sources surface this shape: the `job_queued`→`job_claimed` timecard-gap source (the
+ * seeded 600 000 ms SLA — see {@link MARIO_SEEDED_DEFAULT_SLA_MS}) and the seventh stuck-queued-build
+ * source ({@link readStuckQueuedBuildStalls}, `from_event='build_queued'`). Unlike the sixth
+ * (`spec_authored`, eligible-never-enqueued) source these carry a REAL queued build, so the (d3)
+ * serializer-aware drop is additionally gated on the live job actually being a queued build.
+ */
+const QUEUED_BUILD_SERIAL_WAIT_FROM_EVENTS: ReadonlySet<string> = new Set(["job_queued", "build_queued"]);
+
+/**
+ * Full `from_event` allow-set for the (d3) serializer-aware legit-wait drop — the sixth eligible-
+ * never-enqueued source (`spec_authored`) PLUS the queued-build sources above. A member the goal
+ * serializer is actively refusing (`evaluateGoalMemberBuildDispatch` → ok:false) surfaced under ANY
+ * of these is a legit serial wait, not a stall. The pure predicate
+ * {@link shouldDropSeriallyHeldGoalMember} gates on this set; the detector loop additionally gates
+ * the queued-build sources on the live job being a queued build.
+ */
+const D3_SERIAL_WAIT_FROM_EVENTS: ReadonlySet<string> = new Set([
+  "spec_authored",
+  "job_queued",
+  "build_queued",
+]);
+
+/**
  * `from_event` values EXEMPT from the cross-source init_loop_guard ownership drop
  * (mario-timecard-source-bypasses-init-loop-guard-dedupe). These are the pseudo-slug sources whose
  * candidate `spec_slug` is a PR identifier (`pr-<number>`), not a real spec — init_loop_guard
@@ -1587,23 +1612,32 @@ export async function evaluateStalledSpecs(
     // wait, not a stall. See [[isGoalMemberAwaitingPromotion]] for the pure predicate.
     if (await isSpecRowAwaitingGoalPromotion(admin, specRow)) continue;
 
-    // (d3) SERIALLY-HELD GOAL MEMBER (sixth source only) → legit wait, drop. An eligible-never-
-    // enqueued goal member has `auto_build=true`, every blocker cleared, and no build job — but
-    // the goal build-dispatch serializer admits ONE conflicting member build at a time, so a
-    // waiting member correctly has no job and correctly ages past the grace window. The sixth
-    // source reads that legitimate serial wait as a stall and fires Mario; each firing burns a
-    // Max session and accrues oscillation-guard pressure on a spec that is behaving as designed.
-    // Consult the serializer BEFORE surfacing: ok:false ⇒ drop; ok:true (one-off spec, member of
-    // a different goal, or an admissible member) ⇒ keep. Scoped to `spec_authored` so the other
-    // sources (failed-build, stuck-queued, pr-resolve-storm, orphaned-folded-pr, …) are untouched.
-    // Fail-open on any serializer error so a transient DB fault never silently hides a real stall.
-    if (c.from_event === "spec_authored") {
+    // (d3) SERIALLY-HELD GOAL MEMBER → legit wait, drop. Two shapes trip this. (1) The sixth source
+    // (`spec_authored`): an eligible-never-enqueued goal member has `auto_build=true`, every blocker
+    // cleared, and NO build job, because the goal build-dispatch serializer admits ONE conflicting
+    // member build at a time, so a waiting member correctly has no job and ages past grace. (2) The
+    // QUEUED-BUILD sources ({@link QUEUED_BUILD_SERIAL_WAIT_FROM_EVENTS} — the `job_queued`→
+    // `job_claimed` timecard-gap source and the seventh stuck-queued-build source): the member DOES
+    // have a build job, but it sits `status='queued'` ONLY because the serializer re-releases it each
+    // claim cycle ("serial-claim released (pre-launch) — … is not the earliest ready goal-member …").
+    // Either way the serializer legitimately holds it, so surfacing it fires Mario on a spec behaving
+    // exactly as designed — each firing burns a Max session and accrues MARIO_LOOP_GUARD_MAX pressure.
+    // Consult the serializer BEFORE surfacing: ok:false ⇒ drop; ok:true (one-off spec, member of a
+    // different goal, an admissible member, or a member whose turn has arrived) ⇒ keep. For the
+    // queued-build sources gate the (extra) serializer read on the live job actually being a queued
+    // build (currentJobStatus==='queued' or the pre-seeded 'queued_unclaimed') so a non-build
+    // candidate never pays a needless serializer read. Fail-open on any serializer error so a
+    // transient DB fault never silently hides a real stall.
+    const isQueuedBuildSerialWaitSource =
+      QUEUED_BUILD_SERIAL_WAIT_FROM_EVENTS.has(c.from_event) &&
+      (currentJobStatus === "queued" || c.brief.current_job_status === "queued_unclaimed");
+    if (c.from_event === "spec_authored" || isQueuedBuildSerialWaitSource) {
       try {
         const dispatch = await evaluateGoalMemberBuildDispatch(c.workspace_id, c.spec_slug);
         if (shouldDropSeriallyHeldGoalMember({ fromEvent: c.from_event, dispatch })) continue;
       } catch {
         // Fail-open — let the candidate survive to the M4 agent so a transient serializer read
-        // failure cannot mask a real eligible-never-enqueued stall.
+        // failure cannot mask a real eligible-never-enqueued OR serially-held queued-build stall.
       }
     }
 
@@ -2633,20 +2667,23 @@ export function isGoalMemberAwaitingPromotion(input: {
 /**
  * PURE predicate — should the eligible-never-enqueued candidate be DROPPED because the goal-member
  * build-dispatch serializer is legitimately holding it? An eligible-but-serially-held goal member
- * has `auto_build=true`, every declared blocker cleared, and NO build job — the exact shape the
- * sixth source (`from_event === "spec_authored"`) surfaces — but the goal serializer is
- * intentionally holding it (a conflicting goal-mate build is in flight OR this mate is not the
+ * has `auto_build=true`, every declared blocker cleared, and NO build job — the shape the sixth
+ * source (`from_event === "spec_authored"`) surfaces — OR it has a build job sitting `status='queued'`
+ * that the serializer re-releases every claim cycle — the shape the QUEUED-BUILD sources
+ * (`job_queued` timecard-gap, `build_queued` stuck-queued) surface. In every case the goal serializer
+ * is intentionally holding it (a conflicting goal-mate build is in flight OR this mate is not the
  * earliest ready head). There is no honest live fix: a reclaim would be refused by the same gate
  * and queueing anew would churn on the claim-time serializer. Dropping the candidate at the source
  * means no `mario_fired` row, no oscillation-guard pressure, and no wasted Max session.
  *
- * SCOPED to the sixth source's `from_event` so the other sources (failed-build, stuck-queued,
- * pr-resolve-storm, orphaned-folded-pr, …) are UNTOUCHED — those classes carry a real job to act
- * on and the serial-build gate does not apply.
+ * SCOPED to the (d3) allow-set ({@link D3_SERIAL_WAIT_FROM_EVENTS} — `spec_authored` plus the two
+ * queued-build sources) so the OTHER sources (failed-build, pr-resolve-storm, orphaned-folded-pr, …)
+ * are UNTOUCHED — those classes carry a real job/PR to act on and the serial-build gate does not apply.
  *
- * A one-off spec (resolveGoalSlugForSpec → null → dispatch ok:true) and an admissible goal member
- * (no conflicting mate → ok:true) return `false` from this predicate — they are NEVER dropped by
- * this filter. Only a member the serializer is actively refusing (ok:false) returns `true`.
+ * A one-off spec (resolveGoalSlugForSpec → null → dispatch ok:true), an admissible goal member
+ * (no conflicting mate → ok:true), and a member whose turn has arrived (ok:true) return `false` from
+ * this predicate — they are NEVER dropped by this filter. Only a member the serializer is actively
+ * refusing (ok:false) returns `true`.
  *
  * Kept pure so the drop decision is unit-testable without a stubbed Supabase client (mirrors
  * [[shouldSurfaceEligibleNeverEnqueued]] and [[isGoalMemberAwaitingPromotion]]).
@@ -2655,7 +2692,7 @@ export function shouldDropSeriallyHeldGoalMember(input: {
   fromEvent: string;
   dispatch: GoalMemberBuildDispatchResult;
 }): boolean {
-  if (input.fromEvent !== "spec_authored") return false;
+  if (!D3_SERIAL_WAIT_FROM_EVENTS.has(input.fromEvent)) return false;
   return input.dispatch.ok === false;
 }
 
