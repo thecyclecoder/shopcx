@@ -1,0 +1,1 @@
+- **ROAS margin calculator uses real cost rates from closed QuickBooks months** · verified 2026-11-12 · → [[../dashboard/analytics__roas]]
