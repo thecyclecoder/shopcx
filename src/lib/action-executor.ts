@@ -19,6 +19,7 @@ import { usageCostCents } from "@/lib/ai-usage";
 import { normalizeCountryToIso2 } from "@/lib/country-iso2";
 import { LOYALTY_REMEDY_MAX_CENTS } from "@/lib/loyalty";
 import { attemptAllergenHold, isAllergyEscalation } from "@/lib/order-holds";
+import { isSoftwareModeWorkspace, routeSoftwareModeEscalation } from "@/lib/support-mode";
 import { linkGroupIds } from "@/lib/customer-links";
 import { isSubscriptionUuid } from "@/lib/internal-subscription";
 import type { OneTimeChargeInput, OneTimeChargeResult } from "@/lib/one-time-charge";
@@ -205,6 +206,10 @@ export interface ActionContext {
   // honors this flag so a ticket that was just escalated doesn't get
   // auto-closed underneath the agent.
   _escalatedThisRun?: boolean;
+  // Internal: set by escalateTicket() when a software-mode escalation already sent the honest
+  // live-hours handoff reply to the customer (see routeSoftwareModeEscalation). Callers skip
+  // their generic holding message so the customer gets ONE coherent reply, not two.
+  _softwareHandoffMessageSent?: boolean;
   // Internal: set by close_ticket direct action. Tells the post-execute
   // logic in unified-ticket-handler that the close was intentional —
   // without this flag the "no message sent → reopen" branch would flip
@@ -6307,10 +6312,15 @@ async function handleEscalate(
   // Send holding message to customer. Sonnet's pre-authored
   // response_message is preferred for context-specific framing; fall
   // back to a generic team-handoff line that doesn't sound AI-y.
-  const holdingMsg =
-    decision.response_message ||
-    "Someone on my team is working on this and we'll get back to you shortly!";
-  await send(holdingMsg, ctx.sandbox);
+  // Skip entirely when a software-mode escalation already sent the honest live-hours handoff
+  // reply (escalateTicket → routeSoftwareModeEscalation) — the customer gets one coherent
+  // message, not a generic holding line on top of the time-of-day promise.
+  if (!ctx._softwareHandoffMessageSent) {
+    const holdingMsg =
+      decision.response_message ||
+      "Someone on my team is working on this and we'll get back to you shortly!";
+    await send(holdingMsg, ctx.sandbox);
+  }
   await sysNote(`Escalated: ${reason}`);
 }
 
@@ -6334,6 +6344,28 @@ async function escalateTicket(ctx: ActionContext, reason: string): Promise<void>
   // Mark on the context so executeSonnetDecision returns escalated=true
   // and the post-execute auto-close in unified-ticket-handler skips.
   ctx._escalatedThisRun = true;
+
+  // ── Software-mode live-hours handoff (software-mode-live-hours-handoff) ──
+  // A software-mode SaaS tenant (anything that is NOT the managed Superfoods home workspace)
+  // gets NO June / CS Director routing — that is gated out of the triage-escalations cron.
+  // Instead the handoff is honest about WHEN a person will answer: inside the workspace's live
+  // hours the customer is told a person is coming + a live owner gets a bell card; outside, the
+  // customer is promised an email reply within one business day and the ticket waits in the
+  // inbox. Best-effort on top of the escalation write above — a failure here must never block
+  // the escalation itself.
+  if (isSoftwareModeWorkspace(ctx.workspaceId)) {
+    try {
+      await routeSoftwareModeEscalation({
+        admin: ctx.admin,
+        workspaceId: ctx.workspaceId,
+        ticketId: ctx.ticketId,
+        reason,
+      });
+      ctx._softwareHandoffMessageSent = true;
+    } catch (e) {
+      console.warn("[escalateTicket] software-mode handoff routing failed:", errText(e));
+    }
+  }
 
   // ── Allergen auto-hold — a-flagged-allergen-order-must-not-ship, Phase 1 ──
   // If the escalation is an allergy/safety report, raise a protective hold on
