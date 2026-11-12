@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { normalizeSupportLiveHours } from "@/lib/support-mode";
 
 export async function GET(
   request: Request,
@@ -15,7 +16,7 @@ export async function GET(
   const admin = createAdminClient();
   const { data } = await admin
     .from("workspaces")
-    .select("widget_enabled, widget_color, widget_greeting, widget_position, chat_ticket_creation")
+    .select("widget_enabled, widget_color, widget_greeting, widget_position, chat_ticket_creation, support_live_hours")
     .eq("id", workspaceId)
     .single();
 
@@ -32,7 +33,7 @@ export async function PATCH(
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await request.json();
-  const { widget_enabled, widget_color, widget_greeting, widget_position, chat_ticket_creation } = body;
+  const { widget_enabled, widget_color, widget_greeting, widget_position, chat_ticket_creation, support_live_hours } = body;
 
   const admin = createAdminClient();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -42,6 +43,12 @@ export async function PATCH(
   if (widget_greeting !== undefined) updates.widget_greeting = widget_greeting;
   if (widget_position !== undefined) updates.widget_position = widget_position;
   if (chat_ticket_creation !== undefined) updates.chat_ticket_creation = chat_ticket_creation;
+  // Live hours for the software-mode escalation handoff. null = never live (always the
+  // email-reply promise). Normalized so a malformed value clears back to null rather than
+  // persisting junk. See src/lib/support-mode.ts.
+  if (support_live_hours !== undefined) {
+    updates.support_live_hours = normalizeSupportLiveHours(support_live_hours);
+  }
 
   const { error } = await admin
     .from("workspaces")
