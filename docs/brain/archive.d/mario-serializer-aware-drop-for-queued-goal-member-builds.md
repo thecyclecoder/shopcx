@@ -1,0 +1,1 @@
+- **Extend serializer-aware legit-wait drop to queued-build sources** · verified 2026-11-12 · → [[../libraries/mario]] (§ drops (d3) "Serially-held goal member" + (d3b) "Serially-held goal member with a QUEUED build")
