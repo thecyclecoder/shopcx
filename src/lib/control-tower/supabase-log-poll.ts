@@ -54,6 +54,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise,
   isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
@@ -511,6 +512,14 @@ const LOG_QUERIES: LogQuery[] = [
       // the SELECT-lookup shape on `agent_jobs` (bare or PostgREST CTE wrapper) — a different
       // missing column on the table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale external/REST client SELECTed the
+      // non-existent `slug` column from `goal_milestones` — goal milestones are keyed by UUID and
+      // no `slug`/`sort_order` columns have ever existed (Control Tower signature
+      // `supabase-logs:fd57c60a7f92180d`). Narrowly gated to require BOTH the exact
+      // `column goal_milestones.slug does not exist` message AND the SELECT-lookup shape on
+      // `goal_milestones` (bare or PostgREST CTE wrapper) — a different missing column on the
+      // table, or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale external/REST client assumed every
       // table has an `id` column and SELECTed/ordered `qb_shipping_protection_products` by `id`,
       // but that table's PK is the composite `(workspace_id, shopify_product_id)` and no `id`
