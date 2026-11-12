@@ -168,11 +168,24 @@ async function sumColumn(
   start: string,
   end: string,
 ): Promise<number> {
-  const { data } = await admin
-    .from(table)
-    .select(column)
-    .eq("workspace_id", workspaceId)
-    .gte("sale_date", start)
-    .lte("sale_date", end);
-  return (data ?? []).reduce((sum: number, r: Record<string, unknown>) => sum + num(r[column]), 0);
+  // Page through the rows: these are per-variant, per-day tables, so a 3-month window exceeds
+  // PostgREST's 1,000-row default (Jul–Sep 2026 Shopify = 1,332 rows). An unpaged read silently
+  // truncated the website denominator and inflated every website rate.
+  const PAGE = 1000;
+  let total = 0;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await admin
+      .from(table)
+      .select(`id, ${column}`)
+      .eq("workspace_id", workspaceId)
+      .gte("sale_date", start)
+      .lte("sale_date", end)
+      .order("id", { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw new Error(`closed-book-cost-rates: ${table} read failed: ${error.message}`);
+    const rows = (data ?? []) as unknown as Record<string, unknown>[];
+    total += rows.reduce((sum, r) => sum + num(r[column]), 0);
+    if (rows.length < PAGE) break;
+  }
+  return total;
 }

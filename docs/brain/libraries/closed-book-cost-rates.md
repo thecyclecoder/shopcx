@@ -36,6 +36,7 @@ The Analytics → ROAS margin calculator used to run on typed-in guesses (COGS 1
 - **Closed months only, pre-15th steps back.** Don't feed it the in-progress month; before the 15th the last calendar month's books are premature — `newestTrustedMonth` already handles both.
 - **Name-matched lines** — same fragility as [[quickbooks]]: a QBO account **rename** breaks an extraction (a re-nesting survives). If a rate goes unexpectedly 0, check the account label in the stored `raw` first.
 - **Discounts are deliberately NOT a line here.** ROAS revenue comes from `orders.total_cents` (daily-order-snapshot), already net of discounts, so a discounts rate would double-count.
+- **The sales-snapshot sums must page.** These tables are per-variant, per-day, so a 3-month window passes PostgREST's 1,000-row default (Jul–Sep 2026 Shopify = 1,332 rows). `sumColumn` pages with `.range()`; an unpaged read truncated the website denominator and showed website COGS at 18.4% and fulfillment at 20.6% instead of 14.9% and 15.5%.
 - **Pooled denominators need the sales snapshots populated.** If a channel's sales snapshots are empty for the span, its denominator is 0 and the guarded `pct` returns 0 (not a crash) — the fix is to backfill the snapshots, not to change the math.
 
 ## Related
