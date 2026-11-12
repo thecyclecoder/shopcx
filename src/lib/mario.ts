@@ -1641,6 +1641,36 @@ export async function evaluateStalledSpecs(
       }
     }
 
+    // (d3b) SERIALLY-HELD GOAL MEMBER WITH A QUEUED BUILD (stuck-queued source) → legit wait, drop.
+    // Sibling to (d3): a goal member that ALREADY has a `queued` build job is held by the
+    // DISPATCH-time serializer (one conflicting member build at a time to prevent hot-file
+    // collisions). Its job keeps releasing its serial-claim every poll, so the `job_queued` timecard
+    // ages past the job_queued→job_claimed SLA and trips the stuck-queued threshold
+    // (to_event==='job_claimed') even though the member is behaving exactly as the serializer
+    // designed — a multi-member goal produces one false fire per serially-held mate per cycle.
+    // Consult the serializer: ok:false AND the live job still `queued` ⇒ drop (legit serial wait);
+    // ok:true (genuinely starved queue, one-off spec, admissible member) OR a non-`queued` live job
+    // (job claimed then worker died — the worker-liveness stall this threshold really targets) ⇒
+    // keep. Reuse the fail-OPEN try/catch so a transient serializer read never masks a real stall.
+    // Scoped strictly to the stuck-queued source (to_event==='job_claimed') so the other sources are
+    // untouched.
+    if (c.to_event === "job_claimed") {
+      try {
+        const dispatch = await evaluateGoalMemberBuildDispatch(c.workspace_id, c.spec_slug);
+        if (
+          shouldDropSeriallyHeldGoalMember({
+            fromEvent: c.from_event,
+            dispatch,
+            liveJobStatus: currentJobStatus,
+          })
+        )
+          continue;
+      } catch {
+        // Fail-open — let the candidate survive to the M4 agent so a transient serializer read
+        // failure cannot mask a real stuck-queued stall.
+      }
+    }
+
     // (d4) STANDING INIT-DISMISSAL (sixth source only) → legit held state, drop. When the Platform
     // Director's init lane fires `dismiss_candidate` the spec is PARKED pending a CEO fix-or-cut
     // call — it stays un-enqueued deliberately, on purpose, exactly as the sixth source's "auto_build,
@@ -2677,8 +2707,14 @@ export function isGoalMemberAwaitingPromotion(input: {
  * means no `mario_fired` row, no oscillation-guard pressure, and no wasted Max session.
  *
  * SCOPED to the (d3) allow-set ({@link D3_SERIAL_WAIT_FROM_EVENTS} — `spec_authored` plus the two
- * queued-build sources) so the OTHER sources (failed-build, pr-resolve-storm, orphaned-folded-pr, …)
- * are UNTOUCHED — those classes carry a real job/PR to act on and the serial-build gate does not apply.
+ * queued-build sources, `job_queued` and `build_queued`) so the OTHER sources (failed-build,
+ * pr-resolve-storm, orphaned-folded-pr, …) are UNTOUCHED — those classes carry a real job/PR to
+ * act on and the serial-build gate does not apply. For the queued-build sources the drop is
+ * additionally gated on the live job STILL being `queued` — a non-`queued` live job (job claimed
+ * then the worker died, or no live job at all — the worker-liveness stall this threshold really
+ * targets) still surfaces as a real stall. When `liveJobStatus` is passed (the (d3b) caller path),
+ * it is checked directly; when not passed (the (d3) caller pre-verified via
+ * `isQueuedBuildSerialWaitSource`), the caller's pre-check is trusted.
  *
  * A one-off spec (resolveGoalSlugForSpec → null → dispatch ok:true), an admissible goal member
  * (no conflicting mate → ok:true), and a member whose turn has arrived (ok:true) return `false` from
@@ -2691,9 +2727,21 @@ export function isGoalMemberAwaitingPromotion(input: {
 export function shouldDropSeriallyHeldGoalMember(input: {
   fromEvent: string;
   dispatch: GoalMemberBuildDispatchResult;
+  liveJobStatus?: string | null;
 }): boolean {
   if (!D3_SERIAL_WAIT_FROM_EVENTS.has(input.fromEvent)) return false;
-  return input.dispatch.ok === false;
+  // Only the serializer actively REFUSING (ok:false) is ever a legit wait — an admissible member,
+  // a one-off spec, or a genuinely starved queue returns ok:true and is always a real stall.
+  if (input.dispatch.ok !== false) return false;
+  // spec_authored — the sixth / eligible-never-enqueued source: a member awaiting its serial slot
+  // correctly has no job, so no liveJobStatus guard is needed.
+  if (input.fromEvent === "spec_authored") return true;
+  // Queued-build sources (job_queued, build_queued): additionally gate on the live job STILL being
+  // `queued`. A non-`queued` live job (job claimed then worker died, or no live job) is a real stall.
+  // When liveJobStatus is passed explicitly (d3b path), check it; when not passed (d3 path, caller
+  // pre-verified via isQueuedBuildSerialWaitSource), trust the caller's pre-check.
+  if (input.liveJobStatus !== undefined && input.liveJobStatus !== "queued") return false;
+  return true;
 }
 
 /**

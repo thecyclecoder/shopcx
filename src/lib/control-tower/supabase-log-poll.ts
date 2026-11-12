@@ -53,6 +53,7 @@ import {
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
@@ -503,6 +504,13 @@ const LOG_QUERIES: LogQuery[] = [
       // `agent_jobs` (bare or PostgREST CTE wrapper) — a different missing column on the table,
       // or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale external/REST client SELECTed the
+      // non-existent `heartbeat_at` column from `agent_jobs` — the real column is
+      // `last_heartbeat_at` (Control Tower signature `supabase-logs:ce7fd2bfa252ddc8`). Narrowly
+      // gated to require BOTH the exact `column agent_jobs.heartbeat_at does not exist` message AND
+      // the SELECT-lookup shape on `agent_jobs` (bare or PostgREST CTE wrapper) — a different
+      // missing column on the table, or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale external/REST client assumed every
       // table has an `id` column and SELECTed/ordered `qb_shipping_protection_products` by `id`,
       // but that table's PK is the composite `(workspace_id, shopify_product_id)` and no `id`
