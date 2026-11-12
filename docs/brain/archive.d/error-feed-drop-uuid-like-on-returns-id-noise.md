@@ -1,0 +1,1 @@
+- **Drop foreign uuid-LIKE-on-returns.id Studio/REST noise at error-feed capture** · verified 2026-11-12 · → [[../libraries/error-feed]]
