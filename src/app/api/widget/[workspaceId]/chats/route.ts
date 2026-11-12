@@ -1,16 +1,24 @@
 import { NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getSupportMode, isSoftwareMode } from "@/lib/support-mode";
+import { verifyWidgetIdentity } from "@/lib/widget-identity";
 
 // GET: List chat sessions the caller can PROVE are theirs.
 //
-// Proof = widget_sessions ids this browser created and stored in localStorage,
-// passed back as ?session_id= (repeatable and/or comma-separated). We only ever
-// list tickets belonging to those exact session ids, scoped to this workspace.
-//
-// An email-only request (no session_id) returns { chats: [] } — NOT an error, so
-// old cached widget bundles that still send ?email= degrade quietly to "no past
-// chats" instead of leaking. This closes the read-by-email hole where anyone who
+// cpg workspaces — proof = widget_sessions ids this browser created and stored in
+// localStorage, passed back as ?session_id= (repeatable and/or comma-separated). We
+// only ever list tickets belonging to those exact session ids, scoped to this
+// workspace. An email-only request (no session_id) returns { chats: [] } — NOT an
+// error, so old cached widget bundles that still send ?email= degrade quietly to "no
+// past chats" instead of leaking. This closes the read-by-email hole where anyone who
 // knew a shopper's email could list their chats cross-origin (CORS is `*` here).
+//
+// software workspaces (ShopGrowth merchant support) — proof = a verified identity pass
+// (?identity=). The list is scoped to the store: every ticket tagged `shop:<shop>` from
+// the verified pass, so a staff member sees their own store's conversations from any
+// device and NOBODY else's. No valid pass → 401. The cpg-side session-id path is never
+// taken here. (The cpg read-by-email hole is closed separately by
+// widget-past-chats-requires-proof.)
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ workspaceId: string }> }
@@ -18,6 +26,67 @@ export async function GET(
   const { workspaceId } = await params;
   const url = new URL(request.url);
 
+  const admin = createAdminClient();
+  const mode = await getSupportMode(workspaceId);
+
+  // ── software mode: a verified pass is required; list the store's own tickets ──
+  if (isSoftwareMode(mode)) {
+    const identity = url.searchParams.get("identity");
+    const pass = identity ? await verifyWidgetIdentity(workspaceId, identity) : null;
+    if (!pass) {
+      return NextResponse.json({ error: "A verified identity is required" }, { status: 401 });
+    }
+
+    // Tickets for THIS store (verified shop tag), chat channel only.
+    const { data: tickets } = await admin
+      .from("tickets")
+      .select("id, subject, status, channel, updated_at")
+      .eq("workspace_id", workspaceId)
+      .eq("channel", "chat")
+      .contains("tags", [`shop:${pass.shop}`])
+      .order("updated_at", { ascending: false })
+      .limit(20);
+
+    if (!tickets?.length) return NextResponse.json({ chats: [] });
+
+    // Map each ticket back to its widget session id (the handle the UI reloads with).
+    const ticketIds = tickets.map((t) => t.id);
+    const { data: ticketSessions } = await admin
+      .from("widget_sessions")
+      .select("id, ticket_id, created_at")
+      .eq("workspace_id", workspaceId)
+      .in("ticket_id", ticketIds)
+      .order("created_at", { ascending: false });
+    const sessionByTicket = new Map<string, string>();
+    for (const s of ticketSessions || []) {
+      if (s.ticket_id && !sessionByTicket.has(s.ticket_id)) sessionByTicket.set(s.ticket_id, s.id);
+    }
+
+    const chats = [];
+    for (const ticket of tickets) {
+      const { data: lastMsg } = await admin
+        .from("ticket_messages")
+        .select("body, direction")
+        .eq("ticket_id", ticket.id)
+        .eq("visibility", "external")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single();
+
+      chats.push({
+        id: sessionByTicket.get(ticket.id) || ticket.id,
+        ticket_id: ticket.id,
+        subject: ticket.subject || "Chat",
+        status: ticket.status,
+        last_message: (lastMsg?.body || "").replace(/<[^>]+>/g, "").slice(0, 80),
+        updated_at: ticket.updated_at,
+      });
+    }
+
+    return NextResponse.json({ chats });
+  }
+
+  // ── cpg mode: session-id-proof path (unchanged) ──
   // Collect the session ids the browser claims to hold: repeated ?session_id=
   // and/or comma-separated values. The email param is intentionally ignored.
   const sessionIds = url.searchParams
@@ -28,8 +97,6 @@ export async function GET(
 
   // No proof → no listing, regardless of any email param present.
   if (!sessionIds.length) return NextResponse.json({ chats: [] });
-
-  const admin = createAdminClient();
 
   // Only sessions in THIS workspace whose id the browser actually holds.
   const { data: sessions } = await admin
