@@ -41,6 +41,31 @@ interface ArticleDetail {
 }
 
 const STORAGE_KEY_PREFIX = "shopcx_chat_";
+// List of every widget_sessions id this browser created, per workspace. This is
+// the PROOF the chats route now requires — the past-chats list only returns
+// tickets for session ids the browser can show it created (see
+// src/app/api/widget/[workspaceId]/chats/route.ts). Email alone proves nothing.
+const SESSIONS_KEY_PREFIX = "shopcx_chat_sessions_";
+
+function readStoredSessionIds(workspaceId: string): string[] {
+  try {
+    const raw = localStorage.getItem(`${SESSIONS_KEY_PREFIX}${workspaceId}`);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.filter((x) => typeof x === "string" && x) : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberSessionId(workspaceId: string, sessionId: string | null | undefined) {
+  if (!sessionId) return;
+  const existing = readStoredSessionIds(workspaceId);
+  if (existing.includes(sessionId)) return;
+  const next = [sessionId, ...existing].slice(0, 20);
+  try {
+    localStorage.setItem(`${SESSIONS_KEY_PREFIX}${workspaceId}`, JSON.stringify(next));
+  } catch {}
+}
 
 export default function ChatWidgetPage() {
   const { workspaceId } = useParams<{ workspaceId: string }>();
@@ -156,13 +181,15 @@ export default function ChatWidgetPage() {
   };
 
   const loadChatList = async () => {
-    const storedEmail = email || (() => {
-      try { const s = localStorage.getItem(`${STORAGE_KEY_PREFIX}${workspaceId}`); return s ? JSON.parse(s).email : ""; } catch { return ""; }
-    })();
-    if (!storedEmail) return;
-    const res = await fetch(`/api/widget/${workspaceId}/chats?email=${encodeURIComponent(storedEmail)}`);
+    // Prove ownership with the session ids this browser created — not the email.
+    const ids = readStoredSessionIds(workspaceId);
+    if (!ids.length) { setChatList([]); return; }
+    const qs = ids.map((id) => `session_id=${encodeURIComponent(id)}`).join("&");
+    const res = await fetch(`/api/widget/${workspaceId}/chats?${qs}`);
     const data = await res.json();
-    if (Array.isArray(data)) setChatList(data);
+    // New route returns { chats: [...] }; tolerate a bare array for safety.
+    const list = Array.isArray(data) ? data : data?.chats;
+    if (Array.isArray(list)) setChatList(list);
   };
 
   const openChat = async (chatTicketId: string, chatSessionId: string) => {
@@ -176,6 +203,7 @@ export default function ChatWidgetPage() {
     const data = await res.json();
     if (data.messages) setMessages(data.messages);
     // Save to localStorage
+    rememberSessionId(workspaceId, chatSessionId);
     localStorage.setItem(`${STORAGE_KEY_PREFIX}${workspaceId}`, JSON.stringify({ sessionId: chatSessionId, email, firstName, lastName, ticketId: chatTicketId }));
   };
 
@@ -186,6 +214,9 @@ export default function ChatWidgetPage() {
       try {
         const data = JSON.parse(stored);
         if (data.sessionId) {
+          // Migrate the legacy single-session storage into the proof list so
+          // returning visitors keep access to their existing chat.
+          rememberSessionId(workspaceId, data.sessionId);
           setSessionId(data.sessionId);
           setEmail(data.email || "");
           setFirstName(data.firstName || data.name || "");
@@ -342,6 +373,7 @@ export default function ChatWidgetPage() {
 
       if (data.session_id && data.session_id !== sessionId) {
         setSessionId(data.session_id);
+        rememberSessionId(workspaceId, data.session_id);
         localStorage.setItem(
           `${STORAGE_KEY_PREFIX}${workspaceId}`,
           JSON.stringify({
