@@ -154,6 +154,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise,
   isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
@@ -29341,6 +29342,107 @@ test("isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise KEEPS a
   assert.equal(
     isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(
       "column goal_milestones.slug does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise ──
+test("isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise drops the foreign direct-REST lookup projecting the non-existent spec_id column", () => {
+  // The captured incident shape (Control Tower `supabase-logs:544b54bcf17eade6`): a foreign /
+  // stale direct-REST client reads `spec_card_state?select=...spec_id...`, PostgREST wraps it as a
+  // `WITH pgrst_source AS ( SELECT ... FROM "public"."spec_card_state" ... )` CTE, and Postgres
+  // rejects with `column spec_card_state.spec_id does not exist` — no `spec_id` column has ever
+  // existed on `spec_card_state`.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(
+      "column spec_card_state.spec_id does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."spec_card_state"."id", "public"."spec_card_state"."spec_id" FROM "public"."spec_card_state" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(
+      "column public.spec_card_state.spec_id does not exist",
+      'with pgrst_source as ( select "public"."spec_card_state"."spec_id" from "public"."spec_card_state" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(
+      "ERROR: column spec_card_state.spec_id does not exist",
+      'WITH pgrst_source AS ( SELECT "spec_id" FROM "public"."spec_card_state" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(
+      "column spec_card_state.spec_id does not exist",
+      "select id, spec_id from public.spec_card_state order by id asc",
+    ),
+    true,
+  );
+  // The unqualified-FROM (no `public.`) variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(
+      "column spec_card_state.spec_id does not exist",
+      "select * from spec_card_state where spec_id = $1",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise KEEPS a different spec_card_state column error, a non-SELECT write, and a FATAL (real regressions still page)", () => {
+  // A DIFFERENT missing column on `spec_card_state` is a real column rename / regression and must
+  // still page — the pin covers `spec_id` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(
+      "column spec_card_state.collapsed does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."spec_card_state"."collapsed" FROM "public"."spec_card_state" LIMIT 1 )',
+    ),
+    false,
+  );
+  // The same `spec_id` message attached to a non-SELECT statement shape is a real code-write trying
+  // to persist a bogus column — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(
+      "column spec_card_state.spec_id does not exist",
+      "update public.spec_card_state set spec_id = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(
+      "column spec_card_state.spec_id does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."spec_card_state"("id","spec_id") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  // A FATAL (e.g. connection / auth failure) is not this missing-column message and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select spec_id from public.spec_card_state limit 1",
+    ),
+    false,
+  );
+  // The `spec_id` message on a DIFFERENT relation (a real regression) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(
+      "column spec_cards.spec_id does not exist",
+      "select spec_id from public.spec_cards limit 1",
+    ),
+    false,
+  );
+  // Empty / nullish input returns false — both markers required.
+  assert.equal(isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(null, null), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(
+      "column spec_card_state.spec_id does not exist",
       "",
     ),
     false,
