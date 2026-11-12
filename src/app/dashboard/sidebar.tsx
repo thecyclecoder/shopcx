@@ -22,6 +22,7 @@ import {
 } from "@/lib/developer-nav";
 import type { WorkspaceWithRole } from "@/lib/types/workspace";
 import NotificationBell from "@/components/notification-bell";
+import WorkspaceSwitcher from "./workspace-switcher";
 
 interface TicketView {
   id: string;
@@ -229,9 +230,11 @@ const NAV_ITEMS = NAV_STRUCTURE.flatMap(item =>
 
 export default function Sidebar({
   workspace,
+  workspaces,
   user,
 }: {
   workspace: WorkspaceWithRole;
+  workspaces: WorkspaceWithRole[];
   user: { id: string; email: string; name?: string };
 }) {
   const pathname = usePathname();
@@ -416,15 +419,9 @@ export default function Sidebar({
         </div>
       </div>
 
-      {/* Workspace name */}
-      <div className="border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
-        <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
-          {workspace.name}
-        </p>
-        <p className="text-sm capitalize text-zinc-400">
-          {workspace.role.replace("_", " ")}
-        </p>
-      </div>
+      {/* Workspace name — a dropdown switcher when the user belongs to more than one workspace,
+          otherwise the plain name + role block (see workspace-switcher.tsx). */}
+      <WorkspaceSwitcher current={workspace} workspaces={workspaces} />
 
       {/* Navigation */}
       <nav className="flex-1 space-y-0.5 overflow-y-auto px-3 py-3">
