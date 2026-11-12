@@ -14,6 +14,22 @@ export async function GET(
   if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const admin = createAdminClient();
+
+  // Gate financial analytics (incl. closed-book cost_rates) on workspace
+  // membership — mirrors the owner gate in analytics/revenue/route.ts. Runs
+  // before any daily_order_snapshots/orders/getClosedBookCostRates fetch so no
+  // tenant data is computed or returned for a non-member.
+  const { data: member } = await admin
+    .from("workspace_members")
+    .select("role")
+    .eq("workspace_id", workspaceId)
+    .eq("user_id", user.id)
+    .single();
+
+  if (!member || member.role !== "owner") {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  }
+
   const url = new URL(request.url);
   // Use Central time for "today" to match snapshot boundaries
   const centralToday = new Date().toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
