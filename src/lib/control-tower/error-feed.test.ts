@@ -163,6 +163,7 @@ import {
   isForeignSupabasePostgresUuidLikeOnMigrationAuditsIdAdhocNoise,
   isForeignSupabasePostgresMissingColumnOnMigrationAuditsShopifyContractIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnTicketsIdAdhocNoise,
+  isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise,
   isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise,
@@ -4183,6 +4184,116 @@ test("isForeignSupabasePostgresUuidLikeOnTicketsIdAdhocNoise KEEPS a non-SELECT 
     isForeignSupabasePostgresUuidLikeOnTicketsIdAdhocNoise(
       "operator does not exist: uuid ~~ unknown",
       "delete from public.tickets where id like $1",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise ──
+// The returns twin of the subscriptions.id / migration_audits.id / tickets.id uuid-LIKE Studio/REST
+// probe: a Supabase Studio Table Editor quick-filter / direct-REST probe typed against the uuid
+// `returns.id` column emits `WHERE "id" LIKE $1`, rejected with
+// `operator does not exist: uuid ~~ unknown`. Control Tower signature
+// `supabase-logs:a3e4adaac3bc5983`. Drop AT CAPTURE only when BOTH the exact operator-missing
+// message AND the SELECT-shape on `returns` naming `id like` are present; a uuid-LIKE error on
+// any OTHER table, a DIFFERENT operator mismatch on this table, or a non-SELECT shape still pages.
+
+test("isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise drops the operator-missing message paired with the PostgREST CTE wrapper AND the bare SELECT shape", () => {
+  // The Studio-emitted PostgREST CTE wrapper form (double-quoted identifiers), id LIKE.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      'WITH pgrst_source AS ( SELECT "public"."returns".* FROM "public"."returns" WHERE "public"."returns"."id" like $1 LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise(
+      "ERROR: operator does not exist: uuid ~~ unknown",
+      'WITH pgrst_source AS ( SELECT * FROM "public"."returns" WHERE "id" like $1 )',
+    ),
+    true,
+  );
+  // The bare SELECT shape (no PostgREST wrapper) drops too — the predicate accepts both.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      "select * from public.returns where id like '%abc%'",
+    ),
+    true,
+  );
+  // Unqualified `returns` (no `public.`) + bare SELECT is still the same ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      "select id, status from returns where id like $1",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise KEEPS the same operator-missing message when the FROM is a different table (a real uuid-LIKE code bug elsewhere still pages)", () => {
+  // Same uuid ~~ unknown message, but the query LIKEs a uuid column on another table — that's
+  // a real code-bug shape, not Studio noise on returns.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      "select * from public.subscriptions where id like '%abc%'",
+    ),
+    false,
+  );
+  // PostgREST CTE wrapper form, but FROM is a different table — must still page.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      'WITH pgrst_source AS ( SELECT * FROM "public"."orders" WHERE "id" like $1 )',
+    ),
+    false,
+  );
+  // A table whose name merely starts with `returns` must NOT be swept in by the drop.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      "select * from public.returns_archive where id like $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise KEEPS a DIFFERENT operator-missing error on returns (a real code-bug with a different operator mismatch still pages)", () => {
+  // A different operator mismatch on `returns` is a real code bug we WANT to see.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise(
+      "operator does not exist: uuid = text",
+      "select * from public.returns where id like $1",
+    ),
+    false,
+  );
+  // The uuid ILIKE (~~*) operator-missing message is a different shape — not this drop.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise(
+      "operator does not exist: uuid ~~* unknown",
+      "select * from public.returns where id like $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise KEEPS a non-SELECT statement shape on returns (a real code-bug writing returns still pages)", () => {
+  // An UPDATE / DELETE naming id LIKE indicates real code trying to mutate the table — a bug
+  // we WANT to see, not the Studio-click read we drop.
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      "update public.returns set status = $1 where id like $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresUuidLikeOnReturnsIdAdhocNoise(
+      "operator does not exist: uuid ~~ unknown",
+      "delete from public.returns where id like $1",
     ),
     false,
   );
