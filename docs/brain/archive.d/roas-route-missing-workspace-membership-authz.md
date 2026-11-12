@@ -1,0 +1,1 @@
+- **Gate analytics/roas route on workspace membership before returning closed-book cost rates** · verified 2026-11-12 · → [[../dashboard/analytics__roas]]
