@@ -20,7 +20,7 @@ _None._
 
 ## Permissions
 
-All workspace members. No role gate in the page itself; gated only by middleware auth + workspace membership.
+**Workspace owner only** (`workspace_members.role='owner'` → 403 otherwise). The GET `/api/workspaces/:x/analytics/revenue` route gates on owner membership before serving financial data. This is the template gate for analytics routes with sensitive financial information.
 
 ## Files touched
 

@@ -4880,6 +4880,24 @@ export async function executeSonnetDecision(
   let statusManaged = false;
   const trackedSend: SendFn = async (m, sb) => { messageSent = true; await stampedSend(m, sb); };
 
+  // ── Software-mode hard guard (software-mode-workspace-switch Phase 3) ──
+  // Defense in depth: even if a prompt or playbook row proposes a CPG action on a software
+  // (merchant-support) workspace, nothing may call Appstle/Shopify/order/subscription/journey
+  // code. Refuse direct_action | journey | playbook | workflow, drop an internal note, and
+  // escalate through the existing path so a human picks it up. ai_response / kb_response /
+  // escalate — and the software-mode orchestrator-toolset actions, which are not CPG action
+  // types — behave exactly as today. getSupportMode fails closed to 'cpg', so a read blip can
+  // never block a Superfoods (cpg) action.
+  {
+    const { getSupportMode, isActionAllowedInMode } = await import("@/lib/support-mode");
+    const supportMode = await getSupportMode(ctx.workspaceId);
+    if (!isActionAllowedInMode(supportMode, decision.action_type)) {
+      await sysNote(`[System] CPG action refused in software mode: ${decision.action_type}`);
+      await escalateTicket(ctx, `CPG action refused in software mode: ${decision.action_type}`);
+      return { messageSent: false, escalated: true, closed: false, statusManaged: false };
+    }
+  }
+
   switch (decision.action_type) {
     case "direct_action": {
       // ── Selective-clarify gate ──

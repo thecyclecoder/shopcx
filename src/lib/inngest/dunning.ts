@@ -37,6 +37,7 @@ import {
   sendDunningRecoveryEmail,
 } from "@/lib/email";
 import { sendPaymentRecoveryEmail } from "@/lib/payment-recovery-email";
+import { resolveLiveContractId } from "@/lib/internal-subscription";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { emitReactiveHeartbeat, emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
 
@@ -529,7 +530,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
       // No cycle_number gate — terminal errors cancel on cycle 1
       const { data: exhaustedCycles } = await admin
         .from("dunning_cycles")
-        .select("shopify_contract_id, subscription_id, billing_attempt_id")
+        .select("id, shopify_contract_id, subscription_id, billing_attempt_id")
         .eq("customer_id", customer_id)
         .eq("status", "exhausted")
         // ⭐ Only cycles DUNNING gave up on. A cycle closed because the customer paused or
@@ -541,7 +542,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
       if (!exhaustedCycles?.length) return [];
 
       // Check which ones are actually cancelled
-      const results: { contractId: string; subscriptionId: string | null; billingAttemptId: string | null }[] = [];
+      const results: { contractId: string; cycleId: string; subscriptionId: string | null; billingAttemptId: string | null }[] = [];
       for (const dc of exhaustedCycles) {
         if (!dc.subscription_id) continue;
         const { data: sub } = await admin.from("subscriptions")
@@ -549,6 +550,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
         if (sub?.status === "cancelled") {
           results.push({
             contractId: dc.shopify_contract_id,
+            cycleId: dc.id,
             subscriptionId: dc.subscription_id,
             billingAttemptId: dc.billing_attempt_id,
           });
@@ -567,16 +569,24 @@ export const dunningNewCardRecovery = inngest.createFunction(
     for (const cancelled of cancelledSubs) {
       const result = await step.run(`reactivate-${cancelled.contractId}`, async () => {
         try {
+          // ⭐ Every exhausted cycle carries a PRE-MIGRATION shopify_contract_id (e.g. old
+          // 27900379309 → live 58099171501). subscriptionAction resolves that internally, but the
+          // local writes below (status update, resetBillingDateAfterDunning's subscriptions update
+          // + Shopify date push) key on this id literally and would match ZERO rows against the
+          // stale contract — the exact bug that double-charged e04ce897 on 2026-11-10. Resolve the
+          // live contract once, up front, and use it for every call and write in this step.
+          const liveContractId = await resolveLiveContractId(workspace_id, cancelled.contractId);
+
           // Reactivate the subscription
-          await subscriptionAction(workspace_id, cancelled.contractId, "resume");
+          await subscriptionAction(workspace_id, liveContractId, "resume");
 
           // Switch to new payment method
           if (payment_method_id) {
-            await subscriptionSwitchPaymentMethod(workspace_id, cancelled.contractId, payment_method_id);
+            await subscriptionSwitchPaymentMethod(workspace_id, liveContractId, payment_method_id);
           }
 
           // Attempt billing
-          const billingRes0 = await dunningChargeContract(workspace_id, cancelled.contractId, 0);
+          const billingRes0 = await dunningChargeContract(workspace_id, liveContractId, 0);
           // ⚠️ `ordersRes.success` must mean "we had something to charge", NOT "the charge worked".
           // Wiring the charge outcome into it made a DECLINE take the no-orders early-return, which
           // reports recovered:true, leaves the sub cancelled, and emails the customer a recovery
@@ -592,7 +602,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
               workspaceId: workspace_id,
               customerId: customer_id,
               subscriptionId: cancelled.subscriptionId,
-              shopifyContractId: cancelled.contractId,
+              shopifyContractId: liveContractId,
               paymentMethodId: payment_method_id,
               errorCode: "no_upcoming_orders",
               errorMessage: billingRes0.error || "Reactivated but no upcoming orders to bill",
@@ -600,7 +610,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
               attemptType: "new_card_retry",
               succeeded: false,
             });
-            return { contractId: cancelled.contractId, recovered: true, error: "Reactivated but no upcoming orders to bill" };
+            return { contractId: liveContractId, recovered: true, error: "Reactivated but no upcoming orders to bill" };
           }
 
           const attemptId = ordersRes.orders[0].id;
@@ -610,7 +620,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
             workspaceId: workspace_id,
             customerId: customer_id,
             subscriptionId: cancelled.subscriptionId,
-            shopifyContractId: cancelled.contractId,
+            shopifyContractId: liveContractId,
             billingAttemptId: attemptId,
             paymentMethodId: payment_method_id,
             attemptNumber: 1,
@@ -623,10 +633,16 @@ export const dunningNewCardRecovery = inngest.createFunction(
             await admin.from("subscriptions")
               .update({ status: "active", updated_at: new Date().toISOString() })
               .eq("workspace_id", workspace_id)
-              .eq("shopify_contract_id", cancelled.contractId);
+              .eq("shopify_contract_id", liveContractId);
+            // ⭐ Advance next_billing_date one interval from this recovery charge on the LIVE
+            // contract, so the scheduled renewal cron can't bill the same period again the next day.
+            // 2a previously charged but never moved the date → SC142110 re-billed e04ce897 on
+            // 2026-11-11. Pass the exhausted cycle id (not the stale contract) so the subscriptions
+            // update + Shopify push target the live sub.
+            await resetBillingDateAfterDunning(workspace_id, liveContractId, cancelled.cycleId, true);
           }
 
-          return { contractId: cancelled.contractId, recovered: billingRes.success };
+          return { contractId: liveContractId, recovered: billingRes.success };
         } catch (err) {
           return { contractId: cancelled.contractId, recovered: false, error: errText(err) };
         }
@@ -638,9 +654,15 @@ export const dunningNewCardRecovery = inngest.createFunction(
     for (const cycle of activeCycles) {
       const result = await step.run(`recover-${cycle.shopify_contract_id}`, async () => {
         try {
+          // ⭐ Resolve the live contract once, up front (same pre-migration-id hazard as 2a):
+          // the subscriptions select/update and resetBillingDateAfterDunning's writes key on this
+          // id literally, so a stale cycle.shopify_contract_id matches zero rows and the date never
+          // moves. Use liveContractId for every call and write in this step.
+          const liveContractId = await resolveLiveContractId(workspace_id, cycle.shopify_contract_id);
+
           // Unskip the order if it was skipped or retrying
           if ((cycle.status === "skipped" || cycle.status === "retrying") && cycle.billing_attempt_id) {
-            await dunningUnskip(workspace_id, cycle.shopify_contract_id, cycle.billing_attempt_id);
+            await dunningUnskip(workspace_id, liveContractId, cycle.billing_attempt_id);
           }
 
           // If subscription was cancelled (dunning exhausted), reactivate
@@ -648,23 +670,23 @@ export const dunningNewCardRecovery = inngest.createFunction(
           const { data: sub } = await admin.from("subscriptions")
             .select("status")
             .eq("workspace_id", workspace_id)
-            .eq("shopify_contract_id", cycle.shopify_contract_id)
+            .eq("shopify_contract_id", liveContractId)
             .single();
 
           if (sub?.status === "cancelled") {
-            await subscriptionAction(workspace_id, cycle.shopify_contract_id, "resume");
+            await subscriptionAction(workspace_id, liveContractId, "resume");
           } else if (sub?.status === "paused") {
             // Legacy paused subs — resume them too
-            await subscriptionAction(workspace_id, cycle.shopify_contract_id, "resume");
+            await subscriptionAction(workspace_id, liveContractId, "resume");
           }
 
           // Switch to new payment method if we have a specific ID
           if (payment_method_id) {
-            await subscriptionSwitchPaymentMethod(workspace_id, cycle.shopify_contract_id, payment_method_id);
+            await subscriptionSwitchPaymentMethod(workspace_id, liveContractId, payment_method_id);
           }
 
           // Get upcoming order and trigger billing
-          const billingRes1 = await dunningChargeContract(workspace_id, cycle.shopify_contract_id, 0);
+          const billingRes1 = await dunningChargeContract(workspace_id, liveContractId, 0);
           // See above: lookup-success, not charge-success. A decline must reach logPaymentFailure.
           const ordersRes = { success: !!billingRes1.attemptId, orders: billingRes1.attemptId ? [{ id: billingRes1.attemptId }] : [], error: billingRes1.error } as { success: boolean; orders?: { id: string }[]; error?: string };
           if (!ordersRes.success || !ordersRes.orders?.length) {
@@ -677,7 +699,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
               workspaceId: workspace_id,
               customerId: customer_id,
               subscriptionId: cycle.subscription_id,
-              shopifyContractId: cycle.shopify_contract_id,
+              shopifyContractId: liveContractId,
               paymentMethodId: payment_method_id,
               errorCode: "no_upcoming_orders",
               errorMessage: billingRes1.error || "No upcoming orders",
@@ -685,7 +707,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
               attemptType: "new_card_retry",
               succeeded: false,
             });
-            return { contractId: cycle.shopify_contract_id, recovered: false, error: "No upcoming orders" };
+            return { contractId: liveContractId, recovered: false, error: "No upcoming orders" };
           }
 
           const attemptId = ordersRes.orders[0].id;
@@ -695,7 +717,7 @@ export const dunningNewCardRecovery = inngest.createFunction(
             workspaceId: workspace_id,
             customerId: customer_id,
             subscriptionId: cycle.subscription_id,
-            shopifyContractId: cycle.shopify_contract_id,
+            shopifyContractId: liveContractId,
             billingAttemptId: attemptId,
             paymentMethodId: payment_method_id,
             attemptNumber: 1,
@@ -705,10 +727,10 @@ export const dunningNewCardRecovery = inngest.createFunction(
 
           if (billingRes.success) {
             await updateDunningCycle(cycle.id, { status: "recovered", recovered_at: new Date().toISOString() });
-            await resetBillingDateAfterDunning(workspace_id, cycle.shopify_contract_id, cycle.id, true);
+            await resetBillingDateAfterDunning(workspace_id, liveContractId, cycle.id, true);
           }
 
-          return { contractId: cycle.shopify_contract_id, recovered: billingRes.success };
+          return { contractId: liveContractId, recovered: billingRes.success };
         } catch (err) {
           console.error(`Recovery failed for contract ${cycle.shopify_contract_id}:`, err);
           return { contractId: cycle.shopify_contract_id, recovered: false, error: errText(err) };

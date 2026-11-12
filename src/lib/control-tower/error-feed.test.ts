@@ -150,6 +150,7 @@ import {
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
+  isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
@@ -28965,6 +28966,99 @@ test("isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise KEEPS a 
   assert.equal(
     isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise(
       "column agent_jobs.attempts does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise ──
+test("isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise drops the PostgREST CTE wrapper lookup projecting the non-existent heartbeat_at column", () => {
+  // The captured incident shape (Control Tower `supabase-logs:ce7fd2bfa252ddc8`): a foreign /
+  // stale direct-REST client reads `agent_jobs?select=...heartbeat_at...`, PostgREST wraps it as
+  // a `WITH pgrst_source AS ( SELECT ... FROM "public"."agent_jobs" ... )` CTE, and Postgres
+  // rejects with `column agent_jobs.heartbeat_at does not exist` (the real column is
+  // `last_heartbeat_at`).
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(
+      "column agent_jobs.heartbeat_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs"."id", "public"."agent_jobs"."heartbeat_at" FROM "public"."agent_jobs" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(
+      "column public.agent_jobs.heartbeat_at does not exist",
+      'with pgrst_source as ( select "public"."agent_jobs"."heartbeat_at" from "public"."agent_jobs" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(
+      "ERROR: column agent_jobs.heartbeat_at does not exist",
+      'WITH pgrst_source AS ( SELECT "heartbeat_at" FROM "public"."agent_jobs" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(
+      "column agent_jobs.heartbeat_at does not exist",
+      "select id, heartbeat_at from public.agent_jobs order by heartbeat_at desc limit 10",
+    ),
+    true,
+  );
+  // The unqualified-FROM (no `public.`) variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(
+      "column agent_jobs.heartbeat_at does not exist",
+      "select * from agent_jobs where heartbeat_at is null",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise KEEPS a different agent_jobs column error and a non-SELECT statement (real regressions still page)", () => {
+  // A DIFFERENT missing column on `agent_jobs` (e.g. `finished_at`) is a real column rename /
+  // regression and must still page — the pin covers `heartbeat_at` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(
+      "column agent_jobs.finished_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."agent_jobs"."finished_at" FROM "public"."agent_jobs" LIMIT 1 )',
+    ),
+    false,
+  );
+  // The same `heartbeat_at` message attached to a non-SELECT statement shape is a real
+  // code-write trying to persist a bogus column — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(
+      "column agent_jobs.heartbeat_at does not exist",
+      "update public.agent_jobs set heartbeat_at = now() where id = $1",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(
+      "column agent_jobs.heartbeat_at does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."agent_jobs"("id","heartbeat_at") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  // The `heartbeat_at` message on a DIFFERENT relation (a real product-schema regression) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(
+      "column jobs.heartbeat_at does not exist",
+      "select heartbeat_at from public.jobs limit 1",
+    ),
+    false,
+  );
+  // Empty / nullish input returns false — both markers required.
+  assert.equal(isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(null, null), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(
+      "column agent_jobs.heartbeat_at does not exist",
       "",
     ),
     false,

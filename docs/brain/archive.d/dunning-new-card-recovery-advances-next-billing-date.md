@@ -1,0 +1,1 @@
+- **New-card dunning recovery must advance the next billing date on the live contract** · verified 2026-11-12 · → [[../inngest/dunning]] + [[../libraries/internal-subscription]]

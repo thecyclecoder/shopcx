@@ -2405,13 +2405,17 @@ export async function callSonnetOrchestratorV2(
   // decision.reasoning is prefixed with 'sol:direction-context' so stageResolutionEvent
   // stamps the ticket_resolution_events ledger with the spec-verification tag.
   directionOverride?: TicketDirection | null,
+  // Optional per-channel extra instructions (ai_channel_config.instructions), passed for EVERY
+  // workspace by unified-ticket-handler (software-mode-workspace-switch Phase 2). Appended to the
+  // system prompt as an additional block when non-empty; empty string / null = no change.
+  extraInstructions?: string | null,
 ): Promise<SonnetDecision> {
   const startedAt = Date.now();
   let decision: SonnetDecision | null = null;
   let threw: unknown = null;
   try {
     decision = await runOrchestratorDecision(
-      workspaceId, ticketId, customerId, message, channel, personality, agentContext, modelChoice, directionOverride,
+      workspaceId, ticketId, customerId, message, channel, personality, agentContext, modelChoice, directionOverride, extraInstructions,
     );
     if (directionOverride && !directionOverride.superseded_at && decision) {
       // Prefix the reasoning so downstream stageResolutionEvent stamps
@@ -2453,6 +2457,7 @@ async function runOrchestratorDecision(
   agentContext?: { assigned: boolean; intervened: boolean } | null,
   modelChoice?: { model: OrchestratorModelKey; reason: string } | null,
   directionOverride?: TicketDirection | null,
+  extraInstructions?: string | null,
 ): Promise<SonnetDecision> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -2488,6 +2493,12 @@ async function runOrchestratorDecision(
     const systemBlocks: any[] = [
       { type: "text", text: system, cache_control: { type: "ephemeral", ttl: "1h" } },
     ];
+    // Optional per-channel extra instructions (ai_channel_config.instructions). Appended as a
+    // separate, uncached block AFTER the cached rules so the shared prefix stays byte-identical
+    // (cache hit preserved); empty/whitespace-only = no change. software-mode-workspace-switch Phase 2.
+    if (extraInstructions && extraInstructions.trim()) {
+      systemBlocks.push({ type: "text", text: `ADDITIONAL WORKSPACE INSTRUCTIONS:\n${extraInstructions.trim()}` });
+    }
     const baseTools = buildToolDefinitions();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const tools = baseTools.map((t, i) => i === baseTools.length - 1

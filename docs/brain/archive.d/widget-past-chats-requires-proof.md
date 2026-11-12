@@ -1,0 +1,1 @@
+- **Widget past-chats lookup must not list a shopper's chats from an email alone** · verified 2026-11-12 · → [[../tables/widget_sessions]]

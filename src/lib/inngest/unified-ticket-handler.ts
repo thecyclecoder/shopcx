@@ -29,6 +29,7 @@ import { sendTicketReply } from "@/lib/email";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { isAutomatedInbound } from "@/lib/automated-sender";
 import { decideOutreachRoute } from "@/lib/outreach-route";
+import { getSupportMode, shouldRunCpgSteps } from "@/lib/support-mode";
 import { markFirstTouch, shouldDispatchSolFirstTouch } from "@/lib/first-touch";
 import { launchJourneyForTicket, nudgeJourney } from "@/lib/journey-delivery";
 import { matchPlaybook, matchPlaybookScored, loadDeferThreshold, applyDeferThreshold, startPlaybook, executePlaybookStep, type PlaybookExecResult } from "@/lib/playbook-executor";
@@ -97,6 +98,10 @@ async function channelCfg(admin: Admin, wsId: string, ch: string) {
     // frustration (drift bounces are silent). Migration default is TRUE; the ?? fallback here
     // covers the pre-migration read path (no column yet) with the same customer-visible default.
     sol_frustration_holding_message_enabled: (data as unknown as { sol_frustration_holding_message_enabled?: boolean } | null)?.sol_frustration_holding_message_enabled ?? true,
+    // ai_channel_config.instructions — an optional extra instructions block the workspace can set
+    // per channel. Loaded in the select above but, until software-mode-workspace-switch Phase 2,
+    // never returned here so it never reached the orchestrator prompt. Default "" = no change.
+    instructions: (data as unknown as { instructions?: string | null } | null)?.instructions ?? "",
   };
 }
 
@@ -1076,6 +1081,20 @@ export const unifiedTicketHandler = inngest.createFunction(
     if (!cfg.enabled) return { status: "skipped", reason: "ai_disabled" };
     const pers = await step.run("personality", () => loadPersonality(admin, cfg.personality_id));
 
+    // ── 1a1. Support-mode switch (software-mode-workspace-switch Phase 2) ──
+    // Read the per-workspace support mode ONCE, memoized in a step.run so it survives retries.
+    // In 'software' mode (merchant support, e.g. ShopGrowth) the CPG pipeline steps below are
+    // noise at best and wrong at worst (refund wording, coffee-order lookups, fraud gate, order
+    // auto-link, Sol first-touch), so `runCpg` is false and we skip them and route straight to the
+    // Sonnet orchestrator. 'cpg' (every existing workspace incl. Superfoods) runs exactly as today.
+    // Any read failure degrades to 'cpg' inside getSupportMode, so a DB blip can never change
+    // Superfoods behavior.
+    const supportMode = await step.run("support-mode", () => getSupportMode(wsId));
+    const runCpg = shouldRunCpgSteps(supportMode);
+    if (!runCpg) {
+      await sysNote(admin, tid, `[System] Support mode '${supportMode}' — skipping CPG pipeline steps, routing straight to the Sonnet orchestrator.`);
+    }
+
     // ── 1a2. AUTOMATED-SENDER PRE-FILTER (zero AI, skip the classifier) ──
     // Phase 2 of docs/brain/specs/outreach-tickets-deterministically-close-no-sol-dispatch-no-ai-cost.md.
     // Ahead of the classify-bucket Haiku step below, run a deterministic pre-filter over the
@@ -1132,7 +1151,12 @@ export const unifiedTicketHandler = inngest.createFunction(
     //   creator for the email they used to place an order) and (b) tag
     //   the ticket for analytics filtering.
     let msgType: "account" | "general" | "outreach" = "account";
-    if (isNew) {
+    if (isNew && !runCpg) {
+      // Software mode: no CPG bucket classifier (its account/refund/order wording is for shoppers).
+      // Treat every new ticket as 'general' so the account-data email-lookup path below is skipped
+      // and the orchestrator handles the merchant request directly.
+      msgType = "general";
+    } else if (isNew) {
       msgType = await step.run("classify-bucket", async (): Promise<"account" | "general" | "outreach"> => {
         const cleanMsg = msg.replace(/<[^>]*>/g, " ").replace(/&[^;]+;/g, " ").replace(/\s+/g, " ").trim();
         // System re-triggers always count as account
@@ -1507,7 +1531,7 @@ Respond with EXACTLY one word: "account" or "general" or "outreach".`,
     // `inheritedActivePlaybook` (Phase 1 of the playbooks-survive-merge spec) lets a brand-new
     // ticket that absorbed a running playbook via auto-merge take this SAME continuation path
     // instead of Sol's first touch.
-    if (!isNew || inheritedActivePlaybook) {
+    if ((!isNew || inheritedActivePlaybook) && runCpg) {
       const pbActive = await step.run("check-playbook", async () => {
         const { data: t } = await admin.from("tickets").select("active_playbook_id").eq("id", tid).single();
         if (!t?.active_playbook_id) return null;
@@ -1918,7 +1942,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     //     active known_resellers row
     // On hit: send the canonical refusal, escalate to a human agent
     // (so an admin can review), skip the orchestrator entirely.
-    if (st.custId) {
+    if (st.custId && runCpg) {
       const { getCustomerFraudStatus, shouldBlockOrchestrator, describeBlockReason, pickBlockReply }
         = await import("@/lib/customer-fraud-status");
       const fraudGate = await step.run("fraud-gate", async () => {
@@ -1989,7 +2013,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     // the merged customer data via get_customer_account and route
     // straight to the right journey (cancel, refund, etc.) instead
     // of asking the linking question they already answered.
-    if (st.custId && msg) {
+    if (st.custId && msg && runCpg) {
       await step.run("auto-link-from-inbound", async () => {
         const { autoLinkCustomerFromMessage } = await import("@/lib/auto-link-customer-from-message");
         const result = await autoLinkCustomerFromMessage(admin, wsId, tid, st.custId!);
@@ -2012,7 +2036,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     // normalization name+address match is a high-confidence "same
     // human" signal — link it without asking, so get_customer_account
     // returns the merged set and refund/cancel playbooks can fire.
-    if (st.custId) {
+    if (st.custId && runCpg) {
       await step.run("auto-link-by-identity", async () => {
         const { autoLinkCustomerByIdentity } = await import("@/lib/auto-link-customer-from-message");
         const result = await autoLinkCustomerByIdentity(admin, wsId, st.custId!);
@@ -2056,7 +2080,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     // — those turns already ran the § 3b continuation path above (which returns when the playbook
     // executes) OR fell through to the orchestrator on a genuine new-topic classification; either
     // way a fresh Sol session is never the right move for an inherited-playbook ticket.
-    if (shouldDispatchSolFirstTouch({ isNew, solFirstTouchEnabled: cfg.sol_first_touch_enabled, agentAssigned, msgType, inheritedActivePlaybook })) {
+    if (runCpg && shouldDispatchSolFirstTouch({ isNew, solFirstTouchEnabled: cfg.sol_first_touch_enabled, agentAssigned, msgType, inheritedActivePlaybook })) {
       const isChatChannel = st.ch === "chat";
       const acked = await step.run("sol-first-touch-ack", async () => {
         if (await newerActivity(admin, tid, t0)) return false;
@@ -2131,7 +2155,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     //   • The holding-message send is gated on cfg.sol_frustration_holding_message_enabled
     //     (migration-default true, workspace-tunable) AND explicitly restricted to
     //     kind==='frustration' — drift bounces are silent by spec.
-    const inflectionOutcome = await step.run("sol-inflection-gate", async () => {
+    const inflectionOutcome = !runCpg ? { kind: "none" as const } : await step.run("sol-inflection-gate", async () => {
       if (await newerActivity(admin, tid, t0)) return { kind: "none" as const };
       const { applyInflectionGate } = await import("@/lib/inflection-detector");
       const result = await applyInflectionGate({
@@ -2191,7 +2215,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     // Ledger: stage a ticket_resolution_events row with reasoning='sol:playbook-shortcircuit',
     // then CAS shipped_at (learning #1) — same stage → send → stamp pattern as sendFirstTouchAck.
     // Ledger writes are best-effort — a diagnostic-substrate failure MUST NOT block the send.
-    const solPlaybookShortCircuit = await step.run("sol-playbook-shortcircuit-check", async () => {
+    const solPlaybookShortCircuit = !runCpg ? null : await step.run("sol-playbook-shortcircuit-check", async () => {
       const { loadLiveDirection } = await import("@/lib/ticket-directions");
       const direction = await loadLiveDirection(admin, tid, { workspace_id: wsId });
       if (!direction || direction.superseded_at) return null;
@@ -2284,7 +2308,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
     // → my apply path re-asserts active_playbook_id IS NULL for the FRESH start; if any read-time
     // precondition drifts we fall through to Sonnet (learning #6 — confirming predicate at the
     // action point, no coarse proxy authorizes the deterministic apply).
-    const solDirectionApply = await step.run("sol-direction-apply-check", async () => {
+    const solDirectionApply = !runCpg ? null : await step.run("sol-direction-apply-check", async () => {
       const { loadLiveDirection } = await import("@/lib/ticket-directions");
       const direction = await loadLiveDirection(admin, tid, { workspace_id: wsId });
       if (!direction || direction.superseded_at) return null;
@@ -2409,7 +2433,7 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
       // Refund playbook's tier ladder owns refund-intent messages, not a bare cancel journey
       // chosen by Sonnet (ticket 09f7257a was the ground truth: `unwanted_charge` + `refund_request`
       // matched Refund exactly, yet Sonnet ran a cancel journey).
-      const playbookRouted = await step.run("intent-playbook-route", async () => {
+      const playbookRouted = !runCpg ? { routed: false as const } : await step.run("intent-playbook-route", async () => {
         if (await newerActivity(admin, tid, t0)) return { routed: false as const };
         try {
           // Cheap Haiku-only intent classification over the newest message — matches the shape
@@ -2481,7 +2505,10 @@ Respond with exactly "PLAYBOOK" or "NEW_TOPIC".`, "haiku", 10, { workspaceId: ws
         const decision = await callSonnetOrchestratorV2(wsId, tid, st.custId || "", msg, st.ch, pers,
           agentAssigned ? { assigned: true, intervened: st.intervened } : null,
           pick,
-          directionActive ? liveDirection : null);
+          directionActive ? liveDirection : null,
+          // ai_channel_config.instructions — optional per-channel extra instructions for EVERY
+          // workspace (software-mode-workspace-switch Phase 2). Empty string = no change.
+          cfg.instructions);
         await sysNote(admin, tid, `[System] ${pick.model === "haiku" ? "Haiku" : "Sonnet"}: ${decision.action_type} — ${decision.reasoning}`);
         return decision;
       });

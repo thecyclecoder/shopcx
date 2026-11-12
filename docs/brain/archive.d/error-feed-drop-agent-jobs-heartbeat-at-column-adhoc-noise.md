@@ -1,0 +1,1 @@
+- **Drop the foreign ad-hoc REST read of the non-existent agent_jobs.heartbeat_at column from the Control Tower error feed** · verified 2026-11-12 · → [[../libraries/error-feed]] (§ foreign-noise drops § `isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise`)

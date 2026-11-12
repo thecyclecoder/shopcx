@@ -33,6 +33,8 @@ Last-resort strip of any `{{token}}` / `[UPPER_TOKEN]` a composer failed to fill
 async function executeSonnetDecision(ctx: ActionContext, decision: SonnetDecision, personality: { name?: string; tone?: string; sign_off?: string | null } | null, send: SendFn, sysNote: SysNoteFn,) : Promise<
 ```
 
+**Software-mode hard guard ([[support-mode]], `software-mode-workspace-switch` Phase 3).** Before the `decision.action_type` switch, the executor reads `getSupportMode(ctx.workspaceId)`. If `isActionAllowedInMode(mode, action_type)` is false — i.e. `mode === 'software'` and `action_type` is `direct_action` / `journey` / `playbook` / `workflow` — it does NOT dispatch: it writes the internal note `[System] CPG action refused in software mode: <type>`, calls `escalateTicket`, and returns `{ messageSent: false, escalated: true, closed: false, statusManaged: false }`. `ai_response` / `kb_response` / `escalate` and the software-mode orchestrator-toolset actions pass through unchanged. This is defense in depth — even a prompt/playbook that proposes a CPG action on a software workspace can never reach Appstle/Shopify/order/subscription code. `getSupportMode` fails closed to `'cpg'`, so a read blip never blocks a Superfoods action.
+
 ### `escalateTicket` — function
 
 ```ts
