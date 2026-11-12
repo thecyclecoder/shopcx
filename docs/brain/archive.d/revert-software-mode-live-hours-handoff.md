@@ -1,0 +1,1 @@
+- **Revert the software-mode live-hours handoff** · verified 2026-11-12 · → [[../inngest/triage-escalations]]
