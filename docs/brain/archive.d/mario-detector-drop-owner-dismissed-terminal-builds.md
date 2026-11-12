@@ -1,0 +1,1 @@
+- **M3 stall detector must drop owner-dismissed terminal builds** · verified 2026-11-12 · → [[../libraries/mario]]
