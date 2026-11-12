@@ -27,7 +27,7 @@ _None._
 
 ## Permissions
 
-All workspace members. No role gate in the page itself; gated only by middleware auth + workspace membership.
+**Workspace owner only** (`workspace_members.role='owner'` → 403 otherwise). The GET `/api/workspaces/:id/analytics/roas` route gates on owner membership before computing or returning closed-book cost_rates (and all other tenant financial data). The gate runs immediately after auth + admin client creation and before any daily_order_snapshots/orders query, so unauthorized callers receive no tenant data. Mirrors the financial-data gate on analytics/revenue/route.ts.
 
 ## Files touched
 
