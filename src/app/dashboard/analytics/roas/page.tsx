@@ -400,30 +400,67 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
 
   // Blended metrics for spend scaling
   const blendedAov = s.total_revenue_cents / totalOrders;
-  const blendedSubRate = (s.shopify_new_sub_count + s.amazon_sns_checkout_count) / totalOrders;
-  const blendedChurn = (s.shopify_avg_churn_pct > 0 ? s.shopify_avg_churn_pct : s.amazon_avg_churn_pct) / 100;
-  const lifetimeOrders = blendedChurn > 0 ? (1 - blendedSubRate) + (blendedSubRate / blendedChurn) : 1;
   const variableCostPct = variablePct / 100;
-  // G&A spread across ALL orders (recurring + checkout + Amazon) — not just checkout
-  const allOrders = s.total_all_orders || totalOrders;
-  const gaPerOrder = allOrders > 0 ? gaFixedCents / allOrders : 0;
-  const costPerOrderPct = variableCostPct; // variable only for lifetime calc
 
-  function calcChannel(label: string, revenue: number, orders: number, subCount: number, churnPct: number, color: string, extraFeePct?: number) {
+  type ChannelMetrics = {
+    orders: number;
+    aov: number;
+    subRate: number;
+    varCostPerOrder: number; // variable costs incl. platform fees, per order
+    platformFeePerOrder: number;
+    ltOrders: number;
+    lifetimeRev: number;
+    lifetimeVarCost: number;
+  };
+
+  function channelMetrics(revenue: number, orders: number, subCount: number, churnPct: number, extraFeePct = 0): ChannelMetrics | null {
     if (!orders) return null;
     const aov = revenue / orders;
-    const subRate = orders > 0 ? subCount / orders : 0;
+    const subRate = subCount / orders;
     const churn = churnPct / 100;
-    const channelVarPct = variableCostPct + (extraFeePct || 0) / 100;
-    const varCostPerOrder = aov * channelVarPct;
-    const allCostPerOrder = varCostPerOrder + gaPerOrder; // variable + allocated G&A
-    const channelTotalPct = variablePct + (extraFeePct || 0);
+    const platformFeePerOrder = aov * extraFeePct / 100;
+    const varCostPerOrder = aov * variableCostPct + platformFeePerOrder;
+    const ltOrders = churn > 0 ? (1 - subRate) + (subRate / churn) : 1;
+    return {
+      orders, aov, subRate, varCostPerOrder, platformFeePerOrder, ltOrders,
+      lifetimeRev: aov * ltOrders,
+      lifetimeVarCost: varCostPerOrder * ltOrders, // variable scales with orders
+    };
+  }
+
+  // Blended = order-weighted mix of the channels, so each channel keeps its own
+  // fees, churn and AOV×orders. Re-deriving from pooled AOV/sub-rate drops the
+  // Amazon fees and understates lifetime revenue (high-AOV website customers
+  // also renew more).
+  function blendMetrics(parts: (ChannelMetrics | null)[]): ChannelMetrics | null {
+    const ps = parts.filter((p): p is ChannelMetrics => !!p);
+    const orders = ps.reduce((a, p) => a + p.orders, 0);
+    if (!orders) return null;
+    const w = (f: (p: ChannelMetrics) => number) => ps.reduce((a, p) => a + f(p) * p.orders, 0) / orders;
+    return {
+      orders,
+      aov: w((p) => p.aov),
+      subRate: w((p) => p.subRate),
+      varCostPerOrder: w((p) => p.varCostPerOrder),
+      platformFeePerOrder: w((p) => p.platformFeePerOrder),
+      ltOrders: w((p) => p.ltOrders),
+      lifetimeRev: w((p) => p.lifetimeRev),
+      lifetimeVarCost: w((p) => p.lifetimeVarCost),
+    };
+  }
+
+  const websiteMetrics = channelMetrics(s.shopify_checkout_revenue, s.shopify_new_sub_count + s.shopify_one_time_count, s.shopify_new_sub_count, s.shopify_avg_churn_pct);
+  const amazonMetrics = channelMetrics(s.amazon_checkout_revenue, s.amazon_one_time_count + s.amazon_sns_checkout_count, s.amazon_sns_checkout_count, s.amazon_avg_churn_pct, amzFeePct);
+  const blendedMetrics = blendMetrics([websiteMetrics, amazonMetrics]);
+
+  function calcChannel(label: string, m: ChannelMetrics | null, color: string) {
+    if (!m) return null;
+    const { aov, subRate, varCostPerOrder, platformFeePerOrder, ltOrders, lifetimeRev, lifetimeVarCost } = m;
+    const channelTotalPct = aov > 0 ? Math.round((varCostPerOrder / aov) * 100) : 0;
+    const feePct = aov > 0 ? Math.round((platformFeePerOrder / aov) * 100) : 0;
     const firstProfit = aov - cac - varCostPerOrder;
     const firstMargin = aov > 0 ? (firstProfit / aov) * 100 : 0;
-    const ltOrders = churn > 0 ? (1 - subRate) + (subRate / churn) : 1;
-    const lifetimeRev = aov * ltOrders;
-    const lifetimeVarCost = varCostPerOrder * ltOrders; // variable scales with orders
-    const lifetimeProfit = lifetimeRev - cac - lifetimeVarCost; // contribution margin (no G&A)
+    const lifetimeProfit = lifetimeRev - cac - lifetimeVarCost; // contribution margin (no G&A); ad cost once
     const trueROAS = cac > 0 ? lifetimeProfit / cac : 0;
     const maxCac = lifetimeRev - lifetimeVarCost;
 
@@ -435,7 +472,7 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
           <Row label="Sub rate" value={`${(subRate * 100).toFixed(0)}%`} />
           <Row label="Ad cost (CAC)" value={`-${fmt(cac)}`} color="text-red-500" />
           <Row label={`Variable costs (${channelTotalPct}%)`} value={`-${fmt(varCostPerOrder)}`} color="text-red-500" />
-          {extraFeePct ? <Row label={`  incl. platform fees (${extraFeePct}%)`} value={`-${fmt(aov * extraFeePct / 100)}`} color="text-red-400" /> : null}
+          {platformFeePerOrder > 0 ? <Row label={`  incl. platform fees (${feePct}%)`} value={`-${fmt(platformFeePerOrder)}`} color="text-red-400" /> : null}
           <div className="border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
             <Row label="First order profit" value={`${fmt(firstProfit)} (${firstMargin.toFixed(0)}%)`}
               color={firstProfit >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"} />
@@ -468,13 +505,14 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
     const predictedRoas = Math.max(0.3, theoreticalMaxRoas - roasDecayPerDollar * spendDollars);
     const revCents = spendCents * predictedRoas;
     const orders = blendedAov > 0 ? Math.round(revCents / blendedAov) : 0;
-    const varCosts = revCents * variableCostPct; // only variable costs scale
+    const blendedVarPct = blendedMetrics && blendedMetrics.aov > 0 ? blendedMetrics.varCostPerOrder / blendedMetrics.aov : variableCostPct;
+    const varCosts = revCents * blendedVarPct; // only variable costs scale (incl. Amazon fees on the Amazon share)
     // First order profit: revenue - variable costs - G&A (fixed) - ad spend
     const firstOrderProfit = revCents - varCosts - gaFixedCents - spendCents;
     // Lifetime: variable costs scale with orders, G&A is fixed, ad cost is one-time
     const cacPerCustomer = orders > 0 ? spendCents / orders : 0;
-    const ltRevPerCustomer = blendedAov * lifetimeOrders;
-    const ltVarCostPerCustomer = blendedAov * variableCostPct * lifetimeOrders;
+    const ltRevPerCustomer = blendedMetrics?.lifetimeRev ?? blendedAov;
+    const ltVarCostPerCustomer = blendedMetrics?.lifetimeVarCost ?? blendedAov * variableCostPct;
     const ltProfitPerCustomer = ltRevPerCustomer - ltVarCostPerCustomer - cacPerCustomer;
     const ltProfitTotal = ltProfitPerCustomer * orders - gaFixedCents; // G&A once for the business
     return { mult, spend: spendCents, orders, rev: revCents, firstOrderProfit, ltProfit: ltProfitTotal, roas: predictedRoas };
@@ -511,11 +549,9 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3 mb-6">
-        {calcChannel("Website", s.shopify_checkout_revenue, s.shopify_new_sub_count + s.shopify_one_time_count, s.shopify_new_sub_count, s.shopify_avg_churn_pct, "text-emerald-500")}
-        {calcChannel("Amazon", s.amazon_checkout_revenue, s.amazon_one_time_count + s.amazon_sns_checkout_count, s.amazon_sns_checkout_count, s.amazon_avg_churn_pct, "text-amber-500", amzFeePct)}
-        {calcChannel("Blended", s.total_revenue_cents, totalOrders, s.shopify_new_sub_count + s.amazon_sns_checkout_count,
-          s.shopify_avg_churn_pct > 0 ? s.shopify_avg_churn_pct : s.amazon_avg_churn_pct,
-          "text-zinc-400")}
+        {calcChannel("Website", websiteMetrics, "text-emerald-500")}
+        {calcChannel("Amazon", amazonMetrics, "text-amber-500")}
+        {calcChannel("Blended", blendedMetrics, "text-zinc-400")}
       </div>
 
       {/* Spend Scaling — what happens if you spend more */}
