@@ -63,7 +63,9 @@ const { count } = await admin.from("widget_sessions")
 
 ## Gotchas
 
-_None documented. Probe before assuming — see [[../README]] § Probing technique._
+- **A session id IS the proof of chat ownership — never list a shopper's chats by email alone.** `GET /api/widget/{workspaceId}/chats` (`src/app/api/widget/[workspaceId]/chats/route.ts`) only returns tickets for `widget_sessions` ids the caller passes as `?session_id=` (repeatable / comma-separated) — the ids the iframe stored in `localStorage` (`shopcx_chat_sessions_{workspaceId}`) when it created them. An email-only request returns `{ chats: [] }` (not an error, so stale cached widget bundles degrade quietly to "no past chats"). This closes a read-by-email hole: `/api/widget/*` sends `Access-Control-Allow-Origin: *` (`src/proxy.ts`), so anyone who knew a shopper's email could previously list their chats cross-origin and, through the session, read the conversation. Treat the `id` like a bearer token — it is unguessable (`gen_random_uuid()`) and possession of it is the authorization. A verified identity pass (widget-signed-identity-pass, once shipped) is the only other acceptable proof for listing by store/email.
+
+_Probe before assuming — see [[../README]] § Probing technique._
 
 ---
 
