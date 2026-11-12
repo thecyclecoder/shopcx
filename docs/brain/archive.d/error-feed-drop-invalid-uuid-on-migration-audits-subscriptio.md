@@ -1,0 +1,1 @@
+- **Scope out foreign invalid-UUID probe on migration_audits.subscription_id from the error feed** · verified 2026-11-12 · → [[../libraries/error-feed]] · [[../tables/migration_audits]]
