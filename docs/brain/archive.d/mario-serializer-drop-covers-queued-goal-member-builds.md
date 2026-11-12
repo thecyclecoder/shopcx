@@ -1,0 +1,1 @@
+- **Widen shouldDropSeriallyHeldGoalMember to cover stuck-queued goal members** · verified 2026-11-12 · → [[../libraries/mario]] (§ drops (d3b) "Serially-held goal member with a QUEUED build")
