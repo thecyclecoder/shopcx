@@ -11,13 +11,6 @@ export default function ChatWidgetSettingsPage() {
   const [color, setColor] = useState("#33272B");
   const [greeting, setGreeting] = useState("Hi! How can we help you today?");
   const [position, setPosition] = useState("bottom-right");
-  // Live support hours — the window a person is in chat. When off, support_live_hours saves as
-  // null (never live → escalations always promise an email reply). See src/lib/support-mode.ts.
-  const [liveHoursEnabled, setLiveHoursEnabled] = useState(false);
-  const [liveTz, setLiveTz] = useState("America/New_York");
-  const [liveDays, setLiveDays] = useState<number[]>([1, 2, 3, 4, 5]);
-  const [liveStart, setLiveStart] = useState("09:00");
-  const [liveEnd, setLiveEnd] = useState("17:00");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -34,14 +27,6 @@ export default function ChatWidgetSettingsPage() {
         if (data.widget_color) setColor(data.widget_color);
         if (data.widget_greeting) setGreeting(data.widget_greeting);
         if (data.widget_position) setPosition(data.widget_position);
-        const lh = data.support_live_hours;
-        if (lh && typeof lh === "object") {
-          setLiveHoursEnabled(true);
-          if (typeof lh.tz === "string") setLiveTz(lh.tz);
-          if (Array.isArray(lh.days)) setLiveDays(lh.days.filter((d: unknown) => typeof d === "number"));
-          if (typeof lh.start === "string") setLiveStart(lh.start);
-          if (typeof lh.end === "string") setLiveEnd(lh.end);
-        }
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -58,9 +43,6 @@ export default function ChatWidgetSettingsPage() {
         widget_color: color,
         widget_greeting: greeting,
         widget_position: position,
-        support_live_hours: liveHoursEnabled
-          ? { tz: liveTz, days: liveDays, start: liveStart, end: liveEnd }
-          : null,
       }),
     });
     setSaving(false);
@@ -242,78 +224,6 @@ export default function ChatWidgetSettingsPage() {
             </div>
           </div>
         )}
-
-        {/* Live support hours — software-mode escalation handoff */}
-        <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Live Support Hours</p>
-              <p className="text-sm text-zinc-500">When a chat needs a person: inside these hours the customer is told someone is joining now; outside, they&apos;re promised an email reply within one business day. Off = always the email promise.</p>
-            </div>
-            <button
-              onClick={() => setLiveHoursEnabled(!liveHoursEnabled)}
-              className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${liveHoursEnabled ? "bg-indigo-600" : "bg-zinc-300 dark:bg-zinc-600"}`}
-            >
-              <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${liveHoursEnabled ? "translate-x-5.5 left-[22px]" : "left-0.5"}`} />
-            </button>
-          </div>
-          {liveHoursEnabled && (
-            <div className="mt-4 space-y-3">
-              <div>
-                <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Time zone (IANA)</label>
-                <input
-                  type="text"
-                  value={liveTz}
-                  onChange={(e) => setLiveTz(e.target.value)}
-                  placeholder="America/New_York"
-                  className="w-full rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Days</label>
-                <div className="flex flex-wrap gap-2">
-                  {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((label, idx) => (
-                    <button
-                      key={label}
-                      onClick={() =>
-                        setLiveDays((prev) =>
-                          prev.includes(idx) ? prev.filter((d) => d !== idx) : [...prev, idx].sort((a, b) => a - b),
-                        )
-                      }
-                      className={`rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${
-                        liveDays.includes(idx)
-                          ? "border-indigo-500 bg-indigo-50 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400"
-                          : "border-zinc-200 text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-400"
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="flex gap-3">
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Start</label>
-                  <input
-                    type="time"
-                    value={liveStart}
-                    onChange={(e) => setLiveStart(e.target.value)}
-                    className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">End</label>
-                  <input
-                    type="time"
-                    value={liveEnd}
-                    onChange={(e) => setLiveEnd(e.target.value)}
-                    className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
 
         {/* Path → Category Mappings */}
         {enabled && <PathMappings workspaceId={workspace.id} />}
