@@ -41,6 +41,7 @@ import {
   isForeignSupabasePostgresMissingWorkerHeartbeatsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingTicketDirectionsCreatedAtAdhocNoise,
   isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSpecTestRunsOverallVerdictColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise,
@@ -409,6 +410,11 @@ const LOG_QUERIES: LogQuery[] = [
       // real `agent_verdict` regression), a non-SELECT write, or a FATAL/PANIC/constraint
       // violation still surfaces / pages.
       if (isForeignSupabasePostgresMissingSpecTestRunsVerdictColumnAdhocNoise(message, query)) return null;
+      // Same foreign-owned direct-REST read of `spec_test_runs`, but naming the non-existent
+      // `overall_verdict` column (real column is `agent_verdict`) — drop at capture for the
+      // SELECT-lookup shape only; a different missing column, a non-SELECT write, or a
+      // FATAL/PANIC/constraint violation still surfaces / pages.
+      if (isForeignSupabasePostgresMissingSpecTestRunsOverallVerdictColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
       // `public.returns` with a guessed, wrong column list naming `refund_type` — a column
       // our `returns` table never carried. No ShopCX code path names `returns.refund_type`,
