@@ -166,6 +166,7 @@ import {
   isForeignSupabasePostgresUuidIlikeOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise,
+  isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnAgentJobsIdAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
@@ -4506,6 +4507,116 @@ test("isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise KE
     isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise(
       'invalid input syntax for type uuid: "abc"',
       "delete from public.orders where workspace_id = $1",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise ──
+// The migration_audits/subscription_id sibling of the orders.workspace_id invalid-uuid probe: a
+// `?subscription_id=in.(<partial-uuid>)` / `=eq.<partial-uuid>` direct-REST / Supabase Studio
+// quick-filter binds a hand-typed/truncated subscription uuid to `WHERE
+// "migration_audits"."subscription_id" = ANY($1)` (Studio `in` form) or `= $1` (plain equality),
+// which Postgres rejects at parse/bind time with `invalid input syntax for type uuid: "<garbage>"`.
+// Control Tower signature `supabase-logs:d9393a3e4f8314e2` (290× over six weeks). Drop AT CAPTURE
+// only when BOTH the `invalid input syntax for type uuid:` message AND the SELECT-shape on
+// `migration_audits` with a `subscription_id =` equality marker are present; the same error on any
+// OTHER table, or a non-SELECT shape on migration_audits, still pages.
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise drops the exact ANY($1) CTE sample AND the bare SELECT / plain-equality shapes", () => {
+  // The Studio `in` quick-filter's PostgREST CTE wrapper form (double-quoted identifiers),
+  // subscription_id = ANY($1) — the exact sample shape.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise(
+      'invalid input syntax for type uuid: "7f3a"',
+      'WITH pgrst_source AS ( SELECT "public"."migration_audits".* FROM "public"."migration_audits" WHERE "public"."migration_audits"."subscription_id" = ANY($1) LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the prefix check; plain `= $1` equality form.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise(
+      'ERROR: invalid input syntax for type uuid: "123"',
+      'WITH pgrst_source AS ( SELECT * FROM "public"."migration_audits" WHERE "subscription_id" = $1 )',
+    ),
+    true,
+  );
+  // The bare SELECT shape (no PostgREST wrapper) drops too — the predicate accepts both.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise(
+      'invalid input syntax for type uuid: "zzz"',
+      "select * from public.migration_audits where subscription_id = 'zzz'",
+    ),
+    true,
+  );
+  // Unqualified `migration_audits` (no `public.`) + bare SELECT is still the same ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise(
+      'invalid input syntax for type uuid: "123"',
+      "select id, status from migration_audits where subscription_id = any($1)",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise KEEPS the same invalid-uuid message when the FROM is a different table (a real bad-uuid code bug elsewhere still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.subscriptions where subscription_id = $1",
+    ),
+    false,
+  );
+  // PostgREST CTE wrapper form, but FROM is a different table — must still page.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      'WITH pgrst_source AS ( SELECT * FROM "public"."tickets" WHERE "subscription_id" = $1 )',
+    ),
+    false,
+  );
+  // A table whose name merely starts with `migration_audits` must NOT be swept in by the drop.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.migration_audits_archive where subscription_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise KEEPS a DIFFERENT error on migration_audits, and the invalid-uuid message with no subscription_id marker", () => {
+  // A different error on `migration_audits` is a real code bug we WANT to see.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise(
+      "null value in column id violates not-null constraint",
+      "select * from public.migration_audits where subscription_id = $1",
+    ),
+    false,
+  );
+  // The invalid-uuid message but the SELECT filters some other column (no subscription_id marker) —
+  // not the subscription_id probe shape, so it still pages.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.migration_audits where contract_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise KEEPS a non-SELECT statement shape on migration_audits (a real code-bug writing migration_audits still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "update public.migration_audits set status = $1 where subscription_id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "delete from public.migration_audits where subscription_id = $1",
     ),
     false,
   );

@@ -134,6 +134,7 @@ import {
   isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnQbManualInventoryProductIdAdhocNoise,
+  isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnAgentJobsIdAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
   isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise,
@@ -1425,6 +1426,13 @@ const LOG_QUERIES: LogQuery[] = [
       // rejected by Postgres with `invalid input syntax for type uuid`. No ShopCX code binds a bad
       // uuid to qb_manual_inventory.product_id. Signature `supabase-logs:d9393a3e4f8314e2`.
       if (isForeignSupabasePostgresInvalidUuidSyntaxOnQbManualInventoryProductIdAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: the migration_audits/subscription_id sibling of the
+      // tickets.id / orders.workspace_id / qb_manual_inventory.product_id probes — a malformed-uuid
+      // `migration_audits.subscription_id = $1` or Studio `in` quick-filter `= ANY($1)` read (a
+      // `?subscription_id=in.(<partial-uuid>)` / `=eq.<partial-uuid>` direct-REST / Studio
+      // quick-filter) rejected by Postgres with `invalid input syntax for type uuid`. No ShopCX code
+      // binds a bad uuid to migration_audits.subscription_id. Signature `supabase-logs:d9393a3e4f8314e2`.
+      if (isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: the agent_jobs twin of the same Studio / direct-REST
       // quick-filter that LIKEs the uuid `agent_jobs.id` column, rejected by Postgres with
       // `operator does not exist: uuid ~~ unknown`. No ShopCX code path issues a uuid LIKE (a
