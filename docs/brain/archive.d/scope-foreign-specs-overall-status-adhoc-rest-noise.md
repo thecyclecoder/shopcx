@@ -1,0 +1,1 @@
+- **Filter foreign direct-REST 'specs.overall_status does not exist' noise out of the Control Tower feed** · verified 2026-11-12 · → [[../libraries/error-feed]]
