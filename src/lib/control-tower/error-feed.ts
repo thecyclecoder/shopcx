@@ -1637,6 +1637,61 @@ export function isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoi
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `spec_card_state.spec_id` column for an ad hoc
+ * direct-REST lookup on a table ShopCX does not read that way. A foreign / stale external/REST
+ * client SELECTed the non-existent `spec_id` column from `spec_card_state`, but no such column has
+ * ever existed on that table. Supabase's `postgres_logs` feed captures the resulting
+ * undefined_column ERROR, and log-poll mints a Control Tower incident for a query we don't own
+ * (Control Tower signature `supabase-logs:544b54bcf17eade6`). No ShopCX code issues this query, so
+ * there is no lever to make it resolve — paging Platform on it is repair work for a query no code
+ * owns. The direct twin of `isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise`
+ * above.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column spec_card_state.spec_id does not exist` (with or without the
+ *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.spec_card_state` — either (a)
+ *      the bare `select ... from (public.)?spec_card_state` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."spec_card_state" ... )` CTE wrapper form
+ *      with double-quoted identifiers.
+ *
+ * Intentionally narrow — any genuine schema regression still pages:
+ *   - a DIFFERENT missing column on `spec_card_state` still pages — the pin covers `spec_id` only,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE / DDL, a
+ *     non-SELECT wrapped op inside the CTE) still pages,
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts` is
+ * constructed — returning null fully suppresses the row (no error_event, no loop_alert, no
+ * signature). A capture-time drop, not a `transient` flag.
+ */
+export function isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column spec_card_state.spec_id does not exist" ||
+    stripped === "column public.spec_card_state.spec_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `spec_card_state` — any trailing WHERE/LIMIT/ORDER BY is fine; the pin
+  // is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real code-bug
+  // shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?spec_card_state\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."spec_card_state" ... )` with double-quoted identifiers. Guarded so the CTE branch
+  // requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper is a
+  // real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."spec_card_state"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing `qb_shipping_protection_products.id` column
  * for an ad hoc direct-REST lookup on a table ShopCX does not read that way. A foreign / stale
  * external/REST client assumed every table has an `id` column and ordered / SELECTed

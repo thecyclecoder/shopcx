@@ -56,6 +56,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise,
   isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
@@ -527,6 +528,14 @@ const LOG_QUERIES: LogQuery[] = [
       // `goal_milestones` (bare or PostgREST CTE wrapper) — a different missing column on the
       // table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale external/REST client SELECTed the
+      // non-existent `spec_id` column from `spec_card_state` (a column the table never had),
+      // minting a Control Tower incident for a query no ShopCX code owns (signature
+      // `supabase-logs:544b54bcf17eade6`). Narrowly gated to require BOTH the exact
+      // `column spec_card_state.spec_id does not exist` message AND the SELECT-lookup shape on
+      // `spec_card_state` (bare or PostgREST CTE wrapper) — a different missing column on the
+      // table, or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale external/REST client assumed every
       // table has an `id` column and SELECTed/ordered `qb_shipping_protection_products` by `id`,
       // but that table's PK is the composite `(workspace_id, shopify_product_id)` and no `id`
