@@ -91,7 +91,6 @@ Multi-tenant root. Encrypted credentials, sandbox_mode, response_delays, help_sl
 | `easypost_live_api_key_encrypted` | `text` | ✓ | AES-256-GCM |
 | `easypost_test_mode` | `bool` | — | default: `true` |
 | `chat_ticket_creation` | `bool` | — | default: `true` |
-| `support_live_hours` | `jsonb` | ✓ | `{tz, days:[0-6], start:'HH:MM', end:'HH:MM'}` — the window a live person is in chat. Read by [[../libraries/support-mode]] `getSupportLiveHours` / `isWithinLiveHours`. **null = never live** → a software-mode escalation always promises an email reply. Edited in widget settings (`/dashboard/settings/chat-widget`). Migration `20270114120000_workspaces_support_live_hours.sql`. Spec: software-mode-live-hours-handoff. |
 | `coupon_price_floor_pct` | `int4` | ✓ | default: `50` |
 | `resend_webhook_signing_secret` | `text` | ✓ |  |
 | `fraud_ai_enabled` | `bool` | ✓ | default: `false` |

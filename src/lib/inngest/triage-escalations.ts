@@ -25,7 +25,6 @@
 import { inngest } from "@/lib/inngest/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { emitCronHeartbeat } from "@/lib/control-tower/heartbeat";
-import { isSoftwareModeWorkspace } from "@/lib/support-mode";
 
 // Small per-tick cap so a workspace with a large escalated backlog does not blow the cs-director-
 // call lane in a single tick. Matches the box's triage cap semantics (`TRIAGE_CAP` = 5) — the
@@ -130,13 +129,7 @@ export const triageEscalationsCron = inngest.createFunction(
         status: string | null;
         escalation_reason: string | null;
       }[];
-      // Software-mode SaaS tenants get NO June / CS Director routing — their escalations are
-      // handled honestly at escalation time by the live-hours handoff (an honest customer reply
-      // + a live-hours founder bell card; see src/lib/support-mode.ts). Only the managed home
-      // workspace runs June review. Spec: software-mode-live-hours-handoff.
-      const rows = fetched
-        .filter(passesJuneReviewSelection)
-        .filter((t) => !isSoftwareModeWorkspace(t.workspace_id));
+      const rows = fetched.filter(passesJuneReviewSelection);
       if (!rows.length) return { eligible: 0, deferred: 0, enqueued: 0 };
       const ticketIds = rows.map((t) => t.id);
 
