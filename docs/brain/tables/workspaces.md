@@ -26,6 +26,7 @@ Multi-tenant root. Encrypted credentials, sandbox_mode, response_delays, help_sl
 | `shopify_scopes` | `text` | ✓ |  |
 | `order_source_mapping` | `jsonb` | ✓ | default: `'{}'` |
 | `support_email` | `text` | ✓ |  |
+| `support_mode` | `text` | — | default: `'cpg'` · check `in ('cpg','software')`. The per-workspace support-pipeline switch. `'cpg'` (default, Superfoods + every existing tenant) runs the full CPG shopper pipeline. `'software'` (ShopGrowth merchant support) sends the ticket handler straight to the Sonnet orchestrator and makes the action executor refuse every CPG action. Read by [[../libraries/support-mode]] `getSupportMode`. Migration `20270116120000_workspaces_support_mode.sql`. |
 | `sandbox_mode` | `bool` | — | default: `true` |
 | `replacement_threshold_cents` | `int8` | — | default: `0` |
 | `june_refund_approval_threshold_cents` | `int4` | — | default: `5000` ($50). A June ([[../libraries/cs-director]]) money remedy (refund/credit/replacement) STRICTLY ABOVE this routes to a founder SMS approval via Eve's cockpit before it fires; at-or-below runs autonomously. Read by [[../libraries/june-remedy-approval]] `getRefundApprovalThresholdCents`. Migration `20260710120000_june_refund_approval_threshold.sql`. |
