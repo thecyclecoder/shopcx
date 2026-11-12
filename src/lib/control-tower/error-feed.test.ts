@@ -41,6 +41,7 @@ import {
   isForeignSupabasePostgresSubscriptionsEngineLookupNoise,
   isForeignSupabasePostgresSubscriptionsItemsContainmentInvalidJsonAdhocNoise,
   isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise,
+  isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise,
   isForeignSupabasePostgresAdhocMrrCohortQuerySyntaxNoise,
   isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise,
   isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise,
@@ -8777,6 +8778,81 @@ test("isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise returns false on
     isForeignSupabasePostgresApprovalDecisionAdhocSyntaxNoise(
       "syntax error at end of input",
       null,
+    ),
+    false,
+  );
+});
+
+// -- isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise --
+// A stale / hand-typed ad hoc SELECT against `public.approval_decisions` referencing the
+// non-existent `category` column, which Postgres reports as `column "category" does not
+// exist`. Foreign-owned surface - no lever from us - drop AT CAPTURE only when the exact
+// message AND the bare SELECT-on-approval_decisions shape carrying the `category` token are
+// present. Control Tower signature `supabase-logs:0e3379f172768a91`.
+
+test("isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise drops the ad hoc approval_decisions category-missing read", () => {
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise(
+      'column "category" does not exist',
+      "SELECT id, category, decision FROM approval_decisions WHERE id = '123'",
+    ),
+    true,
+  );
+  // Leading `ERROR: ` prefix is stripped; `public.` qualifier is accepted.
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise(
+      'ERROR: column "category" does not exist',
+      "select category from public.approval_decisions order by created_at desc",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise KEEPS a real approval_decisions read without category", () => {
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise(
+      'column "category" does not exist',
+      "SELECT id, decision FROM approval_decisions WHERE workspace_id = 'w1'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise KEEPS a category-missing error on a DIFFERENT table", () => {
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise(
+      'column "category" does not exist',
+      "SELECT category FROM products WHERE id = '1'",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise KEEPS a different message / non-SELECT / empty input", () => {
+  // A different column-missing error on approval_decisions still pages.
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise(
+      'column "branch_name" does not exist',
+      "SELECT category FROM approval_decisions",
+    ),
+    false,
+  );
+  // A non-SELECT (DDL/DML) on approval_decisions referencing category still pages.
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise(
+      'column "category" does not exist',
+      "ALTER TABLE approval_decisions DROP COLUMN category",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise(null, null),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresApprovalDecisionsMissingCategoryColumnAdhocNoise(
+      'column "category" does not exist',
+      "",
     ),
     false,
   );
