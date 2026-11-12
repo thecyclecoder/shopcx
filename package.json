@@ -61,6 +61,7 @@
     "test:ship-time-backfill-reaudit-classify": "tsx --test src/lib/ship-time-backfill-reaudit.classify.test.ts",
     "test:ship-time-backfill-detector-test-files": "tsx --test src/lib/ship-time-backfill-detector.test-files.test.ts",
     "test:easypost-carrier-normalize": "tsx --test src/lib/easypost.carrier-normalize.test.ts",
+    "test:support-mode": "tsx --test src/lib/support-mode.test.ts",
     "test:ticket-policy-schema-alias-guard": "tsx --test src/lib/sonnet-orchestrator.ticket-policy-schema-alias-guard.test.ts",
     "test:fraud-bin-velocity": "tsx --test src/lib/fraud-detector.bin-velocity.test.ts",
     "test:fraud-confirm-single-customer": "tsx --test src/lib/fraud-confirm-single-customer.test.ts",
