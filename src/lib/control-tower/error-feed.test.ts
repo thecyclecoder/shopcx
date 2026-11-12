@@ -151,6 +151,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise,
+  isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise,
   isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsLastCustomerMessageAtColumnNoise,
@@ -29059,6 +29060,99 @@ test("isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise KEEPS
   assert.equal(
     isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise(
       "column agent_jobs.heartbeat_at does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise ──
+test("isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise drops the PostgREST CTE wrapper lookup projecting the non-existent slug column", () => {
+  // The captured incident shape (Control Tower `supabase-logs:fd57c60a7f92180d`): a foreign /
+  // stale direct-REST client reads `goal_milestones?select=...slug...`, PostgREST wraps it as a
+  // `WITH pgrst_source AS ( SELECT ... FROM "public"."goal_milestones" ... )` CTE, and Postgres
+  // rejects with `column goal_milestones.slug does not exist` — no `slug`/`sort_order` columns
+  // have ever existed on `goal_milestones` (milestones are keyed by UUID).
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(
+      "column goal_milestones.slug does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."goal_milestones"."id", "public"."goal_milestones"."slug" FROM "public"."goal_milestones" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(
+      "column public.goal_milestones.slug does not exist",
+      'with pgrst_source as ( select "public"."goal_milestones"."slug" from "public"."goal_milestones" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(
+      "ERROR: column goal_milestones.slug does not exist",
+      'WITH pgrst_source AS ( SELECT "slug" FROM "public"."goal_milestones" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(
+      "column goal_milestones.slug does not exist",
+      "select id, slug, sort_order from public.goal_milestones order by sort_order asc",
+    ),
+    true,
+  );
+  // The unqualified-FROM (no `public.`) variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(
+      "column goal_milestones.slug does not exist",
+      "select * from goal_milestones where slug = $1",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise KEEPS a different goal_milestones column error and a non-SELECT statement (real regressions still page)", () => {
+  // A DIFFERENT missing column on `goal_milestones` is a real column rename / regression and must
+  // still page — the pin covers `slug` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(
+      "column goal_milestones.title does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."goal_milestones"."title" FROM "public"."goal_milestones" LIMIT 1 )',
+    ),
+    false,
+  );
+  // The same `slug` message attached to a non-SELECT statement shape is a real code-write trying
+  // to persist a bogus column — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(
+      "column goal_milestones.slug does not exist",
+      "update public.goal_milestones set slug = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(
+      "column goal_milestones.slug does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."goal_milestones"("id","slug") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  // The `slug` message on a DIFFERENT relation (a real product-schema regression) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(
+      "column milestones.slug does not exist",
+      "select slug from public.milestones limit 1",
+    ),
+    false,
+  );
+  // Empty / nullish input returns false — both markers required.
+  assert.equal(isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(null, null), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(
+      "column goal_milestones.slug does not exist",
       "",
     ),
     false,
