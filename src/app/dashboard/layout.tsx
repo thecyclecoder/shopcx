@@ -40,6 +40,7 @@ async function DashboardLayoutInner({ children }: { children: React.ReactNode })
       <div className="flex h-screen bg-zinc-50 dark:bg-zinc-950">
         <Sidebar
           workspace={current}
+          workspaces={workspaces}
           user={{ id: user.id, email: user.email!, name: user.user_metadata?.full_name || user.user_metadata?.name }}
         />
         <main className="min-w-0 flex-1 overflow-hidden pt-[calc(4rem+env(safe-area-inset-top))] md:pt-0">
