@@ -58,6 +58,7 @@
     "test:all": "tsx scripts/_run-registered-tests.ts",
     "test:run-registered-tests": "tsx --test scripts/_run-registered-tests.test.ts",
     "test:support-mode": "tsx --test src/lib/support-mode.test.ts",
+    "test:widget-identity": "tsx --test src/lib/widget-identity.test.ts",
     "test:ship-time-backfill-executor-apply": "tsx --test src/lib/ship-time-backfill-executor.apply.test.ts",
     "test:ship-time-backfill-reaudit-classify": "tsx --test src/lib/ship-time-backfill-reaudit.classify.test.ts",
     "test:ship-time-backfill-detector-test-files": "tsx --test src/lib/ship-time-backfill-detector.test-files.test.ts",

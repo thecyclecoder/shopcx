@@ -51,6 +51,7 @@ Multi-tenant root. Encrypted credentials, sandbox_mode, response_delays, help_sl
 | `widget_color` | `text` | ✓ | default: `'#4f46e5'` |
 | `widget_greeting` | `text` | ✓ | default: `'Hi! How can we help you today?'` |
 | `widget_position` | `text` | ✓ | default: `'bottom-right'` |
+| `widget_identity_secret_encrypted` | `text` | ✓ | AES-256-GCM. Per-workspace HMAC secret for the chat widget's signed identity pass. ShopGrowth mints a short-lived pass from the Shopify session token (same secret in its env); the widget API verifies it via [[../libraries/widget-identity]] `verifyWidgetIdentity` before keying the contact to the store. Null = verified identity not enabled (a pass can't verify; software-mode chats are then rejected, cpg falls back to typed email). Migration `20270117120000_workspaces_widget_identity_secret.sql`. |
 | `meta_page_access_token_encrypted` | `text` | ✓ | AES-256-GCM |
 | `meta_instagram_id` | `text` | ✓ |  |
 | `meta_webhook_verify_token` | `text` | ✓ |  |

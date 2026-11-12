@@ -1582,6 +1582,61 @@ export function isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocN
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing `goal_milestones.slug` column for an ad hoc
+ * direct-REST lookup on a table ShopCX does not read that way. A foreign / stale external/REST
+ * client SELECTed the non-existent `slug` (and `sort_order`) columns from `goal_milestones`, but
+ * no such columns have ever existed on that table — goal milestones are keyed by UUID, not slug.
+ * Supabase's `postgres_logs` feed captures the resulting undefined_column ERROR, and log-poll
+ * mints a Control Tower incident for a query we don't own (Control Tower signature
+ * `supabase-logs:fd57c60a7f92180d`). No ShopCX code issues this query, so there is no lever to
+ * make it resolve — paging Platform on it is repair work for a query no code owns. The direct
+ * twin of `isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise` above.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column goal_milestones.slug does not exist` (with or without the
+ *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.goal_milestones` — either (a)
+ *      the bare `select ... from (public.)?goal_milestones` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."goal_milestones" ... )` CTE wrapper form
+ *      with double-quoted identifiers.
+ *
+ * Intentionally narrow — any genuine schema regression still pages:
+ *   - a DIFFERENT missing column on `goal_milestones` still pages — the pin covers `slug` only,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE / DDL,
+ *     a non-SELECT wrapped op inside the CTE) still pages,
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts` is
+ * constructed — returning null fully suppresses the row (no error_event, no loop_alert, no
+ * signature). A capture-time drop, not a `transient` flag.
+ */
+export function isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column goal_milestones.slug does not exist" ||
+    stripped === "column public.goal_milestones.slug does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `goal_milestones` — any trailing WHERE/LIMIT/ORDER BY is fine; the pin
+  // is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real code-bug
+  // shape) stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?goal_milestones\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."goal_milestones" ... )` with double-quoted identifiers. Guarded so the CTE branch
+  // requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the same wrapper is a
+  // real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."goal_milestones"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing `qb_shipping_protection_products.id` column
  * for an ad hoc direct-REST lookup on a table ShopCX does not read that way. A foreign / stale
  * external/REST client assumed every table has an `id` column and ordered / SELECTed

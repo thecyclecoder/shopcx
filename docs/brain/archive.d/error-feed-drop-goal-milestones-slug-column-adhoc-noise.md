@@ -1,0 +1,1 @@
+- **Scope out foreign goal_milestones.slug missing-column noise from the supabase-logs feed** · verified 2026-11-12 · → [[../libraries/error-feed]]
