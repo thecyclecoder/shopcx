@@ -3,6 +3,7 @@ import { getAuthedUser } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { bucketOrder } from "@/lib/order-bucketing";
 import { uuidLineItemProductIds } from "@/lib/email-storefront";
+import { getClosedBookCostRates } from "@/lib/closed-book-cost-rates";
 
 export async function GET(
   request: Request,
@@ -296,10 +297,16 @@ export async function GET(
   // Best-effort: empty/null if storefront_ltv_metrics is absent (M3 not yet shipped here).
   const storefrontSubLtv = await buildStorefrontSubLtv(admin, workspaceId);
 
+  // ── Closed-book variable cost rates (real COGS / fulfillment / fees from the
+  //    trailing closed QuickBooks months) — the margin calculator reads these
+  //    instead of typed-in guesses. null when no closed month is snapshotted yet.
+  const cost_rates = await getClosedBookCostRates(workspaceId, 3, admin);
+
   return NextResponse.json({
     daily,
     totals,
     storefrontSubLtv,
+    cost_rates,
     summary: {
       roas: Math.round(roas * 100) / 100,
       total_revenue_cents: totalRevenue,

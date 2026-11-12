@@ -10,8 +10,15 @@ interface DayData {
   meta_spend: number;
 }
 
+interface CostRates {
+  months: string[];
+  website: { cogsPct: number; fulfillmentPct: number; txFeePct: number };
+  amazon: { cogsPct: number; fbaFeePct: number; sellerFeePct: number };
+}
+
 interface ROASData {
   daily: DayData[];
+  cost_rates?: CostRates | null;
   storefrontSubLtv?: {
     calibrated: boolean;
     weights_version: number;
@@ -60,6 +67,22 @@ function fmtShort(cents: number): string {
   if (Math.abs(cents) >= 10000000) return "$" + (cents / 10000000).toFixed(1) + "M";
   if (Math.abs(cents) >= 100000) return "$" + (cents / 100000).toFixed(1) + "K";
   return "$" + (cents / 100).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
+
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "2026-07-01"…"2026-09-01" → "Jul–Sep 2026" (or "Dec 2025–Feb 2026" across a year boundary). */
+function formatMonthRange(months: string[]): string {
+  if (!months.length) return "—";
+  const part = (iso: string) => {
+    const [y, m] = iso.split("-").map(Number);
+    return { mon: MONTH_ABBR[(m || 1) - 1], year: String(y) };
+  };
+  const first = part(months[0]);
+  const last = part(months[months.length - 1]);
+  if (months.length === 1) return `${first.mon} ${first.year}`;
+  if (first.year === last.year) return `${first.mon}–${last.mon} ${last.year}`;
+  return `${first.mon} ${first.year}–${last.mon} ${last.year}`;
 }
 
 function StatCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
@@ -286,7 +309,7 @@ export default function ROASDashboard() {
           </div>
 
           {/* Margin Calculator */}
-          <MarginCalculator summary={s} />
+          <MarginCalculator summary={s} costRates={data?.cost_rates ?? null} />
 
           {/* ROAS Trendline — only for multi-day ranges */}
           {multiDay && (
@@ -383,24 +406,40 @@ function ROASChart({ daily }: { daily: DayData[] }) {
   );
 }
 
-function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
-  const [cogsPct, setCogsPct] = useState(17);
-  const [shippingPct, setShippingPct] = useState(15);
-  const [gaFixed, setGaFixed] = useState(54542); // Fixed G&A (no platform fees, net of sublease)
-  const [discountPct, setDiscountPct] = useState(12);
-  const [shopifyTxPct, setShopifyTxPct] = useState(3); // Shopify/PayPal/Braintree tx fees
-  const [amzFeePct, setAmzFeePct] = useState(25); // Amazon FBA + seller fees (already includes tx)
+function MarginCalculator({ summary: s, costRates }: { summary: ROASData["summary"]; costRates: CostRates | null }) {
+  const [gaFixed] = useState(54542); // Fixed G&A (no platform fees, net of sublease)
 
   const totalOrders = s.shopify_new_sub_count + s.shopify_one_time_count + s.amazon_one_time_count + s.amazon_sns_checkout_count;
   if (!totalOrders) return null;
 
-  const variablePct = cogsPct + shippingPct + discountPct; // scales with revenue
+  // Cost rates come from the closed QuickBooks books (getClosedBookCostRates), not editable
+  // inputs. Without a closed month there is nothing trustworthy to show — never fall back to guesses.
+  if (!costRates) {
+    return (
+      <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <h2 className="mb-2 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Margin Calculator</h2>
+        <p className="text-sm text-zinc-400">Closed-book cost rates are unavailable — no closed QuickBooks month has been snapshotted yet, so the margin calculator can&apos;t show real unit economics.</p>
+      </div>
+    );
+  }
+
   const gaFixedCents = gaFixed * 100; // monthly fixed overhead
   const cac = totalOrders > 0 && s.total_spend_cents > 0 ? s.total_spend_cents / totalOrders : 0;
 
-  // Blended metrics for spend scaling
+  // Blended AOV for spend scaling
   const blendedAov = s.total_revenue_cents / totalOrders;
-  const variableCostPct = variablePct / 100;
+
+  // Per-channel variable cost rates (fractions of AOV) from the closed books. Website carries COGS +
+  // Amplifier fulfillment + Shopify/PayPal/Braintree tx fees; Amazon carries COGS + FBA + seller fees.
+  // feeRate is the platform-fee portion of varRate (shown as an "incl." line), not an add-on.
+  const websiteRate = {
+    varRate: costRates.website.cogsPct + costRates.website.fulfillmentPct + costRates.website.txFeePct,
+    feeRate: costRates.website.txFeePct,
+  };
+  const amazonRate = {
+    varRate: costRates.amazon.cogsPct + costRates.amazon.fbaFeePct + costRates.amazon.sellerFeePct,
+    feeRate: costRates.amazon.fbaFeePct + costRates.amazon.sellerFeePct,
+  };
 
   type ChannelMetrics = {
     orders: number;
@@ -413,13 +452,13 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
     lifetimeVarCost: number;
   };
 
-  function channelMetrics(revenue: number, orders: number, subCount: number, churnPct: number, extraFeePct = 0): ChannelMetrics | null {
+  function channelMetrics(revenue: number, orders: number, subCount: number, churnPct: number, rate: { varRate: number; feeRate: number }): ChannelMetrics | null {
     if (!orders) return null;
     const aov = revenue / orders;
     const subRate = subCount / orders;
     const churn = churnPct / 100;
-    const platformFeePerOrder = aov * extraFeePct / 100;
-    const varCostPerOrder = aov * variableCostPct + platformFeePerOrder;
+    const platformFeePerOrder = aov * rate.feeRate;
+    const varCostPerOrder = aov * rate.varRate;
     const ltOrders = churn > 0 ? (1 - subRate) + (subRate / churn) : 1;
     return {
       orders, aov, subRate, varCostPerOrder, platformFeePerOrder, ltOrders,
@@ -449,8 +488,8 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
     };
   }
 
-  const websiteMetrics = channelMetrics(s.shopify_checkout_revenue, s.shopify_new_sub_count + s.shopify_one_time_count, s.shopify_new_sub_count, s.shopify_avg_churn_pct);
-  const amazonMetrics = channelMetrics(s.amazon_checkout_revenue, s.amazon_one_time_count + s.amazon_sns_checkout_count, s.amazon_sns_checkout_count, s.amazon_avg_churn_pct, amzFeePct);
+  const websiteMetrics = channelMetrics(s.shopify_checkout_revenue, s.shopify_new_sub_count + s.shopify_one_time_count, s.shopify_new_sub_count, s.shopify_avg_churn_pct, websiteRate);
+  const amazonMetrics = channelMetrics(s.amazon_checkout_revenue, s.amazon_one_time_count + s.amazon_sns_checkout_count, s.amazon_sns_checkout_count, s.amazon_avg_churn_pct, amazonRate);
   const blendedMetrics = blendMetrics([websiteMetrics, amazonMetrics]);
 
   function calcChannel(label: string, m: ChannelMetrics | null, color: string) {
@@ -505,14 +544,14 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
     const predictedRoas = Math.max(0.3, theoreticalMaxRoas - roasDecayPerDollar * spendDollars);
     const revCents = spendCents * predictedRoas;
     const orders = blendedAov > 0 ? Math.round(revCents / blendedAov) : 0;
-    const blendedVarPct = blendedMetrics && blendedMetrics.aov > 0 ? blendedMetrics.varCostPerOrder / blendedMetrics.aov : variableCostPct;
+    const blendedVarPct = blendedMetrics && blendedMetrics.aov > 0 ? blendedMetrics.varCostPerOrder / blendedMetrics.aov : 0;
     const varCosts = revCents * blendedVarPct; // only variable costs scale (incl. Amazon fees on the Amazon share)
     // First order profit: revenue - variable costs - G&A (fixed) - ad spend
     const firstOrderProfit = revCents - varCosts - gaFixedCents - spendCents;
     // Lifetime: variable costs scale with orders, G&A is fixed, ad cost is one-time
     const cacPerCustomer = orders > 0 ? spendCents / orders : 0;
     const ltRevPerCustomer = blendedMetrics?.lifetimeRev ?? blendedAov;
-    const ltVarCostPerCustomer = blendedMetrics?.lifetimeVarCost ?? blendedAov * variableCostPct;
+    const ltVarCostPerCustomer = blendedMetrics?.lifetimeVarCost ?? revCents * blendedVarPct / Math.max(orders, 1);
     const ltProfitPerCustomer = ltRevPerCustomer - ltVarCostPerCustomer - cacPerCustomer;
     const ltProfitTotal = ltProfitPerCustomer * orders - gaFixedCents; // G&A once for the business
     return { mult, spend: spendCents, orders, rev: revCents, firstOrderProfit, ltProfit: ltProfitTotal, roas: predictedRoas };
@@ -520,32 +559,13 @@ function MarginCalculator({ summary: s }: { summary: ROASData["summary"] }) {
 
   return (
     <div className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
-      <h2 className="mb-4 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Margin Calculator</h2>
+      <h2 className="mb-1 text-sm font-semibold text-zinc-900 dark:text-zinc-100">Margin Calculator</h2>
 
-      <div className="mb-4 flex flex-wrap gap-4">
-        <div>
-          <label className="block text-xs font-medium text-zinc-500 mb-1">COGS %</label>
-          <input type="number" value={cogsPct} onChange={(e) => setCogsPct(Number(e.target.value))}
-            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-zinc-500 mb-1">Shipping %</label>
-          <input type="number" value={shippingPct} onChange={(e) => setShippingPct(Number(e.target.value))}
-            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-zinc-500 mb-1">Discounts %</label>
-          <input type="number" value={discountPct} onChange={(e) => setDiscountPct(Number(e.target.value))}
-            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
-        </div>
-        <div>
-          <label className="block text-xs font-medium text-zinc-500 mb-1">AMZ Fees %</label>
-          <input type="number" value={amzFeePct} onChange={(e) => setAmzFeePct(Number(e.target.value))}
-            className="w-16 rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100" />
-        </div>
-        <div className="flex items-end">
-          <span className="text-xs text-zinc-400">Variable: {variablePct}% · AMZ fees: +{amzFeePct}% · CAC: {fmt(cac)}</span>
-        </div>
+      <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span className="text-xs text-zinc-500">Cost rates from closed books: {formatMonthRange(costRates.months)}</span>
+        <span className="text-xs text-zinc-400">
+          Website {(websiteRate.varRate * 100).toFixed(0)}% · Amazon {(amazonRate.varRate * 100).toFixed(0)}% · CAC {fmt(cac)}
+        </span>
       </div>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3 mb-6">
