@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc `director_activity.detail` column-missing query from the Control Tower error feed** · verified 2026-11-13 · → [[../libraries/error-feed]]
