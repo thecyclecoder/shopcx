@@ -173,6 +173,7 @@ import {
   isForeignSupabasePostgresInvalidUuidSyntaxOnTicketsIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnOrdersWorkspaceIdAdhocNoise,
   isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise,
+  isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise,
   isForeignSupabasePostgresUuidLikeOnAgentJobsIdAdhocNoise,
   isForeignSupabasePostgresJsonbIlikeOnErrorEventsSampleAdhocNoise,
   isForeignSupabasePostgresMissingErrorEventsMetadataAdhocNoise,
@@ -4844,6 +4845,116 @@ test("isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdA
     isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise(
       'invalid input syntax for type uuid: "abc"',
       "delete from public.migration_audits where subscription_id = $1",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise ──
+// The subscriptions/id sibling of the migration_audits.subscription_id invalid-uuid probe: a
+// `?id=in.(<partial-uuid>)` / `=eq.<partial-uuid>` direct-REST / Supabase Studio quick-filter binds
+// a hand-typed/truncated subscription primary-key uuid to `WHERE "subscriptions"."id" = ANY($1)`
+// (Studio `in` form) or `= $1` (plain equality), which Postgres rejects at parse/bind time with
+// `invalid input syntax for type uuid: "<garbage>"`. Control Tower signature
+// `supabase-logs:d9393a3e4f8314e2` (296× over ~7 weeks) — the last unfiltered member of the family.
+// Drop AT CAPTURE only when BOTH the `invalid input syntax for type uuid:` message AND the
+// SELECT-shape on `subscriptions` with an `id =` equality marker are present; the same error on any
+// OTHER table, or a non-SELECT shape on subscriptions, still pages.
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise drops the exact ANY($1) CTE sample AND the bare SELECT / plain-equality shapes", () => {
+  // The Studio `in` quick-filter's PostgREST CTE wrapper form (double-quoted identifiers),
+  // id = ANY($1) — the exact sample shape.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise(
+      'invalid input syntax for type uuid: "7f3a"',
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions".* FROM "public"."subscriptions" WHERE "public"."subscriptions"."id" = ANY($1) LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the prefix check; plain `= $1` equality form.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise(
+      'ERROR: invalid input syntax for type uuid: "123"',
+      'WITH pgrst_source AS ( SELECT * FROM "public"."subscriptions" WHERE "id" = $1 )',
+    ),
+    true,
+  );
+  // The bare SELECT shape (no PostgREST wrapper) drops too — the predicate accepts both.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise(
+      'invalid input syntax for type uuid: "zzz"',
+      "select * from public.subscriptions where id = 'zzz'",
+    ),
+    true,
+  );
+  // Unqualified `subscriptions` (no `public.`) + bare SELECT is still the same ad hoc shape.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise(
+      'invalid input syntax for type uuid: "123"',
+      "select id, status from subscriptions where id = any($1)",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise KEEPS the same invalid-uuid message when the FROM is a different table (a real bad-uuid code bug elsewhere still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.migration_audits where id = $1",
+    ),
+    false,
+  );
+  // PostgREST CTE wrapper form, but FROM is a different table — must still page.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      'WITH pgrst_source AS ( SELECT * FROM "public"."tickets" WHERE "id" = $1 )',
+    ),
+    false,
+  );
+  // A table whose name merely starts with `subscriptions` must NOT be swept in by the drop.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.subscriptions_archive where id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise KEEPS a DIFFERENT error on subscriptions, and the invalid-uuid message with no id marker", () => {
+  // A different error on `subscriptions` is a real code bug we WANT to see.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise(
+      "null value in column id violates not-null constraint",
+      "select * from public.subscriptions where id = $1",
+    ),
+    false,
+  );
+  // The invalid-uuid message but the SELECT filters a `_id` column (the `\b` boundary keeps
+  // `subscription_id`/`customer_id` from matching the bare `id` marker) — not the id probe shape.
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "select * from public.subscriptions where customer_id = $1",
+    ),
+    false,
+  );
+});
+
+test("isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise KEEPS a non-SELECT statement shape on subscriptions (a real code-bug writing subscriptions still pages)", () => {
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "update public.subscriptions set status = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise(
+      'invalid input syntax for type uuid: "abc"',
+      "delete from public.subscriptions where id = $1",
     ),
     false,
   );

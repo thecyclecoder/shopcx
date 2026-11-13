@@ -3480,6 +3480,83 @@ export function isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubsc
 }
 
 /**
+ * Foreign-app noise — Postgres rejecting a malformed-uuid read on `subscriptions.id` with
+ * `invalid input syntax for type uuid: "<garbage>"`. This is the `subscriptions/id` sibling of
+ * `isForeignSupabasePostgresInvalidUuidSyntaxOnMigrationAuditsSubscriptionIdAdhocNoise`: instead of
+ * a `migration_audits.subscription_id` lookup, it is a `?id=in.(<partial-uuid>)` / `=eq.<partial-uuid>`
+ * direct-REST (or Supabase Studio quick-filter) read of `public.subscriptions` where the bound value
+ * is a hand-typed / truncated subscription primary-key UUID. The Studio `in` quick-filter emits an
+ * `id = ANY($1)` predicate; the plain equality quick-filter emits `id = $1` — both bind the bad
+ * literal, which Postgres rejects at parse/bind time before any row is read, so no ShopCX code path
+ * produces it (every in-tree reader filters `subscriptions.id` with a well-formed uuid). The
+ * resulting ERROR is repair work for a query no code owns (Control Tower signature
+ * `supabase-logs:d9393a3e4f8314e2`, which has paged Platform 296× over ~7 weeks) and is the last
+ * sibling of the invalid-uuid-syntax noise family on this table not yet filtered, so it is the sole
+ * remaining reason that signature stays open.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message, after stripping any leading `ERROR: ` prefix, starts with
+ *      `invalid input syntax for type uuid:`, AND
+ *   2. the `parsed.query` attribute (quote-stripped + lowercased) is a SELECT-shape on
+ *      `subscriptions` — either (a) the bare `select ... from (public.)?subscriptions` shape, OR
+ *      (b) the PostgREST-generated `with pgrst_source as ( select ... from public.subscriptions`
+ *      CTE wrapper form — AND it contains an `id =` equality marker in either the plain `= $1` or
+ *      the Studio `in` quick-filter `= ANY($1)` form.
+ *
+ * Narrowly gated so:
+ *   - a malformed-uuid error on ANY OTHER table (a real code bug binding bad uuids elsewhere) still
+ *     pages,
+ *   - the same message attached to a non-SELECT statement on `subscriptions` (INSERT / UPDATE /
+ *     DELETE / DDL — a real code-write shape) still pages,
+ *   - a genuine `subscriptions` read failure with a different message, or one with no `id` equality
+ *     marker, still pages.
+ *
+ * The `id` marker is anchored with a leading `\b` word boundary so `subscription_id = ...` (which
+ * ends in `_id`, no word boundary before `id`) does NOT satisfy it — only the bare primary-key `id`
+ * column does.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before `keyParts` is
+ * constructed — the mapRow contract treats `null` as `drop, do not record`, so returning null here
+ * fully suppresses the row (no error_event, no loop_alert, no signature). Not a `transient` flag:
+ * this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresInvalidUuidSyntaxOnSubscriptionsIdAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  if (!stripped.toLowerCase().startsWith("invalid input syntax for type uuid:")) return false;
+  // Quote-stripped + lowercased so `"public"."subscriptions"` collapses to `public.subscriptions`
+  // and `"id" = $1` collapses to `id = $1`, covering both the bare and the double-quoted PostgREST-
+  // wrapper forms with one shape predicate.
+  const q = (query ?? "").trim().toLowerCase().replace(/"/g, "");
+  if (!q) return false;
+  // The uuid primary-key equality marker — the tell that distinguishes the Studio-click/REST
+  // quick-filter equality probe against the uuid `id` column from any other read our own code
+  // issues. The leading `\b` keeps `subscription_id = ...` from matching (no word boundary before
+  // the `id` in `_id`); `(any\s*\()?` tolerates the Studio `in` quick-filter's `= ANY($1)` form as
+  // well as the plain `= $1`; `$?\d*` tolerates a bound `$1` placeholder or an inline literal;
+  // `.id = ` catches the qualified `subscriptions.id = ` form.
+  if (
+    !(
+      /\bid\s*=\s*(any\s*\()?\s*\$?\d*/.test(q) ||
+      q.includes(".id = ")
+    )
+  )
+    return false;
+  const bareSelect =
+    /^select\b[\s\S]*\bfrom\s+(?:public\.)?subscriptions\b/.test(q);
+  // PostgREST wraps direct-REST row reads as `WITH pgrst_source AS ( SELECT ... FROM
+  // public.subscriptions ... )` — the branch requires the wrapped op to be a SELECT so a
+  // PostgREST INSERT/UPDATE inside the same envelope (a real code-write) stays captured/paged.
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+public\.subscriptions\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Foreign-app noise — Postgres rejecting a `WHERE "agent_jobs"."id" LIKE $1` text search typed
  * against the uuid `agent_jobs.id` column with `operator does not exist: uuid ~~ unknown`. The uuid
  * LIKE is an invalid operator pairing (PostgreSQL has no `uuid ~~ text` operator), and the query
