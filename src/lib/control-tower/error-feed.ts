@@ -1990,6 +1990,59 @@ export function isForeignSupabasePostgresMissingSpecsOverallStatusColumnAdhocNoi
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column director_activity.detail does not exist` for an
+ * ad hoc SELECT lookup / PostgREST direct-REST call against `public.director_activity`. A
+ * foreign/stale PostgREST client reads `director_activity` expecting a `detail` column that
+ * exists nowhere in our schema or code ([[../tables/director_activity]]). The offending read is
+ * not ShopCX code; it only reaches Supabase's `postgres_logs` feed when an external / stale
+ * PostgREST client (a foreign app assuming a generic `detail` shape, a deprecated integration, a
+ * stale SQL Editor session) issues a `select=...detail...` against `/rest/v1/director_activity`.
+ * There is no lever from ShopCX to make that query resolve — paging Platform on it (Control Tower
+ * signature `supabase-logs:ebc1e2907868a3c5`) is repair work for a query we do not own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingSpecsOverallStatusColumnAdhocNoise` — same
+ * narrow-gating shape (exact `column <table>.<name> does not exist` message + SELECT-lookup
+ * shape that covers BOTH the bare SELECT and the PostgREST CTE wrapper), scoped to the
+ * `director_activity.detail` direct-REST shape.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the `message` once trimmed equals `column director_activity.detail does not exist`
+ *      (or the `public.` qualified variant, with any leading `ERROR: ` prefix stripped), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.director_activity` — either the
+ *      bare `select ... from (public.)?director_activity` shape (any WHERE/LIMIT/ORDER BY tail is
+ *      fine), or PostgREST's `WITH pgrst_source AS ( SELECT ... FROM "public"."director_activity"
+ *      ... )` direct-REST wrapper (double-quoted identifiers).
+ *
+ * Narrowly gated so a column-missing error for ANY OTHER table, a DIFFERENT column on
+ * `director_activity`, or a non-SELECT statement against the table still pages — the CTE branch
+ * requires the wrapped op to be a SELECT. Empty / nullish message OR query returns `false`.
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]]: returning null drops
+ * the row (no error_event, no loop_alert, no signature). A capture-time drop, not a transient flag.
+ */
+export function isForeignSupabasePostgresMissingDirectorActivityDetailColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column director_activity.detail does not exist" ||
+    stripped === "column public.director_activity.detail does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `director_activity` — any trailing WHERE/LIMIT/ORDER BY is fine; the pin
+  // is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement (real code-bug shape)
+  // stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?director_activity\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."director_activity" ... )` with double-quoted identifiers. The CTE branch requires the
+  // wrapped op to be a SELECT, so a PostgREST write still pages.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."director_activity"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting `column ticket_directions.created_at does not exist`
  * for an ad hoc SELECT lookup / PostgREST direct-REST call against
  * `public.ticket_directions.created_at`. The `ticket_directions` table exists as a first-class
