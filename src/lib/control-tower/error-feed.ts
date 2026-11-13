@@ -7746,16 +7746,19 @@ export function isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
  * work for a query we don't own.
  *
  * Sibling of `isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise` — the
- * same narrow-gating shape (exact `column <table>.<name> does not exist` + bare
- * SELECT-on-table shape), aimed at a different foreign caller.
+ * same narrow-gating shape (exact `column <table>.<name> does not exist` + SELECT-on-table
+ * shape), aimed at a different foreign caller. Covers BOTH the bare direct-REST SELECT and
+ * the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."spec_phases" ... )` CTE
+ * wrapper.
  *
  * `true` ONLY when BOTH markers are present:
  *   1. the message is Postgres's canonical column-missing shape for THIS column —
  *      trimmed equal to `column spec_phases.idx does not exist` (or the `public.`
  *      qualified variant, with any leading `ERROR: ` prefix Postgres includes on the
  *      logs surface stripped), AND
- *   2. the `parsed.query` attribute is a bare `select ... from public.spec_phases`
- *      lookup shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *   2. the `parsed.query` attribute is either a bare `select ... from public.spec_phases`
+ *      lookup OR the PostgREST `WITH pgrst_source AS ( SELECT ... FROM "public"."spec_phases"
+ *      ... )` CTE wrapper (any WHERE / LIMIT / ORDER BY tail is fine).
  *
  * Narrowly gated so:
  *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
@@ -7765,7 +7768,8 @@ export function isForeignSupabasePostgresMissingSpecsArchiveTimestampAdhocNoise(
  *     `position` column got renamed) still pages — the pin covers `idx` only,
  *   - a `spec_phases.idx` error attached to a DIFFERENT statement shape (INSERT /
  *     UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin is the
- *     bare SELECT-lookup shape, matching the ad hoc direct-REST read we've observed,
+ *     bare SELECT-lookup / PostgREST-CTE-SELECT shape, matching the ad hoc direct-REST
+ *     read we've observed,
  *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
  *     `spec_phases` is untouched (different message),
  *   - empty / nullish message OR query returns `false` — we need both markers.
@@ -7796,7 +7800,15 @@ export function isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
   // or without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays
   // captured — a caller that actually writes to spec_phases with a bogus `idx` column is
   // a code bug we DO want to page on, not the ad hoc direct-REST read this drop targets.
-  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?spec_phases\b/.test(q);
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?spec_phases\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."spec_phases" ... )` with double-quoted identifiers (Control Tower
+  // `supabase-logs:1dcc664aba4a5239`). Same foreign-owned read, different rendering — the
+  // plain SELECT regex above misses it because the statement starts with `with` and the
+  // FROM clause carries the quoted `"public"."spec_phases"` shape. Guarded so the CTE
+  // branch requires the wrapped op to be a SELECT (a PostgREST INSERT/UPDATE inside the
+  // same wrapper is a real code-write and stays captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?spec_phases\b/.test(q);
 }
 
 /**
