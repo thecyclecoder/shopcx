@@ -1,0 +1,1 @@
+- **Owner-dismissed self-verify-failed builds park auto_build instead of re-queuing** · verified 2026-11-13 · → [[../libraries/agent-jobs]] § Self-verify circuit breaker
