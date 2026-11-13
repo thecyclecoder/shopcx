@@ -22,8 +22,12 @@ export async function buildCrisisTier1Steps(
     .select("*").eq("id", action.crisis_id).single();
   if (!crisis) return emptyConfig();
 
-  const flavorSwaps = (crisis.available_flavor_swaps as { variantId: string; title: string }[]) || [];
-  if (flavorSwaps.length === 0) return emptyConfig();
+  // The default swap is offered as "Keep {default}", so drop it from the alternatives list.
+  // A product with only two flavors has NO alternatives beyond the default (Cocoa out → Hazelnut
+  // is the only one left); that is a valid tier 1 (keep the swap or reject it), not an empty crisis.
+  const flavorSwaps = ((crisis.available_flavor_swaps as { variantId: string; title: string }[]) || [])
+    .filter(f => f.variantId !== crisis.default_swap_variant_id);
+  if (flavorSwaps.length === 0 && !crisis.default_swap_variant_id) return emptyConfig();
 
   const defaultSwap = crisis.default_swap_title || "current swap";
 
@@ -33,8 +37,12 @@ export async function buildCrisisTier1Steps(
     steps: [{
       key: "flavor_choice",
       type: "single_choice",
-      question: `We've temporarily switched your ${crisis.affected_product_title || "item"} to ${defaultSwap}. Want a different flavor instead?`,
-      subtitle: "Pick the flavor you'd like, or keep the current swap.",
+      question: flavorSwaps.length > 0
+        ? `We've temporarily switched your ${crisis.affected_product_title || "item"} to ${defaultSwap}. Want a different flavor instead?`
+        : `We've temporarily switched your ${crisis.affected_product_title || "item"} to ${defaultSwap}, the only other flavor available right now.`,
+      subtitle: flavorSwaps.length > 0
+        ? "Pick the flavor you'd like, or keep the current swap."
+        : "You don't need to do anything. If you'd rather not switch, let us know below.",
       options: [
         ...flavorSwaps.map(f => ({ value: f.variantId, label: f.title })),
         { value: "keep_current", label: `Keep ${defaultSwap}` },
