@@ -1,0 +1,1 @@
+- **Extend spec_phases.idx noise-drop to also match the PostgREST WITH-pgrst_source CTE query shape** · verified 2026-11-13 · → [[../libraries/error-feed]]
