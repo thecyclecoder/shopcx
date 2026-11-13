@@ -9646,6 +9646,35 @@ test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise drops the ad hoc S
   );
 });
 
+test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise drops the PostgREST `WITH pgrst_source AS ( SELECT ... )` CTE-wrapped rendering of the same foreign read", () => {
+  // The real captured sample: PostgREST direct-REST wraps the lookup in a
+  // `WITH pgrst_source AS ( SELECT "public"."spec_phases".* FROM "public"."spec_phases" ... )`
+  // CTE with double-quoted identifiers — the form actually hitting the postgres log feed.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."spec_phases".* FROM "public"."spec_phases" WHERE spec_id = $1 ORDER BY "public"."spec_phases"."idx" ASC LIMIT $2 OFFSET $3 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant against the same CTE wrapper is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column public.spec_phases.idx does not exist",
+      'with pgrst_source as ( select "public"."spec_phases".* from "public"."spec_phases" order by "public"."spec_phases"."idx" asc limit 100 )',
+    ),
+    true,
+  );
+  // An INSERT wrapped in the same `WITH pgrst_source` CTE is a real code-write and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
+      "column spec_phases.idx does not exist",
+      'with pgrst_source as ( insert into "public"."spec_phases"("idx") values ($1) returning * )',
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have an idx column still pages)", () => {
   assert.equal(
     isForeignSupabasePostgresMissingSpecPhasesIdxAdhocNoise(
