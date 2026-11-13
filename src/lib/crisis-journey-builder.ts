@@ -39,10 +39,10 @@ export async function buildCrisisTier1Steps(
       type: "single_choice",
       question: flavorSwaps.length > 0
         ? `We've temporarily switched your ${crisis.affected_product_title || "item"} to ${defaultSwap}. Want a different flavor instead?`
-        : `We've temporarily switched your ${crisis.affected_product_title || "item"} to ${defaultSwap}. Is that okay?`,
+        : `We've temporarily switched your ${crisis.affected_product_title || "item"} to ${defaultSwap}, the only other flavor available right now.`,
       subtitle: flavorSwaps.length > 0
         ? "Pick the flavor you'd like, or keep the current swap."
-        : `${defaultSwap} is the only other flavor available right now.`,
+        : "You don't need to do anything. If you'd rather not switch, let us know below.",
       options: [
         ...flavorSwaps.map(f => ({ value: f.variantId, label: f.title })),
         { value: "keep_current", label: `Keep ${defaultSwap}` },
