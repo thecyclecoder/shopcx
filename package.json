@@ -305,6 +305,7 @@
     "test:error-feed": "tsx --test src/lib/control-tower/error-feed.test.ts",
     "test:error-feed-playbooks-steps-noise": "tsx --test src/lib/control-tower/error-feed.playbooks-steps-noise.test.ts",
     "test:error-feed-specs-overall-status-noise": "tsx --test src/lib/control-tower/error-feed.specs-overall-status-noise.test.ts",
+    "test:error-feed-ticket-messages-attachments-noise": "tsx --test src/lib/control-tower/error-feed.ticket-messages-attachments-noise.test.ts",
     "test:error-feed-orders-payment-gateway-noise": "tsx --test src/lib/control-tower/error-feed.orders-payment-gateway-noise.test.ts",
     "test:error-feed-subscriptions-engine-noise": "tsx --test src/lib/control-tower/error-feed.subscriptions-engine-noise.test.ts",
     "test:error-feed-replacements-shopify-order-id-noise": "tsx --test src/lib/control-tower/error-feed.replacements-shopify-order-id-noise.test.ts",
