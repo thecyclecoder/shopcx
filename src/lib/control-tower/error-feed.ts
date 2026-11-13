@@ -2608,6 +2608,64 @@ export function isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(
 }
 
 /**
+ * Foreign-app noise — Postgres reporting `column ticket_messages.attachments does not
+ * exist` for a direct-REST read we don't own. `ticket_messages` never carried an
+ * `attachments` column, and no ShopCX code path selects it, so the error originates from
+ * a foreign/stale PostgREST consumer. Twin of
+ * `isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise`, aimed at the
+ * ticket_messages.attachments signature (Control Tower signature
+ * `supabase-logs:6a96a3470d2d7a8e`).
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column ticket_messages.attachments does not exist` (with or
+ *      without the `public.` qualifier and any leading `ERROR: ` prefix the logs surface
+ *      includes), AND
+ *   2. the `parsed.query` is a SELECT-lookup on `ticket_messages` — either (a) the bare
+ *      `select ... from (public.)ticket_messages` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."ticket_messages" ... )` CTE
+ *      wrapper with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error on ANY OTHER table (a real schema regression) still pages,
+ *   - a column-missing error on `ticket_messages` for a DIFFERENT column (a real rename
+ *     that broke a live query) still pages — the pin names `ticket_messages.attachments`
+ *     only,
+ *   - a `ticket_messages.attachments` error attached to a DIFFERENT statement shape
+ *     (INSERT / UPDATE / DELETE / DDL) still pages — the pin is the SELECT-lookup shape;
+ *     the CTE branch likewise requires the wrapped op to be a SELECT,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message),
+ *   - empty / nullish message OR query returns `false` — we need both markers.
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed; returning null there fully suppresses the row (no
+ * error_event, no loop_alert, no signature). A capture-time drop, not a transient flag.
+ */
+export function isForeignSupabasePostgresMissingTicketMessagesAttachmentsColumnNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column ticket_messages.attachments does not exist" ||
+    stripped === "column public.ticket_messages.attachments does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  // Bare SELECT-lookup on `ticket_messages` — any trailing WHERE/LIMIT/ORDER BY is fine;
+  // the pin is the SELECT-FROM shape only, so a non-SELECT / different-FROM statement
+  // stays captured and pages.
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?ticket_messages\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ...
+  // FROM "public"."ticket_messages" ... )` with double-quoted identifiers. Same
+  // foreign-owned read, different rendering. Guarded so the CTE branch requires the
+  // wrapped op to be a SELECT.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."ticket_messages"/.test(q);
+}
+
+/**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc lookup that
  * mistypes `error_events.first_seen` (our schema has `first_seen_at`, not `first_seen`).
  * The twin of `isForeignSupabasePostgresMissingControlTowerEventsLookupNoise`, aimed at

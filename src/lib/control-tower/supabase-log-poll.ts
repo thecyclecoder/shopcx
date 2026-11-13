@@ -64,6 +64,7 @@ import {
   isForeignSupabasePostgresMissingDashboardNotificationsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsStatusColumnNoise,
   isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise,
+  isForeignSupabasePostgresMissingTicketMessagesAttachmentsColumnNoise,
   isForeignSupabasePostgresMissingErrorEventsFirstSeenColumnNoise,
   isForeignSupabasePostgresMissingAppstleApiCallsColumnAdhocNoise,
   isForeignSupabasePostgresJsonbLikeOnAppstleContractSnapshotsRawAdhocNoise,
@@ -603,6 +604,17 @@ const LOG_QUERIES: LogQuery[] = [
       // `qb_items` (bare or PostgREST CTE wrapper) — a different missing column on the
       // table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingQbItemsNameColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client SELECTs an
+      // `attachments` column from `ticket_messages` that the table never owned, and no
+      // ShopCX code path selects it. The resulting undefined_column ERROR is repair work
+      // for a query we don't own
+      // ([[../specs/error-feed-drop-ticket-messages-attachments-column-adhoc-noi]],
+      // Control Tower signature `supabase-logs:6a96a3470d2d7a8e`). Narrowly gated to
+      // require BOTH the exact `column ticket_messages.attachments does not exist` message
+      // AND the SELECT-lookup shape on `ticket_messages` (bare or PostgREST CTE wrapper) —
+      // a different missing column on the table, or the same message via a non-SELECT
+      // statement, still pages.
+      if (isForeignSupabasePostgresMissingTicketMessagesAttachmentsColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an operator typo — a manual SQL client did a
       // `select ... from error_events` naming the wrong column (`first_seen` instead of
       // our real `first_seen_at`). The resulting undefined_column ERROR is repair work
