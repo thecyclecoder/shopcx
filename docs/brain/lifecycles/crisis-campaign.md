@@ -71,6 +71,7 @@ The customer gets an email: "Mixed Berry is temporarily out of stock — we've s
 Mini-site shows:
 
 - Single-choice list of `available_flavor_swaps` + "Keep Strawberry Lemonade, that's fine."
+- The default swap is filtered out of the alternatives (it is already the "Keep" option). If no alternatives remain (a two-flavor product, e.g. Cocoa out leaves only Hazelnut), Tier 1 still renders, telling the customer the swap is done (no question) with Keep / reject. It only falls back to the "No active crisis found" info step when there is neither a default swap nor any alternative.
 
 If they pick a flavor:
 
