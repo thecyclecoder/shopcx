@@ -6370,6 +6370,36 @@ test("isForeignSupabasePostgresOrdersNameLookupNoise drops the ad hoc SELECT loo
   );
 });
 
+test("isForeignSupabasePostgresOrdersNameLookupNoise drops the PostgREST `WITH pgrst_source AS ( SELECT ... FROM \"public\".\"orders\" )` CTE wrapper form", () => {
+  // The real captured sample — PostgREST direct-REST wraps the same foreign lookup in a
+  // `WITH pgrst_source AS ( SELECT ... FROM "public"."orders" ... )` CTE with double-quoted
+  // identifiers. This is the shape that actually reaches the logs.
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column orders.name does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."orders"."id", "public"."orders"."name" FROM "public"."orders" WHERE subscription_id = $1 )',
+    ),
+    true,
+  );
+  // public.-qualified message variant.
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column public.orders.name does not exist",
+      'with pgrst_source as ( select "public"."orders"."name" from "public"."orders" where id = $1 )',
+    ),
+    true,
+  );
+  // A PostgREST INSERT/UPDATE inside the same wrapper is a real code-write and stays
+  // captured/paged — the CTE branch requires the wrapped op to be a SELECT.
+  assert.equal(
+    isForeignSupabasePostgresOrdersNameLookupNoise(
+      "column orders.name does not exist",
+      'with pgrst_source as ( update "public"."orders" set name = $1 where id = $2 )',
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresOrdersNameLookupNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a name column still pages)", () => {
   // A table that DOES have a `name` column missing it is a real schema regression.
   assert.equal(
