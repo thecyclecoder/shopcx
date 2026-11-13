@@ -54,6 +54,8 @@ For each:
 - Create a ticket (channel=`email`) so all communications thread together.
 - Fire the Tier 1 journey CTA via [[../integrations/resend]].
 
+**Start Auto-Swap button (manual, current path).** The daily cron no longer swaps; the swap runs from the crisis page's Start Auto-Swap button (crisis must be `active`). `POST /api/workspaces/[id]/crisis/[crisisId]/auto-swap` works in batches: the page calls it with `cursor` until `done`. Each call scans active/paused subs by id, matches the affected item by Shopify variant id, its resolved UUID, or `affected_sku`, ENROLS a missing `crisis_customer_actions` row (`current_tier=0`, `tier1_sent_at` null, `original_item` = the affected line) and swaps via `subSwapVariant`, which carries the line's locked price across on both rails. A `$0` free line is re-applied after the swap (the swap only preserves positive locks). The cron then sends Tier 1 to enrolled rows once they are inside the lead window. The old "Honor grandfathered pricing" re-price (last order price ÷ 0.75) was removed on 2026-11-13: it could overwrite the price the swap had already preserved.
+
 ### Step 2b — advance existing rows
 
 For rows where `current_tier=N` and `tierN_response='rejected'` and `tierN_sent_at + tier_wait_days <= now()`:

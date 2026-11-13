@@ -125,7 +125,7 @@ export default function CrisisDetailPage() {
   const [saving, setSaving] = useState(false);
   const [resolving, setResolving] = useState(false);
   const [autoSwapping, setAutoSwapping] = useState(false);
-  const [honorGrandfathered, setHonorGrandfathered] = useState(true);
+  const [autoSwapProgress, setAutoSwapProgress] = useState("");
   const [error, setError] = useState("");
 
   // Editable fields
@@ -304,31 +304,40 @@ export default function CrisisDetailPage() {
               {crisis.status === "active" && (
                 <button
                   onClick={async () => {
-                    if (!confirm("This will swap all affected subscriptions to the default swap variant. Continue?")) return;
+                    if (!confirm("This will enroll every subscription that has the affected item in this crisis and swap it to the default swap variant, keeping each subscription's current price. Continue?")) return;
                     setAutoSwapping(true);
+                    const totals = { processed: 0, enrolled: 0, swapped: 0, failed: 0 };
+                    const errors: string[] = [];
+                    let cursor: string | null = null;
                     try {
-                      const res = await fetch(`/api/workspaces/${workspace.id}/crisis/${crisis.id}/auto-swap`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ honor_grandfathered: honorGrandfathered }),
-                      });
-                      const data = await res.json();
-                      alert(`Auto-swap complete!\n\nSwapped: ${data.swapped}\nSkipped (already done): ${data.skipped}\nFailed: ${data.failed}${data.errors?.length ? "\n\nErrors:\n" + data.errors.join("\n") : ""}`);
+                      for (;;) {
+                        const res: Response = await fetch(`/api/workspaces/${workspace.id}/crisis/${crisis.id}/auto-swap`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ cursor }),
+                        });
+                        const data: { processed: number; enrolled: number; swapped: number; failed: number; errors?: string[]; next_cursor: string | null; done: boolean; error?: string } = await res.json();
+                        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+                        totals.processed += data.processed; totals.enrolled += data.enrolled;
+                        totals.swapped += data.swapped; totals.failed += data.failed;
+                        errors.push(...(data.errors || []));
+                        setAutoSwapProgress(`${totals.swapped} swapped, ${totals.failed} failed`);
+                        if (data.done) break;
+                        cursor = data.next_cursor;
+                      }
+                      alert(`Auto-swap complete!\n\nSwapped: ${totals.swapped}\nNewly enrolled: ${totals.enrolled}\nFailed: ${totals.failed}${errors.length ? "\n\nErrors:\n" + errors.slice(0, 20).join("\n") : ""}`);
                       window.location.reload();
-                    } catch { alert("Auto-swap failed"); }
+                    } catch (e) {
+                      alert(`Auto-swap stopped after ${totals.swapped} swapped: ${e instanceof Error ? e.message : "unknown error"}. Running it again picks up where it left off.`);
+                    }
                     setAutoSwapping(false);
+                    setAutoSwapProgress("");
                   }}
                   disabled={autoSwapping}
                   className="rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50 transition-colors"
                 >
-                  {autoSwapping ? "Swapping..." : "Start Auto-Swap"}
+                  {autoSwapping ? `Swapping... ${autoSwapProgress}` : "Start Auto-Swap"}
                 </button>
-              )}
-              {crisis.status === "active" && (
-                <label className="flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
-                  <input type="checkbox" checked={honorGrandfathered} onChange={(e) => setHonorGrandfathered(e.target.checked)} className="rounded" />
-                  Honor grandfathered pricing
-                </label>
               )}
               {crisis.status !== "resolved" && (
                 <button
