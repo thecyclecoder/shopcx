@@ -1,0 +1,1 @@
+- **Scope out foreign ticket_messages.attachments column-missing noise in the supabase-logs feed** · verified 2026-11-13 · → [[../libraries/error-feed]]

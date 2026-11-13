@@ -1,0 +1,1 @@
+- **Scope out foreign malformed-uuid `subscriptions.id` REST/Studio probes from the postgres error feed** · verified 2026-11-13 · → [[../libraries/error-feed]]
