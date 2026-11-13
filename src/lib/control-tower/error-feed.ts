@@ -6437,8 +6437,12 @@ export function isForeignSupabasePostgresAmbiguousOidIntrospectionNoise(
  *      trimmed equal to `column orders.name does not exist` (or the `public.` qualified
  *      variant, with any leading `ERROR: ` prefix Postgres includes on the logs surface
  *      stripped), AND
- *   2. the `parsed.query` attribute is a bare `select ... from public.orders` lookup
- *      shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.orders` — either
+ *      (a) the bare `select ... from public.orders` lookup shape (any WHERE / LIMIT /
+ *      ORDER BY tail is fine), OR (b) the PostgREST-generated `WITH pgrst_source AS (
+ *      SELECT ... FROM "public"."orders" ... )` CTE wrapper form with double-quoted
+ *      identifiers. Both forms are the same foreign-owned read; the CTE form is the shape
+ *      that actually reaches the logs.
  *
  * Narrowly gated so:
  *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
@@ -6478,7 +6482,13 @@ export function isForeignSupabasePostgresOrdersNameLookupNoise(
   // without the `public.` schema qualifier). A JOIN / UNION / non-SELECT stays captured
   // — a caller that actually writes to orders with a bogus `name` column is a code bug
   // we DO want to page on, not the ad hoc direct-REST read this drop targets.
-  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?orders\b/.test(q);
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?orders\b/.test(q)) return true;
+  // PostgREST direct-REST wraps the same lookup as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."orders" ... )` with double-quoted identifiers. This CTE form is the shape that
+  // actually reaches the logs. Guarded so the CTE branch requires the wrapped op to be a
+  // SELECT (a PostgREST INSERT/UPDATE inside the same wrapper is a real code-write and stays
+  // captured/paged).
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"public"\."orders"/.test(q);
 }
 
 /**
