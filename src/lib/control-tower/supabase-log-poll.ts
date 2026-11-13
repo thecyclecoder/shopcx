@@ -58,6 +58,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise,
+  isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise,
   isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise,
   isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
@@ -549,6 +550,14 @@ const LOG_QUERIES: LogQuery[] = [
       // `goal_milestones` (bare or PostgREST CTE wrapper) — a different missing column on the
       // table, or the same message via a non-SELECT statement, still pages.
       if (isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale external/REST client SELECTed the
+      // non-existent `status` column from `goal_milestones` — the column was deliberately removed in
+      // July 2026 and milestone status is now derived by the readers (Control Tower signature
+      // `supabase-logs:567ad26b04f48970`). Narrowly gated to require BOTH the exact
+      // `column goal_milestones.status does not exist` message AND the SELECT-lookup shape on
+      // `goal_milestones` (bare or PostgREST CTE wrapper) — a different missing column on the
+      // table, or the same message via a non-SELECT statement, still pages.
+      if (isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale external/REST client SELECTed the
       // non-existent `spec_id` column from `spec_card_state` (a column the table never had),
       // minting a Control Tower incident for a query no ShopCX code owns (signature

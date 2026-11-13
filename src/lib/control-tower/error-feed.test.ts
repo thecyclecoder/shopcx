@@ -155,6 +155,7 @@ import {
   isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise,
+  isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise,
   isForeignSupabasePostgresMissingSpecCardStateSpecIdColumnNoise,
   isForeignSupabasePostgresMissingQbShippingProtectionProductsIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingIterationRunsAdAccountIdColumnAdhocNoise,
@@ -29624,6 +29625,99 @@ test("isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise KEEPS a
   assert.equal(
     isForeignSupabasePostgresMissingGoalMilestonesSlugColumnAdhocNoise(
       "column goal_milestones.slug does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise ──
+test("isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise drops the PostgREST CTE wrapper lookup projecting the removed status column", () => {
+  // The captured incident shape (Control Tower `supabase-logs:567ad26b04f48970`): a foreign /
+  // stale direct-REST client reads `goal_milestones?select=...status...`, PostgREST wraps it as a
+  // `WITH pgrst_source AS ( SELECT ... FROM "public"."goal_milestones" ... )` CTE, and Postgres
+  // rejects with `column goal_milestones.status does not exist` — the `status` column was
+  // deliberately removed in July 2026 and milestone status is now derived by the readers.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise(
+      "column goal_milestones.status does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."goal_milestones"."id", "public"."goal_milestones"."status" FROM "public"."goal_milestones" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // The `public.`-qualified message variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise(
+      "column public.goal_milestones.status does not exist",
+      'with pgrst_source as ( select "public"."goal_milestones"."status" from "public"."goal_milestones" limit 1 )',
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise(
+      "ERROR: column goal_milestones.status does not exist",
+      'WITH pgrst_source AS ( SELECT "status" FROM "public"."goal_milestones" )',
+    ),
+    true,
+  );
+  // The bare SELECT form (not a PostgREST wrapper) also drops — same foreign surface.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise(
+      "column goal_milestones.status does not exist",
+      "select id, status from public.goal_milestones order by created_at asc",
+    ),
+    true,
+  );
+  // The unqualified-FROM (no `public.`) variant is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise(
+      "column goal_milestones.status does not exist",
+      "select * from goal_milestones where status = $1",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise KEEPS a different goal_milestones column error and a non-SELECT statement (real regressions still page)", () => {
+  // A DIFFERENT missing column on `goal_milestones` is a real column rename / regression and must
+  // still page — the pin covers `status` only.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise(
+      "column goal_milestones.title does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."goal_milestones"."title" FROM "public"."goal_milestones" LIMIT 1 )',
+    ),
+    false,
+  );
+  // The same `status` message attached to a non-SELECT statement shape is a real code-write trying
+  // to persist to a removed column — a bug we WANT to see, not the ad hoc read.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise(
+      "column goal_milestones.status does not exist",
+      "update public.goal_milestones set status = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise(
+      "column goal_milestones.status does not exist",
+      'WITH pgrst_source AS ( INSERT INTO "public"."goal_milestones"("id","status") VALUES ($1,$2) RETURNING * )',
+    ),
+    false,
+  );
+  // The `status` message on a DIFFERENT relation (a real product-schema regression) still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise(
+      "column milestones.status does not exist",
+      "select status from public.milestones limit 1",
+    ),
+    false,
+  );
+  // Empty / nullish input returns false — both markers required.
+  assert.equal(isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise(null, null), false);
+  assert.equal(
+    isForeignSupabasePostgresMissingGoalMilestonesStatusColumnAdhocNoise(
+      "column goal_milestones.status does not exist",
       "",
     ),
     false,
