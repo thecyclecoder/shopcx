@@ -116,6 +116,7 @@ import {
   isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise,
   isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise,
+  isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
   isForeignSupabasePostgresMissingProductIngredientsSortOrderAdhocNoise,
   isForeignSupabasePostgresMissingDailyMetaAdSpendDateAdhocNoise,
@@ -19508,6 +19509,117 @@ test("isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise KEEP
     isForeignSupabasePostgresMissingSubscriptionsPausedAtColumnAdhocNoise(
       "column public.subscriptions.pause_resume_at does not exist",
       'WITH pgrst_source AS ( SELECT "public"."subscriptions"."pause_resume_at" FROM "public"."subscriptions" )',
+    ),
+    false,
+  );
+});
+
+// ── isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise ──
+// A foreign / stale PostgREST direct-REST client reads
+// `/rest/v1/subscriptions?select=...cancel_reason...` against our `public.subscriptions`
+// table. The table exists but has NO `cancel_reason` column — the live cancel-related
+// columns are `status` (the `'cancelled'` lifecycle state) and `cancelled_at` (the cancel
+// timestamp); this is distinct from the sibling `cancellation_reason` phantom. Foreign-
+// owned surface, no lever from us — drop AT CAPTURE only when BOTH the exact column-missing
+// message on `subscriptions.cancel_reason` AND a SELECT-lookup shape on `subscriptions`
+// (bare OR PostgREST CTE wrapper) are present. A column-missing on a live `subscriptions`
+// column (`cancelled_at`), on `cancel_reason` from any other table, or via a non-SELECT
+// statement still pages. Control Tower signature supabase-logs:68b5860a1dc384fa.
+
+test("isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise drops the captured supabase-logs:68b5860a1dc384fa message+query pair (PostgREST CTE + bare SELECT on subscriptions.cancel_reason)", () => {
+  // The captured production sample: PostgREST-wrapped SELECT + the exact column-missing
+  // message on `subscriptions.cancel_reason` (unqualified + public.-qualified).
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise(
+      "column subscriptions.cancel_reason does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."subscriptions"."id", "public"."subscriptions"."cancel_reason" FROM "public"."subscriptions" )',
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise(
+      "column public.subscriptions.cancel_reason does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."cancel_reason" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // The bare-SELECT shape — unqualified and public.-qualified FROM — is the same class.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise(
+      "column subscriptions.cancel_reason does not exist",
+      "select id, cancel_reason from public.subscriptions",
+    ),
+    true,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise(
+      "column subscriptions.cancel_reason does not exist",
+      "select cancel_reason from subscriptions limit 10",
+    ),
+    true,
+  );
+  // Postgres's `ERROR: ` prefix is stripped before the equality check.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise(
+      "ERROR: column subscriptions.cancel_reason does not exist",
+      'WITH pgrst_source AS (SELECT "public"."subscriptions"."cancel_reason" FROM "public"."subscriptions")',
+    ),
+    true,
+  );
+  // Case-insensitive on the query.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise(
+      "column subscriptions.cancel_reason does not exist",
+      "SELECT ID, CANCEL_REASON FROM PUBLIC.SUBSCRIPTIONS",
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise KEEPS a live-column regression, a wrong-table cancel_reason, and a non-SELECT shape (all still page)", () => {
+  // `cancelled_at` IS a live column on `subscriptions` — a real schema regression must page.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise(
+      "column subscriptions.cancelled_at does not exist",
+      "select cancelled_at from public.subscriptions",
+    ),
+    false,
+  );
+  // Distinct from the sibling `cancellation_reason` phantom — this predicate owns only the
+  // `cancel_reason` spelling, so the other name falls through to its own guard, not here.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise(
+      "column subscriptions.cancellation_reason does not exist",
+      "select cancellation_reason from public.subscriptions",
+    ),
+    false,
+  );
+  // `cancel_reason` missing on ANY OTHER table is not this noise — still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise(
+      "column orders.cancel_reason does not exist",
+      "select cancel_reason from public.orders",
+    ),
+    false,
+  );
+  // The pin is the SELECT-lookup shape — a non-SELECT statement (UPDATE) is a real
+  // code-bug shape and still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise(
+      "column subscriptions.cancel_reason does not exist",
+      "update public.subscriptions set cancel_reason = 'x'",
+    ),
+    false,
+  );
+  // Empty message / empty query never match.
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise("", "select cancel_reason from subscriptions"),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise(
+      "column subscriptions.cancel_reason does not exist",
+      "",
     ),
     false,
   );
