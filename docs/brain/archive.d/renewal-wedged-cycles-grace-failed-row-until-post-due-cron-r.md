@@ -1,0 +1,1 @@
+- **renewal-wedged-cycles must give a failed row one post-due renewal-cron run before flagging it wedged** · verified 2026-11-13 · → [[../libraries/control-tower]]
