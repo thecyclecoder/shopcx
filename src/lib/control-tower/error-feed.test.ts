@@ -30186,6 +30186,23 @@ test("isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise drops 
     ),
     true,
   );
+  // `title` — the third off-schema name from the same foreign direct-REST caller. Bare
+  // SELECT form.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(
+      "column crisis_events.title does not exist",
+      "select id, title from public.crisis_events where workspace_id = $1",
+    ),
+    true,
+  );
+  // `title` via the PostgREST CTE wrapper + public.-qualified message with `ERROR: `.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(
+      "ERROR: column public.crisis_events.title does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."crisis_events"."title" FROM "public"."crisis_events" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
 });
 
 test("isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise KEEPS a different column, a non-SELECT write, and a FATAL on crisis_events (real defects still page)", () => {
