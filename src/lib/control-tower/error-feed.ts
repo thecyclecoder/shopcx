@@ -4545,8 +4545,10 @@ export function isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
 /**
  * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
  * `orders.tracking_number` or its `orders.tracking_url` / `orders.carrier` /
- * `orders.shipped_at` / `orders.processed_at` twins. Our `orders` table has NEVER carried
- * any of these Shopify-REST-shaped top-level columns — fulfillment / tracking state lives
+ * `orders.shipped_at` / `orders.processed_at` twins, plus the plural Shopify-array
+ * variants `orders.tracking_numbers` / `orders.tracking_urls` / `orders.tracking_company`
+ * (the shape a Shopify-REST fulfillment payload carries). Our `orders` table has NEVER
+ * carried any of these Shopify-REST-shaped top-level columns — fulfillment / tracking state lives
  * on the sibling `shipments` / `fulfillments` tables, and the order's processed timestamp
  * is not a top-level `orders` column either; they are all part of the same
  * Shopify-REST-shaped foreign query. No ShopCX code path (src/,
@@ -4580,6 +4582,12 @@ export function isForeignSupabasePostgresMissingOrdersEasypostTrackerAdhocNoise(
  *         `column public.orders.shipped_at does not exist`
  *         `column orders.processed_at does not exist`
  *         `column public.orders.processed_at does not exist`
+ *         `column orders.tracking_numbers does not exist`
+ *         `column public.orders.tracking_numbers does not exist`
+ *         `column orders.tracking_urls does not exist`
+ *         `column public.orders.tracking_urls does not exist`
+ *         `column orders.tracking_company does not exist`
+ *         `column public.orders.tracking_company does not exist`
  *      (with or without the `public.` qualifier and any leading `ERROR: ` prefix
  *      Postgres includes on the logs surface), AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.orders` — either
@@ -4619,7 +4627,13 @@ export function isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
     stripped === "column orders.shipped_at does not exist" ||
     stripped === "column public.orders.shipped_at does not exist" ||
     stripped === "column orders.processed_at does not exist" ||
-    stripped === "column public.orders.processed_at does not exist";
+    stripped === "column public.orders.processed_at does not exist" ||
+    stripped === "column orders.tracking_numbers does not exist" ||
+    stripped === "column public.orders.tracking_numbers does not exist" ||
+    stripped === "column orders.tracking_urls does not exist" ||
+    stripped === "column public.orders.tracking_urls does not exist" ||
+    stripped === "column orders.tracking_company does not exist" ||
+    stripped === "column public.orders.tracking_company does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
