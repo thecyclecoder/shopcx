@@ -12,7 +12,16 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Drop foreign ad-hoc `director_activity.detail` column-missing query from the Control Tower error feed** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **Drop foreign goal_milestones.status missing-column noise at capture** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **Extend orders.name noise filter to catch the PostgREST CTE-wrapper form** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **Drop foreign-app noise: ad hoc SELECT of subscriptions.cancel_reason (not our column)** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **Scope out foreign malformed-uuid `subscriptions.id` REST/Studio probes from the postgres error feed** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **Scope out foreign ticket_messages.attachments column-missing noise in the supabase-logs feed** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **Extend spec_phases.idx noise-drop to also match the PostgREST WITH-pgrst_source CTE query shape** · verified 2026-11-13 · → [[../libraries/error-feed]]
+- **renewal-wedged-cycles must give a failed row one post-due renewal-cron run before flagging it wedged** · verified 2026-11-13 · → [[../libraries/control-tower]]
 - **Security dependency upgrades** · verified 2026-11-13 · → [[../libraries/security-agent]]
+- **Owner-dismissed self-verify-failed builds park auto_build instead of re-queuing** · verified 2026-11-13 · → [[../libraries/agent-jobs]] § Self-verify circuit breaker
 - **New-card dunning recovery must advance the next billing date on the live contract** · verified 2026-11-12 · → [[../inngest/dunning]] + [[../libraries/internal-subscription]]
 - **Drop the foreign ad-hoc REST read of the non-existent agent_jobs.heartbeat_at column from the Control Tower error feed** · verified 2026-11-12 · → [[../libraries/error-feed]] (§ foreign-noise drops § `isForeignSupabasePostgresMissingAgentJobsHeartbeatAtColumnAdhocNoise`)
 - **Drop foreign ad-hoc approval_decisions 'column category does not exist' noise at capture** · verified 2026-11-12 · → [[../libraries/error-feed]]
