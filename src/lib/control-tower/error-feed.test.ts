@@ -19349,6 +19349,51 @@ test("isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise drops the c
   );
 });
 
+test("isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise drops the plural Shopify-array tracking columns (tracking_numbers/tracking_urls/tracking_company) — signature supabase-logs:ee936732037aec36", () => {
+  // The plural `tracking_numbers` via the PostgREST `WITH pgrst_source AS (SELECT ...)`
+  // wrapper — the sampled foreign Shopify-array lookup this signature captured.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.tracking_numbers does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."orders"."id", "public"."orders"."tracking_numbers" FROM "public"."orders" )',
+    ),
+    true,
+  );
+  // The `public.`-qualified plural message over the bare-SELECT shape.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column public.orders.tracking_numbers does not exist",
+      "select id, tracking_numbers from public.orders",
+    ),
+    true,
+  );
+  // The `tracking_urls` plural twin.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.tracking_urls does not exist",
+      "select id, tracking_urls from public.orders",
+    ),
+    true,
+  );
+  // The `tracking_company` plural twin.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column public.orders.tracking_company does not exist",
+      "select tracking_company from public.orders",
+    ),
+    true,
+  );
+  // A non-SELECT statement (UPDATE) carrying the SAME plural message still pages — the
+  // pin is the SELECT-lookup shape, not the message alone.
+  assert.equal(
+    isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise(
+      "column orders.tracking_numbers does not exist",
+      "update public.orders set tracking_numbers = '{}' where id = 'x'",
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingOrdersTrackingNumberAdhocNoise KEEPS a genuine orders.order_number column-miss (a real product-schema regression on a live orders column still pages)", () => {
   // The spec's negative case: a real column-missing on the live `order_number` column
   // must NOT be dropped — the pin is the four tracking columns only.
