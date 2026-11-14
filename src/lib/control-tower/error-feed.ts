@@ -11532,14 +11532,16 @@ export function isForeignSupabasePostgresMissingCrisisCustomerActionsColumnDirec
 
 /**
  * Foreign-app noise — Postgres reporting `column crisis_events.<product_title|
- * variant_title> does not exist` for an ad hoc / stale PostgREST direct-REST SELECT
+ * variant_title|title> does not exist` for an ad hoc / stale PostgREST direct-REST SELECT
  * against `public.crisis_events`. The `crisis_events` table exists but has NEVER carried
- * `product_title` or `variant_title` columns — those are Shopify line-item labels that
- * live on order/line-item tables, and every ShopCX reader goes through the crisis SDK /
- * joined queries which select the real column names. The column-missing ERROR only
- * reaches this feed when a foreign app / stale PostgREST session / deprecated
- * integration queries `/rest/v1/crisis_events?select=...product_title...` (or
- * `variant_title`). There is no lever from ShopCX to make that query resolve — paging
+ * `product_title`, `variant_title`, or `title` columns — `product_title`/`variant_title`
+ * are Shopify line-item labels that live on order/line-item tables, and `title` is a
+ * bare off-schema name from the same foreign direct-REST caller; every ShopCX reader goes
+ * through the crisis SDK / joined queries which select the real column names. The
+ * column-missing ERROR only reaches this feed when a foreign app / stale PostgREST
+ * session / deprecated integration queries
+ * `/rest/v1/crisis_events?select=...product_title...` (or `variant_title`, or `title`).
+ * There is no lever from ShopCX to make that query resolve — paging
  * Platform on it (Control Tower signature `supabase-logs:b648bd6f98de3ed5`,
  * [[../specs/error-feed-drop-crisis-events-product-title-column-adhoc-noi]]) is repair
  * work for a query we don't own.
@@ -11553,7 +11555,7 @@ export function isForeignSupabasePostgresMissingCrisisCustomerActionsColumnDirec
  * `true` ONLY when BOTH markers are present:
  *   1. the message is Postgres's canonical column-missing shape for THIS table+column
  *      set — trimmed equal to one of
- *      `column crisis_events.<product_title|variant_title> does not exist` (or the
+ *      `column crisis_events.<product_title|variant_title|title> does not exist` (or the
  *      `public.` qualified variant, with any leading `ERROR: ` prefix Postgres includes
  *      on the logs surface stripped), AND
  *   2. the `parsed.query` attribute is a SELECT-lookup on `public.crisis_events` —
@@ -11589,15 +11591,17 @@ export function isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNo
   if (!msg) return false;
   // Strip an optional leading Postgres `ERROR: ` / `ERROR:  ` prefix — Supabase's logs
   // surface sometimes carries it, sometimes doesn't. The column-missing message itself
-  // has a stable shape: `column <table>.<name> does not exist`, pinned here to the two
-  // off-schema names observed on this signature (`product_title`, `variant_title`), with
-  // or without the `public.` qualifier.
+  // has a stable shape: `column <table>.<name> does not exist`, pinned here to the three
+  // off-schema names observed on this signature (`product_title`, `variant_title`,
+  // `title`), with or without the `public.` qualifier.
   const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
   const messageMatches =
     stripped === "column crisis_events.product_title does not exist" ||
     stripped === "column public.crisis_events.product_title does not exist" ||
     stripped === "column crisis_events.variant_title does not exist" ||
-    stripped === "column public.crisis_events.variant_title does not exist";
+    stripped === "column public.crisis_events.variant_title does not exist" ||
+    stripped === "column crisis_events.title does not exist" ||
+    stripped === "column public.crisis_events.title does not exist";
   if (!messageMatches) return false;
   const q = (query ?? "").trim().toLowerCase();
   if (!q) return false;
