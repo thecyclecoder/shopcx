@@ -46,6 +46,7 @@ import {
   isForeignSupabasePostgresMissingSpecTestRunsOverallVerdictColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
+  isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
@@ -459,6 +460,17 @@ const LOG_QUERIES: LogQuery[] = [
       // regression on any live `returns` column (including the real `resolution_type`), the same
       // message via a write/DDL, or a FATAL/PANIC/constraint violation still surfaces / pages.
       if (isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
+      // `public.returns` with a guessed, wrong column list naming a bare `free_label` — our
+      // `returns` table has `label_url` (and `net_refund_cents`), never a bare `free_label`
+      // (nor a `refund_amount_cents`). No ShopCX code path names `returns.free_label`, so the
+      // resulting column-missing ERROR is repair work for a query we don't own (Control Tower
+      // signature `supabase-logs:4483f178db5fc145`). Narrowly gated to require BOTH the exact
+      // `column returns.free_label does not exist` message AND the SELECT-lookup shape on
+      // `returns` (bare or PostgREST CTE wrapper) — a real schema regression on any live
+      // `returns` column (including the real `label_url`), the same message via a write/DDL, or
+      // a FATAL/PANIC/constraint violation still surfaces / pages.
+      if (isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
       // `public.fraud_cases` expecting an `updated_at` column that lives only on the sibling
       // `fraud_rules` table. The resulting undefined_column ERROR is repair work for a query
