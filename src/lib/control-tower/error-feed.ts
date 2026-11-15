@@ -14314,6 +14314,68 @@ export function isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNois
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `returns.free_label`. Our `public.returns` table has a `label_url` column (and a
+ * `net_refund_cents` column), NOT a bare `free_label` column (nor a `refund_amount_cents`
+ * one), and no ShopCX code path (src/, scripts/, shopify-extension/, supabase/migrations/,
+ * docs/brain/) issues a SELECT that names `returns.free_label`. The message appears on
+ * Supabase's `postgres_logs` feed only when an external / manual tool (Supabase Studio
+ * Table Editor / API Docs, a foreign SQL client reading our `returns` table with a
+ * guessed/wrong column list, a stale exploratory query, a third-party integration) does a
+ * raw `select ... free_label ... from public.returns` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."returns" ... )` CTE wrapper the same
+ * client emits over the REST endpoint. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it (Control Tower signature
+ * `supabase-logs:4483f178db5fc145`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise` — same
+ * narrow-gating shape, scoped to the `returns.free_label` lookup instead of the
+ * `returns.resolution` one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column returns.free_label does not exist` (with or without the
+ *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.returns` — either (a) the
+ *      bare `select ... from public.returns` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."returns" ... )` CTE wrapper form
+ *      with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `returns` (a real product-schema
+ *     regression on a live column, including the real `label_url` / `net_refund_cents`)
+ *     still pages,
+ *   - a column-missing error for `free_label` on ANY OTHER table still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL on `returns`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column returns.free_label does not exist" ||
+    stripped === "column public.returns.free_label does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?returns\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?returns\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Expected-by-design noise — Postgres reporting `duplicate key value violates unique
  * constraint "dashboard_notifications_dedupe_key_open_uniq"` on an INSERT INTO
  * `public.dashboard_notifications`. That partial UNIQUE index (migration
