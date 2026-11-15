@@ -194,6 +194,7 @@ import {
   isForeignSupabasePostgresMissingProductVariantsShopifyProductIdAdhocNoise,
   isForeignSupabasePostgresMissingCrisisCustomerActionsColumnDirectRestNoise,
   isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise,
+  isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingProductsPricingRuleIdLookupNoise,
   isForeignSupabasePostgresMissingPlaybooksTitleAdhocNoise,
@@ -2310,6 +2311,13 @@ const LOG_QUERIES: LogQuery[] = [
       // `crisis_events` via a non-SELECT statement (real code-bug shape) still surfaces /
       // pages on first sighting.
       if (isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(message, query)) return null;
+      // Foreign-app noise — the same ad hoc / stale PostgREST direct-REST read against
+      // `public.crisis_events`, this time assuming a `resolved_at` timestamp the table
+      // has never carried. No ShopCX code change resolves the foreign query, so paging
+      // Platform on it (Control Tower signature `supabase-logs:b8dd442617f2fbdf`) is
+      // repair work for a query we don't own. Same narrow gate as the product_title
+      // filter above — a different column/table or a non-SELECT write still pages.
+      if (isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: an ad hoc / stale PostgREST direct-REST read
       // against `public.meta_ad_accounts.name`. The `meta_ad_accounts` table exists but
       // has NO bare `name` column — the human-readable account label lives on
