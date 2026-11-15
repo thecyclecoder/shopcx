@@ -114,6 +114,7 @@ import {
   isForeignSupabasePostgresMissingJourneyDefinitionsIntentColumnAdhocNoise,
   isForeignSupabasePostgresMissingProductsIntelligenceColumnsAdhocNoise,
   isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise,
+  isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsDiscountCodeColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsCancellationReasonColumnAdhocNoise,
   isForeignSupabasePostgresMissingSubscriptionsCancelReasonColumnAdhocNoise,
@@ -30243,6 +30244,92 @@ test("isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise KEEPS 
   assert.equal(
     isForeignSupabasePostgresMissingCrisisEventsProductTitleColumnNoise(
       "column crisis_events.product_title does not exist",
+      "",
+    ),
+    false,
+  );
+});
+
+// error-feed-drop-crisis-events-resolved-at-column-adhoc-noise spec — Control Tower
+// signature supabase-logs:b8dd442617f2fbdf. `crisis_events` has NEVER carried a
+// `resolved_at` timestamp; a stale integration / Supabase Studio session assumes one and
+// leaks `column crisis_events.resolved_at does not exist` into the feed. No ShopCX lever
+// resolves that foreign read, so it is dropped AT CAPTURE — but only when BOTH the exact
+// column-missing message AND a SELECT-lookup shape on `crisis_events` (bare OR PostgREST
+// CTE wrapper) are present; a different column/table or a non-SELECT write still pages.
+test("isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise drops the bare + PostgREST CTE resolved_at direct-REST reads on crisis_events", () => {
+  // Bare SELECT, unqualified message + public.-qualified FROM.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise(
+      "column crisis_events.resolved_at does not exist",
+      "select id, resolved_at from public.crisis_events where workspace_id = $1",
+    ),
+    true,
+  );
+  // Bare SELECT, unqualified FROM.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise(
+      "column crisis_events.resolved_at does not exist",
+      "select resolved_at from crisis_events order by created_at desc limit 10",
+    ),
+    true,
+  );
+  // PostgREST CTE wrapper form with double-quoted identifiers.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise(
+      "column crisis_events.resolved_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."crisis_events"."id", "public"."crisis_events"."resolved_at" FROM "public"."crisis_events" LIMIT $1 OFFSET $2 )',
+    ),
+    true,
+  );
+  // public.-qualified message + CTE, with the `ERROR: ` prefix.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise(
+      "ERROR: column public.crisis_events.resolved_at does not exist",
+      'WITH pgrst_source AS ( SELECT "resolved_at" FROM "public"."crisis_events" )',
+    ),
+    true,
+  );
+});
+
+test("isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise KEEPS a different column, a non-SELECT write, and a FATAL on crisis_events (real defects still page)", () => {
+  // A different missing column on crisis_events (a real column that got renamed) still
+  // pages — the pin covers resolved_at only.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise(
+      "column crisis_events.severity does not exist",
+      "select severity from public.crisis_events",
+    ),
+    false,
+  );
+  // A non-SELECT write naming resolved_at is a real code-bug shape, not the ad hoc read
+  // this drop targets — stays captured (bare + PostgREST CTE forms).
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise(
+      "column crisis_events.resolved_at does not exist",
+      "update public.crisis_events set resolved_at = $1 where id = $2",
+    ),
+    false,
+  );
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise(
+      "column crisis_events.resolved_at does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."crisis_events" SET "resolved_at" = $1 WHERE "id" = $2 RETURNING * )',
+    ),
+    false,
+  );
+  // A FATAL on crisis_events is a different message — untouched.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise(
+      "FATAL: terminating connection due to administrator command",
+      "select resolved_at from public.crisis_events",
+    ),
+    false,
+  );
+  // Empty / nullish markers return false — we need both.
+  assert.equal(
+    isForeignSupabasePostgresMissingCrisisEventsResolvedAtColumnAdhocNoise(
+      "column crisis_events.resolved_at does not exist",
       "",
     ),
     false,
