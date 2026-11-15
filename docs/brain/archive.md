@@ -12,6 +12,9 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Drop returns.free_label foreign REST noise from error feed** · verified 2026-11-15 · → [[../libraries/error-feed]]
+- **Drop foreign crisis_events.title column-missing noise from the error feed** · verified 2026-11-14 · → [[../libraries/error-feed]]
+- **Drop foreign ad-hoc orders.tracking_numbers/tracking_urls/tracking_company SELECT noise from the Supabase postgres feed** · verified 2026-11-14 · → [[../libraries/error-feed]]
 - **Drop foreign ad-hoc `director_activity.detail` column-missing query from the Control Tower error feed** · verified 2026-11-13 · → [[../libraries/error-feed]]
 - **Drop foreign goal_milestones.status missing-column noise at capture** · verified 2026-11-13 · → [[../libraries/error-feed]]
 - **Extend orders.name noise filter to catch the PostgREST CTE-wrapper form** · verified 2026-11-13 · → [[../libraries/error-feed]]
