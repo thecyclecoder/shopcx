@@ -630,15 +630,24 @@ export async function isReissuableExpiredLoyaltyCode(
  * Phase-1 guard for `apply_loyalty_coupon` (spec:
  * loyalty-coupon-apply-resolves-contract-owning-member-no-doomed-regen).
  *
- * A loyalty code is minted with `customerSelection.customers.add`, so it is
- * locked to ONE Shopify customer. Points combine across a link group; a code
- * does not. Applying a code whose owning Shopify customer is not the one that
- * owns the target subscription contract can never succeed — and the Appstle
- * apply path removes the contract's existing automatic discounts before it
- * tries, so a doomed apply is worse than a no-op. Refuse upfront, before the
- * 2-second Shopify propagation delay, so no Appstle call fires and the regen
- * branch is never entered (regen today mints against the same wrong customer,
- * reproducing the mismatch — Phase 2 rewires that end).
+ * ENGINE-AWARE (spec: loyalty-coupon-owner-mismatch-guard-engine-aware-
+ * internal-subs-span-link-group). On an APPSTLE contract a loyalty code is
+ * minted with `customerSelection.customers.add`, so it is locked to ONE Shopify
+ * customer; applying a code whose owning Shopify customer is not the one that
+ * owns the target contract can never succeed — and the Appstle apply path
+ * removes the contract's existing automatic discounts before it tries, so a
+ * doomed apply is worse than a no-op. Refuse upfront, before the 2-second
+ * Shopify propagation delay, so no Appstle call fires and the regen branch is
+ * never entered. On an INTERNAL/shopcx contract there is NO such lock: the apply
+ * runs `subscriptionApplyCoupon` → `ensureInternalLoyaltyCouponRow`, which
+ * materializes the LOYALTY-* code as an internal `coupons` row scoped to the
+ * contract-owner UUID, NET-ZERO on points — Shopify's `customerSelection` is
+ * never consulted. Points already combine across the link group
+ * (aggregateLinkedMembers) and checkout usability already spans it, so a
+ * sibling-minted code of the same value must too. For internal contracts the
+ * guard therefore resolves the contract owner's whole link group and WAIVES the
+ * Shopify-id refusal when the code's owning member is in that group; the strict
+ * refusal is kept only for Appstle contracts.
  *
  * Returns a well-formed refusal `ActionResult` when a definite mismatch is
  * detected. Returns `null` when both sides can't be resolved (missing sub row,
@@ -661,13 +670,23 @@ export async function refuseLoyaltyCouponIfCustomerMismatch(
 ): Promise<ActionResult | null> {
   const { data: subRow } = await admin
     .from("subscriptions")
-    .select("customer_id")
+    .select("customer_id, is_internal")
     .eq("workspace_id", workspaceId)
     .eq("shopify_contract_id", contractId)
     .maybeSingle();
   const contractCustomerId =
     (subRow as { customer_id?: string | null } | null)?.customer_id ?? null;
   if (!contractCustomerId) return null;
+  // Engine of the target contract. INTERNAL/shopcx subs apply a loyalty code
+  // through `subscriptionApplyCoupon` → `ensureInternalLoyaltyCouponRow`, which
+  // materializes the LOYALTY-* code as an internal `coupons` row scoped to the
+  // contract-owner UUID, NET-ZERO on points — the Shopify `customerSelection`
+  // this guard reasons about is never consulted, so a cross-Shopify-id apply is
+  // NOT a guaranteed failure on that path. Appstle contracts genuinely lock the
+  // code to one Shopify customer via `customerSelection`, so the strict refusal
+  // is kept only for them. See [[docs/brain/libraries/action-executor]].
+  const isInternalContract =
+    !!(subRow as { is_internal?: boolean | null } | null)?.is_internal;
 
   const { data: custRow } = await admin
     .from("customers")
@@ -701,9 +720,10 @@ export async function refuseLoyaltyCouponIfCustomerMismatch(
 
   if (String(contractOwnerShopifyId) === String(codeOwnerShopifyId)) return null;
 
-  // Definite mismatch. Look for a sibling reward in the link group whose
-  // owning member IS the contract owner and whose discount_value matches.
-  let workingSuggestion = "";
+  // Mismatch of raw Shopify customer ids. Resolve the contract owner's whole
+  // link group once — it drives BOTH the engine-aware internal allowance below
+  // and (for Appstle) the working-sibling suggestion in the refusal message.
+  let siblingMembers: Array<{ id: string; shopify_customer_id?: string | null }> = [];
   try {
     const { data: linkRow } = await admin
       .from("customer_links")
@@ -724,13 +744,37 @@ export async function refuseLoyaltyCouponIfCustomerMismatch(
       }
     }
 
-    const { data: siblingMembers } = await admin
+    const { data: sm } = await admin
       .from("loyalty_members")
       .select("id, shopify_customer_id")
       .eq("workspace_id", workspaceId)
       .in("customer_id", [...groupIds]);
+    siblingMembers = (sm ?? []) as Array<{ id: string; shopify_customer_id?: string | null }>;
+  } catch {
+    // Link-group resolution is best-effort. On an internal contract a failure
+    // here falls through to the Appstle-style refusal (safe: we only waive the
+    // guard when linkage is PROVEN, never on an unproven assumption).
+  }
+
+  // Engine-aware waiver: on an INTERNAL contract, if the code's owning member
+  // belongs to the contract owner's link group, the net-zero internal apply
+  // path re-scopes the code to the contract-owner UUID and succeeds — the
+  // Shopify-id mismatch is a false 'guaranteed failure'. Points already combine
+  // across the group (aggregateLinkedMembers) and checkout usability already
+  // spans it, so a sibling-minted code of the same value must too. Appstle
+  // contracts fall through to the strict refusal.
+  const codeOwnerInLinkGroup = siblingMembers.some(
+    (m) => String(m.shopify_customer_id) === String(codeOwnerShopifyId),
+  );
+  if (isInternalContract && codeOwnerInLinkGroup) return null;
+
+  // Definite mismatch (Appstle, or an internal code outside the link group).
+  // Look for a sibling reward in the link group whose owning member IS the
+  // contract owner and whose discount_value matches.
+  let workingSuggestion = "";
+  try {
     const contractOwnerMemberIds =
-      ((siblingMembers ?? []) as Array<{ id: string; shopify_customer_id?: string | null }>)
+      siblingMembers
         .filter((m) => String(m.shopify_customer_id) === String(contractOwnerShopifyId))
         .map((m) => m.id);
 

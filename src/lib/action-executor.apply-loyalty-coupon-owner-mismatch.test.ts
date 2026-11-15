@@ -193,6 +193,54 @@ test("contract has no sub row → returns null (unknown contract provenance)", a
   assert.equal(out, null);
 });
 
+// ─── ENGINE-AWARE tests: internal/shopcx contracts waive the Shopify-id
+// refusal when the code owner is in the contract owner's link group ──────
+// Jennifer Rogers fingerprint (ticket 76d4f5f3): an INTERNAL sub, a code
+// minted on a linked sibling's Shopify id. The net-zero internal apply path
+// re-scopes the code to the contract-owner UUID, so the mismatch is a false
+// 'guaranteed failure' — the guard must return null, not refuse.
+
+function makeInternal(tables: Tables): Tables {
+  (tables.subscriptions![0] as { is_internal?: boolean }).is_internal = true;
+  return tables;
+}
+
+test("INTERNAL contract + code minted on a linked sibling → returns null (net-zero path spans the link group)", async () => {
+  const tables = makeInternal(seedSandra());
+  const admin = makeAdmin(tables);
+  const out = await refuseLoyaltyCouponIfCustomerMismatch(
+    admin, "ws-superfoods", "gid://shopify/SubscriptionContract/999", "LOYALTY-15-YAHOOX",
+  );
+  assert.equal(out, null, "internal engine + code owner in the link group → no refusal; the internal apply re-scopes the code");
+});
+
+test("APPSTLE contract keeps the strict refusal even when the code owner is a linked sibling", async () => {
+  // Same seed, but is_internal stays false (Appstle) — customerSelection
+  // genuinely locks the code, so the group linkage does NOT waive the guard.
+  const tables = seedSandra();
+  const admin = makeAdmin(tables);
+  const out = await refuseLoyaltyCouponIfCustomerMismatch(
+    admin, "ws-superfoods", "gid://shopify/SubscriptionContract/999", "LOYALTY-15-YAHOOX",
+  );
+  assert.ok(out, "Appstle mismatch still refuses");
+  assert.equal(out!.success, false);
+});
+
+test("INTERNAL contract + code owner OUTSIDE the link group → still refuses (linkage not proven)", async () => {
+  const tables = makeInternal(seedSandra());
+  // Unlink the yahoo customer (the code's owner) from the group so the code
+  // owner is no longer in the contract owner's link group.
+  tables.customer_links = tables.customer_links!.filter(
+    (l) => (l as { customer_id?: string }).customer_id !== "uuid-cust-yahoo",
+  );
+  const admin = makeAdmin(tables);
+  const out = await refuseLoyaltyCouponIfCustomerMismatch(
+    admin, "ws-superfoods", "gid://shopify/SubscriptionContract/999", "LOYALTY-15-YAHOOX",
+  );
+  assert.ok(out, "internal engine but the code owner is not linked → the mismatch is real, refuse");
+  assert.equal(out!.success, false);
+});
+
 test("cross-workspace: the guard's workspace filter blocks a sub row from another tenant", async () => {
   const tables = seedSandra();
   // Move the sub row to another workspace and re-attempt — the guard's
