@@ -14376,6 +14376,66 @@ export function isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `returns.shopify_customer_id`. Our `public.returns` table was built AFTER Shopify was
+ * sunset and keys customers on `customer_id` (uuid) — it never had a `shopify_customer_id`
+ * column, and no ShopCX code path (src/, scripts/, shopify-extension/, supabase/migrations/,
+ * docs/brain/) filters `returns` by it (internal joins use UUIDs, never `shopify_*_id`). The
+ * message appears on Supabase's `postgres_logs` feed only when an external / stale /
+ * Shopify-era direct-REST client reading our `returns` table with the legacy
+ * `shopify_customer_id` key does a raw `select ... shopify_customer_id ... from
+ * public.returns` lookup — or the PostgREST `WITH pgrst_source AS ( SELECT ... FROM
+ * "public"."returns" ... )` CTE wrapper the same client emits over the REST endpoint. There
+ * is no lever from ShopCX to make that query resolve — paging Platform on it (Control Tower
+ * signature `supabase-logs:ad5b1a7c44ef77c4`) is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise` — same
+ * narrow-gating shape, scoped to the `returns.shopify_customer_id` lookup instead of the
+ * `returns.free_label` one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column returns.shopify_customer_id does not exist` (with or without
+ *      the `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.returns` — either (a) the
+ *      bare `select ... from public.returns` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."returns" ... )` CTE wrapper form
+ *      with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `returns` (a real product-schema
+ *     regression on a live column) still pages,
+ *   - a column-missing error for `shopify_customer_id` on ANY OTHER table still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL on `returns`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingReturnsShopifyCustomerIdColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column returns.shopify_customer_id does not exist" ||
+    stripped === "column public.returns.shopify_customer_id does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?returns\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?returns\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Expected-by-design noise — Postgres reporting `duplicate key value violates unique
  * constraint "dashboard_notifications_dedupe_key_open_uniq"` on an INSERT INTO
  * `public.dashboard_notifications`. That partial UNIQUE index (migration

@@ -47,6 +47,7 @@ import {
   isForeignSupabasePostgresMissingReturnsRefundTypeColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsResolutionColumnAdhocNoise,
   isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise,
+  isForeignSupabasePostgresMissingReturnsShopifyCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingTicketsMergedIntoTicketIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
@@ -471,6 +472,18 @@ const LOG_QUERIES: LogQuery[] = [
       // `returns` column (including the real `label_url`), the same message via a write/DDL, or
       // a FATAL/PANIC/constraint violation still surfaces / pages.
       if (isForeignSupabasePostgresMissingReturnsFreeLabelColumnAdhocNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a foreign/stale direct-REST client (still using the
+      // old Shopify-era key) reads `public.returns` filtering by a legacy `shopify_customer_id`
+      // column. Our `returns` table was built after Shopify was sunset and keys customers on
+      // `customer_id` (uuid) — it never had a `shopify_customer_id` column, and no ShopCX code
+      // path filters `returns` by it (internal joins use UUIDs, never `shopify_*_id`). The
+      // resulting column-missing ERROR is repair work for a query we don't own (Control Tower
+      // signature `supabase-logs:ad5b1a7c44ef77c4`). Narrowly gated to require BOTH the exact
+      // `column returns.shopify_customer_id does not exist` message AND the SELECT-lookup shape on
+      // `returns` (bare or PostgREST CTE wrapper) — a real schema regression on any live
+      // `returns` column, the same message via a write/DDL, or a FATAL/PANIC/constraint violation
+      // still surfaces / pages.
+      if (isForeignSupabasePostgresMissingReturnsShopifyCustomerIdColumnAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a foreign/stale direct-REST client reads
       // `public.fraud_cases` expecting an `updated_at` column that lives only on the sibling
       // `fraud_rules` table. The resulting undefined_column ERROR is repair work for a query
