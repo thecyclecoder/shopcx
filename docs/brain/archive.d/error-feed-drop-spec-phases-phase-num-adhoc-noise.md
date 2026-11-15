@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc `spec_phases.phase_num` column-missing reads from the error feed** · verified 2026-11-15 · → [[../libraries/error-feed]]
