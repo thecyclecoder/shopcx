@@ -1,0 +1,1 @@
+- **Reject unrecognized exec_kind at spec-author chokepoint** · verified 2026-11-16 · → [[libraries/author-spec]]

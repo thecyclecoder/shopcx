@@ -130,10 +130,11 @@ Real regexes still pass, for example `a|b`, `(foo|bar)`, `get(Spec|Specs)`, `[|]
 
 ## Author chokepoint gate
 
-Two gates fire in order BEFORE the DB write; both throw with the offending phase named so the author sees exactly what's un-testable:
+Three gates fire in order BEFORE the DB write; all throw with the offending phase named so the author sees exactly what's un-testable:
 
 1. [[author-spec]] `assertEveryPhaseHasChecks` throws `MissingVerificationError` if any phase yields zero checks — a totally-empty phase never lands.
 2. [[author-spec]] `assertEveryPhaseHasMachineCheck` — [[../specs/every-spec-writer-authors-machine-runnable-verifications]] Phase 1 — throws `MissingMachineCheckError` if any phase's checks are ALL prose / ALL `needs_human`. Every phase must carry ≥1 check with a valid `exec_kind` (tsc | grep | ci_status | http_get | db_probe_readonly | unit_test | build) that passes `validateExecutableCheck`. Machine-runnable is the sole ship gate; `needs_human` rows are legal only as EXTRA advisory checks alongside a real machine one. Applies to both author entry points (structured + markdown) so every writer (planner, spec-chat, ~17 box-worker author lanes, request-fix) inherits it — no writer can land a prose-only spec.
+3. [[author-spec]] `assertAllExecKindsRecognized` — [[../specs/reject-unrecognized-exec-kind-at-spec-author-chokepoint]] Phase 1 — throws `UnrecognizedExecKindError` if any check carries a non-null `exec_kind` not in the recognized set (the 7 auto-testable kinds — tsc | grep | ci_status | http_get | db_probe_readonly | unit_test | build — plus the safe default 'needs_human'). A check with a bogus exec_kind is rejected with a clear error naming the spec, phase, and offending value BEFORE any row is written, closing the gap the per-phase 'at least one valid check' gate leaves open (a bad exec_kind beside a good one could reach the DB and fail on the constraint). Null/unset exec_kind is legal (the un-stamped prose row); only a non-null out-of-enum value is rejected. Applies to both author entry points so every writer inherits it — no spec can land with an out-of-enum exec_kind.
 
 ## Optional, non-blocking `human_review` (Phase 2)
 
