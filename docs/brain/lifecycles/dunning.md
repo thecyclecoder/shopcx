@@ -87,6 +87,35 @@ The Cycle 1 action can also be configured to pause; Cycle 2 can be configured to
 
 The cycle row updates to `status='exhausted'` after action is taken.
 
+### ⭐ Ladder rung = consecutive unrecovered renewals (2026-11-16)
+
+`handleAllCardsExhausted` no longer feeds the raw `cycle_number` into `resolveCycleAction`.
+`createDunningCycle` numbers cycles over the contract's whole life, counting `recovered` cycles
+too, so a customer who failed once, fixed their card and paid was **cancelled within minutes of
+their next ordinary decline**, months later. The rung now comes from
+`getEffectiveLadderStep` → `effectiveLadderStep` ([[../libraries/dunning]]): 1 + the run of
+`exhausted` cycles immediately before this one, stopping at the first `recovered` cycle or the
+first one older than `LADDER_LOOKBACK_DAYS` (120). `cycle_number` itself is unchanged (it keys the
+`(workspace_id, shopify_contract_id, cycle_number)` unique index).
+
+### ⭐ The hard rung waits for payday retries (2026-11-16)
+
+Step 6 of `dunning-payment-failed` (all cards exhausted) runs BEFORE step 7 schedules payday
+retries. On a cancel/pause rung it used to cancel the sub right there, so repeat-failure customers
+never got a single payday retry (and step 7 then flipped the cancelled sub's cycle to `retrying`,
+which the cron halted on). Step 6 now passes `deferHardAction: settings.dunning_payday_retry_enabled`:
+the sub is NOT cancelled and the billing date is NOT rolled, the recovery email goes out, and an
+internal note says retries are scheduled. The cancel lands in `exhaustPaydayCycle` only if every
+payday retry fails. With payday retries disabled, behaviour is unchanged.
+
+### ⭐ The recovery email now sends on ordinary declines (2026-11-16)
+
+`handleAllCardsExhausted` used to write `payment_update_sent=true` and THEN read it back as its
+"already sent?" guard, so the guard was always true and the card-update email never went out on
+a non-terminal decline (insufficient funds, generic decline, etc.). Only the terminal-code paths,
+which call `sendPaymentRecoveryEmail` directly, ever emailed. The flag is now read first; the email
+sends once per cycle (the second call from `exhaustPaydayCycle` still sees the flag and skips).
+
 ## ⭐ A pause or cancel ENDS dunning (CEO rule, 2026-09-09)
 
 The moment a subscription is paused or cancelled, every **open** dunning cycle on it closes —
@@ -207,6 +236,7 @@ decisions that were live defects in the week of 2026-09-09. Every case is a real
 | Retry cap | `shouldExhaustForRetryCap` | `0` and `null` never read as "capped" (the hardcoded `attemptNumber: 0` that made the guard dead code); fires **at** the max, not past it; a runaway 192 still exhausts |
 | Sub-state halt | `shouldHaltRetryForSubStatus` | `paused` **and** `cancelled` **and** missing all halt; `active` still retries |
 | Cycle ladder | `resolveCycleAction` | cycle 1 → gentle, 2+ → hard; a null `cycle_number` falls back to cycle 1, **never** to cancel; reads workspace settings rather than hardcoded verbs |
+| Ladder rung | `effectiveLadderStep` | a `recovered` prior cycle does NOT escalate the next decline to cancel; one unrecovered prior renewal → rung 2; the run stops at the newest recovered cycle; cycles older than 120 days and null dates fall to rung 1 |
 | Open-cycle set | `isOpenDunningStatus` | `exhausted` is **NOT** open — closing it would silently kill Phase 5 reactivation |
 
 The decisions were extracted from inline Inngest steps specifically so they could be tested —
@@ -364,6 +394,7 @@ the cycle instead of collapsing into "no cards".
 **Known gaps / not yet shipped:** None identified.
 
 **Recent activity:**
+- Recovery fixes (2026-11-16): card-update email now actually sends on ordinary declines (flag was stamped before it was read); ladder rung counts consecutive unrecovered renewals instead of lifetime `cycle_number`; the cancel rung waits for payday retries instead of firing in step 6. Found in the 11/16 subscription leakage review (ShopCX-contract recovery 10–23% vs Braintree ~50%). Decline-code casing (`isTerminalErrorCode` exact match vs Shopify's uppercase codes) still open.
 - `getCustomerPaymentMethods` now retries on Shopify GraphQL 5xx/429/network transients (3 retries, 1-2s backoff) — transient upstream blips no longer surface as "zero payment methods" → exhausted cycle. Mirrors `fetchWithRetry` from [[../libraries/shopify-sync]]. (2026-07-17)
 - Order-now (bill_now) async verify + decline hand-off ([[../specs/order-now-verify-async-result-then-decline-recovery-migrate-and-deterministic-retry]], derived from ticket 0a9e4d7f — Judy): an Appstle bill_now decline now shares the recovery-email lane with the scheduled-renewal path — [[../libraries/order-now-verify]] `dispatchRecoveryOnDecline` fires `sendPaymentRecoveryEmail` on a `declined` verdict, guarded against the dunning-webhook double-send via a `dunning.recovery_email_sent` [[../tables/customer_events]] count since `fired_at`. Post-update the sub migrates → internal and the order-now retry runs deterministically; only a verified paid order (Sol's end-state pass) unblocks the customer confirmation reply ([[../libraries/sol-outcome-claim-guard]]). See § Recovery email is also the order-now decline hand-off above + [[subscription-billing]] § Order-now (bill_now). (2026-07-08)
 - Control Tower **stuck-dunning** assertion ([[../libraries/control-tower]], [[../specs/control-tower-renewal-integrity-assertions]] P1): the `dunning-payday-retry-cron` tile flips red when any [[../tables/dunning_cycles]] row is still `retrying` >48h past `next_retry_at` — the retry engine ran but isn't advancing it to recovered/exhausted. A sub correctly mid-dunning (within its retry schedule) is NOT flagged. Pairs with the renewal-cron outcome-distribution assertion (decline/no-PM-skip spike). (2026-06-22)
