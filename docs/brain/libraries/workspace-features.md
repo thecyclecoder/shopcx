@@ -22,7 +22,7 @@ Each workspace carries an `enabled_features text[]` allow-list on [[../tables/wo
 
 - [[../../../src/app/dashboard/sidebar.tsx]] — `NavItem`/`NavSection` gain an optional `feature` key (default derived from the href via `featureForHref`). An item is hidden when its feature isn't granted; a section is hidden when none of its items is visible (feature + role).
 - [[../../../src/app/dashboard/layout.tsx]] — server-side direct-URL guard (Phase 2). The proxy stamps the request path onto an `x-pathname` request header (see `src/lib/supabase/middleware.ts` `updateSession` → `forwardedHeaders`); the layout resolves its feature via `featureForHref` and `redirect()`s to the first enabled feature (Tickets for ShopGrowth, else the first `enabled_features` entry, else `/dashboard/settings`) when `hasWorkspaceFeature` is false. Superfoods (`null`) never redirects; API routes are out of scope.
-- `enabled_features` loads onto the workspace row via `getUserWorkspaces` (`workspaces(*)`) in [[workspace]] and reaches the sidebar through the dashboard layout's `workspace` prop.
+- `enabled_features` loads onto the workspace row via `getUserWorkspaces` in [[workspace]], whose select is the explicit column list `WORKSPACE_ROW_COLUMNS` (exported here; never `workspaces(*)`, which would ship `*_encrypted` blobs to the browser). It reaches the sidebar through the dashboard layout's `workspace` prop. `enabled_features` must stay in that list: when sidebar-workspace-switcher narrowed the select it was dropped, every workspace read as NULL and the gate failed open (caught by the goal's security review, 2026-11-16; pinned by a test).
 
 ## Tests
 

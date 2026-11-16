@@ -2,6 +2,7 @@ import { cache } from "react";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { cookies } from "next/headers";
 import type { WorkspaceWithRole } from "@/lib/types/workspace";
+import { WORKSPACE_ROW_COLUMNS } from "@/lib/workspace-features";
 import { getAuthedUser, getWorkspaceMemberships } from "@/lib/auth"; // db-load-auth-cache
 
 const WORKSPACE_COOKIE = "workspace_id";
@@ -17,9 +18,7 @@ export const getUserWorkspaces = cache(
       // *_encrypted credential blobs into the RSC payload sent to the browser
       // once this row crosses the Server→Client boundary (Sidebar /
       // WorkspaceSwitcher). See sidebar-workspace-switcher Fix 1.
-      .select(
-        "role, workspaces(id, name, shopify_domain, meta_page_id, stripe_account_id, plan, created_at)"
-      )
+      .select(`role, workspaces(${WORKSPACE_ROW_COLUMNS})`)
       .eq("user_id", userId);
 
     if (error || !data) return [];
