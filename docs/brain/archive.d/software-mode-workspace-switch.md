@@ -1,0 +1,1 @@
+- **Software mode for a workspace: skip every CPG step for merchant (software) support** · verified 2026-11-16 · → [[../lifecycles/ticket-lifecycle]]
