@@ -1,0 +1,1 @@
+- **Drop foreign PostgREST noise: spec_test_runs.overall_verdict column-missing errors** · verified 2026-11-12 · → [[libraries/error-feed]]

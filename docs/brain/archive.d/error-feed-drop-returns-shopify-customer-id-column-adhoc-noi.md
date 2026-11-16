@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: returns.shopify_customer_id column-missing from stale direct-REST reads** · verified 2026-11-15 · → [[../libraries/error-feed]]

@@ -12,7 +12,14 @@ export const getUserWorkspaces = cache(
     const admin = createAdminClient();
     const { data, error } = await admin
       .from("workspace_members")
-      .select("role, workspaces(*)")
+      // Only the presentational columns WorkspaceWithRole declares — never
+      // workspaces(*), which would serialize plaintext webhook secrets and
+      // *_encrypted credential blobs into the RSC payload sent to the browser
+      // once this row crosses the Server→Client boundary (Sidebar /
+      // WorkspaceSwitcher). See sidebar-workspace-switcher Fix 1.
+      .select(
+        "role, workspaces(id, name, shopify_domain, meta_page_id, stripe_account_id, plan, created_at)"
+      )
       .eq("user_id", userId);
 
     if (error || !data) return [];

@@ -14,6 +14,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   decideGoalMemberDeadlockAutoBreak,
+  goalMemberAlreadyOnGoalBranch,
   type GoalMemberDispatchState,
   type GoalMemberInflightRow,
 } from "./agent-jobs";
@@ -123,4 +124,22 @@ test("non-earliest race artifact in-flight does NOT count as head-in-flight for 
   ];
   const decision = decideGoalMemberDeadlockAutoBreak({ members, inflight });
   assert.deepEqual(decision, { deadlocked: true, earliest: "control-tower-switch" });
+});
+
+test("parked earliest head (auto_build off / deferred) is skipped — the next ready member becomes the head", () => {
+  // 2026-11-16 shopgrowth-software-support: the alphabetically-first ready head was parked after repeated
+  // self-verify failures, so the auto-break kept re-enqueuing an unbuildable spec and every sibling sat held.
+  for (const parked of [{ parked: true }, { status: "deferred" as const }]) {
+    const members = [m("a-spec", parked), m("b-spec"), m("c-spec")];
+    const decision = decideGoalMemberDeadlockAutoBreak({ members, inflight: [] });
+    assert.deepEqual(decision, { deadlocked: true, earliest: "b-spec" });
+  }
+});
+
+// ── goalMemberAlreadyOnGoalBranch — no daily pre-merge re-test of a member already on the goal branch ──
+test("goalMemberAlreadyOnGoalBranch: stamped goal_branch_sha skips the daily re-test", () => {
+  assert.equal(goalMemberAlreadyOnGoalBranch({ goal_branch_sha: "dc31611ee9f1fde30b33af787db2bf3cefbfe193" }), true);
+  assert.equal(goalMemberAlreadyOnGoalBranch({ goal_branch_sha: null }), false);
+  assert.equal(goalMemberAlreadyOnGoalBranch({ goal_branch_sha: "  " }), false);
+  assert.equal(goalMemberAlreadyOnGoalBranch(null), false);
 });

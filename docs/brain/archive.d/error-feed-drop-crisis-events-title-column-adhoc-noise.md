@@ -1,0 +1,1 @@
+- **Drop foreign crisis_events.title column-missing noise from the error feed** · verified 2026-11-14 · → [[../libraries/error-feed]]

@@ -2690,7 +2690,7 @@ test("monitor.ts stuck-dunning helper mirrors dunning-payday-retry-cron's find-r
 // NEXT variant of the class, not only the exact 2026-10-04 shape — so the tests cover both
 // status axes (failed / in_flight) and the age axis (fresh / stale) against a matching
 // current cycle_key. Also pin the loop registration so the tile is guaranteed wired.
-import { isWedgedCycleCharge } from "./monitor";
+import { isWedgedCycleCharge, renewalCronFanoutElapsedSinceDue } from "./monitor";
 import { STALE_IN_FLIGHT_RECLAIM_MS } from "../subscription-cycle-charge-claim";
 
 const RENEWAL_CRON_LOOP = MONITORED_LOOPS.find((l) => l.id === "internal-subscription-renewal-cron")!;
@@ -2743,6 +2743,35 @@ test("isWedgedCycleCharge: a reclaimable 'failed' current-cycle row on a NOT-YET
   const charge = { cycle_key: "2026-11-20", status: "failed", claimed_at: "2026-10-01T00:00:00Z" };
   const sub = { next_billing_date: "2026-11-20" };
   assert.equal(isWedgedCycleCharge(charge, sub, NOW), false);
+});
+
+test("isWedgedCycleCharge: a reclaimable 'failed' current-cycle row on a sub that became due MINUTES ago (no intervening 09:00 renewal-cron fan-out) is not wedged (ground truth: sub 9379e53d just-became-due false-red)", () => {
+  // next_billing_date passed five minutes ago, after today's 09:00 fan-out; the next real
+  // `0 9 * * *` renewal-cron run is tomorrow's 09:00, so the cron has not yet had its chance to
+  // reclaim + retry — this is normal in-flight dunning, NOT a wedge. The tile must stay green.
+  const NOW = new Date("2026-11-09T10:05:00Z").getTime();
+  const charge = { cycle_key: "2026-11-09", status: "failed", claimed_at: "2026-10-01T00:00:00Z" };
+  const sub = { next_billing_date: "2026-11-09T10:00:00Z" };
+  assert.equal(isWedgedCycleCharge(charge, sub, NOW), false);
+});
+
+test("renewalCronFanoutElapsedSinceDue: false until a post-due 09:00 fan-out elapses, true once it has (e4e3b82e due-midnight/now-noon still wedges)", () => {
+  // Just-became-due at 10:00 (after today's 09:00): next fan-out is tomorrow 09:00 → not elapsed.
+  assert.equal(
+    renewalCronFanoutElapsedSinceDue("2026-11-09T10:00:00Z", new Date("2026-11-09T10:05:00Z").getTime()),
+    false,
+  );
+  // Same due instant, now past tomorrow's 09:00 → a fan-out has elapsed.
+  assert.equal(
+    renewalCronFanoutElapsedSinceDue("2026-11-09T10:00:00Z", new Date("2026-11-10T09:30:00Z").getTime()),
+    true,
+  );
+  // e4e3b82e shape: due at midnight, now noon — today's 09:00 fan-out is strictly after due and
+  // ≤ now, so the grace is satisfied (this is why that case still reds as wedged).
+  assert.equal(
+    renewalCronFanoutElapsedSinceDue("2026-10-04", new Date("2026-10-04T12:00:00Z").getTime()),
+    true,
+  );
 });
 
 test("isWedgedCycleCharge: a stranded stale in_flight row wedges even when the sub is not yet due (crashed attempt, due-guard must not mask it)", () => {

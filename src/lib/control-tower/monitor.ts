@@ -2308,6 +2308,33 @@ export async function countSegmentStaleTail(
  * Deliberately not scoped to `status='failed'` — the point of the assertion is to catch the
  * NEXT variant of the same class, not only the 2026-10-04 sub e4e3b82e shape.
  */
+/**
+ * Pure helper: has at least one daily renewal-cron fan-out (09:00 UTC, matching the loop's
+ * `0 9 * * *` cadence) actually elapsed since the sub became due?
+ *
+ * Returns true iff there is a 09:00-UTC boundary STRICTLY after `nextBillingDate` and ≤ `now`.
+ * i.e. the renewal cron has had at least one real chance to reclaim + retry the failed row since
+ * the sub went due. Between the instant `next_billing_date` passes and that first post-due 09:00
+ * fan-out, a reclaimable `failed` row is just normal in-flight dunning, not a wedge — so the
+ * renewal-wedged-cycles tile must not red yet (false-red ground truth: a dunning-retrying sub
+ * whose next_billing_date passed five minutes ago).
+ */
+export function renewalCronFanoutElapsedSinceDue(
+  nextBillingDate: string | null,
+  now: number,
+): boolean {
+  if (!nextBillingDate) return false;
+  const dueMs = new Date(nextBillingDate).getTime();
+  if (!Number.isFinite(dueMs)) return false;
+  const due = new Date(dueMs);
+  // 09:00 UTC on the same UTC calendar day the sub went due.
+  let boundary = Date.UTC(due.getUTCFullYear(), due.getUTCMonth(), due.getUTCDate(), 9, 0, 0, 0);
+  // The first `0 9 * * *` fan-out STRICTLY after the due instant (if the due instant is already
+  // at or past today's 09:00, the next real fan-out is tomorrow's 09:00).
+  if (boundary <= dueMs) boundary += 24 * 60 * 60 * 1000;
+  return boundary <= now;
+}
+
 export function isWedgedCycleCharge(
   charge: { cycle_key: string; status: string; claimed_at: string },
   sub: { next_billing_date: string | null; billing_source?: string | null },
@@ -2332,6 +2359,12 @@ export function isWedgedCycleCharge(
   if (charge.status !== "in_flight") {
     const nextBillingMs = sub.next_billing_date ? new Date(sub.next_billing_date).getTime() : NaN;
     if (Number.isFinite(nextBillingMs) && nextBillingMs > now) return false;
+    // Post-due renewal-cron grace: even once the sub is due, a reclaimable `failed` row is only a
+    // wedge after at least one daily renewal-cron fan-out (09:00 UTC) has elapsed since it went
+    // due — the cron must have had its actual chance to reclaim + retry and still left the row
+    // failed. In the window between becoming due and that first post-due 09:00 fan-out this is
+    // normal in-flight dunning, not a stuck charge (false-red ground truth: sub 9379e53d).
+    if (!renewalCronFanoutElapsedSinceDue(sub.next_billing_date, now)) return false;
   }
   return true;
 }

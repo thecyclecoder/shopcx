@@ -247,10 +247,16 @@ export async function updateSession(
   overrideRequestHeaders?: Headers,
 ) {
   // `{ request: { headers } }` forwards modified request headers to the render
-  // (the only mechanism in Next 16 that does). Undefined when not a bot → no-op.
-  const reqInit = overrideRequestHeaders
-    ? { request: { headers: overrideRequestHeaders } }
-    : { request };
+  // (the only mechanism in Next 16 that does). We always build a forwarded-headers
+  // object so we can stamp `x-pathname` (the current path) onto every response the
+  // render sees — the dashboard layout reads it to enforce per-workspace feature
+  // access on direct URLs (workspace-feature-access Phase 2). When the caller
+  // neutralized a bot UA, we clone from those override headers so the UA fix rides
+  // along too; otherwise we clone the raw request headers (a pure superset, so the
+  // storefront SSG rewrites are unaffected — the page never reads x-pathname).
+  const forwardedHeaders = new Headers(overrideRequestHeaders ?? request.headers);
+  forwardedHeaders.set("x-pathname", request.nextUrl.pathname);
+  const reqInit = { request: { headers: forwardedHeaders } };
 
   // ── Subdomain routing for help center mini-sites ──
   const hostname = request.headers.get("host") || "";

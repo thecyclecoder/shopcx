@@ -670,6 +670,17 @@ function ghToken() {
   return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
 }
 
+/**
+ * A goal member whose build has already merged onto the goal branch (`specs.goal_branch_sha` stamped) has
+ * nothing left to re-test pre-merge: its accumulation was verified at the spec→goal merge, and its
+ * `claude/build-*` branch is auto-deleted by GitHub once that PR merges. Re-testing it daily against the
+ * deleted branch only produced a "BRANCH UNRESOLVABLE" skip every morning (2026-11 shopgrowth goal). The
+ * member is tested again on main once the goal promotes (`main_merge_sha` set routes it to the normal lane).
+ */
+export function goalMemberAlreadyOnGoalBranch(spec: Pick<SpecRow, "goal_branch_sha"> | null | undefined): boolean {
+  return Boolean(spec?.goal_branch_sha && spec.goal_branch_sha.trim());
+}
+
 /** The pre-merge test context for a goal-compiled spec: its own `claude/build-*` branch (built off the goal
  *  branch, so the accumulated code is present) + the freshest preview URL captured for it (from a prior build
  *  or spec-test job). Returns null when no preview has been captured — the caller then SKIPS rather than
@@ -762,6 +773,10 @@ export async function enqueueSpecTestIfDue(
     // main_merge_sha is NULL until the goal's atomic M5 promotion lands on main (same signal spec-drift uses
     // for its goal-pending guard). NULL ⇒ the members' code is on the goal branch, not main ⇒ route to branch.
     if (goal && !goal.main_merge_sha) {
+      const memberSpec = await getSpecFromDb(workspaceId, slug);
+      if (goalMemberAlreadyOnGoalBranch(memberSpec)) {
+        return { enqueued: false, reason: `goal member already merged onto goal/${goalSlug} (goal_branch_sha set) — its build branch is gone; it re-verifies when the goal promotes to main` };
+      }
       branchCtx = await resolveGoalMemberTestContext(admin, workspaceId, slug);
       if (!branchCtx) {
         return { enqueued: false, reason: `goal-compiled (${goalSlug} not promoted to main) with no branch preview — skipped main-context re-verify to avoid false-fails` };
@@ -2256,6 +2271,23 @@ export interface GoalMemberDispatchState {
   onGoalBranch: boolean;
   status: SpecStatus | null;
   blockedBy: string[];
+  /** Parked by a human or a director: `deferred` (flag or stored status) or `auto_build=false`. A parked
+   *  member never builds on its own, so it must not hold the goal's serial slot (2026-11-16: the
+   *  shopgrowth-software-support goal sat 4 days behind a parked, unbuildable head). Optional so older
+   *  callers and fixtures read as not parked. */
+  parked?: boolean;
+}
+
+/** Is this goal-member still waiting to be built AND eligible to hold the serial slot? Shared by the
+ *  claim-time serializer and the deadlock auto-break so the two never disagree on who the head is. */
+function isUnbuiltSlotCandidate(m: GoalMemberDispatchState): boolean {
+  return !m.onGoalBranch && m.status !== "shipped" && m.status !== "folded" && m.status !== "deferred" && !m.parked;
+}
+
+/** Reader helper: a member is parked when its spec row is deferred (either column) or auto_build is off. */
+function goalMemberParked(spec: Pick<SpecRow, "deferred" | "status" | "auto_build"> | null | undefined): boolean {
+  if (!spec) return false;
+  return spec.deferred === true || spec.status === "deferred" || spec.auto_build === false;
 }
 
 /** An in-flight sibling build row surfaced to the serializer — one active agent_jobs row per goal-mate. */
@@ -2282,9 +2314,7 @@ export function decideGoalMemberBuildDispatch(input: {
   // existing gate's concern). Sort by slug so the choice is deterministic across ticks. Computed FIRST
   // (before the in-flight guard) because the guard below must know WHICH in-flight mate is legitimate.
   const memberBySlug = new Map(members.map((m) => [m.slug, m] as const));
-  const unbuilt = members.filter(
-    (m) => !m.onGoalBranch && m.status !== "shipped" && m.status !== "folded",
-  );
+  const unbuilt = members.filter(isUnbuiltSlotCandidate);
   if (unbuilt.length === 0) return { ok: true };
 
   const readyHeads: string[] = [];
@@ -2380,6 +2410,7 @@ export async function evaluateGoalMemberBuildDispatch(
       onGoalBranch: m.onGoalBranch,
       status: m.status,
       blockedBy: spec?.blocked_by ?? [],
+      parked: goalMemberParked(spec),
     });
   }
 
@@ -2595,6 +2626,7 @@ export async function evaluateGoalMemberEnqueueAdmission(
       onGoalBranch: m.onGoalBranch,
       status: m.status,
       blockedBy: spec?.blocked_by ?? [],
+      parked: goalMemberParked(spec),
     });
   }
 
@@ -2772,9 +2804,7 @@ export function decideGoalMemberDeadlockAutoBreak(input: {
   if (members.length === 0) return { deadlocked: false, reason: "no-members" };
 
   const memberBySlug = new Map(members.map((m) => [m.slug, m] as const));
-  const unbuilt = members.filter(
-    (m) => !m.onGoalBranch && m.status !== "shipped" && m.status !== "folded",
-  );
+  const unbuilt = members.filter(isUnbuiltSlotCandidate);
   if (unbuilt.length === 0) {
     return { deadlocked: false, reason: "no-unbuilt-members" };
   }
@@ -2879,6 +2909,7 @@ export async function autoBreakGoalMemberDeadlockIfDue(
         onGoalBranch: m.onGoalBranch,
         status: m.status,
         blockedBy: spec?.blocked_by ?? [],
+        parked: goalMemberParked(spec),
       });
     }
 

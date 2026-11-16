@@ -92,10 +92,13 @@ All workspace members. No role gate in the page itself; gated only by middleware
 - `src/app/dashboard/tickets/page.tsx` — sub-route
 - `src/app/dashboard/layout.tsx` — component
 - `src/app/dashboard/sidebar.tsx` — component
+- `src/app/dashboard/workspace-switcher.tsx` — workspace switcher (sidebar name block → dropdown)
 - `src/app/dashboard/layout.tsx` — layout wrapper
 - `src/app/api/dashboard/sidebar-counts/route.ts` — consolidated sidebar badge-count endpoint ([[sidebar-counts]])
 
 ## Status / open work
+
+**Workspace switcher (2026-11-12):** The sidebar's workspace name block is now a `WorkspaceSwitcher` client component (`src/app/dashboard/workspace-switcher.tsx`), fed `workspaces = getUserWorkspaces(user.id)` from `layout.tsx` (passed to `Sidebar` as a new `workspaces` prop). With one workspace it renders exactly as the old static name + role block; with more than one it becomes a button opening a small zinc/indigo menu (styled like `src/app/workspace/select/workspace-list.tsx`) listing every workspace the user belongs to with its role, the current one checked. Selecting one calls the existing `selectWorkspace(id)` server action ([[../../../src/app/workspace/select/actions.ts]] → `setActiveWorkspace`), then `router.push('/dashboard')` + `router.refresh()`. A 'Create workspace' link to `/workspace/new` sits at the bottom of the menu. Shared `sidebarContent` means it works in the mobile drawer too. The tickets-only landing fallback for workspaces lacking the dashboard feature is deferred until the [[../goals/shopgrowth-software-support]] M1 "Workspace feature access" milestone exposes a per-workspace dashboard flag. See [[../libraries/workspace]].
 
 **Performance tuning:** The always-on sidebar's `fetchCounts()` poll interval was widened 30s→60s (2026-07-04, spec `db-reduce-calls-q-7726440967385220442`) to cut authenticated RLS `set_config(...)` call volume — a follow-on to the prior 10s→30s widen targeting the same high-frequency round-trip family. Both changes reduce the dominant authenticated load source without materially hurting responsiveness (badge counts tolerate 60s staleness). Phase 3 consolidation ([[../specs/db-load-cut-getspec-amplifier-claim-fan-sidebar-spray]]) further collapsed the 13-17 per-badge endpoint fetches into ONE authenticated round-trip via the [[sidebar-counts]] endpoint.
 
