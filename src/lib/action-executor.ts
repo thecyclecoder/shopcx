@@ -37,8 +37,15 @@ export interface SonnetDecision {
     | "macro"
     | "kb_response"
     | "ai_response"
-    | "escalate";
+    | "escalate"
+    | "shopgrowth_action";
   actions?: ActionParams[];
+  /** software-mode-orchestrator-toolset Phase 3 — present when action_type === "shopgrowth_action". */
+  shopgrowth_action?: {
+    action: string;
+    params?: Record<string, unknown>;
+    confirmation_quote: string;
+  };
   handler_name?: string;
   response_message?: string;
   needs_clarification?: boolean;
@@ -4896,6 +4903,12 @@ export async function executeSonnetDecision(
       await escalateTicket(ctx, `CPG action refused in software mode: ${decision.action_type}`);
       return { messageSent: false, escalated: true, closed: false, statusManaged: false };
     }
+    // The mirror rule: a merchant-store action never runs on a CPG workspace.
+    if (decision.action_type === "shopgrowth_action" && supportMode !== "software") {
+      await sysNote(`[System] shopgrowth_action refused outside software mode`);
+      await escalateTicket(ctx, `shopgrowth_action refused outside software mode`);
+      return { messageSent: false, escalated: true, closed: false, statusManaged: false };
+    }
   }
 
   switch (decision.action_type) {
@@ -5026,6 +5039,10 @@ export async function executeSonnetDecision(
 
     case "escalate":
       await handleEscalate(ctx, decision, trackedSend, sysNote);
+      break;
+
+    case "shopgrowth_action":
+      await executeShopgrowthAction(ctx, decision, trackedSend, sysNote);
       break;
 
     default:
@@ -6333,6 +6350,79 @@ async function handleEscalate(
 }
 
 // ── Escalation Helper ──
+
+/**
+ * software-mode-orchestrator-toolset Phase 3 — execute one confirmed change on the merchant's store.
+ * Gates, in order: a well-formed action; not a forbidden kind (plan/billing/uninstall/data deletion);
+ * the merchant's latest inbound message verbatim-contains the model's confirmation_quote and reads as a
+ * yes; the workspace has ShopGrowth credentials; the ticket has a verified store. Then POST to
+ * ShopGrowth, which owns the allow-list + validation. The reply is rendered ONLY from ShopGrowth's
+ * {ok, summary}; a non-2xx never claims success. A 404 (endpoint not live) escalates with a note.
+ */
+async function executeShopgrowthAction(
+  ctx: ActionContext,
+  decision: SonnetDecision,
+  send: SendFn,
+  sysNote: SysNoteFn,
+): Promise<void> {
+  const sg = await import("@/lib/shopgrowth-support");
+  const req = decision.shopgrowth_action;
+  const action = String(req?.action ?? "").trim();
+  if (!req || !action) {
+    await sysNote("[ShopGrowth] shopgrowth_action had no action — escalating.");
+    await escalateTicket(ctx, "shopgrowth_action_malformed");
+    return;
+  }
+  if (sg.isForbiddenShopgrowthAction(action)) {
+    await sysNote(`[ShopGrowth] Refused "${action}": plan, billing, uninstall and data deletion are never AI actions.`);
+    await escalateTicket(ctx, `shopgrowth_action_forbidden:${action}`);
+    return;
+  }
+  const { data: latest } = await ctx.admin
+    .from("ticket_messages")
+    .select("body_clean, body")
+    .eq("ticket_id", ctx.ticketId)
+    .eq("direction", "inbound")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const latestText = String((latest as { body_clean?: string | null; body?: string | null } | null)?.body_clean
+    || (latest as { body?: string | null } | null)?.body || "");
+  if (!sg.isShopgrowthActionConfirmed(latestText, req.confirmation_quote)) {
+    await sysNote(`[ShopGrowth] "${action}" not executed: the merchant's latest message does not explicitly confirm it (quote: "${String(req.confirmation_quote ?? "").slice(0, 120)}").`);
+    await escalateTicket(ctx, "shopgrowth_action_unconfirmed");
+    return;
+  }
+  const cfg = await sg.getShopgrowthConfig(ctx.admin, ctx.workspaceId);
+  if (!cfg) {
+    await sysNote("[ShopGrowth] Workspace has no ShopGrowth API base/token configured — cannot execute; escalating.");
+    await escalateTicket(ctx, "shopgrowth_not_configured");
+    return;
+  }
+  const key = await sg.getTicketStoreKey(ctx.admin, ctx.ticketId, ctx.customerId || null);
+  if (!key) {
+    await sysNote("[ShopGrowth] Ticket has no verified store (shop/app tags) — cannot execute; escalating.");
+    await escalateTicket(ctx, "shopgrowth_no_verified_store");
+    return;
+  }
+  if (ctx.sandbox) {
+    await sysNote(`[ShopGrowth] Sandbox: would POST ${action} ${JSON.stringify(req.params ?? {})} for ${key.shop}.`);
+    return;
+  }
+  const result = await sg.postShopgrowthAction(cfg, key, { action, params: req.params ?? {}, ticket_id: ctx.ticketId });
+  if (result.kind === "ok") {
+    await sysNote(`[ShopGrowth] ${action} executed for ${key.shop}: ${result.summary}`);
+    await send(result.summary, ctx.sandbox);
+    return;
+  }
+  if (result.kind === "not_live") {
+    await sysNote(`[ShopGrowth] Actions endpoint not live yet (404) — "${action}" was NOT executed. A human needs to do this in ShopGrowth.`);
+    await escalateTicket(ctx, "shopgrowth_action_endpoint_not_live");
+    return;
+  }
+  await sysNote(`[ShopGrowth] "${action}" failed (${result.status ?? "network"}): ${result.detail}`);
+  await escalateTicket(ctx, `shopgrowth_action_failed:${result.status ?? "network"}`);
+}
 
 async function escalateTicket(ctx: ActionContext, reason: string): Promise<void> {
   // Escalate to the AI Routine: escalated_at set + escalated_to = null (the
