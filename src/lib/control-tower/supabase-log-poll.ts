@@ -54,6 +54,7 @@ import {
   isForeignSupabasePostgresMissingAgentActionRequestsUpdatedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingFraudCasesCustomerIdColumnAdhocNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise,
+  isForeignSupabasePostgresMissingCustomersDisplayNameAdhocNoise,
   isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
@@ -531,6 +532,15 @@ const LOG_QUERIES: LogQuery[] = [
       // shape on `loyalty_redemptions` (bare or PostgREST CTE wrapper) — a different missing
       // column, `customer_id` on `loyalty_members`, a non-SELECT write, or a FATAL still pages.
       if (isForeignSupabasePostgresMissingLoyaltyRedemptionsCustomerIdColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: an external-tool / Studio exploratory SELECT reads
+      // `display_name` from `customers`, a column that table has never carried (user-facing names
+      // come from `workspace_members.display_name`) and that no ShopCX code selects. The resulting
+      // undefined_column ERROR is repair work for a query we don't own (Control Tower signature
+      // `supabase-logs:4125db0b44e76f83`). Narrowly gated to require BOTH the exact
+      // `column customers.display_name does not exist` message AND the SELECT-lookup shape on
+      // `customers` (bare or PostgREST CTE wrapper) — a different missing column, a non-SELECT
+      // write, or a different table still pages.
+      if (isForeignSupabasePostgresMissingCustomersDisplayNameAdhocNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale external/REST client SELECTs `customer_links`
       // with an edge-list assumption (`customer_id` OR `linked_customer_id`) that our
       // `group_id`-based schema never supported — `customer_links.linked_customer_id` has never
