@@ -37,7 +37,7 @@
 
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getBraintreeGateway } from "@/lib/integrations/braintree";
-import { createAmplifierOrder } from "@/lib/integrations/amplifier";
+import { createAmplifierOrder, stampAmplifierImportFailure } from "@/lib/integrations/amplifier";
 import { generateOrderNumber } from "@/lib/order-number";
 import { createTransaction as createAvalaraTx } from "@/lib/avalara";
 import { errText } from "@/lib/error-text";
@@ -64,6 +64,35 @@ export function toAvalaraAddress(
   if (!line1 || !city || !region || !postalCode) return null;
   const line2 = str("address2") || str("line2");
   return { line1, ...(line2 ? { line2 } : {}), city, region, postalCode, country };
+}
+
+/**
+ * Amplifier rejects an order whose ship-to name is blank with a 400. The
+ * one-off path reuses the customer's most recent order address, which can carry
+ * empty firstName/lastName — order SHOPCX583 (Randi Stier) was charged, 400'd,
+ * and sat paid-and-unshipped for 28 days behind exactly that. Fill the name from
+ * the customer record when the address's own name fields are blank/whitespace,
+ * writing both the camelCase (firstName) and snake_case (first_name) keys the
+ * stored `orders.shipping_address` and the Amplifier payload are read under.
+ * Pure — returns a copy, exported for tests.
+ */
+export function withShipToName(
+  ship: Record<string, unknown>,
+  customer: { first_name?: string | null; last_name?: string | null },
+): Record<string, unknown> {
+  const blank = (v: unknown): boolean => typeof v !== "string" || v.trim() === "";
+  const out = { ...ship };
+  const first = (customer.first_name ?? "").trim();
+  const last = (customer.last_name ?? "").trim();
+  if (blank(out.firstName) && blank(out.first_name) && first) {
+    out.firstName = first;
+    out.first_name = first;
+  }
+  if (blank(out.lastName) && blank(out.last_name) && last) {
+    out.lastName = last;
+    out.last_name = last;
+  }
+  return out;
 }
 
 export interface OneTimeChargeItem {
@@ -263,6 +292,9 @@ export async function chargeOneTimeOrder(
     ship = (lastOrder?.shipping_address as Record<string, unknown> | null) ?? null;
   }
   if (!ship) return { success: false, error: "no_shipping_address" };
+  // A reused address can carry blank name fields; Amplifier 400s on a nameless
+  // ship-to. Fill from the customer before we store OR push the order.
+  ship = withShipToName(ship, customer);
 
   const shippingCents = Math.max(0, Math.trunc(input.shippingCents ?? 0));
   const orderNumber = await generateOrderNumber(workspaceId);
@@ -499,14 +531,13 @@ export async function chargeOneTimeOrder(
         .eq("id", order.id);
     } else {
       amplifierError = amp.error || "amplifier_create_failed";
-      await admin
-        .from("orders")
-        .update({ amplifier_last_error: amplifierError })
-        .eq("id", order.id);
+      // Stamp through the import-reliability rail so amplifier_import_attempts
+      // increments — the reconcile sweep and stale-errored CEO card both read it.
+      await stampAmplifierImportFailure(admin, order.id as string, amp.error, amp.details);
     }
   } catch (err) {
     amplifierError = errText(err);
-    await admin.from("orders").update({ amplifier_last_error: amplifierError }).eq("id", order.id);
+    await stampAmplifierImportFailure(admin, order.id as string, "amplifier_threw", amplifierError);
   }
 
   return {

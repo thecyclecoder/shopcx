@@ -38,6 +38,10 @@ test("Phase 2: storefront eligibility is preserved (the original scope)", () => 
   assert.equal(isReconcileEligibleSourceName("storefront"), true);
 });
 
+test("concierge: shopcx-concierge one-off orders are eligible for reconcile retries (order SHOPCX583)", () => {
+  assert.equal(isReconcileEligibleSourceName("shopcx-concierge"), true);
+});
+
 test("Phase 2: comp $0 marker orders are NOT eligible — they don't ship physical product through Amplifier", () => {
   assert.equal(isReconcileEligibleSourceName("internal_subscription_comp_renewal"), false);
 });
@@ -49,9 +53,10 @@ test("Phase 2: an unknown source name is NOT eligible (safety default — never 
   assert.equal(isReconcileEligibleSourceName(undefined), false);
 });
 
-test("Phase 2: the eligible set exposes exactly the two allowed source names (guards accidental drift)", () => {
+test("the eligible set exposes exactly the allowed source names (guards accidental drift)", () => {
   assert.deepEqual([...RECONCILE_ELIGIBLE_SOURCE_NAMES].sort(), [
     "internal_subscription_renewal",
+    "shopcx-concierge",
     "storefront",
   ]);
 });
