@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { hasWorkspaceFeature, featureForHref } from "./workspace-features";
+import { hasWorkspaceFeature, featureForHref, WORKSPACE_ROW_COLUMNS } from "./workspace-features";
 
 test("null enabled_features grants every feature (Superfoods default)", () => {
   assert.equal(hasWorkspaceFeature(null, "tickets"), true);
@@ -40,4 +40,11 @@ test("featureForHref returns null for non-gated hrefs", () => {
   assert.equal(featureForHref("#"), null);
   assert.equal(featureForHref(""), null);
   assert.equal(featureForHref("/showcase"), null);
+});
+
+test("getUserWorkspaces selects enabled_features, so the feature gate cannot fail open", () => {
+  const cols = WORKSPACE_ROW_COLUMNS.split(",").map((c) => c.trim());
+  assert.ok(cols.includes("enabled_features"));
+  assert.ok(!cols.includes("*"));
+  assert.ok(!cols.some((c) => c.endsWith("_encrypted")));
 });

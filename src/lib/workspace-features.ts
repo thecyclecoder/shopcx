@@ -38,3 +38,11 @@ export function featureForHref(href: string): string | null {
   const m = href.match(/^\/dashboard\/([^/?#]+)/);
   return m ? m[1] : null;
 }
+
+/**
+ * Every column `Workspace` declares, and nothing else (never `*`: that would ship *_encrypted blobs to
+ * the browser). `enabled_features` must stay listed: the dashboard layout + sidebar gate on it, and a
+ * select that drops it reads as NULL = "all features enabled" (the guard silently fails open).
+ */
+export const WORKSPACE_ROW_COLUMNS =
+  "id, name, shopify_domain, meta_page_id, stripe_account_id, plan, created_at, enabled_features";
