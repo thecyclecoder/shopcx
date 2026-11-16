@@ -57,6 +57,7 @@ import {
   isForeignSupabasePostgresMissingCustomersDisplayNameAdhocNoise,
   isForeignSupabasePostgresMissingCustomerLinksLinkedCustomerIdColumnNoise,
   isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise,
+  isForeignSupabasePostgresMissingCustomerPaymentMethodsCardTypeColumnNoise,
   isForeignSupabasePostgresMissingDashboardNotificationsDismissedAtColumnNoise,
   isForeignSupabasePostgresMissingAgentJobsFinishedAtColumnAdhocNoise,
   isForeignSupabasePostgresMissingAgentJobsAttemptsColumnAdhocNoise,
@@ -558,6 +559,16 @@ const LOG_QUERIES: LogQuery[] = [
       // exist` message AND the SELECT-lookup shape on `loyalty_redemptions` (bare or PostgREST CTE
       // wrapper) — a different missing column, a non-SELECT write, or a FATAL still pages.
       if (isForeignSupabasePostgresMissingLoyaltyRedemptionsLineageColumnNoise(message, query)) return null;
+      // Drop foreign-app noise at capture: a stale external/REST client SELECTs a display-column
+      // schema (`card_type` / `card_last4` / `card_exp_month` / `card_exp_year`) from
+      // `customer_payment_methods` that the table never carried — our real columns are
+      // `card_brand` / `last4` / `expiration_month` / `expiration_year`. The resulting
+      // undefined_column ERROR is repair work for a query no ShopCX code owns (Control Tower
+      // signature `supabase-logs:163e4ba4ccdd7207`). Narrowly gated to require BOTH the exact
+      // `column customer_payment_methods.card_type does not exist` message AND the SELECT-lookup
+      // shape on `customer_payment_methods` (bare or PostgREST CTE wrapper) — a different missing
+      // column, a non-SELECT write, or a FATAL still pages.
+      if (isForeignSupabasePostgresMissingCustomerPaymentMethodsCardTypeColumnNoise(message, query)) return null;
       // Drop foreign-app noise at capture: a stale external/REST client SELECTs a
       // `dismissed_at` column from `dashboard_notifications` that the table never owned.
       // The resulting undefined_column ERROR is repair work for a query we don't own
