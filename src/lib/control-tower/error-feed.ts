@@ -14573,6 +14573,65 @@ export function isForeignSupabasePostgresMissingReturnsShopifyCustomerIdColumnAd
 }
 
 /**
+ * Foreign-app noise — Postgres reporting a missing column for an ad hoc SELECT lookup of
+ * `returns.refund_on`. Our `public.returns` table has no `refund_on` column (nor `created_by`)
+ * — no ShopCX code path (src/, scripts/, shopify-extension/, supabase/migrations/,
+ * docs/brain/) selects `returns` by it. The message appears on Supabase's `postgres_logs`
+ * feed only when an external / stale direct-REST client reads our `returns` table with a
+ * schema that isn't ours (columns `refund_on`, `created_by`) via a raw
+ * `select ... refund_on ... from public.returns` lookup — or the PostgREST
+ * `WITH pgrst_source AS ( SELECT ... FROM "public"."returns" ... )` CTE wrapper the same
+ * client emits over the REST endpoint. There is no lever from ShopCX to make that query
+ * resolve — paging Platform on it (Control Tower signature `supabase-logs:92aa4d87583b035f`)
+ * is repair work for a query we don't own.
+ *
+ * Sibling of `isForeignSupabasePostgresMissingReturnsShopifyCustomerIdColumnAdhocNoise` —
+ * same narrow-gating shape, scoped to the `returns.refund_on` lookup instead of the
+ * `returns.shopify_customer_id` one.
+ *
+ * `true` ONLY when BOTH markers are present:
+ *   1. the message is Postgres's canonical column-missing shape for THIS column —
+ *      trimmed equal to `column returns.refund_on does not exist` (with or without the
+ *      `public.` qualifier and any leading `ERROR: ` prefix Postgres includes on the logs
+ *      surface), AND
+ *   2. the `parsed.query` attribute is a SELECT-lookup on `public.returns` — either (a) the
+ *      bare `select ... from public.returns` shape, OR (b) the PostgREST-generated
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."returns" ... )` CTE wrapper form
+ *      with double-quoted identifiers.
+ *
+ * Narrowly gated so:
+ *   - a column-missing error for ANY OTHER column on `returns` (a real product-schema
+ *     regression on a live column) still pages,
+ *   - a column-missing error for `refund_on` on ANY OTHER table still pages,
+ *   - the same message attached to a DIFFERENT statement shape (INSERT / UPDATE / DELETE /
+ *     DDL on `returns`) still pages — the pin is the SELECT-lookup shape,
+ *   - a FATAL / PANIC / constraint violation is untouched (different message).
+ *
+ * Consumed by the `postgres` LogQuery's `mapRow` in [[./supabase-log-poll]] before
+ * `keyParts` is constructed — the mapRow contract treats `null` as `drop, do not record`,
+ * so returning null here fully suppresses the row (no error_event, no loop_alert, no
+ * signature). Not a `transient` flag: this is a capture-time drop.
+ */
+export function isForeignSupabasePostgresMissingReturnsRefundOnColumnAdhocNoise(
+  message: string | null | undefined,
+  query: string | null | undefined,
+): boolean {
+  const msg = (message ?? "").trim();
+  if (!msg) return false;
+  const stripped = msg.replace(/^ERROR:\s*/i, "").trim();
+  const messageMatches =
+    stripped === "column returns.refund_on does not exist" ||
+    stripped === "column public.returns.refund_on does not exist";
+  if (!messageMatches) return false;
+  const q = (query ?? "").trim().toLowerCase();
+  if (!q) return false;
+  const bareSelect = /^select\b[\s\S]*\bfrom\s+(?:public\.)?returns\b/.test(q);
+  const pgrstCte =
+    /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?returns\b/.test(q);
+  return bareSelect || pgrstCte;
+}
+
+/**
  * Expected-by-design noise — Postgres reporting `duplicate key value violates unique
  * constraint "dashboard_notifications_dedupe_key_open_uniq"` on an INSERT INTO
  * `public.dashboard_notifications`. That partial UNIQUE index (migration
