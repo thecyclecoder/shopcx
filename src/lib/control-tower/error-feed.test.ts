@@ -7377,6 +7377,28 @@ test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise drops
   );
 });
 
+test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise drops the created_at read via the PostgREST pgrst_source wrapper", () => {
+  // The exact recurring sample for signature supabase-logs:8c74545e2bb338bf — the foreign
+  // read arrives as PostgREST's `WITH pgrst_source AS ( SELECT ... )` direct-REST wrapper
+  // (double-quoted identifiers), the shape the bare-SELECT branch missed.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column spec_status_history.created_at does not exist",
+      'WITH pgrst_source AS ( SELECT "public"."spec_status_history".* FROM "public"."spec_status_history" WHERE "public"."spec_status_history"."field" = $1 ORDER BY "public"."spec_status_history"."created_at" DESC LIMIT $2 OFFSET $3 ) SELECT * FROM "pgrst_source"',
+    ),
+    true,
+  );
+  // A non-SELECT op wrapped in the same `WITH pgrst_source AS (...)` envelope is a real
+  // code bug writing the bogus column — it still pages.
+  assert.equal(
+    isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(
+      "column spec_status_history.created_at does not exist",
+      'WITH pgrst_source AS ( UPDATE "public"."spec_status_history" SET "created_at" = $1 WHERE "id" = $2 RETURNING * ) SELECT * FROM "pgrst_source"',
+    ),
+    false,
+  );
+});
+
 test("isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise KEEPS a column-missing error on any OTHER table (a table that DOES have a created_at column still pages)", () => {
   assert.equal(
     isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocNoise(

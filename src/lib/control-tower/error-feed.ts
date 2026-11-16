@@ -7000,7 +7000,10 @@ export function isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
  *      `public.` qualified variant, with any leading `ERROR: ` prefix Postgres includes
  *      on the logs surface stripped), AND
  *   2. the `parsed.query` attribute is a bare `select ... from public.spec_status_history`
- *      lookup shape (any WHERE / LIMIT / ORDER BY tail is fine).
+ *      lookup shape (any WHERE / LIMIT / ORDER BY tail is fine), or PostgREST's
+ *      `WITH pgrst_source AS ( SELECT ... FROM "public"."spec_status_history" ... )`
+ *      direct-REST wrapper (double-quoted identifiers) — the shape actually recurring in the
+ *      feed for signature `supabase-logs:8c74545e2bb338bf`, mirroring the `old_value` sibling.
  *
  * Narrowly gated so:
  *   - a column-missing error for ANY OTHER table (a real product-schema regression on a
@@ -7009,8 +7012,9 @@ export function isForeignSupabasePostgresMissingSmartPatternsContentAdhocNoise(
  *   - a column-missing error on `spec_status_history` for a DIFFERENT column (e.g. the
  *     real `at` column got renamed) still pages — the pin covers `created_at` only,
  *   - a `spec_status_history.created_at` error attached to a DIFFERENT statement shape
- *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables) still pages — the pin
- *     is the bare SELECT-lookup shape, matching the ad hoc direct-REST read we've observed,
+ *     (INSERT / UPDATE / DELETE / DDL, a JOIN across other tables, or a non-SELECT PostgREST
+ *     wrapper) still pages — the pin is the bare SELECT-lookup OR pgrst_source SELECT-wrapper
+ *     shape, matching the ad hoc direct-REST read we've observed,
  *   - a FATAL / PANIC / constraint violation / permission-denied / relation-missing on
  *     `spec_status_history` is untouched (different message),
  *   - empty / nullish message OR query returns `false` — we need both markers.
@@ -7042,7 +7046,15 @@ export function isForeignSupabasePostgresMissingSpecStatusHistoryCreatedAtAdhocN
   // captured — a caller that actually writes to spec_status_history with a bogus
   // `created_at` column is a code bug we DO want to page on, not the ad hoc direct-REST
   // read this drop targets.
-  return /^select\b[\s\S]*\bfrom\s+(?:public\.)?spec_status_history\b/.test(q);
+  if (/^select\b[\s\S]*\bfrom\s+(?:public\.)?spec_status_history\b/.test(q)) return true;
+  // PostgREST direct-REST reads arrive wrapped as `WITH pgrst_source AS ( SELECT ... FROM
+  // "public"."spec_status_history" ... )` (double-quoted identifiers) — same foreign read,
+  // the shape actually recurring in this signature. The wrapped op must be a SELECT, so a
+  // PostgREST INSERT/UPDATE/DELETE naming the bogus column still pages. Mirrors the
+  // `old_value` sibling.
+  return /^with\s+pgrst_source\s+as\s*\(\s*select\b[\s\S]*\bfrom\s+"?(?:public"?\.)?"?spec_status_history\b/.test(
+    q,
+  );
 }
 
 /**
