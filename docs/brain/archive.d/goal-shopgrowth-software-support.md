@@ -1,0 +1,1 @@
+- **ShopGrowth merchant support on ShopCX (software mode)** · folded 2026-11-16 · → [[../lifecycles/ticket-lifecycle]]
