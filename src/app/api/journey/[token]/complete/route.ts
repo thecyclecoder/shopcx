@@ -864,6 +864,12 @@ export async function POST(
     const metadata = (config.metadata || {}) as Record<string, unknown>;
     const wsId = session.workspace_id;
     const actionLog: string[] = [];
+    // Save-offer result (saved_ outcomes) — drives the ticket close, the customer message and
+    // whether we send them to the portal item editor.
+    let actionType = "unknown";
+    let saveFailed = false;
+    let savedAction = "";
+    let redirectUrl: string | null = null;
 
     const cancelReason = responses?.cancel_reason?.value || "unknown";
     const cancelReasonLabel = responses?.cancel_reason?.label || cancelReason;
@@ -1069,41 +1075,58 @@ export async function POST(
       // Customer accepted a remedy — look up type from DB
       const remedyId = responses?.remedy_selection?.value;
 
-      // Get the actual remedy type from the remedies table
-      let actionType = responses?.remedy_action?.value || "unknown";
-      if (remedyId) {
-        const { data: remedyRow } = await admin.from("remedies").select("type").eq("id", remedyId).maybeSingle();
-        if (remedyRow?.type) actionType = remedyRow.type;
-      }
+      // ⭐ Apply the save through the SAME executor the portal uses (src/lib/remedy-actions.ts).
+      // This branch used to carry its own copy that handled only pause / skip / coupon and a
+      // frequency change hardcoded to every 2 months — `free_product` and `line_item_modifier`
+      // did nothing while the customer was told their subscription was updated.
+      type RemedyRowT = { type: string; config: Record<string, unknown> | null };
+      const remedyRow: RemedyRowT | null = remedyId
+        ? ((await admin.from("remedies").select("type, config").eq("id", remedyId).eq("workspace_id", wsId).maybeSingle()).data as RemedyRowT | null)
+        : null;
+      const couponCode = responses?.remedy_coupon?.value;
+      actionType = remedyRow?.type || (couponCode ? "coupon" : "unknown");
 
-      if (selectedSub && actionType !== "unknown") {
-        const { subscriptionAction, subscriptionSkipNextOrder, subscriptionUpdateBillingInterval } = await import("@/lib/commerce/subscription");
-
-        if (actionType === "pause") {
-          const result = await subscriptionAction(wsId, selectedSub.contractId, "pause");
-          actionLog.push(result.success ? `Paused subscription ${selectedSub.contractId}` : `Failed to pause: ${result.error}`);
-        } else if (actionType === "skip") {
-          const result = await subscriptionSkipNextOrder(wsId, selectedSub.contractId);
-          actionLog.push(result.success ? `Skipped next order for ${selectedSub.contractId}` : `Failed to skip: ${result.error}`);
-        } else if (actionType === "frequency_change") {
-          const result = await subscriptionUpdateBillingInterval(wsId, selectedSub.contractId, "MONTH", 2);
-          actionLog.push(result.success ? `Changed frequency to every 2 months for ${selectedSub.contractId}` : `Failed to change frequency: ${result.error}`);
-        } else if (actionType === "coupon") {
-          // Apply coupon through the commerce SDK — engine-aware, removes existing, mirrors locally.
-          const couponCode = responses?.remedy_coupon?.value;
-          if (couponCode) {
-            try {
-              const { applyCoupon } = await import("@/lib/commerce/subscription");
-              const result = await applyCoupon(wsId, selectedSub.contractId, couponCode);
-              if (result.success) {
-                actionLog.push(`Applied coupon ${couponCode} to subscription ${selectedSub.contractId}`);
-              } else {
-                actionLog.push(`Failed to apply coupon: ${result.error}`);
-              }
-            } catch (err) {
-              actionLog.push(`Failed to apply coupon: ${err}`);
-            }
+      if (!selectedSub || actionType === "unknown") {
+        saveFailed = true;
+        actionLog.push(`Could not apply save offer: ${!selectedSub ? "no target subscription" : "remedy not found"}`);
+      } else if (actionType === "line_item_modifier") {
+        // The item editor lives in the portal. Hand the customer straight into it with a magic
+        // link (no login) rather than claiming a change we didn't make.
+        try {
+          const { data: cust } = await admin.from("customers")
+            .select("id, email, shopify_customer_id").eq("id", session.customer_id).maybeSingle();
+          if (cust?.email) {
+            const { generateMagicLinkURL } = await import("@/lib/magic-link");
+            redirectUrl = await generateMagicLinkURL(cust.id, cust.shopify_customer_id || "", cust.email, wsId, "/subscriptions", 24);
+            actionLog.push(`Customer chose to change items on ${selectedSub.contractId} — sent to the portal item editor`);
+          } else {
+            saveFailed = true;
+            actionLog.push("Customer chose to change items, but has no email for a portal link");
           }
+        } catch (err) {
+          saveFailed = true;
+          actionLog.push(`Failed to build portal link for item change: ${err}`);
+        }
+      } else if (actionType === "coupon" && couponCode) {
+        // The AI ranker can attach a specific code to the offer; apply that exact code.
+        const { applyCoupon } = await import("@/lib/commerce/subscription");
+        const result = await applyCoupon(wsId, selectedSub.contractId, couponCode);
+        if (result.success) {
+          savedAction = `applied ${couponCode} to your subscription`;
+          actionLog.push(`Applied coupon ${couponCode} to subscription ${selectedSub.contractId}`);
+        } else {
+          saveFailed = true;
+          actionLog.push(`Failed to apply coupon: ${result.error}`);
+        }
+      } else {
+        const { executeRemedyAction } = await import("@/lib/remedy-actions");
+        const result = await executeRemedyAction(wsId, selectedSub.contractId, actionType, remedyRow?.config || {});
+        if (result.success) {
+          savedAction = result.savedAction || "";
+          actionLog.push(`Save offer applied (${actionType}) to ${selectedSub.contractId}: ${savedAction}`);
+        } else {
+          saveFailed = true;
+          actionLog.push(`Failed to apply ${actionType} save offer: ${result.error}`);
         }
       }
 
@@ -1114,7 +1137,9 @@ export async function POST(
           customer_id: session.customer_id,
           cancel_reason: cancelReason,
           remedy_id: remedyId || null,
-          remedy_type: responses?.remedy_action?.value || outcome,
+          // The REAL offer type (was the literal "save"/"coupon" from the client), so the offer
+          // ranker can learn from journey saves the same way it learns from portal saves.
+          remedy_type: actionType !== "unknown" ? actionType : (responses?.remedy_action?.value || outcome),
           offered_text: responses?.remedy_selection?.label || null,
           accepted: true,
           first_renewal: isFirstRenewal,
@@ -1123,8 +1148,21 @@ export async function POST(
         if (acceptedErr) console.warn("[cancel-flow] remedy_outcomes insert failed (saved branch)", acceptedErr.message);
       }
 
+      if (saveFailed && session.ticket_id) {
+        // Never tell the customer we changed something we didn't. Leave the ticket OPEN for an
+        // agent and raise it, so a human applies the save the customer accepted.
+        await admin.from("tickets").update({ status: "open", handled_by: null, updated_at: new Date().toISOString() }).eq("id", session.ticket_id);
+        await admin.from("dashboard_notifications").insert({
+          workspace_id: wsId,
+          type: "system",
+          title: "Accepted save offer could not be applied",
+          body: `Ticket ${session.ticket_id} — customer accepted a ${actionType} save offer in the cancel journey but it failed to apply. Apply it manually.`,
+          metadata: { severity: "high", ticket_id: session.ticket_id, journey_session_id: session.id },
+        });
+      }
+
       // Tag ticket positive
-      if (session.ticket_id) {
+      if (session.ticket_id && !saveFailed) {
         const { addTicketTag } = await import("@/lib/ticket-tags");
         await addTicketTag(session.ticket_id, "jo:positive");
 
@@ -1175,7 +1213,7 @@ export async function POST(
       // Send customer-facing confirmation
       const confirmMsg = outcome === "cancelled"
         ? `<p>Your subscription has been cancelled. You won't be charged again.${otherSubsNote}</p>`
-        : "<p>We've updated your subscription. Thank you for staying with us!</p>";
+        : `<p>${savedConfirmation(saveFailed, redirectUrl, savedAction)}</p>`;
 
       // Get ticket info for channel-aware delivery
       const { data: ticketData } = await admin.from("tickets")
@@ -1236,9 +1274,9 @@ export async function POST(
 
     const message = outcome === "cancelled"
       ? "Your subscription has been cancelled. You won't be charged again. You're always welcome back."
-      : "We've updated your subscription. Thank you for staying with us!";
+      : savedConfirmation(saveFailed, redirectUrl, savedAction);
 
-    return NextResponse.json({ success: true, message });
+    return NextResponse.json({ success: !saveFailed, message, ...(redirectUrl ? { redirect_url: redirectUrl } : {}) });
   }
 
   // Handle declined — use journey-delivery nudge system
@@ -1397,4 +1435,12 @@ async function sendCrisisConfirmation(
     agentName: "Customer Care",
     workspaceName: ws?.name || "",
   });
+}
+
+/** Customer-facing wording for an accepted save offer. Never claims a change that didn't happen. */
+function savedConfirmation(saveFailed: boolean, redirectUrl: string | null, savedAction: string): string {
+  if (saveFailed) return "We weren't able to make that change automatically. Our team has been notified and will take care of it shortly.";
+  if (redirectUrl) return "Great, let's update your items. We're opening your subscription so you can make the change.";
+  if (savedAction) return `Done! We've ${savedAction}. Thank you for staying with us!`;
+  return "We've updated your subscription. Thank you for staying with us!";
 }

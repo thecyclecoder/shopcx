@@ -32,16 +32,30 @@ Built live by `src/lib/cancel-journey-builder.ts`. Sequence:
 
 ## Remedy execution
 
-On accept, action dispatch by remedy type:
+⭐ **One executor for both surfaces (2026-11-16).** The portal cancel flow
+([[../libraries/portal__handlers__cancel-journey]]) and the journey / mini-site cancel flow
+(`src/app/api/journey/[token]/complete/route.ts`) both apply an accepted save through
+[[../libraries/remedy-actions]] `executeRemedyAction` / `executeLineItemAction`, all via the
+engine-aware commerce SDK. Before this, the journey had its own copy that handled only pause /
+skip / coupon plus a frequency change hardcoded to every 2 months: `free_product` and
+`line_item_modifier` did nothing while the customer was told "We've updated your subscription",
+and a "Monthly Frequency" offer set every-2-months. **Add a new remedy type in
+`remedy-actions.ts` only, never inline in one surface.**
 
-| type | What |
+| type | What (both surfaces) |
 |---|---|
-| `coupon` | `applyDiscountWithReplace()` ([[../integrations/appstle]] — replaces any existing first) |
-| `pause` | `appstleSubscriptionAction("pause")` + schedule auto-resume via [[../inngest/portal-auto-resume]] |
-| `skip` | `appstleSkipNextOrder()` (disabled — Appstle endpoint unreliable; see project_appstle_disabled_features) |
-| `frequency_change` | `appstleUpdateBillingInterval()` |
-| `free_product` | `appstleAddFreeProduct()` |
-| `line_item_modifier` | Multi-step frontend flow (add/remove/swap items) |
+| `coupon` | `applyCoupon` with the remedy's `coupon_mappings` code (the journey applies the AI-attached `coupon_code` when present) |
+| `pause` | `subscriptionAction("pause")` + `pause_resume_at = now + config.pause_days` (default 30); auto-resume via [[../inngest/portal-auto-resume]] |
+| `skip` | `subscriptionSkipNextOrder` |
+| `frequency_change` | `subscriptionUpdateBillingInterval` from `config.frequency_interval` (monthly / bimonthly / quarterly) |
+| `free_product` | `subscriptionAddFreeProduct(config.product_variant_id)` |
+| `line_item_modifier` | Portal: inline multi-step item editor (`executeLineItemAction`). Journey: no editor of its own, so the customer gets a magic link straight into the portal `/subscriptions` editor (`redirect_url` on the complete response) |
+
+**A save that fails to apply is never reported as done.** On the journey surface a failed or
+unresolvable save leaves the ticket open, raises a high-severity
+[[../tables/dashboard_notifications]] row, and tells the customer the team will apply it.
+`remedy_outcomes.remedy_type` now records the real remedy type on journey saves too (it was the
+literal "save"/"coupon"), so the offer ranker learns from both surfaces.
 
 Every offered + accepted/declined remedy writes to [[../tables/remedy_outcomes]] for AI learning. `first_renewal` boolean tracked separately so first-renewal save rate stays distinct from steady-state.
 

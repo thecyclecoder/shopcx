@@ -7,6 +7,7 @@ import { inngest } from "@/lib/inngest/client";
 import { addTicketTag } from "@/lib/ticket-tags";
 import { markFirstTouch } from "@/lib/first-touch";
 import { resolveProductsByMixedIds } from "@/lib/resolve-products-by-mixed-ids";
+import { executeRemedyAction, executeLineItemAction, type RemedyConfig } from "@/lib/remedy-actions";
 
 async function createChatTicket(
   admin: ReturnType<typeof createAdminClient>,
@@ -55,96 +56,8 @@ async function logChatMessage(
 }
 
 // ── Remedy action execution ──
-
-type RemedyConfig = Record<string, unknown>;
-
-async function executeRemedyAction(
-  workspaceId: string,
-  contractId: string,
-  remedyType: string,
-  config: RemedyConfig,
-): Promise<{ success: boolean; error?: string; patch?: Record<string, unknown>; savedAction?: string }> {
-  const { subscriptionAction, subscriptionSkipNextOrder, subscriptionUpdateBillingInterval, subscriptionAddFreeProduct, applyCoupon } = await import("@/lib/commerce/subscription");
-  const admin = createAdminClient();
-
-  switch (remedyType) {
-    case "coupon": {
-      const couponMappingId = config.coupon_mapping_id as string | undefined;
-      if (!couponMappingId) return { success: false, error: "No coupon configured for this remedy" };
-
-      const { data: mapping } = await admin.from("coupon_mappings")
-        .select("code").eq("id", couponMappingId).single();
-      if (!mapping?.code) return { success: false, error: "Coupon not found" };
-
-      // Through the SDK: the save offer has to land whichever engine bills this sub. The old
-      // path refused with "Appstle not configured" for anything else, which on a migrated
-      // contract turns an accepted save offer into a cancellation.
-      const result = await applyCoupon(workspaceId, contractId, mapping.code);
-      if (!result.success) return { success: false, error: result.error };
-
-      return { success: true, savedAction: `saved with coupon ${mapping.code}`, patch: {} };
-    }
-
-    case "pause": {
-      const pauseDays = Number(config.pause_days) || 30;
-      const result = await subscriptionAction(workspaceId, contractId, "pause");
-      if (!result.success) return { success: false, error: result.error };
-
-      const resumeAt = new Date(Date.now() + pauseDays * 86400000).toISOString();
-
-      // Update DB with resume date
-      await admin.from("subscriptions")
-        .update({ pause_resume_at: resumeAt, updated_at: new Date().toISOString() })
-        .eq("workspace_id", workspaceId)
-        .eq("shopify_contract_id", contractId);
-
-      // Auto-resume handled by hourly cron (portal-auto-resume-cron)
-
-      return {
-        success: true,
-        savedAction: `paused your subscription for ${pauseDays} days`,
-        patch: { status: "PAUSED", pauseResumeAt: resumeAt },
-      };
-    }
-
-    case "skip": {
-      const result = await subscriptionSkipNextOrder(workspaceId, contractId);
-      if (!result.success) return { success: false, error: result.error };
-      return { success: true, savedAction: "skipped your next order", patch: {} };
-    }
-
-    case "frequency_change": {
-      const freqMap: Record<string, { interval: "MONTH"; count: number }> = {
-        monthly: { interval: "MONTH", count: 1 },
-        bimonthly: { interval: "MONTH", count: 2 },
-        quarterly: { interval: "MONTH", count: 3 },
-      };
-      const freq = freqMap[config.frequency_interval as string] || { interval: "MONTH" as const, count: 2 };
-      const result = await subscriptionUpdateBillingInterval(workspaceId, contractId, freq.interval, freq.count);
-      if (!result.success) return { success: false, error: result.error };
-      const label = config.frequency_interval === "monthly" ? "monthly" : config.frequency_interval === "bimonthly" ? "every 2 months" : "every 3 months";
-      return { success: true, savedAction: `changed your delivery to ${label}`, patch: {} };
-    }
-
-    case "free_product": {
-      const variantId = config.product_variant_id as string;
-      if (!variantId) return { success: false, error: "No product configured for this remedy" };
-      const result = await subscriptionAddFreeProduct(workspaceId, contractId, variantId, 1);
-      if (!result.success) return { success: false, error: result.error };
-      const title = (config.product_title as string) || "a free product";
-      return { success: true, savedAction: `added ${title} free to your next order`, patch: {} };
-    }
-
-    case "line_item_modifier": {
-      // Line item modifier is handled by the multi-step frontend flow
-      // This just signals the frontend to open the inline flow
-      return { success: true, savedAction: "", patch: {} };
-    }
-
-    default:
-      return { success: false, error: `Unknown remedy type: ${remedyType}` };
-  }
-}
+// Shared with the journey (mini-site) cancel flow so both surfaces apply a save offer
+// identically — see src/lib/remedy-actions.ts.
 
 export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => {
   if (!auth.loggedInCustomerId) return jsonErr({ error: "not_logged_in" }, 401);
@@ -635,35 +548,16 @@ export const cancelJourney: RouteHandler = async ({ auth, route, req, url }) => 
 
     if (!action) return jsonErr({ error: "missing_action" }, 400);
 
-    const { subAddItem, subRemoveItem, subChangeQuantity, subSwapVariant } = await import("@/lib/subscription-items");
-
-    let result: { success: boolean; error?: string };
-    let savedAction = "";
-
-    if (action === "swap_variant") {
-      const oldVariantId = String(payload?.oldVariantId || "");
-      const newVariantId = String(payload?.newVariantId || "");
-      if (!oldVariantId || !newVariantId) return jsonErr({ error: "missing_variant_ids" }, 400);
-      result = await subSwapVariant(auth.workspaceId, contractId, oldVariantId, newVariantId);
-      savedAction = "changed your product variant";
-    } else if (action === "change_quantity") {
-      const quantity = Number(payload?.quantity);
-      if (!variantId || !quantity || quantity < 1) return jsonErr({ error: "invalid_quantity" }, 400);
-      result = await subChangeQuantity(auth.workspaceId, contractId, variantId, quantity);
-      savedAction = `updated your quantity to ${quantity}`;
-    } else if (action === "remove") {
-      if (!variantId) return jsonErr({ error: "missing_variantId" }, 400);
-      result = await subRemoveItem(auth.workspaceId, contractId, variantId);
-      savedAction = "removed an item from your subscription";
-    } else if (action === "swap_product") {
-      const newVariantId = String(payload?.newVariantId || "");
-      const quantity = Number(payload?.quantity) || 1;
-      if (!variantId || !newVariantId) return jsonErr({ error: "missing_params" }, 400);
-      result = await subSwapVariant(auth.workspaceId, contractId, variantId, newVariantId, quantity);
-      savedAction = "swapped a product in your subscription";
-    } else {
-      return jsonErr({ error: "invalid_action" }, 400);
-    }
+    const lineItem = await executeLineItemAction(auth.workspaceId, contractId, {
+      action,
+      variantId,
+      oldVariantId: payload?.oldVariantId ? String(payload.oldVariantId) : undefined,
+      newVariantId: payload?.newVariantId ? String(payload.newVariantId) : undefined,
+      quantity: payload?.quantity != null ? Number(payload.quantity) : undefined,
+    });
+    if (lineItem.validationError) return jsonErr({ error: lineItem.validationError }, 400);
+    const result = { success: lineItem.success, error: lineItem.error };
+    const savedAction = lineItem.savedAction;
 
     if (!result.success) {
       return jsonErr({ error: "action_failed", message: result.error }, 500);
