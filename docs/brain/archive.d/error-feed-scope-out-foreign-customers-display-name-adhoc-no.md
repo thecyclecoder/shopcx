@@ -1,0 +1,1 @@
+- **Filter foreign ad-hoc 'column customers.display_name does not exist' noise from the error feed** · verified 2026-11-16 · → [[../libraries/error-feed]]
