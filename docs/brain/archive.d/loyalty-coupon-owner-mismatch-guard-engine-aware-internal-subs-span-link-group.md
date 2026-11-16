@@ -1,0 +1,1 @@
+- **apply_loyalty_coupon owner-mismatch guard over-refuses on internal subs within a link group** · verified 2026-11-15 · → [[../libraries/action-executor]]

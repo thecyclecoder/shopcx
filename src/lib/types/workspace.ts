@@ -9,6 +9,9 @@ export interface Workspace {
   stripe_account_id: string | null;
   plan: WorkspacePlan;
   created_at: string;
+  // Per-workspace feature allow-list (workspace-feature-access). NULL = every feature enabled
+  // (the Superfoods default). Feature keys are the first path segment under /dashboard.
+  enabled_features: string[] | null;
 }
 
 export interface WorkspaceMember {

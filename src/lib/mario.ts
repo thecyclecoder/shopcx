@@ -416,6 +416,108 @@ export async function readInitLoopGuardOwnedSlugs(
   return owned;
 }
 
+/**
+ * Returns the set of spec slugs in `workspace_id` whose LATEST kind='build' job is TERMINAL via an
+ * OWNER DISMISS and has no later `build_done` timecard — so Mario must stop re-diagnosing it. The
+ * sibling cross-source drop to `readInitLoopGuardOwnedSlugs`, covering the gap that one leaves open.
+ *
+ * A failed build whose self-verify escapes the repair cap can be cleared by the owner via
+ * POST /api/roadmap/box/dismiss-failed (src/app/api/roadmap/box/dismiss-failed/route.ts), which flips
+ * the failed build job to status='completed' with error=null and a `log_tail` breadcrumb beginning
+ * "dismissed by owner (<actor>) at <iso>". A dismissed/terminal build NEVER emits a `build_done`
+ * timecard event, so the primary build_started→build_done timecard source matches it FOREVER — Mario
+ * re-fires every sweep (build 4d20e15e / software-mode-orchestrator-toolset, dismissed
+ * 2026-11-12T16:47:25Z, re-surfaced to Mario each tick though the owner already closed the card).
+ *
+ * `readInitLoopGuardOwnedSlugs` does NOT cover this case: it drops only a build still status='failed'
+ * AND init_loop_guard-escalated, whereas an owner-dismiss flips the build to status='completed' and the
+ * self-heal here was `build_self_verify_self_heal`, not `init_loop_guard`. An owner who dismisses a
+ * failed build card OWNS that terminal state — the same human-ownership semantics — so Mario stops
+ * re-diagnosing it. If the pipeline truly needs the spec built, the owner re-queues via the roadmap
+ * retry path (a genuinely new `build_started` → a fresh candidate this drop does NOT suppress).
+ *
+ * A slug is included when its LATEST kind='build' job is:
+ *   (1) status in ('completed','failed'), AND
+ *   (2) owner-dismissed — error='dismissed by owner' OR log_tail begins /^(dismissed by owner|owner Dismiss)/, AND
+ *   (3) NO `build_done` timecard event exists for the slug at/after that job's updated_at.
+ *
+ * FAIL-OPEN: any read error returns an empty set so a transient Supabase failure KEEPS the candidate
+ * (a redundant Mario diagnosis is strictly safer than silently dropping a real stall), matching
+ * `readInitLoopGuardOwnedSlugs`. Bounded by `.limit(2000)` on the build scan and `.limit(500)` on the
+ * build_done confirm.
+ */
+export async function readOwnerDismissedTerminalSlugs(
+  admin: Admin,
+  workspace_id: string,
+): Promise<Set<string>> {
+  const empty = new Set<string>();
+  // Latest build attempt per slug — a dismiss only "owns" the slug when it is the spec's CURRENT state.
+  const { data, error } = await admin
+    .from("agent_jobs")
+    .select("spec_slug, status, updated_at, error, log_tail")
+    .eq("workspace_id", workspace_id)
+    .eq("kind", "build")
+    .order("created_at", { ascending: false })
+    .limit(2000);
+  if (error || !data) return empty; // fail-open
+  const latestBySlug = new Map<
+    string,
+    { status: string; updated_at: string; error: string | null; log_tail: string | null }
+  >();
+  for (const j of data as Array<{
+    spec_slug: string;
+    status: string;
+    updated_at: string;
+    error: string | null;
+    log_tail: string | null;
+  }>) {
+    if (!j.spec_slug || latestBySlug.has(j.spec_slug)) continue;
+    latestBySlug.set(j.spec_slug, {
+      status: j.status,
+      updated_at: j.updated_at,
+      error: j.error,
+      log_tail: j.log_tail,
+    });
+  }
+  // Keep only slugs whose latest build is TERMINAL via an owner dismiss.
+  const dismissedAtBySlug = new Map<string, string>();
+  for (const [slug, j] of latestBySlug) {
+    if (!j.updated_at) continue;
+    if (j.status !== "completed" && j.status !== "failed") continue;
+    const dismissed =
+      j.error === "dismissed by owner" ||
+      /^(dismissed by owner|owner Dismiss)/.test(j.log_tail ?? "");
+    if (!dismissed) continue;
+    dismissedAtBySlug.set(slug, j.updated_at);
+  }
+  if (dismissedAtBySlug.size === 0) return empty;
+
+  // A `build_done` at/after the dismiss means the owner re-queued and a new build completed → the gap
+  // is genuinely closed, so surface normally (do NOT drop).
+  const slugs = [...dismissedAtBySlug.keys()];
+  const { data: doneRows, error: doneErr } = await admin
+    .from("spec_timecard_events")
+    .select("spec_slug, at")
+    .eq("workspace_id", workspace_id)
+    .eq("event_kind", "build_done")
+    .in("spec_slug", slugs)
+    .order("at", { ascending: false })
+    .limit(500);
+  if (doneErr) return empty; // fail-open on a timecard read error → keep the candidate
+  const latestDoneBySlug = new Map<string, string>();
+  for (const r of (doneRows ?? []) as Array<{ spec_slug: string; at: string }>) {
+    if (!r.spec_slug || latestDoneBySlug.has(r.spec_slug)) continue;
+    latestDoneBySlug.set(r.spec_slug, r.at);
+  }
+  const owned = new Set<string>();
+  for (const [slug, dismissedAt] of dismissedAtBySlug) {
+    const doneAt = latestDoneBySlug.get(slug);
+    if (doneAt && Date.parse(doneAt) >= Date.parse(dismissedAt)) continue; // new build closed the gap
+    owned.add(slug);
+  }
+  return owned;
+}
+
 /** Grace before a loop-guard-escalated spec is treated as a stall — same shape as the failed-build grace. */
 const MARIO_PROMOTE_GATE_GRACE_MS = 20 * 60 * 1000;
 /** How far back to scan for loop-guard escalations (bounds the director_activity read). */
@@ -1510,6 +1612,32 @@ export async function evaluateStalledSpecs(
     return !ownedSlugsByWs.get(c.workspace_id)?.has(c.spec_slug);
   });
 
+  // Cross-source owner-dismissed-terminal-build drop (mario-detector-drop-owner-dismissed-terminal-builds).
+  // Sibling of the init_loop_guard ownership drop above. A failed build cleared by the owner via
+  // /api/roadmap/box/dismiss-failed is flipped to status='completed' with a "dismissed by owner"
+  // log_tail and NEVER emits `build_done`, so the primary build_started→build_done timecard source
+  // matches it every sweep forever (build 4d20e15e / software-mode-orchestrator-toolset). The
+  // init_loop_guard drop misses it — it only covers a build still status='failed' + init_loop_guard-
+  // escalated — so `readOwnerDismissedTerminalSlugs` is the matching human-ownership drop. SCOPED to
+  // build_started→build_done candidates so a genuinely new `build_started` (owner re-queued) still
+  // surfaces, and the pseudo-slug sources (orphaned_folded_pr / pr_resolve_storm) are untouched.
+  // Computed once per unique workspace_id. FAIL-OPEN: the helper swallows read errors into an empty
+  // set and the try/catch is a belt-and-braces guard — a transient read KEEPS the candidate.
+  const dismissedSlugsByWs = new Map<string, Set<string>>();
+  await Promise.all(
+    Array.from(new Set(deduped.map((c) => c.workspace_id))).map(async (wsId) => {
+      try {
+        dismissedSlugsByWs.set(wsId, await readOwnerDismissedTerminalSlugs(admin, wsId));
+      } catch {
+        dismissedSlugsByWs.set(wsId, new Set()); // fail-open
+      }
+    }),
+  );
+  const afterOwnerDismiss = deduped.filter((c) => {
+    if (c.from_event !== "build_started" || c.to_event !== "build_done") return true;
+    return !dismissedSlugsByWs.get(c.workspace_id)?.has(c.spec_slug);
+  });
+
   // spec-read-eff-mario — Phase 3 of docs/brain/specs/spec-read-efficiency-for-scaling-fleet.md.
   // The N+1 fix: the pre-Phase-3 loop called getSpecBlockers(slug) per candidate, and each call fires
   // a full getRoadmap() (~9 whole-board scans). One tick with M candidates and N workspaces used to
@@ -1518,7 +1646,7 @@ export async function evaluateStalledSpecs(
   // per-candidate cache miss (unknown workspace / getRoadmap error) so a snapshot error can never
   // silently degrade the (b) uncleared-blocker filter — behavior-preserving.
   const boardBySlug = new Map<string, Map<string, SpecCard["blockedBy"]>>();
-  const uniqueWorkspaceIds = Array.from(new Set(deduped.map((c) => c.workspace_id)));
+  const uniqueWorkspaceIds = Array.from(new Set(afterOwnerDismiss.map((c) => c.workspace_id)));
   await Promise.all(
     uniqueWorkspaceIds.map(async (wsId) => {
       try {
@@ -1533,7 +1661,7 @@ export async function evaluateStalledSpecs(
   );
 
   const survivors: StalledCandidate[] = [];
-  for (const c of deduped) {
+  for (const c of afterOwnerDismiss) {
     // (b) uncleared blockedBy → legit wait, drop.
     // spec-read-eff-mario — read from the per-tick board snapshot when present; a workspace whose
     // snapshot failed (or a candidate whose slug isn't on the boardable set — e.g. a pr-<n> pseudo

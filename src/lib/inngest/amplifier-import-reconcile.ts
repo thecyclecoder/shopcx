@@ -55,6 +55,13 @@ const STALE_ERRORED_HOURS = 24;
 export const RECONCILE_ELIGIBLE_SOURCE_NAMES = new Set<string>([
   "storefront",
   "internal_subscription_renewal",
+  // Hand-made (concierge) one-off orders also push to Amplifier via
+  // chargeOneTimeOrder. Order SHOPCX583 was charged but 400'd on a nameless
+  // reused address, landed paid + un-imported with amplifier_import_attempts=0,
+  // and — because this gate was storefront/internal-renewal only — never
+  // retried, never raised the stale-errored CEO card, and sat 28 days until the
+  // customer chased it (ticket bafe291b). Treat it like a storefront order.
+  "shopcx-concierge",
 ]);
 
 /** True when a `paid` order's source_name is one the reconcile rail retries. Pure — unit-tested. */

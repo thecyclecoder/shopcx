@@ -1,0 +1,1 @@
+- **Extend orders.name noise filter to catch the PostgREST CTE-wrapper form** · verified 2026-11-13 · → [[../libraries/error-feed]]

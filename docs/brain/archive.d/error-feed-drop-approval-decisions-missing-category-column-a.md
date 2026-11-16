@@ -1,0 +1,1 @@
+- **Drop foreign ad-hoc approval_decisions 'column category does not exist' noise at capture** · verified 2026-11-12 · → [[../libraries/error-feed]]

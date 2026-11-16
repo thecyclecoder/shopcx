@@ -1,0 +1,1 @@
+- **Drop foreign-app noise: ad hoc SELECT of subscriptions.cancel_reason (not our column)** · verified 2026-11-13 · → [[../libraries/error-feed]]

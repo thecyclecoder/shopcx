@@ -152,3 +152,16 @@ test("in-flight row for THIS spec itself does not block itself", () => {
     { ok: true },
   );
 });
+
+test("a parked earliest member does not hold the goal's serial slot (2026-11-16 shopgrowth jam)", () => {
+  const goalSlug = "g1";
+  const members = [
+    { slug: "a-spec", onGoalBranch: false, status: null, blockedBy: [], parked: true },
+    { slug: "b-spec", onGoalBranch: false, status: null, blockedBy: [] },
+    { slug: "c-spec", onGoalBranch: false, status: null, blockedBy: [] },
+  ];
+  assert.deepEqual(decideGoalMemberBuildDispatch({ slug: "b-spec", goalSlug, members, inflight: [] }), { ok: true });
+  const c = decideGoalMemberBuildDispatch({ slug: "c-spec", goalSlug, members, inflight: [] });
+  assert.equal(c.ok, false);
+  assert.match((c as { reason: string }).reason, /\(b-spec is next\)/);
+});

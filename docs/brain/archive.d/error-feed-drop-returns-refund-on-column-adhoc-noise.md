@@ -1,0 +1,1 @@
+- **Drop foreign returns.refund_on column-missing noise from the Control Tower error feed** · verified 2026-11-16 · → [[../libraries/error-feed]]
