@@ -1,0 +1,1 @@
+- **Scope out foreign direct-REST malformed-UUID equality reads of returns.id from the error feed** · verified 2026-11-16 · → [[../libraries/error-feed]]
