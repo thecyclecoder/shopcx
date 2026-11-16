@@ -124,3 +124,13 @@ test("non-earliest race artifact in-flight does NOT count as head-in-flight for 
   const decision = decideGoalMemberDeadlockAutoBreak({ members, inflight });
   assert.deepEqual(decision, { deadlocked: true, earliest: "control-tower-switch" });
 });
+
+test("parked earliest head (auto_build off / deferred) is skipped — the next ready member becomes the head", () => {
+  // 2026-11-16 shopgrowth-software-support: the alphabetically-first ready head was parked after repeated
+  // self-verify failures, so the auto-break kept re-enqueuing an unbuildable spec and every sibling sat held.
+  for (const parked of [{ parked: true }, { status: "deferred" as const }]) {
+    const members = [m("a-spec", parked), m("b-spec"), m("c-spec")];
+    const decision = decideGoalMemberDeadlockAutoBreak({ members, inflight: [] });
+    assert.deepEqual(decision, { deadlocked: true, earliest: "b-spec" });
+  }
+});

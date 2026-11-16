@@ -2256,6 +2256,23 @@ export interface GoalMemberDispatchState {
   onGoalBranch: boolean;
   status: SpecStatus | null;
   blockedBy: string[];
+  /** Parked by a human or a director: `deferred` (flag or stored status) or `auto_build=false`. A parked
+   *  member never builds on its own, so it must not hold the goal's serial slot (2026-11-16: the
+   *  shopgrowth-software-support goal sat 4 days behind a parked, unbuildable head). Optional so older
+   *  callers and fixtures read as not parked. */
+  parked?: boolean;
+}
+
+/** Is this goal-member still waiting to be built AND eligible to hold the serial slot? Shared by the
+ *  claim-time serializer and the deadlock auto-break so the two never disagree on who the head is. */
+function isUnbuiltSlotCandidate(m: GoalMemberDispatchState): boolean {
+  return !m.onGoalBranch && m.status !== "shipped" && m.status !== "folded" && m.status !== "deferred" && !m.parked;
+}
+
+/** Reader helper: a member is parked when its spec row is deferred (either column) or auto_build is off. */
+function goalMemberParked(spec: Pick<SpecRow, "deferred" | "status" | "auto_build"> | null | undefined): boolean {
+  if (!spec) return false;
+  return spec.deferred === true || spec.status === "deferred" || spec.auto_build === false;
 }
 
 /** An in-flight sibling build row surfaced to the serializer — one active agent_jobs row per goal-mate. */
@@ -2282,9 +2299,7 @@ export function decideGoalMemberBuildDispatch(input: {
   // existing gate's concern). Sort by slug so the choice is deterministic across ticks. Computed FIRST
   // (before the in-flight guard) because the guard below must know WHICH in-flight mate is legitimate.
   const memberBySlug = new Map(members.map((m) => [m.slug, m] as const));
-  const unbuilt = members.filter(
-    (m) => !m.onGoalBranch && m.status !== "shipped" && m.status !== "folded",
-  );
+  const unbuilt = members.filter(isUnbuiltSlotCandidate);
   if (unbuilt.length === 0) return { ok: true };
 
   const readyHeads: string[] = [];
@@ -2380,6 +2395,7 @@ export async function evaluateGoalMemberBuildDispatch(
       onGoalBranch: m.onGoalBranch,
       status: m.status,
       blockedBy: spec?.blocked_by ?? [],
+      parked: goalMemberParked(spec),
     });
   }
 
@@ -2595,6 +2611,7 @@ export async function evaluateGoalMemberEnqueueAdmission(
       onGoalBranch: m.onGoalBranch,
       status: m.status,
       blockedBy: spec?.blocked_by ?? [],
+      parked: goalMemberParked(spec),
     });
   }
 
@@ -2772,9 +2789,7 @@ export function decideGoalMemberDeadlockAutoBreak(input: {
   if (members.length === 0) return { deadlocked: false, reason: "no-members" };
 
   const memberBySlug = new Map(members.map((m) => [m.slug, m] as const));
-  const unbuilt = members.filter(
-    (m) => !m.onGoalBranch && m.status !== "shipped" && m.status !== "folded",
-  );
+  const unbuilt = members.filter(isUnbuiltSlotCandidate);
   if (unbuilt.length === 0) {
     return { deadlocked: false, reason: "no-unbuilt-members" };
   }
@@ -2879,6 +2894,7 @@ export async function autoBreakGoalMemberDeadlockIfDue(
         onGoalBranch: m.onGoalBranch,
         status: m.status,
         blockedBy: spec?.blocked_by ?? [],
+        parked: goalMemberParked(spec),
       });
     }
 
