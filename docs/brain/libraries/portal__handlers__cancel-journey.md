@@ -24,6 +24,8 @@ _No internal callers found via static scan._
 
 ## Gotchas
 
+- Save offers (`remedy` step) and item edits (`line_item_action` step) are applied by [[remedy-actions]], shared with the journey / mini-site cancel flow. Don't re-inline remedy logic here (2026-11-16).
+
 _None documented._
 
 ---

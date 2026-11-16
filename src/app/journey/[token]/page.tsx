@@ -635,6 +635,13 @@ function CancelJourney({
       }),
     });
     const result = await res.json();
+    // "Change items" saves open the portal's item editor (same editor the portal cancel flow
+    // uses) via a magic link — the journey has no item editor of its own.
+    if (typeof result.redirect_url === "string" && result.redirect_url) {
+      onComplete(result.message || "Opening your subscription so you can make the change...");
+      window.location.href = result.redirect_url;
+      return;
+    }
     onComplete(result.message || "We've updated your subscription. Thank you for staying with us!");
   };
 
