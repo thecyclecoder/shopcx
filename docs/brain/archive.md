@@ -12,7 +12,11 @@ One line per verified feature, newest first. Format: `**Title** · verified {YYY
 
 <!-- archive-index: the board parses the list items below; keep the `· verified {date} · → [[link]]` shape -->
 
+- **Drop ad-hoc crisis_events.resolved_at missing-column noise from the error feed** · verified 2026-11-15 · → [[../libraries/error-feed]]
 - **Drop returns.free_label foreign REST noise from error feed** · verified 2026-11-15 · → [[../libraries/error-feed]]
+- **Drop foreign-app noise: returns.shopify_customer_id column-missing from stale direct-REST reads** · verified 2026-11-15 · → [[../libraries/error-feed]]
+- **Drop foreign ad-hoc `spec_phases.phase_num` column-missing reads from the error feed** · verified 2026-11-15 · → [[../libraries/error-feed]]
+- **apply_loyalty_coupon owner-mismatch guard over-refuses on internal subs within a link group** · verified 2026-11-15 · → [[../libraries/action-executor]]
 - **Drop foreign crisis_events.title column-missing noise from the error feed** · verified 2026-11-14 · → [[../libraries/error-feed]]
 - **Drop foreign ad-hoc orders.tracking_numbers/tracking_urls/tracking_company SELECT noise from the Supabase postgres feed** · verified 2026-11-14 · → [[../libraries/error-feed]]
 - **Drop foreign ad-hoc `director_activity.detail` column-missing query from the Control Tower error feed** · verified 2026-11-13 · → [[../libraries/error-feed]]
