@@ -823,7 +823,7 @@ async function executeCancelRequest(admin: Admin, config: Record<string, unknown
   if (config.auto_cancel_via_appstle && ctx.subscription.shopify_contract_id) {
     try {
       const { subscriptionAction } = await import("@/lib/commerce/subscription");
-      await subscriptionAction(ctx.workspaceId, ctx.subscription.shopify_contract_id as string, "cancel");
+      await subscriptionAction(ctx.workspaceId, ctx.subscription.shopify_contract_id as string, "cancel", "workflow: customer cancel request", "Workflow");
       await sendReply(admin, ctx, (config.reply_cancelled as string) || "Hi {{customer.first_name}}, your subscription has been cancelled as requested. If you change your mind, just let us know!", config.reply_cancelled_status as string);
       return;
     } catch {

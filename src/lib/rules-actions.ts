@@ -209,7 +209,8 @@ async function appstleAction(workspaceId: string, params: Record<string, unknown
 
   // Dynamic import to avoid circular deps
   const { subscriptionAction } = await import("@/lib/commerce/subscription");
-  await subscriptionAction(workspaceId, contractId, action as "pause" | "cancel" | "resume");
+  // Pass a reason so rules-engine cancels/pauses aren't recorded as unexplained churn.
+  await subscriptionAction(workspaceId, contractId, action as "pause" | "cancel" | "resume", `rules engine: ${action}`, "Rules engine");
 }
 
 // ── Template resolution ──
