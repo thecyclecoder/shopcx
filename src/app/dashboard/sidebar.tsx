@@ -21,7 +21,9 @@ import {
   type DeveloperBadgeKey,
 } from "@/lib/developer-nav";
 import type { WorkspaceWithRole } from "@/lib/types/workspace";
+import { hasWorkspaceFeature, featureForHref } from "@/lib/workspace-features";
 import NotificationBell from "@/components/notification-bell";
+import WorkspaceSwitcher from "./workspace-switcher";
 
 interface TicketView {
   id: string;
@@ -51,8 +53,10 @@ const ICONS = {
   settings: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z",
 };
 
-interface NavItem { href: string; label: string; icon: string; comingSoon?: boolean; adminOnly?: boolean; ownerOnly?: boolean }
-interface NavSection { label: string; icon?: string; items: NavItem[]; collapsible?: boolean; ownerOnly?: boolean }
+// `feature` gates visibility by the workspace's enabled_features allow-list (workspace-feature-access).
+// When omitted it defaults to the feature derived from the item's href (first /dashboard segment).
+interface NavItem { href: string; label: string; icon: string; comingSoon?: boolean; adminOnly?: boolean; ownerOnly?: boolean; feature?: string }
+interface NavSection { label: string; icon?: string; items: NavItem[]; collapsible?: boolean; ownerOnly?: boolean; feature?: string }
 
 const NAV_STRUCTURE: (NavItem | NavSection)[] = [
   { href: "/dashboard", label: "Dashboard", icon: ICONS.dashboard },
@@ -229,9 +233,11 @@ const NAV_ITEMS = NAV_STRUCTURE.flatMap(item =>
 
 export default function Sidebar({
   workspace,
+  workspaces,
   user,
 }: {
   workspace: WorkspaceWithRole;
+  workspaces: WorkspaceWithRole[];
   user: { id: string; email: string; name?: string };
 }) {
   const pathname = usePathname();
@@ -242,6 +248,18 @@ export default function Sidebar({
   // Developer is a portal: a pathname-driven sidebar takeover (same UX as a director profile, but the
   // member routes are a fixed set, so it's detected from the path rather than registered per-page).
   const inDeveloperPortal = workspace.role === "owner" && !sectionNav && isInDeveloperPortal(pathname);
+  // Per-workspace feature access (workspace-feature-access). NULL = every feature (Superfoods);
+  // an allow-list hides any nav item whose feature isn't granted. Role flags still apply on top.
+  const enabledFeatures = workspace.enabled_features ?? null;
+  const itemVisibleByFeature = (item: NavItem) => {
+    const feat = item.feature ?? featureForHref(item.href);
+    return feat == null || hasWorkspaceFeature(enabledFeatures, feat);
+  };
+  const itemVisibleByRole = (item: NavItem) => {
+    if (item.adminOnly && !["owner", "admin"].includes(workspace.role)) return false;
+    if (item.ownerOnly && workspace.role !== "owner") return false;
+    return true;
+  };
   const [open, setOpen] = useState(false);
   const [ticketViews, setTicketViews] = useState<TicketView[]>([]);
   const [collapsedViews, setCollapsedViews] = useState<Set<string>>(new Set());
@@ -416,15 +434,9 @@ export default function Sidebar({
         </div>
       </div>
 
-      {/* Workspace name */}
-      <div className="border-b border-zinc-200 px-5 py-3 dark:border-zinc-800">
-        <p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
-          {workspace.name}
-        </p>
-        <p className="text-sm capitalize text-zinc-400">
-          {workspace.role.replace("_", " ")}
-        </p>
-      </div>
+      {/* Workspace name — a dropdown switcher when the user belongs to more than one workspace,
+          otherwise the plain name + role block (see workspace-switcher.tsx). */}
+      <WorkspaceSwitcher current={workspace} workspaces={workspaces} />
 
       {/* Navigation */}
       <nav className="flex-1 space-y-0.5 overflow-y-auto px-3 py-3">
@@ -535,6 +547,10 @@ export default function Sidebar({
           if ("items" in entry) {
             const section = entry as NavSection;
             if (section.ownerOnly && workspace.role !== "owner") return null;
+            // An explicit section feature gate, plus: hide the whole section when the workspace
+            // can't see any of its items (feature + role). CommingSoon ("#") items don't count.
+            if (section.feature && !hasWorkspaceFeature(enabledFeatures, section.feature)) return null;
+            if (!section.items.some((i) => i.href !== "#" && itemVisibleByRole(i) && itemVisibleByFeature(i))) return null;
             const isExpanded = expandedSections.has(section.label);
             const sectionHasActive = section.items.some(i => pathname.startsWith(i.href) && i.href !== "#");
             return (
@@ -565,6 +581,7 @@ export default function Sidebar({
                     {section.items.map(item => {
                       if (item.adminOnly && !["owner", "admin"].includes(workspace.role)) return null;
                       if (item.ownerOnly && workspace.role !== "owner") return null;
+                      if (item.href !== "#" && !itemVisibleByFeature(item)) return null;
                       // Most-specific-wins: a parent (e.g. /dashboard/roadmap) isn't active when a longer
                       // sibling (e.g. /dashboard/roadmap/box) also matches — otherwise both light up. Use a
                       // "/" boundary so /dashboard/roadmap doesn't match /dashboard/roadmap-foo.
@@ -662,6 +679,7 @@ export default function Sidebar({
           const item = entry as NavItem;
           if (item.ownerOnly && workspace.role !== "owner") return null;
           if (item.adminOnly && !["owner", "admin"].includes(workspace.role)) return null;
+          if (item.href !== "#" && !itemVisibleByFeature(item)) return null;
           const isActive = pathname === item.href ||
             (item.href !== "/dashboard" && pathname.startsWith(item.href));
           const isTickets = item.href === "/dashboard/tickets";

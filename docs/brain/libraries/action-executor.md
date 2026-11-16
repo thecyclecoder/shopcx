@@ -33,6 +33,8 @@ Last-resort strip of any `{{token}}` / `[UPPER_TOKEN]` a composer failed to fill
 async function executeSonnetDecision(ctx: ActionContext, decision: SonnetDecision, personality: { name?: string; tone?: string; sign_off?: string | null } | null, send: SendFn, sysNote: SysNoteFn,) : Promise<
 ```
 
+**Software-mode hard guard ([[support-mode]], `software-mode-workspace-switch` Phase 3).** Before the `decision.action_type` switch, the executor reads `getSupportMode(ctx.workspaceId)`. If `isActionAllowedInMode(mode, action_type)` is false — i.e. `mode === 'software'` and `action_type` is `direct_action` / `journey` / `playbook` / `workflow` — it does NOT dispatch: it writes the internal note `[System] CPG action refused in software mode: <type>`, calls `escalateTicket`, and returns `{ messageSent: false, escalated: true, closed: false, statusManaged: false }`. `ai_response` / `kb_response` / `escalate` and the software-mode orchestrator-toolset actions pass through unchanged. This is defense in depth — even a prompt/playbook that proposes a CPG action on a software workspace can never reach Appstle/Shopify/order/subscription code. `getSupportMode` fails closed to `'cpg'`, so a read blip never blocks a Superfoods action.
+
 ### `escalateTicket` — function
 
 ```ts
@@ -199,6 +201,14 @@ function resolveCreateReturnResolutionType(
 ```
 
 Pure validator wired into the `create_return` direct-action handler. Normalizes the optional `resolution_type` field on `ActionParams` into the value passed through as `createFullReturn.resolutionType` in [[shopify-returns]]. `undefined` → `undefined` (`createFullReturn` writes its built-in `'refund_return'` default, matching today's every-call behavior); `'refund_return'` / `'store_credit_return'` → passed through unchanged so an agent-authored store-credit return actually resolves as store credit (the sanctioned retention-friendly outcome the returns engine already supports on both Shopify and internal SHOPCX* orders). Any other value → `{ ok: false, error }` and the handler surfaces the reason without ever calling `createFullReturn` (a bogus value must not silently downgrade to the refund default). Tests: `src/lib/action-executor.create-return-resolution-type.test.ts` — six pins covering pass-through, defaults, rejected strings, non-string smuggling, and the handler wiring itself (grep-verifiable that `resolutionType: resolution.resolutionType` is the literal that flows into `createFullReturn`).
+
+### `executeShopgrowthAction` (software-mode-orchestrator-toolset Phase 3)
+
+`executeSonnetDecision` case `shopgrowth_action`: executes one confirmed change on the merchant's store via
+[[../integrations/shopgrowth-support-api]]. Refused (escalated) on a cpg workspace, for a forbidden action
+(plan/billing/uninstall/data deletion), when the latest inbound message doesn't verbatim-contain the model's
+`confirmation_quote` as a yes, with no ShopGrowth credentials, or with no verified store. The reply is ShopGrowth's
+`summary`; a non-2xx escalates and never claims success; a 404 (endpoint not live) escalates with an internal note.
 
 ## Callers
 

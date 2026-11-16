@@ -26,6 +26,8 @@ Multi-tenant root. Encrypted credentials, sandbox_mode, response_delays, help_sl
 | `shopify_scopes` | `text` | ✓ |  |
 | `order_source_mapping` | `jsonb` | ✓ | default: `'{}'` |
 | `support_email` | `text` | ✓ |  |
+| `support_mode` | `text` | — | default: `'cpg'` · check `in ('cpg','software')`. The per-workspace support-pipeline switch. `'cpg'` (default, Superfoods + every existing tenant) runs the full CPG shopper pipeline. `'software'` (ShopGrowth merchant support) sends the ticket handler straight to the Sonnet orchestrator and makes the action executor refuse every CPG action. Read by [[../libraries/support-mode]] `getSupportMode`. Migration `20270116120000_workspaces_support_mode.sql`. |
+| `enabled_features` | `text[]` | ✓ | Per-workspace dashboard feature allow-list (workspace-feature-access). `NULL` = every feature enabled (the Superfoods default, so every pre-existing workspace keeps everything). An array lists enabled feature keys — the first path segment under `/dashboard` (`tickets`, `customers`, `orders`, `analytics`, `storefront`, `logistics`, `marketing`, `research`, `developer`, `dashboard` for the home page). `'settings'` is ALWAYS enabled regardless. The sidebar ([[../../../src/app/dashboard/sidebar.tsx]]) hides any nav item / empty section whose feature isn't granted; role flags still apply on top. ShopGrowth = `array['tickets']`. Read via [[../libraries/workspace-features]] `hasWorkspaceFeature`. Migration `20270119120000_workspaces_enabled_features.sql`. |
 | `sandbox_mode` | `bool` | — | default: `true` |
 | `replacement_threshold_cents` | `int8` | — | default: `0` |
 | `june_refund_approval_threshold_cents` | `int4` | — | default: `5000` ($50). A June ([[../libraries/cs-director]]) money remedy (refund/credit/replacement) STRICTLY ABOVE this routes to a founder SMS approval via Eve's cockpit before it fires; at-or-below runs autonomously. Read by [[../libraries/june-remedy-approval]] `getRefundApprovalThresholdCents`. Migration `20260710120000_june_refund_approval_threshold.sql`. |
@@ -50,6 +52,9 @@ Multi-tenant root. Encrypted credentials, sandbox_mode, response_delays, help_sl
 | `widget_color` | `text` | ✓ | default: `'#4f46e5'` |
 | `widget_greeting` | `text` | ✓ | default: `'Hi! How can we help you today?'` |
 | `widget_position` | `text` | ✓ | default: `'bottom-right'` |
+| `widget_identity_secret_encrypted` | `text` | ✓ | AES-256-GCM. Per-workspace HMAC secret for the chat widget's signed identity pass. ShopGrowth mints a short-lived pass from the Shopify session token (same secret in its env); the widget API verifies it via [[../libraries/widget-identity]] `verifyWidgetIdentity` before keying the contact to the store. Null = verified identity not enabled (a pass can't verify; software-mode chats are then rejected, cpg falls back to typed email). Migration `20270117120000_workspaces_widget_identity_secret.sql`. |
+| `shopgrowth_api_base` | `text` | ✓ | ShopGrowth support API base URL for software-mode workspaces ([[../integrations/shopgrowth-support-api]]). Null = not connected. Migration `20270118120000_workspaces_shopgrowth_support_api.sql`. |
+| `shopgrowth_support_token_encrypted` | `text` | ✓ | AES-256-GCM bearer token for the ShopGrowth support API, read by [[../libraries/shopgrowth-support]] `getShopgrowthConfig`. Never plaintext. Same migration. |
 | `meta_page_access_token_encrypted` | `text` | ✓ | AES-256-GCM |
 | `meta_instagram_id` | `text` | ✓ |  |
 | `meta_webhook_verify_token` | `text` | ✓ |  |

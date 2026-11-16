@@ -24,6 +24,15 @@ Inside the `resolve` step (right after the ticket row load and dispatch-intent c
 
 The two gates are shape-identical (same sentinel-on-resolve → hard-exit-below pattern) but they mean different things: `ai_disabled` is a person's explicit call, `do_not_reply` is an automated filter.
 
+## Support mode — CPG vs software ([[../libraries/support-mode]])
+
+Right after `config` + `personality`, step `support-mode` reads `getSupportMode(wsId)` once (memoized across retries) → `runCpg = shouldRunCpgSteps(mode)`. For a `'software'` workspace (merchant support, e.g. ShopGrowth) the CPG shopper steps are noise at best and wrong at worst, so `runCpg` is `false` and the handler **skips** them and routes straight to the Sonnet orchestrator:
+
+- `classify-bucket` → not invoked; `msgType` is forced to `'general'` (which also skips the account-data inline email-lookup path, keyed on `msgType === 'account'`).
+- the active-playbook continuation (`if ((!isNew || inheritedActivePlaybook) && runCpg)`), the fraud/chargeback gate, `auto-link-from-inbound`, `auto-link-by-identity`, Sol first-touch dispatch, the § 3.97 inflection gate, the § 3.98 Sol playbook short-circuit, § 3.99 Sol direction-apply, and the § 2c intent→playbook router are all gated on `runCpg` (ternary-guarded `step.run`s / `&& runCpg` conditions).
+
+`'cpg'` (every existing workspace incl. Superfoods) runs exactly as before. `getSupportMode` fails closed to `'cpg'`, so a read blip can never change Superfoods behavior. Independent of mode, the handler now also threads `cfg.instructions` (`ai_channel_config.instructions`) into `callSonnetOrchestratorV2` as an optional extra system block (empty string = no change). Spec: `software-mode-workspace-switch`.
+
 ## § 0 Empty-inbound short-circuit — with an image-only exception
 
 Right after the sentinel short-circuit, `§ 0` strips HTML/entities/whitespace from the inbound body; when nothing survives on a follow-up (`!isNew && stripped.length === 0`) the handler treats it as a no-op — it does NOT cancel a pending send or re-run the pipeline (a quoted-thread-only or signature-only reply must not disturb an in-flight turn).

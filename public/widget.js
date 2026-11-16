@@ -6,6 +6,10 @@
   var customerId = script.getAttribute("data-customer-id") || "";
   var customerEmail = script.getAttribute("data-customer-email") || "";
   var customerName = script.getAttribute("data-customer-name") || "";
+  // Signed identity pass (ShopGrowth mints it from the Shopify session token). When present it is
+  // the ONLY trusted proof of who is chatting — the widget API verifies it and keys the contact to
+  // the store. Passed through to the iframe, which returns it with every POST/GET.
+  var identity = script.getAttribute("data-identity") || "";
 
   // Detect product context from JSON-LD or URL
   var productId = "";
@@ -35,6 +39,7 @@
   if (customerId) params.push("cid=" + encodeURIComponent(customerId));
   if (customerEmail) params.push("email=" + encodeURIComponent(customerEmail));
   if (customerName) params.push("name=" + encodeURIComponent(customerName));
+  if (identity) params.push("identity=" + encodeURIComponent(identity));
   if (productId) params.push("pid=" + encodeURIComponent(productId));
   if (productHandle) params.push("handle=" + encodeURIComponent(productHandle));
   params.push("path=" + encodeURIComponent(window.location.pathname));

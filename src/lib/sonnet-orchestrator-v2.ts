@@ -25,6 +25,7 @@ import { INLINE_AGENT_IDS } from "@/lib/control-tower/registry";
 import { AnthropicDependencyError, isRetryableAnthropicStatus, isRetryableThrownError } from "@/lib/anthropic-retry";
 import { LOYALTY_REMEDY_MAX_CENTS, getMemberByCustomerId, getMembersInLinkGroup } from "@/lib/loyalty";
 import { getAgentPolicyPackage, formatAgentPolicyPackage, type AgentPolicyPackageEntry } from "@/lib/policies";
+import { getSupportMode, type SupportMode } from "@/lib/support-mode";
 
 const MODEL_IDS = {
   sonnet: SONNET_MODEL,
@@ -52,7 +53,17 @@ export interface SonnetDecision {
     | "macro"
     | "kb_response"
     | "ai_response"
-    | "escalate";
+    | "escalate"
+    // software-mode-orchestrator-toolset Phase 3 — a confirmed change on the merchant's store, executed by
+    // ShopGrowth (action-executor `executeShopgrowthAction`). Only valid in software mode.
+    | "shopgrowth_action";
+  /** Present when action_type === "shopgrowth_action". */
+  shopgrowth_action?: {
+    action: string;
+    params?: Record<string, unknown>;
+    /** The merchant's own confirming words, copied verbatim from their latest message. */
+    confirmation_quote: string;
+  };
   actions?: {
     type: string;
     contract_id?: string;
@@ -135,7 +146,51 @@ function fallbackWithCancelRoute(message: string, reason: string): SonnetDecisio
 
 // ── Tool Definitions (Anthropic format) ──
 
-function buildToolDefinitions() {
+/** Tools offered in software (merchant-support) mode: KB search + live ShopGrowth store reads. The
+ *  write path (shopgrowth_action) is a decision type, not a tool, so it always runs through the action
+ *  executor's confirmation gate. No CPG tool is ever offered here. */
+export const SOFTWARE_MODE_TOOL_NAMES = ["get_product_knowledge", "get_shopgrowth_store"] as const;
+
+const GET_SHOPGROWTH_STORE_TOOL = {
+  name: "get_shopgrowth_store",
+  description:
+    "Read the merchant's LIVE store state from ShopGrowth (the store comes from the verified chat identity; you never choose it). Sections: summary (plan, settings, app status), events (recent app events/errors), flags (recent risk flags), orders (search/list; pass order to get one order by name like #1234 with its flag, verdict, hold, tags, note, financial and fulfillment status), order (same as orders with order set), chargebacks. CALL THIS before answering anything about the merchant's own store, orders, flags or errors. 'Not available yet' means ShopGrowth has not shipped that endpoint; say so rather than guess.",
+  input_schema: {
+    type: "object" as const,
+    properties: {
+      section: { type: "string", enum: ["summary", "events", "flags", "orders", "order", "chargebacks"], description: "Which part of the store to read. Defaults to summary." },
+      order: { type: "string", description: "Order name or number, e.g. #1234 (orders/order only)." },
+      since: { type: "string", description: "ISO date to read from (events/flags/orders/chargebacks)." },
+    },
+    required: [] as string[],
+  },
+};
+
+/**
+ * The tool list for the orchestrator, by support mode (software-mode-orchestrator-toolset Phase 1).
+ * 'cpg' returns the CPG list unchanged; 'software' returns only the software allow-list.
+ */
+function buildToolDefinitions(mode: SupportMode = "cpg") {
+  const cpgTools = buildCpgToolDefinitions();
+  if (mode !== "software") return cpgTools;
+  const kb = cpgTools.find((t) => t.name === "get_product_knowledge");
+  return [
+    ...(kb
+      ? [{
+          ...kb,
+          description: "Search the knowledge base (help articles, setup guides, FAQs) for the apps this workspace supports. Use for any how-to, setup, feature or policy question.",
+        }]
+      : []),
+    GET_SHOPGROWTH_STORE_TOOL,
+  ];
+}
+
+/** Exported for tests: the tool names offered in a mode. */
+export function toolNamesForMode(mode: SupportMode): string[] {
+  return buildToolDefinitions(mode).map((t) => t.name);
+}
+
+function buildCpgToolDefinitions() {
   return [
     {
       name: "get_customer_account",
@@ -461,6 +516,60 @@ export function computeChargedLineTotals(
   });
 }
 
+/**
+ * The software-mode (merchant support) system prompt — software-mode-orchestrator-toolset Phase 1.
+ * Workspace-stable (no per-ticket content) so it caches exactly like the CPG prompt.
+ */
+export function buildSoftwareSystemPrompt(input: {
+  wsName: string;
+  persBlock: string;
+  policiesSection: string;
+  promptSections: string;
+}): string {
+  return `You support merchants (Shopify store owners and their staff) who use ${input.wsName}'s Shopify apps. Answer from the knowledge base and from the merchant's live store state, and decide the best action.
+
+You have tools to look up data. Use them before you answer:
+- get_product_knowledge: the knowledge base (setup guides, how-tos, FAQs).
+- get_shopgrowth_store: the merchant's live store state in ShopGrowth (plan, settings, events/errors, flags, orders, chargebacks). The store comes from the verified chat identity; you never pick it.
+
+HOW TO HELP:
+- Be concrete and step-by-step. Name the exact setting, page or button from the knowledge base; never invent UI.
+- Check the live store state before telling a merchant what is or isn't happening on their store.
+- State only what the tools returned. If a read says data is unavailable, say you can't see it rather than guess.
+
+ACTING ON THE MERCHANT'S STORE (shopgrowth_action):
+- You may change something on the merchant's store ONLY through action_type "shopgrowth_action", and ONLY after the merchant has explicitly confirmed the exact change in chat.
+- First turn: propose the exact change as a question ("Want me to release order #1234?") using action_type "ai_response". Do not act yet.
+- Next turn, if the merchant's latest message clearly says yes to that exact change: emit "shopgrowth_action" with shopgrowth_action.action, shopgrowth_action.params, and shopgrowth_action.confirmation_quote set to the merchant's confirming words copied verbatim from their latest message. If they did not clearly confirm, do not act.
+- Order changes on the merchant's Shopify store (tags, note, release/hold, cancel, refund) are actions like any other; ShopGrowth executes and validates them.
+- NEVER act on the merchant's own ${input.wsName} plan or billing, uninstalling, or deleting data. Link the merchant to the app's Plans page for plan changes; escalate deletion or privacy requests.
+- Never tell the merchant a change is done until the system confirms it; the system writes that reply from ShopGrowth's result.
+
+ESCALATE (action_type "escalate") only for: a billing dispute, a legal or privacy request, a bug you cannot explain from the store data, or when the merchant asks for a person.
+
+PERSONALITY:
+${input.persBlock}
+
+${input.policiesSection}
+
+${input.promptSections}
+
+When you have enough data, respond with ONLY valid JSON (no tool calls):
+{
+  "reasoning": "brief explanation",
+  "action_type": "ai_response" | "kb_response" | "escalate" | "shopgrowth_action",
+  "response_message": "message to send the merchant (plain text, no markdown, max 2 sentences per paragraph). For shopgrowth_action leave this empty; the system replies from ShopGrowth's result",
+  "shopgrowth_action": { "action": "release_order", "params": { "order": "#1234" }, "confirmation_quote": "yes please release it" },
+  "needs_clarification": false,
+  "clarification_question": null,
+  "problem": "one-line diagnosis of the merchant's underlying problem",
+  "confidence": 0.0-1.0,
+  "options": [{ "label": "short name of an option you considered", "action_shape": {"type": "..."}, "expected_effect": "what the merchant sees if we pick this" }],
+  "chosen": { "option_index": 0, "why": "one sentence" }
+}
+Omit shopgrowth_action unless action_type is "shopgrowth_action". Never use direct_action, journey, playbook, workflow or macro here.`;
+}
+
 async function buildPreContext(
   workspaceId: string,
   ticketId: string,
@@ -478,6 +587,7 @@ async function buildPreContext(
   // only the volatile user block changes shape. See docs/brain/inngest/unified-ticket-handler.md
   // § Step 2e (Direction-scoped branch).
   directionOverride?: TicketDirection | null,
+  supportMode: SupportMode = "cpg",
 ): Promise<{ system: string; userBlockPrefix: string | null; userBlock: string }> {
   const admin = createAdminClient();
 
@@ -873,6 +983,17 @@ RESOLUTION-RECORD FIELDS (problem / confidence / options / chosen) — a per-tur
 These do NOT change what you execute — action_type + actions + response_message are still the authoritative plan. The four fields let downstream verification catch responses that don't actually address the diagnosed problem, and let calibration mine your reasoning over time. Always include them on a real decision.
 Note: "type" on any actions[] entry must NEVER be "skip_next_order" (retired — see above).`;
 
+  // software-mode-orchestrator-toolset Phase 1 — merchant (software) support gets its own prompt:
+  // no CPG handlers (journeys/playbooks/workflows) and no CPG hard rules; decision types limited to
+  // ai_response | kb_response | escalate | shopgrowth_action. Same cache shape as the CPG prompt.
+  const softwareSystem = buildSoftwareSystemPrompt({
+    wsName,
+    persBlock,
+    policiesSection: buildPoliciesSection(policies || []),
+    promptSections: buildPromptSections(canonicalPrompts),
+  });
+  const activeSystem = supportMode === "software" ? softwareSystem : system;
+
   // ── PER-TICKET STABLE PREFIX — the durable merge_summary block. Marked
   // with cache_control by the caller so it's written on the first turn after
   // a merge and read at 10% of input on every subsequent turn (up to the
@@ -923,10 +1044,10 @@ ${guidanceBlock}` : ""}
 
 NEWEST INBOUND (Sol's Direction above summarizes everything prior — do NOT re-fetch customer / orders / prior history):
 Customer: ${message.slice(0, 2000)}`;
-    return { system, userBlockPrefix: null, userBlock: directionUserBlock };
+    return { system: activeSystem, userBlockPrefix: null, userBlock: directionUserBlock };
   }
 
-  return { system, userBlockPrefix, userBlock };
+  return { system: activeSystem, userBlockPrefix, userBlock };
 }
 
 /**
@@ -1029,11 +1150,21 @@ export async function executeToolCall(
   input: Record<string, unknown>,
   workspaceId: string,
   customerId: string,
-  _ticketId: string,
+  ticketId: string,
 ): Promise<string> {
   const admin = createAdminClient();
   try {
     switch (name) {
+      case "get_shopgrowth_store": {
+        // Software mode only — a CPG workspace never reaches ShopGrowth, even if a model names the tool.
+        if ((await getSupportMode(workspaceId)) !== "software") return `Unknown tool: ${name}`;
+        const { getShopgrowthStore } = await import("@/lib/shopgrowth-support");
+        return await getShopgrowthStore(admin, workspaceId, ticketId, customerId || null, {
+          section: (input?.section as string) ?? null,
+          order: (input?.order as string) ?? null,
+          since: (input?.since as string) ?? null,
+        });
+      }
       case "get_customer_account":
         return await getCustomerAccount(admin, workspaceId, customerId);
       case "find_customer": {
@@ -2405,13 +2536,17 @@ export async function callSonnetOrchestratorV2(
   // decision.reasoning is prefixed with 'sol:direction-context' so stageResolutionEvent
   // stamps the ticket_resolution_events ledger with the spec-verification tag.
   directionOverride?: TicketDirection | null,
+  // Optional per-channel extra instructions (ai_channel_config.instructions), passed for EVERY
+  // workspace by unified-ticket-handler (software-mode-workspace-switch Phase 2). Appended to the
+  // system prompt as an additional block when non-empty; empty string / null = no change.
+  extraInstructions?: string | null,
 ): Promise<SonnetDecision> {
   const startedAt = Date.now();
   let decision: SonnetDecision | null = null;
   let threw: unknown = null;
   try {
     decision = await runOrchestratorDecision(
-      workspaceId, ticketId, customerId, message, channel, personality, agentContext, modelChoice, directionOverride,
+      workspaceId, ticketId, customerId, message, channel, personality, agentContext, modelChoice, directionOverride, extraInstructions,
     );
     if (directionOverride && !directionOverride.superseded_at && decision) {
       // Prefix the reasoning so downstream stageResolutionEvent stamps
@@ -2453,6 +2588,7 @@ async function runOrchestratorDecision(
   agentContext?: { assigned: boolean; intervened: boolean } | null,
   modelChoice?: { model: OrchestratorModelKey; reason: string } | null,
   directionOverride?: TicketDirection | null,
+  extraInstructions?: string | null,
 ): Promise<SonnetDecision> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -2467,7 +2603,10 @@ async function runOrchestratorDecision(
   };
 
   try {
-    const { system, userBlockPrefix, userBlock } = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality, agentContext, directionOverride);
+    // software-mode-orchestrator-toolset Phase 1 — the support mode picks the prompt + tool list.
+    // getSupportMode fails closed to 'cpg', so a read blip never moves Superfoods off its path.
+    const supportMode = await getSupportMode(workspaceId);
+    const { system, userBlockPrefix, userBlock } = await buildPreContext(workspaceId, ticketId, customerId, message, channel, personality, agentContext, directionOverride, supportMode);
     // Cache-control breakpoints, 1-hour TTL. The heavy, shared payload
     // (tools + system rules/policies/handlers, ~40-50K tokens) is now
     // byte-identical for every ticket in the workspace, so the first
@@ -2488,7 +2627,13 @@ async function runOrchestratorDecision(
     const systemBlocks: any[] = [
       { type: "text", text: system, cache_control: { type: "ephemeral", ttl: "1h" } },
     ];
-    const baseTools = buildToolDefinitions();
+    // Optional per-channel extra instructions (ai_channel_config.instructions). Appended as a
+    // separate, uncached block AFTER the cached rules so the shared prefix stays byte-identical
+    // (cache hit preserved); empty/whitespace-only = no change. software-mode-workspace-switch Phase 2.
+    if (extraInstructions && extraInstructions.trim()) {
+      systemBlocks.push({ type: "text", text: `ADDITIONAL WORKSPACE INSTRUCTIONS:\n${extraInstructions.trim()}` });
+    }
+    const baseTools = buildToolDefinitions(supportMode);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const tools = baseTools.map((t, i) => i === baseTools.length - 1
       ? { ...t, cache_control: { type: "ephemeral", ttl: "1h" } }
