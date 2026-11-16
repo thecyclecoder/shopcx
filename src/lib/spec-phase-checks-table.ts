@@ -562,6 +562,27 @@ export function validateGrepPatternIsNotMisreadLiteral(pattern: string): Executa
 }
 
 /**
+ * The mirror of `validateGrepPatternIsNotMisreadLiteral`: a pattern in LITERAL mode (the default) that
+ * is plainly written as a regex. An escaped metacharacter (`\(`, `\.`, `\[`, `\$` ...) or a `.*` / `.+`
+ * wildcard cannot appear in TypeScript source as-is, so as a fixed string it never matches and the check
+ * can never pass. Ground truth (2026-11-12): software-mode-orchestrator-toolset's check
+ * `buildToolDefinitions\(.*mode` had no mode, ran as `-F`, failed self-verify on two correct builds and
+ * then held its goal's promotion. Rejected at authoring with the fix: set `grep.mode: 'regex'`.
+ */
+export function validateLiteralGrepIsNotRegex(pattern: string): ExecutableCheckValidation {
+  if (/\\[.*+?()[\]{}|^$]/.test(pattern) || /\.[*+]/.test(pattern)) {
+    return {
+      valid: false,
+      reason:
+        `grep.pattern "${pattern}" is written as a regex (escaped metacharacters or a .* wildcard) but ` +
+        `grep.mode is 'literal' (the default), so it is matched as a fixed string and can never pass. ` +
+        `Set grep.mode:'regex', or write the plain code snippet without escapes.`,
+    };
+  }
+  return { valid: true };
+}
+
+/**
  * verification-check-must-not-demand-a-name-the-builder-has-to-guess Phase 1 — reject a `grep` whose
  * `pattern` pins an EXACT LITERAL for a name the implementation gets to invent (an npm script name, a
  * `*.test.ts` filename, a kebab-case slug, a camelCase symbol) when the spec body does NOT itself pin
@@ -828,6 +849,11 @@ export function validateExecutableCheck(
               reason: `${misread.reason} Or set grep.mode:'literal' to match the snippet verbatim.`,
             };
           }
+        } else {
+          // The mirror lint, author-time only for the same reason: a regex-shaped pattern left in the
+          // literal default is a check that can never pass.
+          const regexInLiteral = validateLiteralGrepIsNotRegex(pattern);
+          if (!regexInLiteral.valid) return regexInLiteral;
         }
         const guess = detectBuilderChosenNameInGrep(pattern, ctx.specText);
         if (guess) {
