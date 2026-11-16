@@ -670,6 +670,17 @@ function ghToken() {
   return process.env.GITHUB_TOKEN || process.env.AGENT_TODO_GITHUB_TOKEN;
 }
 
+/**
+ * A goal member whose build has already merged onto the goal branch (`specs.goal_branch_sha` stamped) has
+ * nothing left to re-test pre-merge: its accumulation was verified at the spec→goal merge, and its
+ * `claude/build-*` branch is auto-deleted by GitHub once that PR merges. Re-testing it daily against the
+ * deleted branch only produced a "BRANCH UNRESOLVABLE" skip every morning (2026-11 shopgrowth goal). The
+ * member is tested again on main once the goal promotes (`main_merge_sha` set routes it to the normal lane).
+ */
+export function goalMemberAlreadyOnGoalBranch(spec: Pick<SpecRow, "goal_branch_sha"> | null | undefined): boolean {
+  return Boolean(spec?.goal_branch_sha && spec.goal_branch_sha.trim());
+}
+
 /** The pre-merge test context for a goal-compiled spec: its own `claude/build-*` branch (built off the goal
  *  branch, so the accumulated code is present) + the freshest preview URL captured for it (from a prior build
  *  or spec-test job). Returns null when no preview has been captured — the caller then SKIPS rather than
@@ -762,6 +773,10 @@ export async function enqueueSpecTestIfDue(
     // main_merge_sha is NULL until the goal's atomic M5 promotion lands on main (same signal spec-drift uses
     // for its goal-pending guard). NULL ⇒ the members' code is on the goal branch, not main ⇒ route to branch.
     if (goal && !goal.main_merge_sha) {
+      const memberSpec = await getSpecFromDb(workspaceId, slug);
+      if (goalMemberAlreadyOnGoalBranch(memberSpec)) {
+        return { enqueued: false, reason: `goal member already merged onto goal/${goalSlug} (goal_branch_sha set) — its build branch is gone; it re-verifies when the goal promotes to main` };
+      }
       branchCtx = await resolveGoalMemberTestContext(admin, workspaceId, slug);
       if (!branchCtx) {
         return { enqueued: false, reason: `goal-compiled (${goalSlug} not promoted to main) with no branch preview — skipped main-context re-verify to avoid false-fails` };
