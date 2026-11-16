@@ -1,0 +1,1 @@
+- **Tighten renewal outcome-distribution systemic guard to a true near-zero-charge collapse** · verified 2026-11-16 · → [[../libraries/control-tower]]
