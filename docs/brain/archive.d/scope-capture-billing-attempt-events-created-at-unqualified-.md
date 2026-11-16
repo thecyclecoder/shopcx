@@ -1,0 +1,1 @@
+- **Drop the unqualified `column "created_at" does not exist` foreign-read noise on shopify_billing_attempt_events** · verified 2026-11-16 · → [[../libraries/error-feed]] (§ Supabase Postgres missing-column noise § `isForeignSupabasePostgresMissingBillingAttemptEventsCreatedAtAdhocNoise`)
