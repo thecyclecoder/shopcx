@@ -1,0 +1,1 @@
+- **Drop the PostgREST pgrst_source wrapper shape in the spec_status_history.created_at foreign-noise filter** · verified 2026-11-16 · → [[../libraries/control-tower]]
