@@ -1756,13 +1756,15 @@ const RENEWAL_MIN_CYCLE_SAMPLE = 10;
 const RENEWAL_HARD_FLOOR_RATE = 0.5;
 /**
  * The systemic hard-floor branch additionally requires that the successful-charge rate itself has
- * collapsed below this fraction. A collapsed charge-success rate is the shared signature of every
- * real systemic cause (bad Braintree creds, mass no-payment-method) — charges go to near-zero. A
- * small cohort that lands at exactly 50% bad while half the subs still charged fine (e.g. 5 charged
- * / 4 declined→dunning / 1 comp-blocked) is ordinary decline clustering, not a payment outage, so it
- * must NOT page. Guards the false "bad Braintree creds" systemic alert on healthy small cohorts.
+ * collapsed to near-zero below this fraction. A near-zero charge-success rate is the shared
+ * signature of every real systemic cause (bad Braintree creds, mass no-payment-method) — charges
+ * genuinely stop. This floor sits well below the 0.5 bad-rate boundary so the systemic branch fires
+ * ONLY on a true near-zero-charge collapse, never when a minimum-size cohort lands at ~50% bad while
+ * a meaningful share of charges still succeed (e.g. 4 charged / 5 declined→dunning / 1 comp-blocked →
+ * 40% still charging) — that is ordinary small-cohort decline clustering, which moderate elevations
+ * route through the baseline spike branch instead. Fingerprint: renewal-systemic-near-zero-charge-floor.
  */
-const RENEWAL_SYSTEMIC_MAX_CHARGE_RATE = 0.5;
+const RENEWAL_SYSTEMIC_MAX_CHARGE_RATE = 0.25;
 /** Below this absolute anomalous-rate a relative spike is ignored (don't alarm on tiny noise even if it's 3× a near-zero baseline). */
 const RENEWAL_MIN_SPIKE_RATE = 0.15;
 /** Relative spike: current anomalous-rate ≥ baseline × this. */
