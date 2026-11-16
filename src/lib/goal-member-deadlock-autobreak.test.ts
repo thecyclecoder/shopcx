@@ -14,6 +14,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   decideGoalMemberDeadlockAutoBreak,
+  goalMemberAlreadyOnGoalBranch,
   type GoalMemberDispatchState,
   type GoalMemberInflightRow,
 } from "./agent-jobs";
@@ -133,4 +134,12 @@ test("parked earliest head (auto_build off / deferred) is skipped — the next r
     const decision = decideGoalMemberDeadlockAutoBreak({ members, inflight: [] });
     assert.deepEqual(decision, { deadlocked: true, earliest: "b-spec" });
   }
+});
+
+// ── goalMemberAlreadyOnGoalBranch — no daily pre-merge re-test of a member already on the goal branch ──
+test("goalMemberAlreadyOnGoalBranch: stamped goal_branch_sha skips the daily re-test", () => {
+  assert.equal(goalMemberAlreadyOnGoalBranch({ goal_branch_sha: "dc31611ee9f1fde30b33af787db2bf3cefbfe193" }), true);
+  assert.equal(goalMemberAlreadyOnGoalBranch({ goal_branch_sha: null }), false);
+  assert.equal(goalMemberAlreadyOnGoalBranch({ goal_branch_sha: "  " }), false);
+  assert.equal(goalMemberAlreadyOnGoalBranch(null), false);
 });
