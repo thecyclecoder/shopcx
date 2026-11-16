@@ -416,6 +416,7 @@
     "test:manual-creative": "tsx --test src/lib/ads/manual-creative.test.ts",
     "test:capi-shopify-purchase": "tsx --test src/lib/meta-capi-shopify-purchase.test.ts",
     "test:one-time-charge": "tsx --test src/lib/one-time-charge.test.ts",
+    "test:one-time-charge-ship-name": "tsx --test src/lib/one-time-charge.ship-name.test.ts",
     "test:analyzer-evidence-gate": "tsx --test src/lib/ticket-analyzer.evidence-gate.test.ts",
     "test:dunning-payday-settled-success": "tsx --test src/lib/inngest/dunning.payday-settled-success.test.ts",
     "test:dunning-new-card-recovery-date": "tsx --test src/lib/inngest/dunning.new-card-recovery-date.test.ts",
