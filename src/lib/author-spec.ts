@@ -33,6 +33,7 @@ import {
   upsertPhaseChecks,
   parseVerificationBlobToChecks,
   validateExecutableCheck,
+  AUTO_TESTABLE_EXEC_KINDS,
   type SpecPhaseCheckInput,
   type SpecPhaseCheckExecKind,
 } from "@/lib/spec-phase-checks-table";
@@ -604,6 +605,67 @@ export function assertEveryPhaseHasMachineCheck(
         `spec-check runner can actually execute the acceptance criterion. \`needs_human\` rows are allowed ` +
         `as EXTRA advisory / subjective checks but never the sole verification ` +
         `(every-spec-writer-authors-machine-runnable-verifications Phase 1).`,
+    );
+  }
+}
+
+/**
+ * reject-unrecognized-exec-kind-at-spec-author-chokepoint Phase 1 — thrown when a verification check
+ * declares an `exec_kind` outside the eight the DB allows. Same fail-loud-at-authoring rail as
+ * `MissingMachineCheckError`; it names the slug, phase, and offending value so an LLM author's bad
+ * exec_kind is rejected up front instead of aborting mid-write on the Postgres check constraint
+ * `spec_phase_checks_exec_kind_check` (9 opaque constraint-violation errors since late September).
+ */
+export class UnrecognizedExecKindError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnrecognizedExecKindError";
+  }
+}
+
+/** Every exec_kind the DB check constraint `spec_phase_checks_exec_kind_check` allows — the
+ *  auto-testable kinds plus the `needs_human` safe default. A null/unset exec_kind is legal (the
+ *  untyped-prose row the parser leaves un-stamped); only a non-null out-of-enum value is rejected. */
+const RECOGNIZED_EXEC_KINDS: ReadonlySet<string> = new Set<string>([
+  ...AUTO_TESTABLE_EXEC_KINDS,
+  "needs_human",
+]);
+
+/**
+ * reject-unrecognized-exec-kind-at-spec-author-chokepoint Phase 1 — reject a spec whose structured
+ * checks carry an `exec_kind` outside the recognized allowlist BEFORE any row is written. The
+ * per-phase `assertEveryPhaseHasMachineCheck` gate only proves ≥1 GOOD check exists; it never catches
+ * a BAD exec_kind sitting beside a good one, so such a row used to reach `upsertPhaseChecks` and fail
+ * mid-write against the Postgres check constraint `spec_phase_checks_exec_kind_check` with an
+ * unactionable error. This assertion runs at the single SDK chokepoint (both author paths), so every
+ * writer (planner, spec-chat, ~17 box-worker author lanes, request-fix) inherits the invariant: a
+ * spec carrying a bogus exec_kind never writes a partial row — it fails loud with the slug + phase +
+ * offending value instead. Exported so a caller can pre-flight the same predicate.
+ */
+export function assertAllExecKindsRecognized(
+  slug: string,
+  phases: { title: string; checks: SpecPhaseCheckInput[] }[],
+): void {
+  const offenders: string[] = [];
+  phases.forEach((p, i) => {
+    for (const c of p.checks) {
+      const kind = c.exec_kind;
+      // null/undefined exec_kind is legal (an un-stamped prose row); only a declared value is checked.
+      if (kind == null) continue;
+      if (!RECOGNIZED_EXEC_KINDS.has(kind)) {
+        offenders.push(
+          `phase ${i + 1}${p.title ? ` (${p.title})` : ""} check ${c.position}: exec_kind "${kind}"`,
+        );
+      }
+    }
+  });
+  if (offenders.length) {
+    throw new UnrecognizedExecKindError(
+      `spec ${slug} carries ${offenders.length === 1 ? "a verification check" : "verification checks"} ` +
+        `with an unrecognized exec_kind — ${offenders.join("; ")}. exec_kind must be one of ` +
+        `${[...RECOGNIZED_EXEC_KINDS].map((k) => `\`${k}\``).join(" | ")} ` +
+        `(the \`spec_phase_checks_exec_kind_check\` DB constraint). Rejected at the author chokepoint ` +
+        `before any row is written (reject-unrecognized-exec-kind-at-spec-author-chokepoint Phase 1).`,
     );
   }
 }
@@ -1207,6 +1269,13 @@ export async function authorSpecRowStructured(
       specText: [spec.why, spec.what, p.title, p.why, p.what, p.body].filter(Boolean).join("\n"),
     })),
   );
+  // reject-unrecognized-exec-kind-at-spec-author-chokepoint Phase 1 — reject any check whose exec_kind
+  // is outside the eight the DB allows BEFORE upsertPhaseChecks writes a row. Closes the gap the
+  // per-phase 'at least one valid check' gate leaves open (a bad exec_kind beside a good one).
+  assertAllExecKindsRecognized(
+    slug,
+    spec.phases.map((p, i) => ({ title: p.title, checks: phaseChecks[i] })),
+  );
 
   // spec-brain-refs Phase 2 — SUGGEST brain refs at authoring time (structured variant). The `**Brain refs:**`
   // convention lives in the SUMMARY text (per build-spec-materializer Rendered shape); prepend a suggested
@@ -1586,6 +1655,12 @@ export async function authorSpecRowFromMarkdown(
         // anywhere in the spec body (top-level why/what OR any phase body) is spec-pinned.
         specText: [markdown, p.title, p.body].filter(Boolean).join("\n"),
       })),
+    );
+    // reject-unrecognized-exec-kind-at-spec-author-chokepoint Phase 1 — same exec_kind allowlist guard
+    // for the markdown author path, before any row is written.
+    assertAllExecKindsRecognized(
+      slug,
+      phaseBodies.map((p, i) => ({ title: p.title, checks: mdPhaseChecks[i] })),
     );
   }
 
