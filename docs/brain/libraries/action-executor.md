@@ -200,6 +200,14 @@ function resolveCreateReturnResolutionType(
 
 Pure validator wired into the `create_return` direct-action handler. Normalizes the optional `resolution_type` field on `ActionParams` into the value passed through as `createFullReturn.resolutionType` in [[shopify-returns]]. `undefined` → `undefined` (`createFullReturn` writes its built-in `'refund_return'` default, matching today's every-call behavior); `'refund_return'` / `'store_credit_return'` → passed through unchanged so an agent-authored store-credit return actually resolves as store credit (the sanctioned retention-friendly outcome the returns engine already supports on both Shopify and internal SHOPCX* orders). Any other value → `{ ok: false, error }` and the handler surfaces the reason without ever calling `createFullReturn` (a bogus value must not silently downgrade to the refund default). Tests: `src/lib/action-executor.create-return-resolution-type.test.ts` — six pins covering pass-through, defaults, rejected strings, non-string smuggling, and the handler wiring itself (grep-verifiable that `resolutionType: resolution.resolutionType` is the literal that flows into `createFullReturn`).
 
+### `executeShopgrowthAction` (software-mode-orchestrator-toolset Phase 3)
+
+`executeSonnetDecision` case `shopgrowth_action`: executes one confirmed change on the merchant's store via
+[[../integrations/shopgrowth-support-api]]. Refused (escalated) on a cpg workspace, for a forbidden action
+(plan/billing/uninstall/data deletion), when the latest inbound message doesn't verbatim-contain the model's
+`confirmation_quote` as a yes, with no ShopGrowth credentials, or with no verified store. The reply is ShopGrowth's
+`summary`; a non-2xx escalates and never claims success; a 404 (endpoint not live) escalates with an internal note.
+
 ## Callers
 
 - `src/lib/inngest/ticket-research.ts`
