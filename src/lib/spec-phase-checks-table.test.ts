@@ -13,6 +13,7 @@ import {
   validateExecutableCheck,
   validateGrepPatternIsPosixEre,
   validateGrepPatternIsNotMisreadLiteral,
+  validateLiteralGrepIsNotRegex,
   grepModeOf,
   isPlainReadonlySql,
   detectBuilderChosenNameInGrep,
@@ -664,4 +665,25 @@ test("the misread-literal gate fires at authoring (specText given), never retroa
   const check = { exec_kind: "grep" as const, params: { pattern: "a || b", expect: "absent", mode: "regex" as const } };
   assert.equal(validateExecutableCheck(check).valid, true);
   assert.equal(validateExecutableCheck(check, { specText: "spec body" }).valid, false);
+});
+
+// ── a regex-shaped pattern left in the literal default can never pass ─────────────────────────────
+test("validateLiteralGrepIsNotRegex rejects escaped metacharacters and wildcards, accepts plain snippets", () => {
+  for (const p of ["buildToolDefinitions\\(.*mode", "foo\\.bar", "a.*b", "x.+y"]) {
+    assert.equal(validateLiteralGrepIsNotRegex(p).valid, false, p);
+  }
+  for (const p of ["buildToolDefinitions(mode", "isFoo(message, query)", "get_shopgrowth_store", "a || b", "foo.bar"]) {
+    assert.equal(validateLiteralGrepIsNotRegex(p).valid, true, p);
+  }
+});
+
+test("authoring rejects the toolset's regex-in-literal check and accepts it in regex mode", () => {
+  const specText = "Phase 1: buildToolDefinitions takes the support mode.";
+  const params = { pattern: "buildToolDefinitions\\(.*mode", path: "src/lib/sonnet-orchestrator-v2.ts", expect: "present" };
+  const lit = validateExecutableCheck({ exec_kind: "grep", params }, { specText });
+  assert.equal(lit.valid, false);
+  assert.match((lit as { reason: string }).reason, /grep\.mode:'regex'/);
+  assert.equal(validateExecutableCheck({ exec_kind: "grep", params: { ...params, mode: "regex" } }, { specText }).valid, true);
+  // The runner path (no specText) never retroactively fails an authored check.
+  assert.equal(validateExecutableCheck({ exec_kind: "grep", params }).valid, true);
 });

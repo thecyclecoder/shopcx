@@ -128,6 +128,10 @@ Before this gate a broken pattern was reported as an infrastructure fault at bui
 
 Real regexes still pass, for example `a|b`, `(foo|bar)`, `get(Spec|Specs)`, `[|]` and escaped `\(`. The rejection reason carries the escaped literal as the suggested pattern.
 
+### Grep regex-in-literal reject: validateLiteralGrepIsNotRegex
+
+The mirror of the misread-literal reject. A pattern left in the `literal` default (no `mode`) that is plainly written as a regex is rejected at authoring, again only when `specText` is passed. It fires on an escaped metacharacter (`\(`, `\.`, `\[`, `\$` and the like) or a `.*` / `.+` wildcard. Neither can appear verbatim in TypeScript source, so as a fixed string the check can never pass. The reason tells the author to set `grep.mode:'regex'` or write the plain snippet. Ground truth: `buildToolDefinitions\(.*mode` on `software-mode-orchestrator-toolset` (2026-11-12) ran as `-F`, failed self-verify on two correct builds, and then held its goal's promotion to main. The check was repaired to `mode:'regex'` through `upsertPhaseChecks` on 2026-11-16.
+
 ## Author chokepoint gate
 
 Three gates fire in order BEFORE the DB write; all throw with the offending phase named so the author sees exactly what's un-testable:
